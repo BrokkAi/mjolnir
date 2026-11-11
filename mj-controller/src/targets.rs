@@ -50,12 +50,18 @@ mod bootstrap;
 pub use bootstrap::*;
 mod container;
 mod container_upgrade;
+mod nitro;
 pub(crate) use container::inspect_container_storage;
 use container::*;
 #[cfg(test)]
 pub(crate) use container_upgrade::container_upgrade_test_plan;
 pub(crate) use container_upgrade::{
     RetainedContainer, inspect_retained_container, recover_removed_container,
+};
+use nitro::*;
+pub use nitro::{
+    NitroEngineInfo, NitroEngineUnavailable, NitroPreflight, nitro_info_command, parse_nitro_info,
+    verify_ssh_nitro,
 };
 mod process_limit;
 pub use process_limit::*;

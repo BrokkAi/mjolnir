@@ -740,7 +740,7 @@ test('container sizing enforces the useful minimum and hard remaining RAM', asyn
   await expect(page.locator('#new-next')).toBeDisabled();
   await page.locator('#new-resource-cpus').fill('4');
   await page.locator('#new-resource-memory').fill('9');
-  await expect(page.locator('#new-resource-error')).toContainText('Mac has 7.9 GiB left');
+  await expect(page.locator('#new-resource-error')).toContainText('host has 7.9 GiB left');
   await expect(page.locator('#new-next')).toBeDisabled();
   await page.locator('#new-resource-memory').fill('7.9');
   await expect(page.locator('#new-resource-error')).toHaveText('');
@@ -779,7 +779,7 @@ test('container overcommit warns and remains launchable except for Apple RAM', a
   const cases = [
     { name: 'non-Apple CPU and RAM', hardRam: false, cpu: '6', memory: '20', submits: true, warning: 'This session asks for more CPUs than the 4 left, so busy sessions may run slower, and more RAM than the 16 GiB left' },
     { name: 'Apple CPU', hardRam: true, cpu: '6', memory: '8', submits: true, warning: 'more CPUs than the 4 left, so busy sessions may run slower' },
-    { name: 'Apple RAM', hardRam: true, cpu: '4', memory: '20', submits: false, error: 'Mac has 16 GiB left' },
+    { name: 'Apple RAM', hardRam: true, cpu: '4', memory: '20', submits: false, error: 'host has 16 GiB left' },
   ];
   for (const scenario of cases) {
     const page = await context.newPage();

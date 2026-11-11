@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::config::offers_attached_directories;
 
 fn declare_wizard_controls<W: WizardDraft>(dashboard: &DashboardState, wizard: &W) {
     let mut form = wizard.form().borrow_mut();
@@ -58,10 +59,9 @@ fn declare_wizard_controls<W: WizardDraft>(dashboard: &DashboardState, wizard: &
         }
         WizardStep::Mounts => declare_mount_controls(&mut form, wizard.mounts()),
         WizardStep::Review => {
-            let can_attach = mount_history_host(
+            let can_attach = offers_attached_directories(
                 &dashboard.config.targets[&nth_key(&dashboard.config.targets, wizard.target())],
-            )
-            .is_some();
+            );
             if !wizard.mounts().mounts.is_empty() {
                 form.declare_with_enabled(
                     WizardControl::ReviewAttachments,
@@ -555,10 +555,9 @@ impl DashboardState {
             Ok(action) => return action,
             Err(wizard) => wizard,
         };
-        let can_attach = mount_history_host(
+        let can_attach = offers_attached_directories(
             &self.config.targets[&nth_key(&self.config.targets, wizard.target())],
-        )
-        .is_some();
+        );
         match id {
             WizardControl::ReviewAttachments => {
                 wizard.note_draft_change(self, DraftChange::AttachmentOpened);

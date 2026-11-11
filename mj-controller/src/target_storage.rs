@@ -271,7 +271,8 @@ pub fn storage_host(locator: &TargetLocator) -> String {
         | TargetLocator::SshBare { ssh, .. }
         | TargetLocator::SshPodman { ssh, .. }
         | TargetLocator::SshDocker { ssh, .. }
-        | TargetLocator::SshAppleContainer { ssh, .. } => {
+        | TargetLocator::SshAppleContainer { ssh, .. }
+        | TargetLocator::SshNitro { ssh, .. } => {
             storage_host_of_destination(Some(&ssh.destination))
         }
     }
@@ -293,6 +294,9 @@ fn host_path(locator: &TargetLocator, path: &str) -> Option<String> {
         // Apple's runtime keeps its storage in a VM disk image on whichever
         // host runs it, which this board does not measure.
         TargetLocator::AppleContainer { .. } | TargetLocator::SshAppleContainer { .. } => None,
+        // A sandbox's disks are sparse files in the engine's state directory,
+        // so a write inside the guest fills that filesystem on the host.
+        TargetLocator::SshNitro { .. } => Some(ContainerStorage::Microvm.path().to_owned()),
     }
 }
 

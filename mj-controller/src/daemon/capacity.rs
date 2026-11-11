@@ -13,6 +13,8 @@ use super::*;
 pub(crate) struct ContainerCapacityInput {
     pub(crate) target_ids: Vec<String>,
     pub(crate) total: mj_core::state::HostContainerSize,
+    /// `total.memory_bytes` is a boot-time pool, not host RAM: no reserve.
+    pub(crate) memory_is_pool: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,6 +175,7 @@ impl RuntimeState {
                 cpus: usage.logical_cores,
                 memory_bytes: usage.memory_total_bytes,
             },
+            memory_is_pool: usage.memory_pool,
         }))
     }
 
@@ -433,6 +436,7 @@ pub(crate) fn capacity_with_reservations_after<'a>(
     reserved_ids.extend(additionally_replaced.iter().map(String::as_str));
     let mut capacity = mj_core::state::host_container_capacity(
         input.total,
+        input.memory_is_pool,
         &input.target_ids,
         sessions
             .iter()
@@ -610,6 +614,7 @@ impl ContainerCapacityProjection {
                                     cpus: usage.logical_cores,
                                     memory_bytes: usage.memory_total_bytes,
                                 },
+                                memory_is_pool: usage.memory_pool,
                             },
                         ))
                     })
@@ -854,6 +859,7 @@ mod tests {
             probe_error: None,
         };
         let usage = crate::targets::DeploymentCapacityUsage {
+            memory_pool: false,
             cpu_percent: Some(0),
             memory_used_bytes: 0,
             memory_total_bytes: 40 << 30,
@@ -1131,6 +1137,7 @@ mod tests {
             },
         )]);
         let input = ContainerCapacityInput {
+            memory_is_pool: false,
             target_ids: vec!["podman".into()],
             total: mj_core::state::HostContainerSize {
                 cpus: 4,
@@ -1167,6 +1174,7 @@ mod tests {
             memory_bytes: 16 << 30,
         });
         let input = ContainerCapacityInput {
+            memory_is_pool: false,
             target_ids: vec!["podman".into()],
             total: mj_core::state::HostContainerSize {
                 cpus: 10,
@@ -1254,6 +1262,7 @@ mod tests {
             },
         )]);
         let input = |target_id: &str| ContainerCapacityInput {
+            memory_is_pool: false,
             target_ids: vec![target_id.into()],
             total: mj_core::state::HostContainerSize {
                 cpus: 10,
@@ -1292,6 +1301,7 @@ mod tests {
             memory_bytes: 16 << 30,
         });
         let input = ContainerCapacityInput {
+            memory_is_pool: false,
             target_ids: vec!["podman".into()],
             total: mj_core::state::HostContainerSize {
                 cpus: 10,
@@ -1318,6 +1328,7 @@ mod tests {
     async fn joined_lease_cannot_remove_the_owning_reservation() {
         let state = crate::daemon::tests::test_runtime_state();
         let input = ContainerCapacityInput {
+            memory_is_pool: false,
             target_ids: vec!["podman".into()],
             total: mj_core::state::HostContainerSize {
                 cpus: 8,
@@ -1368,6 +1379,7 @@ mod tests {
             probe_error: None,
         };
         let usage = crate::targets::DeploymentCapacityUsage {
+            memory_pool: false,
             cpu_percent: Some(20),
             memory_used_bytes: 8 << 30,
             memory_total_bytes: 40 << 30,
@@ -1392,6 +1404,7 @@ mod tests {
                 .is_ok()
         );
         let input = ContainerCapacityInput {
+            memory_is_pool: false,
             target_ids: vec!["podman".into()],
             total: mj_core::state::HostContainerSize {
                 cpus: 10,

@@ -83,8 +83,8 @@ pub(crate) use backend::backend_locator;
 pub(crate) use backend::controller_github_token;
 pub use backend::image_refresh_plan;
 pub(crate) use backend::validate_resource_allocation;
-pub use backend::wait_for_ec2_ssh;
 pub(crate) use backend::{LocalEngineReadiness, is_missing_command, local_engine_readiness};
+pub use backend::{wait_for_ec2_reboot, wait_for_ec2_ssh};
 pub use github_app::GithubBundleSelectionError;
 pub(crate) use github_app::{
     GithubAppTokenProvider, github_token_for_session, install_configured_session_github_token,
@@ -119,6 +119,7 @@ pub use resume::{
     raw_conversion_preview_for,
 };
 pub use subagents::{RegisterSubagentRequest, stopped_subagent, subagent_has_handed_back};
+pub(crate) use worker_binary::ensure_microvm_engine;
 pub use worker_binary::{
     WorkerBinaryAvailability, native_worker_binary_prerequisite, pin_worker_binary_sources,
     ssh_worker_binary_prerequisite, warm_worker_binary_sources,
@@ -782,7 +783,8 @@ impl Controller {
                 .with_context(|| format!("inspect resource source {}", source.display()))?,
             TargetTemplate::SshPodman { ssh, .. }
             | TargetTemplate::SshDocker { ssh, .. }
-            | TargetTemplate::SshAppleContainer { ssh, .. } => {
+            | TargetTemplate::SshAppleContainer { ssh, .. }
+            | TargetTemplate::SshNitro { ssh, .. } => {
                 targets::ssh_directory_exists(&SshTarget::from(ssh), source, executor)?
             }
             TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => {
@@ -1632,7 +1634,8 @@ pub(super) fn removable_profile_root(
         | targets::TargetLocator::AppleContainer { .. }
         | targets::TargetLocator::SshPodman { .. }
         | targets::TargetLocator::SshDocker { .. }
-        | targets::TargetLocator::SshAppleContainer { .. } => {
+        | targets::TargetLocator::SshAppleContainer { .. }
+        | targets::TargetLocator::SshNitro { .. } => {
             format!("/var/lib/hel/profiles/{session_id}")
         }
         targets::TargetLocator::AwsEc2 { .. } | targets::TargetLocator::SshBare { .. } => {

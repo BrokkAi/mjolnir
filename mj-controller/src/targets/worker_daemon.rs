@@ -271,6 +271,7 @@ pub fn clear_relay_state_plan(
         | TargetLocator::SshPodman { .. }
         | TargetLocator::SshDocker { .. }
         | TargetLocator::SshAppleContainer { .. }
+        | TargetLocator::SshNitro { .. }
         | TargetLocator::AwsEc2 { .. } => None,
     })
 }

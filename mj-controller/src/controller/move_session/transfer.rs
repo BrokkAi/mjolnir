@@ -591,6 +591,27 @@ impl Controller {
             },
             false,
         )?)?;
+        // A sandbox is a VM behind the engine: the Move transport (an rsync
+        // container run on the destination, or a mounted staging directory)
+        // has no equivalent there yet. Say so now instead of failing in the
+        // middle of a transfer.
+        let destination = selection
+            .target_template_id
+            .as_deref()
+            .and_then(|target| self.config.targets.get(target));
+        if matches!(layout.backend, targets::TargetLocator::SshNitro { .. })
+            || matches!(
+                destination,
+                Some(mj_core::config::TargetTemplate::SshNitro { .. })
+            )
+        {
+            assessment.blockers.push(
+                "Move does not support Nitro sandbox targets yet. Close this session and start a \
+                 new one on the other target; the workspace stays in the checkpoint."
+                    .into(),
+            );
+            return Ok(assessment);
+        }
         let source_requirement = if targets::is_container(&layout.backend) {
             CONTAINER_RSYNC_REQUIREMENT
         } else {

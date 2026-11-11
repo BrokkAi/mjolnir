@@ -522,7 +522,10 @@ pub(super) fn local_engine_installed(host: &ImageHost, path: Option<&std::ffi::O
         ImageHost::LocalPodman | ImageHost::LocalDocker | ImageHost::AppleContainer => {
             crate::targets::program_on_path(host.engine(), path)
         }
-        ImageHost::SshPodman(_) | ImageHost::SshDocker(_) | ImageHost::SshAppleContainer(_) => true,
+        ImageHost::SshPodman(_)
+        | ImageHost::SshDocker(_)
+        | ImageHost::SshAppleContainer(_)
+        | ImageHost::SshNitro(_) => true,
     }
 }
 
@@ -702,11 +705,20 @@ pub enum ImageRefreshOutcome {
 /// host with a new image, so the user hears about the wait they are in rather
 /// than about every hourly check. The same gate covers background refreshes,
 /// explicit preloads, and session launches, including other mj processes.
+///
+/// A Nitro host's engine is the worker binary, which is not there until mj
+/// puts it there, and a host created for sandboxes is registered and its image
+/// preloaded before any session exists. Every refresh path comes through here,
+/// so this installs the engine before the first engine command; the install
+/// is idempotent and only writes under the SSH user's home.
 pub fn refresh_host_image(
     refresh: &ImageRefresh,
     executor: &impl CommandExecutor,
     report: &dyn Fn(ImageRefreshReport),
 ) -> Result<ImageRefreshOutcome> {
+    if let ImageHost::SshNitro(ssh) = &refresh.host {
+        crate::controller::ensure_microvm_engine(ssh, executor)?;
+    }
     let lock = crate::image_pull_gate::image_pull_mutex(&refresh.host, &refresh.image);
     let _guard = crate::image_pull_gate::hold_image_pull(
         &lock,

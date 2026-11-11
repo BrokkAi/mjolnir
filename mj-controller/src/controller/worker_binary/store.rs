@@ -64,6 +64,9 @@ fn gate_target(locator: &targets::TargetLocator) -> String {
         }
         | SshAppleContainer {
             ssh, container_id, ..
+        }
+        | SshNitro {
+            ssh, container_id, ..
         } => format!("container {container_id} on {}", ssh.destination),
         LocalPodman { container_id, .. }
         | LocalDocker { container_id, .. }
@@ -352,7 +355,7 @@ const LINK_MISSING: i32 = 75;
 const LINK_NO_HARD_LINKS: i32 = 76;
 const LINK_DIGEST_MISMATCH: i32 = 77;
 
-fn install_worker_binary_at(
+pub(super) fn install_worker_binary_at(
     executor: &impl CommandExecutor,
     locator: &targets::TargetLocator,
     session_id: &str,
@@ -588,7 +591,8 @@ fn transfer_binary(
     let remote = match locator {
         targets::TargetLocator::SshPodman { ssh, .. }
         | targets::TargetLocator::SshDocker { ssh, .. }
-        | targets::TargetLocator::SshAppleContainer { ssh, .. } => Some(ssh),
+        | targets::TargetLocator::SshAppleContainer { ssh, .. }
+        | targets::TargetLocator::SshNitro { ssh, .. } => Some(ssh),
         _ => None,
     };
     if let Some(ssh) = remote {

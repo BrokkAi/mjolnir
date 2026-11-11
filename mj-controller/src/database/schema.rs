@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 123;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 124;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2376,6 +2376,17 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
         transaction.commit()?;
     }
 
+    // Breaking: a session on a Nitro Sandbox host records the new `ssh-nitro`
+    // target kind, and older readers treat an unknown kind as impossible
+    // (their decoder is `unreachable!` on a kind the CHECK admitted). Refuse
+    // their reads and writes before such a row can be stored. Two tables
+    // constrain the kind: `session_targets` (revision 98) and the physical
+    // ownership ledger `environment_workers` (revision 122). Their rows copy
+    // over unchanged; no column is added.
+    if version < 124 {
+        migrate_nitro_target_kind(connection)?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -2394,6 +2405,97 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
             SCHEMA_VERSION
         );
     }
+    Ok(())
+}
+
+/// Migration 124: admit `'ssh-nitro'` in the target-kind constraints of
+/// `session_targets` and `environment_workers`.
+///
+/// SQLite cannot widen a CHECK in place, so each table is rebuilt. Foreign keys
+/// are off while it happens: `environments.target_lease_id` references
+/// `environment_workers` with `ON DELETE SET NULL`, and dropping the old table
+/// with enforcement on would clear every environment's lease. The revision-98
+/// and revision-122 definitions are not edited; this rebuild is the new
+/// revision that supersedes them.
+fn migrate_nitro_target_kind(connection: &Connection) -> Result<()> {
+    const KINDS: &str = "'local-bare','local-podman','local-docker','apple-container','aws-ec2','ssh-bare','ssh-podman','ssh-docker','ssh-apple-container','ssh-nitro'";
+    connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
+    let migration = (|| -> Result<()> {
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute_batch(&format!(
+            "CREATE TABLE session_targets_v124 (
+                 session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+                 kind TEXT NOT NULL CHECK(kind IN ({KINDS})),
+                 host TEXT,
+                 resource_id TEXT,
+                 address TEXT,
+                 workspace BLOB,
+                 worker_id TEXT,
+                 workspace_storage TEXT,
+                 borrowed_from TEXT,
+                 CHECK(
+                     (kind = 'local-bare' AND workspace IS NOT NULL
+                      AND host IS NULL AND resource_id IS NULL AND address IS NULL AND worker_id IS NULL)
+                  OR (kind IN ('local-podman','local-docker','apple-container') AND resource_id IS NOT NULL
+                      AND host IS NULL AND address IS NULL AND workspace IS NULL AND worker_id IS NULL)
+                  OR (kind = 'aws-ec2' AND resource_id IS NOT NULL
+                      AND host IS NULL AND workspace IS NULL AND worker_id IS NULL)
+                  OR (kind = 'ssh-bare' AND host IS NOT NULL AND workspace IS NOT NULL
+                      AND resource_id IS NULL AND address IS NULL)
+                  OR (kind IN ('ssh-podman','ssh-docker','ssh-apple-container','ssh-nitro') AND host IS NOT NULL AND resource_id IS NOT NULL
+                      AND address IS NULL AND workspace IS NULL AND worker_id IS NULL)
+                 )
+             ) STRICT;
+             INSERT INTO session_targets_v124(session_id, kind, host, resource_id, address, workspace, worker_id, workspace_storage, borrowed_from)
+                 SELECT session_id, kind, host, resource_id, address, workspace, worker_id, workspace_storage, borrowed_from
+                 FROM session_targets;
+             DROP TABLE session_targets;
+             ALTER TABLE session_targets_v124 RENAME TO session_targets;
+             CREATE TABLE environment_workers_v124 (
+                 lease_id TEXT PRIMARY KEY,
+                 environment_id TEXT NOT NULL REFERENCES environments(environment_id) ON DELETE CASCADE,
+                 worker_session_id TEXT NOT NULL,
+                 kind TEXT NOT NULL CHECK(kind IN ({KINDS})),
+                 host TEXT,
+                 resource_id TEXT,
+                 address TEXT,
+                 workspace BLOB,
+                 worker_id TEXT,
+                 workspace_storage TEXT,
+                 borrowed_from TEXT,
+                 target_template_id TEXT NOT NULL,
+                 runtime_json TEXT CHECK(runtime_json IS NULL OR json_valid(runtime_json)),
+                 CHECK((kind='local-bare' AND workspace IS NOT NULL)
+                     OR (kind='ssh-bare' AND host IS NOT NULL AND workspace IS NOT NULL)
+                     OR (kind IN ('local-podman','local-docker','apple-container','aws-ec2') AND resource_id IS NOT NULL)
+                     OR (kind IN ('ssh-podman','ssh-docker','ssh-apple-container','ssh-nitro') AND host IS NOT NULL AND resource_id IS NOT NULL))
+             ) STRICT;
+             INSERT INTO environment_workers_v124(lease_id, environment_id, worker_session_id, kind, host, resource_id, address, workspace, worker_id, workspace_storage, borrowed_from, target_template_id, runtime_json)
+                 SELECT lease_id, environment_id, worker_session_id, kind, host, resource_id, address, workspace, worker_id, workspace_storage, borrowed_from, target_template_id, runtime_json
+                 FROM environment_workers;
+             DROP TABLE environment_workers;
+             ALTER TABLE environment_workers_v124 RENAME TO environment_workers;
+             CREATE INDEX environment_worker_identity ON environment_workers(worker_session_id);"
+        ))?;
+        ensure!(
+            !transaction
+                .prepare("PRAGMA foreign_key_check")?
+                .exists([])?,
+            "foreign key violation in the Nitro target-kind migration"
+        );
+        transaction.execute_batch(
+            "UPDATE schema_compatibility SET minimum_compatible_version = 124
+                 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (124, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 124;",
+        )?;
+        transaction.commit()?;
+        Ok(())
+    })();
+    let restored = connection.execute_batch("PRAGMA foreign_keys = ON;");
+    migration.context("migrate the target-kind constraints for Nitro sandboxes")?;
+    restored.context("restore foreign key enforcement after the Nitro target-kind migration")?;
     Ok(())
 }
 
@@ -3037,6 +3139,107 @@ mod reader_tests {
             })
             .unwrap();
         assert_eq!(foreign_key_errors, 0);
+    }
+
+    #[test]
+    fn nitro_target_kind_migration_keeps_rows_admits_the_kind_and_raises_the_floor() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("upgrade.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        create_baseline_schema(&connection).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER stop_before_nitro BEFORE INSERT ON schema_migrations
+                 WHEN NEW.version > 123 BEGIN SELECT RAISE(ABORT, 'fixture migration boundary'); END;",
+            )
+            .unwrap();
+        assert!(migrate_schema(&connection).is_err());
+        if !connection.is_autocommit() {
+            connection.execute_batch("ROLLBACK").unwrap();
+        }
+        let released = read_schema_state(&connection).unwrap();
+        assert_eq!(released.revision, 123);
+        assert_eq!(released.minimum_compatible, Some(123));
+        for id in ["apple", "nitro", "no-host"] {
+            connection
+                .execute_batch(&format!(
+                    "INSERT INTO session_contexts(session_id,bundle_id,created_at) VALUES ('{id}','project','now');
+                     INSERT INTO sessions(session_id,title,harness_kind,last_profile,target_template_id,state,updated_at)
+                         VALUES ('{id}','{id}','codex','codex','target','stopped','now');"
+                ))
+                .unwrap();
+        }
+        // The revision-123 table refuses the new kind, which is what keeps an
+        // older daemon from storing a row it could not read back.
+        let insert_nitro = "INSERT INTO session_targets(session_id, kind, host, resource_id)
+                            VALUES ('nitro', 'ssh-nitro', 'ec2.example.test', 'mj-nitro')";
+        assert!(connection.execute(insert_nitro, []).is_err());
+        connection
+            .execute_batch(
+                "DROP TRIGGER stop_before_nitro;
+                 INSERT INTO session_targets(session_id, kind, host, resource_id, borrowed_from)
+                     VALUES ('apple', 'ssh-apple-container', 'mac.example.test', 'mj-apple', 'parent');
+                 INSERT INTO environments(environment_id, owner_session_id, phase, placement_json)
+                     VALUES ('environment', 'apple', 'active', '{}');
+                 INSERT INTO environment_workers(lease_id, environment_id, worker_session_id, kind, host, resource_id, target_template_id)
+                     VALUES ('lease', 'environment', 'apple', 'ssh-apple-container', 'mac.example.test', 'mj-apple', 'target');
+                 UPDATE environments SET target_lease_id = 'lease' WHERE environment_id = 'environment';",
+            )
+            .unwrap();
+
+        migrate_schema(&connection).unwrap();
+
+        let kept: (String, String, String, Option<String>) = connection
+            .query_row(
+                "SELECT kind, host, resource_id, borrowed_from FROM session_targets
+                  WHERE session_id='apple'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            kept,
+            (
+                "ssh-apple-container".into(),
+                "mac.example.test".into(),
+                "mj-apple".into(),
+                Some("parent".into())
+            )
+        );
+        connection.execute(insert_nitro, []).unwrap();
+        // The physical ownership ledger admits the kind too, and rebuilding
+        // its table did not clear the lease that points at it (the foreign
+        // key is `ON DELETE SET NULL`).
+        let lease: Option<String> = connection
+            .query_row(
+                "SELECT target_lease_id FROM environments WHERE environment_id = 'environment'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(lease.as_deref(), Some("lease"));
+        connection
+            .execute(
+                "INSERT INTO environment_workers(lease_id, environment_id, worker_session_id, kind, host, resource_id, target_template_id)
+                 VALUES ('nitro-lease', 'environment', 'nitro', 'ssh-nitro', 'ec2.example.test', 'mj-nitro', 'target')",
+                [],
+            )
+            .unwrap();
+        // The shape constraint still holds for the new kind: a sandbox names
+        // its host and resource, and carries no workspace path.
+        assert!(
+            connection
+                .execute(
+                    "INSERT INTO session_targets(session_id, kind, resource_id)
+                     VALUES ('no-host', 'ssh-nitro', 'mj-nitro')",
+                    [],
+                )
+                .is_err()
+        );
+        let state = read_schema_state(&connection).unwrap();
+        assert_eq!(state.revision, 124);
+        assert_eq!(state.minimum_compatible, Some(124));
+        assert!(state.ensure_supported_by(123).is_err());
     }
 
     #[test]

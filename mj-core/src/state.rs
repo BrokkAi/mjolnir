@@ -936,6 +936,18 @@ pub enum TargetLocator {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         borrowed_from: Option<String>,
     },
+    /// A Nitro Sandbox (a Firecracker microVM) on an EC2 host reached over
+    /// SSH. The workspace is always a named volume the host engine owns, so
+    /// unlike Podman there is no workspace storage to record.
+    SshNitro {
+        host: String,
+        container_id: String,
+        /// The session that owns the sandbox when this locator is a
+        /// sub-agent child borrowing its parent's sandbox; `None` when the
+        /// session owns the sandbox itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
+    },
 }
 
 impl ManagedWorktreeTarget {
@@ -1206,6 +1218,9 @@ impl TargetLocator {
             Self::SshAppleContainer {
                 host, container_id, ..
             } => Some(("apple", Some(host), container_id)),
+            Self::SshNitro {
+                host, container_id, ..
+            } => Some(("nitro", Some(host), container_id)),
             _ => None,
         }
     }
@@ -1232,7 +1247,8 @@ impl TargetLocator {
             | Self::AppleContainer { borrowed_from, .. }
             | Self::SshPodman { borrowed_from, .. }
             | Self::SshDocker { borrowed_from, .. }
-            | Self::SshAppleContainer { borrowed_from, .. } => borrowed_from.is_none(),
+            | Self::SshAppleContainer { borrowed_from, .. }
+            | Self::SshNitro { borrowed_from, .. } => borrowed_from.is_none(),
             Self::LocalBare { .. } | Self::SshBare { .. } | Self::AwsEc2 { .. } => false,
         }
     }
@@ -1265,6 +1281,7 @@ impl TargetLocator {
             | Self::SshPodman { container_id, .. }
             | Self::SshDocker { container_id, .. }
             | Self::SshAppleContainer { container_id, .. }
+            | Self::SshNitro { container_id, .. }
                 if container_id.trim().is_empty() =>
             {
                 bail!("target locator has an empty container id")
@@ -1314,6 +1331,9 @@ impl TargetLocator {
             }
             Self::SshAppleContainer { host, .. } if host.trim().is_empty() => {
                 bail!("SSH Apple container target locator has an empty host")
+            }
+            Self::SshNitro { host, .. } if host.trim().is_empty() => {
+                bail!("SSH Nitro target locator has an empty host")
             }
             _ => {}
         }
@@ -1728,10 +1748,19 @@ pub fn session_owns_container(session: &SessionRecord) -> bool {
 /// the parent's allocation.
 pub fn host_container_capacity<'a>(
     total: HostContainerSize,
+    memory_is_pool: bool,
     target_ids: &[String],
     sessions: impl IntoIterator<Item = &'a SessionRecord>,
 ) -> HostContainerCapacity {
-    let reserved = reserved_container_capacity(total);
+    // A pool set aside at boot is already net of the host's own needs.
+    let reserved = if memory_is_pool {
+        HostContainerSize {
+            cpus: 0,
+            memory_bytes: 0,
+        }
+    } else {
+        reserved_container_capacity(total)
+    };
     let usable = HostContainerSize {
         cpus: total.cpus.saturating_sub(reserved.cpus),
         memory_bytes: total.memory_bytes.saturating_sub(reserved.memory_bytes),
@@ -1834,14 +1863,14 @@ impl HostContainerCapacity {
     /// Why [`Self::refuses`] refused, for the person.
     pub fn refusal_message(&self, allocation: &SessionResourceAllocation) -> String {
         if !self.complete {
-            return "a live container on this Mac has no recorded RAM size, so Mjolnir cannot work out the RAM left safely".into();
+            return "a live container on this host has no recorded RAM size, so Mjolnir cannot work out the RAM left safely".into();
         }
         let requested = match allocation {
             SessionResourceAllocation::Container { memory_bytes, .. } => *memory_bytes,
             _ => 0,
         };
         format!(
-            "this session asks for {} GiB of RAM, but this Mac has {} GiB left after the macOS reserve and live containers. Apple containers do not give freed memory back to macOS, so Mjolnir does not overcommit RAM on a Mac. Suspend or stop a session on this Mac, or choose less RAM. Mjolnir does not stop sessions automatically",
+            "this session asks for {} GiB of RAM, but this host has {} GiB left after its reserve and live containers. RAM is a hard limit on this host, so Mjolnir does not overcommit it: Apple containers do not give freed memory back to macOS, and Nitro sandboxes take theirs from the memory pool the host reserved at boot. Suspend or stop a session on this host, or choose less RAM. Mjolnir does not stop sessions automatically",
             floor_gib_tenths(requested),
             floor_gib_tenths(self.remaining.memory_bytes),
         )
@@ -3457,6 +3486,18 @@ impl TargetLocator {
                     ..
                 },
                 TargetLocator::SshDocker {
+                    host: right_host,
+                    container_id: right_container,
+                    ..
+                },
+            )
+            | (
+                TargetLocator::SshNitro {
+                    host: left_host,
+                    container_id: left_container,
+                    ..
+                },
+                TargetLocator::SshNitro {
                     host: right_host,
                     container_id: right_container,
                     ..

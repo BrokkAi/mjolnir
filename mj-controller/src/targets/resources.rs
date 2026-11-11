@@ -76,6 +76,30 @@ pub fn ssh_host_capacity_command(ssh: &SshTarget, storage_paths: &[String]) -> C
     ssh_command(ssh, words).purpose("sample deployment host capacity")
 }
 
+/// [`ssh_host_capacity_command`] for a host that runs Nitro sandboxes: the
+/// same sample, then the engine's report appended as one `microvm.info=<json>`
+/// line.
+///
+/// Sandbox memory comes from the pool reserved at boot, not from what the host
+/// has free, so the pool is the host's total for admission. The engine is
+/// optional here: before the first session installs it, this reports the
+/// host's own totals, and the next sample after that corrects them. A probe
+/// that required the engine would refuse the very launch that installs it.
+/// Only an absent engine is optional: an installed engine that cannot report
+/// fails the sample, rather than passing physical memory off as the pool.
+pub fn ssh_nitro_host_capacity_command(ssh: &SshTarget, storage_paths: &[String]) -> CommandSpec {
+    let mut command = ssh_host_capacity_command(ssh, storage_paths);
+    let engine = engine_shell_words(MICROVM_ENGINE);
+    let remote = command
+        .args
+        .last_mut()
+        .expect("an SSH command ends with the remote command line");
+    *remote = format!(
+        "{remote} && if [ -e \"$HOME/{MICROVM_ENGINE_WORKER}\" ]; then info=$({engine} info --format json) || exit 1; printf 'microvm.info=%s\\n' \"$(printf '%s' \"$info\" | tr -d '\\n')\"; fi"
+    );
+    command
+}
+
 // vm_stat reports pages, whose size differs between Intel and Apple silicon.
 // Count active, wired and compressed pages as used; inactive/speculative pages
 // are reclaimable cache. top's second sample measures an interval, not uptime.
@@ -195,10 +219,16 @@ pub fn measure_local_storage(
 
 pub fn parse_host_capacity(output: &[u8], host: &str) -> Result<DeploymentCapacityUsage> {
     let values = parse_key_values(output);
-    let total = parse_required_u64(&values, "memory.max")?;
+    let mut total = parse_required_u64(&values, "memory.max")?;
+    let mut used = parse_required_u64(&values, "memory.current")?;
+    let memory_pool = values.contains_key("microvm.info");
+    if let Some(info) = values.get("microvm.info") {
+        (used, total) = nitro_pool_memory(info)?;
+    }
     Ok(DeploymentCapacityUsage {
+        memory_pool,
         cpu_percent: Some(parse_percent(required_value(&values, "cpu.percent")?)?),
-        memory_used_bytes: parse_required_u64(&values, "memory.current")?,
+        memory_used_bytes: used,
         memory_total_bytes: total,
         logical_cores: parse_required_u64(&values, "logical.cores")?,
         disk_total_bytes: None,
@@ -210,6 +240,7 @@ pub fn parse_aws_allocated_capacity(output: &[u8], host: &str) -> Result<Deploym
     let values = parse_key_values(output);
     let memory_total_bytes = parse_required_u64(&values, "memory.total")?;
     Ok(DeploymentCapacityUsage {
+        memory_pool: false,
         cpu_percent: None,
         memory_used_bytes: 0,
         memory_total_bytes,

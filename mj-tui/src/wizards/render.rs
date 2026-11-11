@@ -1,4 +1,5 @@
 use super::*;
+use mj_core::config::offers_attached_directories;
 
 /// Whether the target step sets a size for `target`: containers get CPU and
 /// memory, EC2 an instance type. Other targets run with what the host has.
@@ -803,7 +804,7 @@ pub(crate) fn render_review_wizard(
         conversion,
     } = view;
     let target = &dashboard.config.targets[target_id];
-    let can_attach = mount_history_host(target).is_some();
+    let can_attach = offers_attached_directories(target);
     let mut lines = vec![
         Line::from(vec![
             Span::styled("Profile: ", theme::muted()),
@@ -1433,6 +1434,11 @@ pub(crate) fn render_mount_wizard(
         }
         TargetTemplate::AwsEc2 { .. } => {
             "EC2 directories stream as tar.gz through one SSH connection into the destination."
+        }
+        // Reachable when a wizard that already holds attachments moves to a
+        // sandbox: the launch drops them and says so.
+        TargetTemplate::SshNitro { .. } => {
+            "Nitro sandboxes cannot attach host directories; these are dropped when the session starts."
         }
         TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => {
             unreachable!("bare targets do not attach resources")

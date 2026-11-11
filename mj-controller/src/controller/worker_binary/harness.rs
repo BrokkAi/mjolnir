@@ -18,7 +18,8 @@ pub(super) fn workspace_paths(
         | targets::TargetLocator::AppleContainer { .. }
         | targets::TargetLocator::SshPodman { .. }
         | targets::TargetLocator::SshDocker { .. }
-        | targets::TargetLocator::SshAppleContainer { .. } => {
+        | targets::TargetLocator::SshAppleContainer { .. }
+        | targets::TargetLocator::SshNitro { .. } => {
             targets::container_workspace_root(container_workspace)
         }
         targets::TargetLocator::AwsEc2 { workspace, .. }

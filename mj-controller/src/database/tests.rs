@@ -1038,6 +1038,33 @@ fn local_docker_locator_round_trips_through_the_normalized_target_table() {
             .unwrap(),
         "local-docker"
     );
+
+    // A sandbox keeps its host and resource in the same normalized columns,
+    // and its borrowing child keeps its owner.
+    for (id, borrowed_from) in [
+        ("sandbox", None),
+        ("sandbox-child", Some("sandbox".to_owned())),
+    ] {
+        let mut record = session(id, "project-1");
+        record.target_template_id = "nitro".into();
+        record.target = Some(TargetLocator::SshNitro {
+            borrowed_from,
+            host: "ec2.example.test".into(),
+            container_id: "mj-sandbox".into(),
+        });
+        save_session_to(&database, &record).unwrap();
+        assert_eq!(load_state_from(&database).unwrap().sessions[id], record);
+    }
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT kind FROM session_targets WHERE session_id = 'sandbox'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "ssh-nitro"
+    );
 }
 
 #[test]

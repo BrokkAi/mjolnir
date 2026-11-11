@@ -77,6 +77,8 @@ mod install;
 pub(super) use install::*;
 mod store;
 use store::*;
+mod microvm;
+pub(crate) use microvm::ensure_microvm_engine;
 mod upgrade;
 pub(crate) use upgrade::*;
 mod process;

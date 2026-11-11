@@ -78,6 +78,18 @@ fn close_plan_scoped(
         });
     }
 
+    // The engine stops a sandbox's process before it deletes a disk, so
+    // removal needs no more than the sandbox and its two named volumes. A
+    // sandbox has no host Git cache snapshot to remove.
+    if let TargetLocator::SshNitro {
+        ssh, container_id, ..
+    } = locator
+    {
+        return Ok(CommandPlan {
+            description: format!("clean up stopped Mjolnir session {session_id}"),
+            commands: nitro_destroy_commands(ssh, container_id),
+        });
+    }
     let session_worker_root = worker_root(locator, session_id)?;
     let session_profile_home = format!(".local/share/hel/profiles/{session_id}");
     if matches!(
@@ -110,7 +122,9 @@ fn close_plan_scoped(
             )
         }
         TargetLocator::LocalPodman { .. } => unreachable!("handled above"),
-        TargetLocator::SshDocker { .. } | TargetLocator::SshAppleContainer { .. } => {
+        TargetLocator::SshDocker { .. }
+        | TargetLocator::SshAppleContainer { .. }
+        | TargetLocator::SshNitro { .. } => {
             unreachable!("handled above")
         }
         TargetLocator::LocalDocker { container_id, .. } => {
@@ -299,6 +313,15 @@ pub fn quiesce_plan(locator: &TargetLocator, session_id: &str) -> Result<Option<
         !is_borrowed(locator),
         "refusing to operate on a target borrowed from another session; act on the owning session instead"
     );
+    if let TargetLocator::SshNitro {
+        ssh, container_id, ..
+    } = locator
+    {
+        return Ok(Some(CommandPlan {
+            description: format!("quiesce Mjolnir session {session_id}"),
+            commands: vec![nitro_quiesce_command(ssh, container_id)],
+        }));
+    }
     let (ssh, container_id) = match locator {
         TargetLocator::LocalPodman { container_id, .. } => (None, container_id),
         TargetLocator::SshPodman {
@@ -598,6 +621,9 @@ pub fn cleanup_target_is_confirmed_absent(
             podman_absence_command(Some(ssh), container_id, workspace_storage, session_id),
             true,
         ),
+        TargetLocator::SshNitro {
+            ssh, container_id, ..
+        } => (nitro_absence_command(ssh, container_id), true),
         _ => return Ok(false),
     };
     let command = match locator {

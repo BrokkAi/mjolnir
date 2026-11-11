@@ -46,6 +46,7 @@ pub fn provision_plan_named(
                 | TargetTemplate::SshPodman { .. }
                 | TargetTemplate::SshDocker { .. }
                 | TargetTemplate::SshAppleContainer { .. }
+                | TargetTemplate::SshNitro { .. }
         )
     {
         bail!("additional mounts require a container-backed target");
@@ -181,6 +182,32 @@ pub fn provision_plan_named(
         TargetTemplate::SshDocker { .. } | TargetTemplate::SshAppleContainer { .. } => {
             unreachable!("handled above")
         }
+        TargetTemplate::SshNitro { ssh, container } => {
+            validate_ssh(ssh)?;
+            validate_container_template(container)?;
+            // The engine creates the workspace and /tmp volumes and removes
+            // them again if the launch fails, so the plan is the engine's
+            // `run` directly, not a shell wrapper that does that itself.
+            commands.extend(nitro_container_run(
+                container,
+                name,
+                session_id,
+                additional_mounts,
+                ssh,
+                &workspace,
+            )?);
+            commands.extend(
+                install_git_plan(ExecutionBoundary::SshContainer {
+                    engine: MICROVM_ENGINE,
+                    ssh,
+                    container_id: name,
+                })
+                .commands,
+            );
+            commands.extend(clone_commands(bundle, &workspace, github_token, |args| {
+                command_over_ssh(container_exec(MICROVM_ENGINE, name, args), ssh)
+            }));
+        }
         TargetTemplate::SshPodman { ssh, container } => {
             validate_ssh(ssh)?;
             validate_container_template(container)?;
@@ -242,6 +269,22 @@ pub fn provision_bare_project_plan(
 /// setup catches an unusable image or runtime before the first session exists.
 pub fn setup_smoke_plan(template: &TargetTemplate, smoke_id: &str) -> Result<CommandPlan> {
     let name = resource_name(smoke_id)?;
+    if let TargetTemplate::SshNitro { ssh, container } = template {
+        validate_ssh(ssh)?;
+        validate_container_template(container)?;
+        let mut create =
+            nitro_container_run(container, &name, smoke_id, &[], ssh, CONTAINER_WORKSPACE)?;
+        create.truncate(1);
+        return Ok(CommandPlan {
+            description: format!("smoke test Mjolnir setup target {smoke_id}"),
+            commands: vec![
+                create.remove(0).purpose("create disposable setup sandbox"),
+                ssh_engine_command(ssh, MICROVM_ENGINE, ["exec", "-i", name.as_str(), "true"])
+                    .purpose("execute setup smoke command"),
+                nitro_destroy_in_one_command(ssh, &name),
+            ],
+        });
+    }
     let (engine, container, boundary) = match template {
         TargetTemplate::LocalPodman(container) => ("podman", container, ExecutionBoundary::Direct),
         TargetTemplate::LocalDocker(container) => ("docker", container, ExecutionBoundary::Direct),
