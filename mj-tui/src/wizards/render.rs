@@ -1435,10 +1435,13 @@ pub(crate) fn render_mount_wizard(
         TargetTemplate::AwsEc2 { .. } => {
             "EC2 directories stream as tar.gz through one SSH connection into the destination."
         }
-        TargetTemplate::LocalBare
-        | TargetTemplate::SshBare { .. }
-        | TargetTemplate::SshNitro { .. } => {
-            unreachable!("bare and Nitro targets do not attach resources")
+        // Reachable when a wizard that already holds attachments moves to a
+        // sandbox: the launch drops them and says so.
+        TargetTemplate::SshNitro { .. } => {
+            "Nitro sandboxes cannot attach host directories; these are dropped when the session starts."
+        }
+        TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => {
+            unreachable!("bare targets do not attach resources")
         }
     };
     let mut lines = vec![
