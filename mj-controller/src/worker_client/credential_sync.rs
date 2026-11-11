@@ -1946,7 +1946,7 @@ impl LoginAccess {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn with_lock_marker(mut self, marker: std::path::PathBuf) -> Self {
         self.lock_marker = Some(marker);
         self
