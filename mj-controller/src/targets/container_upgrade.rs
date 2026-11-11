@@ -143,8 +143,11 @@ fn host_and_name(locator: &TargetLocator) -> Result<(ImageHost, &str)> {
         TargetLocator::SshDocker {
             ssh, container_id, ..
         } => (ImageHost::SshDocker(ssh.clone()), container_id),
+        TargetLocator::SshNitro {
+            ssh, container_id, ..
+        } => (ImageHost::SshNitro(ssh.clone()), container_id),
         _ => bail!(
-            "storage-preserving container upgrades support owned Podman and Docker containers; this target is unsupported"
+            "storage-preserving container upgrades support owned Podman, Docker and Nitro sandbox containers; this target is unsupported"
         ),
     })
 }
@@ -567,6 +570,9 @@ impl RetainedContainer {
             return Ok(());
         }
         let (host, _) = host_and_name(&self.locator)?;
+        if matches!(host, ImageHost::SshNitro(_)) {
+            return self.nitro_release(&host, executor);
+        }
         let pin = self.image_pin();
         let inspected = executor.execute(&host.command(
             vec![
@@ -643,6 +649,9 @@ impl RetainedContainer {
             );
             self.prepared_image = Some(id);
         }
+        if matches!(host, ImageHost::SshNitro(_)) {
+            return self.nitro_stage(&host, executor);
+        }
         checked(
             &host,
             vec![
@@ -681,6 +690,9 @@ impl RetainedContainer {
             .prepared_image
             .as_ref()
             .context("container image has not been prepared")?;
+        if matches!(host, ImageHost::SshNitro(_)) {
+            return self.nitro_replace(&host, session_id, executor);
+        }
         if let Some(current) = inspect(&host, &self.name, executor)? {
             owned(&current, session_id)?;
             if current.config.labels.get("dev.mj.container-upgrade") == Some(&self.operation_id) {
@@ -876,6 +888,10 @@ impl RetainedContainer {
         executor: &impl CommandExecutor,
     ) -> Result<()> {
         let (host, _) = host_and_name(&self.locator)?;
+        if matches!(host, ImageHost::SshNitro(_)) {
+            // The previous root disk is part of the VM, which Destroy removes.
+            return Ok(());
+        }
         if let Some(backup) = inspect(&host, &self.backup_name, executor)? {
             owned(&backup, session_id)?;
             ensure!(
@@ -896,7 +912,9 @@ impl RetainedContainer {
             replacement.config.labels.get("dev.mj.container-upgrade") == Some(&self.operation_id),
             "replacement ownership changed"
         );
-        if let Some(backup) = inspect(&host, &self.backup_name, executor)? {
+        if matches!(host, ImageHost::SshNitro(_)) {
+            self.nitro_release(&host, executor)?;
+        } else if let Some(backup) = inspect(&host, &self.backup_name, executor)? {
             owned(&backup, session_id)?;
             ensure!(
                 backup.id == self.source_id && !backup.state.running,
@@ -911,6 +929,103 @@ impl RetainedContainer {
                 "cannot retire completed private control-state transfer"
             );
         }
+        Ok(())
+    }
+}
+
+/// The Nitro engine replaces the root disk of the one VM in place. Two VMs
+/// may not list a volume (two kernels would corrupt its ext4 image), so the
+/// Podman sequence of renaming the source and creating a second container on
+/// its volumes has no engine equivalent. The engine's `replace-root` verbs keep
+/// the same guarantees: the old root disk stays beside the new one until
+/// `release`, the staged image is pinned against `image prune`, every step is
+/// repeatable, and the VM's id changes at the swap, so `source_is_current` and
+/// the label check in `replace` tell source from replacement as they do for
+/// Podman.
+impl RetainedContainer {
+    fn nitro_verb(&self, verb: &str, extra: Vec<String>) -> Vec<String> {
+        let mut args = vec![
+            "container".into(),
+            "replace-root".into(),
+            verb.into(),
+            "--operation".into(),
+            self.operation_id.clone(),
+        ];
+        args.extend(extra);
+        args.push(self.name.clone());
+        args
+    }
+
+    /// Pin the prepared image in the VM's record. Unlike the Podman tag, the
+    /// pin cannot outlive the VM.
+    fn nitro_stage(&self, host: &ImageHost, executor: &impl CommandExecutor) -> Result<()> {
+        let image = self
+            .prepared_image
+            .as_ref()
+            .context("container image has not been prepared")?;
+        let mut extra = Vec::new();
+        for label in [
+            format!("dev.mj.container-upgrade={}", self.operation_id),
+            format!("dev.mj.container-image={}", self.target_image),
+        ] {
+            extra.extend(["--label".into(), label]);
+        }
+        let mut args = self.nitro_verb("stage", extra);
+        args.push(image.trim_start_matches("sha256:").to_owned());
+        checked(host, args, executor)?;
+        Ok(())
+    }
+
+    /// Ends the operation: drops the previous root disk once the replacement
+    /// is swapped in, or just the pin when it never was. Repeating it is safe.
+    fn nitro_release(&self, host: &ImageHost, executor: &impl CommandExecutor) -> Result<()> {
+        checked(host, self.nitro_verb("release", Vec::new()), executor)?;
+        Ok(())
+    }
+
+    fn nitro_replace(
+        &self,
+        host: &ImageHost,
+        session_id: &str,
+        executor: &impl CommandExecutor,
+    ) -> Result<()> {
+        let current = inspect(host, &self.name, executor)?.context(
+            "the session's sandbox is missing; refusing to create another worker over its volumes",
+        )?;
+        owned(&current, session_id)?;
+        if current.config.labels.get("dev.mj.container-upgrade") == Some(&self.operation_id) {
+            if !current.state.running {
+                checked(host, vec!["start".into(), self.name.clone()], executor)?;
+            }
+            return Ok(());
+        }
+        ensure!(
+            current.id == self.source_id,
+            "container identity changed since upgrade confirmation; refusing replacement"
+        );
+        ensure!(
+            !self.control_state_restored,
+            "replacement container is missing after its worker state was restored; retaining the source and refusing to replay older work"
+        );
+        if current.state.running {
+            // The worker is already stopped. A stop gives the guest the chance
+            // to flush the volumes, which hold the captured control state.
+            checked(
+                host,
+                vec![
+                    "stop".into(),
+                    "--time".into(),
+                    "0".into(),
+                    self.name.clone(),
+                ],
+                executor,
+            )?;
+        }
+        mj_core::test_hooks::reach_test_hook(
+            "container_upgrade_source_retained_before_replacement",
+        )?;
+        checked(host, self.nitro_verb("apply", Vec::new()), executor)?;
+        checked(host, vec!["start".into(), self.name.clone()], executor)?;
         Ok(())
     }
 }
@@ -1634,5 +1749,219 @@ mod tests {
             &ProcessExecutor,
         )
         .unwrap();
+    }
+
+    /// The engine's rules for one VM, as the controller sees them: one VM
+    /// owns the volumes, so the replacement is the same VM with another root
+    /// disk and another id, and `start` is admitted only when no other VM of
+    /// this session runs.
+    #[derive(Default)]
+    struct FakeNitroEngine {
+        vm: std::cell::RefCell<FakeVm>,
+        log: std::cell::RefCell<Vec<String>>,
+        /// Fail the next command whose verb starts with this text.
+        fail: std::cell::RefCell<Option<&'static str>>,
+    }
+
+    #[derive(Default)]
+    struct FakeVm {
+        id: String,
+        running: bool,
+        labels: BTreeMap<String, String>,
+        staged: Option<String>,
+        applied: bool,
+        has_previous_root: bool,
+        pinned_image: Option<String>,
+    }
+
+    impl FakeNitroEngine {
+        fn new(session: &str) -> Self {
+            let engine = Self::default();
+            *engine.vm.borrow_mut() = FakeVm {
+                id: "source-id".into(),
+                running: true,
+                labels: BTreeMap::from([
+                    ("dev.mj.managed".into(), "true".into()),
+                    ("dev.mj.session".into(), session.into()),
+                ]),
+                ..FakeVm::default()
+            };
+            engine
+        }
+
+        fn inspection(&self) -> String {
+            let vm = self.vm.borrow();
+            serde_json::json!([{
+                "Id": vm.id,
+                "Name": "nitro-name",
+                "Image": "sha256:source-image",
+                "ImageName": "example/image:old",
+                "Config": {
+                    "Image": "example/image:old",
+                    "Labels": vm.labels,
+                    "User": "0:0",
+                    "Env": ["HOME=/home/hel"],
+                    "WorkingDir": "",
+                    "Cmd": ["sh", "-c", container::KEEPALIVE_SCRIPT],
+                    "Entrypoint": [],
+                },
+                "HostConfig": { "Memory": 4294967296u64, "NanoCpus": 2000000000u64, "NetworkMode": "nitro" },
+                "Mounts": [
+                    {"Type": "volume", "Name": "nitro-name-tmp", "Source": "/v/tmp", "Destination": "/tmp", "RW": true},
+                    {"Type": "volume", "Name": "nitro-name-workspace", "Source": "/v/ws", "Destination": "/workspace/session-fixture", "RW": true},
+                ],
+                "State": { "Status": if vm.running { "running" } else { "exited" }, "Running": vm.running },
+            }])
+            .to_string()
+        }
+    }
+
+    impl CommandExecutor for FakeNitroEngine {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            let ok = |stdout: &str| {
+                Ok(CommandOutput {
+                    status: 0,
+                    stdout: stdout.as_bytes().to_vec(),
+                    stderr: Vec::new(),
+                })
+            };
+            // ssh sends the remote command as one quoted line.
+            let remote = command.args.last().cloned().unwrap_or_default();
+            let Some(position) = remote.find("mj-microvm") else {
+                bail!("unexpected command that does not go through the engine: {remote}");
+            };
+            let words: Vec<String> = remote[position + "mj-microvm".len()..]
+                .split_whitespace()
+                .map(|word| word.trim_matches('\'').to_owned())
+                .filter(|word| !word.is_empty())
+                .collect();
+            let words = &words;
+            let verb = words.join(" ");
+            let failing = *self.fail.borrow();
+            if let Some(prefix) = failing
+                && verb.starts_with(prefix)
+            {
+                self.fail.borrow_mut().take();
+                bail!("injected failure of `{verb}`");
+            }
+            self.log.borrow_mut().push(verb.clone());
+            let mut vm = self.vm.borrow_mut();
+            match words[0].as_str() {
+                "container" if words[1] == "inspect" => {
+                    drop(vm);
+                    ok(&self.inspection())
+                }
+                "image" => ok("sha256:target-image\n"),
+                // Guest commands: the tar probe, capture and restore.
+                "exec" => ok(
+                    "--one-file-system --unlink-first --strip-components --no-recursion --occurrence",
+                ),
+                "container" if words[1] == "replace-root" => {
+                    let operation =
+                        words[words.iter().position(|w| w == "--operation").unwrap() + 1].clone();
+                    match words[2].as_str() {
+                        "stage" => {
+                            vm.staged = Some(operation);
+                            vm.pinned_image = Some(words.last().unwrap().clone());
+                        }
+                        "apply" => {
+                            assert!(!vm.running, "the engine refuses to swap a running VM");
+                            assert_eq!(vm.staged.as_deref(), Some(operation.as_str()));
+                            if !vm.applied {
+                                vm.applied = true;
+                                vm.has_previous_root = true;
+                                vm.id = "replacement-id".into();
+                                vm.labels
+                                    .insert("dev.mj.container-upgrade".into(), operation);
+                            }
+                        }
+                        "release" => {
+                            vm.staged = None;
+                            vm.pinned_image = None;
+                            vm.has_previous_root = false;
+                        }
+                        other => bail!("unexpected replace-root {other}"),
+                    }
+                    ok("")
+                }
+                "stop" => {
+                    vm.running = false;
+                    ok("")
+                }
+                "start" => {
+                    vm.running = true;
+                    ok("")
+                }
+                other => bail!("unexpected engine verb {other}"),
+            }
+        }
+    }
+
+    // No VM may run beside its replacement (two kernels on one ext4 volume),
+    // and a failure between any two engine calls must resume.
+    #[test]
+    fn nitro_replacement_swaps_the_root_of_the_stopped_vm_and_resumes_after_each_failure() {
+        let session = "session-fixture";
+        let locator = TargetLocator::SshNitro {
+            ssh: mj_core::targets::SshTarget {
+                destination: "host".into(),
+                ssh_args: Vec::new(),
+            },
+            container_id: "nitro-name".into(),
+            borrowed_from: None,
+        };
+        for failing in [
+            None,
+            Some("stop"),
+            Some("container replace-root apply"),
+            Some("start"),
+        ] {
+            let engine = FakeNitroEngine::new(session);
+            let mut plan = inspect_retained_container(
+                &locator,
+                session,
+                "example/image:new",
+                "op1",
+                Path::new("/workspace/session-fixture"),
+                Path::new("/var/lib/hel/workers/session-fixture"),
+                &engine,
+            )
+            .unwrap();
+            assert!(
+                plan.control_state.is_some(),
+                "the worker root is on the replaced disk"
+            );
+            plan.image_pin_reserved = true;
+            plan.prepare(&engine).unwrap();
+            assert_eq!(
+                engine.vm.borrow().pinned_image.as_deref(),
+                Some("target-image")
+            );
+            assert!(plan.source_is_current(&engine).unwrap());
+            *engine.fail.borrow_mut() = failing;
+            if failing.is_some() {
+                assert!(plan.replace(session, &engine).is_err(), "{failing:?}");
+            }
+            plan.replace(session, &engine).unwrap();
+            plan.replace(session, &engine).unwrap();
+            let verbs = engine.log.borrow().clone();
+            let applied = verbs
+                .iter()
+                .filter(|v| v.starts_with("container replace-root apply"))
+                .count();
+            assert!((1..=2).contains(&applied), "{failing:?}: {verbs:?}");
+            // The source stops before the swap and the VM starts only after it.
+            let position =
+                |prefix: &str| verbs.iter().rposition(|v| v.starts_with(prefix)).unwrap();
+            assert!(position("stop") < position("container replace-root apply"));
+            assert!(position("container replace-root apply") < position("start"));
+            assert!(engine.vm.borrow().running);
+            assert!(!plan.source_is_current(&engine).unwrap());
+
+            plan.finish(session, &engine).unwrap();
+            let vm = engine.vm.borrow();
+            assert!(!vm.has_previous_root && vm.pinned_image.is_none() && vm.staged.is_none());
+            assert_eq!(vm.labels["dev.mj.container-upgrade"], "op1");
+        }
     }
 }

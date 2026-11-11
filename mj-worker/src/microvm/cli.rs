@@ -18,7 +18,7 @@ use super::image::{self, PullPolicy};
 use super::protocol::ExecRequest;
 use super::state::{ImageConfig, Layout, VolumeMetadata, validate_label, validate_name};
 use super::vm::{self, RunSpec, VolumeArg};
-use super::{net, sys, tarcopy, template, volume};
+use super::{net, replace_root, sys, tarcopy, template, volume};
 
 /// The exit status of an engine failure, as Podman uses.
 const ENGINE_FAILURE: i32 = 125;
@@ -186,6 +186,37 @@ enum ContainerCommand {
         format: Option<String>,
         name: String,
     },
+    /// Replace a stopped VM's root disk with a clone of another image,
+    /// keeping its volumes (the controller's retained-storage image upgrade).
+    #[command(subcommand)]
+    ReplaceRoot(ReplaceRootCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum ReplaceRootCommand {
+    /// Record the target image and keep it from `image prune`; prints its id.
+    Stage {
+        /// The controller's operation id; every step of one replacement names it.
+        #[arg(long)]
+        operation: String,
+        /// Labels the swap adds to the VM.
+        #[arg(long = "label")]
+        labels: Vec<String>,
+        name: String,
+        image: String,
+    },
+    /// Swap the root disk of the stopped VM; prints the VM's new id.
+    Apply {
+        #[arg(long)]
+        operation: String,
+        name: String,
+    },
+    /// Delete the previous root disk and the record.
+    Release {
+        #[arg(long)]
+        operation: String,
+        name: String,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -321,6 +352,7 @@ fn dispatch(layout: &Layout, command: Command) -> Result<i32> {
             print_described(&description, format.as_deref())?;
             Ok(0)
         }
+        Command::Container(ContainerCommand::ReplaceRoot(command)) => replace_root(layout, command),
         Command::Ps(args) => list(layout, args),
         Command::Start(args) => {
             for name in &args.names {
@@ -354,6 +386,40 @@ fn dispatch(layout: &Layout, command: Command) -> Result<i32> {
         }
         Command::Volume(command) => volume_command(layout, command),
     }
+}
+
+fn replace_root(layout: &Layout, command: ReplaceRootCommand) -> Result<i32> {
+    layout.ensure()?;
+    match command {
+        ReplaceRootCommand::Stage {
+            operation,
+            labels,
+            name,
+            image,
+        } => {
+            let labels = parse_labels(&labels)?;
+            println!(
+                "{}",
+                replace_root::stage(
+                    layout,
+                    &vm::resolve(layout, &name)?,
+                    &operation,
+                    &image,
+                    &labels
+                )?
+            );
+        }
+        ReplaceRootCommand::Apply { operation, name } => {
+            println!(
+                "{}",
+                replace_root::apply(layout, &vm::resolve(layout, &name)?, &operation)?
+            );
+        }
+        ReplaceRootCommand::Release { operation, name } => {
+            replace_root::release(layout, &vm::resolve(layout, &name)?, &operation)?;
+        }
+    }
+    Ok(0)
 }
 
 fn print_info(info: &Value) {

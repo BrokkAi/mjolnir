@@ -18,7 +18,7 @@ To see it working: create a Nitro host, start a session on it with `mj new --tar
 - [x] (2026-11-10) Milestone 3: `mj ec2 create --runtime nitro` host bootstrap; AWS-boundary fixtures cover the Nitro launch requests and bootstrap. Registration and image preload remain for Milestone 4.
 - [x] (2026-11-11) Milestone 4: integration and live acceptance on EC2. Registration and preload wired (`e0630dd9c`); four defects found live and fixed (`21b955298`, `dcc7aec87`, `9b0bd6e88`, `c95b16983`, see Surprises). Acceptance passed on a fresh m7i.4xlarge from an isolated `--instance nitro-live` (transcript under Artifacts and Notes). Remaining: per-volume lock files left after destroy (engine follow-up).
 - [x] (2026-11-11) Milestone 5: Firecracker jailer. Every VM's Firecracker now runs under the jailer 1.18.0 as its own unprivileged user (commit 556b7f144); proven on the spike host with the Milestone 1 transcript, the old-layout upgrade case, the isolation checks and a host reboot (see Artifacts and Notes, "Milestone 5 transcript").
-- [ ] Milestone 6: storage-preserving image upgrade for Nitro sessions.
+- [x] (2026-11-11) Milestone 6: storage-preserving image upgrade for Nitro sessions. Engine verbs and controller dispatch are in `f18ddd188`; the engine half is proven on the spike host (transcript under Artifacts and Notes); the session-level live check is in Artifacts and Notes, "Milestone 6 live check".
 
 ## Surprises & Discoveries
 
@@ -167,6 +167,17 @@ To see it working: create a Nitro host, start a session on it with `mj new --tar
 - Decision (Milestone 5): `state.json` format 2 adds `jailed`. Format 1 files read back with `jailed: false` and behave as before: `exec`, `cp`, `stop` (with its flush), `rm` and inspect use the old runtime-directory socket, and the old unit's `ExecStopPost` (`host-tap-down`, still supported) cleans its TAP. The next `start` of such a VM launches it in a jail and rewrites its state as format 2, so a running session on an existing host survives an engine upgrade untouched and moves into a jail the next time it is stopped and started. An engine that only knows format 1 refuses a format 2 file, as designed. `inspect` reports `HostConfig.Isolation` as `jailer` or `none`. `info` reports `jailer_path`, and a launch needs the jailer installed.
   Rationale: upgrades must complete without intervention (AGENTS.md); no running VM is restarted by an upgrade.
   Date/Author: 2026-11-11, Milestone 5 implementer.
+- Decision (Milestone 6): The engine replaces the root disk of the one stopped VM (`container replace-root stage|apply|release`) instead of creating a second VM on the same volumes. Podman's flow renames the source to a backup and runs a replacement on its volumes; the engine's one-VM-per-volume rule (two kernels writing one ext4 image corrupt it) forbids that, and relaxing the rule for a stopped backup would let a later `start` of the backup break it. The rollback resource Podman keeps in the renamed source container is the VM's previous root disk, kept beside the new one as `root.previous` until `release`. Like Podman's, the controller's recovery is forward only: a repeated `replace` finishes the same operation; nothing swaps back automatically. The old root disk holds only what the Podman writable layer would hold (the home directory and installed packages), because the workspace, `/tmp` and, through the existing control-state capture, the worker's journal and harness state live on or are copied through the volumes.
+  Rationale: smallest change that keeps the controller's replacement state machine (`RetainedContainer`: inspect, prepare, replace, finish, recovery by operation label and id) as the single mechanism. `RetainedContainer` dispatches to the engine verbs only where the engines differ (pin, replace, retire).
+  Date/Author: 2026-11-11, Milestone 6 implementer.
+- Decision (Milestone 6): `stage` records `{operation, image id, labels, new id}` in `vms/<name>/replace-root.json` and that record is the image pin: `image prune` treats a staged image as in use, and removing the VM removes the pin, so it cannot leak (Podman's `localhost/mj-container-upgrade` tag can, which is why it needs `release_image_pin`). The record carries the VM's post-swap id, chosen at stage time, and "applied" is `state.json id == record.new_id`, a fact in the file `apply` writes last, so no pair of files has to agree. `apply` orders its steps (clone the image over `root.next`, rename `root.ext4` to `root.previous`, rename `root.next` to `root.ext4`, write `state.json`) so a crash after any step is finished by a second `apply`; `release` of a swap that stopped half way is refused, because the previous disk is then the only root. Once the old root disk is set aside, `inspect` reports the replacement's id and labels (`observed`) even if `state.json` was not yet written, and `start` finishes the interrupted swap first, under the same VM lock (`resume_interrupted_locked`), so recovery never mistakes a half-swapped VM for the source and recaptures control state from its empty root (review finding). The VM's id changes at the swap because the controller tells source from replacement by id (`source_is_current`); if the id stayed, a retry would capture control state from the new, still empty root over the archive. The state format stays 1: `replace-root.json` is a new file, not a new field, and an older engine that never reads it would at worst prune a staged image, which `apply` reports as a missing image.
+  Date/Author: 2026-11-11, Milestone 6 implementer.
+- Decision (Milestone 6): The controller stops the source VM with `stop --time 0` (the engine's guest flush, which writes the captured control-state archive on the `/tmp` volume) before `apply`, then `start`s it. `start` goes through the engine's ordinary admission under the global lock, which counts only VMs whose unit is not inactive, so the replacement is charged once: after the source stopped, never beside it. If another sandbox took the freed memory in between, `start` is refused naming the pool and the upgrade resumes at `start` on the next attempt (the daemon's admission still counts the session once, so a new session cannot take it).
+  Date/Author: 2026-11-11, Milestone 6 implementer.
+- Decision (Milestone 6): No schema change and no migration. `ContainerSettings::upgrade_supported` stays the single gate and no longer excludes `ssh-nitro`; the feed, viewer and CLI read it unchanged.
+  Date/Author: 2026-11-11, Milestone 6 implementer.
+- Decision (Milestone 6): The check that the new image has `tar` and `flock` is not repeated for Nitro. Podman runs `run --rm --entrypoint sh IMAGE -c 'command -v tar ...'` before the upgrade is committed. The engine has no throwaway container: a probe VM would be charged against the pool, would need its own cleanup after a daemon crash, and would execute in a VM only to learn what the source's `tar --help` probe already established for the same image family. A new image that lacks them makes the control-state restore fail after the swap; the previous root disk is retained. Add a probe verb if that ever happens in practice.
+  Date/Author: 2026-11-11, Milestone 6 implementer.
 
 ## Outcomes & Retrospective
 
@@ -591,6 +602,39 @@ Two jailed VMs (`j1` 2 vCPU 2g with two volumes, `j2` 1 vCPU 1g). The full lifec
     run --memory 60g: refused naming the pool, nothing left; SIGTERM mid-run: "interrupted", nothing left
     three parallel 20g runs: 2 admitted, 1 refused; after rm -f -v: units 0, TAPs 0, jails 0, VM dirs 0, slots in use 0
     host reboot with a jailed VM running: afterwards status exited, no unit/TAP/jail; start restored it with its data ("survives-reboot-jailed")
+### Milestone 6 engine transcript, 2026-11-11
+
+On the spike host with a stripped musl build of `f18ddd188` merged with the jailer commit `556b7f144` (another agent's VMs on the same host had written state format 2, which a build without the jailer refuses to list). Images `alpine:3.19` and `alpine:3.20` stand in for two agent-dev versions. Run as `ec2-user` with `sudo -n ./mj-worker-m6 microvm ...`; `[exit N]` lines omitted when 0.
+
+    $ run --detach --name m6t --label dev.mj.managed=true --label dev.mj.session=m6 --memory 512m --cpus 1 --user 0:0 --volume m6t-ws:/workspace:rw,U --volume m6t-tmp:/tmp:rw alpine:3.19 tail -f /dev/null
+    739b8b98...
+    $ exec m6t sh -c 'cat /etc/alpine-release; echo kept-in-workspace > /workspace/keep; echo kept-in-tmp > /tmp/keep; echo lost-with-root > /root/rootfile; sync'
+    3.19.9
+    $ container replace-root stage --operation op1 --label dev.mj.container-upgrade=op1 --label dev.mj.container-image=alpine:3.20 m6t alpine:3.20
+    bf8527eb...
+    $ container replace-root apply --operation op1 m6t           (VM still running)
+    Error: container m6t is running; stop it before replacing its root disk   [exit 125]
+    $ stop --time 0 m6t
+    $ container replace-root stage --operation op2 m6t alpine:3.19
+    Error: container m6t already has a root replacement in progress (operation op1); release it first   [exit 125]
+    $ container replace-root apply --operation op1 m6t
+    40600531...                                                  (new id)
+    $ container replace-root apply --operation op1 m6t           (repeat)
+    40600531...
+    $ ls -la vms/m6t
+    replace-root.json  root.ext4  root.previous (owned by the jail user)  state.json
+    $ start m6t
+    $ exec m6t sh -c 'cat /etc/alpine-release; cat /workspace/keep; cat /tmp/keep; ls /root/rootfile'
+    release: 3.20.10
+    workspace: kept-in-workspace
+    tmp: kept-in-tmp
+    ls: /root/rootfile: No such file or directory
+    $ container inspect --format '{{.Id}} {{.Config.Image}} {{json .Config.Labels}} {{.State.Status}}' m6t
+    40600531... alpine:3.20 {"dev.mj.container-image":"alpine:3.20","dev.mj.container-upgrade":"op1","dev.mj.managed":"true","dev.mj.session":"m6"} running
+    $ container replace-root release --operation op1 m6t   (twice, both exit 0)
+    $ ls vms/m6t
+    root.ext4  state.json
+    $ rm --force m6t; volume rm m6t-ws m6t-tmp               (nothing left in vms/ or volumes/)
 
 ## Interfaces and Dependencies
 
