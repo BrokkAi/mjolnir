@@ -28,6 +28,13 @@ pub struct MailboxEventResponse {
 pub struct SessionMessageResponse {
     pub session_id: String,
     pub via: String,
+    /// Worker-reported delivery timing for mailbox messages. Omitted when
+    /// the live worker has not published this capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mailbox_delivery: Option<mj_core::mailbox::MailboxDeliveryMode>,
+    /// Human-readable explanation when delivery waits for the recipient turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<u64>,
     /// Internal routing detail used to preserve the shipped child-tool result
