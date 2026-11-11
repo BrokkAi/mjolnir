@@ -461,6 +461,10 @@ fn parse_volume(text: &str) -> Result<VolumeArg> {
             ),
         }
     }
+    ensure!(
+        read_write || !chown,
+        "--volume {text:?}: option U changes ownership, which a read-only volume cannot take"
+    );
     Ok(VolumeArg {
         name: name.to_owned(),
         destination: destination.to_owned(),
