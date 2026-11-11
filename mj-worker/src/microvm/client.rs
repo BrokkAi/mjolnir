@@ -208,20 +208,26 @@ impl<T: Transport> Client<T> {
             .and_then(|writer| writer.finish().context("finish tar stream"));
         match packed {
             Ok(()) => self.expect_exit(),
-            Err(packing) => {
-                // A write that failed because the agent refused the copy has
-                // the agent's reason waiting in the connection.
+            Err(packing) if connection_broke(&packing) => {
+                // The write failed because the agent refused the copy and
+                // closed the connection; its reason is waiting in it.
                 match self.expect_exit() {
-                    Err(reason) if self.frames_have_error(&reason) => Err(reason),
+                    Err(reason) if !reason.to_string().starts_with("connection closed") => {
+                        Err(reason)
+                    }
                     _ => Err(packing),
                 }
             }
+            Err(packing) => {
+                // The failure is on this side (a missing or unreadable source).
+                // The agent is still waiting for tar frames, so end the
+                // connection rather than leave it waiting.
+                if let Err(error) = self.sender.shutdown() {
+                    tracing::warn!(%error, "could not close the connection after a failed copy");
+                }
+                Err(packing)
+            }
         }
-    }
-
-    fn frames_have_error(&self, reason: &anyhow::Error) -> bool {
-        // A closed connection reports "connection closed"; a refusal carries text.
-        !reason.to_string().starts_with("connection closed")
     }
 
     /// Copy `source` out of the guest to `destination` on the host.
@@ -246,4 +252,18 @@ impl<T: Transport> Client<T> {
         self.request(&Request::Stop)?;
         self.expect_exit()
     }
+}
+
+/// Whether a packing failure came from writing to the connection.
+fn connection_broke(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+            )
+        })
+    })
 }

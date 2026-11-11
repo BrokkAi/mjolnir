@@ -407,6 +407,12 @@ fn bootstrap_login_environment(
 /// `mj-worker microvm ...`: the Nitro Sandbox host engine and guest agent.
 /// They have their own command line (a Podman-compatible one), so they are
 /// dispatched before the worker's parser sees the arguments.
+#[cfg(not(target_os = "linux"))]
+fn run_microvm() -> Result<()> {
+    anyhow::bail!("mj-worker microvm runs only on Linux hosts")
+}
+
+#[cfg(target_os = "linux")]
 fn run_microvm() -> Result<()> {
     install_stderr_logging()?;
     let arguments: Vec<_> = std::env::args_os().skip(2).collect();

@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! The guest agent's PID 1 reaper owns every `waitpid`. It runs alone in this
 //! test binary because it blocks SIGCHLD process-wide and collects the exit
 //! status of every child of the process.
@@ -20,14 +22,21 @@ fn reaper_survives_failed_spawns_and_reports_exits_and_orphans() {
     for _ in 0..50 {
         let mut missing_directory = Command::new("true");
         missing_directory.current_dir("/nonexistent-directory");
-        let error = reaper.spawn(&mut missing_directory).err().expect("spawn must fail");
+        let error = reaper
+            .spawn(&mut missing_directory)
+            .err()
+            .expect("spawn must fail");
         assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
     }
 
     let mut exits = Command::new("sh");
     exits.args(["-c", "exit 3"]);
     let spawned = reaper.spawn(&mut exits).unwrap();
-    let status = spawned.exit.recv_timeout(Duration::from_secs(10)).unwrap().unwrap();
+    let status = spawned
+        .exit
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap()
+        .unwrap();
     assert_eq!(status.code(), Some(3));
 
     // A grandchild outlives its parent and is reaped without anyone waiting for it.

@@ -11,6 +11,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail, ensure};
+use mj_core::file_lock::FileLock;
 
 use super::state::{
     Layout, METADATA_FORMAT, VmState, VolumeMetadata, validate_label, validate_name,
@@ -48,6 +49,15 @@ pub fn create(
     }
     layout.ensure()?;
     let _lock = layout.lock_volume(name)?;
+    create_locked(layout, name, labels)
+}
+
+/// [`create`] for a caller that already holds the volume's lock.
+fn create_locked(
+    layout: &Layout,
+    name: &str,
+    labels: BTreeMap<String, String>,
+) -> Result<VolumeMetadata> {
     ensure!(
         VolumeMetadata::read(layout, name)?.is_none(),
         "volume {name} already exists"
@@ -97,28 +107,29 @@ pub fn create(
 }
 
 /// What `run` needs of a volume: it exists, created now if it did not, and it
-/// does not belong to another session. Returns whether this call created it.
-pub fn ensure_for_run(
+/// does not belong to another session. Returns the volume's lock, which the
+/// caller holds until the VM state that lists the volume is written (a
+/// `volume rm` decides under the same lock), and whether this call created it.
+pub fn prepare_for_run(
     layout: &Layout,
     name: &str,
     labels: &BTreeMap<String, String>,
-) -> Result<bool> {
+) -> Result<(FileLock, bool)> {
+    validate_name("volume", name)?;
+    layout.ensure()?;
+    let lock = layout.lock_volume(name)?;
     match VolumeMetadata::read(layout, name)? {
         Some(existing) => {
             check_ownership(&existing, labels)?;
-            Ok(false)
+            Ok((lock, false))
         }
-        None => match create(layout, name, labels.clone()) {
-            Ok(_) => Ok(true),
-            // Another run created it between the check and the create; it
-            // must pass the same ownership test.
-            Err(_) if VolumeMetadata::read(layout, name)?.is_some() => {
-                let existing = VolumeMetadata::read(layout, name)?.context("volume vanished")?;
-                check_ownership(&existing, labels)?;
-                Ok(false)
+        None => {
+            for (key, value) in labels {
+                validate_label(key, value)?;
             }
-            Err(error) => Err(error),
-        },
+            create_locked(layout, name, labels.clone())?;
+            Ok((lock, true))
+        }
     }
 }
 

@@ -345,6 +345,15 @@ pub fn run(layout: &Layout, spec: &RunSpec) -> Result<String> {
             "two volumes are mounted at {}",
             volume.destination
         );
+        ensure!(
+            spec.volumes
+                .iter()
+                .filter(|other| other.name == volume.name)
+                .count()
+                == 1,
+            "volume {} is mounted twice",
+            volume.name
+        );
     }
     ensure!(
         spec.memory_bytes >= 64 << 20,
@@ -366,16 +375,42 @@ pub fn run(layout: &Layout, spec: &RunSpec) -> Result<String> {
     sys::install_interrupt_handlers();
     let mut created_volumes = Vec::new();
     let result = (|| -> Result<VmState> {
-        for volume in &spec.volumes {
+        // Hold the image's lock from before the VM names it until its root disk
+        // is cloned, so a prune cannot remove it in between, and every volume's
+        // lock until the state that lists them is written, so a `volume rm`
+        // cannot remove one in between. Lock order: VM, image, volumes in name
+        // order, global.
+        let _image_lock = layout.lock_image(&image_id)?;
+        let mut names: Vec<&VolumeArg> = spec.volumes.iter().collect();
+        names.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut volume_locks = Vec::new();
+        for volume in names {
             sys::check_interrupted()?;
-            if volume::ensure_for_run(layout, &volume.name, &spec.labels)
-                .with_context(|| format!("prepare volume {}", volume.name))?
-            {
+            let (lock, created) = volume::prepare_for_run(layout, &volume.name, &spec.labels)
+                .with_context(|| format!("prepare volume {}", volume.name))?;
+            volume_locks.push(lock);
+            if created {
                 created_volumes.push(volume.name.clone());
             }
         }
         let state = {
             let _global = layout.lock_global()?;
+            // A volume is one ext4 image; two kernels writing it would corrupt
+            // it. The volume locks held above make this check and the state
+            // write below one decision.
+            for other in VmState::list(layout)? {
+                if let Some(shared) = other.volumes.iter().find(|mounted| {
+                    spec.volumes
+                        .iter()
+                        .any(|wanted| wanted.name == mounted.name)
+                }) {
+                    bail!(
+                        "volume {} is already attached to container {}",
+                        shared.name,
+                        other.name
+                    );
+                }
+            }
             let slot = allocate_slot(layout)?;
             let state = build_state(layout, spec, &image_id, slot)?;
             // The state file reserves the slot; the root disk follows.
@@ -384,6 +419,7 @@ pub fn run(layout: &Layout, spec: &RunSpec) -> Result<String> {
             state.write(layout)?;
             state
         };
+        drop(volume_locks);
         reflink(
             &image::root_image(layout, &image_id),
             &layout.vm(&state.name).join("root.ext4"),

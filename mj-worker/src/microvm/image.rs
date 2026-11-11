@@ -110,21 +110,33 @@ pub fn pull(layout: &Layout, reference: &str, platform: Option<&str>) -> Result<
     layout.ensure()?;
     let platform = platform_for(platform)?;
     let crane = sys::find_tool("crane")?;
+    // Resolve a mutable tag once. The configuration and the filesystem are both
+    // fetched by digest, so a tag that moves in between cannot pair one image's
+    // configuration with another's files.
+    let pinned = String::from_utf8(
+        sys::run_checked(&crane, &["digest", "--full-ref", reference])
+            .with_context(|| format!("resolve {reference}"))?
+            .stdout,
+    )
+    .context("crane printed a digest that is not UTF-8")?
+    .trim()
+    .to_owned();
     let config_bytes = sys::run_checked(
         &crane,
-        &["config", "--platform", platform.as_str(), reference],
+        &["config", "--platform", platform.as_str(), pinned.as_str()],
     )
-    .with_context(|| format!("fetch the configuration of {reference}"))?
+    .with_context(|| format!("fetch the configuration of {pinned}"))?
     .stdout;
     let id = hex(&Sha256::digest(&config_bytes));
     let config: serde_json::Value =
         serde_json::from_slice(&config_bytes).context("decode the OCI image configuration")?;
-    {
-        let _image_lock = layout.lock_image(&id)?;
-        if !layout.image(&id).join("config.json").is_file() {
-            flatten(layout, &crane, reference, &platform, &id, &config)
-                .with_context(|| format!("flatten {reference}"))?;
-        }
+    // The image lock covers flattening and recording the reference, so a prune
+    // (which decides under the same lock) never sees the image between the two.
+    // Lock order everywhere is image, then global.
+    let _image_lock = layout.lock_image(&id)?;
+    if !layout.image(&id).join("config.json").is_file() {
+        flatten(layout, &crane, &pinned, &platform, &id, &config)
+            .with_context(|| format!("flatten {reference}"))?;
     }
     let _global = layout.lock_global()?;
     let mut refs = ImageRefs::read(layout)?;
@@ -334,39 +346,48 @@ fn extract(
 /// An image is in use if a reference names it or a VM was created from it.
 pub fn prune(layout: &Layout) -> Result<Vec<String>> {
     layout.ensure()?;
-    let _global = layout.lock_global()?;
-    let refs = ImageRefs::read(layout)?;
-    let mut used: std::collections::BTreeSet<String> = refs.refs.values().cloned().collect();
-    used.extend(VmState::list(layout)?.into_iter().map(|vm| vm.image_id));
     let mut removed = Vec::new();
+    let mut names = Vec::new();
     for entry in fs::read_dir(layout.images()).context("list images")? {
-        let entry = entry.context("list images")?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with(".tmp-") {
-            // A pull holds the image lock while it writes scratch; the lock
-            // is per image id, which the scratch name carries.
-            let id = name
-                .trim_start_matches(".tmp-")
-                .split('-')
-                .next()
-                .unwrap_or_default()
-                .to_owned();
-            if let Ok(_image_lock) = layout.lock_image(&id) {
-                match fs::remove_dir_all(entry.path()) {
-                    Ok(()) => {}
-                    // The pull we waited for published it.
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error).with_context(|| format!("remove {name}")),
-                }
+        names.push(
+            entry
+                .context("list images")?
+                .file_name()
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    for name in names {
+        if let Some(scratch) = name.strip_prefix(".tmp-") {
+            // A pull holds its image's lock while it writes scratch, and the
+            // scratch name carries the id; waiting for the lock waits for it.
+            let id = scratch.split('-').next().unwrap_or_default();
+            let Ok(_image_lock) = layout.lock_image(id) else {
+                continue;
+            };
+            match fs::remove_dir_all(layout.images().join(&name)) {
+                Ok(()) => {}
+                // The pull we waited for published it.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).with_context(|| format!("remove {name}")),
             }
-            continue;
-        }
-        if name.len() == 64 && !used.contains(&name) {
+        } else if name.len() == 64 {
+            // Decide under the image's lock, which pulls and runs hold from
+            // before they name the image until they have recorded their use
+            // of it. Lock order: image, then global.
             let _image_lock = layout.lock_image(&name)?;
-            fs::remove_dir_all(entry.path()).with_context(|| format!("remove image {name}"))?;
-            removed.push(name);
+            let _global = layout.lock_global()?;
+            let refs = ImageRefs::read(layout)?;
+            let in_use = refs.refs.values().any(|id| *id == name)
+                || VmState::list(layout)?.iter().any(|vm| vm.image_id == name);
+            if !in_use && layout.image(&name).exists() {
+                fs::remove_dir_all(layout.image(&name))
+                    .with_context(|| format!("remove image {name}"))?;
+                removed.push(name);
+            }
         }
     }
+    let _global = layout.lock_global()?;
     removed.extend(super::boot::prune(layout)?);
     Ok(removed)
 }

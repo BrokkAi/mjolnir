@@ -47,11 +47,11 @@ for entry in "${vols[@]}"; do
   [ -b "/dev/$dev" ] || fatal "no /dev/$dev for $dest"
   mkdir -p "/newroot$dest"
   covered=$(stat -c '%u:%g %a' "/newroot$dest")
-  mount -t ext4 -o "rw,noatime" "/dev/$dev" "/newroot$dest" || fatal "mount $dev on $dest failed"
-  if [ -z "$(ls -A "/newroot$dest" | grep -v '^lost+found$')" ]; then
+  # A read-only drive cannot be mounted read-write, and a read-only volume cannot be copied up to.
+  mount -t ext4 -o "$mode,noatime" "/dev/$dev" "/newroot$dest" || fatal "mount $dev on $dest failed"
+  if [ "$mode" = rw ] && [ -z "$(ls -A "/newroot$dest" | grep -v '^lost+found$')" ]; then
     chown "${covered% *}" "/newroot$dest"; chmod "${covered#* }" "/newroot$dest"
   fi
-  [ "$mode" = ro ] && mount -o remount,ro "/newroot$dest"
 done
 
 # Kernel modules for later modprobe in the guest. A bind mount would be deleted by switch_root
