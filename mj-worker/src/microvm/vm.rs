@@ -857,6 +857,7 @@ pub fn inspect(layout: &Layout, name: &str) -> Result<Value> {
     validate_name("container", name)?;
     let state = VmState::read(layout, name)?
         .ok_or_else(|| anyhow!("no container with name or ID {name:?} found: no such container"))?;
+    let state = super::replace_root::observed(layout, name, state)?;
     let activity = activity(name)?;
     let status = match activity {
         Activity::Running => "running",

@@ -165,6 +165,45 @@ fn validate_operation(operation: &str) -> Result<()> {
     Ok(())
 }
 
+/// The VM as an observer must see it: once the old root disk has been set
+/// aside, the swap has started and the VM is the replacement, whether or not
+/// the crash that interrupted it came before `state.json` was written. The
+/// controller tells source from replacement by this id; showing the source
+/// there would send recovery to capture control state from a half-swapped root.
+pub fn observed(layout: &Layout, name: &str, mut state: VmState) -> Result<VmState> {
+    if let Some(record) = read_record(layout, name)?
+        && state.id != record.new_id
+        && layout.vm(name).join(PREVIOUS).exists()
+    {
+        state.id = record.new_id;
+        state.image_id = record.image_id;
+        state.image_reference = record.image_reference;
+        state.labels.extend(record.labels);
+    }
+    Ok(state)
+}
+
+/// Finish a swap that a crash interrupted, before the VM is started. Without
+/// a swap in progress this does nothing.
+pub fn resume_interrupted(layout: &Layout, name: &str) -> Result<()> {
+    validate_name("container", name)?;
+    let _vm_lock = layout.lock_vm(name)?;
+    let Some(state) = VmState::read(layout, name)? else {
+        return Ok(());
+    };
+    let Some(record) = read_record(layout, name)? else {
+        return Ok(());
+    };
+    if state.id != record.new_id && layout.vm(name).join(PREVIOUS).exists() {
+        ensure!(
+            vm::activity(name)? == vm::Activity::Stopped,
+            "container {name} is running with an interrupted root replacement"
+        );
+        apply_stopped(layout, name, &record.operation, &vm::reflink)?;
+    }
+    Ok(())
+}
+
 /// Swap the root disk of the stopped VM `name`. Returns the VM's new id.
 pub fn apply(layout: &Layout, name: &str, operation: &str) -> Result<String> {
     validate_name("container", name)?;
@@ -393,6 +432,14 @@ mod tests {
             let (_directory, layout) = host();
             stage(&layout, "t1", "op1", "agent:new", &labels()).unwrap();
             crash_after(&layout, steps);
+            let seen = observed(
+                &layout,
+                "t1",
+                VmState::read(&layout, "t1").unwrap().unwrap(),
+            )
+            .unwrap();
+            let record = read_record(&layout, "t1").unwrap().unwrap();
+            assert_eq!(seen.id == record.new_id, steps >= 2, "after {steps} steps");
             let id = apply_stopped(&layout, "t1", "op1", &copy).unwrap();
             let state = VmState::read(&layout, "t1").unwrap().unwrap();
             assert_eq!(state.id, id, "after {steps} steps");

@@ -349,6 +349,9 @@ fn dispatch(layout: &Layout, command: Command) -> Result<i32> {
         Command::Ps(args) => list(layout, args),
         Command::Start(args) => {
             for name in &args.names {
+                // A crash can leave a root replacement half done; finish it
+                // before the VM boots from whichever disk is in place.
+                replace_root::resume_interrupted(layout, &vm::resolve(layout, name)?)?;
                 vm::start(layout, name)?;
                 println!("{name}");
             }
