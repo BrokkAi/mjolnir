@@ -89,7 +89,11 @@ impl CacheHost {
             | targets::TargetTemplate::SshAppleContainer { ssh, .. } => {
                 Some(Self::Ssh(ssh.clone()))
             }
-            targets::TargetTemplate::LocalBare | targets::TargetTemplate::SshBare { .. } => None,
+            // The host's caches are directories a container mounts; a sandbox
+            // is a VM and cannot, so it has no cache host.
+            targets::TargetTemplate::SshNitro { .. }
+            | targets::TargetTemplate::LocalBare
+            | targets::TargetTemplate::SshBare { .. } => None,
         }
     }
 
@@ -118,9 +122,8 @@ impl CacheHost {
             mj_core::config::TargetTemplate::SshBare { ssh, .. }
             | mj_core::config::TargetTemplate::SshPodman { ssh, .. }
             | mj_core::config::TargetTemplate::SshDocker { ssh, .. }
-            | mj_core::config::TargetTemplate::SshAppleContainer { ssh, .. } => {
-                Self::for_ssh_input(ssh)
-            }
+            | mj_core::config::TargetTemplate::SshAppleContainer { ssh, .. }
+            | mj_core::config::TargetTemplate::SshNitro { ssh, .. } => Self::for_ssh_input(ssh),
         }
     }
 

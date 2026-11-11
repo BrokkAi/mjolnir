@@ -906,6 +906,20 @@ pub(super) fn stored_target_values(target: &TargetLocator) -> Result<StoredTarge
                 None,
                 borrowed_from.as_deref(),
             ),
+            TargetLocator::SshNitro {
+                host,
+                container_id,
+                borrowed_from,
+            } => (
+                "ssh-nitro",
+                Some(host.as_str()),
+                Some(container_id.as_str()),
+                None,
+                None,
+                None,
+                None,
+                borrowed_from.as_deref(),
+            ),
             TargetLocator::SshDocker {
                 host,
                 container_id,
@@ -1111,6 +1125,11 @@ pub(super) fn decode_target(
             container_id: resource.unwrap(),
         },
         "ssh-apple-container" => TargetLocator::SshAppleContainer {
+            borrowed_from,
+            host: host.unwrap(),
+            container_id: resource.unwrap(),
+        },
+        "ssh-nitro" => TargetLocator::SshNitro {
             borrowed_from,
             host: host.unwrap(),
             container_id: resource.unwrap(),

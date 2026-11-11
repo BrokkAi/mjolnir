@@ -1434,8 +1434,10 @@ pub(crate) fn render_mount_wizard(
         TargetTemplate::AwsEc2 { .. } => {
             "EC2 directories stream as tar.gz through one SSH connection into the destination."
         }
-        TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => {
-            unreachable!("bare targets do not attach resources")
+        TargetTemplate::LocalBare
+        | TargetTemplate::SshBare { .. }
+        | TargetTemplate::SshNitro { .. } => {
+            unreachable!("bare and Nitro targets do not attach resources")
         }
     };
     let mut lines = vec![

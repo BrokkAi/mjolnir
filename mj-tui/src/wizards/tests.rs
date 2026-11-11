@@ -3381,7 +3381,7 @@ fn apple_container_ram_overcommit_blocks_submission() {
         wizard
             .sizing_error
             .as_deref()
-            .is_some_and(|error| { error.contains("does not overcommit RAM on a Mac") })
+            .is_some_and(|error| { error.contains("RAM is a hard limit on this host") })
     );
     assert!(!target_advance_enabled(&dashboard, wizard));
 }

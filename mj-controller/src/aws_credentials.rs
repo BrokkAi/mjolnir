@@ -51,7 +51,8 @@ impl From<&TargetLocator> for SessionHost {
             | TargetLocator::SshBare { .. }
             | TargetLocator::SshPodman { .. }
             | TargetLocator::SshDocker { .. }
-            | TargetLocator::SshAppleContainer { .. } => Self::Isolated,
+            | TargetLocator::SshAppleContainer { .. }
+            | TargetLocator::SshNitro { .. } => Self::Isolated,
         }
     }
 }
@@ -68,7 +69,8 @@ impl From<&mj_core::config::TargetTemplate> for SessionHost {
             | T::SshBare { .. }
             | T::SshPodman { .. }
             | T::SshDocker { .. }
-            | T::SshAppleContainer { .. } => Self::Isolated,
+            | T::SshAppleContainer { .. }
+            | T::SshNitro { .. } => Self::Isolated,
         }
     }
 }

@@ -125,6 +125,19 @@ pub fn target_recovery_plan(
             ssh_command(ssh, ["podman", "start", container_id])
                 .purpose("start stopped remote Mjolnir session container"),
         ),
+        // A retained sandbox stops when the host reboots or the unit dies, and
+        // the engine relaunches it from its retained disks, so it recovers
+        // exactly like Podman, through the engine on the host.
+        TargetLocator::SshNitro {
+            ssh, container_id, ..
+        } => (
+            ssh_engine_command(ssh, MICROVM_ENGINE, ["container", "exists", container_id])
+                .purpose("check for remote Mjolnir session sandbox"),
+            ssh_engine_command(ssh, MICROVM_ENGINE, ["container", "inspect", container_id])
+                .purpose("inspect remote Mjolnir session sandbox"),
+            ssh_engine_command(ssh, MICROVM_ENGINE, ["start", container_id])
+                .purpose("start stopped remote Mjolnir session sandbox"),
+        ),
         TargetLocator::LocalBare { .. }
         | TargetLocator::AppleContainer { .. }
         | TargetLocator::AwsEc2 { .. }

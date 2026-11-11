@@ -260,6 +260,8 @@ fn supported_host(target: &targets::TargetTemplate) -> Option<(CacheHost, Target
         }
         targets::TargetTemplate::AppleContainer(_)
         | targets::TargetTemplate::SshAppleContainer { .. }
+        // A sandbox is a VM with no way to mount a host directory.
+        | targets::TargetTemplate::SshNitro { .. }
         | targets::TargetTemplate::LocalBare
         | targets::TargetTemplate::SshBare { .. } => return None,
     };

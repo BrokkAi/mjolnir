@@ -14,7 +14,7 @@ To see it working: create a Nitro host, start a session on it with `mj new --tar
 
 - [x] (2026-11-10) Spike on a real m7i.4xlarge AL2023 host: agent-dev boots as a Nitro Sandbox in direct mode, vsock, two drives, NAT with IMDS refused, nested rootless Podman, stop/relaunch from retained disks. Notes and scripts: `.agents/docs/nitro-sandbox-spike.md` and `.agents/docs/nitro-sandbox-spike/`.
 - [ ] Milestone 1: host engine `mj-worker microvm` and guest agent, proven by hand on the spike host.
-- [ ] Milestone 2: `ssh_nitro` target kind in mj-core, mj-controller, mj-tui, with the breaking schema migration.
+- [x] (2026-11-10) Milestone 2: `ssh_nitro` target kind in mj-core, mj-controller, mj-tui, with breaking migration 124. Implemented against the Milestone 1 contract without the engine: unit-level and golden tests only. The controller's dependencies on the engine are listed under Artifacts and Notes, "Controller use of the engine"; nothing has run against a real host.
 - [ ] Milestone 3: `mj ec2 create --runtime nitro` host bootstrap; agent-dev image runs nested Podman without a host socket.
 - [ ] Milestone 4: integration and live acceptance on EC2.
 - [ ] Milestone 5: Firecracker jailer.
@@ -30,6 +30,11 @@ To see it working: create a Nitro host, start a session on it with `mj new --tar
 - Observation: Without udev in the guest, `/dev/net/tun` and `/dev/fuse` must be made mode 0666 by init, and `/` must be made rshared for rootless Podman. A bind mount of `/lib/modules` is deleted by `switch_root`; copying into a tmpfs works.
 - Observation: The Firecracker vsock Unix socket is `root:root 0755`; only root can connect to it.
 - Observation: Launch to vsock-ready is 2.6–3.3 s; a reflink clone of an 11 GiB root image takes 4–5 ms and no space on XFS.
+
+- Observation (Milestone 2): `environment_workers`, the physical-ownership ledger from revision 122, carries its own `kind` CHECK, so a new target kind has two constraints to widen, not one. Rebuilding that table with foreign keys on would clear every `environments.target_lease_id` (`ON DELETE SET NULL` on the drop); migration 124 turns enforcement off for the rebuild and the migration test checks the lease survives.
+- Observation (Milestone 2): `sudo` resets the environment, so the `GH_TOKEN` that provisioning feeds a launch through the command's environment would not reach the engine. The engine prefix preserves that one name (`--preserve-env=GH_TOKEN`). Separately, `sudo` logs the full command line, so user environment values that the template builder puts on the line as `--env KEY=VALUE` (Podman has the same exposure in `ps`) are now also in the host's authentication log. The engine contract has no way to receive them out of band.
+- Observation (Milestone 2): The admission refusal text was written for Macs ("this Mac has N GiB left after the macOS reserve"). Plan acceptance step 9 needs a message that names the pool, so the text (in `mj-core/src/state.rs` and the web viewer) now speaks of "this host" and explains both hard limits.
+- Observation (Milestone 2): The generic 20% host RAM reserve (`reserved_container_capacity`) still applies on top of the pool, which is already net of the host's own memory. Effective sandbox memory is 80% of the pool until the reserve becomes a property of the capacity reading.
 
 ## Decision Log
 
@@ -69,6 +74,24 @@ To see it working: create a Nitro host, start a session on it with `mj new --tar
 - Decision: The daemon installs the host-architecture worker binary on the EC2 host with the same machinery it uses for `ssh_bare` hosts and invokes the engine from that path. The engine's on-disk state format and the guest-agent vsock protocol are versioned and stay readable by newer builds, because VMs and their agents outlive engine upgrades.
   Rationale: upgrades complete without user intervention (AGENTS.md).
   Date/Author: 2026-11-10, lead.
+
+- Decision: In configuration the runtime is `kind = "nitro"` on an `ssh` machine (`StoredTarget::Nitro`), fused in memory into `TargetTemplate::SshNitro` (`kind_name` `ssh-nitro`), exactly as `apple-container` resolves to `SshAppleContainer`. The plan text said `ssh_nitro`; the code spells kinds in kebab-case and splits machine from runtime since config version 11. A `nitro` runtime on `local` or an EC2-template machine is refused at load. `mj ec2 create --runtime nitro` should build `TargetTemplate::SshNitro` and let `stored_target` write the file.
+  Rationale: one shape for every remote VM-backed runtime.
+  Date/Author: 2026-11-10, Milestone 2 worker.
+- Decision: One owner for the engine's command line. `mj_core::targets::engine_argv`/`engine_shell_words` render the prefix `sh -c 'exec sudo -n --preserve-env=GH_TOKEN "$HOME/.local/share/hel/microvm/hel" microvm "$@"' mj-microvm` from the single constant `MICROVM_ENGINE_WORKER`; every Podman call site that built `[engine, verb...]` now goes through `engine_argv`, `ssh_engine_command` or `with_engine_argv`. The prefix expands `$HOME` itself because `sudo` needs an absolute path and ssh quotes every argument. The container engine name used as a selector (`container_engine()`) is `"microvm"`.
+  Rationale: the controller never recomputes the path; scripts get the same words through `engine_shell_words`.
+  Date/Author: 2026-11-10, Milestone 2 worker.
+- Decision: The host engine is installed by `ensure_microvm_engine` (`mj-controller/src/controller/worker_binary/microvm.rs`) with the `ssh_bare` machinery: platform probe, the shared digest-keyed worker store, `install_worker_binary_at` with a host-scoped destination. It runs at every launch preflight (`verify_target`), before the image refresher pulls to the host, and in the Targets pane's Test action. `mj doctor` only reads and reports "not installed yet" with the fix.
+  Rationale: the engine is this build's worker and must match the daemon that launches VMs; a host created for sandboxes is preloaded before any session exists.
+  Date/Author: 2026-11-10, Milestone 2 worker.
+- Decision: Nitro sessions run as root with `HOME=/home/hel` (`run --user 0:0 --env HOME=/home/hel`), as Podman sessions do, so the Podman upload, ownership and checkpoint paths apply unchanged and no `exec --user` is needed. Nested rootless Podman in the guest therefore runs as root unless Milestone 3 decides otherwise.
+  Rationale: smallest difference from the Podman call sites; the VM is the security boundary.
+  Date/Author: 2026-11-10, Milestone 2 worker.
+- Decision: Dropped for a Nitro launch, with a notice naming each: additional host-path mounts (the session's stored choice stays), the mbx build cache, the Git clone cache and the tool cache. The target is not offered attached directories (`mount_history_host` is `None`). Move to or from a Nitro target is refused in the assessment with a blocker that says to close and start anew. Retained container upgrade is unsupported until Milestone 6 (`ContainerSettings::upgrade_supported`). The PID-limit probe does not apply.
+  Rationale: no virtio-fs; Move's transport needs host mounts or `run --rm --entrypoint`.
+  Date/Author: 2026-11-10, Milestone 2 worker.
+- Decision: Migration 124 is breaking and rebuilds `session_targets` and `environment_workers` to admit `ssh-nitro`; it raises the minimum compatible revision to 124 in the same transaction. Older daemons would hit `unreachable!` decoding a kind their CHECK admitted, so the floor is the only protection.
+  Date/Author: 2026-11-10, Milestone 2 worker.
 
 ## Outcomes & Retrospective
 
@@ -156,6 +179,29 @@ Every engine verb is safe to repeat: `run` on an existing name fails without sid
 ## Artifacts and Notes
 
 Spike transcript and measurements: `.agents/docs/nitro-sandbox-spike.md`.
+
+### Controller use of the engine (Milestone 2)
+
+Every command is `ssh <host> <engine prefix> <verb...>`, so the engine sees exactly the verbs below. "Contract" means named in Milestone 1; "needs" means the controller depends on behavior Milestone 1 does not state, and the engine must provide it or the controller must change.
+
+| Controller path | Command | Parsed output | Status |
+| --- | --- | --- | --- |
+| Launch preflight, doctor, Targets Test | `info --format json` | keys `engine_version`, `state_format`, `firecracker_version`, `kernel_version`, `memory_pool_total_mib`, `memory_pool_free_mib`, `slots_in_use`, `slots_total`, `cpus`; checks Firecracker present, pool > 0, kernel >= 6.18.51 | needs: exact key names |
+| Capacity probe (every few seconds) | `info --format json` inside the host probe script, optional | pool total and free replace host RAM | needs: same keys |
+| Image refresh | `image inspect --format '{{.Id}}' IMG`, `pull [--platform=P] IMG`, `image prune -f` | id text before and after | contract |
+| Provision | `run --pull=missing\|always\|never --init --stop-signal KILL --detach --name N --label dev.mj.session=ID --label dev.mj.managed=true --label dev.mj.instance=I [--cpus C] [--memory M] [--env K=V]... [--env GH_TOKEN] --user 0:0 --env HOME=/home/hel --volume N-tmp:/tmp:rw --volume N-workspace:/workspace/ID:rw IMG sh -c KEEPALIVE` | exit status | contract, except valueless `--env GH_TOKEN` (inherit from the engine's environment, which `sudo --preserve-env=GH_TOKEN` supplies) and `--memory` given in bytes |
+| Provision | `exec N sh -c 'chown 0:0 /tmp; chmod 1777 /tmp'` | status | contract |
+| Git install, clone, worker install, all attached commands | `exec -i N argv...` under the existing drain wrapper | exit status, streams | contract |
+| Worker start | `exec --detach N sh -c SCRIPT` | status | contract |
+| Worker, profile and checkpoint files | `cp HOST ID:PATH`, `cp ID:PATH HOST` | status | contract |
+| Recovery, Restart | `container exists N` (0, 1, other), `container inspect N` (JSON array of one with `Config.Labels`, `State.Status`), `start N` | as Podman | contract |
+| Container storage | `container inspect N`, reads `Mounts[].Name/Destination` | JSON | contract |
+| Quiesce | `stop --time 0 --ignore N`, `container exists N`, `container inspect --format '{{.State.Running}}' N` == `false` | text | contract (template named in Context) |
+| Destroy | `stop --time 0 --ignore N`, `rm --force --ignore N`, `volume rm --force N-workspace N-tmp` | status | needs: `volume rm --force` ignores an absent volume |
+| Absence check after a failed destroy | `container exists N`, `volume exists N-workspace`, `volume exists N-tmp` (0, 1, other) | status | needs: `volume exists` |
+| Recovery scan | `ps --all --filter label=dev.mj.managed=true --format json` | one JSON object per line with `Labels` as `k=v,k=v` | needs: `ps` |
+
+The controller does not use `exec --user`, `--mount`, `--cap-add`, `--security-opt`, `--pids-limit`, `--platform` on `run` (a VM runs the host architecture; the platform applies to `pull`), `rm --volumes`, or `run --rm --entrypoint`.
 
 ## Interfaces and Dependencies
 

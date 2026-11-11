@@ -1029,6 +1029,7 @@ fn locator_is_remote(locator: &mj_core::targets::TargetLocator) -> bool {
             | mj_core::targets::TargetLocator::SshPodman { .. }
             | mj_core::targets::TargetLocator::SshDocker { .. }
             | mj_core::targets::TargetLocator::SshAppleContainer { .. }
+            | mj_core::targets::TargetLocator::SshNitro { .. }
     )
 }
 

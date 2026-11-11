@@ -522,7 +522,10 @@ pub(super) fn local_engine_installed(host: &ImageHost, path: Option<&std::ffi::O
         ImageHost::LocalPodman | ImageHost::LocalDocker | ImageHost::AppleContainer => {
             crate::targets::program_on_path(host.engine(), path)
         }
-        ImageHost::SshPodman(_) | ImageHost::SshDocker(_) | ImageHost::SshAppleContainer(_) => true,
+        ImageHost::SshPodman(_)
+        | ImageHost::SshDocker(_)
+        | ImageHost::SshAppleContainer(_)
+        | ImageHost::SshNitro(_) => true,
     }
 }
 
@@ -531,12 +534,22 @@ pub(super) fn local_engine_installed(host: &ImageHost, path: Option<&std::ffi::O
 /// A refresh is a chore, not a launch: it only observes Apple's service and
 /// never starts one the user stopped. The next launch preflight starts it
 /// when a session needs it.
+///
+/// A Nitro host's engine is the worker binary, which is not there until the
+/// daemon puts it there. A host created for sandboxes is registered and its
+/// image preloaded before any session exists, so the refresh installs the
+/// engine itself; the install is idempotent and only writes under the SSH
+/// user's home.
 pub(super) fn host_is_running(host: &ImageHost, executor: &impl CommandExecutor) -> Result<bool> {
     match host {
         ImageHost::AppleContainer => Ok(matches!(
             crate::targets::apple_container_runtime_status(executor)?,
             crate::targets::AppleContainerStatus::Running
         )),
+        ImageHost::SshNitro(ssh) => {
+            crate::controller::ensure_microvm_engine(ssh, executor)?;
+            Ok(true)
+        }
         _ => Ok(true),
     }
 }

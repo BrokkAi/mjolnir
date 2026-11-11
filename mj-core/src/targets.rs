@@ -1969,7 +1969,8 @@ impl CommandPlan {
             }
             TargetTemplate::SshPodman { .. }
             | TargetTemplate::SshDocker { .. }
-            | TargetTemplate::SshAppleContainer { .. } => {
+            | TargetTemplate::SshAppleContainer { .. }
+            | TargetTemplate::SshNitro { .. } => {
                 let remote = command
                     .args
                     .last_mut()
@@ -2320,6 +2321,92 @@ pub enum ImageHost {
     SshPodman(SshTarget),
     SshDocker(SshTarget),
     SshAppleContainer(SshTarget),
+    /// The `mj-worker microvm` engine on an EC2 host; see [`MICROVM_ENGINE`].
+    SshNitro(SshTarget),
+}
+
+/// The name of the Nitro Sandbox host engine, `mj-worker microvm`. It
+/// implements the subset of Podman's verbs, flags and output formats that
+/// Mjolnir drives over SSH, so most call sites treat it like `podman`.
+pub const MICROVM_ENGINE: &str = "microvm";
+
+/// Where the host engine's worker binary lives on an SSH host, relative to
+/// the login home. The daemon installs it there before the first engine call
+/// (see the controller's `ensure_microvm_engine`); this is the only place
+/// that names the path.
+pub const MICROVM_ENGINE_WORKER: &str = ".local/share/hel/microvm/hel";
+
+/// The argument vector that runs `engine` on its host, up to the verb.
+///
+/// Podman, Docker and Apple's `container` are one program. The microVM engine
+/// is the installed worker run as root. `sudo` needs an absolute path and
+/// ssh quotes every argument, so the login shell cannot expand `$HOME`; the
+/// inner `sh` does it before `sudo` starts. Everything after this prefix
+/// reaches the engine unchanged, including stdin, stdout and the exit status.
+pub fn engine_argv(engine: &str) -> Vec<String> {
+    if engine == MICROVM_ENGINE {
+        vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            format!(r#"exec {} "$@""#, engine_shell_words(engine)),
+            "mj-microvm".to_owned(),
+        ]
+    } else {
+        vec![engine.to_owned()]
+    }
+}
+
+/// `engine` as the words of a shell command line, for a script that runs it:
+/// `exec $(engine_shell_words) volume rm "$volume"`. The words contain `$HOME`
+/// for the microVM engine, so they belong inside a script that does not quote
+/// them away, never in an argument that ssh quotes.
+///
+/// `sudo` resets the environment, which would drop the `GH_TOKEN` that
+/// provisioning feeds a launch through the command's environment (a value on
+/// the command line would be logged by `sudo` and visible in `ps`), so that one
+/// name is preserved.
+pub fn engine_shell_words(engine: &str) -> String {
+    if engine == MICROVM_ENGINE {
+        format!(
+            r#"sudo -n --preserve-env=GH_TOKEN "$HOME/{MICROVM_ENGINE_WORKER}" {MICROVM_ENGINE}"#
+        )
+    } else {
+        engine.to_owned()
+    }
+}
+
+/// `args` with a leading engine name expanded to the command that runs it.
+pub fn with_engine_argv(mut args: Vec<String>) -> Vec<String> {
+    if args.first().is_some_and(|first| first == MICROVM_ENGINE) {
+        let verbs = args.split_off(1);
+        let mut argv = engine_argv(MICROVM_ENGINE);
+        argv.extend(verbs);
+        argv
+    } else {
+        args
+    }
+}
+
+/// `engine` followed by `args`, as one command.
+pub fn engine_command(
+    engine: &str,
+    args: impl IntoIterator<Item = impl Into<String>>,
+) -> CommandSpec {
+    let mut argv = engine_argv(engine);
+    argv.extend(args.into_iter().map(Into::into));
+    let program = argv.remove(0);
+    CommandSpec::new(program, argv)
+}
+
+/// `engine` followed by `args`, run on the SSH host.
+pub fn ssh_engine_command(
+    ssh: &SshTarget,
+    engine: &str,
+    args: impl IntoIterator<Item = impl Into<String>>,
+) -> CommandSpec {
+    let mut argv = engine_argv(engine);
+    argv.extend(args.into_iter().map(Into::into));
+    ssh_command_owned(ssh, argv)
 }
 
 impl ImageHost {
@@ -2328,6 +2415,7 @@ impl ImageHost {
             Self::LocalPodman | Self::SshPodman(_) => "podman",
             Self::LocalDocker | Self::SshDocker(_) => "docker",
             Self::AppleContainer | Self::SshAppleContainer(_) => "container",
+            Self::SshNitro(_) => MICROVM_ENGINE,
         }
     }
 
@@ -2340,17 +2428,24 @@ impl ImageHost {
             Self::SshPodman(ssh) => format!("podman on {}", ssh.destination),
             Self::SshDocker(ssh) => format!("docker on {}", ssh.destination),
             Self::SshAppleContainer(ssh) => format!("apple container on {}", ssh.destination),
+            Self::SshNitro(ssh) => format!("nitro sandboxes on {}", ssh.destination),
         }
     }
 
-    /// Run `args` (an engine command line) on this host.
+    /// Run `args` (an engine command line, starting with the engine's name)
+    /// on this host.
     pub fn command(&self, args: Vec<String>, purpose: String) -> CommandSpec {
         match self {
             Self::LocalPodman | Self::LocalDocker | Self::AppleContainer => {
                 CommandSpec::new(args[0].clone(), args[1..].iter().cloned())
             }
-            Self::SshPodman(ssh) | Self::SshDocker(ssh) | Self::SshAppleContainer(ssh) => {
-                ssh_command_owned(ssh, args)
+            Self::SshPodman(ssh)
+            | Self::SshDocker(ssh)
+            | Self::SshAppleContainer(ssh)
+            | Self::SshNitro(ssh) => {
+                let mut argv = engine_argv(&args[0]);
+                argv.extend(args.into_iter().skip(1));
+                ssh_command_owned(ssh, argv)
             }
         }
         .purpose(purpose)
@@ -2501,6 +2596,10 @@ pub enum TargetTemplate {
         ssh: SshTarget,
         container: ContainerTemplate,
     },
+    SshNitro {
+        ssh: SshTarget,
+        container: ContainerTemplate,
+    },
 }
 
 fn default_ssh_prefix() -> String {
@@ -2597,6 +2696,15 @@ pub enum TargetLocator {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         borrowed_from: Option<String>,
     },
+    SshNitro {
+        ssh: SshTarget,
+        container_id: String,
+        /// The session that owns the sandbox when this locator is a
+        /// sub-agent child borrowing its parent's sandbox; `None` when the
+        /// session owns the sandbox itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
+    },
 }
 
 impl TargetTemplate {
@@ -2605,6 +2713,7 @@ impl TargetTemplate {
             Self::LocalPodman(_) | Self::SshPodman { .. } => Some("podman"),
             Self::LocalDocker(_) | Self::SshDocker { .. } => Some("docker"),
             Self::AppleContainer(_) | Self::SshAppleContainer { .. } => Some("container"),
+            Self::SshNitro { .. } => Some(MICROVM_ENGINE),
             _ => None,
         }
     }
@@ -2624,6 +2733,9 @@ impl TargetTemplate {
             }
             Self::SshAppleContainer { ssh, container } => {
                 Some((ImageHost::SshAppleContainer(ssh.clone()), container))
+            }
+            Self::SshNitro { ssh, container } => {
+                Some((ImageHost::SshNitro(ssh.clone()), container))
             }
             Self::LocalBare | Self::SshBare { .. } => None,
         }
@@ -2652,6 +2764,7 @@ impl TargetLocator {
             Self::SshPodman { .. } => "ssh-podman",
             Self::SshDocker { .. } => "ssh-docker",
             Self::SshAppleContainer { .. } => "ssh-apple-container",
+            Self::SshNitro { .. } => "ssh-nitro",
         }
     }
 
@@ -2660,6 +2773,7 @@ impl TargetLocator {
             Self::LocalPodman { .. } | Self::SshPodman { .. } => Some("podman"),
             Self::LocalDocker { .. } | Self::SshDocker { .. } => Some("docker"),
             Self::AppleContainer { .. } | Self::SshAppleContainer { .. } => Some("container"),
+            Self::SshNitro { .. } => Some(MICROVM_ENGINE),
             _ => None,
         }
     }
@@ -2798,7 +2912,8 @@ pub fn workspace_for(template: &TargetTemplate, session_id: &str) -> Result<Stri
         | TargetTemplate::AppleContainer(_)
         | TargetTemplate::SshPodman { .. }
         | TargetTemplate::SshDocker { .. }
-        | TargetTemplate::SshAppleContainer { .. } => {
+        | TargetTemplate::SshAppleContainer { .. }
+        | TargetTemplate::SshNitro { .. } => {
             bail!("container targets use the session's recorded container workspace")
         }
         TargetTemplate::SshBare {
@@ -2859,6 +2974,9 @@ pub fn locator_command(locator: &TargetLocator, args: Vec<String>) -> CommandSpe
         }
         | TargetLocator::SshAppleContainer {
             ssh, container_id, ..
+        }
+        | TargetLocator::SshNitro {
+            ssh, container_id, ..
         } => {
             let remote = drained_container_exec(
                 locator.container_engine().expect("remote container"),
@@ -2880,7 +2998,8 @@ pub fn worker_root(locator: &TargetLocator, session_id: &str) -> Result<String> 
         | TargetLocator::AppleContainer { .. }
         | TargetLocator::SshPodman { .. }
         | TargetLocator::SshDocker { .. }
-        | TargetLocator::SshAppleContainer { .. } => {
+        | TargetLocator::SshAppleContainer { .. }
+        | TargetLocator::SshNitro { .. } => {
             format!("/var/lib/hel/workers/{session_id}")
         }
         TargetLocator::AwsEc2 { .. } => format!(".local/share/hel/workers/{session_id}"),
@@ -2906,7 +3025,7 @@ pub fn container_exec(
 ) -> CommandSpec {
     let mut command_args = vec!["exec".to_owned(), "-i".to_owned(), container_id.to_owned()];
     command_args.extend(args.into_iter().map(Into::into));
-    CommandSpec::new(engine, command_args)
+    engine_command(engine, command_args)
 }
 
 /// A container exec run on a remote host over SSH, through the output drain

@@ -978,7 +978,8 @@ pub(super) fn worker_workspace_for_recovery(
         | targets::TargetLocator::AwsEc2 { .. }
         | targets::TargetLocator::SshPodman { .. }
         | targets::TargetLocator::SshDocker { .. }
-        | targets::TargetLocator::SshAppleContainer { .. } => return None,
+        | targets::TargetLocator::SshAppleContainer { .. }
+        | targets::TargetLocator::SshNitro { .. } => return None,
     };
     Some(WorkerWorkspace {
         target,

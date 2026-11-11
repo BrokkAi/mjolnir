@@ -175,7 +175,9 @@ impl Controller {
 
         let mut local_ids = Vec::new();
         // Per host: its target ids, and per SSH connection the paths to measure.
-        type HostProbes = (Vec<String>, Vec<(SshTarget, Vec<String>)>);
+        // The flag marks a connection that also runs Nitro sandboxes, whose
+        // memory total is the engine's pool.
+        type HostProbes = (Vec<String>, Vec<(SshTarget, Vec<String>, bool)>);
         let mut ssh_hosts: BTreeMap<String, HostProbes> = BTreeMap::new();
         let mut targets = Vec::new();
         for (target_id, template) in &self.config.targets {
@@ -189,17 +191,25 @@ impl Controller {
                 TargetTemplate::SshBare { ssh, .. }
                 | TargetTemplate::SshPodman { ssh, .. }
                 | TargetTemplate::SshDocker { ssh, .. }
-                | TargetTemplate::SshAppleContainer { ssh, .. } => {
+                | TargetTemplate::SshAppleContainer { ssh, .. }
+                | TargetTemplate::SshNitro { ssh, .. } => {
                     let entry = ssh_hosts.entry(ssh.host.clone()).or_default();
                     entry.0.push(target_id.clone());
                     let connection = SshTarget::from(ssh);
-                    let paths = match entry.1.iter_mut().find(|(known, _)| *known == connection) {
-                        Some((_, paths)) => paths,
+                    let nitro = matches!(template, TargetTemplate::SshNitro { .. });
+                    let position = match entry
+                        .1
+                        .iter()
+                        .position(|(known, _, _)| *known == connection)
+                    {
+                        Some(position) => position,
                         None => {
-                            entry.1.push((connection, Vec::new()));
-                            &mut entry.1.last_mut().expect("just pushed").1
+                            entry.1.push((connection, Vec::new(), false));
+                            entry.1.len() - 1
                         }
                     };
+                    entry.1[position].2 |= nitro;
+                    let paths = &mut entry.1[position].1;
                     push_unique(paths, ssh_storage_paths(template));
                     // Each live session's own directories: a project or
                     // clone can sit on a filesystem of its own.
@@ -273,7 +283,13 @@ impl Controller {
                         local: false,
                         probes: connections
                             .iter()
-                            .map(|(ssh, paths)| targets::ssh_host_capacity_command(ssh, paths))
+                            .map(|(ssh, paths, nitro)| {
+                                if *nitro {
+                                    targets::ssh_nitro_host_capacity_command(ssh, paths)
+                                } else {
+                                    targets::ssh_host_capacity_command(ssh, paths)
+                                }
+                            })
                             .collect(),
                         local_storage_paths: Vec::new(),
                         probe_error: None,
@@ -361,6 +377,7 @@ pub(crate) fn ssh_storage_paths(template: &TargetTemplate) -> Vec<String> {
         }
         TargetTemplate::SshPodman { .. } => paths.push(ContainerStorage::Podman.path().to_owned()),
         TargetTemplate::SshDocker { .. } => paths.push(ContainerStorage::Docker.path().to_owned()),
+        TargetTemplate::SshNitro { .. } => paths.push(ContainerStorage::Microvm.path().to_owned()),
         _ => {}
     }
     paths.extend(build_cache_directory(template));
@@ -571,6 +588,20 @@ pub(super) fn verify_target(
                     )
                 })
         }
+        TargetTemplate::SshNitro { ssh, .. } => {
+            let ssh = SshTarget::from(ssh);
+            // The engine is the worker binary itself, so it is installed
+            // before the first command that needs it.
+            super::worker_binary::ensure_microvm_engine(&ssh, executor)
+                .and_then(|()| targets::verify_ssh_nitro(&ssh, executor))
+                .map(|_| ())
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "Nitro sandbox host preflight failed for {}. Fix the problem below{then_retry}: {error:#}",
+                        ssh.destination
+                    )
+                })
+        }
         TargetTemplate::SshBare { ssh, .. } => {
             verify_ssh_connectivity(&SshTarget::from(ssh), executor)
         }
@@ -755,6 +786,10 @@ pub(super) fn backend_target(
             ssh: SshTarget::from(ssh),
             container: backend_container(container, allocation, overrides),
         },
+        TargetTemplate::SshNitro { ssh, container } => targets::TargetTemplate::SshNitro {
+            ssh: SshTarget::from(ssh),
+            container: backend_container(container, allocation, overrides),
+        },
     })
 }
 
@@ -908,7 +943,8 @@ pub(super) fn configure_github_token_environment(target: &mut targets::TargetTem
         | targets::TargetTemplate::AppleContainer(container)
         | targets::TargetTemplate::SshPodman { container, .. }
         | targets::TargetTemplate::SshDocker { container, .. }
-        | targets::TargetTemplate::SshAppleContainer { container, .. } => container,
+        | targets::TargetTemplate::SshAppleContainer { container, .. }
+        | targets::TargetTemplate::SshNitro { container, .. } => container,
         targets::TargetTemplate::LocalBare | targets::TargetTemplate::SshBare { .. } => {
             return false;
         }
@@ -1110,6 +1146,11 @@ pub(super) fn locator_after_provision_named(
             container_id: generated,
         },
         TargetTemplate::SshAppleContainer { ssh, .. } => TargetLocator::SshAppleContainer {
+            borrowed_from: None,
+            host: ssh.host.clone(),
+            container_id: generated,
+        },
+        TargetTemplate::SshNitro { ssh, .. } => TargetLocator::SshNitro {
             borrowed_from: None,
             host: ssh.host.clone(),
             container_id: generated,
