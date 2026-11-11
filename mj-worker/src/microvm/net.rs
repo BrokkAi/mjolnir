@@ -57,17 +57,32 @@ pub fn tap_up(link: &Link) -> Result<()> {
     let ip = sys::find_tool("ip")?;
     let exists = sys::run_unchecked(&ip, &["link", "show", link.tap.as_str()])?;
     if !exists.status.success() {
-        sys::run_checked(&ip, &["tuntap", "add", "dev", link.tap.as_str(), "mode", "tap"])?;
+        sys::run_checked(
+            &ip,
+            &["tuntap", "add", "dev", link.tap.as_str(), "mode", "tap"],
+        )?;
     }
     let address = format!("{}/30", link.host);
-    sys::run_checked(&ip, &["addr", "replace", address.as_str(), "dev", link.tap.as_str()])?;
+    sys::run_checked(
+        &ip,
+        &[
+            "addr",
+            "replace",
+            address.as_str(),
+            "dev",
+            link.tap.as_str(),
+        ],
+    )?;
     sys::run_checked(&ip, &["link", "set", link.tap.as_str(), "up"])?;
     Ok(())
 }
 
 /// Remove a TAP device. An absent device is the goal state, not an error.
 pub fn tap_down(tap: &str) -> Result<()> {
-    ensure!(is_engine_tap(tap), "{tap:?} is not a microvm TAP device name");
+    ensure!(
+        is_engine_tap(tap),
+        "{tap:?} is not a microvm TAP device name"
+    );
     let ip = sys::find_tool("ip")?;
     let output = sys::run_unchecked(&ip, &["link", "del", tap])?;
     if !output.status.success() {
@@ -148,9 +163,10 @@ fn find_route_overlap(routes: &str) -> Option<String> {
         if fields.len() < 8 || fields[0].starts_with(TAP_PREFIX) {
             continue;
         }
-        let (Ok(destination), Ok(mask)) =
-            (u32::from_str_radix(fields[1], 16), u32::from_str_radix(fields[7], 16))
-        else {
+        let (Ok(destination), Ok(mask)) = (
+            u32::from_str_radix(fields[1], 16),
+            u32::from_str_radix(fields[7], 16),
+        ) else {
             continue;
         };
         // The kernel prints the in-memory (network order) value as a host-order hex number.

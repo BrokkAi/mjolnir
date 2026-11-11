@@ -24,8 +24,8 @@ const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Connect to the guest agent through Firecracker's vsock socket.
 pub fn connect_unix(socket: &Path, port: u32) -> Result<UnixStream> {
-    let mut stream = UnixStream::connect(socket)
-        .with_context(|| format!("connect to {}", socket.display()))?;
+    let mut stream =
+        UnixStream::connect(socket).with_context(|| format!("connect to {}", socket.display()))?;
     stream.set_read_timeout(Some(ATTEMPT_TIMEOUT))?;
     stream.set_write_timeout(Some(ATTEMPT_TIMEOUT))?;
     stream
@@ -35,7 +35,9 @@ pub fn connect_unix(socket: &Path, port: u32) -> Result<UnixStream> {
     let mut line = Vec::new();
     loop {
         let mut byte = [0u8; 1];
-        let count = stream.read(&mut byte).context("read Firecracker's answer")?;
+        let count = stream
+            .read(&mut byte)
+            .context("read Firecracker's answer")?;
         if count == 0 {
             bail!("the guest agent is not listening on vsock port {port}");
         }
@@ -69,7 +71,9 @@ pub fn handshake<T: Transport>(transport: T) -> Result<Client<T>> {
     sender.send_json(FrameKind::Hello, &ours)?;
     let reply = frames.expect("the agent's hello")?;
     let theirs: Hello = match reply.kind {
-        FrameKind::Hello => serde_json::from_slice(&reply.payload).context("decode the agent's hello")?,
+        FrameKind::Hello => {
+            serde_json::from_slice(&reply.payload).context("decode the agent's hello")?
+        }
         FrameKind::Error => bail!("{}", String::from_utf8_lossy(&reply.payload)),
         other => bail!("expected a hello frame, received {other:?}"),
     };
@@ -94,11 +98,9 @@ impl<T: Transport> Client<T> {
     fn accepted(&mut self) -> Result<u32> {
         let frame = self.frames.expect("the agent's answer")?;
         match frame.kind {
-            FrameKind::Accepted => {
-                Ok(serde_json::from_slice::<Accepted>(&frame.payload)
-                    .context("decode the agent's answer")?
-                    .pid)
-            }
+            FrameKind::Accepted => Ok(serde_json::from_slice::<Accepted>(&frame.payload)
+                .context("decode the agent's answer")?
+                .pid),
             FrameKind::Error => Err(error_text(&frame.payload)),
             other => bail!("expected an accepted frame, received {other:?}"),
         }
@@ -153,8 +155,9 @@ impl<T: Transport> Client<T> {
                             }
                             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                             Err(error) => {
-                                let _ = input_errors
-                                    .send(anyhow!(error).context("read the command's standard input"));
+                                let _ = input_errors.send(
+                                    anyhow!(error).context("read the command's standard input"),
+                                );
                                 break;
                             }
                         }
@@ -167,8 +170,12 @@ impl<T: Transport> Client<T> {
         loop {
             let frame = self.frames.expect("the command's output or exit")?;
             match frame.kind {
-                FrameKind::Stdout => stdout.write_all(&frame.payload).context("write command output")?,
-                FrameKind::Stderr => stderr.write_all(&frame.payload).context("write command error output")?,
+                FrameKind::Stdout => stdout
+                    .write_all(&frame.payload)
+                    .context("write command output")?,
+                FrameKind::Stderr => stderr
+                    .write_all(&frame.payload)
+                    .context("write command error output")?,
                 FrameKind::Exit => {
                     stdout.flush().context("flush command output")?;
                     if let Ok(error) = input_failures.try_recv() {
@@ -197,9 +204,8 @@ impl<T: Transport> Client<T> {
             destination: destination.to_owned(),
         })?;
         let writer = TarFrameWriter::new(self.sender.clone());
-        let packed = tarcopy::pack(source, writer).and_then(|writer| {
-            writer.finish().context("finish tar stream")
-        });
+        let packed = tarcopy::pack(source, writer)
+            .and_then(|writer| writer.finish().context("finish tar stream"));
         match packed {
             Ok(()) => self.expect_exit(),
             Err(packing) => {
@@ -219,7 +225,12 @@ impl<T: Transport> Client<T> {
     }
 
     /// Copy `source` out of the guest to `destination` on the host.
-    pub fn copy_out(mut self, source: &str, destination: &Path, owner: Option<(u32, u32)>) -> Result<()> {
+    pub fn copy_out(
+        mut self,
+        source: &str,
+        destination: &Path,
+        owner: Option<(u32, u32)>,
+    ) -> Result<()> {
         self.request(&Request::CopyOut {
             source: source.to_owned(),
         })?;

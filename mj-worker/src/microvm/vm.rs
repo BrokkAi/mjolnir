@@ -56,7 +56,10 @@ pub enum Activity {
 pub fn activity(name: &str) -> Result<Activity> {
     let systemctl = sys::find_tool("systemctl")?;
     let unit = unit_name(name);
-    let output = sys::run_checked(&systemctl, &["show", "--property=ActiveState", "--value", unit.as_str()])?;
+    let output = sys::run_checked(
+        &systemctl,
+        &["show", "--property=ActiveState", "--value", unit.as_str()],
+    )?;
     Ok(match String::from_utf8_lossy(&output.stdout).trim() {
         "active" | "activating" | "reloading" => Activity::Running,
         "deactivating" => Activity::Stopping,
@@ -116,7 +119,9 @@ fn read_pool() -> Result<Option<Pool>> {
 /// is still checked, to notice memory the engine did not hand out.
 fn admit(layout: &Layout, vm: &VmState) -> Result<()> {
     let Some(pool) = read_pool()? else {
-        bail!("this host has no Nitro Enclaves driver ({NITRO_SYSFS} is missing); launch the instance with enclave support and boot with nitro_enclaves.mempool set");
+        bail!(
+            "this host has no Nitro Enclaves driver ({NITRO_SYSFS} is missing); launch the instance with enclave support and boot with nitro_enclaves.mempool set"
+        );
     };
     let mut committed = 0u64;
     let mut running = 0u32;
@@ -151,8 +156,11 @@ fn admit(layout: &Layout, vm: &VmState) -> Result<()> {
     if slots_needed > pool.slots {
         let raised = slots_needed.div_ceil(SLOT_STEP) * SLOT_STEP;
         let raised = raised.min(pool.slots_total);
-        fs::write(Path::new(NITRO_SYSFS).join("pcie_slots"), raised.to_string())
-            .with_context(|| format!("raise the Nitro Sandbox slot count to {raised}"))?;
+        fs::write(
+            Path::new(NITRO_SYSFS).join("pcie_slots"),
+            raised.to_string(),
+        )
+        .with_context(|| format!("raise the Nitro Sandbox slot count to {raised}"))?;
     }
     Ok(())
 }
@@ -192,7 +200,9 @@ fn validate_destination(destination: &str) -> Result<()> {
         && destination
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-'))
-        && !destination.split('/').any(|part| part == ".." || part == ".");
+        && !destination
+            .split('/')
+            .any(|part| part == ".." || part == ".");
     ensure!(
         valid,
         "unsupported volume destination {destination:?}: use a plain absolute path of letters, digits, '/', '.', '_' and '-'"
@@ -213,8 +223,10 @@ fn random_id() -> Result<String> {
 }
 
 fn allocate_slot(layout: &Layout) -> Result<u32> {
-    let used: std::collections::BTreeSet<u32> =
-        VmState::list(layout)?.into_iter().map(|vm| vm.slot).collect();
+    let used: std::collections::BTreeSet<u32> = VmState::list(layout)?
+        .into_iter()
+        .map(|vm| vm.slot)
+        .collect();
     (0..net::MAX_SLOTS)
         .find(|slot| !used.contains(slot))
         .ok_or_else(|| anyhow!("no free network slot: {} VMs exist", net::MAX_SLOTS))
@@ -225,14 +237,21 @@ fn allocate_slot(layout: &Layout) -> Result<u32> {
 /// image per VM is not a fallback worth hiding.
 fn reflink(source: &Path, destination: &Path) -> Result<()> {
     const FICLONE: u32 = 0x4004_9409;
-    let source_file = fs::File::open(source).with_context(|| format!("open {}", source.display()))?;
+    let source_file =
+        fs::File::open(source).with_context(|| format!("open {}", source.display()))?;
     let destination_file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(destination)
         .with_context(|| format!("create {}", destination.display()))?;
     // SAFETY: FICLONE takes the source descriptor as its argument; both are open files.
-    let result = unsafe { libc::ioctl(destination_file.as_raw_fd(), FICLONE as _, source_file.as_raw_fd()) };
+    let result = unsafe {
+        libc::ioctl(
+            destination_file.as_raw_fd(),
+            FICLONE as _,
+            source_file.as_raw_fd(),
+        )
+    };
     if result != 0 {
         let error = std::io::Error::last_os_error();
         let _ = fs::remove_file(destination);
@@ -251,7 +270,9 @@ pub fn build_state(layout: &Layout, spec: &RunSpec, image_id: &str, slot: u32) -
     let image = ImageConfig::read(layout, image_id)?;
     let cpus = match spec.cpus {
         Some(cpus) => cpus,
-        None => std::thread::available_parallelism().map(|n| n.get() as f64).unwrap_or(1.0),
+        None => std::thread::available_parallelism()
+            .map(|n| n.get() as f64)
+            .unwrap_or(1.0),
     };
     ensure!(cpus > 0.0, "--cpus must be positive");
     let vcpus = (cpus.ceil() as u32).clamp(1, MAX_VCPUS);
@@ -261,7 +282,11 @@ pub fn build_state(layout: &Layout, spec: &RunSpec, image_id: &str, slot: u32) -
         env.retain(|existing| existing.split_once('=').map(|(k, _)| k) != Some(key));
         env.push(entry.clone());
     }
-    let cmd = if spec.command.is_empty() { image.cmd.clone() } else { spec.command.clone() };
+    let cmd = if spec.command.is_empty() {
+        image.cmd.clone()
+    } else {
+        spec.command.clone()
+    };
     ensure!(
         !(image.entrypoint.is_empty() && cmd.is_empty()),
         "the image has no command; give one after the image name"
@@ -279,7 +304,11 @@ pub fn build_state(layout: &Layout, spec: &RunSpec, image_id: &str, slot: u32) -
         memory_bytes: spec.memory_bytes,
         env,
         user: spec.user.clone().unwrap_or(image.user),
-        working_dir: spec.workdir.clone().filter(|w| !w.is_empty()).unwrap_or(image.working_dir),
+        working_dir: spec
+            .workdir
+            .clone()
+            .filter(|w| !w.is_empty())
+            .unwrap_or(image.working_dir),
         entrypoint: image.entrypoint,
         cmd,
         volumes: spec
@@ -303,7 +332,10 @@ pub fn run(layout: &Layout, spec: &RunSpec) -> Result<String> {
     for (key, value) in &spec.labels {
         validate_label(key, value)?;
     }
-    ensure!(spec.volumes.len() <= 24, "at most 24 volumes can be attached to a VM");
+    ensure!(
+        spec.volumes.len() <= 24,
+        "at most 24 volumes can be attached to a VM"
+    );
     let mut destinations = std::collections::BTreeSet::new();
     for volume in &spec.volumes {
         validate_name("volume", &volume.name)?;
@@ -318,7 +350,10 @@ pub fn run(layout: &Layout, spec: &RunSpec) -> Result<String> {
         spec.memory_bytes >= 64 << 20,
         "--memory is required and must be at least 64m: a microVM's memory is reserved from the Nitro pool"
     );
-    ensure!(sys::is_root(), "the microvm engine must run as root (use sudo -n)");
+    ensure!(
+        sys::is_root(),
+        "the microvm engine must run as root (use sudo -n)"
+    );
     layout.ensure()?;
     let _vm_lock = layout.lock_vm(&spec.name)?;
     ensure!(
@@ -349,7 +384,10 @@ pub fn run(layout: &Layout, spec: &RunSpec) -> Result<String> {
             state.write(layout)?;
             state
         };
-        reflink(&image::root_image(layout, &image_id), &layout.vm(&state.name).join("root.ext4"))?;
+        reflink(
+            &image::root_image(layout, &image_id),
+            &layout.vm(&state.name).join("root.ext4"),
+        )?;
         launch(layout, &state)?;
         Ok(state)
     })();
@@ -368,7 +406,10 @@ pub fn run(layout: &Layout, spec: &RunSpec) -> Result<String> {
             if problems.is_empty() {
                 Err(error)
             } else {
-                Err(error.context(format!("cleanup after the failure also failed: {}", problems.join("; "))))
+                Err(error.context(format!(
+                    "cleanup after the failure also failed: {}",
+                    problems.join("; ")
+                )))
             }
         }
     }
@@ -377,7 +418,10 @@ pub fn run(layout: &Layout, spec: &RunSpec) -> Result<String> {
 /// Start an existing VM from its retained disks.
 pub fn start(layout: &Layout, name: &str) -> Result<()> {
     validate_name("container", name)?;
-    ensure!(sys::is_root(), "the microvm engine must run as root (use sudo -n)");
+    ensure!(
+        sys::is_root(),
+        "the microvm engine must run as root (use sudo -n)"
+    );
     let _vm_lock = layout.lock_vm(name)?;
     let state = VmState::read(layout, name)?
         .ok_or_else(|| anyhow!("no container with name or ID {name:?} found: no such container"))?;
@@ -398,13 +442,20 @@ pub fn start(layout: &Layout, name: &str) -> Result<()> {
         }
         return match stopped {
             Ok(()) => Err(error),
-            Err(cleanup) => Err(error.context(format!("stopping the failed launch also failed: {cleanup:#}"))),
+            Err(cleanup) => Err(error.context(format!(
+                "stopping the failed launch also failed: {cleanup:#}"
+            ))),
         };
     }
     Ok(())
 }
 
-fn firecracker_config(layout: &Layout, state: &VmState, boot: &boot::BootAssets, link: &Link) -> Result<Value> {
+fn firecracker_config(
+    layout: &Layout,
+    state: &VmState,
+    boot: &boot::BootAssets,
+    link: &Link,
+) -> Result<Value> {
     let mut drives = vec![json!({
         "drive_id": "rootfs",
         "path_on_host": layout.vm(&state.name).join("root.ext4"),
@@ -467,16 +518,23 @@ fn launch(layout: &Layout, state: &VmState) -> Result<()> {
         net::apply_host_policy()?;
         admit(layout, state)?;
         let config = layout.vm(&state.name).join("fc.json");
-        super::state::write_json_atomic(&config, &firecracker_config(layout, state, &boot, &link)?)?;
+        super::state::write_json_atomic(
+            &config,
+            &firecracker_config(layout, state, &boot, &link)?,
+        )?;
         net::tap_up(&link)?;
         let unit = unit_name(&state.name);
         let runtime = format!("RuntimeDirectory=mj-microvm/{}", state.name);
-        let stop_post = format!("ExecStopPost={engine_text} microvm host-tap-down {}", link.tap);
+        let stop_post = format!(
+            "ExecStopPost={engine_text} microvm host-tap-down {}",
+            link.tap
+        );
         let description = format!("Nitro Sandbox {}", state.name);
         sys::run_tool(
             "systemd-run",
             &[
-                "--quiet", "--collect",
+                "--quiet",
+                "--collect",
                 &format!("--unit={}", unit.trim_end_matches(".service")),
                 &format!("--description={description}"),
                 "--property=KillMode=control-group",
@@ -484,7 +542,9 @@ fn launch(layout: &Layout, state: &VmState) -> Result<()> {
                 &format!("--property={runtime}"),
                 "--property=RuntimeDirectoryPreserve=no",
                 &format!("--property={stop_post}"),
-                firecracker.to_str().context("firecracker path is not UTF-8")?,
+                firecracker
+                    .to_str()
+                    .context("firecracker path is not UTF-8")?,
                 "--no-api",
                 "--config-file",
                 config.to_str().context("config path is not UTF-8")?,
@@ -493,17 +553,29 @@ fn launch(layout: &Layout, state: &VmState) -> Result<()> {
         .context("start the VM unit")?;
     }
     let client = wait_for_agent(&state.name)?;
-    let argv: Vec<String> = state.entrypoint.iter().chain(state.cmd.iter()).cloned().collect();
+    let argv: Vec<String> = state
+        .entrypoint
+        .iter()
+        .chain(state.cmd.iter())
+        .cloned()
+        .collect();
     client
         .start(StartRequest {
             argv,
             env: state.env.clone(),
-            cwd: if state.working_dir.is_empty() { "/".to_owned() } else { state.working_dir.clone() },
+            cwd: if state.working_dir.is_empty() {
+                "/".to_owned()
+            } else {
+                state.working_dir.clone()
+            },
             user: state.user.clone(),
             volumes: state
                 .volumes
                 .iter()
-                .map(|volume| VolumeSpec { destination: volume.destination.clone(), chown: volume.chown })
+                .map(|volume| VolumeSpec {
+                    destination: volume.destination.clone(),
+                    chown: volume.chown,
+                })
                 .collect(),
         })
         .context("start the container command")?;
@@ -516,7 +588,10 @@ fn wait_for_agent(name: &str) -> Result<Client<UnixStream>> {
     loop {
         sys::check_interrupted()?;
         if activity(name)? == Activity::Stopped {
-            bail!("the VM stopped before its guest agent answered:\n{}", journal_tail(name));
+            bail!(
+                "the VM stopped before its guest agent answered:\n{}",
+                journal_tail(name)
+            );
         }
         if socket.exists()
             && let Ok(client) = open_agent(name)
@@ -531,7 +606,10 @@ fn journal_tail(name: &str) -> String {
     let unit = unit_name(name);
     sys::find_tool("journalctl")
         .and_then(|journalctl| {
-            sys::run_unchecked(&journalctl, &["-u", unit.as_str(), "-n", "30", "--no-pager", "-o", "cat"])
+            sys::run_unchecked(
+                &journalctl,
+                &["-u", unit.as_str(), "-n", "30", "--no-pager", "-o", "cat"],
+            )
         })
         .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
         .unwrap_or_else(|error| format!("(journal unavailable: {error:#})"))
@@ -556,7 +634,8 @@ pub fn agent_for(layout: &Layout, name: &str) -> Result<(VmState, Client<UnixStr
     if activity(name)? != Activity::Running {
         bail!("can only use a running container: container state improper");
     }
-    let client = open_agent(name).with_context(|| format!("connect to the guest agent of {name}"))?;
+    let client =
+        open_agent(name).with_context(|| format!("connect to the guest agent of {name}"))?;
     Ok((state, client))
 }
 
@@ -592,8 +671,13 @@ fn stop_locked(name: &str, grace: Duration) -> Result<()> {
             .context("start the guest flush")?;
         match done.recv_timeout(grace) {
             Ok(Ok(())) => {}
-            Ok(Err(error)) => tracing::warn!(%error, container = name, "guest flush failed; stopping the VM anyway"),
-            Err(_) => tracing::warn!(container = name, "guest flush did not finish within the grace period; stopping the VM anyway"),
+            Ok(Err(error)) => {
+                tracing::warn!(%error, container = name, "guest flush failed; stopping the VM anyway")
+            }
+            Err(_) => tracing::warn!(
+                container = name,
+                "guest flush did not finish within the grace period; stopping the VM anyway"
+            ),
         }
         stop_unit(name)?;
         // Stopping the unit closed the guest's connection, so the flush thread is done.
@@ -615,17 +699,29 @@ fn teardown(layout: &Layout, name: &str) -> Result<()> {
     let directory = layout.vm(name);
     if directory.exists() {
         // Hide the VM atomically, then delete: a crash leaves scratch, never a half VM.
-        let doomed = layout.vms().join(format!(".removing-{name}-{}", sys::scratch_suffix()));
-        fs::rename(&directory, &doomed).with_context(|| format!("unpublish {}", directory.display()))?;
+        let doomed = layout
+            .vms()
+            .join(format!(".removing-{name}-{}", sys::scratch_suffix()));
+        fs::rename(&directory, &doomed)
+            .with_context(|| format!("unpublish {}", directory.display()))?;
         fs::remove_dir_all(&doomed).with_context(|| format!("remove {}", doomed.display()))?;
     }
     Ok(())
 }
 
 /// Remove a VM. `force` stops a running one first; `volumes` also removes its named volumes.
-pub fn remove(layout: &Layout, name: &str, force: bool, ignore_missing: bool, volumes: bool) -> Result<()> {
+pub fn remove(
+    layout: &Layout,
+    name: &str,
+    force: bool,
+    ignore_missing: bool,
+    volumes: bool,
+) -> Result<()> {
     validate_name("container", name)?;
-    ensure!(sys::is_root(), "the microvm engine must run as root (use sudo -n)");
+    ensure!(
+        sys::is_root(),
+        "the microvm engine must run as root (use sudo -n)"
+    );
     let _vm_lock = layout.lock_vm(name)?;
     let state = VmState::read(layout, name)?;
     if state.is_none() && !layout.vm(name).exists() {
@@ -635,7 +731,10 @@ pub fn remove(layout: &Layout, name: &str, force: bool, ignore_missing: bool, vo
         bail!("no container with name or ID {name:?} found: no such container");
     }
     if activity(name)? != Activity::Stopped {
-        ensure!(force, "cannot remove running container {name}: stop it first, or use --force");
+        ensure!(
+            force,
+            "cannot remove running container {name}: stop it first, or use --force"
+        );
         stop_locked(name, Duration::from_secs(DEFAULT_STOP_SECONDS))?;
     }
     teardown(layout, name)?;
@@ -724,7 +823,12 @@ pub fn info(layout: &Layout) -> Result<Value> {
         String::from_utf8_lossy(&output.stdout)
             .lines()
             .next()
-            .map(|line| line.trim_start_matches("Firecracker").trim().trim_start_matches('v').to_owned())
+            .map(|line| {
+                line.trim_start_matches("Firecracker")
+                    .trim()
+                    .trim_start_matches('v')
+                    .to_owned()
+            })
     });
     let mut running = 0u32;
     let mut committed = 0u64;

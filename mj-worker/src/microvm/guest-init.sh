@@ -79,7 +79,7 @@ printf '127.0.0.1 localhost\n%s %s\n::1 localhost\n' "${sbx_ip%/*}" "$sbx_name" 
 printf 'nameserver %s\n' "${sbx_dns:-169.254.169.253}" > /newroot/etc/resolv.conf
 
 mkdir -p /sys/fs/cgroup && mount -t cgroup2 cgroup2 /sys/fs/cgroup 2>/dev/null || log "cgroup2 mount failed"
-echo 1 > /proc/sys/kernel/printk 2>/dev/null
+echo 4 > /proc/sys/kernel/printk 2>/dev/null   # console: errors and worse
 mount --make-rshared /newroot          # rootless Podman warns when / is not a shared mount
 log "switch_root"
 exec switch_root /newroot /.mj-microvm/mj-worker microvm guest-agent

@@ -14,12 +14,13 @@ pub fn render(template: &str, value: &Value) -> Result<String> {
     while let Some(start) = rest.find("{{") {
         output.push_str(&rest[..start]);
         let after = &rest[start + 2..];
-        let end = after
-            .find("}}")
-            .ok_or_else(|| anyhow!("unsupported --format template {template:?}: unterminated action"))?;
-        output.push_str(&action(after[..end].trim(), value).map_err(|error| {
-            anyhow!("unsupported --format template {template:?}: {error}")
-        })?);
+        let end = after.find("}}").ok_or_else(|| {
+            anyhow!("unsupported --format template {template:?}: unterminated action")
+        })?;
+        output.push_str(
+            &action(after[..end].trim(), value)
+                .map_err(|error| anyhow!("unsupported --format template {template:?}: {error}"))?,
+        );
         rest = &after[end + 2..];
     }
     output.push_str(rest);

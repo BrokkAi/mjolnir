@@ -14,7 +14,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, ChildStderr, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
@@ -23,8 +23,8 @@ use std::thread::JoinHandle;
 use anyhow::{Context, Result, anyhow, bail};
 
 use super::protocol::{
-    Accepted, CHUNK_SIZE, ExecRequest, ExitInfo, FrameKind, FrameReader, FrameSender,
-    Hello, Request, StartRequest, TarFrameReader, TarFrameWriter, Transport, negotiate,
+    Accepted, CHUNK_SIZE, ExecRequest, ExitInfo, FrameKind, FrameReader, FrameSender, Hello,
+    Request, StartRequest, TarFrameReader, TarFrameWriter, Transport, negotiate,
 };
 use super::tarcopy;
 
@@ -69,7 +69,8 @@ impl ProcessSpawner for DirectSpawner {
     fn spawn(&self, command: &mut Command) -> io::Result<Spawned> {
         let mut child = command.spawn()?;
         let pid = child.id();
-        let (stdin, stdout, stderr) = (child.stdin.take(), child.stdout.take(), child.stderr.take());
+        let (stdin, stdout, stderr) =
+            (child.stdin.take(), child.stdout.take(), child.stderr.take());
         let (sender, exit) = mpsc::channel();
         std::thread::Builder::new()
             .name(format!("wait-{pid}"))
@@ -128,6 +129,10 @@ impl Reaper {
                 klog(&format!("reaper: sigwait failed: errno {result}"));
                 continue;
             }
+            // Reap under the spawn lock. A spawn that fails to exec waits for
+            // its own half-started child, and std panics if this thread has
+            // already collected it.
+            let mut waiters = self.lock();
             loop {
                 let mut status = 0;
                 // SAFETY: `status` is a valid out pointer.
@@ -135,17 +140,19 @@ impl Reaper {
                 if pid <= 0 {
                     break;
                 }
-                let waiter = self
-                    .waiters
-                    .lock()
-                    .map(|mut waiters| waiters.remove(&pid))
-                    .unwrap_or(None);
-                if let Some(waiter) = waiter {
+                if let Some(waiter) = waiters.remove(&pid) {
                     // The starter may have stopped listening (a detached exec).
                     let _ = waiter.send(Ok(ExitStatus::from_raw(status)));
                 }
             }
         }
+    }
+
+    /// The table is a plain map, so a panic elsewhere cannot leave it inconsistent.
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<i32, mpsc::Sender<WaitResult>>> {
+        self.waiters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -153,13 +160,11 @@ impl ProcessSpawner for Reaper {
     fn spawn(&self, command: &mut Command) -> io::Result<Spawned> {
         // Holding the lock across the spawn means the reaper cannot see the
         // child's exit before its waiter is registered.
-        let mut waiters = self
-            .waiters
-            .lock()
-            .map_err(|_| io::Error::other("reaper lock was poisoned"))?;
+        let mut waiters = self.lock();
         let mut child: Child = command.spawn()?;
         let pid = child.id();
-        let (stdin, stdout, stderr) = (child.stdin.take(), child.stdout.take(), child.stderr.take());
+        let (stdin, stdout, stderr) =
+            (child.stdin.take(), child.stdout.take(), child.stderr.take());
         let (sender, exit) = mpsc::channel();
         waiters.insert(pid as i32, sender);
         Ok(Spawned {
@@ -211,7 +216,9 @@ pub fn resolve_user(spec: &str, passwd: &str, group: &str) -> Result<ResolvedUse
             Some(fields[0].clone()),
         ),
         (None, Some(uid)) => (uid, uid, "/".to_owned(), None),
-        (None, None) => bail!("unable to find user {user_part}: no matching entries in passwd file"),
+        (None, None) => {
+            bail!("unable to find user {user_part}: no matching entries in passwd file")
+        }
     };
     let group_entries: Vec<Vec<&str>> = group
         .lines()
@@ -232,7 +239,10 @@ pub fn resolve_user(spec: &str, passwd: &str, group: &str) -> Result<ResolvedUse
     let mut groups = Vec::new();
     if let Some(name) = &name {
         for fields in &group_entries {
-            if fields.get(3).is_some_and(|members| members.split(',').any(|m| m == name)) {
+            if fields
+                .get(3)
+                .is_some_and(|members| members.split(',').any(|m| m == name))
+            {
                 if let Ok(gid) = fields[2].parse::<u32>() {
                     groups.push(gid);
                 }
@@ -295,7 +305,8 @@ impl Agent {
         if hello.kind != FrameKind::Hello {
             bail!("expected a hello frame, received {:?}", hello.kind);
         }
-        let theirs: Hello = serde_json::from_slice(&hello.payload).context("decode client hello")?;
+        let theirs: Hello =
+            serde_json::from_slice(&hello.payload).context("decode client hello")?;
         let ours = Hello::current();
         if let Err(error) = negotiate(&ours, &theirs) {
             // Tell the peer why, then close; a peer too old to read this still
@@ -314,7 +325,9 @@ impl Agent {
         let result = match request {
             Request::Start(start) => self.handle_start(&sender, start),
             Request::Exec(exec) => self.handle_exec(&sender, frames, exec),
-            Request::CopyIn { destination } => self.handle_copy_in(&sender, &mut frames, &destination),
+            Request::CopyIn { destination } => {
+                self.handle_copy_in(&sender, &mut frames, &destination)
+            }
             Request::CopyOut { source } => self.handle_copy_out(&sender, &source),
             Request::Stop => self.handle_stop(&sender),
         };
@@ -325,7 +338,11 @@ impl Agent {
         result
     }
 
-    fn handle_start<T: Transport>(self: &Arc<Self>, sender: &FrameSender<T>, start: StartRequest) -> Result<()> {
+    fn handle_start<T: Transport>(
+        self: &Arc<Self>,
+        sender: &FrameSender<T>,
+        start: StartRequest,
+    ) -> Result<()> {
         if self.started.swap(true, Ordering::SeqCst) {
             bail!("the container has already been started");
         }
@@ -344,7 +361,10 @@ impl Agent {
             lchown(Path::new(&volume.destination), user.uid, user.gid)
                 .with_context(|| format!("give {} to the container user", volume.destination))?;
         }
-        *self.defaults.lock().map_err(|_| anyhow!("agent state lock was poisoned"))? = start.clone();
+        *self
+            .defaults
+            .lock()
+            .map_err(|_| anyhow!("agent state lock was poisoned"))? = start.clone();
         let request = ExecRequest {
             argv: start.argv.clone(),
             detach: true,
@@ -360,7 +380,9 @@ impl Agent {
             .spawn(move || {
                 match spawned.exit.recv() {
                     Ok(Ok(status)) => klog(&format!("container command exited: {status}")),
-                    Ok(Err(error)) => klog(&format!("waiting for the container command failed: {error}")),
+                    Ok(Err(error)) => klog(&format!(
+                        "waiting for the container command failed: {error}"
+                    )),
                     Err(_) => klog("the container command's exit was lost"),
                 }
                 agent.system.quiesce();
@@ -396,8 +418,12 @@ impl Agent {
             .lock()
             .map_err(|_| failure(125, "agent state lock was poisoned"))?
             .clone();
-        let user_spec = request.user.clone().unwrap_or_else(|| defaults.user.clone());
-        let user = resolve_user_in_guest(&user_spec).map_err(|error| failure(126, format!("{error:#}")))?;
+        let user_spec = request
+            .user
+            .clone()
+            .unwrap_or_else(|| defaults.user.clone());
+        let user = resolve_user_in_guest(&user_spec)
+            .map_err(|error| failure(126, format!("{error:#}")))?;
         let mut environment: Vec<(String, String)> = Vec::new();
         for entry in defaults.env.iter().chain(request.env.iter()) {
             let (key, value) = entry.split_once('=').unwrap_or((entry.as_str(), ""));
@@ -418,9 +444,13 @@ impl Agent {
         if user.uid != 0 && user.uid != current_uid && !lookup("XDG_RUNTIME_DIR", &environment) {
             // Rootless nested containers expect this directory; no logind makes it here.
             let directory = self.run_user_root.join(user.uid.to_string());
-            ensure_runtime_directory(&directory, &user)
-                .map_err(|error| failure(126, format!("prepare {}: {error:#}", directory.display())))?;
-            environment.push(("XDG_RUNTIME_DIR".to_owned(), directory.display().to_string()));
+            ensure_runtime_directory(&directory, &user).map_err(|error| {
+                failure(126, format!("prepare {}: {error:#}", directory.display()))
+            })?;
+            environment.push((
+                "XDG_RUNTIME_DIR".to_owned(),
+                directory.display().to_string(),
+            ));
         }
         let path = environment
             .iter()
@@ -437,8 +467,12 @@ impl Agent {
             .argv
             .first()
             .ok_or_else(|| failure(125, "the command is empty"))?;
-        let program = resolve_program(program, &path)
-            .ok_or_else(|| failure(127, format!("executable file `{program}` not found in $PATH")))?;
+        let program = resolve_program(program, &path).ok_or_else(|| {
+            failure(
+                127,
+                format!("executable file `{program}` not found in $PATH"),
+            )
+        })?;
         let mut command = Command::new(program);
         command
             .args(&request.argv[1..])
@@ -469,11 +503,15 @@ impl Agent {
                 Ok(())
             });
         }
-        self.spawner.spawn(&mut command).map_err(|error| match error.kind() {
-            io::ErrorKind::NotFound => failure(127, format!("{}: {error}", request.argv[0])),
-            io::ErrorKind::PermissionDenied => failure(126, format!("{}: {error}", request.argv[0])),
-            _ => failure(126, format!("start {}: {error}", request.argv[0])),
-        })
+        self.spawner
+            .spawn(&mut command)
+            .map_err(|error| match error.kind() {
+                io::ErrorKind::NotFound => failure(127, format!("{}: {error}", request.argv[0])),
+                io::ErrorKind::PermissionDenied => {
+                    failure(126, format!("{}: {error}", request.argv[0]))
+                }
+                _ => failure(126, format!("start {}: {error}", request.argv[0])),
+            })
     }
 
     fn handle_exec<T: Transport>(
@@ -491,26 +529,42 @@ impl Agent {
                 Err(failure) => bail!("{}", failure.message),
             };
         }
-        let stdin_mode = if request.stdin { Stdio::piped() } else { Stdio::null() };
-        let mut spawned = match self.spawn_process(&request, stdin_mode, Stdio::piped(), Stdio::piped()) {
-            Ok(spawned) => spawned,
-            Err(failure) => {
-                let _ = sender.send(FrameKind::Stderr, format!("Error: {}\n", failure.message).as_bytes());
-                sender.send_json(
-                    FrameKind::Exit,
-                    &ExitInfo {
-                        code: Some(failure.status),
-                        signal: None,
-                    },
-                )?;
-                return Ok(());
-            }
+        let stdin_mode = if request.stdin {
+            Stdio::piped()
+        } else {
+            Stdio::null()
         };
+        let mut spawned =
+            match self.spawn_process(&request, stdin_mode, Stdio::piped(), Stdio::piped()) {
+                Ok(spawned) => spawned,
+                Err(failure) => {
+                    let _ = sender.send(
+                        FrameKind::Stderr,
+                        format!("Error: {}\n", failure.message).as_bytes(),
+                    );
+                    sender.send_json(
+                        FrameKind::Exit,
+                        &ExitInfo {
+                            code: Some(failure.status),
+                            signal: None,
+                        },
+                    )?;
+                    return Ok(());
+                }
+            };
         let wake = Arc::new(eventfd()?);
         let mut pumps: Vec<JoinHandle<()>> = Vec::new();
         for (source, kind, name) in [
-            (spawned.stdout.take().map(Source::Stdout), FrameKind::Stdout, "stdout"),
-            (spawned.stderr.take().map(Source::Stderr), FrameKind::Stderr, "stderr"),
+            (
+                spawned.stdout.take().map(Source::Stdout),
+                FrameKind::Stdout,
+                "stdout",
+            ),
+            (
+                spawned.stderr.take().map(Source::Stderr),
+                FrameKind::Stderr,
+                "stderr",
+            ),
         ] {
             let Some(source) = source else { continue };
             let (sender, wake) = (sender.clone(), Arc::clone(&wake));
@@ -545,9 +599,15 @@ impl Agent {
                     },
                     Ok(Err(error)) => {
                         klog(&format!("waiting for an exec process failed: {error}"));
-                        ExitInfo { code: Some(125), signal: None }
+                        ExitInfo {
+                            code: Some(125),
+                            signal: None,
+                        }
                     }
-                    Err(_) => ExitInfo { code: Some(125), signal: None },
+                    Err(_) => ExitInfo {
+                        code: Some(125),
+                        signal: None,
+                    },
                 };
                 // A client that went away cannot be told; that is not an error.
                 let _ = monitor_sender.send_json(FrameKind::Exit, &info);
@@ -589,14 +649,24 @@ impl Agent {
         frames: &mut FrameReader<T>,
         destination: &str,
     ) -> Result<()> {
-        let defaults = self.defaults.lock().map_err(|_| anyhow!("agent state lock was poisoned"))?.clone();
+        let defaults = self
+            .defaults
+            .lock()
+            .map_err(|_| anyhow!("agent state lock was poisoned"))?
+            .clone();
         let user = resolve_user_in_guest(&defaults.user)?;
         // SAFETY: geteuid has no preconditions.
         let owner = (unsafe { libc::geteuid() } == 0).then_some((user.uid, user.gid));
         let mut reader = TarFrameReader::new(frames);
         tarcopy::unpack(&mut reader, Path::new(destination), owner)?;
         reader.finish()?;
-        sender.send_json(FrameKind::Exit, &ExitInfo { code: Some(0), signal: None })?;
+        sender.send_json(
+            FrameKind::Exit,
+            &ExitInfo {
+                code: Some(0),
+                signal: None,
+            },
+        )?;
         Ok(())
     }
 
@@ -604,7 +674,13 @@ impl Agent {
         let writer = TarFrameWriter::new(sender.clone());
         let writer = tarcopy::pack(Path::new(source), writer)?;
         writer.finish().context("finish tar stream")?;
-        sender.send_json(FrameKind::Exit, &ExitInfo { code: Some(0), signal: None })?;
+        sender.send_json(
+            FrameKind::Exit,
+            &ExitInfo {
+                code: Some(0),
+                signal: None,
+            },
+        )?;
         Ok(())
     }
 }
@@ -645,7 +721,8 @@ fn lchown(path: &Path, uid: u32, gid: u32) -> Result<()> {
     let path_bytes = std::ffi::CString::new(path.as_os_str().as_bytes())?;
     // SAFETY: `path_bytes` is a valid NUL-terminated string for the call.
     if unsafe { libc::lchown(path_bytes.as_ptr(), uid, gid) } != 0 {
-        return Err(io::Error::last_os_error()).with_context(|| format!("change owner of {}", path.display()));
+        return Err(io::Error::last_os_error())
+            .with_context(|| format!("change owner of {}", path.display()));
     }
     Ok(())
 }
@@ -718,8 +795,16 @@ fn pump<T: Transport>(
     loop {
         if !exited {
             let mut fds = [
-                libc::pollfd { fd, events: libc::POLLIN, revents: 0 },
-                libc::pollfd { fd: wake.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+                libc::pollfd {
+                    fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: wake.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
             ];
             // SAFETY: `fds` is a valid array of two pollfd.
             let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
@@ -759,7 +844,8 @@ fn pump<T: Transport>(
 
 /// Write a line to the kernel log, which the VM's console shows.
 pub fn klog(message: &str) {
-    let line = format!("mj-microvm-agent: {message}\n");
+    // Level 3 (error) shows on the console, which init limits to errors and worse.
+    let line = format!("<3>mj-microvm-agent: {message}\n");
     let written = fs::OpenOptions::new()
         .write(true)
         .open("/dev/kmsg")
@@ -780,7 +866,8 @@ impl Read for VsockStream {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         loop {
             // SAFETY: reads into a valid buffer of the stated length.
-            let count = unsafe { libc::read(self.0.as_raw_fd(), buffer.as_mut_ptr().cast(), buffer.len()) };
+            let count =
+                unsafe { libc::read(self.0.as_raw_fd(), buffer.as_mut_ptr().cast(), buffer.len()) };
             if count >= 0 {
                 return Ok(count as usize);
             }
@@ -796,7 +883,8 @@ impl Write for VsockStream {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
         loop {
             // SAFETY: writes from a valid buffer of the stated length.
-            let count = unsafe { libc::write(self.0.as_raw_fd(), buffer.as_ptr().cast(), buffer.len()) };
+            let count =
+                unsafe { libc::write(self.0.as_raw_fd(), buffer.as_ptr().cast(), buffer.len()) };
             if count >= 0 {
                 return Ok(count as usize);
             }
@@ -946,10 +1034,15 @@ fn unmount_data_filesystems() {
         .collect();
     points.reverse();
     for point in points {
-        let Ok(path) = std::ffi::CString::new(point.clone()) else { continue };
+        let Ok(path) = std::ffi::CString::new(point.clone()) else {
+            continue;
+        };
         // SAFETY: plain umount of a NUL-terminated path.
         if unsafe { libc::umount2(path.as_ptr(), 0) } != 0 {
-            klog(&format!("unmount {point} failed: {}", io::Error::last_os_error()));
+            klog(&format!(
+                "unmount {point} failed: {}",
+                io::Error::last_os_error()
+            ));
         }
     }
 }
@@ -1000,5 +1093,4 @@ pub(super) mod test_support {
             self.powered_off.store(true, Ordering::SeqCst);
         }
     }
-
 }

@@ -9,7 +9,14 @@ use mj_core::subprocess::run_with_input;
 
 /// Directories searched before `PATH`: where the host bootstrap installs
 /// Firecracker and crane.
-const TOOL_DIRECTORIES: &[&str] = &["/usr/local/bin", "/usr/local/sbin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"];
+const TOOL_DIRECTORIES: &[&str] = &[
+    "/usr/local/bin",
+    "/usr/local/sbin",
+    "/usr/sbin",
+    "/usr/bin",
+    "/sbin",
+    "/bin",
+];
 
 /// Locate an installed tool. The engine runs under `sudo`, whose `PATH` is not the caller's.
 pub fn find_tool(name: &str) -> Result<PathBuf> {
@@ -98,7 +105,11 @@ pub fn now_rfc3339() -> String {
 
 /// Seconds-since-epoch free-form unique suffix for scratch names.
 pub fn scratch_suffix() -> String {
-    format!("{}-{}", std::process::id(), chrono::Utc::now().timestamp_micros())
+    format!(
+        "{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_micros()
+    )
 }
 
 /// Set by the termination signal handler during a launch, which then rolls back.

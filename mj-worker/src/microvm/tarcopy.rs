@@ -172,8 +172,9 @@ fn checked_target(root: &Path, relative: &Path) -> Result<PathBuf> {
                 "refusing to unpack through {}: it is not a directory",
                 current.display()
             ),
-            Err(_) => fs::create_dir(&current)
-                .with_context(|| format!("create {}", current.display()))?,
+            Err(_) => {
+                fs::create_dir(&current).with_context(|| format!("create {}", current.display()))?
+            }
         }
     }
     Ok(current)
@@ -185,8 +186,7 @@ fn remove_non_directory(target: &Path) -> Result<()> {
             "refusing to replace directory {} with a file",
             target.display()
         ),
-        Ok(_) => fs::remove_file(target)
-            .with_context(|| format!("replace {}", target.display())),
+        Ok(_) => fs::remove_file(target).with_context(|| format!("replace {}", target.display())),
         Err(_) => Ok(()),
     }
 }

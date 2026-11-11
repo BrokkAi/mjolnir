@@ -38,7 +38,10 @@ pub fn ensure(layout: &Layout) -> Result<BootAssets> {
         );
     }
     let kernel_version = sys::kernel_release()?;
-    let tag = format!("{kernel_version}-{}", mj_core::worker_build::WORKER_BUILD_ID);
+    let tag = format!(
+        "{kernel_version}-{}",
+        mj_core::worker_build::WORKER_BUILD_ID
+    );
     let directory = layout.boot().join(&tag);
     let assets = BootAssets {
         kernel: directory.join("vmlinuz"),
@@ -54,7 +57,9 @@ pub fn ensure(layout: &Layout) -> Result<BootAssets> {
     if assets.kernel.is_file() && assets.initrd.is_file() {
         return Ok(assets);
     }
-    let scratch = layout.boot().join(format!(".tmp-{}-{}", assets.tag, sys::scratch_suffix()));
+    let scratch = layout
+        .boot()
+        .join(format!(".tmp-{}-{}", assets.tag, sys::scratch_suffix()));
     fs::create_dir_all(&scratch).with_context(|| format!("create {}", scratch.display()))?;
     let built = build(&scratch, &kernel_version);
     if let Err(error) = built {
@@ -64,7 +69,8 @@ pub fn ensure(layout: &Layout) -> Result<BootAssets> {
         return Err(error.context("build the microvm kernel and initrd"));
     }
     if directory.exists() {
-        fs::remove_dir_all(&directory).with_context(|| format!("replace {}", directory.display()))?;
+        fs::remove_dir_all(&directory)
+            .with_context(|| format!("replace {}", directory.display()))?;
     }
     fs::rename(&scratch, &directory).with_context(|| format!("publish {}", directory.display()))?;
     Ok(assets)
@@ -83,13 +89,24 @@ fn build(scratch: &std::path::Path, kernel_version: &str) -> Result<()> {
     sys::run_checked(
         &dracut,
         &[
-            "--force", "--no-hostonly", "--reproducible", "--no-early-microcode",
-            "--modules", "bash",
-            "--add-drivers", GUEST_DRIVERS,
-            "--install", INIT_PROGRAMS,
-            "--include", init.to_str().context("init path is not UTF-8")?, "/init",
-            "--include", engine.to_str().context("engine path is not UTF-8")?, "/mj-worker",
-            "--kver", kernel_version,
+            "--force",
+            "--no-hostonly",
+            "--reproducible",
+            "--no-early-microcode",
+            "--modules",
+            "bash",
+            "--add-drivers",
+            GUEST_DRIVERS,
+            "--install",
+            INIT_PROGRAMS,
+            "--include",
+            init.to_str().context("init path is not UTF-8")?,
+            "/init",
+            "--include",
+            engine.to_str().context("engine path is not UTF-8")?,
+            "/mj-worker",
+            "--kver",
+            kernel_version,
             initrd.to_str().context("initrd path is not UTF-8")?,
         ],
     )?;

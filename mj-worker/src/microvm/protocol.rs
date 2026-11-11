@@ -168,9 +168,13 @@ pub enum Request {
     Start(StartRequest),
     Exec(ExecRequest),
     /// Receive a tar stream and unpack it at `destination`.
-    CopyIn { destination: String },
+    CopyIn {
+        destination: String,
+    },
     /// Send `source` as a tar stream.
-    CopyOut { source: String },
+    CopyOut {
+        source: String,
+    },
     /// Flush every filesystem, answer, and power the VM off.
     Stop,
 }
@@ -286,7 +290,9 @@ impl<T: Read> FrameReader<T> {
         let kind = FrameKind::from_byte(header[0])?;
         let length = u32::from_be_bytes([header[1], header[2], header[3], header[4]]) as usize;
         if length > MAX_FRAME_SIZE {
-            bail!("microvm protocol frame of {length} bytes exceeds the {MAX_FRAME_SIZE} byte limit");
+            bail!(
+                "microvm protocol frame of {length} bytes exceeds the {MAX_FRAME_SIZE} byte limit"
+            );
         }
         let mut payload = vec![0u8; length];
         self.inner
@@ -360,7 +366,9 @@ impl<T: Read> Read for TarFrameReader<'_, T> {
                     return Ok(0);
                 }
                 FrameKind::Error => {
-                    return Err(io::Error::other(String::from_utf8_lossy(&frame.payload).into_owned()));
+                    return Err(io::Error::other(
+                        String::from_utf8_lossy(&frame.payload).into_owned(),
+                    ));
                 }
                 other => {
                     return Err(io::Error::other(format!(

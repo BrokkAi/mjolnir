@@ -4,9 +4,9 @@
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
-use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -75,7 +75,11 @@ fn exec_moves_more_than_a_pipe_buffer_in_both_directions_at_once() {
         )
         .unwrap();
     assert_eq!(exit.code, Some(0));
-    assert!(stdout == input, "stdout differs from the {} byte input", input.len());
+    assert!(
+        stdout == input,
+        "stdout differs from the {} byte input",
+        input.len()
+    );
     assert_eq!(stderr, vec![b'x'; 200_000]);
 }
 
@@ -170,12 +174,26 @@ fn exec_reports_exit_codes_signals_and_missing_programs() {
         (exit, String::from_utf8_lossy(&stderr).into_owned())
     };
     let (exit, _) = run(&["sh", "-c", "exit 7"]);
-    assert_eq!((exit.code, exit.signal, exit.shell_status()), (Some(7), None, 7));
+    assert_eq!(
+        (exit.code, exit.signal, exit.shell_status()),
+        (Some(7), None, 7)
+    );
     let (exit, _) = run(&["sh", "-c", "kill -KILL $$"]);
-    assert_eq!((exit.code, exit.signal, exit.shell_status()), (None, Some(9), 137));
+    assert_eq!(
+        (exit.code, exit.signal, exit.shell_status()),
+        (None, Some(9), 137)
+    );
     let (exit, stderr) = run(&["definitely-not-a-program"]);
     assert_eq!(exit.code, Some(127));
     assert!(stderr.contains("not found"), "{stderr}");
+    let mut request = exec_request(&["pwd"]);
+    request.cwd = Some("/nonexistent-directory".to_owned());
+    let mut stderr = Vec::new();
+    let exit = harness
+        .client()
+        .exec(request, None, &mut Vec::new(), &mut stderr)
+        .unwrap();
+    assert_eq!(exit.code, Some(127), "{}", String::from_utf8_lossy(&stderr));
 }
 
 #[test]
@@ -185,7 +203,11 @@ fn detached_exec_answers_at_once_and_the_process_keeps_running() {
     let marker = directory.path().join("marker");
     let pid = harness
         .client()
-        .exec_detached(exec_request(&["sh", "-c", &format!("sleep 0.3; touch {}", marker.display())]))
+        .exec_detached(exec_request(&[
+            "sh",
+            "-c",
+            &format!("sleep 0.3; touch {}", marker.display()),
+        ]))
         .unwrap();
     assert!(pid > 0);
     assert!(!marker.exists());
@@ -208,7 +230,13 @@ fn raw_hello(stream: &UnixStream, hello: &Hello) -> FrameSender<UnixStream> {
 fn a_peer_with_no_common_protocol_version_is_refused_with_a_reason() {
     let harness = Harness::new();
     let (stream, thread) = harness.connect();
-    let _sender = raw_hello(&stream, &Hello { version: 0, min_version: 0 });
+    let _sender = raw_hello(
+        &stream,
+        &Hello {
+            version: 0,
+            min_version: 0,
+        },
+    );
     let mut frames = FrameReader::new(stream);
     let reply = frames.expect("the refusal").unwrap();
     assert_eq!(reply.kind, FrameKind::Error);
@@ -253,10 +281,24 @@ fn copy_moves_a_directory_in_and_out_with_podman_naming() {
     // Into an existing directory: the tree lands inside it under its own name.
     let inbox = work.path().join("inbox");
     std::fs::create_dir(&inbox).unwrap();
-    harness.client().copy_in(&source, inbox.to_str().unwrap()).unwrap();
-    assert_eq!(std::fs::read(inbox.join("tree/big.bin")).unwrap(), pattern(300_000));
-    assert_eq!(std::fs::read_to_string(inbox.join("tree/sub/a.txt")).unwrap(), "alpha");
-    assert_eq!(std::fs::read_link(inbox.join("tree/link")).unwrap().to_str(), Some("sub/a.txt"));
+    harness
+        .client()
+        .copy_in(&source, inbox.to_str().unwrap())
+        .unwrap();
+    assert_eq!(
+        std::fs::read(inbox.join("tree/big.bin")).unwrap(),
+        pattern(300_000)
+    );
+    assert_eq!(
+        std::fs::read_to_string(inbox.join("tree/sub/a.txt")).unwrap(),
+        "alpha"
+    );
+    assert_eq!(
+        std::fs::read_link(inbox.join("tree/link"))
+            .unwrap()
+            .to_str(),
+        Some("sub/a.txt")
+    );
 
     // To a path that does not exist: the destination becomes the tree's name.
     let back = work.path().join("back");
@@ -264,8 +306,14 @@ fn copy_moves_a_directory_in_and_out_with_podman_naming() {
         .client()
         .copy_out(inbox.join("tree").to_str().unwrap(), &back, None)
         .unwrap();
-    assert_eq!(std::fs::read(back.join("big.bin")).unwrap(), pattern(300_000));
-    assert_eq!(std::fs::read_to_string(back.join("sub/a.txt")).unwrap(), "alpha");
+    assert_eq!(
+        std::fs::read(back.join("big.bin")).unwrap(),
+        pattern(300_000)
+    );
+    assert_eq!(
+        std::fs::read_to_string(back.join("sub/a.txt")).unwrap(),
+        "alpha"
+    );
 
     // A missing destination parent is the agent's refusal, relayed to the client.
     let error = harness
@@ -291,29 +339,56 @@ fn unpacking_never_leaves_the_destination_or_writes_through_a_symlink() {
             let name = &mut header.as_old_mut().name;
             name[..path.len()].copy_from_slice(path.as_bytes());
             header.set_entry_type(*kind);
-            header.set_size(if *kind == tar::EntryType::Regular { 3 } else { 0 });
-            header.set_mode(if *kind == tar::EntryType::Directory { 0o755 } else { 0o644 });
+            header.set_size(if *kind == tar::EntryType::Regular {
+                3
+            } else {
+                0
+            });
+            header.set_mode(if *kind == tar::EntryType::Directory {
+                0o755
+            } else {
+                0o644
+            });
             if !target.is_empty() {
                 header.set_link_name(target).unwrap();
             }
             header.set_cksum();
-            builder.append(&header, &b"abc"[..if *kind == tar::EntryType::Regular { 3 } else { 0 }]).unwrap();
+            builder
+                .append(
+                    &header,
+                    &b"abc"[..if *kind == tar::EntryType::Regular {
+                        3
+                    } else {
+                        0
+                    }],
+                )
+                .unwrap();
         }
         builder.into_inner().unwrap()
     };
 
     let traversal = tar_with(&[("top/../../escaped", tar::EntryType::Regular, "")]);
     let error = super::tarcopy::unpack(&traversal[..], &destination, None).unwrap_err();
-    assert!(format!("{error:#}").contains("leaves its destination"), "{error:#}");
+    assert!(
+        format!("{error:#}").contains("leaves its destination"),
+        "{error:#}"
+    );
     assert!(!work.path().join("escaped").exists());
 
     let through_link = tar_with(&[
         ("top", tar::EntryType::Directory, ""),
-        ("top/out", tar::EntryType::Symlink, outside.to_str().unwrap()),
+        (
+            "top/out",
+            tar::EntryType::Symlink,
+            outside.to_str().unwrap(),
+        ),
         ("top/out/file", tar::EntryType::Regular, ""),
     ]);
     let error = super::tarcopy::unpack(&through_link[..], &destination, None).unwrap_err();
-    assert!(format!("{error:#}").contains("not a directory"), "{error:#}");
+    assert!(
+        format!("{error:#}").contains("not a directory"),
+        "{error:#}"
+    );
     assert!(!outside.join("file").exists());
 
     let device = tar_with(&[("top", tar::EntryType::Char, "")]);

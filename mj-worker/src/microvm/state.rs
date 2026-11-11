@@ -229,7 +229,8 @@ impl VmState {
 
     /// Decode a `state.json`, refusing a format newer than this build knows.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
-        let value: serde_json::Value = serde_json::from_slice(bytes).context("decode state.json")?;
+        let value: serde_json::Value =
+            serde_json::from_slice(bytes).context("decode state.json")?;
         refuse_newer_format("VM state", &value, STATE_FORMAT)?;
         serde_json::from_value(value).context("decode state.json")
     }
@@ -286,15 +287,14 @@ pub fn write_json_atomic<V: Serialize>(path: &Path, value: &V) -> Result<()> {
         ".{}.tmp",
         path.file_name().and_then(|n| n.to_str()).unwrap_or("file")
     ));
-    let mut file = File::create(&temporary)
-        .with_context(|| format!("create {}", temporary.display()))?;
+    let mut file =
+        File::create(&temporary).with_context(|| format!("create {}", temporary.display()))?;
     serde_json::to_writer_pretty(&mut file, value)
         .with_context(|| format!("write {}", temporary.display()))?;
     file.write_all(b"\n")?;
     file.sync_all()
         .with_context(|| format!("sync {}", temporary.display()))?;
-    fs::rename(&temporary, path)
-        .with_context(|| format!("publish {}", path.display()))?;
+    fs::rename(&temporary, path).with_context(|| format!("publish {}", path.display()))?;
     Ok(())
 }
 
@@ -343,7 +343,11 @@ impl VolumeMetadata {
         };
         let mut names: Vec<String> = Vec::new();
         for entry in entries {
-            let name = entry.context("list volumes")?.file_name().to_string_lossy().into_owned();
+            let name = entry
+                .context("list volumes")?
+                .file_name()
+                .to_string_lossy()
+                .into_owned();
             if !name.starts_with('.') {
                 names.push(name);
             }
@@ -385,8 +389,8 @@ impl ImageConfig {
     pub fn read(layout: &Layout, id: &str) -> Result<Self> {
         let path = layout.image(id).join("config.json");
         let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-        let value: serde_json::Value = serde_json::from_slice(&bytes)
-            .with_context(|| format!("decode {}", path.display()))?;
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).with_context(|| format!("decode {}", path.display()))?;
         refuse_newer_format("image metadata", &value, METADATA_FORMAT)?;
         serde_json::from_value(value).with_context(|| format!("decode {}", path.display()))
     }
@@ -471,10 +475,15 @@ mod tests {
         let mut newer = serde_json::to_value(&state).unwrap();
         newer["format"] = serde_json::json!(STATE_FORMAT + 1);
         newer["quantum_flux"] = serde_json::json!(true);
-        fs::write(VmState::path(&layout, "t1"), serde_json::to_vec(&newer).unwrap()).unwrap();
+        fs::write(
+            VmState::path(&layout, "t1"),
+            serde_json::to_vec(&newer).unwrap(),
+        )
+        .unwrap();
         let error = format!("{:#}", VmState::read(&layout, "t1").unwrap_err());
         assert!(
-            error.contains("newer mj-worker") && error.contains(&format!("format {}", STATE_FORMAT + 1)),
+            error.contains("newer mj-worker")
+                && error.contains(&format!("format {}", STATE_FORMAT + 1)),
             "{error}"
         );
     }

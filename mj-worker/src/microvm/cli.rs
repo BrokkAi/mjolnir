@@ -24,7 +24,11 @@ use super::{net, sys, template, volume};
 const ENGINE_FAILURE: i32 = 125;
 
 #[derive(Debug, Parser)]
-#[command(name = "mj-worker microvm", about = "Run OCI images as Nitro Sandbox microVMs with a Podman-compatible command line", version)]
+#[command(
+    name = "mj-worker microvm",
+    about = "Run OCI images as Nitro Sandbox microVMs with a Podman-compatible command line",
+    version
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -232,16 +236,24 @@ enum VolumeCommand {
         format: Option<String>,
         name: String,
     },
-    Exists { name: String },
+    Exists {
+        name: String,
+    },
 }
 
 /// Run the engine with `args` (the words after `microvm`) and return the exit status.
 pub fn main(args: Vec<OsString>) -> Result<i32> {
-    let argv: Vec<OsString> = std::iter::once(OsString::from("mj-worker microvm")).chain(args).collect();
+    let argv: Vec<OsString> = std::iter::once(OsString::from("mj-worker microvm"))
+        .chain(args)
+        .collect();
     let cli = match Cli::try_parse_from(argv) {
         Ok(cli) => cli,
         Err(error) => {
-            let status = if error.use_stderr() { ENGINE_FAILURE } else { 0 };
+            let status = if error.use_stderr() {
+                ENGINE_FAILURE
+            } else {
+                0
+            };
             // clap writes its own text, including --help and --version.
             error.print().context("print command-line error")?;
             return Ok(status);
@@ -328,7 +340,10 @@ fn print_info(info: &Value) {
 /// `--format` rendering.
 fn print_described(description: &Value, format: Option<&str>) -> Result<()> {
     match format {
-        None => println!("{}", serde_json::to_string_pretty(&Value::Array(vec![description.clone()]))?),
+        None => println!(
+            "{}",
+            serde_json::to_string_pretty(&Value::Array(vec![description.clone()]))?
+        ),
         Some(format) => print!("{}", template::render(format, description)?),
     }
     Ok(())
@@ -365,13 +380,20 @@ fn image_command(layout: &Layout, command: ImageCommand) -> Result<i32> {
             Ok(0)
         }
         ImageCommand::Prune { force } => {
-            ensure!(force, "image prune needs -f: there is no confirmation prompt");
+            ensure!(
+                force,
+                "image prune needs -f: there is no confirmation prompt"
+            );
             for id in image::prune(layout)? {
                 println!("{id}");
             }
             Ok(0)
         }
-        ImageCommand::Exists { image } => Ok(if image::lookup(layout, &image)?.is_some() { 0 } else { 1 }),
+        ImageCommand::Exists { image } => Ok(if image::lookup(layout, &image)?.is_some() {
+            0
+        } else {
+            1
+        }),
     }
 }
 
@@ -383,8 +405,12 @@ fn parse_memory(text: &str) -> Result<u64> {
         value if value.ends_with('g') => (&value[..value.len() - 1], 1u64 << 30),
         value => (value, 1),
     };
-    let amount: u64 = digits.parse().with_context(|| format!("invalid --memory {text:?}: use a number with an optional b, k, m or g suffix"))?;
-    amount.checked_mul(factor).ok_or_else(|| anyhow!("--memory {text:?} is too large"))
+    let amount: u64 = digits.parse().with_context(|| {
+        format!("invalid --memory {text:?}: use a number with an optional b, k, m or g suffix")
+    })?;
+    amount
+        .checked_mul(factor)
+        .ok_or_else(|| anyhow!("--memory {text:?} is too large"))
 }
 
 fn parse_volume(text: &str) -> Result<VolumeArg> {
@@ -399,12 +425,19 @@ fn parse_volume(text: &str) -> Result<VolumeArg> {
     );
     let mut read_write = true;
     let mut chown = false;
-    for option in parts.next().unwrap_or_default().split(',').filter(|o| !o.is_empty()) {
+    for option in parts
+        .next()
+        .unwrap_or_default()
+        .split(',')
+        .filter(|o| !o.is_empty())
+    {
         match option {
             "rw" => read_write = true,
             "ro" => read_write = false,
             "U" => chown = true,
-            other => bail!("unsupported volume option {other:?} in --volume {text:?}; supported: rw, ro, U"),
+            other => bail!(
+                "unsupported volume option {other:?} in --volume {text:?}; supported: rw, ro, U"
+            ),
         }
     }
     Ok(VolumeArg {
@@ -432,7 +465,9 @@ fn run(layout: &Layout, args: RunArgs) -> Result<i32> {
     );
     if let Some(signal) = &args.stop_signal {
         ensure!(
-            signal.eq_ignore_ascii_case("KILL") || signal == "9" || signal.eq_ignore_ascii_case("SIGKILL"),
+            signal.eq_ignore_ascii_case("KILL")
+                || signal == "9"
+                || signal.eq_ignore_ascii_case("SIGKILL"),
             "unsupported --stop-signal {signal:?}: stopping a VM always kills it; use KILL"
         );
     }
@@ -442,19 +477,30 @@ fn run(layout: &Layout, args: RunArgs) -> Result<i32> {
         .as_deref()
         .map(parse_memory)
         .transpose()?
-        .ok_or_else(|| anyhow!("--memory is required: a microVM's memory is reserved from the Nitro pool"))?;
+        .ok_or_else(|| {
+            anyhow!("--memory is required: a microVM's memory is reserved from the Nitro pool")
+        })?;
     let spec = RunSpec {
         name: args.name,
         image: args.image,
         platform: args.platform,
-        pull: args.pull.as_deref().map(PullPolicy::parse).transpose()?.unwrap_or(PullPolicy::Missing),
+        pull: args
+            .pull
+            .as_deref()
+            .map(PullPolicy::parse)
+            .transpose()?
+            .unwrap_or(PullPolicy::Missing),
         labels: parse_labels(&args.labels)?,
         cpus: args.cpus,
         memory_bytes: memory,
         env: args.env,
         user: args.user,
         workdir: args.workdir,
-        volumes: args.volumes.iter().map(|v| parse_volume(v)).collect::<Result<_>>()?,
+        volumes: args
+            .volumes
+            .iter()
+            .map(|v| parse_volume(v))
+            .collect::<Result<_>>()?,
         command: args.command,
     };
     println!("{}", vm::run(layout, &spec)?);
@@ -472,12 +518,21 @@ fn exec(layout: &Layout, args: ExecArgs) -> Result<i32> {
         detach: args.detach,
     };
     if args.detach {
-        ensure!(!args.interactive, "--detach and --interactive cannot be combined");
+        ensure!(
+            !args.interactive,
+            "--detach and --interactive cannot be combined"
+        );
         client.exec_detached(request)?;
         return Ok(0);
     }
-    let stdin: Option<Box<dyn Read + Send>> = args.interactive.then(|| Box::new(std::io::stdin()) as _);
-    let exit = client.exec(request, stdin, &mut std::io::stdout(), &mut std::io::stderr())?;
+    let stdin: Option<Box<dyn Read + Send>> =
+        args.interactive.then(|| Box::new(std::io::stdin()) as _);
+    let exit = client.exec(
+        request,
+        stdin,
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    )?;
     Ok(exit.shell_status())
 }
 
@@ -490,7 +545,10 @@ fn split_container_operand(operand: &str) -> Option<(&str, &str)> {
 }
 
 fn copy(layout: &Layout, args: CpArgs) -> Result<i32> {
-    match (split_container_operand(&args.source), split_container_operand(&args.destination)) {
+    match (
+        split_container_operand(&args.source),
+        split_container_operand(&args.destination),
+    ) {
         (None, Some((name, destination))) => {
             let (_state, client) = vm::agent_for(layout, name)?;
             client.copy_in(&PathBuf::from(&args.source), destination)?;
@@ -550,7 +608,11 @@ fn volume_command(layout: &Layout, command: VolumeCommand) -> Result<i32> {
         }
         VolumeCommand::Exists { name } => {
             validate_name("volume", &name)?;
-            Ok(if VolumeMetadata::read(layout, &name)?.is_some() { 0 } else { 1 })
+            Ok(if VolumeMetadata::read(layout, &name)?.is_some() {
+                0
+            } else {
+                1
+            })
         }
     }
 }

@@ -31,7 +31,9 @@ impl PullPolicy {
             "always" | "newer" => Ok(Self::Always),
             "missing" => Ok(Self::Missing),
             "never" => Ok(Self::Never),
-            other => bail!("unsupported --pull value {other:?}; use always, missing, never or newer"),
+            other => {
+                bail!("unsupported --pull value {other:?}; use always, missing, never or newer")
+            }
         }
     }
 }
@@ -89,7 +91,9 @@ pub fn lookup(layout: &Layout, reference: &str) -> Result<Option<String>> {
 
 fn platform_for(requested: Option<&str>) -> Result<String> {
     let host = sys::host_architecture()?;
-    let platform = requested.map(str::to_owned).unwrap_or_else(|| format!("linux/{host}"));
+    let platform = requested
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("linux/{host}"));
     let (os, architecture) = platform
         .split_once('/')
         .with_context(|| format!("invalid platform {platform:?}; use os/architecture"))?;
@@ -143,7 +147,12 @@ fn strings(value: &serde_json::Value, key: &str) -> Vec<String> {
     value
         .get(key)
         .and_then(serde_json::Value::as_array)
-        .map(|items| items.iter().filter_map(|i| i.as_str().map(str::to_owned)).collect())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|i| i.as_str().map(str::to_owned))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -155,8 +164,11 @@ fn flatten(
     id: &str,
     config: &serde_json::Value,
 ) -> Result<()> {
-    let scratch = layout.images().join(format!(".tmp-{id}-{}", sys::scratch_suffix()));
-    fs::create_dir_all(scratch.join("rootfs")).with_context(|| format!("create {}", scratch.display()))?;
+    let scratch = layout
+        .images()
+        .join(format!(".tmp-{id}-{}", sys::scratch_suffix()));
+    fs::create_dir_all(scratch.join("rootfs"))
+        .with_context(|| format!("create {}", scratch.display()))?;
     let result = flatten_into(&scratch, crane, reference, platform, id, config);
     if result.is_err() {
         // The scratch tree is ours alone; the processes that wrote it have exited.
@@ -179,7 +191,13 @@ fn flatten_into(
 ) -> Result<()> {
     let rootfs = scratch.join("rootfs");
     extract(crane, reference, platform, scratch, &rootfs)?;
-    for (directory, mode) in [("proc", 0o755), ("sys", 0o755), ("dev", 0o755), ("run", 0o755), ("tmp", 0o1777)] {
+    for (directory, mode) in [
+        ("proc", 0o755),
+        ("sys", 0o755),
+        ("dev", 0o755),
+        ("run", 0o755),
+        ("tmp", 0o1777),
+    ] {
         let path = rootfs.join(directory);
         if !path.exists() {
             fs::create_dir(&path).with_context(|| format!("create {}", path.display()))?;
@@ -188,8 +206,9 @@ fn flatten_into(
     }
     let du = sys::find_tool("du")?;
     let rootfs_arg = rootfs.to_str().context("rootfs path is not UTF-8")?;
-    let bytes = first_number(&sys::run_checked(&du, &["-sb", "--apparent-size", rootfs_arg])?.stdout)
-        .context("read the size of the extracted image")?;
+    let bytes =
+        first_number(&sys::run_checked(&du, &["-sb", "--apparent-size", rootfs_arg])?.stdout)
+            .context("read the size of the extracted image")?;
     let inodes = first_number(&sys::run_checked(&du, &["--inodes", "-s", rootfs_arg])?.stdout)
         .context("read the file count of the extracted image")?;
     // Room for the guest to install packages and write outside its volumes.
@@ -202,9 +221,18 @@ fn flatten_into(
     sys::run_tool(
         "mkfs.ext4",
         &[
-            "-q", "-F", "-m", "0", "-N", inode_count.as_str(), "-L", "rootfs",
-            "-E", "root_owner=0:0,lazy_itable_init=1,lazy_journal_init=1,nodiscard",
-            "-d", rootfs.to_str().context("rootfs path is not UTF-8")?,
+            "-q",
+            "-F",
+            "-m",
+            "0",
+            "-N",
+            inode_count.as_str(),
+            "-L",
+            "rootfs",
+            "-E",
+            "root_owner=0:0,lazy_itable_init=1,lazy_journal_init=1,nodiscard",
+            "-d",
+            rootfs.to_str().context("rootfs path is not UTF-8")?,
             root_image.to_str().context("image path is not UTF-8")?,
         ],
     )?;
@@ -229,8 +257,16 @@ fn flatten_into(
             .unwrap_or_default()
             .to_owned(),
         env: strings(&inner, "Env"),
-        user: inner.get("User").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
-        working_dir: inner.get("WorkingDir").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
+        user: inner
+            .get("User")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        working_dir: inner
+            .get("WorkingDir")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
         entrypoint: strings(&inner, "Entrypoint"),
         cmd: strings(&inner, "Cmd"),
         labels,
@@ -243,7 +279,13 @@ fn flatten_into(
 /// `crane export | tar -x`. The two processes share a pipe the parent never
 /// touches, and each one's diagnostics go to a file, so nothing here can block
 /// on an unread pipe.
-fn extract(crane: &Path, reference: &str, platform: &str, scratch: &Path, rootfs: &Path) -> Result<()> {
+fn extract(
+    crane: &Path,
+    reference: &str,
+    platform: &str,
+    scratch: &Path,
+    rootfs: &Path,
+) -> Result<()> {
     let crane_log = scratch.join("crane.log");
     let tar_log = scratch.join("tar.log");
     let mut exporter = Command::new(crane)
@@ -253,10 +295,20 @@ fn extract(crane: &Path, reference: &str, platform: &str, scratch: &Path, rootfs
         .stderr(fs::File::create(&crane_log)?)
         .spawn()
         .context("start crane export")?;
-    let pipe = exporter.stdout.take().context("crane export has no output pipe")?;
+    let pipe = exporter
+        .stdout
+        .take()
+        .context("crane export has no output pipe")?;
     let tar = sys::find_tool("tar")?;
     let unpacker = Command::new(tar)
-        .args(["-x", "--numeric-owner", "--xattrs", "--xattrs-include=*", "-p", "-C"])
+        .args([
+            "-x",
+            "--numeric-owner",
+            "--xattrs",
+            "--xattrs-include=*",
+            "-p",
+            "-C",
+        ])
         .arg(rootfs)
         .stdin(Stdio::from(pipe))
         .stdout(Stdio::null())
@@ -293,7 +345,12 @@ pub fn prune(layout: &Layout) -> Result<Vec<String>> {
         if name.starts_with(".tmp-") {
             // A pull holds the image lock while it writes scratch; the lock
             // is per image id, which the scratch name carries.
-            let id = name.trim_start_matches(".tmp-").split('-').next().unwrap_or_default().to_owned();
+            let id = name
+                .trim_start_matches(".tmp-")
+                .split('-')
+                .next()
+                .unwrap_or_default()
+                .to_owned();
             if let Ok(_image_lock) = layout.lock_image(&id) {
                 match fs::remove_dir_all(entry.path()) {
                     Ok(()) => {}

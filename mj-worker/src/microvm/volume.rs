@@ -37,7 +37,11 @@ fn filesystem_bytes(layout: &Layout) -> Result<u64> {
 }
 
 /// Create a volume. Fails if the name is taken.
-pub fn create(layout: &Layout, name: &str, labels: BTreeMap<String, String>) -> Result<VolumeMetadata> {
+pub fn create(
+    layout: &Layout,
+    name: &str,
+    labels: BTreeMap<String, String>,
+) -> Result<VolumeMetadata> {
     validate_name("volume", name)?;
     for (key, value) in &labels {
         validate_label(key, value)?;
@@ -48,7 +52,9 @@ pub fn create(layout: &Layout, name: &str, labels: BTreeMap<String, String>) -> 
         VolumeMetadata::read(layout, name)?.is_none(),
         "volume {name} already exists"
     );
-    let scratch = layout.volumes().join(format!(".tmp-{name}-{}", sys::scratch_suffix()));
+    let scratch = layout
+        .volumes()
+        .join(format!(".tmp-{name}-{}", sys::scratch_suffix()));
     fs::create_dir(&scratch).with_context(|| format!("create {}", scratch.display()))?;
     let built = (|| -> Result<()> {
         let disk = scratch.join("disk.ext4");
@@ -58,8 +64,12 @@ pub fn create(layout: &Layout, name: &str, labels: BTreeMap<String, String>) -> 
         sys::run_tool(
             "mkfs.ext4",
             &[
-                "-q", "-F", "-m", "0",
-                "-E", "lazy_itable_init=1,lazy_journal_init=1,nodiscard",
+                "-q",
+                "-F",
+                "-m",
+                "0",
+                "-E",
+                "lazy_itable_init=1,lazy_journal_init=1,nodiscard",
                 disk.to_str().context("volume path is not UTF-8")?,
             ],
         )?;
@@ -148,7 +158,9 @@ pub fn remove(layout: &Layout, name: &str, ignore_missing: bool) -> Result<()> {
         bail!("volume {name} is being used by container {}", user.name);
     }
     // Unpublish first so a crash leaves scratch, not a volume without a disk.
-    let doomed = layout.volumes().join(format!(".removing-{name}-{}", sys::scratch_suffix()));
+    let doomed = layout
+        .volumes()
+        .join(format!(".removing-{name}-{}", sys::scratch_suffix()));
     fs::rename(layout.volume(name), &doomed).with_context(|| format!("unpublish volume {name}"))?;
     fs::remove_dir_all(&doomed).with_context(|| format!("remove {}", doomed.display()))?;
     Ok(())
