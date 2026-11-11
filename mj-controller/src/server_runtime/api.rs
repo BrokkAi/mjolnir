@@ -1465,8 +1465,8 @@ impl ApiBackend {
     /// Start a parked child's worker again and wait until its session can
     /// take a prompt. Returns whether there was a park to wait for or undo; a
     /// running child with no park in progress needs nothing and returns
-    /// false. Once wake is accepted, failures leave the active child available
-    /// for ordinary worker recovery.
+    /// false. A proved dead wake returns its failure and leaves the child
+    /// parked for another send; uncertain liveness remains recoverable.
     async fn unpark_child(&self, child_id: &str) -> Result<bool> {
         let parked = self
             .exports
@@ -2288,6 +2288,12 @@ fn subagent_status(
             true,
         );
     }
+    if progress.login_failure.is_some()
+        && let Some(record) = record
+            .filter(|record| record.state == SessionState::Parked && record.last_error.is_some())
+    {
+        return ("failed".into(), record.last_error.clone(), true);
+    }
     let start_pending = matches!(start, Some(StartStatus::Pending));
     let lifecycle = record.map(|record| record.state);
     // A parked child's worker was stopped only once it was idle, and nothing
@@ -2508,12 +2514,28 @@ fn child_progress(committed: &crate::database::CommittedState, child_id: &str) -
                 turn.and_then(|turn| turn.failed_message.as_deref()),
             )
         }),
-        login_failure: last
-            .filter(|turn| mj_core::subagent::turn_failed_on_login(turn))
-            .and_then(|_| subagent.map(|record| record.profile_id.clone())),
+        login_failure: child_login_failure(
+            committed.state.sessions.get(child_id),
+            last,
+            subagent.map(|record| record.profile_id.as_str()),
+        ),
         provider_failure: last.and_then(provider_failure),
         report_dir: recorded.report_dir.clone(),
     }
+}
+
+/// One projection for provider refusals before a turn and during a turn.
+fn child_login_failure(
+    record: Option<&mj_core::state::SessionRecord>,
+    last: Option<&mj_core::state::MaterializedTurnOutcome>,
+    profile: Option<&str>,
+) -> Option<String> {
+    let refused = record
+        .filter(|record| record.state == SessionState::Parked)
+        .and_then(|record| record.last_error.as_deref())
+        .is_some_and(mj_core::credentials::text_reports_auth_failure)
+        || last.is_some_and(mj_core::subagent::turn_failed_on_login);
+    profile.filter(|_| refused).map(str::to_owned)
 }
 
 fn provider_failure(
@@ -2557,10 +2579,11 @@ pub(crate) fn load_child_progress(child_id: &str) -> Result<ChildProgress> {
         }
         _ => None,
     };
-    let login_failure = last
-        .as_ref()
-        .filter(|turn| mj_core::subagent::turn_failed_on_login(turn))
-        .and(subagent.map(|record| record.profile_id));
+    let login_failure = child_login_failure(
+        crate::database::load_session_record(child_id)?.as_ref(),
+        last.as_ref(),
+        subagent.as_ref().map(|record| record.profile_id.as_str()),
+    );
     Ok(ChildProgress {
         turn_pending: false,
         finished_span: last.as_ref().and_then(|turn| {
@@ -2619,6 +2642,7 @@ fn wait_agent_entry(
         });
     }
     if state == "failed"
+        && progress.login_failure.is_none()
         && progress.provider_failure.is_some()
         && let Some((_, summary)) = &progress.failed_turn
     {

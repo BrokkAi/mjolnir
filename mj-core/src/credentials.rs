@@ -528,7 +528,7 @@ pub fn write_credential_file(kind: HarnessKind, path: &Path, bytes: &[u8]) -> Re
 /// Full-phrase markers that a harness rejected the session's credentials.
 /// Kept tight on purpose: a false positive costs one redundant sync and one
 /// notice, but a noisy list would train operators to ignore both.
-const AUTH_FAILURE_PHRASES: [&str; 8] = [
+const AUTH_FAILURE_PHRASES: [&str; 9] = [
     "oauth session expired and could not be refreshed",
     "please run /login",
     "authorization grant is invalid",
@@ -546,6 +546,8 @@ const AUTH_FAILURE_PHRASES: [&str; 8] = [
     // Hel's own marker for a turn the bridge failed with ACP `auth_required`.
     // The bridge's wording ("Authentication required") is too generic to match.
     "acp auth_required",
+    // Codex ACP can refuse workspace routing while loading a parked session.
+    "workspace routing discovery unauthorized (401)",
 ];
 
 /// Machine-readable authentication errors must be complete identifiers. This

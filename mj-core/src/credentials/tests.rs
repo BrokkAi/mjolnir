@@ -323,6 +323,11 @@ fn a_missing_credential_file_reads_as_an_absent_snapshot() {
 
 #[test]
 fn auth_failure_phrases_match_and_near_misses_do_not() {
+    // Hard-won: #1508: Codex ACP session-load refusals bypassed login classification.
+    assert!(auth_failure_signature(
+        HarnessKind::Codex,
+        r#"ACP protocol failed: Internal error: "load ACP session 01a1c46e-48d2-7ef0-a803-ce37deb2e2d8: Internal error: {\"details\": \"workspace routing discovery unauthorized (401)\"}""#
+    ));
     assert!(auth_failure_signature(
         HarnessKind::Claude,
         "Error: OAuth session expired and could not be refreshed"

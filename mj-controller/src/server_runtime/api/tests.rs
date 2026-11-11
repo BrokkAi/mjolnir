@@ -2125,6 +2125,37 @@ fn a_child_whose_login_was_refused_fails_naming_its_profile_and_the_fix() {
         "{entry}"
     );
 
+    // #1508: a session-load refusal has no new failed turn. Its lifecycle
+    // failure must take precedence over the previous delivered answer.
+    let mut parked = record.clone();
+    parked.state = SessionState::Parked;
+    parked.last_error = Some("login_invalid: workspace routing discovery unauthorized (401); run `mj login --profile codex4` for target ec2".into());
+    let lifecycle_progress = ChildProgress {
+        login_failure: child_login_failure(Some(&parked), None, Some("codex4")),
+        report: ReportState::Delivered("previous answer".into()),
+        failed_turn: None,
+        answer: None,
+        ..progress.clone()
+    };
+    let (state, output, finished) = subagent_status(
+        Some(&parked),
+        Some(&summary),
+        None,
+        None,
+        false,
+        &lifecycle_progress,
+    );
+    let entry = super::wait_agent_entry(
+        "child",
+        &state,
+        output,
+        finished,
+        &lifecycle_progress,
+        false,
+    );
+    assert_eq!(entry["failure"]["kind"], "login_invalid");
+    assert_eq!(entry["output"], parked.last_error.unwrap());
+
     // A report the child did hand back is still its report.
     let delivered = ChildProgress {
         report: ReportState::Delivered("done".into()),
