@@ -386,7 +386,8 @@ fn stop_exporter(exporter: &mut std::process::Child) {
 }
 
 /// Remove images nothing refers to, and scratch left by interrupted pulls.
-/// An image is in use if a reference names it or a VM was created from it.
+/// An image is in use if a reference names it, a VM was created from it, or a
+/// staged root replacement is about to use it.
 pub fn prune(layout: &Layout) -> Result<Vec<String>> {
     layout.ensure()?;
     let mut removed = Vec::new();
@@ -422,7 +423,8 @@ pub fn prune(layout: &Layout) -> Result<Vec<String>> {
             let _global = layout.lock_global()?;
             let refs = ImageRefs::read(layout)?;
             let in_use = refs.refs.values().any(|id| *id == name)
-                || VmState::list(layout)?.iter().any(|vm| vm.image_id == name);
+                || VmState::list(layout)?.iter().any(|vm| vm.image_id == name)
+                || super::replace_root::pinned_images(layout)?.contains(&name);
             if !in_use && layout.image(&name).exists() {
                 fs::remove_dir_all(layout.image(&name))
                     .with_context(|| format!("remove image {name}"))?;

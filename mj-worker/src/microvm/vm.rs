@@ -216,7 +216,7 @@ fn validate_destination(destination: &str) -> Result<()> {
     Ok(())
 }
 
-fn random_id() -> Result<String> {
+pub(super) fn random_id() -> Result<String> {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).map_err(|error| anyhow!("generate a container id: {error}"))?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
@@ -235,7 +235,7 @@ fn allocate_slot(layout: &Layout) -> Result<u32> {
 /// Copy-on-write clone of a file on a reflink-capable filesystem (XFS with
 /// `reflink=1`, btrfs). Fails visibly elsewhere: a full copy of an 11 GiB
 /// image per VM is not a fallback worth hiding.
-fn reflink(source: &Path, destination: &Path) -> Result<()> {
+pub(super) fn reflink(source: &Path, destination: &Path) -> Result<()> {
     const FICLONE: u32 = 0x4004_9409;
     let source_file =
         fs::File::open(source).with_context(|| format!("open {}", source.display()))?;

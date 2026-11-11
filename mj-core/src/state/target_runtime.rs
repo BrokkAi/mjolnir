@@ -65,9 +65,6 @@ impl ContainerSettings {
                 Some(
                     TargetLocator::AppleContainer { .. }
                         | TargetLocator::SshAppleContainer { .. }
-                        // Storage-preserving replacement of a VM's root disk
-                        // is a later milestone of the Nitro plan (#1494).
-                        | TargetLocator::SshNitro { .. }
                 )
             )
     }
