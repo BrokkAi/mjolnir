@@ -63,8 +63,7 @@ impl ContainerSettings {
             && !matches!(
                 session.target,
                 Some(
-                    TargetLocator::AppleContainer { .. }
-                        | TargetLocator::SshAppleContainer { .. }
+                    TargetLocator::AppleContainer { .. } | TargetLocator::SshAppleContainer { .. }
                 )
             )
     }

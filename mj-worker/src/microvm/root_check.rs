@@ -68,11 +68,11 @@ pub fn check_image(layout: &Layout, image_id: &str, user: &str, path: &str) -> R
     let removed = fs::remove_dir(&directory);
     let output = output?;
     removed.with_context(|| format!("remove {}", directory.display()))?;
-    ensure!(
-        output.status.success(),
-        "{}",
-        sys::tail(&String::from_utf8_lossy(&output.stderr), 20)
-    );
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // The inner process reports as an engine failure; the caller adds its own.
+        bail!("{}", sys::tail(&stderr, 20).trim_start_matches("Error: "));
+    }
     Ok(())
 }
 
