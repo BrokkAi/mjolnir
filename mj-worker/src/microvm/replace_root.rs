@@ -183,11 +183,11 @@ pub fn observed(layout: &Layout, name: &str, mut state: VmState) -> Result<VmSta
     Ok(state)
 }
 
-/// Finish a swap that a crash interrupted, before the VM is started. Without
+/// Finish a swap that a crash interrupted. The caller holds the VM's lock
+/// and calls this before it starts the VM, in the same critical section, so
+/// no other `apply` can interleave between the decision and the boot. Without
 /// a swap in progress this does nothing.
-pub fn resume_interrupted(layout: &Layout, name: &str) -> Result<()> {
-    validate_name("container", name)?;
-    let _vm_lock = layout.lock_vm(name)?;
+pub fn resume_interrupted_locked(layout: &Layout, name: &str) -> Result<()> {
     let Some(state) = VmState::read(layout, name)? else {
         return Ok(());
     };

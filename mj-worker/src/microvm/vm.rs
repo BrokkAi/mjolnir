@@ -489,6 +489,9 @@ pub fn start(layout: &Layout, name: &str) -> Result<()> {
         "the microvm engine must run as root (use sudo -n)"
     );
     let _vm_lock = layout.lock_vm(name)?;
+    // A crash can leave a root replacement half done; finish it under this
+    // lock before the VM boots from whichever disk is in place.
+    super::replace_root::resume_interrupted_locked(layout, name)?;
     let state = VmState::read(layout, name)?
         .ok_or_else(|| anyhow!("no container with name or ID {name:?} found: no such container"))?;
     match activity(name)? {
