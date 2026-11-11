@@ -504,7 +504,7 @@ impl Agent {
             .argv
             .first()
             .ok_or_else(|| failure(125, "the command is empty"))?;
-        let program = resolve_program(program, &path).ok_or_else(|| {
+        let program = resolve_program(program, &path, &cwd).ok_or_else(|| {
             failure(
                 127,
                 format!("executable file `{program}` not found in $PATH"),
@@ -730,13 +730,22 @@ fn failure(status: i32, message: impl Into<String>) -> SpawnFailure {
     }
 }
 
-fn resolve_program(program: &str, path: &str) -> Option<OsString> {
+/// Find `program` in `path`. A relative entry, and an empty one, mean the
+/// command's working directory, so they are resolved against `cwd`; the
+/// result is absolute for those.
+fn resolve_program(program: &str, path: &str, cwd: &str) -> Option<OsString> {
     if program.contains('/') {
         return Some(program.into());
     }
     path.split(':')
-        .filter(|directory| !directory.is_empty())
-        .map(|directory| Path::new(directory).join(program))
+        .map(|directory| {
+            if directory.is_empty() {
+                PathBuf::from(cwd)
+            } else {
+                Path::new(cwd).join(directory)
+            }
+        })
+        .map(|directory| directory.join(program))
         .find(|candidate| {
             fs::metadata(candidate)
                 .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)

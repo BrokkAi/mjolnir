@@ -498,7 +498,9 @@ fn firecracker_config(
         "is_root_device": true,
         "is_read_only": false,
     })];
-    let mut volume_map = Vec::new();
+    // (path depth, entry): init mounts shallow destinations first so a volume
+    // at /workspace cannot hide one at /workspace/sub.
+    let mut volume_map: Vec<(usize, String)> = Vec::new();
     for (index, volume) in state.volumes.iter().enumerate() {
         let device = format!("vd{}", (b'b' + index as u8) as char);
         drives.push(json!({
@@ -507,19 +509,27 @@ fn firecracker_config(
             "is_root_device": false,
             "is_read_only": !volume.read_write,
         }));
-        volume_map.push(format!(
-            "{device}:{}:{}",
-            volume.destination,
-            if volume.read_write { "rw" } else { "ro" }
+        volume_map.push((
+            volume.destination.matches('/').count(),
+            format!(
+                "{device}:{}:{}",
+                volume.destination,
+                if volume.read_write { "rw" } else { "ro" }
+            ),
         ));
     }
+    volume_map.sort_by_key(|(depth, _)| *depth);
     let boot_args = format!(
         "panic=1 initcall_blacklist=i8042_init sbx.name={} sbx.ip={} sbx.gw={} sbx.dns={} sbx.vols={}",
         state.name,
         link.guest_cidr(),
         link.host,
         net::GUEST_DNS,
-        volume_map.join(",")
+        volume_map
+            .iter()
+            .map(|(_, entry)| entry.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
     );
     Ok(json!({
         "boot-source": {
