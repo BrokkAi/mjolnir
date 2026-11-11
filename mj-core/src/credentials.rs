@@ -18,7 +18,7 @@
 mod locking;
 pub use locking::{
     CLAUDE_REFRESH_LOCK_WAIT, CredentialInstall, CredentialWriteGuard,
-    install_credentials_if_newer, install_session_credentials,
+    canonical_login_is_replaced_by, install_credentials_if_newer, install_session_credentials,
 };
 
 use crate::hex::lower_hex;

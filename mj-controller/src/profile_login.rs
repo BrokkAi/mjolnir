@@ -59,29 +59,37 @@ pub fn status(
             }
         },
         AuthScheme::NativeLogin => {
-            let authenticated =
-                crate::setup::harness_is_authenticated_with_executor(profile, executor);
+            // On a Mac the Keychain item is the only Claude login; a
+            // `.credentials.json` there (a profile home's, or Claude Code's
+            // plaintext fallback) is not one. A Mac without the item is
+            // signed out, and `mj login` fixes it.
             if matches!(
                 profile
                     .kind
                     .login_store(mj_core::config::HarnessHost::current(), &profile.home),
                 mj_core::config::HarnessLoginStore::MacKeychain
-            ) && !profile.authentication_marker().is_file()
-            {
-                return if authenticated {
-                    LoginStatus::SignedIn
-                } else {
-                    LoginStatus::Unknown(
-                        "Claude Code keeps this login in the macOS Keychain".to_owned(),
-                    )
+            ) {
+                return match crate::setup::read_claude_keychain_login(executor) {
+                    Ok(crate::setup::KeychainLogin::Present(_)) => LoginStatus::SignedIn,
+                    Ok(crate::setup::KeychainLogin::Missing) => LoginStatus::SignedOut,
+                    Ok(crate::setup::KeychainLogin::Unreadable { status }) => {
+                        LoginStatus::Unknown(format!(
+                            "the macOS Keychain could not be read (security exited with status {status})"
+                        ))
+                    }
+                    Err(error) => LoginStatus::Unknown(format!(
+                        "could not read the Claude login from the macOS Keychain: {error:#}"
+                    )),
                 };
             }
+            let authenticated =
+                crate::setup::harness_is_authenticated_with_executor(profile, executor);
             if !authenticated {
                 return LoginStatus::SignedOut;
             }
             // Authenticated, but a recorded access-token expiry is worth
-            // calling out. Harnesses with no expiry record (or a macOS
-            // Keychain login with no file) simply stay "signed in".
+            // calling out. Harnesses with no expiry record simply stay
+            // "signed in".
             match credentials::read_credential_file(profile.kind, &profile.authentication_marker())
             {
                 Ok((snapshot, _)) if !snapshot.present => LoginStatus::SignedIn,

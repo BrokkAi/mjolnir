@@ -1037,6 +1037,20 @@ async fn claude_installs_never_drop_the_hosts_refresh_token_and_converge_copies(
             .installed
     );
     std::fs::write(&host, &with_token).unwrap();
+    // A host without a login (after a logout) is not handed a stripped copy
+    // nothing can renew; a copy with its own login still signs it in.
+    let signed_out = directory.path().join("signed-out/.credentials.json");
+    let outcome = install_credentials_if_newer(HarnessKind::Claude, &signed_out, &later_stripped)
+        .await
+        .unwrap();
+    assert!(!outcome.installed);
+    assert!(!signed_out.exists());
+    assert!(
+        install_credentials_if_newer(HarnessKind::Claude, &signed_out, &own_login)
+            .await
+            .unwrap()
+            .installed
+    );
 
     // (a) A copy holding the host's refresh token at the same expiry is
     // replaced by the stripped copy, but only under the session-copy rule.

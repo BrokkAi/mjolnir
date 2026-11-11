@@ -332,6 +332,8 @@ fn claude_keychain_marks_the_default_home_authenticated_without_a_marker() {
         commands[0].args,
         [
             "find-generic-password",
+            "-a",
+            &claude_keychain_account(),
             "-s",
             "Claude Code-credentials",
             "-w"

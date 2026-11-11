@@ -2114,8 +2114,9 @@ Last 7d · 5966 requests · 78 sessions
     impl CommandExecutor for FakeMac {
         fn execute(&self, command: &CommandSpec) -> anyhow::Result<CommandOutput> {
             if command.program == "security" {
-                assert_eq!(command.args[..2], ["find-generic-password", "-s"]);
-                assert_eq!(command.args[2], "Claude Code-credentials");
+                assert_eq!(command.args[0], "find-generic-password");
+                assert_eq!(command.args[1], "-a");
+                assert_eq!(command.args[3..], ["-s", "Claude Code-credentials", "-w"]);
                 return Ok(CommandOutput {
                     status: self.security_status,
                     stdout: self

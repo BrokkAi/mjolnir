@@ -2935,84 +2935,156 @@ async fn claude_sync_converges_copies_to_the_hosts_login_without_its_refresh_tok
     }
 }
 
-/// #1491: a login the macOS Keychain holds reaches sessions as the stripped
-/// copy, and nothing a session holds ever replaces it: a copy with its own
-/// newer login (someone ran /login inside the session) stays in that session,
-/// and the host's profile home gets no credential file.
+/// One macOS sync pass for one session whose copy is `session_login`, against
+/// a host whose login `keychain` holds, with `claude_dir` standing for
+/// `~/.claude`. Returns the session's copy afterwards
+/// and what the pass did.
 #[cfg(unix)]
+async fn mac_sync_pass(
+    keychain: &Arc<crate::claude_login::fake::FakeKeychain>,
+    claude_dir: &std::path::Path,
+    session_login: &[u8],
+) -> (Vec<u8>, credential_sync::SessionSync) {
+    let kind = mj_core::config::HarnessKind::Claude;
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let received = scratch.path().join("session-login");
+    let target = claude_sync_target(home.path(), "claude-session", session_login, &received);
+    let skills = Arc::new(CanonicalSkills::collect(&target));
+    let read = match crate::setup::read_claude_keychain_login(&**keychain).unwrap() {
+        crate::setup::KeychainLogin::Present(bytes) => {
+            (CredentialSnapshot::of(kind, &bytes), bytes)
+        }
+        _ => (CredentialSnapshot::absent(), Vec::new()),
+    };
+    let pass = credential_sync::PassLogin::Keychain {
+        read: Arc::new(Ok(read)),
+        access: credential_sync::LoginAccess::new(
+            mj_core::config::HarnessLoginStore::MacKeychain,
+            keychain.clone(),
+        )
+        .with_lock_marker(claude_dir.join(".credentials.json")),
+    };
+    let sync = reconcile_session(
+        &SessionRelays::Direct,
+        &target,
+        &skills,
+        &credential_sync::GithubSync::Known(None),
+        &credential_sync::AwsSync::Unmanaged,
+        credential_sync::HostLogins {
+            slopcop: &credential_sync::HostSlopcopLogin::Unknown,
+            harness: &pass,
+        },
+        credential_sync::JobHold::new(None, None, None, None),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        !home.path().join(".credentials.json").exists(),
+        "the profile home gains no login file"
+    );
+    (std::fs::read(&received).unwrap(), sync)
+}
+
+/// #1491: a login the macOS Keychain holds reaches sessions as the stripped
+/// copy. A session copy that is strictly newer and holds its own refresh token
+/// (a pre-upgrade container or remote session that refreshed the shared grant,
+/// so the spent token is the only one the host has left) is pulled into the
+/// Keychain, with the secret on `security`'s stdin and never in its arguments,
+/// and the session is handed the stripped copy back.
+#[cfg(unix)]
+// Hard-won: #1491 review: a macOS session's refreshed login stayed in the session while the Keychain kept the spent token
 #[tokio::test]
-async fn keychain_login_sync_pushes_stripped_copies_and_never_pulls_into_the_keychain() {
+async fn keychain_login_sync_pulls_a_newer_session_login_into_the_keychain_and_pushes_it_back_stripped()
+ {
     let kind = mj_core::config::HarnessKind::Claude;
     let host_login = claude_login(2_000, "access-host", Some("refresh-host"));
     let stripped_host =
         mj_core::credentials::credential_copy_for_harness(kind, &host_login).into_owned();
     let own_login = claude_login(3_000, "access-own", Some("refresh-own"));
+    let stripped_own =
+        mj_core::credentials::credential_copy_for_harness(kind, &own_login).into_owned();
+    let stripped_newer = claude_login(3_000, "access-stripped", None);
+    let claude_dir = tempfile::tempdir().unwrap();
+    // (name, session copy, expected actions, session after, Keychain after)
     #[allow(clippy::type_complexity, reason = "one-off table of scenarios")]
-    let cases: [(&str, Vec<u8>, Vec<CredentialSyncAction>, Vec<u8>); 4] = [
+    let cases: [(&str, Vec<u8>, Vec<CredentialSyncAction>, Vec<u8>, Vec<u8>); 5] = [
         (
-            "pre-upgrade copy that still holds the refresh token",
+            "pre-upgrade copy that still holds the host's refresh token",
             host_login.clone(),
             vec![CredentialSyncAction::Pushed],
             stripped_host.clone(),
+            host_login.clone(),
         ),
         (
             "converged copy",
             stripped_host.clone(),
             vec![],
             stripped_host.clone(),
+            host_login.clone(),
         ),
         (
             "older copy",
             claude_login(1_000, "access-old", None),
             vec![CredentialSyncAction::Pushed],
             stripped_host.clone(),
+            host_login.clone(),
         ),
         (
-            "copy with its own newer login",
+            "newer copy that holds its own refresh token",
             own_login.clone(),
-            vec![],
+            vec![CredentialSyncAction::Pulled, CredentialSyncAction::Pushed],
+            stripped_own.clone(),
             own_login.clone(),
         ),
-    ];
-    for (name, session_login, actions, session_after) in cases {
-        let home = tempfile::tempdir().unwrap();
-        let scratch = tempfile::tempdir().unwrap();
-        let received = scratch.path().join("session-login");
-        let target = claude_sync_target(home.path(), "claude-session", &session_login, &received);
-        let skills = Arc::new(CanonicalSkills::collect(&target));
-        let read = (
-            CredentialSnapshot::of(kind, &host_login),
+        (
+            "newer copy without a refresh token cannot become the host's login",
+            stripped_newer.clone(),
+            vec![],
+            stripped_newer.clone(),
             host_login.clone(),
+        ),
+    ];
+    for (name, session_login, actions, session_after, keychain_after) in cases {
+        let keychain = Arc::new(
+            crate::claude_login::fake::FakeKeychain::holding(&host_login)
+                .requiring_lock_in(claude_dir.path()),
         );
 
-        let sync = reconcile_session(
-            &SessionRelays::Direct,
-            &target,
-            &skills,
-            &credential_sync::GithubSync::Known(None),
-            &credential_sync::AwsSync::Unmanaged,
-            credential_sync::HostLogins {
-                slopcop: &credential_sync::HostSlopcopLogin::Unknown,
-                harness: &credential_sync::PassLogin::Keychain(Arc::new(Ok(read))),
-            },
-            credential_sync::JobHold::new(None, None, None, None),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let (session, sync) = mac_sync_pass(&keychain, claude_dir.path(), &session_login).await;
 
         assert!(sync.failures.is_empty(), "{name}: {:?}", sync.failures);
         assert_eq!(sync.actions, actions, "{name}");
+        assert_eq!(session, session_after, "{name}: session");
         assert_eq!(
-            std::fs::read(&received).unwrap(),
-            session_after,
-            "{name}: session"
+            keychain.login().unwrap(),
+            keychain_after,
+            "{name}: Keychain"
         );
-        assert!(
-            !home.path().join(".credentials.json").exists(),
-            "{name}: the profile home gains no login file"
-        );
+        for (args, stdin) in keychain.calls() {
+            let secret_in_arguments = args
+                .iter()
+                .any(|arg| arg.contains("refresh-own") || arg.contains("refresh-host"));
+            assert!(!secret_in_arguments, "{name}: {args:?}");
+            if args == ["-i"] {
+                assert!(stdin.is_some(), "{name}: the write comes on stdin");
+            }
+        }
     }
+
+    // A Keychain that refuses the write fails the pull as a login step. The
+    // session keeps its login, and nothing is written to a file instead.
+    let keychain = Arc::new(crate::claude_login::fake::FakeKeychain::holding(
+        &host_login,
+    ));
+    keychain.refuse_writes();
+    let (session, sync) = mac_sync_pass(&keychain, claude_dir.path(), &own_login).await;
+    assert_eq!(sync.failures.len(), 1, "{:?}", sync.failures);
+    assert_eq!(sync.failures[0].step, SyncStep::HarnessLogin);
+    assert_eq!(session, own_login);
+    assert_eq!(keychain.login().unwrap(), host_login);
+    assert!(!claude_dir.path().join(".oauth_refresh.lock").exists());
 }
 
 #[cfg(unix)]

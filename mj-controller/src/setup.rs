@@ -435,6 +435,17 @@ fn harness_is_authenticated_with(
     if let Some(env_key) = kind.api_key_variable() {
         return profile.supplies_api_key(env_key);
     }
+    // On a Mac the Keychain item is the only Claude login. A
+    // `.credentials.json` there (a profile home's, left by earlier releases,
+    // or Claude Code's plaintext fallback) is not one, so the marker proves
+    // nothing, and every profile shares the item: asking the CLI about a
+    // scoped home would only report the default profile's state again.
+    if matches!(
+        kind.login_store(HarnessHost::current(), home),
+        mj_core::config::HarnessLoginStore::MacKeychain
+    ) {
+        return claude_keychain_reports_authenticated(executor);
+    }
     if profile.authentication_marker().is_file()
         || (kind == HarnessKind::Kimi && home.join("credentials").is_file())
     {
@@ -443,25 +454,18 @@ fn harness_is_authenticated_with(
     if kind != HarnessKind::Claude {
         return false;
     }
-    // Where the login is the Keychain item, every Claude profile shares it, so
-    // asking the CLI about a scoped home would only report the default
-    // profile's state again. The default home on a host without a Keychain has
-    // no marker, so there is no login: setting `CLAUDE_CONFIG_DIR` for the
-    // default home would change Claude's profile selection.
-    match kind.login_store(HarnessHost::current(), home) {
-        mj_core::config::HarnessLoginStore::MacKeychain => {
-            claude_keychain_reports_authenticated(executor)
-        }
-        mj_core::config::HarnessLoginStore::File { .. } if is_default_home => false,
-        mj_core::config::HarnessLoginStore::File { .. } => {
-            claude_cli_reports_authenticated(home, executor)
-        }
+    // The default home on a host without a Keychain has no marker, so there is
+    // no login: setting `CLAUDE_CONFIG_DIR` for the default home would change
+    // Claude's profile selection.
+    if is_default_home {
+        return false;
     }
+    claude_cli_reports_authenticated(home, executor)
 }
 
 /// Ask Claude Code about a scoped profile. Setting `CLAUDE_CONFIG_DIR` for the
-/// default home changes Claude's profile selection, so the default macOS
-/// profile is checked directly in the Keychain instead.
+/// default home changes Claude's profile selection, so the default home is
+/// never asked.
 fn claude_cli_reports_authenticated(home: &Path, executor: &impl CommandExecutor) -> bool {
     let mut command = CommandSpec::new("claude", ["auth", "status", "--json"])
         .purpose("check Claude Code authentication");
@@ -503,6 +507,13 @@ pub(crate) enum KeychainLogin {
     Present(Vec<u8>),
 }
 
+/// The account of Claude Code's Keychain item, by Claude Code's own rule. The
+/// reader and the writer ([`crate::claude_login::write_claude_keychain_login`]) share it, so both
+/// address the item Claude Code uses.
+pub(crate) fn claude_keychain_account() -> String {
+    mj_core::config::claude_keychain_account(std::env::var("USER").ok().as_deref())
+}
+
 /// How long a `security` lookup of the Keychain login may take before it is
 /// treated as wedged (it can wait on a Keychain prompt). The same bound as the
 /// other host credential lookups (the AWS export).
@@ -519,16 +530,19 @@ const SECURITY_ITEM_NOT_FOUND: i32 = 44;
 pub(crate) fn read_claude_keychain_login(
     executor: &(impl CommandExecutor + ?Sized),
 ) -> anyhow::Result<KeychainLogin> {
-    let command = CommandSpec::new(
+    let mut command = CommandSpec::new(
         "security",
         [
             "find-generic-password",
+            "-a",
+            &claude_keychain_account(),
             "-s",
             mj_core::config::CLAUDE_KEYCHAIN_SERVICE,
             "-w",
         ],
     )
     .purpose("read Claude Code authentication from the macOS Keychain");
+    command.sensitive_output = true;
     let output = executor
         .execute(&command)
         .map_err(|error| error.context("read Claude Code's login from the macOS Keychain"))?;

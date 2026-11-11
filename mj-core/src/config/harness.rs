@@ -49,14 +49,40 @@ pub enum HarnessLoginStore {
     File { marker: PathBuf },
     /// The login is the macOS Keychain item [`CLAUDE_KEYCHAIN_SERVICE`], which
     /// every Claude profile there shares because its commands run with
-    /// `CLAUDE_CONFIG_DIR` unset. Claude Code takes its refresh locks under
-    /// `~/.claude`; see [`HarnessLoginStore::lock_marker`].
+    /// `CLAUDE_CONFIG_DIR` unset, and nothing else: a `.credentials.json` on a
+    /// Mac (a profile home's, left by earlier releases, or Claude Code's own
+    /// plaintext fallback when its Keychain write fails) is not a login.
+    /// Claude Code takes its refresh locks under `~/.claude`; see
+    /// [`HarnessLoginStore::lock_marker`].
     MacKeychain,
 }
 
 /// The Keychain item Claude Code stores its login in when `CLAUDE_CONFIG_DIR`
 /// is unset (CC 2.1.321: a set variable adds `-<sha256(dir)[:8]>`).
 pub const CLAUDE_KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+
+/// The Keychain account Claude Code uses when `$USER` is missing or holds
+/// characters outside `[a-zA-Z0-9._-]`.
+const CLAUDE_KEYCHAIN_FALLBACK_ACCOUNT: &str = "claude-code-user";
+
+/// The account of Claude Code's Keychain item, by Claude Code's own rule
+/// (2.1.321): `$USER` when it is non-empty and made only of
+/// `[a-zA-Z0-9._-]`, otherwise a fixed name. Reading and writing with the
+/// same account addresses the item Claude Code uses instead of adding a
+/// second one.
+pub fn claude_keychain_account(user: Option<&str>) -> String {
+    match user {
+        Some(user)
+            if !user.is_empty()
+                && user.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+                }) =>
+        {
+            user.to_owned()
+        }
+        _ => CLAUDE_KEYCHAIN_FALLBACK_ACCOUNT.to_owned(),
+    }
+}
 
 impl HarnessLoginStore {
     /// The credential file whose directory carries the locks every writer of

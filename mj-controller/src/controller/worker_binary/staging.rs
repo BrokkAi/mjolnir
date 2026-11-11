@@ -62,15 +62,23 @@ pub(super) fn claude_environment_login_present(
         })
 }
 
-/// Carry the host's native Claude login into a session's staged home when the
-/// host keeps it in the macOS Keychain ([`mj_core::config::HarnessKind::login_store`]).
+/// Make a session's staged `.credentials.json` exactly the host's Claude login
+/// when the host keeps it in the macOS Keychain
+/// ([`mj_core::config::HarnessKind::login_store`]), or remove it when there is
+/// none.
 ///
 /// Every session runs with `CLAUDE_CONFIG_DIR` set to its staged home, so
 /// Claude Code looks in a Keychain item named after that directory, which
 /// never exists, and then in the home's `.credentials.json`. That file is
-/// where the login reaches every target, local ones included. The copy omits
-/// the refresh token like every other copy: the daemon renews the Keychain
-/// login and the credential sync pushes the result (`copies_omit_refresh_token`).
+/// where the login reaches every target, local ones included. On a Mac the
+/// Keychain item is the only login: a `.credentials.json` that `stage_profile`
+/// copied from the profile home (earlier releases left session copies there)
+/// is replaced by the Keychain login or removed, never staged as a login. The
+/// copy omits the refresh token like every other copy: the daemon renews the
+/// Keychain login and the credential sync pushes the result
+/// (`copies_omit_refresh_token`). A Keychain that cannot be read (locked)
+/// stages no login, as Claude Code would see none; the sync pushes it once the
+/// Keychain opens.
 ///
 /// The setup token takes precedence: when that environment variable is
 /// present, Claude never reads this file.
@@ -91,14 +99,26 @@ pub(super) fn stage_claude_keychain_login(
     {
         return Ok(());
     }
-    if let Some(credentials) = crate::setup::claude_keychain_credentials(executor)? {
-        let copy = mj_core::credentials::credential_copy_for_harness(profile.kind, &credentials);
-        let path = destination.join(profile.kind.credential_file_name());
-        mj_core::credentials::write_credential_file(profile.kind, &path, &copy).with_context(
-            || format!("stage Claude's macOS Keychain login at {}", path.display()),
-        )?;
+    let path = destination.join(profile.kind.credential_file_name());
+    match crate::setup::claude_keychain_credentials(executor)? {
+        Some(credentials) => {
+            let copy =
+                mj_core::credentials::credential_copy_for_harness(profile.kind, &credentials);
+            mj_core::credentials::write_credential_file(profile.kind, &path, &copy).with_context(
+                || format!("stage Claude's macOS Keychain login at {}", path.display()),
+            )
+        }
+        None => match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).with_context(|| {
+                format!(
+                    "remove a leftover Claude login from the staged home {}",
+                    path.display()
+                )
+            }),
+        },
     }
-    Ok(())
 }
 
 /// Kimi's runtime-aware engine cannot infer a runtime identity from an ACP
