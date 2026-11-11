@@ -38,7 +38,7 @@ for i in $(seq 1 100); do [ -b /dev/vda ] && break; sleep 0.1; done
 mount -t ext4 -o rw,noatime /dev/vda /newroot || fatal "mount root failed"
 
 # Volumes. A volume that is new (the engine says `new` until a container has started with it, and it
-# holds only lost+found) is filled from the image directory it
+# holds nothing the image did not put there) is filled from the image directory it
 # covers, with that directory's owner and mode, the way a named volume copies up from the image.
 IFS=',' read -ra vols <<< "$sbx_vols"
 for entry in "${vols[@]}"; do
@@ -52,8 +52,10 @@ for entry in "${vols[@]}"; do
   if [ "$mode" = rw ]; then
     mkdir -p /volume-staging
     mount -t ext4 -o "rw,noatime" "/dev/$dev" /volume-staging || fatal "mount $dev failed"
-    if [ "$fresh" = new ] && [ -z "$(ls -A /volume-staging | grep -v '^lost+found$')" ]; then
-      cp -a "/newroot$dest/." /volume-staging/ || fatal "copy $dest into its volume failed"
+    # A `new` volume has never been used by a container, so anything on it is from an interrupted
+    # copy: finish it without overwriting.
+    if [ "$fresh" = new ]; then
+      cp -an "/newroot$dest/." /volume-staging/ || fatal "copy $dest into its volume failed"
       chown "${covered% *}" /volume-staging; chmod "${covered#* }" /volume-staging
     fi
     umount /volume-staging || fatal "unmount staging for $dev failed"

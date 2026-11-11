@@ -311,6 +311,9 @@ fn resolve_user_in_guest(spec: &str) -> Result<ResolvedUser> {
 pub struct Agent {
     defaults: Mutex<StartRequest>,
     started: AtomicBool,
+    /// True once shutdown has begun. Spawns hold the read side, so a process
+    /// is either admitted before the shutdown sweep kills it or refused.
+    shutting_down: std::sync::RwLock<bool>,
     spawner: Arc<dyn ProcessSpawner>,
     system: Arc<dyn GuestSystem>,
     /// Where `/run/user/<uid>` directories are made.
@@ -328,6 +331,7 @@ impl Agent {
         Arc::new(Self {
             defaults: Mutex::new(StartRequest::default()),
             started: AtomicBool::new(false),
+            shutting_down: std::sync::RwLock::new(false),
             spawner,
             system,
             run_user_root: PathBuf::from("/run/user"),
@@ -431,6 +435,7 @@ impl Agent {
                 }
                 // Returns when `hold` is dropped; nothing is ever sent.
                 let _ = released.recv();
+                agent.begin_shutdown();
                 agent.system.quiesce();
                 agent.system.power_off();
             })
@@ -438,7 +443,17 @@ impl Agent {
         Ok((pid, hold))
     }
 
+    /// Refuse new processes from now on. Returns once every spawn in progress
+    /// has finished, so the kill sweep that follows sees all of them.
+    fn begin_shutdown(&self) {
+        *self
+            .shutting_down
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+    }
+
     fn handle_stop<T: Transport>(&self, sender: &FrameSender<T>) -> Result<()> {
+        self.begin_shutdown();
         self.system.quiesce();
         sender.send_json(
             FrameKind::Exit,
@@ -549,6 +564,16 @@ impl Agent {
                 }
                 Ok(())
             });
+        }
+        // Admit the process under the read side of the shutdown lock, held
+        // across the spawn: shutdown takes the write side before its kill
+        // sweep, so no child can appear after the sweep.
+        let admission = self
+            .shutting_down
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *admission {
+            return Err(failure(125, "the VM is shutting down"));
         }
         self.spawner
             .spawn(&mut command)

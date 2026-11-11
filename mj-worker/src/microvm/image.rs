@@ -326,18 +326,22 @@ fn extract(
 ) -> Result<()> {
     let crane_log = scratch.join("crane.log");
     let tar_log = scratch.join("tar.log");
+    // Everything that can fail before the exporter starts happens first, so
+    // no early return leaves it running.
+    let tar = sys::find_tool("tar")?;
+    let crane_log_file = fs::File::create(&crane_log)?;
+    let tar_log_file = fs::File::create(&tar_log)?;
     let mut exporter = Command::new(crane)
         .args(["export", "--platform", platform, reference, "-"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(fs::File::create(&crane_log)?)
+        .stderr(crane_log_file)
         .spawn()
         .context("start crane export")?;
-    let pipe = exporter
-        .stdout
-        .take()
-        .context("crane export has no output pipe")?;
-    let tar = sys::find_tool("tar")?;
+    let Some(pipe) = exporter.stdout.take() else {
+        stop_exporter(&mut exporter);
+        bail!("crane export has no output pipe");
+    };
     let unpacker = Command::new(tar)
         .args([
             "-x",
@@ -350,8 +354,11 @@ fn extract(
         .arg(rootfs)
         .stdin(Stdio::from(pipe))
         .stdout(Stdio::null())
-        .stderr(fs::File::create(&tar_log)?)
+        .stderr(tar_log_file)
         .status();
+    if unpacker.is_err() {
+        stop_exporter(&mut exporter);
+    }
     let exported = exporter.wait().context("wait for crane export");
     let unpacked = unpacker.context("run tar")?;
     let exported = exported?;
@@ -366,6 +373,16 @@ fn extract(
         sys::tail(&fs::read_to_string(&tar_log).unwrap_or_default(), 10)
     );
     Ok(())
+}
+
+/// End an exporter whose consumer never started, and reap it.
+fn stop_exporter(exporter: &mut std::process::Child) {
+    if let Err(error) = exporter.kill() {
+        tracing::warn!(%error, "could not stop crane export");
+    }
+    if let Err(error) = exporter.wait() {
+        tracing::warn!(%error, "could not wait for crane export");
+    }
 }
 
 /// Remove images nothing refers to, and scratch left by interrupted pulls.

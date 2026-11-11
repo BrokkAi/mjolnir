@@ -89,6 +89,13 @@ impl Layout {
             fs::create_dir_all(&directory)
                 .with_context(|| format!("create {}", directory.display()))?;
         }
+        // Flattened images hold setuid binaries and guest data: nobody but root
+        // may traverse the state tree, whatever the umask was.
+        fs::set_permissions(
+            &self.root,
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .with_context(|| format!("restrict {}", self.root.display()))?;
         Ok(())
     }
 
