@@ -179,7 +179,18 @@ fn creatable_directory(root: &Path, path: &str) -> Result<()> {
         walked.push_str(&part);
         match resolve(root, &walked)? {
             Some(found) => ensure!(found.is_dir(), "{walked} is not a directory"),
-            None => return Ok(()),
+            None => {
+                // Absent, or a link to nothing: `mkdir -p` creates the first
+                // and fails on the second, where the link occupies the name.
+                let parent = walked.rsplit_once('/').map_or("/", |(parent, _)| parent);
+                let parent = resolve(root, if parent.is_empty() { "/" } else { parent })?
+                    .context("the parent directory disappeared")?;
+                ensure!(
+                    fs::symlink_metadata(parent.join(&part)).is_err(),
+                    "{walked} is a link to nothing"
+                );
+                return Ok(());
+            }
         }
     }
     Ok(())
@@ -256,6 +267,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(problems(root.path(), "/opt/none").len(), 3);
+
+        // A link to nothing occupies the name, so `mkdir -p` fails on it, at
+        // the last component and at an ancestor.
+        symlink("/nowhere", root.path().join("var/lib/hel")).unwrap();
+        assert!(creatable_directory(root.path(), CONTROL_ROOT).is_err());
+        fs::remove_file(root.path().join("var/lib/hel")).unwrap();
+        symlink("/nowhere", root.path().join("var/lib/dangling")).unwrap();
+        assert!(creatable_directory(root.path(), "/var/lib/dangling/hel").is_err());
+        assert!(creatable_directory(root.path(), CONTROL_ROOT).is_ok());
+        fs::remove_file(root.path().join("var/lib/dangling")).unwrap();
 
         // `mkdir -p /var/lib/hel` cannot pass through a file.
         fs::remove_dir(root.path().join("var/lib")).unwrap();
