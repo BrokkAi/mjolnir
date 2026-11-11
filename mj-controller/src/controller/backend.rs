@@ -175,8 +175,10 @@ impl Controller {
 
         let mut local_ids = Vec::new();
         // Per host: its target ids, and per SSH connection the paths to measure.
-        // The flag marks a connection that also runs Nitro sandboxes, whose
-        // memory total is the engine's pool.
+        // The flag marks a connection on which every target is a Nitro
+        // sandbox, whose memory total is the engine's pool. A host shared
+        // with other runtimes keeps its physical memory as the total, because
+        // their sessions draw on all of it.
         type HostProbes = (Vec<String>, Vec<(SshTarget, Vec<String>, bool)>);
         let mut ssh_hosts: BTreeMap<String, HostProbes> = BTreeMap::new();
         let mut targets = Vec::new();
@@ -204,11 +206,11 @@ impl Controller {
                     {
                         Some(position) => position,
                         None => {
-                            entry.1.push((connection, Vec::new(), false));
+                            entry.1.push((connection, Vec::new(), true));
                             entry.1.len() - 1
                         }
                     };
-                    entry.1[position].2 |= nitro;
+                    entry.1[position].2 &= nitro;
                     let paths = &mut entry.1[position].1;
                     push_unique(paths, ssh_storage_paths(template));
                     // Each live session's own directories: a project or
