@@ -738,27 +738,11 @@ pub(super) async fn run_daemon_runtime(
                 }
                 _ = recovery_tick.tick() => {
                     progress.phase(ServingPhase::Recovery);
-                    while let Some(result) = recovery.try_result() {
-                        if let Err(error) = &result.outcome {
-                            // A deferred copy found the agent working. That is
-                            // the normal state of a session in use, so it is
-                            // news, not a fault.
-                            if result.deferred {
-                                tracing::info!(session_id = %result.session_id, %error, "recovery copy deferred: agent is working");
-                            } else if result.cancelled {
-                                // The daemon asked for this cancel (a suspend
-                                // or close superseded the copy), so it is not
-                                // a failure of the checkpoint.
-                                tracing::info!(session_id = %result.session_id, %error, reason = "superseded by suspend", "daemon recovery checkpoint cancelled");
-                            } else {
-                                tracing::warn!(session_id = %result.session_id, %error, "daemon recovery checkpoint failed");
-                            }
-                        }
-                        refresh_runtime_controller(&state).await;
-                    }
-                    while let Some(result) = worker_upgrades.try_result() {
-                        report_worker_upgrade(&state, &result).await;
-                    }
+                    publish_background_results(
+                        &state,
+                        std::iter::from_fn(|| recovery.try_result()),
+                        std::iter::from_fn(|| worker_upgrades.try_result()),
+                    );
                 }
                 _ = background_policy_tick.tick() => {
                     progress.phase(ServingPhase::BackgroundPolicy);
