@@ -242,10 +242,9 @@ pub fn resolve_user(spec: &str, passwd: &str, group: &str) -> Result<ResolvedUse
             if fields
                 .get(3)
                 .is_some_and(|members| members.split(',').any(|m| m == name))
+                && let Ok(gid) = fields[2].parse::<u32>()
             {
-                if let Ok(gid) = fields[2].parse::<u32>() {
-                    groups.push(gid);
-                }
+                groups.push(gid);
             }
         }
     }
@@ -492,13 +491,12 @@ impl Agent {
                 if detach && libc::setsid() < 0 {
                     return Err(io::Error::last_os_error());
                 }
-                if switch_user {
-                    if libc::setgroups(groups.len(), groups.as_ptr()) != 0
+                if switch_user
+                    && (libc::setgroups(groups.len(), groups.as_ptr()) != 0
                         || libc::setgid(gid) != 0
-                        || libc::setuid(uid) != 0
-                    {
-                        return Err(io::Error::last_os_error());
-                    }
+                        || libc::setuid(uid) != 0)
+                {
+                    return Err(io::Error::last_os_error());
                 }
                 Ok(())
             });
@@ -617,7 +615,7 @@ impl Agent {
         // Feed stdin until the client says it is done, or goes away.
         let mut stdin = spawned.stdin.take();
         loop {
-            let frame = match frames.next() {
+            let frame = match frames.next_frame() {
                 Ok(Some(frame)) => frame,
                 // The monitor shut the connection down after the exit frame, or
                 // the client left. Either way the child's stdin ends here.

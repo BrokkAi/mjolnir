@@ -23,6 +23,41 @@ const GUEST_DRIVERS: &str = "virtio_pci virtio_blk virtio_net ext4 vmw_vsock_vir
 /// Programs `/init` runs.
 const INIT_PROGRAMS: &str = "mount umount modprobe ip switch_root mkdir hostname cat cut sleep cp ls seq grep head tee echo ln chmod chown stat";
 
+/// The assets directory name for this kernel and engine build.
+fn current_tag() -> Result<String> {
+    Ok(format!(
+        "{}-{}",
+        sys::kernel_release()?,
+        mj_core::worker_build::WORKER_BUILD_ID
+    ))
+}
+
+/// Remove boot assets built for other kernels or engine builds, and scratch
+/// from interrupted builds. Running VMs have already loaded theirs; a later
+/// `start` rebuilds what it needs. The caller holds the global lock, which
+/// is also what builders hold while they write scratch.
+pub fn prune(layout: &Layout) -> Result<Vec<String>> {
+    let current = current_tag()?;
+    let mut removed = Vec::new();
+    let entries = match fs::read_dir(layout.boot()) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(removed),
+        Err(error) => {
+            return Err(error).with_context(|| format!("list {}", layout.boot().display()));
+        }
+    };
+    for entry in entries {
+        let entry = entry.context("list boot assets")?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name != current {
+            fs::remove_dir_all(entry.path())
+                .with_context(|| format!("remove boot assets {name}"))?;
+            removed.push(name);
+        }
+    }
+    Ok(removed)
+}
+
 pub struct BootAssets {
     pub kernel: PathBuf,
     pub initrd: PathBuf,

@@ -277,7 +277,7 @@ impl<T: Read> FrameReader<T> {
     }
 
     /// The next frame, or `None` on a clean end of stream between frames.
-    pub fn next(&mut self) -> Result<Option<Frame>> {
+    pub fn next_frame(&mut self) -> Result<Option<Frame>> {
         let mut header = [0u8; 5];
         match self.inner.read_exact(&mut header[..1]) {
             Ok(()) => {}
@@ -304,7 +304,7 @@ impl<T: Read> FrameReader<T> {
     /// The next frame; end of stream is an error because the conversation
     /// is not over.
     pub fn expect(&mut self, what: &str) -> Result<Frame> {
-        self.next()?
+        self.next_frame()?
             .ok_or_else(|| anyhow!("connection closed while waiting for {what}"))
     }
 }

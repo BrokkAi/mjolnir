@@ -367,6 +367,7 @@ pub fn prune(layout: &Layout) -> Result<Vec<String>> {
             removed.push(name);
         }
     }
+    removed.extend(super::boot::prune(layout)?);
     Ok(removed)
 }
 

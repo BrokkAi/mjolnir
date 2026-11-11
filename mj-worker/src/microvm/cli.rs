@@ -44,7 +44,7 @@ enum Command {
     #[command(subcommand)]
     Image(ImageCommand),
     /// Create and start a VM.
-    Run(RunArgs),
+    Run(Box<RunArgs>),
     /// Run a command in a running VM.
     Exec(ExecArgs),
     /// Copy files between the host and a running VM.
@@ -288,7 +288,7 @@ fn dispatch(layout: &Layout, command: Command) -> Result<i32> {
             Ok(0)
         }
         Command::Image(command) => image_command(layout, command),
-        Command::Run(args) => run(layout, args),
+        Command::Run(args) => run(layout, *args),
         Command::Exec(args) => exec(layout, args),
         Command::Cp(args) => copy(layout, args),
         Command::Container(ContainerCommand::Exists { name }) => {
