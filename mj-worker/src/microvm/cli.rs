@@ -307,6 +307,11 @@ fn dispatch(layout: &Layout, command: Command) -> Result<i32> {
             Ok(0)
         }
         Command::Stop(args) => {
+            // `--time 0` still gets the default grace: the controller stops
+            // sessions with `--time 0` and keeps their volumes, and killing the
+            // VM outright would discard what the guest has not yet written.
+            // The grace only bounds an unresponsive guest; a flush takes well
+            // under a second.
             let grace = Duration::from_secs(match args.time {
                 Some(0) | None => vm::DEFAULT_STOP_SECONDS,
                 Some(seconds) => seconds,

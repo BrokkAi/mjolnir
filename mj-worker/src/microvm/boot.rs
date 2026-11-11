@@ -49,11 +49,24 @@ pub fn prune(layout: &Layout) -> Result<Vec<String>> {
     for entry in entries {
         let entry = entry.context("list boot assets")?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name != current {
-            fs::remove_dir_all(entry.path())
-                .with_context(|| format!("remove boot assets {name}"))?;
-            removed.push(name);
+        if name == current {
+            continue;
         }
+        if name.starts_with(".tmp-") {
+            // Builders write scratch under the global lock, which the caller holds.
+            fs::remove_dir_all(entry.path())
+                .with_context(|| format!("remove boot scratch {name}"))?;
+            continue;
+        }
+        // Another engine build may be launching from these assets.
+        let Some(_exclusive) = layout.try_lock_boot_exclusive(&name)? else {
+            continue;
+        };
+        fs::remove_dir_all(entry.path()).with_context(|| format!("remove boot assets {name}"))?;
+        if let Err(error) = fs::remove_file(layout.boot_lock_path(&name)) {
+            tracing::warn!(%error, tag = name, "could not remove a boot lock file");
+        }
+        removed.push(name);
     }
     Ok(removed)
 }
@@ -63,6 +76,8 @@ pub struct BootAssets {
     pub initrd: PathBuf,
     /// The directory name, `<kernel version>-<engine build>`.
     pub tag: String,
+    /// Keeps `image prune` from other engine builds away until dropped.
+    pub _reservation: mj_core::file_lock::FileLock,
 }
 
 /// The assets for this kernel and engine build, built if absent.
@@ -78,10 +93,13 @@ pub fn ensure(layout: &Layout) -> Result<BootAssets> {
         mj_core::worker_build::WORKER_BUILD_ID
     );
     let directory = layout.boot().join(&tag);
+    layout.ensure()?;
+    let reservation = layout.lock_boot_shared(&tag)?;
     let assets = BootAssets {
         kernel: directory.join("vmlinuz"),
         initrd: directory.join("initrd.img"),
         tag,
+        _reservation: reservation,
     };
     if assets.kernel.is_file() && assets.initrd.is_file() {
         return Ok(assets);

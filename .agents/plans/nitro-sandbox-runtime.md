@@ -105,6 +105,9 @@ To see it working: create a Nitro host, start a session on it with `mj new --tar
 - Decision: Engine lock order is VM, image, volumes in name order, global. `pull` holds the image lock from flattening through recording the reference; `run` holds the image lock until the root disk is cloned and every volume lock until the VM state that lists the volumes is written; `image prune` and `volume rm` decide under those same locks. A volume can be listed by only one VM, because two kernels writing one ext4 image would corrupt it. `pull` resolves a tag to a digest first and fetches the configuration and the filesystem by that digest. The module is compiled on Linux only.
   Rationale: review of the first implementation found each of these as a race between two engine verbs or a hang; a single lock order makes them structurally impossible (AGENTS.md concurrency rule). Verified live: a read-only volume mounts read-only, `cp` with a missing source fails at once, a second VM on an attached volume is refused and leaves nothing.
   Date/Author: 2026-11-10, Milestone 1 implementer.
+- Decision: A launch holds a shared lock on its boot-assets directory (`locks/boot-<tag>.lock`) from before it names the assets until the guest agent answers, and `image prune` removes other builds' assets only when it can take the exclusive lock without waiting. `stop --time 0` keeps the 10-second flush bound on purpose (review asked for an immediate kill): the controller stops sessions with `--time 0` and keeps their volumes, and a kill loses the guest's unwritten data. IPv6 from TAP devices is dropped by an `ip6` table beside the `ip` one, and a root guest agent always applies the requested group.
+  Rationale: review findings; one lock order, no unobserved cap added.
+  Date/Author: 2026-11-10, Milestone 1 implementer.
 
 ## Outcomes & Retrospective
 

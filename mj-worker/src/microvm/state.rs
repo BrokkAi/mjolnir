@@ -118,6 +118,44 @@ impl Layout {
         self.lock_file(&format!("image-{id}.lock"))
     }
 
+    /// Reserve a boot-assets directory: held (shared) from before a launch
+    /// names the assets until Firecracker has opened them, so a prune by another
+    /// engine build cannot remove them in between.
+    pub fn lock_boot_shared(&self, tag: &str) -> Result<FileLock> {
+        let file = self.open_lock_file(&format!("boot-{tag}.lock"))?;
+        file.lock_shared()
+            .with_context(|| format!("lock boot assets {tag}"))?;
+        Ok(FileLock::new(file))
+    }
+
+    /// The exclusive lock on boot assets, or `None` while a launch holds them.
+    pub fn try_lock_boot_exclusive(&self, tag: &str) -> Result<Option<FileLock>> {
+        let file = self.open_lock_file(&format!("boot-{tag}.lock"))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(FileLock::new(file))),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => {
+                Err(error).with_context(|| format!("lock boot assets {tag}"))
+            }
+        }
+    }
+
+    pub fn boot_lock_path(&self, tag: &str) -> PathBuf {
+        self.locks().join(format!("boot-{tag}.lock"))
+    }
+
+    fn open_lock_file(&self, file_name: &str) -> Result<File> {
+        fs::create_dir_all(self.locks())
+            .with_context(|| format!("create {}", self.locks().display()))?;
+        let path = self.locks().join(file_name);
+        OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("open lock {}", path.display()))
+    }
+
     fn lock_file(&self, file_name: &str) -> Result<FileLock> {
         fs::create_dir_all(self.locks())
             .with_context(|| format!("create {}", self.locks().display()))?;
