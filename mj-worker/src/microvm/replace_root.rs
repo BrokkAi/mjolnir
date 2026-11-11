@@ -301,6 +301,9 @@ fn apply_stopped(
             clone(&image::root_image(layout, &record.image_id), &next)?;
         }
         sync_file(&next)?;
+        // The clone's directory entry must be durable before the old root moves:
+        // a recovery that finds `previous` skips the clone.
+        sync_directory(&directory)?;
         fs::rename(&root, &previous).with_context(|| format!("set aside {}", root.display()))?;
     }
     // From here the old root disk is `previous` and `next` is complete; a
