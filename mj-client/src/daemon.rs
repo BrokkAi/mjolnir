@@ -484,6 +484,86 @@ pub struct ResumeSessionRequest {
     pub repository_preflight: Option<ResumeRepositorySourceReceipt>,
 }
 
+/// A lifecycle mutation whose execution belongs to the daemon after acceptance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "operation", content = "options")]
+pub enum SessionLifecycleRequest {
+    Suspend {
+        session_id: String,
+        acknowledge_unpublished_work: bool,
+        ignore_nested_repositories: bool,
+    },
+    Restart {
+        session_id: String,
+        acknowledge_container_recreation: bool,
+    },
+    Resume(Box<ResumeSessionRequest>),
+    Move(Box<MoveSessionRequest>),
+    Discard {
+        session_id: String,
+        checkpoint: mj_core::state::CheckpointMetadata,
+    },
+    DestroyStopped {
+        session_id: String,
+        delete_branch: bool,
+    },
+    ForceDestroy {
+        session_id: String,
+        delete_branch: bool,
+    },
+}
+
+impl SessionLifecycleRequest {
+    pub fn session_id(&self) -> &str {
+        match self {
+            Self::Suspend { session_id, .. }
+            | Self::Restart { session_id, .. }
+            | Self::Discard { session_id, .. }
+            | Self::DestroyStopped { session_id, .. }
+            | Self::ForceDestroy { session_id, .. } => session_id,
+            Self::Resume(request) => &request.session_id,
+            Self::Move(request) => &request.preparation.selection.session_id,
+        }
+    }
+}
+
+/// A lost acceptance reply never proves that the daemon refused this mutation.
+#[derive(Debug)]
+pub struct LifecycleAdmissionUnconfirmed(pub String);
+
+impl std::fmt::Display for LifecycleAdmissionUnconfirmed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Could not confirm daemon acceptance for session {}; inspect session status before retrying",
+            self.0
+        )
+    }
+}
+impl std::error::Error for LifecycleAdmissionUnconfirmed {}
+
+/// Observation was lost; this says nothing about the mutation's outcome.
+#[derive(Debug)]
+pub struct LifecycleObservationUnavailable(pub LifecycleReceipt);
+
+impl std::fmt::Display for LifecycleObservationUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Observation of operation {} for session {} is unavailable; inspect session status for its current state",
+            self.0.operation_id, self.0.session_id
+        )
+    }
+}
+impl std::error::Error for LifecycleObservationUnavailable {}
+
+/// Identifies the admitted operation, independently of later work on its session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LifecycleReceipt {
+    pub session_id: String,
+    pub operation_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateSessionRequest {
@@ -968,6 +1048,8 @@ pub enum DaemonAction {
         session_id: String,
         resolution: Resolution,
     },
+    StartSessionLifecycle(SessionLifecycleRequest),
+    WaitSessionLifecycle(LifecycleReceipt),
     SuspendSession {
         session_id: String,
         #[serde(default)]
@@ -1082,6 +1164,10 @@ pub struct ResponseEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "reply", content = "value")]
 pub enum DaemonReply {
+    LifecycleAccepted(LifecycleReceipt),
+    /// Only a captured operation result may report this failure.
+    LifecycleFailed(String),
+    LifecycleObservationUnavailable(LifecycleReceipt),
     NativeAgentHistory(mj_core::native_agent::NativeAgentHistoryPage),
     Pong,
     UpgradePending,
@@ -2706,6 +2792,54 @@ impl DaemonClient {
         }
     }
 
+    /// Submit once and retain the receipt; a lost reply does not permit replay.
+    pub async fn start_session_lifecycle(
+        &mut self,
+        request: SessionLifecycleRequest,
+    ) -> Result<LifecycleReceipt> {
+        let session_id = request.session_id().to_owned();
+        let reply = self
+            .request(DaemonAction::StartSessionLifecycle(request))
+            .await
+            .map_err(|error| {
+                if error.is::<DaemonRefusal>() {
+                    error
+                } else {
+                    anyhow::Error::new(LifecycleAdmissionUnconfirmed(session_id.clone()))
+                        .context(error)
+                }
+            })?;
+        match reply {
+            DaemonReply::LifecycleAccepted(receipt) => Ok(receipt),
+            reply => Err(
+                anyhow::Error::new(LifecycleAdmissionUnconfirmed(session_id))
+                    .context(format!("unexpected lifecycle acceptance reply {reply:?}")),
+            ),
+        }
+    }
+
+    /// Observe exactly this operation. Dropping the observer never cancels it.
+    pub async fn wait_session_lifecycle(
+        &mut self,
+        receipt: LifecycleReceipt,
+    ) -> Result<DaemonReply> {
+        let reply = self
+            .request(DaemonAction::WaitSessionLifecycle(receipt.clone()))
+            .await
+            .map_err(|error| {
+                anyhow::Error::new(LifecycleObservationUnavailable(receipt.clone())).context(error)
+            })?;
+        match reply {
+            reply @ (DaemonReply::Done | DaemonReply::MoveOutcome(_)) => Ok(reply),
+            DaemonReply::LifecycleFailed(detail) => Err(DaemonRefusal(detail).into()),
+            DaemonReply::LifecycleObservationUnavailable(receipt) => {
+                Err(LifecycleObservationUnavailable(receipt).into())
+            }
+            reply => Err(anyhow::Error::new(LifecycleObservationUnavailable(receipt))
+                .context(format!("unexpected lifecycle completion reply {reply:?}"))),
+        }
+    }
+
     pub async fn suspend_session(&mut self, session_id: String) -> Result<()> {
         self.suspend_session_with_ack(session_id, false).await
     }
@@ -2996,7 +3130,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // RuntimeSessionView carries policy-owned config keys; older strict readers reject them.
 // Terminal draft persistence carries per-client revisions and clear tombstones.
 // The host node is gone: NodeConnect is no longer an action.
-pub const PROTOCOL_VERSION: u32 = 86;
+// Lifecycle submission acknowledges ownership separately from completion.
+pub const PROTOCOL_VERSION: u32 = 87;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
@@ -3431,5 +3566,105 @@ mod tests {
             message.contains("this client runs /home/dev/.cargo/bin/mj (version 2.9.0)"),
             "{message}"
         );
+    }
+
+    #[tokio::test]
+    async fn unavailable_lifecycle_observation_distinguishes_disconnect_from_operation_failure() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address: listener.local_addr().unwrap(),
+            token: "lifecycle-observation".into(),
+            started_at: "test".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
+        };
+        let receipt = LifecycleReceipt {
+            session_id: "observed-session".into(),
+            operation_id: "accepted-operation".into(),
+        };
+        let server = tokio::spawn(async move {
+            for phase in 0..5 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                assert!(matches!(
+                    (&request.action, phase),
+                    (DaemonAction::WaitSessionLifecycle(_), 0 | 1 | 4)
+                        | (DaemonAction::StartSessionLifecycle(_), 2 | 3)
+                ));
+                if matches!(phase, 1 | 3 | 4) {
+                    write_frame(
+                        &mut stream,
+                        &ResponseEnvelope {
+                            protocol_version: request.protocol_version,
+                            request_id: request.request_id,
+                            result: if phase == 4 {
+                                Ok(DaemonReply::LifecycleFailed(
+                                    "checkpoint verification failed".into(),
+                                ))
+                            } else {
+                                Err("daemon is shutting down; retry to reach a fresh daemon".into())
+                            },
+                        },
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+        });
+        let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
+        let error = client
+            .wait_session_lifecycle(receipt.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<LifecycleObservationUnavailable>()
+                .unwrap()
+                .0,
+            receipt
+        );
+        drop(client);
+        let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
+        let error = client
+            .wait_session_lifecycle(receipt.clone())
+            .await
+            .unwrap_err();
+        assert!(error.is::<LifecycleObservationUnavailable>());
+        assert!(format!("{error:#}").contains("daemon is shutting down"));
+        drop(client);
+        for disconnected in [true, false] {
+            let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
+            let error = client
+                .start_session_lifecycle(SessionLifecycleRequest::Suspend {
+                    session_id: "observed-session".into(),
+                    acknowledge_unpublished_work: true,
+                    ignore_nested_repositories: false,
+                })
+                .await
+                .unwrap_err();
+            if disconnected {
+                assert_eq!(
+                    error
+                        .downcast_ref::<LifecycleAdmissionUnconfirmed>()
+                        .unwrap()
+                        .0,
+                    "observed-session"
+                );
+                assert!(!error.is::<DaemonRefusal>());
+            } else {
+                assert!(error.is::<DaemonRefusal>());
+                assert!(!error.is::<LifecycleAdmissionUnconfirmed>());
+            }
+        }
+        let mut client = DaemonClient::connect(metadata).await.unwrap();
+        let error = client.wait_session_lifecycle(receipt).await.unwrap_err();
+        assert!(error.is::<DaemonRefusal>());
+        assert!(!error.is::<LifecycleObservationUnavailable>());
+        assert!(error.to_string().contains("checkpoint verification failed"));
+        drop(client);
+        server.await.unwrap();
     }
 }

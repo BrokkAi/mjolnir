@@ -18,6 +18,45 @@ pub(super) struct Reclamation {
     _permits: Vec<WorkerPermit>,
 }
 
+/// Exact physical worker covered by a live all-writers-stopped retirement.
+pub(crate) struct StoppedWorker<'a> {
+    _authority: &'a Reclamation,
+    session_id: &'a str,
+    target: &'a targets::TargetLocator,
+    root: String,
+}
+impl StoppedWorker<'_> {
+    pub(crate) fn session_id(&self) -> &str {
+        self.session_id
+    }
+    pub(crate) fn target(&self) -> &targets::TargetLocator {
+        self.target
+    }
+    pub(crate) fn root(&self) -> &str {
+        &self.root
+    }
+}
+impl Reclamation {
+    fn stopped_worker<'a>(
+        &'a self,
+        worker: &'a EnvironmentWorker,
+        target: &'a targets::TargetLocator,
+    ) -> Result<StoppedWorker<'a>> {
+        ensure!(
+            self.workers
+                .iter()
+                .any(|(entry, location)| std::ptr::eq(entry, worker) && location == target),
+            "retirement does not cover worker placement"
+        );
+        Ok(StoppedWorker {
+            _authority: self,
+            session_id: &worker.session_id,
+            target,
+            root: targets::worker_root(target, &worker.session_id)?,
+        })
+    }
+}
+
 fn backend(worker: &EnvironmentWorker, config: &Config) -> Result<targets::TargetLocator> {
     recorded_backend_locator(
         &worker.target,
@@ -32,7 +71,7 @@ impl Reclamation {
     pub(super) fn acquire(
         environment: EnvironmentRecord,
         config: &Config,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
     ) -> Result<Self> {
         // The physical owner is always first, including environments with no
         // workers yet. All entry points share this ordering with lifecycle.
@@ -73,34 +112,71 @@ impl Reclamation {
                 quiesced.push(&worker.target);
             }
         }
-        for (worker, target) in &workers {
-            if quiesced
+        let results = std::thread::scope(|scope| {
+            let handles = workers
                 .iter()
-                .any(|stopped| stopped.same_resource(&worker.target))
-            {
-                continue;
-            }
-            let permit = permits
-                .iter()
-                .find(|permit| permit.session_id() == worker.session_id)
-                .context("environment worker permit disappeared")?;
-            let root = targets::worker_root(target, &worker.session_id)?;
-            if let Err(error) = super::worker_binary::stop_worker(permit, executor, target, &root) {
-                if !targets::is_borrowed(target)
-                    && targets::cleanup_target_is_confirmed_absent(
-                        target,
-                        &worker.session_id,
-                        executor,
-                    )?
-                {
-                    continue;
-                }
-                return Err(error.context(format!(
-                    "stop environment worker {} before removing shared files",
-                    worker.session_id
-                )));
-            }
-        }
+                .filter(|(worker, _)| {
+                    !quiesced
+                        .iter()
+                        .any(|stopped| stopped.same_resource(&worker.target))
+                })
+                .map(|(worker, target)| {
+                    let permit = permits
+                        .iter()
+                        .find(|permit| permit.session_id() == worker.session_id)
+                        .expect("environment worker permit disappeared");
+                    scope.spawn(move || {
+                        permit.scope_blocking(|| -> Result<()> {
+                            let root = targets::worker_root(target, &worker.session_id)?;
+                            if let Err(error) =
+                                super::worker_binary::fence_worker(permit, executor, target, &root)
+                            {
+                                if !targets::is_borrowed(target)
+                                    && targets::cleanup_target_is_confirmed_absent(
+                                        target,
+                                        &worker.session_id,
+                                        executor,
+                                    )?
+                                {
+                                    return Ok(());
+                                }
+                                return Err(error);
+                            }
+                            Ok(())
+                        })
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle.join().unwrap_or_else(|panic| {
+                        Err(anyhow::anyhow!(
+                            "worker stop thread panicked: {}",
+                            targets::command_thread_panic_message(panic.as_ref())
+                        ))
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
+        let errors = workers
+            .iter()
+            .filter(|(worker, _)| {
+                !quiesced
+                    .iter()
+                    .any(|stopped| stopped.same_resource(&worker.target))
+            })
+            .zip(results)
+            .filter_map(|((worker, _), result)| {
+                result.err().map(|error| {
+                    format!(
+                        "stop environment worker {} before removing shared files: {error:#}",
+                        worker.session_id
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        ensure!(errors.is_empty(), "{}", errors.join("; "));
         Ok(Self {
             environment,
             workers,
@@ -147,8 +223,10 @@ impl Reclamation {
                 // A removed container removes these private roots with it. A
                 // bare child has a separate root that must be reclaimed here.
                 if matches!(target, targets::TargetLocator::SshBare { .. }) {
-                    targets::borrowed_worker_cleanup_plan(target, &worker.session_id)?
-                        .execute(executor)?;
+                    targets::stopped_borrowed_worker_cleanup_plan(
+                        self.stopped_worker(worker, target)?,
+                    )?
+                    .execute(executor)?;
                 }
             } else if worker.session_id != self.environment.owner_session_id {
                 execute_owned_target_cleanup(self, target, worker, executor)?;
@@ -190,9 +268,9 @@ fn execute_owned_target_cleanup(
             other.id != authority.environment.id && other.phase != EnvironmentPhase::Reclaimed
         });
     let plan = if shared {
-        targets::retire_move_target_plan(target, session_id)?
+        targets::retire_stopped_move_target_plan(authority.stopped_worker(worker, target)?)?
     } else {
-        targets::close_plan(target, session_id)?
+        targets::close_stopped_target_plan(authority.stopped_worker(worker, target)?)?
     };
     if let Err(error) = plan.execute(executor) {
         if !targets::cleanup_target_is_confirmed_absent(target, session_id, executor)? {
@@ -236,7 +314,7 @@ pub(super) fn stop_borrower(
 pub(super) fn retire_session_environment(
     session: &SessionRecord,
     config: &Config,
-    executor: &impl CommandExecutor,
+    executor: &(impl CommandExecutor + Sync),
     branch: BranchDisposition,
 ) -> Result<()> {
     retire_session_environment_with_checkout(
@@ -252,7 +330,7 @@ pub(super) fn retire_session_environment(
 pub(super) fn retire_session_environment_with_checkout(
     session: &SessionRecord,
     config: &Config,
-    executor: &impl CommandExecutor,
+    executor: &(impl CommandExecutor + Sync),
     branch: BranchDisposition,
     checkout: super::lifecycle::CheckoutDisposition,
 ) -> Result<Option<std::path::PathBuf>> {
@@ -278,7 +356,7 @@ pub(super) fn retire_session_environment_with_checkout(
 pub(super) fn retire_owned_environment(
     environment: EnvironmentRecord,
     config: &Config,
-    executor: &impl CommandExecutor,
+    executor: &(impl CommandExecutor + Sync),
     branch: BranchDisposition,
     checkout: super::lifecycle::CheckoutDisposition,
 ) -> Result<Option<std::path::PathBuf>> {
@@ -362,7 +440,7 @@ pub(super) fn retire_owned_environment(
 pub(super) fn quiesce_session_environment(
     session: &SessionRecord,
     config: &Config,
-    executor: &impl CommandExecutor,
+    executor: &(impl CommandExecutor + Sync),
 ) -> Result<()> {
     let environment =
         database::session_environment(&session.id)?.context("session has no environment")?;
@@ -433,7 +511,7 @@ pub(super) fn cleanup_unstarted_checkout(
 pub(super) fn remove_runtime_preserving_workspace(
     session: &SessionRecord,
     config: &Config,
-    executor: &impl CommandExecutor,
+    executor: &(impl CommandExecutor + Sync),
 ) -> Result<()> {
     let environment =
         database::session_environment(&session.id)?.context("session has no environment")?;
@@ -462,7 +540,7 @@ pub(super) fn remove_runtime_preserving_workspace(
 pub(super) fn destroy_session_environments(
     session: &SessionRecord,
     config: &Config,
-    executor: &impl CommandExecutor,
+    executor: &(impl CommandExecutor + Sync),
     branch: BranchDisposition,
 ) -> Result<()> {
     let environments = database::worker_environments(&session.id)?;
@@ -490,7 +568,7 @@ pub(super) fn destroy_session_environments(
 pub(super) fn retire_inactive_environments(
     session: &SessionRecord,
     config: &Config,
-    executor: &impl CommandExecutor,
+    executor: &(impl CommandExecutor + Sync),
     branch: BranchDisposition,
     checkout: super::CheckoutDisposition,
 ) -> Result<Option<std::path::PathBuf>> {
@@ -518,6 +596,8 @@ mod tests {
     struct ControlledExecutor {
         waiting: mpsc::Sender<()>,
         operations: Mutex<Vec<String>>,
+        stop_barrier: Option<std::sync::Barrier>,
+        fail_stops: std::sync::atomic::AtomicBool,
     }
     impl CommandExecutor for ControlledExecutor {
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
@@ -525,6 +605,19 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(command.purpose.clone());
+            if command.purpose == "kill retired Mjolnir worker forest" {
+                if let Some(barrier) = &self.stop_barrier {
+                    barrier.wait();
+                }
+                if self.fail_stops.load(std::sync::atomic::Ordering::SeqCst) {
+                    anyhow::bail!("injected stop failure");
+                }
+            } else if command.purpose.contains("remove exact") {
+                assert!(
+                    !command.args.iter().any(|arg| arg.contains("hel_stop")),
+                    "reclamation must not repeat worker stopping"
+                );
+            }
             Ok(CommandOutput {
                 status: 0,
                 stdout: Vec::new(),
@@ -568,6 +661,8 @@ mod tests {
         let executor = ControlledExecutor {
             waiting,
             operations: Mutex::default(),
+            stop_barrier: None,
+            fail_stops: std::sync::atomic::AtomicBool::new(false),
         };
         let intent = database::WorkerRestartIntent {
             operation_id: "replacement".into(),
@@ -595,6 +690,7 @@ mod tests {
         database::admit_environment_worker(&session.id, session.target.as_ref().unwrap()).unwrap();
     }
 
+    // Hard-won: #1506: retirement serialized historical workers and stopped each twice.
     #[test]
     fn retirement_drains_an_admitted_child_and_refuses_later_launch_and_registration() {
         const TEST: &str =
@@ -643,6 +739,8 @@ mod tests {
         let executor = Arc::new(ControlledExecutor {
             waiting: waiting_tx,
             operations: Mutex::default(),
+            stop_barrier: Some(std::sync::Barrier::new(2)),
+            fail_stops: std::sync::atomic::AtomicBool::new(true),
         });
         let admitted =
             WorkerPermit::acquire_blocking(&child.id, "accepted child launch", executor.as_ref())
@@ -673,10 +771,33 @@ mod tests {
             "no writer may be stopped or files removed before the accepted launch settles"
         );
         drop(admitted);
-        let authority = retiring.join().unwrap().unwrap();
+        let error = match retiring.join().unwrap() {
+            Ok(_) => panic!("stop failures must refuse reclamation"),
+            Err(error) => error,
+        };
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(&parent.id) && message.contains(&child.id),
+            "{message}"
+        );
+        assert_eq!(
+            executor.operations.lock().unwrap().len(),
+            2,
+            "no deletion after a stop failure"
+        );
+        executor.operations.lock().unwrap().clear();
+        executor
+            .fail_stops
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let environment = database::session_environment(&parent.id).unwrap().unwrap();
+        let authority =
+            Reclamation::acquire(environment, &Config::default(), executor.as_ref()).unwrap();
         assert_eq!(
             executor.operations.lock().unwrap().as_slice(),
-            ["stop Mjolnir worker daemon", "stop Mjolnir worker daemon"]
+            [
+                "kill retired Mjolnir worker forest",
+                "kill retired Mjolnir worker forest"
+            ]
         );
         authority.remove_targets(executor.as_ref()).unwrap();
         authority.finish().unwrap();

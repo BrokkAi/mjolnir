@@ -1508,6 +1508,30 @@ impl Controller {
         repository_preflight: Option<ResumeRepositorySourceReceipt>,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<MaterializedSession> {
+        self.resume_session_controlled_with_repository_preflight_and_admission(
+            session_id,
+            profile_id,
+            target_id,
+            options,
+            repository_preflight,
+            executor,
+            || {},
+        )
+        .await
+    }
+
+    // Keep the established resume arguments together with its admission hook.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn resume_session_controlled_with_repository_preflight_and_admission(
+        &mut self,
+        session_id: &str,
+        profile_id: &str,
+        target_id: &str,
+        options: SessionResumeOptions,
+        repository_preflight: Option<ResumeRepositorySourceReceipt>,
+        executor: &(impl CommandExecutor + Sync),
+        on_accepted: impl FnOnce() + Send,
+    ) -> Result<MaterializedSession> {
         self.resume_session_with_origin(
             session_id,
             profile_id,
@@ -1516,6 +1540,7 @@ impl Controller {
             repository_preflight,
             None,
             executor,
+            on_accepted,
         )
         .await
     }
@@ -1545,6 +1570,7 @@ impl Controller {
             None,
             Some(operation),
             executor,
+            || {},
         )
         .await
     }
@@ -1559,6 +1585,7 @@ impl Controller {
         repository_preflight: Option<ResumeRepositorySourceReceipt>,
         move_operation: Option<&mj_core::state::MoveOperation>,
         executor: &(impl CommandExecutor + Sync),
+        on_accepted: impl FnOnce() + Send,
     ) -> Result<MaterializedSession> {
         crate::worker_lifecycle::run(session_id, "resume session with origin", executor, async {
             crate::worker_lifecycle::require(session_id)?.verify_cached_target(&self.state)?;
@@ -1910,6 +1937,7 @@ impl Controller {
                 .as_ref()
                 .map(|(host, size)| (host.as_str(), *size)),
         )?;
+        on_accepted();
         if let Some((host, size)) = selected_container_size.as_ref() {
             self.state.remember_container_size(host, *size);
         }

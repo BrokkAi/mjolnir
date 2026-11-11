@@ -454,7 +454,7 @@ impl Controller {
     pub(super) fn cleanup_new_session_worktree_after_failure(
         &self,
         session_id: &str,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
         if !self.state.sessions.contains_key(session_id) {
             return Ok(());

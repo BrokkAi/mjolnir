@@ -945,6 +945,7 @@ async fn workspace_deletion_guard_ignores_global_client_presence() {
     state.owner().lifecycle.insert(
         "session-a".into(),
         ActiveLifecycle {
+            acceptance: tokio::sync::watch::channel(Some(Ok(()))).1,
             move_operation_id: None,
             restart_intent: None,
             upgrade_work: Arc::new(Mutex::new(None)),
@@ -974,6 +975,7 @@ async fn checkpoint_lifecycle_guard_is_per_session() {
     state.owner().lifecycle.insert(
         "session-b".into(),
         ActiveLifecycle {
+            acceptance: tokio::sync::watch::channel(Some(Ok(()))).1,
             move_operation_id: None,
             restart_intent: None,
             upgrade_work: Arc::new(Mutex::new(None)),
@@ -2648,6 +2650,7 @@ fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
     let operation = |kind: LifecycleKind, control: LifecycleControl| {
         let (_completed, result) = tokio::sync::watch::channel(None);
         ActiveLifecycle {
+            acceptance: tokio::sync::watch::channel(Some(Ok(()))).1,
             move_operation_id: None,
             restart_intent: None,
             upgrade_work: Arc::new(Mutex::new(None)),
@@ -2700,6 +2703,7 @@ async fn completed_stop_stays_visible_until_cleanup_takes_ownership() {
     state.owner().lifecycle.insert(
         "cleanup-gap".into(),
         ActiveLifecycle {
+            acceptance: tokio::sync::watch::channel(Some(Ok(()))).1,
             move_operation_id: None,
             restart_intent: None,
             upgrade_work: Arc::new(Mutex::new(None)),
@@ -6715,13 +6719,14 @@ async fn a_cancelled_workspace_close_lets_committed_stops_finish_and_reports_the
     // committed and still removing its target, one still checkpointing.
     let committed = LifecycleControl::default();
     let finish_teardown = Arc::new(tokio::sync::Notify::new());
-    state
-        .start_or_join_lifecycle_controlled(
+    let key = serde_json::to_string(&(true, false)).unwrap();
+    let (committed_acceptance, committed_watch) = tokio::sync::watch::channel(Some(Ok(())));
+    let started = state
+        .admit_prepared_lifecycle(
             "past-commit".into(),
             LifecycleKind::Suspend,
-            None,
-            None,
-            Some(committed.clone()),
+            super::lifecycle::LifecycleStart::request(key.clone(), None, Some(committed.clone())),
+            Some(committed_watch),
             {
                 let finish_teardown = finish_teardown.clone();
                 move |_, _, _| async move {
@@ -6731,34 +6736,43 @@ async fn a_cancelled_workspace_close_lets_committed_stops_finish_and_reports_the
             },
         )
         .unwrap();
+    drop(started);
+    let committed_baseline = committed_acceptance.receiver_count();
     assert!(committed.grant_commit());
-    state
-        .start_or_join_lifecycle("before-commit".into(), LifecycleKind::Suspend, {
+    let (cancellable_acceptance, cancellable_watch) = tokio::sync::watch::channel(Some(Ok(())));
+    let started = state
+        .admit_prepared_lifecycle(
+            "before-commit".into(),
+            LifecycleKind::Suspend,
+            super::lifecycle::LifecycleStart::request(key, None, None),
+            Some(cancellable_watch),
             move |_, _, cancelled| async move {
                 while !cancelled.load(Ordering::Acquire) {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
                 bail!("operation cancelled before the session began to stop")
-            }
-        })
+            },
+        )
         .unwrap();
-    let closing = tokio::spawn({
+    drop(started);
+    let cancellable_baseline = cancellable_acceptance.receiver_count();
+    let mut closing = tokio::spawn({
         let state = state.clone();
         let id = workspace.id.clone();
         async move { state.close_workspace(id).await }
     });
-    // Cancel only once the close has joined both stops. A cancel before that
-    // ends the close without submitting them, which is not this case.
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !["past-commit", "before-commit"]
-            .into_iter()
-            .all(|id| state.close_is_requested(id))
-        {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("the workspace close never joined both stops");
+    // A fresh stop already sets its close marker. Only an additional acceptance
+    // receiver proves that the workspace close has joined that existing stop.
+    tokio::select! {
+        result = &mut closing => panic!("workspace close completed before joining both stops: {result:?}"),
+        joined = tokio::time::timeout(Duration::from_secs(5), async {
+            while committed_acceptance.receiver_count() <= committed_baseline
+                || cancellable_acceptance.receiver_count() <= cancellable_baseline
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }) => joined.expect("the workspace close never joined both stops"),
+    }
     state.cancel_workspace_close(&workspace.id).unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while state
@@ -8076,15 +8090,76 @@ async fn discarding_changes_since_a_checkpoint_stops_the_sub_agents() {
         .clone()
         .unwrap();
 
-    tokio::time::timeout(
-        Duration::from_secs(60),
+    let bytes = std::fs::read(&checkpoint.archive_path).unwrap();
+    std::fs::write(&checkpoint.archive_path, b"corrupt recovery archive").unwrap();
+    let rejected = parent
+        .state
+        .start_session_lifecycle(SessionLifecycleRequest::Discard {
+            session_id: LATCH_RELAY_SESSION.into(),
+            checkpoint: checkpoint.clone(),
+        })
+        .await
+        .unwrap_err();
+    assert!(format!("{rejected:#}").contains("SHA changed"));
+    let unchanged = crate::database::load_state().unwrap();
+    assert_eq!(
+        unchanged.sessions[LATCH_RELAY_SESSION].state,
+        SessionState::Running
+    );
+    assert!(unchanged.sessions.contains_key(WORKING_CHILD));
+    std::fs::write(&checkpoint.archive_path, bytes).unwrap();
+
+    let release = Arc::new(tokio::sync::Notify::new());
+    let child = parent
+        .state
+        .start_or_join_lifecycle(WORKING_CHILD.into(), LifecycleKind::StopSubagent, {
+            let release = release.clone();
+            move |_, _, _| async move {
+                release.notified().await;
+                Ok(DaemonLifecycleResult::Done)
+            }
+        })
+        .unwrap();
+    let receipt = tokio::time::timeout(
+        Duration::from_secs(30),
         parent
             .state
-            .discard_since_checkpoint(LATCH_RELAY_SESSION.to_owned(), checkpoint),
+            .start_session_lifecycle(SessionLifecycleRequest::Discard {
+                session_id: LATCH_RELAY_SESSION.into(),
+                checkpoint: checkpoint.clone(),
+            }),
     )
     .await
-    .unwrap()
+    .expect("Discard acceptance waited for child teardown")
     .unwrap();
+    let accepted = crate::database::load_state().unwrap();
+    assert_eq!(
+        accepted.sessions[LATCH_RELAY_SESSION].state,
+        SessionState::Destroying
+    );
+    assert_eq!(
+        accepted.sessions[LATCH_RELAY_SESSION].checkpoint.as_ref(),
+        Some(&checkpoint)
+    );
+    assert!(accepted.sessions.contains_key(WORKING_CHILD));
+    assert!(
+        parent
+            .state
+            .cancel_lifecycle_with_intent(LATCH_RELAY_SESSION)
+            .await
+            .is_err()
+    );
+    let mut completion = Box::pin(parent.state.wait_session_lifecycle(receipt));
+    assert!(futures::poll!(&mut completion).is_pending());
+    release.notify_one();
+    RuntimeState::wait_lifecycle_result(child).await.unwrap();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(60), completion)
+            .await
+            .unwrap()
+            .unwrap(),
+        DaemonReply::Done
+    ));
 
     let stored = crate::database::load_state().unwrap();
     assert_eq!(
@@ -8102,6 +8177,92 @@ async fn discarding_changes_since_a_checkpoint_stops_the_sub_agents() {
             .map(|child| child.child_session_id.as_str())
             .collect::<Vec<_>>(),
         [WORKING_CHILD]
+    );
+    parent.channels.shutdown.shutdown().await.unwrap();
+}
+
+// Hard-won: #1507: an accepted Discard had no durable teardown intent before target removal.
+#[cfg(unix)]
+#[tokio::test]
+async fn discard_intent_recovers_without_checkpointing_and_reconciles_children() {
+    use crate::controller::checkpoint::tests::LATCH_RELAY_SESSION;
+    const NAME: &str = "discard_intent_recovers_without_checkpointing_and_reconciles_children";
+    if !in_isolated_live_parent_test(NAME) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let parent = live_parent_with_a_working_sub_agent(ParentRecoveryCopy::Installed).await;
+    parent
+        .channels
+        .control
+        .session(LATCH_RELAY_SESSION)
+        .await
+        .unwrap()
+        .submit(
+            new_command_id("after-selected-checkpoint").unwrap(),
+            RelayCommand::RecordNotice {
+                text: "New work after the selected recovery copy".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let mut controller = Controller::load().unwrap();
+    let checkpoint = controller.state.sessions[LATCH_RELAY_SESSION]
+        .checkpoint
+        .clone()
+        .unwrap();
+    controller
+        .prepare_discard(
+            LATCH_RELAY_SESSION,
+            &checkpoint,
+            &ProcessExecutor,
+            || Ok(()),
+        )
+        .unwrap();
+    let durable = Controller::load().unwrap();
+    assert_eq!(
+        durable.state.sessions[LATCH_RELAY_SESSION].state,
+        SessionState::Destroying
+    );
+    assert!(interrupted_suspend_session_ids(&durable).contains(&LATCH_RELAY_SESSION.to_owned()));
+    assert!(durable.state.sessions.contains_key(WORKING_CHILD));
+    let recovery = crate::recovery::RecoveryCoordinator::spawn(parent.channels.control.clone());
+    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
+        parent.channels.control.clone(),
+        &recovery.observer(),
+    );
+    let restarted = Arc::new(RuntimeState::new_with_controller_loader(
+        parent.channels.control.clone(),
+        durable,
+        recovery.observer(),
+        upgrades.observer(),
+        Vec::new(),
+        Controller::load,
+    ));
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        restarted.suspend_session(LATCH_RELAY_SESSION.into()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let restored = crate::database::load_state().unwrap();
+    assert_eq!(
+        restored.sessions[LATCH_RELAY_SESSION].state,
+        SessionState::Stopped
+    );
+    assert_eq!(
+        restored.sessions[LATCH_RELAY_SESSION].checkpoint.as_ref(),
+        Some(&checkpoint)
+    );
+    assert!(restored.sessions[LATCH_RELAY_SESSION].target.is_none());
+    assert!(!restored.sessions.contains_key(WORKING_CHILD));
+    assert!(!restored.subagents.contains_key(WORKING_CHILD));
+    assert_eq!(
+        crate::database::load_stopped_subagents(LATCH_RELAY_SESSION)
+            .unwrap()
+            .len(),
+        1
     );
     parent.channels.shutdown.shutdown().await.unwrap();
 }
@@ -9343,6 +9504,7 @@ async fn move_destination_ownership_is_typed_and_survives_cancellation() {
     state.owner().lifecycle.insert(
         "moving".into(),
         ActiveLifecycle {
+            acceptance: tokio::sync::watch::channel(Some(Ok(()))).1,
             move_operation_id: None,
             restart_intent: None,
             upgrade_work: Arc::new(Mutex::new(None)),
@@ -11759,4 +11921,160 @@ async fn a_failure_after_a_sub_agent_registers_moves_it_to_error() {
             "second-question",
         ))
         .expect("a fresh oracle may register once the failed one is in Error");
+}
+
+// Selection keys join running work; durable caller keys also replay completion.
+#[tokio::test]
+async fn fresh_lifecycle_retries_replace_completed_results_but_replays_keep_them() {
+    let state = test_runtime_state();
+    let key = "confirmed-selection".to_owned();
+    let first = state
+        .admit_prepared_lifecycle(
+            "retry-session".into(),
+            LifecycleKind::ForceStop,
+            super::lifecycle::LifecycleStart::request(key.clone(), None, None),
+            None,
+            |_, _, _| async { bail!("injected operation failure") },
+        )
+        .unwrap();
+    let old = first.receipt.clone();
+    assert!(
+        RuntimeState::wait_lifecycle_result(first.result)
+            .await
+            .is_err()
+    );
+    let replay = state
+        .start_or_join_lifecycle_with_key(
+            old.session_id.clone(),
+            LifecycleKind::ForceStop,
+            None,
+            Some(key.clone()),
+            |_, _, _| async { panic!("replay started duplicate work") },
+        )
+        .unwrap();
+    assert!(RuntimeState::wait_lifecycle_result(replay).await.is_err());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let next = state
+        .admit_prepared_lifecycle(
+            old.session_id.clone(),
+            LifecycleKind::ForceStop,
+            super::lifecycle::LifecycleStart::request(key, None, None),
+            None,
+            {
+                let release = release.clone();
+                move |_, _, _| async move {
+                    release.notified().await;
+                    Ok(DaemonLifecycleResult::Done)
+                }
+            },
+        )
+        .unwrap();
+    assert_ne!(next.receipt.operation_id, old.operation_id);
+    assert!(
+        state
+            .admit_prepared_lifecycle(
+                old.session_id.clone(),
+                LifecycleKind::ForceStop,
+                super::lifecycle::LifecycleStart::request(
+                    "different-checkpoint".into(),
+                    None,
+                    None
+                ),
+                None,
+                |_, _, _| async { panic!("changed selections were admitted concurrently") },
+            )
+            .is_err()
+    );
+    assert!(matches!(
+        state.wait_session_lifecycle(old).await.unwrap(),
+        DaemonReply::LifecycleObservationUnavailable(_)
+    ));
+    release.notify_one();
+    RuntimeState::wait_lifecycle_result(next.result)
+        .await
+        .unwrap();
+}
+
+// Hard-won: #1507: the initiating terminal waited through checkpoint and target retirement.
+#[cfg(unix)]
+#[tokio::test]
+async fn suspend_acceptance_survives_client_disconnect_during_checkpoint() {
+    use crate::controller::checkpoint::tests::{LATCH_RELAY_HOLD_PATH, LATCH_RELAY_SESSION};
+    const NAME: &str = "suspend_acceptance_survives_client_disconnect_during_checkpoint";
+    if !in_held_close_child(NAME, "begin_checkpoint") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (controller, channels, _handle) =
+        crate::controller::checkpoint::tests::close_cut_controller(SessionState::Running).await;
+    controller.config.save().unwrap();
+    let recovery = crate::recovery::RecoveryCoordinator::spawn(channels.control.clone());
+    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
+        channels.control.clone(),
+        &recovery.observer(),
+    );
+    let state = Arc::new(RuntimeState::new_with_controller_loader(
+        channels.control.clone(),
+        Controller::load().unwrap(),
+        recovery.observer(),
+        upgrades.observer(),
+        Vec::new(),
+        Controller::load,
+    ));
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let metadata = test_metadata(listener.local_addr().unwrap());
+    let server_metadata = metadata.clone();
+    let server = tokio::spawn({
+        let state = state.clone();
+        async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_client(stream, server_metadata, state, CancellationToken::new())
+                .await
+                .unwrap();
+        }
+    });
+    let mut client = DaemonClient::connect(metadata).await.unwrap();
+    let receipt = tokio::time::timeout(
+        Duration::from_secs(30),
+        client.start_session_lifecycle(SessionLifecycleRequest::Suspend {
+            session_id: LATCH_RELAY_SESSION.into(),
+            acknowledge_unpublished_work: true,
+            ignore_nested_repositories: false,
+        }),
+    )
+    .await
+    .expect("acceptance waited for the held checkpoint")
+    .unwrap();
+    assert_eq!(
+        crate::database::load_state().unwrap().sessions[LATCH_RELAY_SESSION].state,
+        SessionState::Closing
+    );
+    assert!(state.close_is_requested(LATCH_RELAY_SESSION));
+    drop(client);
+    server.await.unwrap();
+    let hold = PathBuf::from(std::env::var_os(LATCH_RELAY_HOLD_PATH).unwrap());
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while !hold.with_extension("reached").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the daemon did not continue after acceptance");
+    let mut completion = Box::pin(state.wait_session_lifecycle(receipt));
+    assert!(futures::poll!(&mut completion).is_pending());
+    std::fs::write(hold.with_extension("release"), b"continue").unwrap();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(60), completion)
+            .await
+            .unwrap()
+            .unwrap(),
+        DaemonReply::Done
+    ));
+    assert!(!state.close_is_requested(LATCH_RELAY_SESSION));
+    let stored = crate::database::load_state().unwrap();
+    assert_eq!(
+        stored.sessions[LATCH_RELAY_SESSION].state,
+        SessionState::Stopped
+    );
+    assert!(stored.sessions[LATCH_RELAY_SESSION].checkpoint.is_some());
 }

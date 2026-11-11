@@ -328,7 +328,7 @@ impl Controller {
     pub(crate) fn cleanup_failed_startup_controlled(
         &mut self,
         session_id: &str,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
         self.finish_failed_startup_controlled(session_id, executor, false)
     }
@@ -336,7 +336,7 @@ impl Controller {
     fn finish_failed_startup_controlled(
         &mut self,
         session_id: &str,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
         retry_after_stop: bool,
     ) -> Result<()> {
         crate::worker_lifecycle::run_blocking(
@@ -490,7 +490,7 @@ impl Controller {
         &mut self,
         session_id: &str,
         error: anyhow::Error,
-        target_cleanup_executor: &impl CommandExecutor,
+        target_cleanup_executor: &(impl CommandExecutor + Sync),
     ) -> Result<anyhow::Error> {
         let session = self
             .state
@@ -1352,7 +1352,7 @@ fn execute_repository_setup(
 fn failed_environment_creation_cleanup(
     environment: &crate::database::EnvironmentRecord,
     config: &Config,
-    executor: &impl CommandExecutor,
+    executor: &(impl CommandExecutor + Sync),
 ) -> String {
     match super::environment::retire_owned_environment(
         environment.clone(),

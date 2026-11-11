@@ -7,6 +7,7 @@ mod feed;
 mod owner;
 mod record_index;
 mod restart;
+mod session_lifecycle;
 mod session_move;
 use crate::controller::move_session::{
     MoveMutationGuard, MoveOutcome, MovePreparation, MoveSelection, MoveSessionRequest,
@@ -581,6 +582,7 @@ struct ActiveLifecycle {
     request_key: Option<String>,
     _move_guard: Option<MoveMutationGuard>,
     result: LifecycleWatch,
+    acceptance: LifecycleAcceptance,
 }
 
 enum LifecyclePhase {
@@ -597,6 +599,29 @@ enum LifecyclePhase {
 impl ActiveLifecycle {
     fn is_running(&self) -> bool {
         !matches!(self.phase, LifecyclePhase::Completed(_))
+    }
+
+    fn check_request(
+        &self,
+        session_id: &str,
+        kind: LifecycleKind,
+        key: Option<&str>,
+        workspace: Option<&str>,
+        child_close: bool,
+    ) -> Result<()> {
+        ensure!(
+            child_close || self.request_key.as_deref() == key,
+            "another lifecycle request with different selections is already running for session {session_id}"
+        );
+        ensure!(
+            self.kind == kind,
+            "another lifecycle operation is already running for session {session_id}"
+        );
+        ensure!(
+            workspace.is_none() || self.resume_workspace_id.as_deref() == workspace,
+            "session {session_id} is already resuming into another workspace"
+        );
+        Ok(())
     }
 
     /// The stages this operation is in, oldest stage first.
@@ -725,6 +750,18 @@ pub(crate) struct LifecycleFailure {
 /// from. `None` means the operation is still running.
 type LifecycleResult = std::result::Result<DaemonLifecycleResult, LifecycleFailure>;
 type LifecycleWatch = tokio::sync::watch::Receiver<Option<LifecycleResult>>;
+
+type LifecycleAcceptance =
+    tokio::sync::watch::Receiver<Option<std::result::Result<(), LifecycleFailure>>>;
+
+type LifecycleAcceptanceSender =
+    tokio::sync::watch::Sender<Option<std::result::Result<(), LifecycleFailure>>>;
+
+pub(crate) struct StartedLifecycle {
+    receipt: LifecycleReceipt,
+    result: LifecycleWatch,
+    acceptance: LifecycleAcceptance,
+}
 
 impl LifecycleFailure {
     fn of(error: &anyhow::Error) -> Self {

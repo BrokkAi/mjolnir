@@ -699,14 +699,37 @@ pub(crate) struct LifecycleOperationRequest {
     pub(crate) updates: UnboundedSender<DashboardLifecycleUpdate>,
 }
 
-/// Runs one session lifecycle operation on a blocking task.
-///
-/// Every one of them asks the daemon, which owns lifecycle/recovery
-/// serialization, and answers on the lifecycle channel whatever happens.
+/// Keeps client ownership until the daemon confirms lifecycle admission.
+pub(crate) struct LifecycleSubmission(
+    Arc<std::sync::Mutex<Option<mj_client::operations::CriticalOperationGuard>>>,
+);
+
+impl LifecycleSubmission {
+    pub(crate) async fn submit(
+        self,
+        client: &mut daemon::DaemonClient,
+        request: daemon::SessionLifecycleRequest,
+    ) -> Result<daemon::LifecycleReceipt> {
+        let receipt = client.start_session_lifecycle(request).await?;
+        self.release();
+        Ok(receipt)
+    }
+
+    fn release(&self) {
+        let guard = self
+            .0
+            .lock()
+            .expect("lifecycle submission ownership")
+            .take();
+        drop(guard);
+    }
+}
+
+/// Protect submission, then follow daemon-owned work without holding quit.
 pub(crate) fn spawn_lifecycle_operation(
     request: LifecycleOperationRequest,
     tracker: CriticalOperationTracker,
-    work: impl FnOnce(Arc<AtomicBool>) -> Result<LifecycleSuccess> + Send + 'static,
+    work: impl FnOnce(Arc<AtomicBool>, LifecycleSubmission) -> Result<LifecycleSuccess> + Send + 'static,
 ) {
     let LifecycleOperationRequest {
         session_id,
@@ -715,15 +738,26 @@ pub(crate) fn spawn_lifecycle_operation(
         cancelled,
         updates,
     } = request;
-    let guard = tracker.begin_cancellable(
+    let submission = LifecycleSubmission(Arc::new(std::sync::Mutex::new(Some(tracker.begin(
         format!(
-            "{} session {session_name}",
+            "submitting {} for session {session_name}",
             kind.label().to_ascii_lowercase()
         ),
-        cancelled.clone(),
-    );
-    tokio::task::spawn_blocking(move || {
-        let result = work(cancelled.clone()).map_err(|error| format!("{error:#}"));
+    )))));
+    tokio::spawn(async move {
+        let worker_cancelled = cancelled.clone();
+        // Failed or panicking submission must report its uncertainty before
+        // quit is released; successful submission releases at the receipt.
+        let worker_submission = LifecycleSubmission(Arc::clone(&submission.0));
+        let result =
+            match tokio::task::spawn_blocking(move || work(worker_cancelled, worker_submission))
+                .await
+            {
+                Ok(result) => result.map_err(crate::pollers::DashboardLifecycleFailure::from),
+                Err(error) => Err(crate::pollers::DashboardLifecycleFailure::Failed(format!(
+                    "session lifecycle operation task failed: {error}"
+                ))),
+            };
         report(
             "session lifecycle operation",
             &updates,
@@ -733,7 +767,7 @@ pub(crate) fn spawn_lifecycle_operation(
                 operation: cancelled.clone(),
             },
         );
-        drop(guard);
+        submission.release();
     });
 }
 
@@ -1444,7 +1478,7 @@ fn follow_daemon_creation(
         Ok::<_, anyhow::Error>(LifecycleSuccess::Created)
     })
     .and_then(|result| result)
-    .map_err(|error| format!("{error:#}"));
+    .map_err(crate::pollers::DashboardLifecycleFailure::from);
     report(
         operation,
         lifecycle_updates,

@@ -29,6 +29,10 @@ impl RuntimeState {
         {
             return Ok(());
         }
+        self.persist_suspension_intent(session_id).await
+    }
+
+    async fn persist_suspension_intent(self: &Arc<Self>, session_id: &str) -> Result<()> {
         blocking({
             let session_id = session_id.to_owned();
             let observer = self.recovery_observer.clone();
@@ -98,43 +102,55 @@ impl RuntimeState {
         acknowledge_unpublished_work: bool,
         ignore_nested_repositories: bool,
     ) -> Result<()> {
-        self.request_close(&session_id);
-        let result = self
-            .suspend_with_children(
-                &session_id,
+        let started = self
+            .start_suspend_session(
+                session_id,
                 acknowledge_unpublished_work,
                 ignore_nested_repositories,
             )
-            .await;
-        if let Err(error) = &result {
-            let reference = new_command_id("suspension").unwrap_or_else(|_| "suspension".into());
-            tracing::warn!(%session_id, %reference, error = format!("{error:#}"), "session suspension failed");
-            self.record_failed_close(&session_id, &reference, &LifecycleFailure::of(error))
-                .await;
-        }
-        self.clear_close_request(&session_id);
-        if result.is_err() {
-            self.tell_live_parent_about_stopped_subagents(&session_id)
-                .await;
-        }
-        result
+            .await?;
+        Self::wait_lifecycle_result(started.result).await?;
+        Ok(())
     }
 
-    /// The parent's sub-agents are stopped inside its close, once its
-    /// checkpoint is verified (see [`Self::stop_subagents_for_suspend`]).
-    async fn suspend_with_children(
+    pub(super) async fn start_suspend_session(
         self: &Arc<Self>,
-        session_id: &str,
+        session_id: String,
         acknowledge_unpublished_work: bool,
         ignore_nested_repositories: bool,
-    ) -> Result<()> {
-        self.prepare_suspension(session_id).await?;
-        self.close_requested_session_with_ack(
-            session_id.to_owned(),
-            acknowledge_unpublished_work,
-            ignore_nested_repositories,
+    ) -> Result<StartedLifecycle> {
+        self.wait_before_close(&session_id).await?;
+        let control = LifecycleControl::default();
+        let key =
+            serde_json::to_string(&(acknowledge_unpublished_work, ignore_nested_repositories))?;
+        let (accepted, acceptance) = tokio::sync::watch::channel(None);
+        self.admit_prepared_lifecycle(
+            session_id,
+            LifecycleKind::Suspend,
+            super::lifecycle::LifecycleStart::request(key, None, Some(control.clone())),
+            Some(acceptance),
+            move |state, session_id, _| async move {
+                let result = async {
+                    state.persist_suspension_intent(&session_id).await?;
+                    accepted.send_replace(Some(Ok(())));
+                    state
+                        .suspend_admitted(
+                            session_id.clone(),
+                            control,
+                            acknowledge_unpublished_work,
+                            ignore_nested_repositories,
+                        )
+                        .await
+                }
+                .await;
+                if result.is_err() {
+                    state
+                        .tell_live_parent_about_stopped_subagents(&session_id)
+                        .await;
+                }
+                result
+            },
         )
-        .await
     }
 
     /// Stop every active Mjolnir sub-agent of a parent whose suspend or
@@ -289,7 +305,7 @@ impl RuntimeState {
     ///
     /// A close admitted on a record already past this point started
     /// committed; a commit never reverts, so that one goes on.
-    fn commit_close(control: &LifecycleControl) -> Result<()> {
+    pub(super) fn commit_close(control: &LifecycleControl) -> Result<()> {
         ensure!(
             control.grant_commit() || control.is_committed(),
             "operation cancelled before the session began to stop"
@@ -449,38 +465,6 @@ impl RuntimeState {
             move |state, session_id, _cancelled| async move {
                 state
                     .suspend_admitted(session_id, control, true, false)
-                    .await
-            },
-        )?;
-        let completed = result.clone();
-        let outcome = Self::wait_lifecycle_result(result).await;
-        self.remove_completed_lifecycle(&completed);
-        outcome?;
-        Ok(())
-    }
-
-    async fn close_requested_session_with_ack(
-        self: &Arc<Self>,
-        session_id: String,
-        acknowledge_unpublished_work: bool,
-        ignore_nested_repositories: bool,
-    ) -> Result<()> {
-        self.wait_before_close(&session_id).await?;
-        let control = LifecycleControl::default();
-        let result = self.start_or_join_lifecycle_controlled(
-            session_id,
-            LifecycleKind::Suspend,
-            None,
-            None,
-            Some(control.clone()),
-            move |state, session_id, _cancelled| async move {
-                state
-                    .suspend_admitted(
-                        session_id,
-                        control,
-                        acknowledge_unpublished_work,
-                        ignore_nested_repositories,
-                    )
                     .await
             },
         )?;

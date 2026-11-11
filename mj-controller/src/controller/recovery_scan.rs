@@ -332,7 +332,7 @@ impl Controller {
         target_id: &str,
         confirmation: &str,
         all_instances: bool,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
         if confirmation != session_id {
             bail!("refusing destructive recovery: --confirm must exactly match the session ID");

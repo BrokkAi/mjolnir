@@ -642,6 +642,26 @@ pub(in crate::controller) fn failure_line(error: &anyhow::Error) -> String {
         .join(": ")
 }
 
+/// Retirement has closed launch admission and no longer needs graceful shutdown.
+pub(in crate::controller) fn fence_worker(
+    owner: &crate::worker_lifecycle::WorkerPermit,
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    worker_root: &str,
+) -> Result<()> {
+    ensure!(
+        targets::worker_root(locator, owner.session_id())? == worker_root,
+        "worker owner does not cover the selected root"
+    );
+    let script = targets::fence_worker_daemon_script(worker_root);
+    execute_checked(
+        executor,
+        targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
+            .purpose("kill retired Mjolnir worker forest"),
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod probe_tests {
     use super::*;

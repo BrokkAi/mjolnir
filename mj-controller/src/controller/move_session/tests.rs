@@ -3074,8 +3074,9 @@ fn quota_move_preserves_idle_active_goal_at_both_admission_gates() {
             .await
             .unwrap();
         let executor = RecordingProcessExecutor::default();
+        let admitted = std::sync::atomic::AtomicBool::new(false);
         let outcome = controller
-            .move_session_managed_controlled(
+            .move_session_managed_controlled_with_admission(
                 request,
                 Some((
                     "quota stopped".into(),
@@ -3083,8 +3084,33 @@ fn quota_move_preserves_idle_active_goal_at_both_admission_gates() {
                 )),
                 &executor,
                 &channels.control,
+                || {
+                    let durable = crate::database::load_move_operation(LATCH_RELAY_SESSION)
+                        .unwrap()
+                        .unwrap();
+                    assert!(
+                        durable.accepted_preparation.is_some(),
+                        "acceptance preceded the committed intent"
+                    );
+                    assert_eq!(
+                        durable.selection.profile_id.as_deref(),
+                        Some(IN_PLACE_DESTINATION_PROFILE)
+                    );
+                    assert_eq!(
+                        executor.move_stop_calls(),
+                        0,
+                        "source interruption preceded acceptance"
+                    );
+                    assert!(!admitted.swap(true, std::sync::atomic::Ordering::SeqCst));
+                },
             )
             .await;
+        if race == "idle" {
+            assert!(admitted.load(std::sync::atomic::Ordering::SeqCst));
+        }
+        if matches!(race.as_str(), "running" | "completed") {
+            assert!(!admitted.load(std::sync::atomic::Ordering::SeqCst));
+        }
         channels.shutdown.shutdown().await.unwrap();
         if race != "idle" {
             let error = match outcome {

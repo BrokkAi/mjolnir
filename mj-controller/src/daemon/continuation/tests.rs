@@ -1916,6 +1916,7 @@ fn an_appended_error_is_cut_on_a_character_boundary_within_the_worker_limit() {
 fn lifecycle_entry(kind: LifecycleKind) -> ActiveLifecycle {
     let (_completed, result) = tokio::sync::watch::channel(None);
     ActiveLifecycle {
+        acceptance: tokio::sync::watch::channel(Some(Ok(()))).1,
         move_operation_id: None,
         restart_intent: None,
         upgrade_work: Arc::new(Mutex::new(None)),

@@ -60,9 +60,6 @@ impl DashboardContext {
         self.cancel_chat_open();
         self.critical_operations.cancel_all();
         self.cancel_session_preflight();
-        for operation in self.lifecycle_operations.values() {
-            operation.cancelled.store(true, Ordering::Release);
-        }
         if let Some(active) = self.active_import.as_ref() {
             active.cancelled.store(true, Ordering::Release);
         }
