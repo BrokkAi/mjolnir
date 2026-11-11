@@ -16,6 +16,7 @@ To see it working: create a Nitro host, start a session on it with `mj new --tar
 - [ ] Milestone 1: host engine `mj-worker microvm` and guest agent, proven by hand on the spike host.
 - [ ] Milestone 2: `ssh_nitro` target kind in mj-core, mj-controller, mj-tui, with the breaking schema migration.
 - [ ] Milestone 3: `mj ec2 create --runtime nitro` host bootstrap; agent-dev image runs nested Podman without a host socket.
+- [ ] (2026-11-10) Milestone 3 host bootstrap and agent-dev nested Podman changes implemented; registration and image preload remain for integration with the parallel `ssh_nitro` target work. AWS-boundary fixtures cover the Nitro launch requests and bootstrap. Local image build is deferred because this sandbox's Podman runtime directory is read-only.
 - [ ] Milestone 4: integration and live acceptance on EC2.
 - [ ] Milestone 5: Firecracker jailer.
 - [ ] Milestone 6: storage-preserving image upgrade for Nitro sessions.
@@ -66,6 +67,8 @@ To see it working: create a Nitro host, start a session on it with `mj new --tar
 - Decision: New target kind `ssh_nitro` in config (`TargetTemplate::SshNitro`) and `ssh-nitro` in durable state (`TargetLocator::SshNitro`). Widening `session_targets.kind` is a breaking schema migration, following migration 98 (`ssh-apple-container`); no relay protocol bump.
   Rationale: older daemons treat unknown target kinds as impossible.
   Date/Author: 2026-11-10, lead.
+- Decision: Pin Firecracker v1.18.0 archives to the SHA-256 values from each upstream `firecracker-v1.18.0-<arch>.tgz.sha256.txt` release asset; pin crane v0.22.1 to its release `checksums.txt` asset. The checksums were verified against the downloaded Firecracker archives by the milestone lead.
+  Date/Author: 2026-11-10, milestone lead and implementer.
 - Decision: The daemon installs the host-architecture worker binary on the EC2 host with the same machinery it uses for `ssh_bare` hosts and invokes the engine from that path. The engine's on-disk state format and the guest-agent vsock protocol are versioned and stay readable by newer builds, because VMs and their agents outlive engine upgrades.
   Rationale: upgrades complete without user intervention (AGENTS.md).
   Date/Author: 2026-11-10, lead.

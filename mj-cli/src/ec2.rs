@@ -8,7 +8,7 @@ use std::process::{Command, Output};
 
 use anyhow::{Context, Result, bail, ensure};
 use base64::Engine;
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use mj_core::config::{
     Config, ContainerTemplate, Machine, SshConnection, TargetBuildCache, TargetTemplate,
     config_dir, config_path, validate_id,
@@ -53,6 +53,9 @@ struct AwsArgs {
 struct CreateArgs {
     /// EC2 instance type, for example c8id.16xlarge.
     instance_type: String,
+    /// Host runtime to install. Nitro hosts run workloads in isolated microVMs.
+    #[arg(long, value_enum, default_value_t = Ec2Runtime::Podman)]
+    runtime: Ec2Runtime,
     /// Availability zone, for example us-east-1a.
     #[arg(long)]
     zone: String,
@@ -83,6 +86,13 @@ struct CreateArgs {
     /// Print the created host as JSON. Progress still goes to stderr.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+enum Ec2Runtime {
+    #[default]
+    Podman,
+    Nitro,
 }
 
 #[derive(Debug, Args)]
@@ -331,6 +341,17 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
         .as_array()
         .and_then(|v| v.first())
         .context("AWS returned no instance type")?;
+    if args.runtime == Ec2Runtime::Nitro {
+        ensure!(
+            instance_type["NitroEnclavesSupport"] == "supported",
+            "{} does not support Nitro Enclaves; choose an EC2 instance type whose describe-instance-types response has NitroEnclavesSupport=\"supported\"",
+            args.instance_type
+        );
+        ensure!(
+            !args.zfs_cache,
+            "--zfs-cache is not available for Nitro hosts"
+        );
+    }
     let architecture = instance_type["ProcessorInfo"]["SupportedArchitectures"]
         .as_array()
         .context("instance type has no CPU architecture")?;
@@ -383,21 +404,38 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
         .as_str()
         .context("subnet has no ID")?;
     let vpc = subnets[0]["VpcId"].as_str().context("subnet has no VPC")?;
-    let parameter = cloud.call("ssm", &["get-parameter"], json!({"Name":format!("/aws/service/canonical/ubuntu/server/24.04/stable/current/{ami_arch}/hvm/ebs-gp3/ami-id")}))?;
+    let ssm_arch = if ami_arch == "amd64" {
+        "x86_64"
+    } else {
+        ami_arch
+    };
+    let parameter_name = match args.runtime {
+        Ec2Runtime::Podman => format!(
+            "/aws/service/canonical/ubuntu/server/24.04/stable/current/{ami_arch}/hvm/ebs-gp3/ami-id"
+        ),
+        Ec2Runtime::Nitro => {
+            format!("/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.18-{ssm_arch}")
+        }
+    };
+    let parameter = cloud.call("ssm", &["get-parameter"], json!({"Name":parameter_name}))?;
     let ami = parameter["Parameter"]["Value"]
         .as_str()
         .context("Ubuntu SSM parameter has no image ID")?;
-    let image = cloud.ec2(
-        "describe-images",
-        json!({"ImageIds":[ami],"Owners":["099720109477"]}),
-    )?;
-    let image = image["Images"]
-        .as_array()
-        .and_then(|v| v.first())
-        .context("image is not published by Canonical")?;
-    let root_device = image["RootDeviceName"]
-        .as_str()
-        .context("Ubuntu image has no root device")?;
+    let root_device = if args.runtime == Ec2Runtime::Podman {
+        let image = cloud.ec2(
+            "describe-images",
+            json!({"ImageIds":[ami],"Owners":["099720109477"]}),
+        )?;
+        image["Images"]
+            .as_array()
+            .and_then(|v| v.first())
+            .context("image is not published by Canonical")?["RootDeviceName"]
+            .as_str()
+            .context("Ubuntu image has no root device")?
+            .to_owned()
+    } else {
+        "/dev/xvda".to_owned()
+    };
     let cidr = match &args.ssh_cidr {
         Some(cidr) => cidr.clone(),
         None => {
@@ -447,12 +485,15 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
         )?;
         let key_name = format!("mj-ec2-{}", record.operation);
         cloud.ec2("import-key-pair", json!({"KeyName":key_name,"PublicKeyMaterial":base64::engine::general_purpose::STANDARD.encode(fs::read(directory.join("id_ed25519.pub"))?),"TagSpecifications":[tags(&record,"key-pair")]}))?;
-        let group = cloud.ec2("create-security-group", json!({"GroupName":key_name,"Description":format!("Mjolnir Podman host {}",record.target),"VpcId":vpc,"TagSpecifications":[tags(&record,"security-group")]}))?;
+        let group = cloud.ec2("create-security-group", json!({"GroupName":key_name,"Description":format!("Mjolnir {} host {}", if args.runtime == Ec2Runtime::Nitro { "Nitro" } else { "Podman" },record.target),"VpcId":vpc,"TagSpecifications":[tags(&record,"security-group")]}))?;
         let group_id = group["GroupId"]
             .as_str()
             .context("AWS returned no security group ID")?;
         cloud.ec2("authorize-security-group-ingress", json!({"GroupId":group_id,"IpPermissions":[{"IpProtocol":"tcp","FromPort":22,"ToPort":22,"IpRanges":[{"CidrIp":cidr}]}]}))?;
-        let bootstrap = bootstrap(local_nvme);
+        let bootstrap = match args.runtime {
+            Ec2Runtime::Podman => bootstrap(local_nvme),
+            Ec2Runtime::Nitro => nitro_bootstrap(ami_arch),
+        };
         let mut ebs = json!({
             "VolumeSize": args.disk_gib,
             "VolumeType": "gp3",
@@ -467,7 +508,7 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
         if let Some(iops) = args.disk_iops {
             ebs["Iops"] = iops.into();
         }
-        let launched = cloud.ec2("run-instances", json!({
+        let mut launch_request = json!({
             "ImageId":ami,"InstanceType":args.instance_type,"MinCount":1,"MaxCount":1,
             "KeyName":key_name,"ClientToken":record.operation,"Placement":{"AvailabilityZone":args.zone},
             "NetworkInterfaces":[{"DeviceIndex":0,"SubnetId":subnet_id,"Groups":[group_id],"AssociatePublicIpAddress":true,"DeleteOnTermination":true}],
@@ -475,7 +516,11 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
             "MetadataOptions":{"HttpTokens":"required","HttpEndpoint":"enabled"},
             "UserData":base64::engine::general_purpose::STANDARD.encode(bootstrap),
             "TagSpecifications":[tags(&record,"instance"),tags(&record,"volume")]
-        }))?;
+        });
+        if args.runtime == Ec2Runtime::Nitro {
+            launch_request["EnclaveOptions"] = json!({"Enabled":true});
+        }
+        let launched = cloud.ec2("run-instances", launch_request)?;
         let id = launched["Instances"][0]["InstanceId"]
             .as_str()
             .context("AWS launch response has no instance ID")?
@@ -492,24 +537,29 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
         let host = live["Reservations"][0]["Instances"][0]["PublicIpAddress"]
             .as_str()
             .context("instance has no public IPv4; use a public subnet")?;
-        let ssh = connection(&record, root, host)?;
+        let ssh = if args.runtime == Ec2Runtime::Nitro {
+            connection_for_user(&record, root, host, "ec2-user")?
+        } else {
+            connection(&record, root, host)?
+        };
         mj_controller::controller::wait_for_ec2_ssh(
             &mj_controller::targets::ProcessExecutor,
             &(&ssh).into(),
         )?;
-        let output = checked(
-            &mut ssh_command(
-                &ssh,
-                "cloud-init status --wait; status=$?; if [ \"$status\" -ne 0 ]; then sudo tail -100 /var/log/cloud-init-output.log; exit \"$status\"; fi; podman info --format '{{.Host.Security.Rootless}}'",
-            ),
-            &[],
-        )?;
-        ensure!(
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .any(|line| line.trim() == "true"),
-            "Podman did not report rootless operation"
-        );
+        let verify_command = if args.runtime == Ec2Runtime::Nitro {
+            "set -eu; version=$(uname -r | cut -d- -f1); printf '%s\\n' \"$version\" | awk -F. '{ if (($1*1000000+$2*1000+$3) < (6*1000000+18*1000+51)) exit 1 }' || { echo 'Nitro host kernel must be at least 6.18.51' >&2; exit 1; }; sudo dmesg | grep -F 'nitro_enclaves: CMA pool' || { echo 'Nitro Enclaves CMA pool was not initialized' >&2; exit 1; }"
+        } else {
+            "cloud-init status --wait; status=$?; if [ \"$status\" -ne 0 ]; then sudo tail -100 /var/log/cloud-init-output.log; exit \"$status\"; fi; podman info --format '{{.Host.Security.Rootless}}'"
+        };
+        let output = checked(&mut ssh_command(&ssh, verify_command), &[])?;
+        if args.runtime == Ec2Runtime::Podman {
+            ensure!(
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .any(|line| line.trim() == "true"),
+                "Podman did not report rootless operation"
+            );
+        }
         // Attach the persistent address after cloud-init's package downloads
         // finish, before publishing a host that can accept session launches.
         let address = cloud.ec2(
@@ -528,7 +578,11 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
             "associate-address",
             json!({"InstanceId":id,"AllocationId":allocation}),
         )?;
-        let ssh = connection(&record, root, host)?;
+        let ssh = if args.runtime == Ec2Runtime::Nitro {
+            connection_for_user(&record, root, host, "ec2-user")?
+        } else {
+            connection(&record, root, host)?
+        };
         mj_controller::controller::wait_for_ec2_ssh(
             &mj_controller::targets::ProcessExecutor,
             &(&ssh).into(),
@@ -542,12 +596,23 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
             workspace_prefix: mj_core::config::DEFAULT_WORKSPACE_PREFIX.into(),
             build_cache: cache,
         };
-        if local_nvme {
+        if local_nvme && args.runtime == Ec2Runtime::Podman {
             eprintln!("Installing mj's pinned mbx on the new host.");
             mj_controller::controller::install_mbx(
                 &machine,
                 &mj_controller::targets::ProcessExecutor,
             )?;
+        }
+        if args.runtime == Ec2Runtime::Nitro {
+            return register_nitro_host(
+                &record,
+                &ssh,
+                platform,
+                &id,
+                host,
+                &args,
+                &record.operation,
+            );
         }
         let image = mj_core::config::DEFAULT_CONTAINER_IMAGE;
         Config::update(|config| {
@@ -683,10 +748,19 @@ fn lock_target(root: &Path, target: &str) -> Result<mj_core::file_lock::FileLock
 }
 
 fn connection(record: &Record, root: &Path, host: &str) -> Result<SshConnection> {
+    connection_for_user(record, root, host, "ubuntu")
+}
+
+fn connection_for_user(
+    record: &Record,
+    root: &Path,
+    host: &str,
+    user: &str,
+) -> Result<SshConnection> {
     let directory = record.directory(root)?;
     Ok(SshConnection {
         host: host.into(),
-        user: Some("ubuntu".into()),
+        user: Some(user.into()),
         identity_file: Some(directory.join("id_ed25519")),
         extra_args: vec![
             "-o".into(),
@@ -998,6 +1072,65 @@ sudo -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 podman info --format '{{{{.Host.Se
     )
 }
 
+fn nitro_bootstrap(architecture: &str) -> String {
+    let release_arch = if architecture == "arm64" {
+        "aarch64"
+    } else {
+        "x86_64"
+    };
+    // Crane hashes are from the checksums.txt release asset for google/go-containerregistry v0.22.1.
+    // Firecracker hashes are from the matching firecracker-v1.18.0-<arch>.tgz.sha256.txt assets.
+    let (crane_hash, firecracker_hash) = if architecture == "arm64" {
+        (
+            "898c0cff975f898a33e8c4580bdafb0e7c02c7faa33374e946762f97c4ab7110",
+            "2a6130ff0338901ff9d7fbd73ce046c6b1c6123889dc84a34d678aa53bd0c0c2",
+        )
+    } else {
+        (
+            "0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0",
+            "1ac8eec866dd5eea14efecf6323e22b23eea24054545338a5b34bc5bca6623cd",
+        )
+    };
+    format!(
+        r#"#!/bin/bash
+set -euxo pipefail
+dnf install -y nftables e2fsprogs dracut git tar curl
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+curl -fL --retry 3 -o "$tmp/firecracker.tgz" https://github.com/firecracker-microvm/firecracker/releases/download/v1.18.0/firecracker-v1.18.0-{release_arch}.tgz
+echo '{firecracker_hash}  '"$tmp/firecracker.tgz" | sha256sum -c -
+tar -xzf "$tmp/firecracker.tgz" -C "$tmp"
+install -m 0755 "$tmp/release-v1.18.0-{release_arch}/firecracker-v1.18.0-{release_arch}" /usr/local/bin/firecracker
+install -m 0755 "$tmp/release-v1.18.0-{release_arch}/jailer-v1.18.0-{release_arch}" /usr/local/bin/jailer
+curl -fL --retry 3 -o "$tmp/crane.tgz" https://github.com/google/go-containerregistry/releases/download/v0.22.1/go-containerregistry_Linux_{crane_arch}.tar.gz
+echo '{crane_hash}  '"$tmp/crane.tgz" | sha256sum -c -
+tar -xzf "$tmp/crane.tgz" -C "$tmp" crane
+install -m 0755 "$tmp/crane" /usr/local/bin/crane
+grubby --update-kernel=ALL --args="nitro_enclaves.mempool=95%-1G"
+reboot
+"#,
+        crane_arch = if architecture == "arm64" {
+            "arm64"
+        } else {
+            "x86_64"
+        },
+    )
+}
+
+fn register_nitro_host(
+    _record: &Record,
+    _ssh: &SshConnection,
+    _platform: &str,
+    _instance_id: &str,
+    _public_ip: &str,
+    _args: &CreateArgs,
+    _operation: &str,
+) -> Result<Value> {
+    bail!(
+        "Nitro host bootstrap is complete, but ssh_nitro target registration and image preload are not wired yet"
+    )
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -1031,11 +1164,15 @@ elif op == 'describe-instances':
     response = {'Reservations':[{'Instances':instances}] if instances else [], 'Padding':'x'*70000}
 elif op == 'describe-instance-types':
     kind = {'ProcessorInfo':{'SupportedArchitectures':['x86_64']}}
+    if (root/'nitro').exists(): kind['NitroEnclavesSupport'] = 'supported'
     if (root/'nvme').exists(): kind['InstanceStorageInfo'] = {'TotalSizeInGB':3800,'NvmeSupport':'required'}
     response = {'InstanceTypes':[kind]}
 elif op == 'describe-subnets':
     response = {'Subnets':[{'SubnetId':'subnet-test','VpcId':'vpc-test','AvailabilityZone':'us-east-1a'}]}
-elif op == 'get-parameter': response = {'Parameter':{'Value':'ami-test'}}
+elif op == 'get-parameter':
+    if (root/'nitro').exists(): assert request['Name'] == '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.18-x86_64'
+    else: assert request['Name'] == '/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id'
+    response = {'Parameter':{'Value':'ami-test'}}
 elif op == 'describe-images':
     assert request['Owners'] == ['099720109477']
     response = {'Images':[{'RootDeviceName':'/dev/sda1'}]}
@@ -1060,7 +1197,17 @@ elif op == 'run-instances':
         assert 'Throughput' not in ebs and 'Iops' not in ebs
     import base64
     bootstrap = base64.b64decode(request['UserData']).decode()
-    if (root/'nvme').exists():
+    if (root/'nitro').exists():
+        assert request['EnclaveOptions'] == {'Enabled':True}
+        assert 'dnf install -y nftables e2fsprogs dracut git tar curl' in bootstrap
+        assert 'nitro_enclaves.mempool=95%-1G' in bootstrap
+        assert 'firecracker-v1.18.0-x86_64.tgz' in bootstrap
+        assert 'release-v1.18.0-x86_64/firecracker-v1.18.0-x86_64' in bootstrap
+        assert '1ac8eec866dd5eea14efecf6323e22b23eea24054545338a5b34bc5bca6623cd' in bootstrap
+        assert 'go-containerregistry_Linux_x86_64.tar.gz' in bootstrap
+        assert '0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0' in bootstrap
+        assert 'podman' not in bootstrap.lower() and 'zfs' not in bootstrap.lower()
+    elif (root/'nvme').exists():
         assert 'graphroot = "/mnt/nvme/podman"' in bootstrap
         assert 'mount_program = "/usr/bin/fuse-overlayfs"' in bootstrap
         assert 'Requires=mj-ec2-cache.service' in bootstrap
@@ -1147,7 +1294,7 @@ else:
             ("aws", AWS_FIXTURE),
             (
                 "ssh",
-                "#!/bin/sh\nfor remote_command do :; done\nexec sh -c \"$remote_command\"\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$MJ_EC2_FIXTURE_CHILD/ssh-calls\"\nfor remote_command do :; done\ncase \"$remote_command\" in *dmesg*) printf '6.18.56-126.188.amzn2023\\nnitro_enclaves: CMA pool: 49152 MiB reserved\\n' ;; *) exec sh -c \"$remote_command\" ;; esac\n",
             ),
             ("podman", PODMAN_FIXTURE),
             ("cloud-init", "#!/bin/sh\nprintf 'status: done\\n'\n"),
@@ -1181,6 +1328,7 @@ else:
     fn create_args() -> CreateArgs {
         CreateArgs {
             instance_type: "c8id.16xlarge".into(),
+            runtime: Ec2Runtime::Podman,
             zone: "us-east-1a".into(),
             name: Some("builder".into()),
             aws: AwsArgs::default(),
@@ -1340,6 +1488,66 @@ else:
             .position(|c| c["operation"] == "delete-security-group")
             .unwrap();
         assert!(terminated < removed);
+    }
+
+    #[test]
+    fn nitro_create_uses_enclave_ami_and_verified_bootstrap_before_registration() {
+        if fixture_child(
+            "ec2::tests::nitro_create_uses_enclave_ami_and_verified_bootstrap_before_registration",
+            None,
+        ) {
+            return;
+        }
+        let fixture = PathBuf::from(std::env::var_os("MJ_EC2_FIXTURE_CHILD").unwrap());
+        let bin = fixture.join("bin");
+        let root = config_dir().join("ec2");
+        fs::write(bin.join("nitro"), "").unwrap();
+        let mut args = create_args();
+        args.runtime = Ec2Runtime::Nitro;
+        let error = create(args, &root).unwrap_err();
+        assert!(format!("{error:#}").contains("registration and image preload are not wired yet"));
+
+        let calls: Vec<Value> = fs::read_to_string(bin.join("calls"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let launch = calls
+            .iter()
+            .find(|call| call["operation"] == "run-instances")
+            .unwrap();
+        assert_eq!(launch["request"]["EnclaveOptions"]["Enabled"], true);
+        let bootstrap = String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(launch["request"]["UserData"].as_str().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            bootstrap.contains("1ac8eec866dd5eea14efecf6323e22b23eea24054545338a5b34bc5bca6623cd")
+        );
+        assert!(bootstrap.contains("nitro_enclaves.mempool=95%-1G"));
+        assert!(
+            !calls
+                .iter()
+                .any(|call| call["operation"] == "describe-images")
+        );
+        let ssh_calls = fs::read_to_string(fixture.join("ssh-calls")).unwrap();
+        assert!(ssh_calls.contains("ec2-user@192.0.2.1"));
+        assert!(ssh_calls.contains("ec2-user@192.0.2.7"));
+        let record = records(&root).unwrap().pop().unwrap();
+        assert_eq!(record.instance_id.as_deref(), Some("i-test"));
+        assert!(!Config::load().unwrap().machines.contains_key("builder"));
+        assert!(
+            calls
+                .iter()
+                .any(|call| call["operation"] == "allocate-address")
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|call| call["operation"] == "associate-address")
+        );
     }
 
     #[test]
