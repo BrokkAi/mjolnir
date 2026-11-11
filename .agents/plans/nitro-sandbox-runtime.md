@@ -102,6 +102,9 @@ To see it working: create a Nitro host, start a session on it with `mj new --tar
 - Decision: `info --format json` keys are the contract for Milestone 2 preflight: `engine_version`, `engine_build`, `state_format`, `protocol_version`, `kernel_version`, `architecture`, `cpus`, `nitro_enclaves`, `memory_pool_total_mib`, `memory_pool_free_mib`, `memory_committed_mib`, `slots_in_use`, `slots_total`, `slots_enabled`, `firecracker_path`, `firecracker_version`, `crane_path`, `notes`. `--format` templates support `{{.A.B}}`, `{{json .A.B}}` and `{{index .Map "key"}}`; anything else fails naming the template.
   Rationale: the plan listed the facts but not their names; the Podman scripts in the controller use exactly those template forms.
   Date/Author: 2026-11-10, Milestone 1 implementer.
+- Decision: Engine lock order is VM, image, volumes in name order, global. `pull` holds the image lock from flattening through recording the reference; `run` holds the image lock until the root disk is cloned and every volume lock until the VM state that lists the volumes is written; `image prune` and `volume rm` decide under those same locks. A volume can be listed by only one VM, because two kernels writing one ext4 image would corrupt it. `pull` resolves a tag to a digest first and fetches the configuration and the filesystem by that digest. The module is compiled on Linux only.
+  Rationale: review of the first implementation found each of these as a race between two engine verbs or a hang; a single lock order makes them structurally impossible (AGENTS.md concurrency rule). Verified live: a read-only volume mounts read-only, `cp` with a missing source fails at once, a second VM on an attached volume is refused and leaves nothing.
+  Date/Author: 2026-11-10, Milestone 1 implementer.
 
 ## Outcomes & Retrospective
 
