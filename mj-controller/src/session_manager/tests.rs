@@ -1352,6 +1352,15 @@ fn leased_relay_child_serves_stdio() {
     let Some(root) = std::env::var_os(LEASED_RELAY_ROOT) else {
         return;
     };
+    let memory_protocol = {
+        let path = PathBuf::from(&root).join("memory-sync-protocol");
+        path.exists().then(|| {
+            std::fs::read_to_string(path)
+                .unwrap()
+                .parse::<u32>()
+                .unwrap()
+        })
+    };
     // With `--nocapture` libtest writes `test <name> ... ` without a
     // trailing newline before the body runs. End that line first so it
     // cannot glue itself onto the first protocol frame.
@@ -1454,7 +1463,7 @@ fn leased_relay_child_serves_stdio() {
             }
             let history = match &request.request {
                 RelayRequest::Hello { .. } => Some(RelayResponsePayload::Hello {
-                    negotiated: mj_core::relay::RELAY_PROTOCOL_VERSION,
+                    negotiated: memory_protocol.unwrap_or(mj_core::relay::RELAY_PROTOCOL_VERSION),
                     relay_version: "1.0.0".into(),
                     session_id: LEASED_RELAY_SESSION.into(),
                     worker_build: None,
@@ -1572,11 +1581,15 @@ fn leased_relay_child_serves_stdio() {
                 _ => None,
             };
             if let Some(payload) = history {
+                let protocol_version = match &payload {
+                    RelayResponsePayload::Hello { negotiated, .. } => *negotiated,
+                    _ => request.protocol_version,
+                };
                 mj_core::relay::write_relay_frame(
                     &mut output,
                     &RelayResponseEnvelope {
                         request_id: request.request_id,
-                        protocol_version: request.protocol_version,
+                        protocol_version,
                         body: RelayResponseBody::Ok { payload },
                     },
                 )
@@ -1697,7 +1710,18 @@ fn leased_relay_child_serves_stdio() {
                         },
                     }
                 } else {
-                    relay.handle(request)
+                    let wire_protocol = request.protocol_version;
+                    let mut request = request;
+                    if memory_protocol.is_some() {
+                        // This scoped peer speaks its advertised wire version,
+                        // while the in-process relay retains its strict current protocol.
+                        request.protocol_version = mj_core::relay::RELAY_PROTOCOL_VERSION;
+                    }
+                    let mut response = relay.handle(request);
+                    if memory_protocol.is_some() {
+                        response.protocol_version = wire_protocol;
+                    }
+                    response
                 };
             if starts_clear && std::env::var_os(CLEAR_MAILBOX_CONTROL).is_some() {
                 relay.claim_pending_commands(true).unwrap();
@@ -1919,16 +1943,31 @@ async fn retirement_ends_a_connect_that_never_answers() {
 #[tokio::test]
 async fn relay_attach_does_not_probe_or_install_project_memory() {
     if std::env::var_os(EXPLICIT_MEMORY_SYNC_TEST_CHILD).is_none() {
-        run_in_isolated_child(
-            EXPLICIT_MEMORY_SYNC_TEST_CHILD,
-            "relay_attach_does_not_probe_or_install_project_memory",
-        );
+        for protocol in [58, 59] {
+            let directory = tempfile::tempdir().unwrap();
+            IsolatedTest::new(exact_test_name(
+                "relay_attach_does_not_probe_or_install_project_memory",
+            ))
+            .env(EXPLICIT_MEMORY_SYNC_TEST_CHILD, protocol.to_string())
+            .env("MJ_DATA_DIR", directory.path())
+            .env("MJ_CONFIG_DIR", directory.path().join("config"))
+            .run();
+        }
         return;
     }
     // Alone in this child process, so it installs the one writer.
     let _writer = crate::database::install_isolated_test_writer();
     register_leased_relay_session();
     let relay_root = tempfile::tempdir().unwrap();
+    let protocol: u32 = std::env::var(EXPLICIT_MEMORY_SYNC_TEST_CHILD)
+        .unwrap()
+        .parse()
+        .unwrap();
+    std::fs::write(
+        relay_root.path().join("memory-sync-protocol"),
+        protocol.to_string(),
+    )
+    .unwrap();
     let canonical = tempfile::tempdir().unwrap();
     let mut target = leased_relay_target(relay_root.path());
     target.project_memory = Some(ProjectMemorySyncTarget {
@@ -1944,16 +1983,52 @@ async fn relay_attach_does_not_probe_or_install_project_memory() {
     );
 
     connection
+        .sync()
+        .await
+        .expect("ordinary polling must not probe memory");
+    let requests = std::fs::read_to_string(relay_root.path().join(RELAY_REQUEST_LOG)).unwrap();
+    assert!(
+        requests
+            .lines()
+            .all(|method| !method.contains("project_memory")),
+        "{requests}"
+    );
+
+    let result = connection
         .sync_project_memory(
             &mj_core::config::Config::default(),
             tokio_util::sync::CancellationToken::new(),
         )
-        .await
-        .expect("an explicit sync may detect a legacy memory endpoint");
-    assert!(
-        connection.project_memory.is_none(),
-        "the explicit sync reached the relay and disabled its unavailable endpoint"
-    );
+        .await;
+    if protocol == 58 {
+        result.expect("an explicit sync may detect a legacy memory endpoint");
+        assert!(
+            connection.project_memory.is_none(),
+            "legacy absent endpoint was disabled"
+        );
+    } else {
+        let error = result.expect_err("new transfer failures must remain visible");
+        assert_eq!(
+            error
+                .downcast_ref::<crate::worker_client::RelayRejected>()
+                .unwrap()
+                .0
+                .code,
+            mj_core::relay::RelayErrorCode::InvalidState
+        );
+        assert!(
+            connection.project_memory.is_some(),
+            "new transfer error must not disable memory"
+        );
+        let requests = std::fs::read_to_string(relay_root.path().join(RELAY_REQUEST_LOG)).unwrap();
+        assert_eq!(
+            requests
+                .lines()
+                .filter(|method| method.contains("project_memory"))
+                .collect::<Vec<_>>(),
+            ["project_memory_transfer"]
+        );
+    }
 }
 
 #[cfg(unix)]

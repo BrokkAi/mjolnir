@@ -945,6 +945,7 @@ fn export_spec_schema_mismatch_is_detected_from_the_parse_error() {
 }
 pub(crate) const LATCH_RELAY_ROOT: &str = "MJ_TEST_LATCH_RELAY_ROOT";
 pub(crate) const LATCH_RELAY_MAX_PROTOCOL: &str = "MJ_TEST_LATCH_RELAY_MAX_PROTOCOL";
+const LATCH_REJECT_PROJECT_MEMORY: &str = "MJ_TEST_LATCH_REJECT_PROJECT_MEMORY";
 pub(crate) const LATCH_RECORD_SUBAGENT_ADMISSION: &str = "MJ_TEST_LATCH_RECORD_SUBAGENT_ADMISSION";
 pub(crate) const LATCH_DROP_ADMISSION_CLOSE_REPLY: &str =
     "MJ_TEST_LATCH_DROP_ADMISSION_CLOSE_REPLY";
@@ -1052,9 +1053,16 @@ fn latch_relay_child_serves_stdio() {
     while let Some(request) =
         mj_core::relay::read_relay_frame(&mut reader).expect("read a relay request")
     {
+        if std::env::var_os(LATCH_REJECT_PROJECT_MEMORY).is_some() {
+            assert!(
+                !request.request.method_name().contains("project_memory"),
+                "idle worker upgrade must not require a project-memory transfer"
+            );
+        }
         let max_protocol = std::env::var(LATCH_RELAY_MAX_PROTOCOL)
             .ok()
-            .and_then(|value| value.parse::<u32>().ok());
+            .and_then(|value| value.parse::<u32>().ok())
+            .or(Some(mj_core::relay::RELAY_CHANGE_WAIT_PROTOCOL));
         let payload = match &request.request {
             mj_core::relay::RelayRequest::Hello { supported, .. } => {
                 let negotiated = max_protocol
@@ -1571,6 +1579,7 @@ pub(crate) fn latch_relay_target(
     for key in [
         "MJ_TEST_QUOTA_BARRIER_RACE",
         LATCH_RELAY_MAX_PROTOCOL,
+        LATCH_REJECT_PROJECT_MEMORY,
         LATCH_RECORD_SUBAGENT_ADMISSION,
         LATCH_DROP_ADMISSION_CLOSE_REPLY,
     ] {
@@ -1671,6 +1680,8 @@ async fn worker_upgrade_defers_a_busy_turn_and_keeps_steering_on_the_same_connec
         IsolatedTest::new(test_name)
             .env(LATCH_TEST_CHILD, "1")
             .env("MJ_INSTANCE", "upgrade-in-flight-test")
+            .env(LATCH_RELAY_MAX_PROTOCOL, "58")
+            .env(LATCH_REJECT_PROJECT_MEMORY, "1")
             .isolated_store(directory.path())
             .run();
         return;
@@ -1680,15 +1691,12 @@ async fn worker_upgrade_defers_a_busy_turn_and_keeps_steering_on_the_same_connec
     let starts = root.path().join("starts");
     crate::database::save_session(&checkpoint_test_session(LATCH_RELAY_SESSION)).unwrap();
     let channels = crate::session_manager::spawn_session_manager().unwrap();
-    channels
-        .targets
-        .send(vec![latch_relay_target(
-            root.path(),
-            Some(&starts),
-            ReleaseSupport::Supported,
-            true,
-        )])
-        .unwrap();
+    let mut target =
+        latch_relay_target(root.path(), Some(&starts), ReleaseSupport::Supported, true);
+    target.project_memory = Some(crate::session_manager::ProjectMemorySyncTarget {
+        canonical_root: root.path().join("memory"),
+    });
+    channels.targets.send(vec![target]).unwrap();
     let handle = channels
         .control
         .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
@@ -1721,6 +1729,7 @@ async fn worker_upgrade_defers_a_busy_turn_and_keeps_steering_on_the_same_connec
         .unwrap();
     handle.sync_now().await.unwrap();
     let snapshot = handle.view().snapshot.unwrap();
+    assert_eq!(snapshot.operational.relay_protocol_version, Some(58));
     assert!(snapshot.operational.checkpoint_barrier.is_none());
     assert_eq!(
         snapshot.operational.steering.as_ref().unwrap().command_id,
@@ -1844,6 +1853,8 @@ async fn worker_upgrade_reservation_releases_after_abandonment() {
         IsolatedTest::new(test_name)
             .env(LATCH_TEST_CHILD, "1")
             .env("MJ_INSTANCE", "upgrade-in-flight-test")
+            .env(LATCH_RELAY_MAX_PROTOCOL, "58")
+            .env(LATCH_REJECT_PROJECT_MEMORY, "1")
             .isolated_store(directory.path())
             .run();
         return;
@@ -1852,15 +1863,11 @@ async fn worker_upgrade_reservation_releases_after_abandonment() {
     let root = tempfile::tempdir().unwrap();
     crate::database::save_session(&checkpoint_test_session(LATCH_RELAY_SESSION)).unwrap();
     let channels = crate::session_manager::spawn_session_manager().unwrap();
-    channels
-        .targets
-        .send(vec![latch_relay_target(
-            root.path(),
-            None,
-            ReleaseSupport::Supported,
-            false,
-        )])
-        .unwrap();
+    let mut target = latch_relay_target(root.path(), None, ReleaseSupport::Supported, false);
+    target.project_memory = Some(crate::session_manager::ProjectMemorySyncTarget {
+        canonical_root: root.path().join("memory"),
+    });
+    channels.targets.send(vec![target]).unwrap();
     let handle = channels
         .control
         .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
@@ -1871,6 +1878,7 @@ async fn worker_upgrade_reservation_releases_after_abandonment() {
         .await
         .unwrap()
         .expect("idle worker");
+    assert_eq!(lease.protocol_version(), 58);
     assert!(lease.verify_for_upgrade().await.unwrap());
     drop(lease);
     wait_until_the_actor_is_safe_to_replace(&handle, HarnessKind::Codex).await;

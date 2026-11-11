@@ -5130,7 +5130,7 @@ for line in sys.stdin:
         raise AssertionError(method)
     print(json.dumps({"request_id": req["request_id"], "protocol_version": protocol, "result": "ok", "payload": payload}), flush=True)
 "#;
-    for protocol in [43, 44] {
+    for protocol in [43, 44, 58] {
         for response_compressed in [0, 1] {
             let spec = CommandSpec::new(
                 "python3",
@@ -5296,4 +5296,208 @@ for line in sys.stdin:
     assert!(retired.0.is_empty() && retired.1.is_empty());
     let unchanged = client.subagent_requests().await.unwrap();
     assert!(retired.0.ptr_eq(&unchanged.0) && retired.1.ptr_eq(&unchanged.1));
+}
+
+#[cfg(unix)]
+// Hard-won: #1500: a single project-memory file could exceed the relay frame on download or upload.
+#[tokio::test]
+async fn project_memory_transfer_pages_large_files_and_preserves_cas_and_cleanup() {
+    use mj_core::project_memory::{ProjectMemorySnapshot, ReplicaReplaceOutcome, TreeVersion};
+    let script = r#"
+import base64, gzip, json, pathlib, sys, time
+mode, size, marker = sys.argv[1], int(sys.argv[2]), pathlib.Path(sys.argv[3])
+alphabet = b'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+state, content = 7, bytearray(size)
+for i in range(size):
+    state = (state * 1664525 + 1013904223) & 0xffffffff
+    content[i] = alphabet[state >> 26]
+tree = {'files': {'/one-huge.md': content.decode()}}
+current = {'files': dict(tree['files'], **{'/delete.md': 'remove this'})}
+active, ident, injected = None, 0, False
+limit = 8 * 1024 * 1024
+for line in sys.stdin:
+    assert len(line.encode()) <= limit
+    req = json.loads(line)
+    method = req['request']['method']
+    if method == 'hello':
+        payload = {'type':'hello','data':{'negotiated':59,'relay_version':'memory-pages-peer','session_id':sys.argv[4]}}
+    else:
+        assert method == 'project_memory_transfer', 'new protocol must never use legacy requests'
+        action = req['request']['params']['action']
+        name, params = action['action'], action.get('params', {})
+        error = None
+        if name == 'begin_snapshot':
+            assert active is None
+            ident += 1
+            wire = {'gzip': base64.b64encode(gzip.compress(json.dumps(current['files']).encode())).decode()}
+            data = json.dumps({'baseline':wire,'replica':wire}).encode()
+            if mode == 'healthy': assert len(data) > limit
+            active = ('download', data)
+            result = {'action':'snapshot_started','data':{'transfer_id':ident,'total_bytes':len(data)}}
+        elif name == 'read_snapshot_page':
+            assert params['transfer_id'] == ident and active[0] == 'download'
+            offset = params['offset']
+            # Exact serialized response overhead plus newline determines the base64 capacity.
+            template = {'request_id':req['request_id'],'protocol_version':59,'result':'ok','payload':{'type':'project_memory_transfer','data':{'result':{'action':'snapshot_page','data':{'transfer_id':ident,'offset':offset,'next_offset':len(active[1]),'complete':False,'chunk':''}}}}}
+            capacity = 3 * ((limit - len(json.dumps(template).encode()) - 1) // 4)
+            chunk = active[1][offset:offset+capacity]
+            end = offset + len(chunk)
+            complete = end == len(active[1])
+            result = {'action':'snapshot_page','data':{'transfer_id':ident,'offset':offset,'next_offset':end,'complete':complete,'chunk':base64.b64encode(chunk).decode()}}
+            if complete: active = None
+        elif name == 'begin_upload':
+            assert active is None
+            ident += 1
+            if mode == 'healthy': assert params['total_bytes'] > limit
+            active = ('upload', bytearray(), params)
+            result = {'action':'upload_started','data':{'transfer_id':ident}}
+        elif name == 'append_upload':
+            assert params['transfer_id'] == ident and active[0] == 'upload'
+            assert params['offset'] == len(active[1])
+            if mode == 'cancel':
+                marker.write_text('append accepted')
+                sys.stdin.read()
+                sys.exit(0)
+            if mode in ('append_error', 'abort_error') and not injected:
+                injected = True
+                error = 'injected append refusal'
+            else:
+                active[1].extend(base64.b64decode(params['chunk']))
+                result = {'action':'upload_progress','data':{'transfer_id':ident,'next_offset':len(active[1])}}
+        elif name == 'commit_upload':
+            assert params['transfer_id'] == ident and active[0] == 'upload'
+            assert len(active[1]) == active[2]['total_bytes']
+            wire = json.loads(active[1])
+            incoming = {'files':json.loads(gzip.decompress(base64.b64decode(wire['gzip'])))}
+            assert incoming == tree
+            kind = active[2]['kind']
+            if kind['kind'] == 'install_snapshot':
+                current['files'].update(incoming['files'])
+                result = {'action':'installed'}
+            else:
+                assert kind['kind'] == 'replace_tree'
+                replaced = kind['params']['expected_replica'] == 'current'
+                if replaced: current = incoming
+                result = {'action':'replaced','data':{'outcome':'replaced' if replaced else 'replica_changed'}}
+            active = None
+        elif name == 'abort':
+            assert active is not None and params['transfer_id'] == ident
+            if mode == 'abort_error': error = 'injected abort refusal'
+            else:
+                active = None
+                result = {'action':'aborted','data':{'transfer_id':ident}}
+        else: raise AssertionError(name)
+        if error:
+            response = {'request_id':req['request_id'],'protocol_version':59,'result':'error','error':{'code':'invalid_state','message':error,'retryable':False}}
+            print(json.dumps(response), flush=True)
+            continue
+        payload = {'type':'project_memory_transfer','data':{'result':result}}
+    response = json.dumps({'request_id':req['request_id'],'protocol_version':59,'result':'ok','payload':payload})
+    assert len(response.encode()) + 1 <= limit
+    print(response, flush=True)
+"#;
+    for mode in ["healthy", "append_error", "abort_error", "cancel"] {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("append");
+        let size = if mode == "healthy" {
+            12 * 1024 * 1024
+        } else {
+            128 * 1024
+        };
+        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut state = 7u32;
+        let content: String = (0..size)
+            .map(|_| {
+                state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                alphabet[(state >> 26) as usize] as char
+            })
+            .collect();
+        let tree = ProjectMemorySnapshot {
+            files: BTreeMap::from([("/one-huge.md".into(), content)]),
+        };
+        let spec = CommandSpec::new(
+            "python3",
+            [
+                "-c".to_owned(),
+                script.to_owned(),
+                mode.to_owned(),
+                size.to_string(),
+                marker.to_string_lossy().into_owned(),
+                SESSION_ID.to_owned(),
+            ],
+        )
+        .purpose("paged project-memory protocol peer");
+        let mut client =
+            RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(30))
+                .await
+                .unwrap();
+        if mode == "healthy" {
+            let mut before = tree.clone();
+            before
+                .files
+                .insert("/delete.md".into(), "remove this".into());
+            assert_eq!(
+                client.project_memory_snapshot().await.unwrap(),
+                (before.clone(), before.clone())
+            );
+            client
+                .install_project_memory_snapshot(tree.clone())
+                .await
+                .unwrap();
+            assert_eq!(
+                client.project_memory_snapshot().await.unwrap(),
+                (before.clone(), before)
+            );
+            assert_eq!(
+                client
+                    .replace_project_memory_tree(TreeVersion("stale".into()), tree.clone())
+                    .await
+                    .unwrap(),
+                ReplicaReplaceOutcome::ReplicaChanged
+            );
+            assert_eq!(
+                client
+                    .replace_project_memory_tree(TreeVersion("current".into()), tree.clone())
+                    .await
+                    .unwrap(),
+                ReplicaReplaceOutcome::Replaced
+            );
+            assert_eq!(
+                client.project_memory_snapshot().await.unwrap(),
+                (tree.clone(), tree)
+            );
+        } else if mode == "cancel" {
+            {
+                let upload =
+                    client.replace_project_memory_tree(TreeVersion("current".into()), tree);
+                tokio::pin!(upload);
+                tokio::select! {
+                    result = &mut upload => panic!("upload completed before cancellation: {result:?}"),
+                    () = async { while !marker.exists() { tokio::time::sleep(Duration::from_millis(10)).await; } } => {}
+                }
+            }
+            assert!(client.abandoned.is_some());
+            assert!(client.input.is_none());
+        } else {
+            let error = client
+                .replace_project_memory_tree(TreeVersion("current".into()), tree.clone())
+                .await
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("injected append refusal"));
+            if mode == "abort_error" {
+                assert!(format!("{error:#}").contains("injected abort refusal"));
+                assert!(client.abandoned.is_some());
+                assert!(client.input.is_none());
+            } else {
+                assert!(client.abandoned.is_none());
+                assert_eq!(
+                    client
+                        .replace_project_memory_tree(TreeVersion("current".into()), tree)
+                        .await
+                        .unwrap(),
+                    ReplicaReplaceOutcome::Replaced
+                );
+            }
+        }
+    }
 }

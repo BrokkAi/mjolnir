@@ -133,7 +133,10 @@ pub const RELAY_STATE_DIGEST_PROTOCOL: u32 = 57;
 /// what the controller names, so the controller syncs on change instead of on
 /// a timer.
 pub const RELAY_CHANGE_WAIT_PROTOCOL: u32 = 58;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_CHANGE_WAIT_PROTOCOL;
+/// 59 adds paged, connection-only project-memory snapshot and replacement
+/// transfers so complete trees need not fit in one relay frame.
+pub const RELAY_PROJECT_MEMORY_TRANSFER_PROTOCOL: u32 = 59;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_PROJECT_MEMORY_TRANSFER_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

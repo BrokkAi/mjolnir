@@ -16,10 +16,11 @@ A session whose turn stopped at a provider quota limit should be able to switch 
 - [x] (2026-11-11) Corrected failed pre-stop retry classification; the regression proves a different profile stays in place with no workspace transfer.
 - [x] (2026-11-11) Changed the worker handshake budget to 60 seconds.
 - [x] (2026-11-11) Removed blocking recovery/upgrade result settlement from the serving loop; four focused publication/admission/lifecycle tests passed.
-- [ ] Diagnose the reported `d1af5b48` project-memory snapshot relay disconnect and resolve the proven cause if it lies in this path.
+- [x] (2026-11-11) Proved the `d1af5b48` disconnect is a project-memory response exceeding the relay frame limit; separated implementation into #1500 and `.agents/plans/chunk-project-memory-transfers.md`.
 - [x] (2026-11-11) With explicit user authorization, fast-forwarded the checkout by 80 upstream commits to 2fc7ec17b, preserving all in-progress edits.
 - [x] (2026-11-11) Reviewed the integrated changes; completed full core/controller suites with the sole older-fixture failure repaired and rerun, workspace clippy, formatting and diff checks.
-- [ ] Commit, complete push review, push to origin/master, and close the issue.
+- [x] (2026-11-11 16:16Z) Committed the validated changes, completed push review, merged upstream, and pushed d73304e73; issues #1498 and #1499 closed.
+- [x] (2026-11-11 16:27Z) Completed the explicitly requested installation with source and Git HEAD frozen throughout all builds. Ordinary installed CLI invocation handed off the live daemon, which reports build 2.70.0+d73304e7.
 
 ## Surprises & Discoveries
 
@@ -49,7 +50,7 @@ Decision: Bind the automatic preparation's opaque fingerprint to its original us
 
 ## Outcomes & Retrospective
 
-Implementation and validation are in progress. No installation is authorized by this task. The live disk expansion was completed before this plan; source changes do not require touching live sessions.
+Implementation, validation, push, and the subsequently authorized installation are complete. The live disk expansion was also completed. The remaining memory-size defect is tracked separately in #1500; the user requested its implementation and a second installation after this one.
 
 The result-publication change now keeps configuration-lock waits out of the serving loop. Upgrade failure settlement retains the existing per-session attempt and a named daemon admission through the durable write. Four focused tests passed, including actual Ping/Stop traffic while the configuration lock remains held and a real SQLite write-lock wait while another session proceeds. Log: `.mj/agents/4a58f6d94bc675fcf4acd5f24798cfc1/publication-tests-retry.log`.
 
@@ -57,7 +58,11 @@ The full admission regression now requires a completed Move, the destination pro
 
 Final validation: controller 2544 passed and 19 ignored, with one older native-source fixture initially failing because it supplied no pending quota recovery. That fixture now models a real quota-stopped live source and its focused rerun passed. Core 643 passed and 3 ignored; the three Jev scenario tests passed; documentation tests completed without failures. Workspace clippy passed after collapsing one nested conditional. Relevant logs are `consolidated-tests.log`, `consolidated-core-tests.log`, `consolidated-core-scenarios.log`, `consolidated-doctests.log`, and `consolidated-clippy-retry.log` in the publication agent's report directory, and `native-drain-fix2.log` in the Move agent's report directory. No full suite was repeated to confirm the fixture repair.
 
-The separate relay disconnect is now proven to be an oversized project-memory snapshot frame on morannon, tracked in #1500. Its transfer design is under investigation; raising the global frame cap would only postpone the failure.
+The separate relay disconnect is proven to be an oversized project-memory snapshot frame on morannon, tracked in #1500 and `.agents/plans/chunk-project-memory-transfers.md`. Raising the global frame cap would only postpone the failure.
+
+Push review completed against d73304e73. One P2 alleging quota recovery replacement during Move was declined: MoveMutationGuard owns lifecycle admission before execution; continuation claiming returns Claim::Move and the sole quota-recovery publisher checks that ownership before publishing. Already-prepared recovery also carries an exact expected relay cursor, which rejects a newer turn. The late-turn regression independently proves non-interrupting deferral. The review override was recorded before pushing.
+
+The normal release-profile installer completed all native and musl worker builds without source or Git changes, and installed matching worker compatibility stamps. An ordinary installed `mj sessions` invocation completed daemon handoff; `mj daemon status` reports pid 1646927, build 2.70.0+d73304e7, started 2026-11-11T16:27:39Z, and "This daemon runs this build."
 
 ## Context and Orientation
 
@@ -92,7 +97,7 @@ The quota Move regression must demonstrate successful same-environment automatic
 
 ## Idempotence and Recovery
 
-No database migration, protocol change, or live session mutation is planned. Regression fixtures own their private state. Source changes are reversible through version control. A failed validation leaves the checkout available for targeted repairs. Do not install the changes unless the user requests installation.
+No database migration or protocol change was required for this stage. Regression fixtures own their private state. Source changes are reversible through version control. A failed validation leaves the checkout available for targeted repairs. The user explicitly requested installation after push, then a second installation after fixing memory transport; the first installation is complete. Keep source and Git HEAD unchanged during each installer build so controller and worker identities agree.
 
 ## Artifacts and Notes
 
@@ -107,3 +112,5 @@ Revision note (2026-11-11): Initial plan records the confirmed cause, authorized
 Revision note (2026-11-11): Added the transfer-chooser defect and recovery ownership fix, and recorded explicit advance-merge authorization and completed fast-forward.
 
 Revision note (2026-11-11): Recorded the user's expanded recovery/upgrade publication scope and additional relay disconnect report, with confirmed evidence and the selected ownership fix.
+
+Revision note (2026-11-11): Recorded completed validation, push review, upstream merge, push, explicit installation authorization, successful daemon handoff, and the separate follow-up memory transport plan.

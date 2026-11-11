@@ -756,7 +756,7 @@ mod history_tests {
 }
 
 impl ProjectMemoryEndpoint {
-    fn new(config: Option<super::ProjectMemoryLaunchConfig>) -> Self {
+    pub(super) fn new(config: Option<super::ProjectMemoryLaunchConfig>) -> Self {
         Self {
             config,
             io: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -2142,6 +2142,7 @@ pub(super) async fn serve_client_with_memory(
     let mut reader = BufReader::new(reader);
     let mut checkpoint_barriers = BTreeSet::new();
     let mut subagent_feed = super::subagents::SubagentFeed::default();
+    let mut project_memory_transfer = ConnectionProjectMemoryTransfer::default();
     let serving_result = async {
         while let Some(line) =
             read_bounded_line(&mut reader, mj_core::relay::MAX_FRAME_BYTES).await?
@@ -2346,9 +2347,15 @@ pub(super) async fn serve_client_with_memory(
                 RelayRequest::ProjectMemorySnapshot
                     | RelayRequest::InstallProjectMemorySnapshot { .. }
                     | RelayRequest::ReplaceProjectMemoryTree { .. }
+                    | RelayRequest::ProjectMemoryTransfer { .. }
             ) {
                 let operation = envelope.request.method_name();
-                let response = project_memory_response(envelope, &project_memory).await;
+                let response = project_memory_response(
+                    envelope,
+                    &project_memory,
+                    &mut project_memory_transfer,
+                )
+                .await;
                 write_logged_response(&mut writer, &response, &session_id, operation).await?;
                 continue;
             }

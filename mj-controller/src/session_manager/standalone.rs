@@ -728,12 +728,16 @@ impl StandaloneSession {
         }
         let (baseline, replica) = match self.client.project_memory_snapshot().await {
             Ok(snapshot) => snapshot,
+            // Upgraded workers receive the current matching memory launch config.
+            // Transfer-state errors on their new transport must remain visible.
             Err(error)
-                if error
-                    .downcast_ref::<RelayRejected>()
-                    .is_some_and(|rejected| {
-                        rejected.0.code == mj_core::relay::RelayErrorCode::InvalidState
-                    }) =>
+                if self.client.protocol_version()
+                    < mj_core::relay::RELAY_PROJECT_MEMORY_TRANSFER_PROTOCOL
+                    && error
+                        .downcast_ref::<RelayRejected>()
+                        .is_some_and(|rejected| {
+                            rejected.0.code == mj_core::relay::RelayErrorCode::InvalidState
+                        }) =>
             {
                 tracing::warn!(
                     session_id = self.materialized.session_id,

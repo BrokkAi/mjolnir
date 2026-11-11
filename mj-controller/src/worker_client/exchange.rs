@@ -203,8 +203,12 @@ impl RelayClient {
             .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
     }
 
+    pub(super) fn request_id_for(&self, sequence: u64) -> String {
+        format!("relay-{:016x}-{sequence}", self.connection_nonce)
+    }
+
     pub(super) fn request_id(&mut self) -> String {
-        let id = format!("relay-{:016x}-{}", self.connection_nonce, self.next_request);
+        let id = self.request_id_for(self.next_request);
         self.next_request = self.next_request.wrapping_add(1);
         id
     }

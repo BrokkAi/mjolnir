@@ -83,6 +83,177 @@ impl ProjectMemoryWireTree {
     }
 }
 
+/// The complete connection-only project-memory snapshot transferred in
+/// protocol 59. Serializing this value once gives every page the same frozen
+/// baseline and replica, even if either tree changes while pages are read.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectMemoryWireSnapshot {
+    pub baseline: ProjectMemoryWireTree,
+    pub replica: ProjectMemoryWireTree,
+}
+
+impl ProjectMemoryWireSnapshot {
+    pub fn encode(
+        baseline: ProjectMemorySnapshot,
+        replica: ProjectMemorySnapshot,
+        protocol: u32,
+    ) -> Result<Vec<u8>> {
+        let snapshot = Self {
+            baseline: ProjectMemoryWireTree::encode(baseline, protocol)?,
+            replica: ProjectMemoryWireTree::encode(replica, protocol)?,
+        };
+        serde_json::to_vec(&snapshot).context("serialize project memory transfer snapshot")
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<(ProjectMemorySnapshot, ProjectMemorySnapshot)> {
+        let snapshot: Self =
+            serde_json::from_slice(bytes).context("parse project memory transfer snapshot")?;
+        Ok((snapshot.baseline.decode()?, snapshot.replica.decode()?))
+    }
+}
+
+/// Actions carried by the protocol-59 connection-only project-memory transfer
+/// method. `chunk` fields contain standard-base64 encoded serialized bytes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "action",
+    content = "params",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum ProjectMemoryTransferAction {
+    BeginSnapshot,
+    ReadSnapshotPage {
+        transfer_id: u64,
+        offset: u64,
+    },
+    BeginUpload {
+        kind: ProjectMemoryUploadKind,
+        total_bytes: u64,
+    },
+    AppendUpload {
+        transfer_id: u64,
+        offset: u64,
+        chunk: String,
+    },
+    CommitUpload {
+        transfer_id: u64,
+    },
+    Abort {
+        transfer_id: u64,
+    },
+}
+
+/// Semantics applied when a complete project-memory upload is committed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "params",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum ProjectMemoryUploadKind {
+    InstallSnapshot,
+    ReplaceTree { expected_replica: TreeVersion },
+}
+
+/// Results returned by protocol-59 project-memory transfer actions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "action",
+    content = "data",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum ProjectMemoryTransferResult {
+    SnapshotStarted {
+        transfer_id: u64,
+        total_bytes: u64,
+    },
+    SnapshotPage {
+        transfer_id: u64,
+        offset: u64,
+        next_offset: u64,
+        complete: bool,
+        chunk: String,
+    },
+    UploadStarted {
+        transfer_id: u64,
+    },
+    UploadProgress {
+        transfer_id: u64,
+        next_offset: u64,
+    },
+    Installed,
+    Replaced {
+        outcome: ReplicaReplaceOutcome,
+    },
+    Aborted {
+        transfer_id: u64,
+    },
+}
+
+/// Largest raw byte slice that fits in a protocol-59 append request, using
+/// the exact serialized envelope overhead and base64 expansion.
+pub fn project_memory_transfer_request_chunk_bytes(
+    protocol_version: u32,
+    request_id: &str,
+) -> Result<usize> {
+    let envelope = RelayRequestEnvelope {
+        request_id: request_id.to_owned(),
+        protocol_version,
+        request: RelayRequest::ProjectMemoryTransfer {
+            action: ProjectMemoryTransferAction::AppendUpload {
+                transfer_id: u64::MAX,
+                offset: u64::MAX,
+                chunk: String::new(),
+            },
+        },
+    };
+    transfer_chunk_capacity(&envelope)
+}
+
+/// Largest raw byte slice that fits in a protocol-59 snapshot-page response,
+/// using the exact serialized envelope overhead and base64 expansion.
+pub fn project_memory_transfer_response_chunk_bytes(
+    protocol_version: u32,
+    request_id: &str,
+) -> Result<usize> {
+    let envelope = RelayResponseEnvelope {
+        request_id: request_id.to_owned(),
+        protocol_version,
+        body: RelayResponseBody::Ok {
+            payload: RelayResponsePayload::ProjectMemoryTransfer {
+                result: ProjectMemoryTransferResult::SnapshotPage {
+                    transfer_id: u64::MAX,
+                    offset: u64::MAX,
+                    next_offset: u64::MAX,
+                    complete: false,
+                    chunk: String::new(),
+                },
+            },
+        },
+    };
+    transfer_chunk_capacity(&envelope)
+}
+
+fn transfer_chunk_capacity(envelope: &impl Serialize) -> Result<usize> {
+    // The base64 field is empty in the serialized template, so its encoded
+    // length can be added without JSON escaping. Include the newline because
+    // the worker's bounded reader counts it against the frame budget.
+    let overhead = serde_json::to_vec(envelope)?.len().saturating_add(1);
+    let remaining = MAX_FRAME_BYTES
+        .checked_sub(overhead)
+        .context("project memory transfer envelope exceeds relay frame budget")?;
+    let capacity = (remaining / 4) * 3;
+    anyhow::ensure!(
+        capacity > 0,
+        "project memory transfer envelope leaves no room for a chunk"
+    );
+    Ok(capacity)
+}
+
 /// A request on the new controller-to-relay boundary. ACP payloads remain ACP
 /// payloads; only durability and queue-control operations are Hel-specific.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -156,6 +327,11 @@ pub enum RelayRequest {
     ReplaceProjectMemoryTree {
         expected_replica: TreeVersion,
         tree: ProjectMemoryWireTree,
+    },
+    /// Transfer a frozen project-memory snapshot or a compare-and-replace tree
+    /// over bounded connection-only pages. Protocol 59.
+    ProjectMemoryTransfer {
+        action: ProjectMemoryTransferAction,
     },
     /// Connection-only CPU measurement; never journaled.
     CpuUsage,
@@ -402,6 +578,7 @@ impl RelayRequest {
             Self::ProjectMemorySnapshot => "project_memory_snapshot",
             Self::InstallProjectMemorySnapshot { .. } => "install_project_memory_snapshot",
             Self::ReplaceProjectMemoryTree { .. } => "replace_project_memory_tree",
+            Self::ProjectMemoryTransfer { .. } => "project_memory_transfer",
             Self::AttachmentPresent { .. } => "attachment_present",
             Self::InstallAttachment { .. } => "install_attachment",
             Self::ReadAttachment { .. } => "read_attachment",
@@ -471,6 +648,7 @@ impl RelayRequest {
             Self::InstallPromptContext { .. } => 3,
             Self::ProjectMemorySnapshot | Self::InstallProjectMemorySnapshot { .. } => 4,
             Self::ReplaceProjectMemoryTree { .. } => super::RELAY_PROJECT_MEMORY_REPLACE_PROTOCOL,
+            Self::ProjectMemoryTransfer { .. } => super::RELAY_PROJECT_MEMORY_TRANSFER_PROTOCOL,
             Self::Submit { command, .. } => command.minimum_protocol(),
             Self::Reviewer {
                 request:
@@ -787,6 +965,9 @@ pub enum RelayResponsePayload {
     ProjectMemorySnapshotInstalled,
     ProjectMemoryTreeReplaced {
         outcome: ReplicaReplaceOutcome,
+    },
+    ProjectMemoryTransfer {
+        result: ProjectMemoryTransferResult,
     },
     /// Fingerprint and freshness of a session's harness credentials. Neither
     /// value is secret.

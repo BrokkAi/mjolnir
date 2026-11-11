@@ -1,4 +1,58 @@
 use super::*;
+use mj_core::relay::{
+    ProjectMemoryTransferAction as MemoryAction, ProjectMemoryTransferResult as MemoryResult,
+};
+
+/// Owns a staged transfer until completion or an acknowledged abort. Dropping
+/// its future closes the input and invalidates the existing connection owner.
+struct ProjectMemoryTransfer<'a> {
+    client: Option<&'a mut RelayClient>,
+    id: u64,
+}
+
+impl ProjectMemoryTransfer<'_> {
+    async fn call(&mut self, action: MemoryAction) -> Result<MemoryResult> {
+        match self
+            .client
+            .as_mut()
+            .unwrap()
+            .call(RelayRequest::ProjectMemoryTransfer { action })
+            .await?
+        {
+            RelayResponsePayload::ProjectMemoryTransfer { result } => Ok(result),
+            _ => bail!("relay returned an unexpected project-memory transfer response"),
+        }
+    }
+
+    async fn abort(mut self, error: anyhow::Error) -> anyhow::Error {
+        match self
+            .call(MemoryAction::Abort {
+                transfer_id: self.id,
+            })
+            .await
+        {
+            Ok(MemoryResult::Aborted { transfer_id }) if transfer_id == self.id => {
+                self.client.take();
+                error
+            }
+            result => error.context(format!("abort project-memory transfer failed: {result:?}")),
+        }
+    }
+
+    fn complete(mut self) {
+        self.client.take();
+    }
+}
+
+impl Drop for ProjectMemoryTransfer<'_> {
+    fn drop(&mut self) {
+        if let Some(client) = self.client.take() {
+            client.abandoned =
+                Some("project-memory transfer was abandoned; reconnect the relay".into());
+            client.input.take();
+        }
+    }
+}
 
 impl RelayClient {
     pub async fn cpu_usage(&mut self) -> Result<Option<mj_core::cpu_usage::SessionCpuUsage>> {
@@ -410,6 +464,9 @@ impl RelayClient {
         mj_core::project_memory::ProjectMemorySnapshot,
         mj_core::project_memory::ProjectMemorySnapshot,
     )> {
+        if self.protocol_version >= mj_core::relay::RELAY_PROJECT_MEMORY_TRANSFER_PROTOCOL {
+            return self.download_project_memory().await;
+        }
         let request = RelayRequest::ProjectMemorySnapshot;
         match self.call(request).await? {
             RelayResponsePayload::ProjectMemorySnapshot { baseline, replica } => {
@@ -421,10 +478,193 @@ impl RelayClient {
         }
     }
 
+    async fn begin_memory_transfer(&mut self, action: MemoryAction) -> Result<MemoryResult> {
+        let mut transfer = ProjectMemoryTransfer {
+            client: Some(self),
+            id: 0,
+        };
+        let result = transfer.call(action).await;
+        if result.is_ok()
+            || result
+                .as_ref()
+                .is_err_and(|error| error.downcast_ref::<RelayRejected>().is_some())
+        {
+            transfer.complete();
+        }
+        result
+    }
+
+    async fn download_project_memory(
+        &mut self,
+    ) -> Result<(
+        mj_core::project_memory::ProjectMemorySnapshot,
+        mj_core::project_memory::ProjectMemorySnapshot,
+    )> {
+        let MemoryResult::SnapshotStarted {
+            transfer_id,
+            total_bytes,
+        } = self
+            .begin_memory_transfer(MemoryAction::BeginSnapshot)
+            .await?
+        else {
+            self.abandoned =
+                Some("invalid project-memory snapshot start; reconnect the relay".into());
+            self.input.take();
+            bail!("relay returned an unexpected project-memory snapshot start response");
+        };
+        let mut transfer = ProjectMemoryTransfer {
+            client: Some(self),
+            id: transfer_id,
+        };
+        let result = async {
+            let mut bytes = Vec::new();
+            let mut offset = 0u64;
+            loop {
+                let MemoryResult::SnapshotPage {
+                    transfer_id: page_id,
+                    offset: page_offset,
+                    next_offset,
+                    complete,
+                    chunk,
+                } = transfer
+                    .call(MemoryAction::ReadSnapshotPage {
+                        transfer_id,
+                        offset,
+                    })
+                    .await?
+                else {
+                    bail!("relay returned an unexpected project-memory page response");
+                };
+                let chunk = tokio::task::spawn_blocking(move || BASE64.decode(chunk))
+                    .await
+                    .context("decode project-memory page task failed")??;
+                anyhow::ensure!(
+                    page_id == transfer_id && page_offset == offset,
+                    "project-memory page identity or offset changed"
+                );
+                anyhow::ensure!(
+                    offset.checked_add(chunk.len() as u64) == Some(next_offset)
+                        && next_offset <= total_bytes,
+                    "project-memory page length is inconsistent"
+                );
+                anyhow::ensure!(
+                    complete == (next_offset == total_bytes) && (complete || next_offset > offset),
+                    "project-memory page did not advance to its declared end"
+                );
+                bytes.extend_from_slice(&chunk);
+                offset = next_offset;
+                if complete {
+                    return Ok(bytes);
+                }
+            }
+        }
+        .await;
+        let bytes = match result {
+            Ok(bytes) => {
+                transfer.complete();
+                bytes
+            }
+            Err(error) => return Err(transfer.abort(error).await),
+        };
+        tokio::task::spawn_blocking(move || {
+            mj_core::relay::ProjectMemoryWireSnapshot::decode(&bytes)
+        })
+        .await
+        .context("decode project-memory snapshot task failed")?
+    }
+
+    async fn upload_project_memory(
+        &mut self,
+        kind: mj_core::relay::ProjectMemoryUploadKind,
+        tree: mj_core::project_memory::ProjectMemorySnapshot,
+    ) -> Result<MemoryResult> {
+        let protocol = self.protocol_version;
+        let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+            Ok(serde_json::to_vec(
+                &mj_core::relay::ProjectMemoryWireTree::encode(tree, protocol)?,
+            )?)
+        })
+        .await
+        .context("encode project-memory upload task failed")??;
+        // The counter's type bounds the actual ID width for every page.
+        let chunk_bytes = mj_core::relay::project_memory_transfer_request_chunk_bytes(
+            protocol,
+            &self.request_id_for(u64::MAX),
+        )?;
+        let MemoryResult::UploadStarted { transfer_id } = self
+            .begin_memory_transfer(MemoryAction::BeginUpload {
+                kind,
+                total_bytes: bytes.len() as u64,
+            })
+            .await?
+        else {
+            self.abandoned =
+                Some("invalid project-memory upload start; reconnect the relay".into());
+            self.input.take();
+            bail!("relay returned an unexpected project-memory upload start response");
+        };
+        let mut transfer = ProjectMemoryTransfer {
+            client: Some(self),
+            id: transfer_id,
+        };
+        let result = async {
+            let mut offset = 0u64;
+            for chunk in bytes.chunks(chunk_bytes) {
+                let next = offset + chunk.len() as u64;
+                let chunk = BASE64.encode(chunk);
+                let MemoryResult::UploadProgress {
+                    transfer_id: upload_id,
+                    next_offset,
+                } = transfer
+                    .call(MemoryAction::AppendUpload {
+                        transfer_id,
+                        offset,
+                        chunk,
+                    })
+                    .await?
+                else {
+                    bail!("relay returned an unexpected project-memory upload progress response");
+                };
+                anyhow::ensure!(
+                    upload_id == transfer_id && next_offset == next,
+                    "project-memory upload offset changed"
+                );
+                offset = next_offset;
+            }
+            match transfer
+                .call(MemoryAction::CommitUpload { transfer_id })
+                .await?
+            {
+                outcome @ (MemoryResult::Installed | MemoryResult::Replaced { .. }) => Ok(outcome),
+                _ => bail!("relay returned an unexpected project-memory upload commit response"),
+            }
+        }
+        .await;
+        match result {
+            Ok(outcome) => {
+                transfer.complete();
+                Ok(outcome)
+            }
+            Err(error) => Err(transfer.abort(error).await),
+        }
+    }
+
     pub async fn install_project_memory_snapshot(
         &mut self,
         snapshot: mj_core::project_memory::ProjectMemorySnapshot,
     ) -> Result<()> {
+        if self.protocol_version >= mj_core::relay::RELAY_PROJECT_MEMORY_TRANSFER_PROTOCOL {
+            return match self
+                .upload_project_memory(
+                    mj_core::relay::ProjectMemoryUploadKind::InstallSnapshot,
+                    snapshot,
+                )
+                .await?
+            {
+                MemoryResult::Installed => Ok(()),
+                _ => bail!("relay returned an unexpected project-memory install terminal response"),
+            };
+        }
         let protocol = self.protocol_version;
         let snapshot = tokio::task::spawn_blocking(move || {
             mj_core::relay::ProjectMemoryWireTree::encode(snapshot, protocol)
@@ -451,6 +691,18 @@ impl RelayClient {
         expected_replica: mj_core::project_memory::TreeVersion,
         tree: mj_core::project_memory::ProjectMemorySnapshot,
     ) -> Result<mj_core::project_memory::ReplicaReplaceOutcome> {
+        if self.protocol_version >= mj_core::relay::RELAY_PROJECT_MEMORY_TRANSFER_PROTOCOL {
+            return match self
+                .upload_project_memory(
+                    mj_core::relay::ProjectMemoryUploadKind::ReplaceTree { expected_replica },
+                    tree,
+                )
+                .await?
+            {
+                MemoryResult::Replaced { outcome } => Ok(outcome),
+                _ => bail!("relay returned an unexpected project-memory replace terminal response"),
+            };
+        }
         let protocol = self.protocol_version;
         let tree = tokio::task::spawn_blocking(move || {
             mj_core::relay::ProjectMemoryWireTree::encode(tree, protocol)

@@ -353,9 +353,10 @@ where
     .await
 }
 
-pub(crate) async fn project_memory_response(
+pub(super) async fn project_memory_response(
     envelope: RelayRequestEnvelope,
     endpoint: &ProjectMemoryEndpoint,
+    transfer: &mut ConnectionProjectMemoryTransfer,
 ) -> RelayResponseEnvelope {
     let body = match endpoint.config.as_ref() {
         None => RelayResponseBody::Error {
@@ -369,17 +370,45 @@ pub(crate) async fn project_memory_response(
         Some(memory) => {
             let memory = memory.clone();
             let request = envelope.request.clone();
+            let request_id = envelope.request_id.clone();
+            let protocol_version = envelope.protocol_version;
+            let mut connection_transfer = std::mem::take(transfer);
             match run_serialized_project_memory_io(&endpoint.io, move || {
-                apply_project_memory_request(&memory, &request)
+                let result = match &request {
+                    RelayRequest::ProjectMemoryTransfer { action } => {
+                        apply_project_memory_transfer_request(
+                            &memory,
+                            &mut connection_transfer,
+                            action,
+                            &request_id,
+                            protocol_version,
+                        )
+                    }
+                    _ => apply_project_memory_request(&memory, &request),
+                };
+                Ok((result, connection_transfer))
             })
             .await
             {
-                Ok(Ok(payload)) => RelayResponseBody::Ok { payload },
+                Ok(Ok((result, connection_transfer))) => {
+                    *transfer = connection_transfer;
+                    match result {
+                        Ok(payload) => RelayResponseBody::Ok { payload },
+                        Err(error) => RelayResponseBody::Error {
+                            error: RelayProtocolError {
+                                code: RelayErrorCode::InvalidRequest,
+                                message: format!("{error:#}"),
+                                retryable: false,
+                                detail: None,
+                            },
+                        },
+                    }
+                }
                 Ok(Err(error)) => RelayResponseBody::Error {
                     error: RelayProtocolError {
-                        code: RelayErrorCode::InvalidRequest,
+                        code: RelayErrorCode::Internal,
                         message: format!("{error:#}"),
-                        retryable: false,
+                        retryable: true,
                         detail: None,
                     },
                 },
@@ -398,6 +427,271 @@ pub(crate) async fn project_memory_response(
         request_id: envelope.request_id,
         protocol_version: envelope.protocol_version,
         body,
+    }
+}
+
+#[derive(Default)]
+pub(super) struct ConnectionProjectMemoryTransfer {
+    next_transfer_id: u64,
+    active: ActiveProjectMemoryTransfer,
+}
+
+#[derive(Default)]
+enum ActiveProjectMemoryTransfer {
+    #[default]
+    None,
+    Download {
+        transfer_id: u64,
+        bytes: Vec<u8>,
+        next_offset: u64,
+    },
+    Upload {
+        transfer_id: u64,
+        kind: mj_core::relay::ProjectMemoryUploadKind,
+        total_bytes: u64,
+        bytes: Vec<u8>,
+    },
+}
+
+impl ConnectionProjectMemoryTransfer {
+    fn allocate_id(&mut self) -> Result<u64> {
+        let id = self
+            .next_transfer_id
+            .checked_add(1)
+            .context("project-memory transfer ID space exhausted for this connection")?;
+        self.next_transfer_id = id;
+        Ok(id)
+    }
+}
+
+fn apply_project_memory_transfer_request(
+    memory: &crate::worker_runtime::ProjectMemoryLaunchConfig,
+    transfer: &mut ConnectionProjectMemoryTransfer,
+    action: &mj_core::relay::ProjectMemoryTransferAction,
+    request_id: &str,
+    protocol_version: u32,
+) -> Result<RelayResponsePayload> {
+    use base64::Engine as _;
+    use mj_core::relay::{
+        ProjectMemoryTransferAction as Action, ProjectMemoryTransferResult as ResultKind,
+        ProjectMemoryUploadKind as UploadKind,
+    };
+
+    match action {
+        Action::BeginSnapshot => {
+            anyhow::ensure!(
+                matches!(&transfer.active, ActiveProjectMemoryTransfer::None),
+                "this connection already owns a project-memory transfer; abort it first"
+            );
+            let baseline = mj_core::project_memory::ProjectMemoryStore::new(&memory.baseline_root)
+                .snapshot()?;
+            let replica =
+                mj_core::project_memory::ProjectMemoryStore::new(&memory.root).snapshot()?;
+            let bytes = mj_core::relay::ProjectMemoryWireSnapshot::encode(
+                baseline,
+                replica,
+                protocol_version,
+            )?;
+            let total_bytes = u64::try_from(bytes.len())
+                .context("project-memory snapshot exceeds the transfer offset range")?;
+            let transfer_id = transfer.allocate_id()?;
+            transfer.active = ActiveProjectMemoryTransfer::Download {
+                transfer_id,
+                bytes,
+                next_offset: 0,
+            };
+            Ok(RelayResponsePayload::ProjectMemoryTransfer {
+                result: ResultKind::SnapshotStarted {
+                    transfer_id,
+                    total_bytes,
+                },
+            })
+        }
+        Action::ReadSnapshotPage {
+            transfer_id,
+            offset,
+        } => {
+            let ActiveProjectMemoryTransfer::Download {
+                transfer_id: active_id,
+                bytes,
+                next_offset,
+            } = &mut transfer.active
+            else {
+                anyhow::bail!("this connection has no project-memory snapshot transfer")
+            };
+            anyhow::ensure!(
+                transfer_id == active_id,
+                "project-memory snapshot transfer ID does not match this connection"
+            );
+            anyhow::ensure!(
+                offset == next_offset,
+                "project-memory snapshot page offset mismatch: expected {next_offset}, got {offset}"
+            );
+            let capacity = mj_core::relay::project_memory_transfer_response_chunk_bytes(
+                protocol_version,
+                request_id,
+            )?;
+            let start = usize::try_from(*offset)
+                .context("project-memory snapshot offset exceeds addressable memory")?;
+            let end = start.saturating_add(capacity).min(bytes.len());
+            let chunk = base64::engine::general_purpose::STANDARD.encode(&bytes[start..end]);
+            let next = u64::try_from(end)
+                .context("project-memory snapshot offset exceeds the transfer range")?;
+            let complete = end == bytes.len();
+            let id = *active_id;
+            *next_offset = next;
+            if complete {
+                transfer.active = ActiveProjectMemoryTransfer::None;
+            }
+            Ok(RelayResponsePayload::ProjectMemoryTransfer {
+                result: ResultKind::SnapshotPage {
+                    transfer_id: id,
+                    offset: *offset,
+                    next_offset: next,
+                    complete,
+                    chunk,
+                },
+            })
+        }
+        Action::BeginUpload { kind, total_bytes } => {
+            anyhow::ensure!(
+                matches!(&transfer.active, ActiveProjectMemoryTransfer::None),
+                "this connection already owns a project-memory transfer; abort it first"
+            );
+            usize::try_from(*total_bytes)
+                .context("project-memory upload exceeds addressable memory")?;
+            let transfer_id = transfer.allocate_id()?;
+            transfer.active = ActiveProjectMemoryTransfer::Upload {
+                transfer_id,
+                kind: kind.clone(),
+                total_bytes: *total_bytes,
+                bytes: Vec::new(),
+            };
+            Ok(RelayResponsePayload::ProjectMemoryTransfer {
+                result: ResultKind::UploadStarted { transfer_id },
+            })
+        }
+        Action::AppendUpload {
+            transfer_id,
+            offset,
+            chunk,
+        } => {
+            let ActiveProjectMemoryTransfer::Upload {
+                transfer_id: active_id,
+                total_bytes,
+                bytes,
+                ..
+            } = &mut transfer.active
+            else {
+                anyhow::bail!("this connection has no project-memory upload transfer")
+            };
+            anyhow::ensure!(
+                transfer_id == active_id,
+                "project-memory upload transfer ID does not match this connection"
+            );
+            let expected_offset = u64::try_from(bytes.len())
+                .context("project-memory upload offset exceeds the transfer range")?;
+            anyhow::ensure!(
+                *offset == expected_offset,
+                "project-memory upload offset mismatch: expected {expected_offset}, got {offset}"
+            );
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(chunk)
+                .context("decode project-memory upload chunk")?;
+            anyhow::ensure!(!decoded.is_empty(), "project-memory upload chunk is empty");
+            let new_len = bytes
+                .len()
+                .checked_add(decoded.len())
+                .context("project-memory upload length overflow")?;
+            anyhow::ensure!(
+                u64::try_from(new_len)? <= *total_bytes,
+                "project-memory upload exceeds its declared byte length"
+            );
+            bytes.extend_from_slice(&decoded);
+            Ok(RelayResponsePayload::ProjectMemoryTransfer {
+                result: ResultKind::UploadProgress {
+                    transfer_id: *active_id,
+                    next_offset: u64::try_from(new_len)?,
+                },
+            })
+        }
+        Action::CommitUpload { transfer_id } => {
+            let ActiveProjectMemoryTransfer::Upload {
+                transfer_id: active_id,
+                kind,
+                total_bytes,
+                bytes,
+            } = std::mem::take(&mut transfer.active)
+            else {
+                anyhow::bail!("this connection has no project-memory upload transfer")
+            };
+            if *transfer_id != active_id {
+                transfer.active = ActiveProjectMemoryTransfer::Upload {
+                    transfer_id: active_id,
+                    kind,
+                    total_bytes,
+                    bytes,
+                };
+                anyhow::bail!("project-memory upload transfer ID does not match this connection");
+            }
+            if u64::try_from(bytes.len())? != total_bytes {
+                transfer.active = ActiveProjectMemoryTransfer::Upload {
+                    transfer_id: active_id,
+                    kind,
+                    total_bytes,
+                    bytes,
+                };
+                anyhow::bail!("project-memory upload is incomplete");
+            }
+            let tree: mj_core::relay::ProjectMemoryWireTree =
+                serde_json::from_slice(&bytes).context("parse uploaded project-memory tree")?;
+            match kind {
+                UploadKind::InstallSnapshot => {
+                    apply_project_memory_request(
+                        memory,
+                        &RelayRequest::InstallProjectMemorySnapshot { snapshot: tree },
+                    )?;
+                    Ok(RelayResponsePayload::ProjectMemoryTransfer {
+                        result: ResultKind::Installed,
+                    })
+                }
+                UploadKind::ReplaceTree { expected_replica } => {
+                    let payload = apply_project_memory_request(
+                        memory,
+                        &RelayRequest::ReplaceProjectMemoryTree {
+                            expected_replica,
+                            tree,
+                        },
+                    )?;
+                    let RelayResponsePayload::ProjectMemoryTreeReplaced { outcome } = payload
+                    else {
+                        anyhow::bail!("project-memory replacement returned an unexpected result")
+                    };
+                    Ok(RelayResponsePayload::ProjectMemoryTransfer {
+                        result: ResultKind::Replaced { outcome },
+                    })
+                }
+            }
+        }
+        Action::Abort { transfer_id } => {
+            let active_id = match &transfer.active {
+                ActiveProjectMemoryTransfer::Download { transfer_id, .. }
+                | ActiveProjectMemoryTransfer::Upload { transfer_id, .. } => *transfer_id,
+                ActiveProjectMemoryTransfer::None => {
+                    anyhow::bail!("this connection has no project-memory transfer to abort")
+                }
+            };
+            anyhow::ensure!(
+                *transfer_id == active_id,
+                "project-memory transfer ID does not match this connection"
+            );
+            transfer.active = ActiveProjectMemoryTransfer::None;
+            Ok(RelayResponsePayload::ProjectMemoryTransfer {
+                result: ResultKind::Aborted {
+                    transfer_id: active_id,
+                },
+            })
+        }
     }
 }
 
