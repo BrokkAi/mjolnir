@@ -2770,13 +2770,12 @@ fn checkout_authentication_uses_real_git_without_persisting_the_token() {
             .iter()
             .find(|command| command.purpose == purpose)
             .unwrap()
-            .to_node_run(false)
     };
     assert_eq!(
-        clone("clone app").sensitive_stdin.as_deref(),
+        clone("clone app").sensitive_stdin(),
         Some(b"checkout-only-secret\n".as_slice())
     );
-    assert!(clone("clone libs/lib").sensitive_stdin.is_none());
+    assert!(clone("clone libs/lib").sensitive_stdin().is_none());
 }
 
 fn cutoff_bundle(reference: Option<&str>) -> ProjectBundleSpec {

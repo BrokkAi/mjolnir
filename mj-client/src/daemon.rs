@@ -689,12 +689,6 @@ pub enum DaemonAction {
     DeleteWorkspace {
         workspace_id: String,
     },
-    /// Turn this connection into a node connection (`mj_core::node`). After
-    /// the `Done` reply the daemon speaks HTTP/2 on it as the client and the
-    /// node serves.
-    NodeConnect {
-        node_id: String,
-    },
     /// Take or renew a client's attachment lease.
     Attach {
         client_id: String,
@@ -3001,7 +2995,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // reviewer capture actions no longer carry turn scope or baselines.
 // RuntimeSessionView carries policy-owned config keys; older strict readers reject them.
 // Terminal draft persistence carries per-client revisions and clear tombstones.
-pub const PROTOCOL_VERSION: u32 = 85;
+// The host node is gone: NodeConnect is no longer an action.
+pub const PROTOCOL_VERSION: u32 = 86;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

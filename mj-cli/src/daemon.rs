@@ -211,7 +211,6 @@ pub async fn connect_or_start() -> Result<DaemonClient> {
     if std::env::var_os(DEV_RESTART_STALE_DAEMON_ENV).is_none() {
         let shared = acquire_shared_start_guard(lock_path.clone()).await?;
         if let ExistingDaemon::Use(client) = inspect_existing_daemon(&shared).await? {
-            crate::node::ensure_node().await;
             return Ok(client);
         }
     }
@@ -494,6 +493,7 @@ pub(crate) fn daemon_runs_this_build(identity: &DaemonIdentity) -> Result<Option
 /// this computer, or a process in this instance's daemon container. Either way
 /// the result is a host PID the caller follows until the daemon answers.
 async fn launch_daemon(log_path: &Path) -> Result<LaunchedDaemon> {
+    retire_legacy_node();
     // An unreadable file is the daemon's to report: it refuses to start and
     // says why, which is the answer this launch then shows.
     let daemon = load_daemon_config().await.unwrap_or_default();
@@ -531,25 +531,18 @@ async fn launch_daemon(log_path: &Path) -> Result<LaunchedDaemon> {
                 .map(|metadata| metadata.len())
                 .unwrap_or(0);
             let executable = daemon_launch_executable()?;
-            // This launch owns the daemon's endpoint, so the node can find
-            // the daemon while it is still starting: startup recovery runs
-            // its commands on the node.
-            let endpoint = crate::node::NodeEndpoint {
-                address: free_loopback_address()?,
-                token: random_token()?,
-                build_version: mj_client::build_identity::this_build().published(),
-            };
-            crate::node::write_endpoint(&endpoint)?;
             let mut command = std::process::Command::new(executable);
             command
-                .env("MJ_DAEMON_LISTEN", endpoint.address.to_string())
-                .env("MJ_DAEMON_TOKEN", &endpoint.token)
                 .arg("daemon-run")
                 // This switch makes the invoking development client authoritative. It
                 // has no meaning inside the persistent daemon or its child processes.
                 .env_remove(DEV_RESTART_STALE_DAEMON_ENV);
             command.env_remove("MJ_UPGRADE_RESUME_FILE");
             command.env_remove(DAEMON_CONTAINER_ENV);
+            // A host daemon picks its own endpoint and token; only a container
+            // launcher chooses them.
+            command.env_remove("MJ_DAEMON_LISTEN");
+            command.env_remove("MJ_DAEMON_TOKEN");
             // The program runs through `/proc/self/exe` on Linux, which `ps`
             // would otherwise show as the daemon's name. `mj daemon-run` is
             // what a person looks for (launch finding R13-9); nothing reads
@@ -558,7 +551,6 @@ async fn launch_daemon(log_path: &Path) -> Result<LaunchedDaemon> {
             #[cfg(unix)]
             std::os::unix::process::CommandExt::arg0(&mut command, "mj");
             let pid = mj_core::subprocess::spawn_detached(&mut command, &log_path)?;
-            crate::node::spawn_node()?;
             Ok(LaunchedDaemon {
                 pid,
                 log_offset,
@@ -570,13 +562,22 @@ async fn launch_daemon(log_path: &Path) -> Result<LaunchedDaemon> {
     .context("spawn daemon task failed")?
 }
 
-/// A loopback port nothing listens on now. The daemon binds it moments later;
-/// if something else took it in between, the daemon fails to start and says
-/// which address was taken.
-fn free_loopback_address() -> Result<std::net::SocketAddr> {
-    let probe = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-        .context("find a free loopback port for the daemon")?;
-    probe.local_addr().context("read the free loopback port")
+/// Releases 2.66.0 through 2.70.x started an `mj node` beside every host
+/// daemon. That node exits when it loses its daemon and finds no
+/// `node-endpoint.json`, so removing the file here, after the old daemon is
+/// gone and before its replacement starts, retires it. Delete this once no
+/// supported upgrade starts from those releases.
+fn retire_legacy_node() {
+    let data = data_dir();
+    for name in ["node-endpoint.json", "node-id", "node.lock"] {
+        match fs::remove_file(data.join(name)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(%error, file = name, "could not remove a file of the retired node");
+            }
+        }
+    }
 }
 
 fn random_token() -> Result<String> {
@@ -1039,23 +1040,23 @@ pub struct RestartedDaemon {
 /// keep running.
 const RESTART_ATTEMPTS: usize = 2;
 
-/// Stop this instance and withdraw its node endpoint, including when the
-/// daemon is already absent. The startup lock owns the decision and the
-/// withdrawal together, so a concurrent launcher cannot lose its endpoint.
-/// Returns whether a running daemon was stopped.
+/// Stop this instance, including when the daemon is already absent. The
+/// startup lock is held throughout, so a stop cannot call the daemon absent
+/// while another client is still launching it. Returns whether a running
+/// daemon was stopped.
 pub(crate) async fn stop_instance() -> Result<bool> {
     mj_core::config::ensure_may_control_store(&data_dir(), "stop the Mjolnir daemon")?;
     let _startup = acquire_start_guard(data_dir().join("daemon-start.lock")).await?;
     let mut daemon = match connect_management().await {
         Ok(daemon) => daemon,
         Err(error) if daemon_not_running(&error).is_some() => {
-            crate::node::withdraw_endpoint();
+            retire_legacy_node();
             return Ok(false);
         }
         Err(error) => return Err(error.context("Mjolnir daemon is not answering")),
     };
     stop_and_wait(&mut daemon).await?;
-    crate::node::withdraw_endpoint();
+    retire_legacy_node();
     Ok(true)
 }
 
@@ -2219,23 +2220,18 @@ mod tests {
             .expect("a shared hold waited after the replacement ended")
             .unwrap();
     }
-    // Hard-won: cb94086a3: stop removed an endpoint while its launcher still held the startup lock.
+    // Hard-won: ab8be9d0a: stop decided the daemon was absent while a launcher still held the startup lock.
     #[tokio::test]
-    async fn stopping_an_absent_daemon_waits_for_its_launch_before_withdrawing_the_endpoint() {
+    async fn stopping_an_absent_daemon_waits_for_a_launch_in_progress() {
         const CHILD: &str = "MJ_TEST_STOP_WAITS_FOR_DAEMON_LAUNCH";
-        const TEST: &str = "daemon::tests::stopping_an_absent_daemon_waits_for_its_launch_before_withdrawing_the_endpoint";
+        const TEST: &str =
+            "daemon::tests::stopping_an_absent_daemon_waits_for_a_launch_in_progress";
         if crate::test_support::rerun_in_isolated_child(CHILD, TEST) {
             return;
         }
         let startup = acquire_start_guard(data_dir().join("daemon-start.lock"))
             .await
             .unwrap();
-        let endpoint = crate::node::NodeEndpoint {
-            address: "127.0.0.1:1".parse().unwrap(),
-            token: "isolated-launch".to_owned(),
-            build_version: this_build().published(),
-        };
-        crate::node::write_endpoint(&endpoint).unwrap();
         assert!(!metadata_path().exists());
         assert!(
             tokio::time::timeout(Duration::from_millis(150), stop_instance())
@@ -2243,15 +2239,8 @@ mod tests {
                 .is_err(),
             "stop must wait until the launcher finishes before deciding whether the daemon is absent"
         );
-        let bytes = fs::read(crate::node::endpoint_path()).unwrap();
-        assert_eq!(
-            serde_json::from_slice::<crate::node::NodeEndpoint>(&bytes).unwrap(),
-            endpoint,
-            "the starting daemon must retain its endpoint"
-        );
         drop(startup);
         assert!(!stop_instance().await.unwrap());
-        assert!(!crate::node::endpoint_path().exists());
     }
 
     /// The restart holds one guard across its stop and its start. That is only

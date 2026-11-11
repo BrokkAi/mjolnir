@@ -1088,8 +1088,8 @@ impl std::fmt::Display for SshRefusalPersisted {
 impl std::error::Error for SshRefusalPersisted {}
 
 /// What follows each refusal of one `ssh` command: the single owner of the
-/// retry decision, shared by the executors, the relay connect, the node, Move
-/// and the resource poller.
+/// retry decision, shared by the executors, the relay connect, Move and the
+/// resource poller.
 ///
 /// The command never ran, so it is safe to retry. A refused session on a
 /// shared master that another shard may still have room on retries at once:

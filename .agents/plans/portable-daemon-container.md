@@ -1,6 +1,6 @@
 # Run the daemon in a container that shares nothing with the host
 
-Superseded by `.agents/plans/container-native-daemon.md`. This plan made a host node the primary executor for local work, which conflicts with the container-native goal. Keep this file as history only.
+Superseded by `.agents/plans/container-native-daemon.md`. This plan made a host node the primary executor for local work, which conflicts with the container-native goal. Keep this file as history only. The node, its protocol and `HostFs` were removed on 2026-11-11; see the Decision Log of the superseding plan. Milestone 1 (clients no longer open the store, `Identity`, attachment leases, daemon-owned settings) remains.
 
 This ExecPlan is a living document. The sections `Progress`, `Surprises & Discoveries`, `Decision Log`, and `Outcomes & Retrospective` must be kept up to date as work proceeds. It follows `.agents/PLANS.md`. It supersedes `.agents/plans/daemon-in-container.md`, whose design this plan replaces; read that plan only for history.
 

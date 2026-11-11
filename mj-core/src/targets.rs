@@ -228,11 +228,6 @@ pub struct CommandSpec {
     /// environment, serialized plan, or debug representation.
     #[serde(skip)]
     sensitive_stdin: Option<SensitiveCommandInput>,
-    /// The command works on the daemon's own data (its checkpoint archives,
-    /// its store), so it runs where the daemon runs rather than on the node.
-    /// Executor-local, never serialized.
-    #[serde(skip)]
-    in_daemon: bool,
 }
 
 impl CommandSpec {
@@ -261,7 +256,6 @@ impl CommandSpec {
             ssh_session_probe: false,
             ssh_start_marker: false,
             sensitive_stdin: None,
-            in_daemon: false,
         }
     }
 
@@ -327,8 +321,8 @@ impl CommandSpec {
     ///
     /// An `ssh` command's remote line is prefixed to print [`SSH_START_MARKER`]
     /// first. The reader of its stdout must strip it and report the start to
-    /// the lease's [`StartGate`] (see [`SessionCommand::gate`]); the executors,
-    /// the node and `spawn_session_proxy` do. A command without a session
+    /// the lease's [`StartGate`] (see [`SessionCommand::gate`]); the executors
+    /// and `spawn_session_proxy` do. A command without a session
     /// request is returned unchanged. `executor` runs the master check and,
     /// when needed, the opener. `walk` is the command's walk across the
     /// connection's shards: a command that retries after a refusal passes the
@@ -420,17 +414,11 @@ impl CommandSpec {
         self
     }
 
-    pub(crate) fn sensitive_stdin(&self) -> Option<&[u8]> {
+    /// The command-owned input, for executors and test fakes.
+    pub fn sensitive_stdin(&self) -> Option<&[u8]> {
         self.sensitive_stdin
             .as_ref()
             .map(|input| input.0.as_slice())
-    }
-
-    /// Run where the daemon runs: the command reads or writes the daemon's own
-    /// data, which only the daemon can reach.
-    pub fn in_daemon(mut self) -> Self {
-        self.in_daemon = true;
-        self
     }
 }
 
@@ -591,122 +579,6 @@ impl SessionCommand<'_> {
     pub fn into_parts(self) -> (CommandSpec, Option<SshSessionLease>) {
         (self.command.into_owned(), self.lease)
     }
-}
-
-/// A [`CommandSpec`] as it travels to a node, carrying the executor-local
-/// fields that its own serialization leaves out. Only the node protocol uses
-/// this form; plans and stores keep the redacted one.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NodeRun {
-    pub spec: CommandSpec,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub arg0: Option<String>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub sensitive_output: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub preserve_children_on_cancel: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sensitive_stdin: Option<Vec<u8>>,
-    /// The caller streams stdin after the description; otherwise the child's
-    /// stdin is empty (or `sensitive_stdin`).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub streamed_stdin: bool,
-}
-
-impl std::fmt::Debug for NodeRun {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("NodeRun")
-            .field("spec", &self.spec)
-            .field("streamed_stdin", &self.streamed_stdin)
-            .finish_non_exhaustive()
-    }
-}
-
-impl CommandSpec {
-    /// The command with every field a node needs to run it exactly as this
-    /// process would. With streamed stdin, the caller supplies the body and
-    /// command-owned input is omitted from the description.
-    pub fn to_node_run(&self, streamed_stdin: bool) -> NodeRun {
-        let mut spec = self.clone();
-        // The spec never serializes this field. Drop its shared reference too:
-        // streaming callers keep the bytes at the source, outside the command.
-        spec.sensitive_stdin = None;
-        NodeRun {
-            spec,
-            #[cfg(unix)]
-            arg0: self.arg0.clone(),
-            #[cfg(not(unix))]
-            arg0: None,
-            sensitive_output: self.sensitive_output,
-            preserve_children_on_cancel: self.preserve_children_on_cancel,
-            sensitive_stdin: if streamed_stdin {
-                None
-            } else {
-                self.sensitive_stdin().map(<[u8]>::to_vec)
-            },
-            streamed_stdin,
-        }
-    }
-}
-
-impl NodeRun {
-    pub fn into_spec(self) -> CommandSpec {
-        let mut spec = self.spec;
-        #[cfg(unix)]
-        {
-            spec.arg0 = self.arg0;
-        }
-        spec.sensitive_output = self.sensitive_output;
-        spec.preserve_children_on_cancel = self.preserve_children_on_cancel;
-        spec.sensitive_stdin = self
-            .sensitive_stdin
-            .map(|input| SensitiveCommandInput(Arc::new(input)));
-        spec
-    }
-}
-
-/// Where this process's commands run. In the daemon that is its node, the
-/// process on the computer holding the user's files; everywhere else it is
-/// unset and commands run here. Installed once at daemon startup, so every
-/// executor in the daemon makes the same choice and none runs a command
-/// locally behind the node's back.
-pub trait CommandHost: Send + Sync {
-    /// Run `command` to completion with `input` as its stdin (or none),
-    /// abandoning it once `is_cancelled` turns true. Errors keep the text the
-    /// executing side gave them, so "operation cancelled" stays recognisable.
-    fn run(
-        &self,
-        command: &CommandSpec,
-        input: Option<&mut (dyn Read + Send)>,
-        is_cancelled: &(dyn Fn() -> bool + Sync),
-    ) -> Result<CommandOutput>;
-
-    /// Start `command` as a live stream: stdin, stdout and stderr flow while
-    /// it runs. Long-lived proxies run this way.
-    fn open_stream<'a>(
-        &'a self,
-        command: &CommandSpec,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<crate::node::NodeExec>> + Send + 'a>,
-    >;
-}
-
-static COMMAND_HOST: std::sync::OnceLock<Arc<dyn CommandHost>> = std::sync::OnceLock::new();
-
-/// Send every command this process runs to `host`. Only the daemon calls
-/// this, once, before it runs any command.
-pub fn install_command_host(host: Arc<dyn CommandHost>) -> Result<()> {
-    COMMAND_HOST
-        .set(host)
-        .map_err(|_| anyhow::anyhow!("a command host is already installed"))
-}
-
-/// The host that runs `command`, or `None` to run it in this process. Every
-/// caller that starts a process asks this, so none decides on its own.
-pub fn command_host(command: &CommandSpec) -> Option<&'static Arc<dyn CommandHost>> {
-    COMMAND_HOST.get().filter(|_| !command.in_daemon)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1174,25 +1046,11 @@ impl ProcessExecutor {
         command: &CommandSpec,
         gate: Option<&Arc<StartGate>>,
     ) -> Result<CommandOutput> {
-        if gate.is_some() || command.sensitive_stdin.is_some() {
-            // A session that reports its start is read through the shared
-            // collector; with no cancellation it only ends when the child does.
-            return CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false)))
-                .run_once(command, gate);
-        }
-        let started = Instant::now();
-        let output = configured_command(command)
-            .stdin(Stdio::null())
-            .output()
-            .with_context(|| format!("run {} for {}", command.program, command.purpose))?;
-        let status = output.status.code().unwrap_or(-1);
-        Ok(finished_command(
-            command,
-            started,
-            status,
-            output.stdout,
-            output.stderr,
-        ))
+        // One path for both executors: the child gets its own process group,
+        // output is drained for a bounded time after it exits, and leftover
+        // descendants are killed. With no cancellation it only ends when the
+        // child does.
+        CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false))).run_once(command, gate)
     }
 }
 
@@ -1204,9 +1062,6 @@ impl CommandExecutor for ProcessExecutor {
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         crate::runtime::off_async_worker(|| {
             let _running = BlockingOperation::command(command);
-            if let Some(host) = command_host(command) {
-                return host.run(command, None, &|| false);
-            }
             with_ssh_refusal_retry(command, self, None, |command, gate| {
                 self.run_once(command, gate)
             })
@@ -1220,9 +1075,6 @@ impl CommandExecutor for ProcessExecutor {
     ) -> Result<CommandOutput> {
         crate::runtime::off_async_worker(|| {
             let _running = BlockingOperation::command(command);
-            if let Some(host) = command_host(command) {
-                return host.run(command, Some(input), &|| false);
-            }
             // The stream is not read until the session has started, so a
             // refused session is retried with the same stream. Plain process
             // execution is not cancellable, so a transfer only ends when the
@@ -1787,12 +1639,6 @@ impl CommandExecutor for CancellableProcessExecutor {
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         crate::runtime::off_async_worker(|| {
             let _running = BlockingOperation::command(command);
-            if let Some(host) = command_host(command) {
-                return self.describe_cancellation(
-                    command,
-                    host.run(command, None, &|| self.is_cancelled()),
-                );
-            }
             self.describe_cancellation(
                 command,
                 with_ssh_refusal_retry(
@@ -1814,9 +1660,6 @@ impl CommandExecutor for CancellableProcessExecutor {
             command,
             crate::runtime::off_async_worker(|| {
                 let _running = BlockingOperation::command(command);
-                if let Some(host) = command_host(command) {
-                    return host.run(command, Some(input), &|| self.is_cancelled());
-                }
                 // The stream is not read until the session has started, so a
                 // refused session is retried with the same stream. The child
                 // runs in its own process group so cancellation can kill the

@@ -187,7 +187,7 @@ pub(crate) mod fake {
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             assert_eq!(command.program, "security");
             assert!(command.sensitive_output, "a login passes through here");
-            let stdin = command.to_node_run(false).sensitive_stdin;
+            let stdin = command.sensitive_stdin().map(<[u8]>::to_vec);
             let mut state = self.state.lock().unwrap();
             state.calls.push((command.args.clone(), stdin.clone()));
             let status = |status| {

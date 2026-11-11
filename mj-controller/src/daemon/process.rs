@@ -42,13 +42,6 @@ pub async fn run_daemon_process() -> Result<()> {
     // no daemon state behind.
     let owner_pid = owner_pid_to_watch()?;
     let cancellation = crate::termination::Coordinator::install().token();
-    // A container-native daemon runs every command beside itself, inside its
-    // own container. A host daemon routes host work to the node. Tests that
-    // run a daemon in-process never reach this line.
-    if placement() == DaemonPlacement::Host {
-        crate::node_registry::install_command_host(cancellation.clone())?;
-        crate::node_registry::install_host_fs(cancellation.clone())?;
-    }
     let opening = Instant::now();
     let guard = ControllerStoreGuard::acquire()?;
     super::previous_daemon::report_unclean_previous_daemon();
@@ -57,7 +50,6 @@ pub async fn run_daemon_process() -> Result<()> {
     let epilogue_started = AtomicBool::new(false);
     let mut outcome = run_daemon_runtime(&epilogue_started, owner_pid, cancellation.clone()).await;
     cancellation.cancel();
-    crate::node_registry::registry().finish().await;
     if !epilogue_started.load(Ordering::Acquire) {
         // Initialization failed before the runtime-owned epilogue existed.
         // The same process-level bound still applies to closing the writer.
@@ -129,8 +121,9 @@ pub(super) async fn run_daemon_runtime(
         .await
         .context("earlier sessions' profile home link task failed")?;
     }
-    // The launcher may choose the endpoint and token, so it can hand them to
-    // the node before the daemon is ready; otherwise the daemon picks both.
+    // A container launcher chooses the endpoint and token, because it
+    // publishes the port and writes `daemon.json` itself; otherwise the daemon
+    // picks both.
     let listen = match mj_core::config::env_override("DAEMON_LISTEN") {
         Some(address) => address
             .parse::<SocketAddr>()
@@ -148,7 +141,7 @@ pub(super) async fn run_daemon_runtime(
         protocol_version: PROTOCOL_VERSION,
         pid: std::process::id(),
         address: listener.local_addr()?,
-        token: token.clone(),
+        token,
         started_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         // The version, with the revision and build times as semver build
         // metadata that older clients ignore; see `mj_client::build_identity`.
@@ -161,14 +154,6 @@ pub(super) async fn run_daemon_runtime(
         // `/proc`.
         placement: placement(),
     };
-    // Startup recovery can run commands, and commands run on the node, so the
-    // node has to be able to connect before this daemon is ready for clients.
-    let early_accept_stop = CancellationToken::new();
-    let early_accept = tokio::spawn(accept_nodes_while_starting(
-        listener,
-        token,
-        early_accept_stop.clone(),
-    ));
     let workspaces = tokio::task::spawn_blocking(crate::database::list_workspaces)
         .await
         .context("daemon workspace load task panicked")??;
@@ -672,10 +657,6 @@ pub(super) async fn run_daemon_runtime(
     // hook or the event loop, flows through the same bounded epilogue.
     let mut auto_afk = auto_afk::spawn(state.clone(), cancellation.clone());
     let mut auto_afk_outcome = None;
-    early_accept_stop.cancel();
-    let listener = early_accept
-        .await
-        .context("the startup node acceptor failed")?;
     let mut outcome = async {
         write_metadata(&daemon_metadata_path, &metadata)?;
         reach_test_hook("daemon_metadata_before_listening").await?;
@@ -722,7 +703,6 @@ pub(super) async fn run_daemon_runtime(
                     progress.phase(ServingPhase::IdleCheck);
                     state.prune_dead_clients();
                     if state.attachments().is_empty() {
-                        crate::node_registry::registry().dismiss_node_on_exit();
                         break;
                     }
                 }
@@ -732,7 +712,6 @@ pub(super) async fn run_daemon_runtime(
                         && !process_is_alive(owner)
                     {
                         tracing::info!(owner_pid = owner, "daemon owner process exited; shutting down");
-                        crate::node_registry::registry().dismiss_node_on_exit();
                         break;
                     }
                 }
@@ -1589,74 +1568,6 @@ pub(super) async fn refresh_runtime_controller(state: &RuntimeState) {
             error = format!("{error:#}"),
             "could not refresh daemon controller state"
         );
-    }
-}
-
-/// Accept node connections while the daemon starts, and nothing else: no
-/// client can use a daemon that has not published itself. Returns the
-/// listener once the daemon is ready to serve everyone on it.
-async fn accept_nodes_while_starting(
-    listener: TcpListener,
-    token: String,
-    stop: CancellationToken,
-) -> TcpListener {
-    let mut connections = tokio::task::JoinSet::new();
-    loop {
-        tokio::select! {
-            biased;
-            _ = stop.cancelled() => break,
-            accepted = listener.accept() => match accepted {
-                Ok((stream, _)) => {
-                    connections.spawn(serve_while_starting(stream, token.clone()));
-                }
-                Err(error) => tracing::warn!(%error, "could not accept a connection while starting"),
-            },
-            Some(joined) = connections.join_next(), if !connections.is_empty() => {
-                match joined {
-                    Ok(Err(error)) => tracing::debug!(error = format!("{error:#}"), "startup connection ended"),
-                    Err(error) => tracing::warn!(%error, "startup connection task failed"),
-                    Ok(Ok(())) => {}
-                }
-            }
-        }
-    }
-    // An adopted node lives in the registry; a refused client has its answer.
-    connections.detach_all();
-    listener
-}
-
-async fn serve_while_starting(mut stream: TcpStream, token: String) -> Result<()> {
-    let request: RequestEnvelope = read_frame(&mut stream).await?;
-    let request_id = request.request_id;
-    let protocol_version = request.protocol_version;
-    match request.action {
-        DaemonAction::NodeConnect { node_id }
-            if request.token == token && protocol_version == PROTOCOL_VERSION =>
-        {
-            write_response(
-                &mut stream,
-                ResponseEnvelope {
-                    protocol_version,
-                    request_id,
-                    result: Ok(DaemonReply::Done),
-                },
-            )
-            .await?;
-            crate::node_registry::registry()
-                .adopt(stream, node_id)
-                .await
-        }
-        _ => {
-            write_response(
-                &mut stream,
-                ResponseEnvelope {
-                    protocol_version,
-                    request_id,
-                    result: Err("the Mjolnir daemon is still starting".to_owned()),
-                },
-            )
-            .await
-        }
     }
 }
 

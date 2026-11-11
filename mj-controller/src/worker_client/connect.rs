@@ -119,9 +119,7 @@ impl RelayClient {
         handshake_timeout: Duration,
         walk: &mut mj_core::targets::SshWalk,
     ) -> std::result::Result<Self, ConnectFailure> {
-        // SSH that runs on the node is leased there, beside the connection
-        // it shares.
-        if spec.ssh_destination.is_none() || mj_core::targets::command_host(spec).is_some() {
+        if spec.ssh_destination.is_none() {
             return Self::spawn_and_handshake(
                 spec,
                 expected_session_id,

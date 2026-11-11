@@ -68,9 +68,6 @@ dirs = "6"
 # on the pure-Rust deflate without a C toolchain.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 getrandom = "0.3"
-# The node protocol: HTTP/2 streams over a connection the node opened.
-h2 = "0.4"
-http = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 imbl = { version = "7.0.2", features = ["serde"] }
 libc = "0.2"

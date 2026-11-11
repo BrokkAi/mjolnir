@@ -18,7 +18,6 @@ pub mod controller;
 pub mod desktop;
 pub mod doctor;
 pub(crate) mod handoff;
-mod host_fs;
 pub mod image;
 pub mod import;
 pub mod opencode_logins;
@@ -51,7 +50,6 @@ pub mod targets;
 pub mod termination;
 
 pub mod daemon;
-pub mod node_registry;
 pub mod pollers;
 pub(crate) mod project_memory_merge;
 pub mod server_runtime;

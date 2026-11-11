@@ -309,10 +309,7 @@ fn a_nitro_launch_keeps_referenced_environment_values_off_the_command_line() {
     assert!(line.contains("--preserve-env=API_KEY"), "{line}");
     assert!(line.contains("'--env' 'API_KEY'"), "{line}");
     assert!(line.contains("'--env' 'MODE=fast'"), "{line}");
-    assert_eq!(
-        run.to_node_run(false).sensitive_stdin.as_deref(),
-        Some(&b"sk-secret-value\n"[..])
-    );
+    assert_eq!(run.sensitive_stdin(), Some(&b"sk-secret-value\n"[..]));
 }
 
 fn container_target(image: &str, pull_policy: mj_core::config::ImagePullPolicy) -> ConfigContainer {

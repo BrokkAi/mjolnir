@@ -3298,11 +3298,8 @@ fn worker_changed_since_daemon_start(path: &Path, started_at: &str) -> Result<bo
     let started: SystemTime = chrono::DateTime::parse_from_rfc3339(started_at)
         .map_err(|error| anyhow::anyhow!("parse daemon start time {started_at:?}: {error}"))?
         .into();
-    let modified = crate::host_fs::metadata_sync(path)?
-        .modified_ms
-        .and_then(chrono::DateTime::from_timestamp_millis)
-        .ok_or_else(|| anyhow::anyhow!("read modification time of {}", path.display()))?;
-    Ok(SystemTime::from(modified) > started)
+    let modified = std::fs::metadata(path)?.modified()?;
+    Ok(modified > started)
 }
 
 /// The targets the build-cache and worker-binary checks cover: every target
@@ -3748,13 +3745,13 @@ impl ReviewResidue {
 pub(crate) fn review_residue(repository: &Path) -> ReviewResidue {
     let mut residue = ReviewResidue::default();
     let git_dir = repository.join(".git");
-    if crate::host_fs::metadata_sync(&git_dir).is_err() {
+    if !git_dir.exists() {
         return residue;
     }
     loose_refs(&git_dir.join("refs/hel"), "refs/hel", &mut residue.refs);
     loose_refs(&git_dir.join("refs/mj"), "refs/mj", &mut residue.refs);
     // A packed ref survives `git pack-refs`, which a `git gc` runs.
-    if let Ok(packed) = crate::host_fs::read_to_string_sync(&git_dir.join("packed-refs")) {
+    if let Ok(packed) = std::fs::read_to_string(git_dir.join("packed-refs")) {
         for line in packed.lines() {
             if let Some((_, reference)) = line.split_once(' ')
                 && (reference.starts_with("refs/hel/") || reference.starts_with("refs/mj/"))
@@ -3764,10 +3761,14 @@ pub(crate) fn review_residue(repository: &Path) -> ReviewResidue {
             }
         }
     }
-    if let Ok(entries) = crate::host_fs::list_sync(&git_dir) {
-        for entry in entries {
-            if entry.name.starts_with("hel-review-index-") {
-                residue.scratch_indexes.push(git_dir.join(entry.name));
+    if let Ok(entries) = std::fs::read_dir(&git_dir) {
+        for entry in entries.filter_map(Result::ok) {
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("hel-review-index-"))
+            {
+                residue.scratch_indexes.push(entry.path());
             }
         }
     }
@@ -3778,16 +3779,19 @@ pub(crate) fn review_residue(repository: &Path) -> ReviewResidue {
 
 /// Appends every loose ref stored under `directory`, named from `prefix`.
 fn loose_refs(directory: &Path, prefix: &str, refs: &mut Vec<String>) {
-    let Ok(entries) = crate::host_fs::list_sync(directory) else {
+    let Ok(entries) = std::fs::read_dir(directory) else {
         return;
     };
-    for entry in entries {
-        let reference = format!("{prefix}/{}", entry.name);
-        let path = directory.join(entry.name);
-        match crate::host_fs::metadata_sync(&path) {
-            Ok(metadata) if metadata.is_dir => loose_refs(&path, &reference, refs),
-            Ok(metadata) if metadata.is_file => refs.push(reference),
-            _ => {}
+    for entry in entries.filter_map(Result::ok) {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let reference = format!("{prefix}/{name}");
+        let path = entry.path();
+        if path.is_dir() {
+            loose_refs(&path, &reference, refs);
+        } else if path.is_file() {
+            refs.push(reference);
         }
     }
 }

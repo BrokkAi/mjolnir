@@ -378,31 +378,28 @@ async fn run_resource_command(
     command: &CommandSpec,
     walk: &mut crate::targets::SshWalk,
 ) -> Result<(CommandOutput, Option<crate::targets::SshSessionLease>)> {
-    // A remote probe the daemon runs itself is one session on a shared SSH
-    // connection; the lease is held until the probe has exited. A probe that
-    // runs on the node is leased, retried and stripped of the start marker
-    // there, beside the connection it shares.
-    let (command, ssh_session) =
-        if command.ssh_session.is_some() && crate::targets::command_host(command).is_none() {
-            let requested = command.clone();
-            let executor = crate::targets::CancellableProcessExecutor::with_timeout(
-                crate::targets::SSH_MASTER_OPEN_TIMEOUT,
-            );
-            let _cancel_preparation = executor.cancel_on_drop();
-            let mut walked = std::mem::take(walk);
-            let (prepared, walked) = tokio::task::spawn_blocking(move || {
-                let prepared = requested
-                    .open_ssh_session(&executor, &mut walked)
-                    .map(crate::targets::SessionCommand::into_parts);
-                (prepared, walked)
-            })
-            .await
-            .context("join the SSH session lease for a resource probe")?;
-            *walk = walked;
-            prepared?
-        } else {
-            (command.clone(), None)
-        };
+    // A remote probe is one session on a shared SSH connection; the lease is
+    // held until the probe has exited.
+    let (command, ssh_session) = if command.ssh_session.is_some() {
+        let requested = command.clone();
+        let executor = crate::targets::CancellableProcessExecutor::with_timeout(
+            crate::targets::SSH_MASTER_OPEN_TIMEOUT,
+        );
+        let _cancel_preparation = executor.cancel_on_drop();
+        let mut walked = std::mem::take(walk);
+        let (prepared, walked) = tokio::task::spawn_blocking(move || {
+            let prepared = requested
+                .open_ssh_session(&executor, &mut walked)
+                .map(crate::targets::SessionCommand::into_parts);
+            (prepared, walked)
+        })
+        .await
+        .context("join the SSH session lease for a resource probe")?;
+        *walk = walked;
+        prepared?
+    } else {
+        (command.clone(), None)
+    };
     let command = &command;
     let crate::streamed_child::ProxyStdio {
         mut child,

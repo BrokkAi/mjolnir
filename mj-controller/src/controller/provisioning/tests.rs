@@ -336,9 +336,9 @@ fn credential_free_container_creation_omits_runtime_token_environment() {
     assert!(run_args.iter().all(|arg| !arg.contains("runtime-secret")));
     assert!(run_args.iter().any(|arg| arg == "NON_SECRET_SETTING=keep"));
     for command in &plan.commands {
-        let input = command.to_node_run(false).sensitive_stdin;
+        let input = command.sensitive_stdin();
         if command.purpose.starts_with("clone ") {
-            assert_eq!(input.as_deref(), Some(b"checkout-secret\n".as_slice()));
+            assert_eq!(input, Some(b"checkout-secret\n".as_slice()));
         } else {
             assert!(input.is_none());
         }

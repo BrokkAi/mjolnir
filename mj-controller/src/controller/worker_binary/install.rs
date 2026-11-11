@@ -1368,7 +1368,6 @@ mod profile_archive_tests {
 
     struct SystemTar {
         streams: Cell<usize>,
-        host: mj_core::node::NodeCommandHost,
     }
     impl CommandExecutor for SystemTar {
         fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
@@ -1381,109 +1380,83 @@ mod profile_archive_tests {
         ) -> Result<CommandOutput> {
             self.streams.set(self.streams.get() + 1);
             let script = command.args.last().context("missing remote command")?;
-            use mj_core::targets::CommandHost;
-            self.host.run(
-                &CommandSpec::new("sh", ["-c", script]),
-                Some(input),
-                &|| false,
-            )
+            mj_core::targets::ProcessExecutor
+                .execute_with_stdin(&CommandSpec::new("sh", ["-c", script]), input)
         }
     }
 
     // Hard-won: #1483: recursive scp spent 162 seconds on a 17 MB profile.
     // Hard-won: #1187: BSD chmod treats -- after the mode as a filename.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn streamed_profile_roundtrips_through_system_tar_without_per_file_commands() {
-        let (daemon_side, node_side) = tokio::io::duplex(64 * 1024);
-        let server = tokio::spawn(mj_core::node::serve(node_side));
-        let (client, driver) = mj_core::node::NodeClient::handshake(daemon_side)
-            .await
-            .unwrap();
-        let driver = tokio::spawn(driver);
-        let (slot, receiver) = tokio::sync::watch::channel(Some(client));
-        let host = mj_core::node::NodeCommandHost::new(
-            receiver,
-            tokio::runtime::Handle::current(),
-            tokio_util::sync::CancellationToken::new(),
+    #[test]
+    fn streamed_profile_roundtrips_through_system_tar_without_per_file_commands() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("staged profile");
+        let nested = source.join("plugins/日本語");
+        fs::create_dir_all(&nested).unwrap();
+        // The production archive is over 8 MiB.
+        let mut payload = vec![0; 8 * 1024 * 1024 + 70_000];
+        getrandom::fill(&mut payload).unwrap();
+        fs::write(nested.join("tool data"), &payload).unwrap();
+        fs::set_permissions(nested.join("tool data"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::create_dir(source.join("empty")).unwrap();
+        fs::write(source.join(".credentials.json"), b"synthetic credentials").unwrap();
+        symlink("plugins/日本語/tool data", source.join("linked plugin")).unwrap();
+        let destination = temp.path().join("remote profile");
+        let executor = SystemTar {
+            streams: Cell::new(0),
+        };
+        upload_profile_archive(
+            &executor,
+            &SshTarget {
+                destination: "unused".into(),
+                ssh_args: vec![],
+            },
+            &source,
+            destination.to_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(executor.streams.get(), 1);
+        assert_eq!(
+            fs::read(destination.join("plugins/日本語/tool data")).unwrap(),
+            payload
         );
-        let checked = tokio::task::spawn_blocking(move || {
-            use std::os::unix::fs::{PermissionsExt, symlink};
-            let temp = tempfile::tempdir().unwrap();
-            let source = temp.path().join("staged profile");
-            let nested = source.join("plugins/日本語");
-            fs::create_dir_all(&nested).unwrap();
-            // The production archive is over 8 MiB; #1482 also reported failures
-            // near that size when data crossed a node. Exercise the real node path.
-            let mut payload = vec![0; 8 * 1024 * 1024 + 70_000];
-            getrandom::fill(&mut payload).unwrap();
-            fs::write(nested.join("tool data"), &payload).unwrap();
-            fs::set_permissions(nested.join("tool data"), fs::Permissions::from_mode(0o755))
-                .unwrap();
-            fs::create_dir(source.join("empty")).unwrap();
-            fs::write(source.join(".credentials.json"), b"synthetic credentials").unwrap();
-            symlink("plugins/日本語/tool data", source.join("linked plugin")).unwrap();
-            let destination = temp.path().join("remote profile");
-            let executor = SystemTar {
-                streams: Cell::new(0),
-                host,
-            };
-            upload_profile_archive(
-                &executor,
-                &SshTarget {
-                    destination: "unused".into(),
-                    ssh_args: vec![],
-                },
-                &source,
-                destination.to_str().unwrap(),
-            )
-            .unwrap();
-            assert_eq!(executor.streams.get(), 1);
-            assert_eq!(
-                fs::read(destination.join("plugins/日本語/tool data")).unwrap(),
-                payload
-            );
-            assert_eq!(
-                fs::read(destination.join("linked plugin")).unwrap(),
-                payload
-            );
-            assert!(
-                !destination
-                    .join("linked plugin")
-                    .symlink_metadata()
-                    .unwrap()
-                    .file_type()
-                    .is_symlink()
-            );
-            assert!(destination.join("empty").is_dir());
-            assert_eq!(
-                fs::read(destination.join(".credentials.json")).unwrap(),
-                b"synthetic credentials"
-            );
-            assert_eq!(
-                destination
-                    .join(".credentials.json")
-                    .metadata()
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o077,
-                0
-            );
-            assert_eq!(
-                destination
-                    .join("plugins/日本語/tool data")
-                    .metadata()
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o700
-            );
-        })
-        .await;
-        drop(slot);
-        driver.await.unwrap().unwrap();
-        server.await.unwrap().unwrap();
-        checked.unwrap();
+        assert_eq!(
+            fs::read(destination.join("linked plugin")).unwrap(),
+            payload
+        );
+        assert!(
+            !destination
+                .join("linked plugin")
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(destination.join("empty").is_dir());
+        assert_eq!(
+            fs::read(destination.join(".credentials.json")).unwrap(),
+            b"synthetic credentials"
+        );
+        assert_eq!(
+            destination
+                .join(".credentials.json")
+                .metadata()
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o077,
+            0
+        );
+        assert_eq!(
+            destination
+                .join("plugins/日本語/tool data")
+                .metadata()
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
     }
 }

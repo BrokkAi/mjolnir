@@ -18,7 +18,6 @@ mod go;
 mod hints;
 mod import;
 mod logging;
-mod node;
 mod pollers;
 mod session_presentation;
 mod simple;
@@ -104,9 +103,6 @@ enum Command {
     /// Internal persistent controller process.
     #[command(hide = true)]
     DaemonRun,
-    /// Internal process that runs the daemon's work on this computer.
-    #[command(hide = true)]
-    Node,
     /// Serve the Agent Client Protocol on standard input and output, running
     /// each session it creates through this daemon.
     Acp(acp::AcpArgs),
@@ -530,9 +526,9 @@ fn main() -> Result<()> {
     // child inherits it. This also covers `daemon-run`, which is this same
     // binary, so a per-instance daemon validates its own environment on boot.
     mj_core::config::apply_instance_flag(cli.instance.as_deref())?;
-    if matches!(cli.command, Some(Command::DaemonRun | Command::Node)) {
+    if matches!(cli.command, Some(Command::DaemonRun)) {
         // Set this before starting threads: the launcher's session checkout
-        // can be removed while the daemon or its sibling node is still running.
+        // can be removed while the daemon is still running.
         let home = mj_core::path_input::user_home()
             .context("locate the background process's home directory")?;
         std::env::set_current_dir(&home)
@@ -828,7 +824,7 @@ fn install_panic_logging() {
 /// short CLI invocations never push a long-running process's log out of it.
 fn process_kind(command: Option<&Command>) -> logging::ProcessKind {
     match command {
-        Some(Command::DaemonRun) | Some(Command::Node) => logging::ProcessKind::Daemon,
+        Some(Command::DaemonRun) => logging::ProcessKind::Daemon,
         None
         | Some(Command::Go(_))
         | Some(Command::Simple(_))
@@ -848,7 +844,6 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::DesktopBootstrap) => "desktop-bootstrap",
         Some(Command::Daemon(_)) => "daemon",
         Some(Command::DaemonRun) => "daemon-run",
-        Some(Command::Node) => "node",
         Some(Command::Acp(_)) => "acp",
         Some(Command::Doctor(_)) => "doctor",
         Some(Command::Ec2(_)) => "ec2",
@@ -1023,7 +1018,6 @@ async fn run_command(
         Some(Command::DaemonRun) => daemon::run_daemon_process()
             .await
             .map(|()| DashboardExit::Normal),
-        Some(Command::Node) => node::run_node().await.map(|()| DashboardExit::Normal),
         Some(Command::Acp(args)) => {
             let Some(workspace) = args.workspace.or(requested_workspace) else {
                 return Err(workspace_required("mj acp").await);

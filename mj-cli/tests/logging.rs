@@ -27,8 +27,7 @@ fn top_level_failure_is_written_to_a_private_per_run_log() {
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .collect::<Vec<_>>();
-    // The daemon's host node writes its own log too. Check the process we
-    // started rather than pinning the number of supporting processes.
+    // Check the process we started rather than pinning the number of logs.
     let daemon_start = format!("process_id={daemon_pid} command=\"daemon-run\"");
     assert!(
         logs.iter()
