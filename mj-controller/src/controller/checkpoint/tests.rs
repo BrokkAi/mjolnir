@@ -707,6 +707,7 @@ fn a_working_session_defers_but_close_waits_for_cancellation_before_recovery() {
         &snapshot,
         "checkpoint-1",
         BarrierBusyPolicy::DeferWhileRunning,
+        HarnessKind::Codex,
         false,
         false,
     )
@@ -728,6 +729,7 @@ fn a_working_session_defers_but_close_waits_for_cancellation_before_recovery() {
             &snapshot,
             "checkpoint-1",
             BarrierBusyPolicy::InterruptWhileRunning,
+            HarnessKind::Codex,
             false,
             false,
         )
@@ -737,6 +739,7 @@ fn a_working_session_defers_but_close_waits_for_cancellation_before_recovery() {
         &snapshot,
         "checkpoint-1",
         BarrierBusyPolicy::InterruptWhileRunning,
+        HarnessKind::Codex,
         true,
         true,
     )
@@ -762,6 +765,7 @@ fn a_working_session_defers_but_close_waits_for_cancellation_before_recovery() {
         &snapshot,
         "checkpoint-1",
         BarrierBusyPolicy::DeferWhileRunning,
+        HarnessKind::Codex,
         true,
         false,
     )
@@ -779,6 +783,7 @@ fn a_working_session_defers_but_close_waits_for_cancellation_before_recovery() {
         &snapshot,
         "checkpoint-1",
         BarrierBusyPolicy::DeferWhileRunning,
+        HarnessKind::Codex,
         true,
         false,
     )
@@ -1202,6 +1207,31 @@ fn latch_relay_child_serves_stdio() {
                 "checkpoint submitted before current ACP startup finished"
             );
         }
+        if std::env::var("MJ_TEST_QUOTA_BARRIER_RACE").as_deref() == Ok("1") {
+            if matches!(
+                &request.request,
+                mj_core::relay::RelayRequest::Submit {
+                    command: RelayCommand::BeginCheckpoint { .. },
+                    ..
+                }
+            ) {
+                relay
+                    .record_observation(mj_core::relay::RelayObservation::HarnessTurnStarted {
+                        started_at_ms: mj_core::clock::epoch_millis(),
+                    })
+                    .unwrap();
+            }
+            assert!(
+                !matches!(
+                    &request.request,
+                    mj_core::relay::RelayRequest::Submit {
+                        command: RelayCommand::CancelTurn,
+                        ..
+                    }
+                ),
+                "automatic quota Move cancelled new work"
+            );
+        }
         #[cfg(unix)]
         hold_named_relay_command(&request.request);
         // The harness keeps talking while a checkpoint barrier holds: this
@@ -1539,6 +1569,7 @@ pub(crate) fn latch_relay_target(
         spec.env.insert(LATCH_CHECKPOINT_ONLY.into(), "1".into());
     }
     for key in [
+        "MJ_TEST_QUOTA_BARRIER_RACE",
         LATCH_RELAY_MAX_PROTOCOL,
         LATCH_RECORD_SUBAGENT_ADMISSION,
         LATCH_DROP_ADMISSION_CLOSE_REPLY,

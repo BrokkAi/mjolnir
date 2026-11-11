@@ -172,6 +172,15 @@ impl RuntimeState {
         self: &Arc<Self>,
         selection: MoveSelection,
     ) -> Result<MovePreparation> {
+        self.prepare_move_session_for(selection, mj_core::activity::MovePurpose::Manual)
+            .await
+    }
+
+    async fn prepare_move_session_for(
+        self: &Arc<Self>,
+        selection: MoveSelection,
+        purpose: mj_core::activity::MovePurpose,
+    ) -> Result<MovePreparation> {
         let (source_harness, source_active, source_has_request_queue) = {
             let controller_owner = self.owner();
             let controller = controller_owner.controller();
@@ -223,7 +232,18 @@ impl RuntimeState {
             let mut operational = snapshot.operational;
             operational.queued_prompts.clear();
             operational.checkpoint_barrier = None;
-            preparation.active |= !operational.safe_to_replace(source_harness);
+            let purpose = if preparation.in_place && !preparation.cross_harness {
+                purpose
+            } else {
+                mj_core::activity::MovePurpose::Manual
+            };
+            preparation.active |= !operational.safe_to_move(source_harness, purpose);
+            if purpose == mj_core::activity::MovePurpose::QuotaRetry {
+                preparation.fingerprint = crate::controller::move_session::quota_move_fingerprint(
+                    &preparation.fingerprint,
+                    &operational,
+                )?;
+            }
         }
         Ok(preparation)
     }
@@ -234,18 +254,21 @@ impl RuntimeState {
         profile_id: &str,
     ) -> Result<MoveSessionRequest> {
         let preparation = self
-            .prepare_move_session(MoveSelection {
-                oracle: None,
-                oracle_choice: None,
-                session_id: session_id.to_owned(),
-                profile_id: Some(profile_id.to_owned()),
-                target_template_id: None,
-                workspace: Default::default(),
-                clear_resource_allocation: false,
-                additional_mounts: None,
-                resource_allocation: None,
-                subagents: None,
-            })
+            .prepare_move_session_for(
+                MoveSelection {
+                    oracle: None,
+                    oracle_choice: None,
+                    session_id: session_id.to_owned(),
+                    profile_id: Some(profile_id.to_owned()),
+                    target_template_id: None,
+                    workspace: Default::default(),
+                    clear_resource_allocation: false,
+                    additional_mounts: None,
+                    resource_allocation: None,
+                    subagents: None,
+                },
+                mj_core::activity::MovePurpose::QuotaRetry,
+            )
             .await?;
         let blockers: Vec<_> = [
             (!preparation.in_place, "the environment would change"),
@@ -924,5 +947,27 @@ mod admission_tests {
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+}
+
+#[cfg(test)]
+impl RuntimeState {
+    pub(crate) fn move_test_runtime(
+        controller: Controller,
+        manager: SessionManagerControl,
+    ) -> Arc<RuntimeState> {
+        let recovery = crate::recovery::RecoveryCoordinator::spawn(manager.clone());
+        let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
+            manager.clone(),
+            &recovery.observer(),
+        );
+        Arc::new(RuntimeState::new_with_controller_loader(
+            manager,
+            controller,
+            recovery.observer(),
+            upgrades.observer(),
+            Vec::new(),
+            Controller::load,
+        ))
     }
 }

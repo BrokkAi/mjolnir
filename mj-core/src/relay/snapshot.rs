@@ -957,6 +957,19 @@ impl RelayOperationalState {
         crate::activity::safe_to_replace(&self.facts(), harness)
     }
 
+    /// Move's purpose-specific interruption decision.
+    #[must_use]
+    pub fn safe_to_move(
+        &self,
+        harness: HarnessKind,
+        purpose: crate::activity::MovePurpose,
+    ) -> bool {
+        if purpose == crate::activity::MovePurpose::Manual {
+            return self.safe_to_replace(harness);
+        }
+        crate::activity::safe_to_move(&self.facts(), harness, purpose)
+    }
+
     /// Terminal startup failure; this worker cannot retry preparation in place.
     #[must_use]
     pub fn harness_preparation_failed(&self) -> bool {

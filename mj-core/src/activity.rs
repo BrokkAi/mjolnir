@@ -666,6 +666,24 @@ pub fn safe_to_replace(facts: &ActivityFacts, harness: HarnessKind) -> bool {
         && (harness != HarnessKind::Kimi || facts.background_work_known == Some(true))
 }
 
+/// Why a Move is being admitted. Quota retries preserve the durable goal in
+/// the same native conversation; ordinary Moves still warn about active goals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MovePurpose {
+    Manual,
+    QuotaRetry,
+}
+
+/// Shared interruption decision for Move preparation and source-lease validation.
+#[must_use]
+pub fn safe_to_move(facts: &ActivityFacts, harness: HarnessKind, purpose: MovePurpose) -> bool {
+    let mut preserved = facts.clone();
+    if purpose == MovePurpose::QuotaRetry {
+        preserved.goal_active = false;
+    }
+    safe_to_replace(&preserved, harness)
+}
+
 /// What keeps [`safe_to_replace`] false, one name per cause, so a caller that
 /// declines to replace a worker can say why. Empty exactly when
 /// [`safe_to_replace`] is true.

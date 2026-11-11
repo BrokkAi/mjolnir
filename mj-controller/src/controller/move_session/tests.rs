@@ -170,16 +170,24 @@ fn move_queue_relay_child() {
         let relay = relay.get_or_insert_with(|| {
             let mut relay = DurableRelay::open(&root, MOVE_QUEUE_SESSION_ID, "1.0.0")
                 .expect("open move queue test relay");
-            if crash_after_first && std::env::var(MOVE_QUEUE_GOAL).as_deref() == Ok("1") {
+            let goal_mode = std::env::var(MOVE_QUEUE_GOAL).unwrap_or_default();
+            if crash_after_first && matches!(goal_mode.as_str(), "1" | "active") {
                 relay.record_session_update(serde_json::from_value(serde_json::json!({
                     "sessionUpdate": "session_info_update",
                     "_meta": {
                         "mjGoalCapability": {"version": 1, "controlMethod": "_session/goal", "actions": ["resume", "pause"]},
-                        "goal": {"objective": "Finish the interrupted work", "status": "limited", "createdAt": 42,
+                        "goal": {"objective": "Finish the interrupted work", "status": if goal_mode == "active" { "active" } else { "limited" }, "createdAt": 42,
                             "controlMethod": "_session/goal", "limitReason": "usage"},
                         "execution": {"version": 1, "status": "idle"}
                     }
                 })).unwrap()).unwrap();
+            }
+            if crash_after_first && goal_mode == "active" {
+                relay.record_observation(mj_core::relay::RelayObservation::SessionConfigured { config_options: vec![] }).unwrap();
+                // Hard-won: #1498: quota-stopped active goals blocked automatic in-place Move.
+                let operational = relay.operational_state();
+                assert!(!operational.safe_to_move(HarnessKind::Codex, mj_core::activity::MovePurpose::Manual));
+                assert!(operational.safe_to_move(HarnessKind::Codex, mj_core::activity::MovePurpose::QuotaRetry), "{:?}", operational.facts());
             }
             relay
         });
@@ -835,11 +843,12 @@ fn move_queue_checkpoint(directory: &Path, session_id: &str) -> CheckpointMetada
 }
 
 #[cfg(unix)]
+// Hard-won: #1498: quota-stopped active goals blocked automatic in-place Move.
 #[test]
 fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store() {
     let short = "move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store";
     if std::env::var_os("MJ_MOVE_QUEUE_REPLAY_CHILD").is_none() {
-        for goal in ["0", "1"] {
+        for goal in ["0", "1", "active"] {
             let directory = tempfile::tempdir().unwrap();
             IsolatedTest::new(test_name(short))
                 .env("MJ_MOVE_QUEUE_REPLAY_CHILD", "1")
@@ -995,6 +1004,17 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
     );
     let reopened = DurableRelay::open(&worker_root, MOVE_QUEUE_SESSION_ID, "1.0.0").unwrap();
     let operational = reopened.operational_state();
+    // Hard-won: a turn starting after preparation must still block source replacement.
+    assert!(!operational.safe_to_move(
+        HarnessKind::Codex,
+        mj_core::activity::MovePurpose::QuotaRetry
+    ));
+    if std::env::var(MOVE_QUEUE_GOAL).as_deref() == Ok("active") {
+        assert!(
+            operational.goal.active(),
+            "quota Prompt preserves the active goal"
+        );
+    }
     if goal {
         assert!(operational.goal.running());
         assert!(!operational.goal.resumable_after_quota());
@@ -2932,6 +2952,257 @@ fn run_in_place_move(
         channels.shutdown.shutdown().await.unwrap();
         result
     })
+}
+
+#[cfg(unix)]
+// Hard-won: #1498: idle active goals blocked quota Move at preparation and source lease.
+#[test]
+fn quota_move_preserves_idle_active_goal_at_both_admission_gates() {
+    let name = test_name("quota_move_preserves_idle_active_goal_at_both_admission_gates");
+    if std::env::var_os("MJ_QUOTA_ACTIVE_ADMISSION_CHILD").is_none() {
+        for race in ["idle", "running", "completed", "barrier"] {
+            let directory = tempfile::tempdir().unwrap();
+            IsolatedTest::new(name.clone())
+                .env("MJ_QUOTA_ACTIVE_RACE", race)
+                .env(
+                    "MJ_TEST_QUOTA_BARRIER_RACE",
+                    if race == "barrier" { "1" } else { "0" },
+                )
+                .env("MJ_QUOTA_ACTIVE_ADMISSION_CHILD", "1")
+                .env(
+                    crate::controller::checkpoint::tests::LATCH_RELAY_JOURNALS_BEFORE_CLOSE,
+                    crate::controller::checkpoint::tests::LATE_HARNESS_NOTIFICATION,
+                )
+                .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+                .isolated_store(directory.path())
+                .run();
+        }
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+    let native = fixture
+        .worker_root
+        .join("profile/projects/fixture/native-session.jsonl");
+    fs::create_dir_all(native.parent().unwrap()).unwrap();
+    fs::write(
+        &native,
+        b"{\"type\":\"assistant\",\"message\":{\"content\":\"native history\"}}\n",
+    )
+    .unwrap();
+    fixture.controller.config.save().unwrap();
+    let source_relay = seed_source_relay(&fixture.worker_root);
+    let mut relay = DurableRelay::open(&source_relay, LATCH_RELAY_SESSION, "1.0.0").unwrap();
+    relay
+        .record_session_update(
+            serde_json::from_value(serde_json::json!({
+                "sessionUpdate":"session_info_update", "_meta": {
+                    "goal":{"objective":"Finish work", "status":"active", "createdAt":42},
+                    "execution":{"version":1,"status":"idle"}
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    seed_quota_recovery(&mut relay, "quota-user-turn");
+    drop(relay);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let channels = start_source_relay_manager(&source_relay);
+        channels
+            .control
+            .wait_for_session(LATCH_RELAY_SESSION, std::time::Duration::from_secs(5))
+            .await
+            .unwrap()
+            .sync_now()
+            .await
+            .unwrap();
+        let mut controller = fixture.controller;
+        let state = crate::daemon::RuntimeState::move_test_runtime(
+            Controller {
+                config: controller.config.clone(),
+                state: controller.state.clone(),
+            },
+            channels.control.clone(),
+        );
+        // A failed pre-stop Move owns no recovery state. A historical session
+        // checkpoint must not force a new profile selection through transfer.
+        let mut failed = in_place_operation(&controller, IN_PLACE_SOURCE_PROFILE);
+        failed.phase = MovePhase::Failed;
+        failed.error = Some("failed before stopping source".into());
+        crate::database::save_move_operation(&failed).unwrap();
+        let selection = in_place_operation(&controller, IN_PLACE_DESTINATION_PROFILE).selection;
+        let manual = state.prepare_move_session(selection).await.unwrap();
+        assert!(manual.active);
+        assert!(manual.in_place);
+        assert!(manual.workspace.is_none());
+        assert!(!manual.stops_subagents);
+        let request = state
+            .prepare_quota_move(LATCH_RELAY_SESSION, IN_PLACE_DESTINATION_PROFILE)
+            .await
+            .unwrap();
+        assert!(!request.preparation.active);
+        assert!(!request.acknowledge_interruption);
+        channels.shutdown.shutdown().await.unwrap();
+        let race = std::env::var("MJ_QUOTA_ACTIVE_RACE").unwrap();
+        if race == "running" || race == "completed" {
+            let mut relay =
+                DurableRelay::open(&source_relay, LATCH_RELAY_SESSION, "1.0.0").unwrap();
+            if race == "completed" {
+                seed_quota_recovery(&mut relay, "new-user-turn");
+            } else {
+                relay
+                    .record_observation(mj_core::relay::RelayObservation::HarnessTurnStarted {
+                        started_at_ms: mj_core::clock::epoch_millis(),
+                    })
+                    .unwrap();
+            }
+        }
+        let channels = start_source_relay_manager(&source_relay);
+        channels
+            .control
+            .wait_for_session(LATCH_RELAY_SESSION, std::time::Duration::from_secs(5))
+            .await
+            .unwrap()
+            .sync_now()
+            .await
+            .unwrap();
+        let executor = RecordingProcessExecutor::default();
+        let outcome = controller
+            .move_session_managed_controlled(
+                request,
+                Some((
+                    "quota stopped".into(),
+                    mj_core::state::QuotaMoveContinuation::Prompt,
+                )),
+                &executor,
+                &channels.control,
+            )
+            .await;
+        channels.shutdown.shutdown().await.unwrap();
+        if race != "idle" {
+            let error = match outcome {
+                Err(error) => format!("{error:#}"),
+                Ok(outcome) => {
+                    assert_eq!(outcome.outcome, "failed");
+                    outcome.error.unwrap()
+                }
+            };
+            let expected = match race.as_str() {
+                "running" => "superseded",
+                "completed" => "changed",
+                "barrier" => "working",
+                _ => unreachable!(),
+            };
+            assert!(format!("{error:#}").contains(expected), "{error:#}");
+            if race != "barrier" {
+                assert_eq!(executor.move_stop_calls(), 0);
+            }
+            return;
+        }
+        let outcome = outcome.unwrap();
+        assert_eq!(outcome.outcome, "completed", "{outcome:?}");
+        assert_eq!(
+            controller.state.sessions[LATCH_RELAY_SESSION].last_profile,
+            IN_PLACE_DESTINATION_PROFILE
+        );
+        assert_eq!(
+            fs::read(fixture.worker_root.join("build-cache.txt")).unwrap(),
+            b"warm cache"
+        );
+        assert!(
+            fs::read_to_string(&native)
+                .unwrap()
+                .contains("native history")
+        );
+        let moved = crate::database::load_move_operation(LATCH_RELAY_SESSION)
+            .unwrap()
+            .unwrap();
+        assert!(moved.in_place);
+        assert!(moved.workspace_transfer.is_none());
+        let archive = moved.restore_artifact().unwrap();
+        let verified =
+            mj_checkpoint::archive::verify_archive_streaming(&archive.archive_path).unwrap();
+        assert!(
+            verified
+                .canonical_session
+                .session
+                .configuration
+                .goal
+                .as_ref()
+                .unwrap()
+                .active()
+        );
+    });
+}
+
+#[cfg(unix)]
+fn seed_quota_recovery(relay: &mut DurableRelay, id: &str) {
+    fn submit(relay: &mut DurableRelay, id: &str, command: RelayCommand) {
+        let response = relay.handle(mj_core::relay::RelayRequestEnvelope {
+            request_id: id.into(),
+            protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+            request: RelayRequest::Submit {
+                command_id: id.into(),
+                command,
+            },
+        });
+        assert!(
+            matches!(response.body, mj_core::relay::RelayResponseBody::Ok { .. }),
+            "{response:?}"
+        );
+    }
+    submit(
+        relay,
+        id,
+        RelayCommand::Prompt {
+            prompt: mj_core::continuation::prompt_blocks(),
+        },
+    );
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed(
+            id,
+            mj_core::relay::RelayCommandOutcome::Prompt {
+                work_facts: None,
+                diagnostic: None,
+                stop_reason: "quota_limit".into(),
+                usage: None,
+            },
+        )
+        .unwrap();
+    if let Some(mut assessment) = relay.operational_state().assessment {
+        assessment.action = Some(mj_core::assessment::Action::RecoverQuota);
+        assessment.status = mj_core::assessment::Status::Deferred;
+        relay
+            .record_observation(mj_core::relay::RelayObservation::TurnAssessmentUpdated {
+                assessment,
+            })
+            .unwrap();
+    }
+    let operational = relay.operational_state();
+    submit(
+        relay,
+        &format!("schedule-quota-{id}"),
+        RelayCommand::SetQuotaRecovery {
+            expected: mj_core::relay::RelayCursor {
+                ordinal: operational.latest_ordinal,
+                digest: operational.latest_digest,
+            },
+            recovery: Some(Box::new(mj_core::continuation::QuotaRecovery {
+                user_command_id: id.into(),
+                completed_command_id: id.into(),
+                profile_id: IN_PLACE_SOURCE_PROFILE.into(),
+                reset_at_ms: None,
+                retry_at_ms: None,
+                notice: "quota stopped".into(),
+                submitted: false,
+            })),
+        },
+    );
 }
 
 /// The source relay journal an in-place move starts from.
