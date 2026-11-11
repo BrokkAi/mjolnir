@@ -636,6 +636,17 @@ On the spike host with a stripped musl build of `f18ddd188` merged with the jail
     root.ext4  state.json
     $ rm --force m6t; volume rm m6t-ws m6t-tmp               (nothing left in vms/ or volumes/)
 
+### Milestone 6 live check, 2026-11-11
+
+Same isolated instance and EC2 host as the Milestone 4 acceptance, build `4df6055cd` (jailer and image upgrade). Session J was launched by the pre-jailer engine, survived the daemon handoff to the jailer build, and came back jailed after suspend and resume (Firecracker uid 3100000, CapEff 0, NoNewPrivs 1, Seccomp 2; its uncommitted `MARKER.txt` kept). Then markers in `/workspace/<id>/MARKER.txt`, `/tmp/m6-tmp` and `/root/m6-root`, the target's image set to `ghcr.io/brokkai/mjolnir/agent-dev:sha-2986a36`, and:
+
+    $ mj upgrade-container --session <J> --acknowledge-writable-layer-loss
+    Current image: ghcr.io/brokkai/mjolnir/agent-dev:latest (a7382fe34c82...)
+    Target image: ghcr.io/brokkai/mjolnir/agent-dev:sha-2986a36 (not cached)
+    container upgrade pending; accepted work will finish first
+
+Host view: crane pulled for about a minute; at 03:06 the VM directory held `replace-root.json root.ext4 root.previous state.json`; by 03:07:45 only `root.ext4 state.json`, the VM running image `457abe7514ea...` with labels `dev.mj.container-image=...:sha-2986a36` and `dev.mj.container-upgrade=...`, a new id, `Isolation: jailer`. The agent's next turn printed both workspace marker lines and `tmp-marker`, and `cat: /root/m6-root: No such file or directory`.
+
 ## Interfaces and Dependencies
 
 `mj-worker/src/microvm/mod.rs` exposes the CLI entry `pub fn main(args: Vec<OsString>) -> anyhow::Result<i32>` dispatched from the worker binary's argument parser for the `microvm` subcommand. The vsock protocol types live in `mj-worker/src/microvm/protocol.rs` with `pub const PROTOCOL_VERSION: u32`. External tools on the host: Firecracker and jailer 1.18.0, crane (pinned), dracut, e2fsprogs, nftables, systemd. No new Rust crates beyond what the workspace already uses unless a milestone records why in the Decision Log.
