@@ -17,6 +17,7 @@ pub mod checkpoint;
 pub mod move_workspace;
 
 pub mod mailbox_hook;
+pub mod microvm;
 mod mcp_stdio;
 pub mod memory_mcp;
 pub mod review;
