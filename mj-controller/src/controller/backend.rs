@@ -1130,6 +1130,34 @@ pub fn wait_for_ec2_ssh(executor: &impl CommandExecutor, ssh: &SshTarget) -> Res
     )
 }
 
+/// Wait until a rebooting EC2 host answers SSH from a boot other than
+/// `previous_boot_id`, so an answer from the old boot, just before it goes
+/// down, cannot pass for the new one. Call from supervised blocking work.
+pub fn wait_for_ec2_reboot(
+    executor: &impl CommandExecutor,
+    ssh: &SshTarget,
+    previous_boot_id: &str,
+) -> Result<()> {
+    wait_for_ssh_ready(
+        executor,
+        &crate::targets::ssh_command(
+            ssh,
+            [
+                "sh",
+                "-c",
+                "test \"$(cat /proc/sys/kernel/random/boot_id)\" != \"$1\"",
+                "sh",
+                previous_boot_id,
+            ],
+        )
+        .purpose("wait for the EC2 host to come back from its reboot")
+        .stage(ProvisionStage::Booting),
+        AWS_SSH_READY_TIMEOUT,
+        Instant::now,
+        std::thread::sleep,
+    )
+}
+
 pub(super) fn locator_after_provision_named(
     canonical: &TargetTemplate,
     backend: &targets::TargetTemplate,

@@ -28,7 +28,8 @@ pub(crate) struct Ec2Args {
 
 #[derive(Debug, Subcommand)]
 enum Ec2Command {
-    /// Launch Ubuntu with rootless Podman and add an SSH machine/target.
+    /// Launch a host (Ubuntu with rootless Podman, or Amazon Linux with Nitro
+    /// Sandboxes) and add an SSH machine/target.
     /// Charges continue until you stop or destroy the VM.
     Create(CreateArgs),
     /// List mj-managed VMs and unfinished local provisioning operations.
@@ -59,7 +60,7 @@ struct CreateArgs {
     /// Availability zone, for example us-east-1a.
     #[arg(long)]
     zone: String,
-    /// Machine and Podman target name. Omitted generates a unique name.
+    /// Machine and target name. Omitted generates a unique name.
     #[arg(long)]
     name: Option<String>,
     #[command(flatten)]
@@ -555,12 +556,42 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
             &mj_controller::targets::ProcessExecutor,
             &(&ssh).into(),
         )?;
+        // A failed bootstrap reports its own log rather than a later symptom.
+        const CLOUD_INIT_WAIT: &str = "cloud-init status --wait; status=$?; if [ \"$status\" -ne 0 ]; then sudo tail -100 /var/log/cloud-init-output.log >&2; exit \"$status\"; fi";
         let verify_command = if args.runtime == Ec2Runtime::Nitro {
-            "set -eu; version=$(uname -r | cut -d- -f1); printf '%s\\n' \"$version\" | awk -F. '{ if (($1*1000000+$2*1000+$3) < (6*1000000+18*1000+51)) exit 1 }' || { echo 'Nitro host kernel must be at least 6.18.51' >&2; exit 1; }; sudo dmesg | grep -F 'nitro_enclaves: CMA pool' || { echo 'Nitro Enclaves CMA pool was not initialized' >&2; exit 1; }"
+            // The bootstrap puts the enclave memory pool on the kernel command
+            // line; it takes effect at the next boot. The reboot is issued here,
+            // not by the bootstrap, so the wait can tell the new boot from the
+            // old one instead of racing the shutdown.
+            let output = checked(
+                &mut ssh_command(
+                    &ssh,
+                    &format!("{CLOUD_INIT_WAIT}; cat /proc/sys/kernel/random/boot_id"),
+                ),
+                &[],
+            )?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let boot_id = stdout
+                .lines()
+                .last()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .context("the host did not report its boot ID")?;
+            checked(
+                &mut ssh_command(&ssh, "sudo systemctl --no-block reboot"),
+                &[],
+            )?;
+            eprintln!("Rebooting {id} to reserve the Nitro Enclaves memory pool.");
+            mj_controller::controller::wait_for_ec2_reboot(
+                &mj_controller::targets::ProcessExecutor,
+                &(&ssh).into(),
+                boot_id,
+            )?;
+            "set -eu; version=$(uname -r | cut -d- -f1); printf '%s\\n' \"$version\" | awk -F. '{ if (($1*1000000+$2*1000+$3) < (6*1000000+18*1000+51)) exit 1 }' || { echo 'Nitro host kernel must be at least 6.18.51' >&2; exit 1; }; sudo dmesg | grep -F 'nitro_enclaves: CMA pool' || { echo 'Nitro Enclaves CMA pool was not initialized' >&2; exit 1; }".to_owned()
         } else {
-            "cloud-init status --wait; status=$?; if [ \"$status\" -ne 0 ]; then sudo tail -100 /var/log/cloud-init-output.log; exit \"$status\"; fi; podman info --format '{{.Host.Security.Rootless}}'"
+            format!("{CLOUD_INIT_WAIT}; podman info --format '{{{{.Host.Security.Rootless}}}}'")
         };
-        let output = checked(&mut ssh_command(&ssh, verify_command), &[])?;
+        let output = checked(&mut ssh_command(&ssh, &verify_command), &[])?;
         if args.runtime == Ec2Runtime::Podman {
             ensure!(
                 String::from_utf8_lossy(&output.stdout)
@@ -1100,7 +1131,8 @@ fn nitro_bootstrap(architecture: &str) -> String {
     format!(
         r#"#!/bin/bash
 set -euxo pipefail
-dnf install -y nftables e2fsprogs dracut git tar curl
+# AL2023 ships curl-minimal, which provides curl and conflicts with the curl package.
+dnf install -y nftables e2fsprogs dracut git tar
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 curl -fL --retry 3 -o "$tmp/firecracker.tgz" https://github.com/firecracker-microvm/firecracker/releases/download/v1.18.0/firecracker-v1.18.0-{release_arch}.tgz
@@ -1112,8 +1144,8 @@ curl -fL --retry 3 -o "$tmp/crane.tgz" https://github.com/google/go-containerreg
 echo '{crane_hash}  '"$tmp/crane.tgz" | sha256sum -c -
 tar -xzf "$tmp/crane.tgz" -C "$tmp" crane
 install -m 0755 "$tmp/crane" /usr/local/bin/crane
+# Takes effect at the next boot; `mj ec2 create` reboots once cloud-init finishes.
 grubby --update-kernel=ALL --args="nitro_enclaves.mempool=95%-1G"
-reboot
 "#,
         crane_arch = if architecture == "arm64" {
             "arm64"
@@ -1191,7 +1223,8 @@ elif op == 'run-instances':
     bootstrap = base64.b64decode(request['UserData']).decode()
     if (root/'nitro').exists():
         assert request['EnclaveOptions'] == {'Enabled':True}
-        assert 'dnf install -y nftables e2fsprogs dracut git tar curl' in bootstrap
+        assert 'dnf install -y nftables e2fsprogs dracut git tar\n' in bootstrap
+        assert '\nreboot' not in bootstrap
         assert 'nitro_enclaves.mempool=95%-1G' in bootstrap
         assert 'firecracker-v1.18.0-x86_64.tgz' in bootstrap
         assert 'release-v1.18.0-x86_64/firecracker-v1.18.0-x86_64' in bootstrap
@@ -1286,7 +1319,17 @@ else:
             ("aws", AWS_FIXTURE),
             (
                 "ssh",
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$MJ_EC2_FIXTURE_CHILD/ssh-calls\"\nfor remote_command do :; done\ncase \"$remote_command\" in *dmesg*) printf '6.18.56-126.188.amzn2023\\nnitro_enclaves: CMA pool: 49152 MiB reserved\\n' ;; *) exec sh -c \"$remote_command\" ;; esac\n",
+                concat!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$MJ_EC2_FIXTURE_CHILD/ssh-calls\"\n",
+                    "for remote_command do :; done\n",
+                    // The host's boot ID lives in a fixture file that a reboot replaces.
+                    "[ -e \"$MJ_EC2_FIXTURE_CHILD/boot_id\" ] || echo boot-1 > \"$MJ_EC2_FIXTURE_CHILD/boot_id\"\n",
+                    "remote_command=$(printf '%s' \"$remote_command\" | sed \"s#/proc/sys/kernel/random/boot_id#$MJ_EC2_FIXTURE_CHILD/boot_id#g\")\n",
+                    "case \"$remote_command\" in\n",
+                    "*'systemctl --no-block reboot'*) echo boot-2 > \"$MJ_EC2_FIXTURE_CHILD/boot_id\" ;;\n",
+                    "*dmesg*) printf '6.18.56-126.188.amzn2023\\nnitro_enclaves: CMA pool: 49152 MiB reserved\\n' ;;\n",
+                    "*) exec sh -c \"$remote_command\" ;;\nesac\n",
+                ),
             ),
             ("podman", PODMAN_FIXTURE),
             ("cloud-init", "#!/bin/sh\nprintf 'status: done\\n'\n"),
