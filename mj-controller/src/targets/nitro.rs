@@ -198,13 +198,13 @@ pub(super) fn nitro_run_args(
         session_id,
     ));
     // The size, platform and environment the shared template builder wrote in
-    // Podman's `--flag=value` spelling. A VM runs the host's architecture, so
-    // the platform belongs to the image pull, not to `run`.
+    // Podman's `--flag=value` spelling. A VM runs only the host's
+    // architecture; the engine refuses any other platform rather than
+    // quietly running the host's variant.
     let mut extra = template.extra_run_args.iter();
     while let Some(argument) = extra.next() {
         match argument.split_once('=') {
-            Some(("--platform", _)) => {}
-            Some((flag @ ("--cpus" | "--memory"), value)) => {
+            Some((flag @ ("--platform" | "--cpus" | "--memory"), value)) => {
                 args.extend([flag.to_owned(), value.to_owned()]);
             }
             _ if argument == "--env" => {
@@ -317,6 +317,10 @@ fn nitro_script_command(
     ssh_command_owned(ssh, words)
 }
 
+// `--time 0` matches the Podman scripts' shape, but the engine does not kill
+// the VM outright: it maps 0 to its default grace (`mj-worker` microvm
+// `cli.rs`, `Command::Stop`), so the guest flushes, syncs and unmounts before
+// the unit stops, and the retained disks hold every completed write.
 const NITRO_STOP_SCRIPT: &str = r#"container=$1
 mj_microvm stop --time 0 --ignore "$container" >/dev/null
 "#;

@@ -57,6 +57,9 @@ pub fn ensure_image(
     platform: Option<&str>,
     policy: PullPolicy,
 ) -> Result<(String, FileLock)> {
+    // A requested platform this host cannot run is refused even when an
+    // image is already present: that copy is the host's architecture.
+    platform_for(platform)?;
     layout.ensure()?;
     if policy != PullPolicy::Always
         && let Some(id) = lookup(layout, reference)?
