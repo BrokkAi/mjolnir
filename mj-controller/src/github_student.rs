@@ -538,6 +538,11 @@ fn probe_pair(
         Ok(tokens) => tokens,
         Err(error) => return (ProbeOutcome::ControlFailed, Err(error)),
     };
+    // Compare warm executions on both sessions. A first CPU run may allocate
+    // and initialize kernels just as the discarded GPU warmup does.
+    if let Err(error) = engine.score_tokens(ids.clone(), mask.clone()) {
+        return (ProbeOutcome::ControlFailed, Err(error));
+    }
     let start = std::time::Instant::now();
     #[cfg(test)]
     if inner
