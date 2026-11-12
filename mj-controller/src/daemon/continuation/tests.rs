@@ -70,6 +70,7 @@ fn view(id: &str, completed: bool) -> ManagedSessionView {
         ..Default::default()
     };
     ManagedSessionView {
+        attention: Default::default(),
         connected: true,
         error: None,
         snapshot: Some(ManagedSessionSnapshot {

@@ -419,7 +419,7 @@ impl RuntimeState {
             if fallback_is_safe(target) {
                 ensure!(
                     record.target.as_ref().is_none_or(|target| matches!(
-                        target,
+                        &**target,
                         mj_core::state::TargetLocator::LocalBare { .. }
                             | mj_core::state::TargetLocator::SshBare { .. }
                             | mj_core::state::TargetLocator::AwsEc2 { .. }
@@ -502,7 +502,7 @@ impl RuntimeState {
             let checkpoint_sha256 = intent
                 .handoff
                 .as_ref()
-                .or(record.checkpoint.as_ref())
+                .or(record.checkpoint.as_deref())
                 .context("Restart checkpoint completed without a checkpoint")?
                 .sha256
                 .clone();
@@ -924,7 +924,7 @@ pub(super) fn restart_checkpoint_matches(
         && intent
             .handoff
             .as_ref()
-            .or(record.checkpoint.as_ref())
+            .or(record.checkpoint.as_deref())
             .is_some_and(|checkpoint| {
                 intent.checkpoint_sha256.as_deref() == Some(checkpoint.sha256.as_str())
             })

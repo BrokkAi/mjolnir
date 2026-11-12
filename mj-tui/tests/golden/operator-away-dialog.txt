@@ -1,16 +1,16 @@
 === AFK (100x32) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
-│ default !2                         ≡ ││                                                          │
+│ default ?2                         ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                                                          │
 ╭ Sessio                                                                                           │
 │ Create                                                                                           │
 │hel ───  ╭ ×  AFK  ─────────────────────────────────────────────────────────────────────╮         │
-│  ! Exp  │                                                                              │         │
+│  ? Exp  │                                                                              │         │
 │  Quest  │                    ▟█████▙  ▄████▄  ██████  ██   ██     ╱╱                   │         │
 │  │ Cho  │                    ▜█████▛  ██  ██  ██      ██  ██     ╱╱                    │         │
 │  │      │                       ║     ██████  █████   █████     ╱━━                    │         │
 │         │                       ║     ██  ██  ██      ██  ██     ╱╱                    │         │
-│  ! Cla  │                       ▀     ██  ██  ██      ██   ██   ╱╱                     │         │
+│  ? Cla  │                       ▀     ██  ██  ██      ██   ██   ╱╱                     │         │
 │  Quest  │                                                                              │         │
 │  │ I n  │   While you are away, an agent that asks a question or needs permission is   │         │
 │  │      │  told that you are away and asked to do other useful work first. If it asks  │         │
@@ -33,7 +33,7 @@
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 === AFK classifier intervention only (100x32) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────── ◇   ⋯───╮
-│ default !1                         ≡ ││                                                          │
+│ default ?1                         ≡ ││                                                          │
 ╰──────────────────────────────────────╯│                                                          │
 ╭ Sessio                                                                                           │
 │ Create                                                                                           │
@@ -43,7 +43,7 @@
 │  │ I n  │                    ▜█████▛  ██  ██  ██      ██  ██     ╱╱                    │         │
 │  │      │                       ║     ██████  █████   █████     ╱━━                    │         │
 │         │                       ║     ██  ██  ██      ██  ██     ╱╱                    │         │
-│  ! Cla  │                       ▀     ██  ██  ██      ██   ██   ╱╱                     │         │
+│  ? Cla  │                       ▀     ██  ██  ██      ██   ██   ╱╱                     │         │
 │  Quest  │                                                                              │         │
 │  │ I n  │   While you are away, an agent that asks a question or needs permission is   │         │
 │  │      │  told that you are away and asked to do other useful work first. If it asks  │         │
@@ -99,17 +99,17 @@
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · : / ? palette
 === AFK ASCII (100x32) ===
 + Workspaces -------- * MJOLNIR vX.Y.Z ++ Browse | Conversation -------------------------- +   .---+
-| default !2                         = ||                                                          |
+| default ?2                         = ||                                                          |
 +--------------------------------------+|                                                          |
 + Sessio                                                                                           |
 | Create                                                                                           |
 |hel ---  + x  AFK  ---------------------------------------------------------------------+         |
-|  ! Exp  |                                                                              |         |
+|  ? Exp  |                                                                              |         |
 |  Quest  |                    .=====.  /####\  ######  ##   ##     //                   |         |
 |  | Cho  |                    '==+=='  ##  ##  ##      ##  ##     //                    |         |
 |  |      |                       |     ######  #####   #####     /==                    |         |
 |         |                       |     ##  ##  ##      ##  ##     //                    |         |
-|  ! Cla  |                      [_]    ##  ##  ##      ##   ##   //                     |         |
+|  ? Cla  |                      [_]    ##  ##  ##      ##   ##   //                     |         |
 |  Quest  |                                                                              |         |
 |  | I n  |   While you are away, an agent that asks a question or needs permission is   |         |
 |  |      |  told that you are away and asked to do other useful work first. If it asks  |         |

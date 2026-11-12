@@ -218,6 +218,7 @@ fn view_of(
         });
     }
     ManagedSessionView {
+        attention: Default::default(),
         snapshot: Some(ManagedSessionSnapshot {
             subagent_requests: Default::default(),
             subagent_completions: Default::default(),

@@ -55,9 +55,9 @@ fn in_place_subagent_prompt_roster_uses_latest_child_state() {
     let mut child = parent.clone();
     child.id = "fresh-child".into();
     child.state = SessionState::Running;
-    child.target = Some(TargetLocator::LocalBare {
+    child.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: child_directory.path().join(&child.id),
-    });
+    }));
     let relation = mj_core::subagent::SubagentRecord {
         kind: mj_core::subagent::SubagentKind::Worker,
         reviewer_launch: None,
@@ -112,9 +112,9 @@ async fn repairing_an_accepted_source_preserves_repository_ids_and_layout_across
     let id = "0123456789abcdef0123456789abcdef";
     let mut session = checkpoint_test_session(id);
     session.state = SessionState::Stopped;
-    session.checkpoint = Some(
+    session.checkpoint = Some(Box::new(
         crate::controller::test_support::write_network_checkpoint_archive(directory.path(), id, 0),
-    );
+    ));
     let bundle = ProjectBundle {
         primary_repo: "project".into(),
         repositories: vec![ProjectRepository {
@@ -177,12 +177,12 @@ async fn a_local_checkout_resuming_into_a_container_preflights_its_conversion() 
     config
         .bundles
         .insert(session.bundle_id.clone(), local_bundle(checkout.path()));
-    session.checkpoint = Some(mj_core::state::CheckpointMetadata {
+    session.checkpoint = Some(Box::new(mj_core::state::CheckpointMetadata {
         archive_path: checkout.path().join("unused.hel.zip"),
         sha256: "a".repeat(64),
         created_at: "2026-09-14T00:00:00Z".into(),
         event_frontier: 3,
-    });
+    }));
     let session_id = session.id.clone();
     let controller = Controller {
         config,
@@ -262,7 +262,7 @@ fn a_resume_preflights_the_worker_binary_before_compacting() {
     let checkpoint = write_checkpoint_gate_archive(&archive_directory, session_id, 7);
     let repository = committed_repository();
     let mut session = managed_worktree_session(repository.path(), session_id);
-    session.checkpoint = Some(checkpoint);
+    session.checkpoint = Some(Box::new(checkpoint));
 
     let profile_home = data_directory.join("profile");
     std::fs::create_dir_all(&profile_home).unwrap();
@@ -327,13 +327,13 @@ async fn network_resume_ignores_host_history_but_an_explicit_raw_move_checks_it(
     let session_id = "0123456789abcdef0123456789abcdef";
     let mut session = checkpoint_test_session(session_id);
     session.state = SessionState::Stopped;
-    session.checkpoint = Some(
+    session.checkpoint = Some(Box::new(
         super::super::test_support::write_network_checkpoint_archive(
             directory.path(),
             session_id,
             0,
         ),
-    );
+    ));
     let mut config = resume_compatibility_config();
     config.bundles.insert(
         "project".into(),
@@ -369,11 +369,11 @@ async fn raw_in_place_preflight_does_not_require_its_synthetic_bundle() {
     let directory = tempfile::tempdir().unwrap();
     let session_id = "0123456789abcdef0123456789abcdef";
     let mut session = checkpoint_test_session(session_id);
-    session.checkpoint = Some(write_checkpoint_gate_archive(
+    session.checkpoint = Some(Box::new(write_checkpoint_gate_archive(
         directory.path(),
         session_id,
         3,
-    ));
+    )));
     session.bundle_id = "remote-project-a66373eef659f856".into();
     session.target_template_id = "localhost".into();
     session.project_directory = Some("/mnt/optane/bifrost-fird".into());
@@ -535,7 +535,7 @@ fn repository_preflight_checks_independent_sources_concurrently_and_receipts_are
         })
         .to_vec();
     let mut session = checkpoint_test_session(session_id);
-    session.checkpoint = Some(checkpoint.clone());
+    session.checkpoint = Some(Box::new(checkpoint.clone()));
     let mut controller = Controller {
         config: Config {
             bundles: BTreeMap::from([(
@@ -757,7 +757,7 @@ fn lost_bundle_sessions_reach_resume_compatibility_before_the_record_changes() {
     let checkpoint = write_checkpoint_gate_archive(directory.path(), session_id, 3);
     let mut session = checkpoint_test_session(session_id);
     session.state = SessionState::Lost;
-    session.checkpoint = Some(checkpoint);
+    session.checkpoint = Some(Box::new(checkpoint));
     let previous = session.clone();
     let profile_home = directory.path().join("profile");
     std::fs::create_dir_all(&profile_home).unwrap();
@@ -1208,7 +1208,7 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
     let mut cleaned = previous.clone();
     cleaned.state = SessionState::Error;
     cleaned.last_profile = "codex-new".into();
-    cleaned.target = Some(partial_target.clone());
+    cleaned.target = Some(Box::new(partial_target.clone()));
     let destination: TargetTemplate =
         serde_json::from_str(r#"{"kind":"local-podman","image":"test"}"#).unwrap();
     let destination_runtime = mj_core::state::TargetRuntimeSettings::from(&destination);
@@ -1230,7 +1230,7 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
     let mut cleanup_failed = previous.clone();
     cleanup_failed.state = SessionState::Error;
     cleanup_failed.last_profile = "codex-new".into();
-    cleanup_failed.target = Some(partial_target.clone());
+    cleanup_failed.target = Some(Box::new(partial_target.clone()));
     cleanup_failed.target_runtime = Some(destination_runtime.clone().into());
     let partial_checkout = crate::controller::test_support::managed_raw_session(
         mj_core::state::ManagedWorktreeTarget::Local,
@@ -1247,7 +1247,7 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
 
     assert_eq!(cleanup_failed.state, SessionState::Error);
     assert_eq!(cleanup_failed.last_profile, "codex-new");
-    assert_eq!(cleanup_failed.target, Some(partial_target));
+    assert_eq!(cleanup_failed.target, Some(Box::new(partial_target)));
     assert_eq!(
         cleanup_failed.target_runtime,
         Some(destination_runtime.into())
@@ -1353,7 +1353,7 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
 
     let mut session = checkpoint_test_session(session_id);
     session.state = SessionState::Stopped;
-    session.checkpoint = Some(checkpoint.clone());
+    session.checkpoint = Some(Box::new(checkpoint.clone()));
     session.additional_mounts = vec![AdditionalMount {
         source: PathBuf::from("/host/old"),
         destination: PathBuf::from("/mnt/old"),
@@ -1541,7 +1541,7 @@ fn failed_resume_retires_a_checkout_it_recreated() {
     let checkpoint = write_checkpoint_gate_archive(&archive_directory, session_id, 7);
     let repository = committed_repository();
     let mut session = managed_worktree_session(repository.path(), session_id);
-    session.checkpoint = Some(checkpoint);
+    session.checkpoint = Some(Box::new(checkpoint));
     let worktree = session.managed_worktree.clone().unwrap();
     super::super::environment::cleanup_unstarted_checkout(
         &ProcessExecutor,
@@ -1760,7 +1760,7 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
             .unwrap()
             .into(),
     );
-    session.checkpoint = Some(checkpoint.clone());
+    session.checkpoint = Some(Box::new(checkpoint.clone()));
     let worktree = session.managed_worktree.clone().unwrap();
     let previous = session.clone();
 
@@ -1845,7 +1845,7 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
 
     let retained = controller.state.sessions.get(session_id).unwrap();
     assert_eq!(retained.state, SessionState::Stopped);
-    assert_eq!(retained.checkpoint, Some(checkpoint.clone()));
+    assert_eq!(retained.checkpoint, Some(Box::new(checkpoint.clone())));
     assert_eq!(retained.project_directory, previous.project_directory);
     assert_eq!(retained.managed_worktree, previous.managed_worktree);
     assert_eq!(retained.bundle_id, previous.bundle_id);
@@ -1857,7 +1857,10 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
         "the previous archive is what the rolled-back record names"
     );
     let durable = crate::database::load_state().unwrap();
-    assert_eq!(durable.sessions[session_id].checkpoint, Some(checkpoint));
+    assert_eq!(
+        durable.sessions[session_id].checkpoint,
+        Some(Box::new(checkpoint))
+    );
     // The conversion archive is litter once the resume has failed, and the
     // directory it was written in proves the conversion really ran.
     let sessions = mj_core::config::sessions_dir();
@@ -2048,13 +2051,13 @@ exit 0
     session.harness_kind = harness;
     session.last_profile = profile_id.into();
     session.target_template_id = "local-bare".into();
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: worker_root.clone(),
-    });
+    }));
     session.project_directory = Some(checkout.clone());
     session.state = SessionState::Provisioning;
     session.native_session_id = Some("native-session".into());
-    session.checkpoint = Some(checkpoint.clone());
+    session.checkpoint = Some(Box::new(checkpoint.clone()));
     crate::database::save_session(&session).unwrap();
     crate::database::save_materialized_session(&archived_projection).unwrap();
     let stopped = mj_core::subagent::StoppedSubagent {

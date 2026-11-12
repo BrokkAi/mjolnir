@@ -21,6 +21,7 @@ pub(crate) fn apply_session_activity(
     session_id: &str,
     view: &ManagedSessionView,
 ) {
+    dashboard.set_session_attention_for(session_id, view.attention);
     let current_step_started_at_ms = view
         .snapshot
         .as_ref()
@@ -38,7 +39,10 @@ pub(crate) fn apply_session_activity(
         view.snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.operational.assessment.as_ref())
-            .filter(|assessment| assessment.inferred_question().is_some())
+            .filter(|assessment| {
+                view.attention == mj_core::attention::SessionAttention::NeedsInput
+                    && assessment.current()
+            })
             .and_then(|assessment| assessment.question_message.clone()),
     );
     dashboard.set_session_connectivity(session_id, view.connected);
@@ -302,6 +306,7 @@ mod tests {
             pending_elicitations: Vec::new(),
         };
         ManagedSessionView {
+            attention: mj_core::attention::SessionAttention::Unreachable,
             snapshot: Some(ManagedSessionSnapshot {
                 window: ProjectionWindow::of(&materialized),
                 materialized,
@@ -368,11 +373,13 @@ mod tests {
         assessment.question_message = Some("agent:msg_1".into());
         operational.assessment = Some(std::sync::Arc::new(assessment.clone()));
         let mut view = managed_view(operational, true);
+        view.attention = mj_core::attention::SessionAttention::NeedsInput;
         apply_session_activity(&mut dashboard, "session-1", &view);
         assert_eq!(dashboard.question_message("session-1"), Some("agent:msg_1"));
 
         assessment.status = Status::Superseded;
         assessment.reason = "question_dismissed".into();
+        view.attention = mj_core::attention::SessionAttention::Idle;
         view.snapshot.as_mut().unwrap().operational.assessment =
             Some(std::sync::Arc::new(assessment));
         apply_session_activity(&mut dashboard, "session-1", &view);
@@ -403,6 +410,7 @@ mod tests {
             "disconnected row was not marked red"
         );
         view.connected = true;
+        view.attention = mj_core::attention::SessionAttention::Working;
         apply_session_activity(&mut dashboard, "session-1", &view);
         let (text, _) = dashboard_text(&mut dashboard);
         assert!(

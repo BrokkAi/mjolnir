@@ -230,7 +230,7 @@ impl RuntimeState {
                                 .state
                                 .sessions
                                 .get(&session_id)
-                                .and_then(|s| s.checkpoint.as_ref())
+                                .and_then(|s| s.checkpoint.as_deref())
                                 == Some(&checkpoint),
                             "the recovery copy changed; review it before discarding changes"
                         );

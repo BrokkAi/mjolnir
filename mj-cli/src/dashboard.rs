@@ -1885,6 +1885,7 @@ impl DashboardContext {
         );
         dashboard.set_workspace_names(workspace_names);
         dashboard.set_launch_recency(launch_recency);
+        dashboard.set_session_attention(bootstrap.projection.metadata.session_attention.clone());
         // Sessions inherit this host's Git author identity; the first new
         // session of the run makes sure there is one.
         dashboard.require_git_identity_check();

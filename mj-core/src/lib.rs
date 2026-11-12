@@ -78,3 +78,5 @@ pub mod workspace;
 pub mod continuation;
 
 pub mod cpu_usage;
+
+pub mod attention;

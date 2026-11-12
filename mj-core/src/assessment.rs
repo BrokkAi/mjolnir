@@ -349,6 +349,8 @@ pub struct InferredQuestion {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnAssessment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention: Option<crate::attention::AssessmentAttention>,
     pub turn_id: String,
     pub completed_ordinal: u64,
     pub revision: u64,
@@ -373,6 +375,7 @@ pub struct TurnAssessment {
 impl TurnAssessment {
     pub fn pending(turn_id: String, ordinal: u64, at: i64, completion: CompletionEvidence) -> Self {
         Self {
+            attention: None,
             turn_id,
             completed_ordinal: ordinal,
             revision: ordinal,
@@ -398,6 +401,7 @@ impl TurnAssessment {
         self.evidence = None;
         self.verdict = None;
         self.glide = None;
+        self.attention = None;
         self.action = None;
         self.question_message = None;
     }

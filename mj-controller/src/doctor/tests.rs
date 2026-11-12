@@ -1694,7 +1694,7 @@ fn review_leftovers_skip_managed_checkouts_and_repositories_in_use() {
         let mut session = checkpoint_test_session(id);
         session.state = state;
         session.project_directory = Some(root.clone());
-        session.managed_worktree = Some(ManagedWorktree {
+        session.managed_worktree = Some(Box::new(ManagedWorktree {
             kind,
             source_project_directory: project.clone(),
             source_repository: project.clone(),
@@ -1702,7 +1702,7 @@ fn review_leftovers_skip_managed_checkouts_and_repositories_in_use() {
             branch: format!("mj/{id}"),
             target: ManagedWorktreeTarget::Local,
             base_commit: None,
-        });
+        }));
         session
     };
     let running_clone = managed("a1", ManagedCheckoutKind::Clone, SessionState::Running);

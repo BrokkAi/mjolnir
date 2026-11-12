@@ -389,6 +389,7 @@ pub struct WorkspaceSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeSessionView {
+    pub attention: mj_core::attention::SessionAttention,
     /// Config selectors owned by the target permission policy.
     #[serde(default)]
     pub policy_config_keys: Vec<String>,
@@ -415,6 +416,7 @@ impl RuntimeSessionView {
                 });
         Self {
             session_id,
+            attention: view.attention,
             policy_config_keys: Vec::new(),
             projection_ordinal,
             projection_digest,
