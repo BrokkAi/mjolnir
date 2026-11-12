@@ -2347,20 +2347,23 @@ fn review_lines(review: Option<&mj_controller::server::ViewerTurnReview>) -> Vec
     lines
 }
 
-/// Print where the API is and which file holds its token, which is what a
-/// caller driving it with curl needs.
+/// Print the API location without exposing credentials.
 pub(crate) async fn api_info(args: ApiInfoArgs) -> Result<()> {
     let client = ApiClient::connect().await?;
-    let token_path = ApiClient::token_path();
     if args.json {
         return print_json(&serde_json::json!({
             "base_url": format!("{}/api/v1", client.base_url()),
-            "token_path": token_path,
         }));
     }
     println!("base url   {}/api/v1", client.base_url());
-    println!("token file {}", token_path.display());
     println!("version    Mjolnir API 1");
+    Ok(())
+}
+
+/// Explicit credential output for callers authenticating outside the CLI.
+pub(crate) async fn api_token() -> Result<()> {
+    let mut client = crate::daemon::connect_or_start().await?;
+    println!("{}", client.api_credential().await?);
     Ok(())
 }
 

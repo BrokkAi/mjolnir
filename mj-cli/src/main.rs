@@ -210,8 +210,10 @@ enum Command {
     Review(api_commands::ReviewArgs),
     /// Stop a session's background task, or all tasks the worker can stop.
     StopTask(api_commands::StopTaskArgs),
-    /// Print the API base URL and where its bearer token lives.
+    /// Print the API base URL.
     ApiInfo(api_commands::ApiInfoArgs),
+    /// Print only the API bearer token for external HTTP clients.
+    ApiToken,
     /// Print a valid GitHub App token for an owner or repository.
     GithubToken(api_commands::GithubTokenArgs),
     /// Change what the person's dashboard shows: pane sizes, which session
@@ -894,6 +896,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Review(_)) => "review",
         Some(Command::StopTask(_)) => "stop-task",
         Some(Command::ApiInfo(_)) => "api-info",
+        Some(Command::ApiToken) => "api-token",
         Some(Command::GithubToken(_)) => "github-token",
         Some(Command::Ui(_)) => "ui",
         Some(Command::Models(_)) => "models",
@@ -1242,6 +1245,9 @@ async fn run_command(
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::SetConfig(args)) => api_commands::set_config(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::ApiToken) => api_commands::api_token()
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::ApiInfo(args)) => api_commands::api_info(args)

@@ -740,6 +740,7 @@ pub enum DaemonAction {
     },
     Status,
     WebViewerAccess,
+    ApiCredential,
     /// The daemon host's Git commit author, which its sessions inherit.
     GitIdentity,
     /// Write the daemon host's global Git commit author.
@@ -1182,6 +1183,7 @@ pub enum DaemonReply {
     ProjectSource(mj_core::state::ProjectSourceIdentity),
     Status(DaemonStatus),
     WebViewerAccess(crate::web::WebViewerAccess),
+    ApiCredential(String),
     GitIdentity(GitIdentity),
     WebListeners(Vec<crate::web::WebListenerProcess>),
     SubagentOptions(mj_core::subagent::SubagentOptions),
@@ -1849,6 +1851,14 @@ impl DaemonClient {
         match self.request(DaemonAction::Status).await? {
             DaemonReply::Status(status) => Ok(status),
             reply => bail!("unexpected daemon status reply {reply:?}"),
+        }
+    }
+
+    /// Obtain the HTTP bearer credential from its daemon owner.
+    pub async fn api_credential(&mut self) -> Result<String> {
+        match self.request(DaemonAction::ApiCredential).await? {
+            DaemonReply::ApiCredential(token) => Ok(token),
+            reply => bail!("unexpected API credential reply: {reply:?}"),
         }
     }
 
@@ -3131,7 +3141,7 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Terminal draft persistence carries per-client revisions and clear tombstones.
 // The host node is gone: NodeConnect is no longer an action.
 // Lifecycle submission acknowledges ownership separately from completion.
-pub const PROTOCOL_VERSION: u32 = 87;
+pub const PROTOCOL_VERSION: u32 = 88;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

@@ -126,6 +126,13 @@ pub(super) async fn handle_action(
                 phone_status: state.phone_status(),
             }))
         }
+        DaemonAction::ApiCredential => Ok(DaemonReply::ApiCredential(
+            state
+                .api_credential
+                .get()
+                .context("the HTTP API credential is not ready")?
+                .clone(),
+        )),
         DaemonAction::WebViewerAccess => {
             Ok(DaemonReply::WebViewerAccess(state.web_viewer.access()))
         }

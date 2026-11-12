@@ -178,9 +178,12 @@ pub(crate) async fn run_server(
     startup.finished("load cookie credentials");
     // The documented `/api/v1` surface authenticates with a persisted bearer
     // token and drives sessions through the daemon-side backend.
-    options.set_api_token(crate::server::load_or_create_api_token(
-        &crate::server::api_token_path(),
-    )?);
+    let token = crate::server::load_or_create_api_token(&crate::server::api_token_path())?;
+    daemon_runtime
+        .api_credential
+        .set(token)
+        .map_err(|_| anyhow::anyhow!("API credential already initialized"))?;
+    options.set_api_token(daemon_runtime.api_credential.get().unwrap().clone());
     options.set_subagent_backend(api_backend.clone());
     // A launch onto a target the daemon has no worker binary for is refused at
     // admission, from the configuration as it is on disk right now.

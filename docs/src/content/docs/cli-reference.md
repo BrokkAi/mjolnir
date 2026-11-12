@@ -326,6 +326,7 @@ mj review start --session <id> [--json]
 mj review status --session <id> [--json]
 mj stop-task --session <id> (<task-id> | --all) [--json]
 mj api-info [--json]
+mj api-token
 mj events [--session <id>] [--workspace-id <id>] [--workspace <name>] [--after-seq <seq>]
 mj usage --session <id> [--after-seq <seq>] [--limit <count>] [--json]
 mj put-file --session <id> --path <workspace-relative path> [--overwrite] [--json] <source>|-
@@ -698,7 +699,7 @@ filters agent messages and uses the finished-prefix cursor described above.
 `mj daemon` commands do not take `--json`. The commands in this section are
 clients for the [HTTP API](/api-reference/), which documents the routes,
 the wait outcomes, the export preconditions, and the bearer token these
-commands read. `mj api-info` prints the base URL and the token file.
+commands read. `mj api-info` prints the base URL; `mj api-token` prints the bearer token.
 
 ## Operator environment variables
 
