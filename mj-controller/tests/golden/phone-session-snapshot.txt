@@ -67,6 +67,7 @@
 === live container session with a second workspace (1 session card) ===
 {
   "attention": "unknown",
+  "notification_dismissal": null,
   "oracle": true,
   "review_trigger": "off",
   "review_count": 0,
@@ -159,6 +160,7 @@
     "suspend": true,
     "destroy": true,
     "rename": true,
+    "dismiss_notification": false,
     "resume": false,
     "move_session": true,
     "set_config": true,
@@ -173,6 +175,7 @@
 {
   "row": {
     "attention": "unknown",
+    "notification_dismissal": null,
     "oracle": true,
     "review_trigger": "off",
     "review_count": 0,
@@ -217,7 +220,7 @@
     "configuration_issue": "Session \"session-1\" needs configuration repair: missing bundle \"project\". Restore these entries in config.toml, then retry. Run mj setup to rediscover installed profiles and targets; existing sessions are preserved.",
     "conversation_available": false,
     "prompt_images_supported": false,
-    "capabilities_ref": "384a583596d3e25e",
+    "capabilities_ref": "6accfc3d8e1416a4",
     "project_label": "project",
     "project_key": "1c8e6dc679624037",
     "display_location": "podman",
@@ -255,7 +258,7 @@
         "argument": "status"
       }
     ],
-    "384a583596d3e25e": {
+    "6accfc3d8e1416a4": {
       "clear_context": false,
       "open": false,
       "read_history": false,
@@ -266,6 +269,7 @@
       "suspend": true,
       "destroy": true,
       "rename": true,
+      "dismiss_notification": false,
       "resume": false,
       "move_session": true,
       "set_config": true,
@@ -283,6 +287,7 @@
 === only workspace (1 session card) ===
 {
   "attention": "unknown",
+  "notification_dismissal": null,
   "oracle": true,
   "review_trigger": "off",
   "review_count": 0,
@@ -359,6 +364,7 @@
     "suspend": true,
     "destroy": true,
     "rename": true,
+    "dismiss_notification": false,
     "resume": false,
     "move_session": true,
     "set_config": true,
@@ -376,6 +382,7 @@
   "session": {
     "row": {
       "attention": "unknown",
+      "notification_dismissal": null,
       "oracle": true,
       "review_trigger": "off",
       "review_count": 0,
@@ -405,7 +412,7 @@
       "configuration_issue": "Session \"session-1\" needs configuration repair: missing bundle \"project\". Restore these entries in config.toml, then retry. Run mj setup to rediscover installed profiles and targets; existing sessions are preserved.",
       "conversation_available": false,
       "prompt_images_supported": false,
-      "capabilities_ref": "f58b9c3b71090769",
+      "capabilities_ref": "01a760400fccab69",
       "project_label": "project",
       "project_key": "1c8e6dc679624037",
       "display_location": "podman",
@@ -427,6 +434,27 @@
       "compatible_resume_targets_ref": "be0135ab881b9218"
     },
     "interned": {
+      "01a760400fccab69": {
+        "clear_context": false,
+        "open": false,
+        "read_history": false,
+        "prompt": true,
+        "run_shell": true,
+        "interrupt_turn": false,
+        "cancel_operation": false,
+        "suspend": true,
+        "destroy": true,
+        "rename": true,
+        "dismiss_notification": false,
+        "resume": false,
+        "move_session": true,
+        "set_config": true,
+        "set_plan_mode": false,
+        "change_workspace": false,
+        "container_settings": true,
+        "restart": true,
+        "interrupt_all": false
+      },
       "20ccb1ff18326783": [
         {
           "name": "help",
@@ -447,27 +475,7 @@
       ],
       "be0135ab881b9218": [
         "podman"
-      ],
-      "f58b9c3b71090769": {
-        "clear_context": false,
-        "open": false,
-        "read_history": false,
-        "prompt": true,
-        "run_shell": true,
-        "interrupt_turn": false,
-        "cancel_operation": false,
-        "suspend": true,
-        "destroy": true,
-        "rename": true,
-        "resume": false,
-        "move_session": true,
-        "set_config": true,
-        "set_plan_mode": false,
-        "change_workspace": false,
-        "container_settings": true,
-        "restart": true,
-        "interrupt_all": false
-      }
+      ]
     }
   }
 }
@@ -478,6 +486,7 @@
   "session": {
     "row": {
       "attention": "unknown",
+      "notification_dismissal": null,
       "oracle": true,
       "review_trigger": "off",
       "review_count": 0,
@@ -507,7 +516,7 @@
       "configuration_issue": "Session \"session-1\" needs configuration repair: missing bundle \"project\". Restore these entries in config.toml, then retry. Run mj setup to rediscover installed profiles and targets; existing sessions are preserved.",
       "conversation_available": false,
       "prompt_images_supported": false,
-      "capabilities_ref": "f58b9c3b71090769",
+      "capabilities_ref": "01a760400fccab69",
       "project_label": "project",
       "project_key": "1c8e6dc679624037",
       "display_location": "podman",
@@ -529,6 +538,27 @@
       "compatible_resume_targets_ref": "be0135ab881b9218"
     },
     "interned": {
+      "01a760400fccab69": {
+        "clear_context": false,
+        "open": false,
+        "read_history": false,
+        "prompt": true,
+        "run_shell": true,
+        "interrupt_turn": false,
+        "cancel_operation": false,
+        "suspend": true,
+        "destroy": true,
+        "rename": true,
+        "dismiss_notification": false,
+        "resume": false,
+        "move_session": true,
+        "set_config": true,
+        "set_plan_mode": false,
+        "change_workspace": false,
+        "container_settings": true,
+        "restart": true,
+        "interrupt_all": false
+      },
       "20ccb1ff18326783": [
         {
           "name": "help",
@@ -549,27 +579,7 @@
       ],
       "be0135ab881b9218": [
         "podman"
-      ],
-      "f58b9c3b71090769": {
-        "clear_context": false,
-        "open": false,
-        "read_history": false,
-        "prompt": true,
-        "run_shell": true,
-        "interrupt_turn": false,
-        "cancel_operation": false,
-        "suspend": true,
-        "destroy": true,
-        "rename": true,
-        "resume": false,
-        "move_session": true,
-        "set_config": true,
-        "set_plan_mode": false,
-        "change_workspace": false,
-        "container_settings": true,
-        "restart": true,
-        "interrupt_all": false
-      }
+      ]
     }
   }
 }
@@ -577,6 +587,7 @@
 {
   "parent": {
     "attention": "unknown",
+    "notification_dismissal": null,
     "oracle": true,
     "review_trigger": "off",
     "review_count": 0,
@@ -653,6 +664,7 @@
       "suspend": true,
       "destroy": true,
       "rename": true,
+      "dismiss_notification": false,
       "resume": false,
       "move_session": true,
       "set_config": true,
@@ -665,6 +677,7 @@
   },
   "child": {
     "attention": "unknown",
+    "notification_dismissal": null,
     "oracle": true,
     "review_trigger": "off",
     "review_count": 0,
@@ -743,6 +756,7 @@
       "suspend": true,
       "destroy": true,
       "rename": true,
+      "dismiss_notification": false,
       "resume": false,
       "move_session": true,
       "set_config": true,
@@ -757,6 +771,7 @@
 === bare target (1 session card) ===
 {
   "attention": "unknown",
+  "notification_dismissal": null,
   "oracle": true,
   "review_trigger": "off",
   "review_count": 0,
@@ -833,6 +848,7 @@
     "suspend": true,
     "destroy": true,
     "rename": true,
+    "dismiss_notification": false,
     "resume": false,
     "move_session": true,
     "set_config": true,
@@ -846,6 +862,7 @@
 === stopped session without recovery copy (1 session card) ===
 {
   "attention": "unknown",
+  "notification_dismissal": null,
   "oracle": true,
   "review_trigger": "off",
   "review_count": 0,
@@ -931,6 +948,7 @@
     "suspend": false,
     "destroy": true,
     "rename": true,
+    "dismiss_notification": false,
     "resume": true,
     "move_session": false,
     "set_config": false,
@@ -945,6 +963,7 @@
 {
   "row": {
     "attention": "unknown",
+    "notification_dismissal": null,
     "retry_assessment_pending": false,
     "id": "session-1",
     "publication_state": "unknown",
@@ -975,10 +994,10 @@
     "pending_elicitation_count": 0,
     "detail": false,
     "queued_prompt_count": 0,
-    "capabilities_ref": "c6ac9d70d06b69a4"
+    "capabilities_ref": "5b2a10f6d8b19574"
   },
   "interned": {
-    "c6ac9d70d06b69a4": {
+    "5b2a10f6d8b19574": {
       "clear_context": false,
       "open": false,
       "read_history": false,
@@ -989,6 +1008,7 @@
       "suspend": false,
       "destroy": true,
       "rename": true,
+      "dismiss_notification": false,
       "resume": true,
       "move_session": false,
       "set_config": false,
@@ -1003,6 +1023,7 @@
 === last top-level message time (1 session card) ===
 {
   "attention": "unknown",
+  "notification_dismissal": null,
   "oracle": true,
   "review_trigger": "off",
   "review_count": 0,
@@ -1072,6 +1093,7 @@
     "suspend": true,
     "destroy": true,
     "rename": true,
+    "dismiss_notification": false,
     "resume": false,
     "move_session": true,
     "set_config": false,
@@ -1086,6 +1108,7 @@
 === messages without recorded times (1 session card) ===
 {
   "attention": "unknown",
+  "notification_dismissal": null,
   "oracle": true,
   "review_trigger": "off",
   "review_count": 0,
@@ -1153,6 +1176,7 @@
     "suspend": true,
     "destroy": true,
     "rename": true,
+    "dismiss_notification": false,
     "resume": false,
     "move_session": true,
     "set_config": false,
@@ -1167,6 +1191,7 @@
 === conversation not available (1 session card) ===
 {
   "attention": "unknown",
+  "notification_dismissal": null,
   "oracle": true,
   "review_trigger": "off",
   "review_count": 0,
@@ -1230,6 +1255,7 @@
     "suspend": true,
     "destroy": true,
     "rename": true,
+    "dismiss_notification": false,
     "resume": false,
     "move_session": true,
     "set_config": false,
@@ -1245,6 +1271,7 @@
 {
   "session": {
     "attention": "unknown",
+    "notification_dismissal": null,
     "oracle": true,
     "review_trigger": "off",
     "review_count": 0,
@@ -1308,6 +1335,7 @@
       "suspend": true,
       "destroy": true,
       "rename": false,
+      "dismiss_notification": false,
       "resume": false,
       "move_session": false,
       "set_config": false,
@@ -1324,11 +1352,59 @@
     "session_id": "0123456789abcdef0123456789abcdef"
   }
 }
-=== viewer quota windows (Claude, unknown Claude, and Codex profiles) ===
+=== viewer quota windows (Antigravity, Claude, unknown Claude, and Codex profiles) ===
 {
   "profiles": [
     {
+      "id": "agy",
+      "quota_pools": [
+        "Ge",
+        "Cl"
+      ],
+      "quota": {
+        "summary": "Week (Ge) 73% left · Week (Cl) 0% left",
+        "windows": [
+          {
+            "label": "Week",
+            "pool": "Ge",
+            "resets_at_epoch_seconds": 2000000000,
+            "reset_countdown_style": "long",
+            "percent_used": 27,
+            "projects_exhaustion_before_reset": false
+          },
+          {
+            "label": "5H",
+            "pool": "Ge",
+            "resets_at_epoch_seconds": 2000000000,
+            "reset_countdown_style": "five_hour",
+            "percent_used": 52,
+            "projects_exhaustion_before_reset": false
+          },
+          {
+            "label": "Week",
+            "pool": "Cl",
+            "resets_at_epoch_seconds": 2000000000,
+            "reset_countdown_style": "long",
+            "percent_used": 100,
+            "projects_exhaustion_before_reset": false
+          },
+          {
+            "label": "5H",
+            "pool": "Cl",
+            "resets_at_epoch_seconds": 2000000000,
+            "reset_countdown_style": "five_hour",
+            "percent_used": 19,
+            "projects_exhaustion_before_reset": false
+          }
+        ],
+        "stale": true,
+        "refreshed_at_epoch_seconds": 0,
+        "has_error": false
+      }
+    },
+    {
       "id": "claude",
+      "quota_pools": [],
       "quota": {
         "summary": "Week 21% left · Week (Fable) 17% left",
         "windows": [
@@ -1355,6 +1431,7 @@
     },
     {
       "id": "claude-unknown",
+      "quota_pools": [],
       "quota": {
         "summary": "Week available · Week (Fable) 17% left",
         "windows": [
@@ -1379,6 +1456,7 @@
     },
     {
       "id": "codex",
+      "quota_pools": [],
       "quota": {
         "summary": "Week 70% left",
         "windows": [

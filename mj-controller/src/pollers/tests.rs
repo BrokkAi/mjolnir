@@ -420,6 +420,7 @@ fn probeless_request(id: &str) -> QuotaRefreshRequest {
 fn stored_report(id: &str, age_seconds: u64) -> crate::quota::ProfileQuota {
     crate::quota::ProfileQuota {
         paid_credits: None,
+        monthly_price_usd: None,
         banked_resets: None,
         profile_id: id.into(),
         harness: mj_core::config::HarnessKind::Codex,

@@ -154,6 +154,7 @@ fn api_quota(
 ) -> mj_client::quota::ProfileQuota {
     mj_client::quota::ProfileQuota {
         paid_credits: None,
+        monthly_price_usd: None,
         banked_resets: None,
         profile_id: profile.into(),
         harness,

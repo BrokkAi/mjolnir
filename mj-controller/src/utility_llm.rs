@@ -597,7 +597,7 @@ fn utility_family(profile: &HarnessProfile) -> Option<UtilityFamily> {
         HarnessKind::Claude => None,
         // OpenCode is a multi-provider aggregator with no inference client of
         // its own; it never serves Mjolnir's utility work.
-        HarnessKind::OpenCode => None,
+        HarnessKind::OpenCode | HarnessKind::Antigravity => None,
         HarnessKind::Dsh => dsh_deepseek_base_url(profile).map(|_| UtilityFamily::DeepSeek),
     }
 }
@@ -713,7 +713,7 @@ fn backend_for_profile(profile: &HarnessProfile) -> Result<Option<Arc<dyn LlmBac
         // Claude exposes no direct utility inference client independent of its
         // coding-agent session.
         HarnessKind::Claude => Ok(None),
-        HarnessKind::OpenCode => Ok(None),
+        HarnessKind::OpenCode | HarnessKind::Antigravity => Ok(None),
         // DSH reaches the same chat-completions endpoint with the key its
         // sessions read, when the profile has one.
         HarnessKind::Dsh => {
@@ -877,6 +877,7 @@ mod tests {
 
         let stale = ProfileQuota {
             paid_credits: None,
+            monthly_price_usd: None,
             banked_resets: None,
             profile_id: "grok".into(),
             harness: HarnessKind::Grok,
@@ -1112,6 +1113,7 @@ mod tests {
     fn zero_quota_is_excluded_and_api_ranks_last() {
         let mut report = ProfileQuota {
             paid_credits: None,
+            monthly_price_usd: None,
             banked_resets: None,
             profile_id: "p".into(),
             harness: HarnessKind::Codex,

@@ -1504,6 +1504,7 @@ fn quota_move_candidates_filter_model_health_and_keep_usage_priced_last() {
                 "api" => CandidateQuota::UsagePriced,
                 "unknown" => CandidateQuota::Unknown,
                 _ => CandidateQuota::Subscription {
+                    monthly_price_usd: None,
                     refreshed_at_epoch_seconds: 0,
                     paid_credits: if matches!(id, "paid" | "unhealthy") {
                         mj_client::quota::PaidCredits::limited(75.0)
@@ -2041,6 +2042,7 @@ async fn quota_recovery_reads_full_owner_reports_without_requesting_another_prob
         harness: HarnessKind::Claude,
         windows: vec![window("5H", None, 70, now + 3 * 3600)],
         paid_credits: None,
+        monthly_price_usd: None,
         banked_resets: None,
         extra: None,
         error: None,
@@ -2428,6 +2430,7 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
                 limit: None,
             }],
             paid_credits: None,
+            monthly_price_usd: None,
             banked_resets: None,
             extra: None,
             error: None,

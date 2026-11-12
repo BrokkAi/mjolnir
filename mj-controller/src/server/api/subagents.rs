@@ -1,6 +1,6 @@
+use crate::profile_scheduler::draw_candidates;
 #[cfg(test)]
-use crate::profile_scheduler::order_by_draw;
-use crate::profile_scheduler::{draw_candidates, rank_candidates};
+use crate::profile_scheduler::{order_by_draw, rank_candidates};
 
 use super::*;
 
@@ -411,7 +411,7 @@ async fn resolve_model_profile_selection_from(
                 draw_candidates(&mut offered, None, model, now_epoch_seconds())?
             }
             ModelProfileCandidateSource::Session { ranking_anchor } => {
-                rank_candidates(&mut offered, ranking_anchor, model, now_epoch_seconds())
+                draw_candidates(&mut offered, ranking_anchor, model, now_epoch_seconds())?
             }
         }
     }
@@ -668,7 +668,7 @@ fn choose_model_profile(
                 validate_selectors(&chosen.choices, Some(model), None)?;
                 return Ok(chosen);
             }
-            rank_candidates(&mut offered, ranking_anchor, model, now_epoch_seconds());
+            draw_candidates(&mut offered, ranking_anchor, model, now_epoch_seconds())?;
             take_healthy_offer(offered, &unavailable, model, "configured")
         }
     }
@@ -1156,6 +1156,7 @@ mod tests {
             },
             quota: remaining.map_or(CandidateQuota::Unknown, |remaining| {
                 CandidateQuota::Subscription {
+                    monthly_price_usd: None,
                     refreshed_at_epoch_seconds: 0,
                     paid_credits: None,
                     windows: vec![crate::quota::QuotaWindow {
@@ -1299,7 +1300,7 @@ mod tests {
     }
 
     #[test]
-    fn drawing_picks_in_proportion_to_quota_then_paid_balances() {
+    fn drawing_picks_in_proportion_to_subscription_dollars_and_quota_then_paid_balances() {
         // A fixed stream proves the distribution and prevents one large paid
         // wallet from jumping ahead of included subscription usage.
         let mut state = 0x2545_f491_4f6c_dd1d_u64;
@@ -1309,7 +1310,7 @@ mod tests {
                 .wrapping_add(1_442_695_040_888_963_407);
             ((state >> 11) + 1) as f64 / (1u64 << 53) as f64
         };
-        for included in [true, false] {
+        for (included, price_weighted) in [(true, false), (true, true), (false, true)] {
             let mut profiles = vec![
                 SubagentCandidate {
                     quota: CandidateQuota::UsagePriced,
@@ -1319,10 +1320,28 @@ mod tests {
                 candidate("empty", Some(0), &["luna"]),
             ];
             for (id, amount) in [("sixty", 60), ("thirty-a", 30), ("thirty-b", 30)] {
-                let mut profile = candidate(id, Some(if included { amount } else { 0 }), &["luna"]);
-                let CandidateQuota::Subscription { paid_credits, .. } = &mut profile.quota else {
+                let mut profile = candidate(
+                    id,
+                    Some(if !included {
+                        0
+                    } else if price_weighted {
+                        90
+                    } else {
+                        amount
+                    }),
+                    &["luna"],
+                );
+                let CandidateQuota::Subscription {
+                    paid_credits,
+                    monthly_price_usd,
+                    ..
+                } = &mut profile.quota
+                else {
                     unreachable!()
                 };
+                if price_weighted {
+                    *monthly_price_usd = Some(if amount == 60 { 200 } else { 100 });
+                }
                 // Opposite paid weights while quota remains must have no effect.
                 *paid_credits = mj_client::quota::PaidCredits::limited(if included {
                     if amount == 60 { 0.01 } else { 1e12 }

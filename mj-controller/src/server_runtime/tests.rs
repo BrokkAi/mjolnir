@@ -53,6 +53,7 @@ fn web_suspend_restart_and_move_use_the_lifecycle_cancellation_control() {
     }
 }
 
+// Hard-won: 92684ad3b: unread-frontier changes must reach the viewer even when attention stays unchanged.
 #[test]
 fn ordinary_web_publications_project_only_changed_rows_at_every_history_size() {
     for count in [100, 10_000, 100_000] {
@@ -114,6 +115,10 @@ fn ordinary_web_publications_project_only_changed_rows_at_every_history_size() {
             .metadata
             .session_attention
             .insert("history-000000".into(), attention);
+        runtime
+            .metadata
+            .unread_frontiers
+            .insert("history-000000".into(), 80);
         let runtime_view = mj_client::daemon::RuntimeSessionView::from_managed(
             "history-000000".into(),
             mj_client::session::ManagedSessionView {
@@ -130,6 +135,7 @@ fn ordinary_web_publications_project_only_changed_rows_at_every_history_size() {
             serde_json::to_value(&api).unwrap()["attention"]
         );
         assert_eq!(viewer.attention, runtime_view.attention);
+        assert_eq!(viewer.unread_frontier, Some(80));
         assert_eq!(
             viewer.native_subagent_attention["native"],
             mj_core::attention::SessionAttention::Working
@@ -147,8 +153,17 @@ fn ordinary_web_publications_project_only_changed_rows_at_every_history_size() {
         crate::server::take_viewer_row_visits();
         publisher.snapshot(&controller, &[], &Default::default(), &views, 2);
         assert_eq!(crate::server::take_viewer_row_visits(), 0);
-        publisher.dirty.insert("history-000000".into());
-        publisher.snapshot(&controller, &[], &Default::default(), &views, 3);
+        runtime
+            .metadata
+            .unread_frontiers
+            .insert("history-000000".into(), 99);
+        publisher.observe_runtime(&runtime, &mut Default::default(), &mut Default::default());
+        let frontier_only = publisher.snapshot(&controller, &[], &Default::default(), &views, 3);
+        assert_eq!(
+            frontier_only.sessions.0["history-000000"].unread_frontier,
+            Some(99)
+        );
+        assert_eq!(held.sessions.0["history-000000"].unread_frontier, Some(80));
         assert_eq!(crate::server::take_viewer_row_visits(), 1);
         controller
             .state
@@ -1407,7 +1422,14 @@ fn golden_phone_session_snapshot() {
         }),
     );
 
-    let mut quota_controller = controller_with_profiles(&["claude", "claude-unknown", "codex"]);
+    let mut quota_controller =
+        controller_with_profiles(&["agy", "claude", "claude-unknown", "codex"]);
+    quota_controller
+        .config
+        .profiles
+        .get_mut("agy")
+        .unwrap()
+        .kind = HarnessKind::Antigravity;
     quota_controller
         .config
         .profiles
@@ -1435,6 +1457,7 @@ fn golden_phone_session_snapshot() {
     };
     let quota_report = |profile_id: &str, harness: HarnessKind, windows| ProfileQuota {
         paid_credits: None,
+        monthly_price_usd: None,
         banked_resets: None,
         profile_id: profile_id.into(),
         harness,
@@ -1445,6 +1468,39 @@ fn golden_phone_session_snapshot() {
         rate_limited_until_epoch_seconds: None,
     };
     let quota_reports = BTreeMap::from([
+        (
+            "agy".into(),
+            quota_report(
+                "agy",
+                HarnessKind::Antigravity,
+                vec![
+                    quota_window(
+                        "Week",
+                        Some(73),
+                        Some(mj_client::quota::AntigravityQuotaPool::Gemini.model_scope()),
+                        7 * 24 * 60 * 60,
+                    ),
+                    quota_window(
+                        "5H",
+                        Some(48),
+                        Some(mj_client::quota::AntigravityQuotaPool::Gemini.model_scope()),
+                        5 * 60 * 60,
+                    ),
+                    quota_window(
+                        "Week",
+                        Some(0),
+                        Some(mj_client::quota::AntigravityQuotaPool::Claude.model_scope()),
+                        7 * 24 * 60 * 60,
+                    ),
+                    quota_window(
+                        "5H",
+                        Some(81),
+                        Some(mj_client::quota::AntigravityQuotaPool::Claude.model_scope()),
+                        5 * 60 * 60,
+                    ),
+                ],
+            ),
+        ),
         (
             "claude".into(),
             quota_report(
@@ -1506,10 +1562,11 @@ fn golden_phone_session_snapshot() {
     section(
         &mut out,
         "viewer quota windows",
-        "Claude, unknown Claude, and Codex profiles",
+        "Antigravity, Claude, unknown Claude, and Codex profiles",
         &serde_json::json!({
             "profiles": quota_snapshot.profiles.iter().map(|profile| serde_json::json!({
                 "id": profile.id,
+                "quota_pools": profile.quota_pools,
                 "quota": profile.quota,
             })).collect::<Vec<_>>(),
         }),
@@ -2184,6 +2241,7 @@ fn quota_projection_preserves_reset_metadata_and_marks_only_overdue_readings_sta
             "codex".to_owned(),
             ProfileQuota {
                 paid_credits: None,
+                monthly_price_usd: None,
                 banked_resets: Some(1),
                 profile_id: "codex".into(),
                 harness: HarnessKind::Codex,

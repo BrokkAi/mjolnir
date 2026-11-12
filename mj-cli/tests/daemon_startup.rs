@@ -248,6 +248,7 @@ fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
     // Restore the review table before migrations 104 and 106 add these columns.
     // Restore prompt_history before migration 116 adds its triggers, search table and command column.
     // Hard-won: #1187: revision-121 cleanup triggers referenced tables removed by this legacy fixture.
+    // Hard-won: 128c9a3de: revision-126 fixtures omitted historical harness constraints.
     connection
         .execute_batch(
             "ALTER TABLE session_moves DROP COLUMN source_environment_id;
@@ -299,6 +300,9 @@ fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
          PRAGMA writable_schema=ON;
          UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '')
              WHERE type='table' AND name='sessions';
+         UPDATE sqlite_schema SET sql=replace(sql, 'harness_kind TEXT NOT NULL',
+             'harness_kind TEXT NOT NULL CHECK(harness_kind IN (''codex'',''claude'',''kimi'',''grok'',''deepseek'',''muse'',''zcode''))')
+             WHERE type='table' AND name IN ('sessions','hidden_native_sessions');
          PRAGMA writable_schema=RESET;
          DELETE FROM schema_migrations WHERE version > 43;
          UPDATE schema_compatibility SET minimum_compatible_version = 43;

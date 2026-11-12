@@ -42,12 +42,21 @@ pub struct GithubItem {
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct HistorySnippet {
+    pub time: Option<String>,
+    pub text: String,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionContext {
     pub conversation: String,
     pub files: Vec<String>,
     pub references: Vec<String>,
     #[serde(default)]
     pub mentions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<Vec<HistorySnippet>>,
     /// Per-session reference index; never included in a provider request.
     #[serde(skip)]
     pub mention_candidates: Vec<(crate::github_reference::GithubReference, String)>,
@@ -379,4 +388,19 @@ mod tests {
             assert!(GithubItemVerdict::parse(&response).is_err());
         }
     }
+}
+
+#[path = "github_item/history_unicode.rs"]
+pub mod history_unicode;
+
+/// Frozen tokenizer for aliases600 evidence budgets, without truncation or padding.
+#[cfg(feature = "github-history")]
+pub fn history_tokenizer() -> Result<tokenizers::Tokenizer> {
+    let mut t =
+        tokenizers::Tokenizer::from_bytes(include_bytes!("github_item/ettin-tokenizer.json"))
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    t.with_padding(None);
+    t.with_truncation(None)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(t)
 }

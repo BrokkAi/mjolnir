@@ -85,9 +85,9 @@ pub(crate) enum DashboardIoUpdate {
         session_id: String,
         result: std::result::Result<Box<PreparedMaterializedSessionDetail>, String>,
     },
-    QuestionDismissed {
+    NotificationDismissed {
         session_id: String,
-        question: mj_core::assessment::InferredQuestion,
+        target: mj_core::attention::NotificationDismissal,
         result: std::result::Result<u64, String>,
     },
     /// A bounded tail of a resumed session's stored transcript, loaded off the
@@ -803,8 +803,8 @@ impl DashboardContext {
             DashboardIoUpdate::MaterializedSessionProjection { session_id, result } => {
                 self.finish_materialized_projection(session_id, result);
             }
-            DashboardIoUpdate::QuestionDismissed { session_id, question, result } => {
-                self.dashboard.question_dismissal_finished(&session_id, question, result);
+            DashboardIoUpdate::NotificationDismissed { session_id, target, result } => {
+                self.dashboard.notification_dismissal_finished(&session_id, target, result);
             }
             DashboardIoUpdate::TranscriptTailSeed { materialized } => {
                 let viewed_through_event_ordinal = self

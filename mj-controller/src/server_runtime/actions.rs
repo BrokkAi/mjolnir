@@ -415,6 +415,13 @@ pub(super) async fn apply_phone_action(
                 })?;
             Ok(())
         }
+        ControllerAction::DismissNotification { session_id, target } => {
+            services
+                .daemon_runtime
+                .dismiss_notification(session_id, target)
+                .await?;
+            Ok(())
+        }
         ControllerAction::TurnControl {
             session_id,
             command,

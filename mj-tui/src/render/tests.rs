@@ -1006,6 +1006,7 @@ fn host_usage(cpu_percent: u8) -> mj_core::targets::DeploymentCapacityUsage {
 fn weekly_quota(profile_id: &str, remaining: u8) -> ProfileQuota {
     ProfileQuota {
         paid_credits: None,
+        monthly_price_usd: None,
         banked_resets: None,
         profile_id: profile_id.into(),
         harness: HarnessKind::Claude,
@@ -1048,6 +1049,7 @@ fn weekly_and_five_hour_quota(profile_id: &str, weekly: u8, five_hour: u8) -> Pr
 fn api_quota(profile_id: &str) -> ProfileQuota {
     ProfileQuota {
         paid_credits: None,
+        monthly_price_usd: None,
         banked_resets: None,
         profile_id: profile_id.into(),
         harness: HarnessKind::Codex,
@@ -3234,6 +3236,7 @@ fn golden_dashboard_session_render() {
     let mut dashboard = dashboard_with_session(running_session());
     apply_materialized_transcript(&mut dashboard, numbered_conversation(2));
     clear_session_activity(&mut dashboard, "session-1");
+    dashboard.set_session_attention_for("session-1", mj_core::attention::SessionAttention::Unread);
     dashboard
         .session_details
         .get_mut("session-1")
@@ -3664,6 +3667,7 @@ fn golden_dashboard_resource_panels() {
             "codex-1".into(),
             ProfileQuota {
                 paid_credits: None,
+                monthly_price_usd: None,
                 banked_resets: None,
                 profile_id: "codex-1".into(),
                 harness: HarnessKind::Codex,
@@ -3690,6 +3694,7 @@ fn golden_dashboard_resource_panels() {
             "claude-1".into(),
             ProfileQuota {
                 paid_credits: None,
+                monthly_price_usd: None,
                 banked_resets: None,
                 profile_id: "claude-1".into(),
                 harness: HarnessKind::Claude,
@@ -3761,6 +3766,7 @@ fn golden_dashboard_resource_panels() {
     );
     let claude_quota = |profile_id: &str, fable: Option<u8>| ProfileQuota {
         paid_credits: None,
+        monthly_price_usd: None,
         banked_resets: None,
         profile_id: profile_id.into(),
         harness: HarnessKind::Claude,
@@ -3841,6 +3847,7 @@ fn golden_dashboard_resource_panels() {
 
     let quota = ProfileQuota {
         paid_credits: None,
+        monthly_price_usd: None,
         banked_resets: None,
         profile_id: "codex-1".into(),
         harness: HarnessKind::Codex,
@@ -3886,6 +3893,7 @@ fn golden_dashboard_resource_panels() {
 
     let quota = ProfileQuota {
         paid_credits: None,
+        monthly_price_usd: None,
         banked_resets: Some(1),
         profile_id: "codex-1".into(),
         harness: HarnessKind::Codex,
@@ -3927,6 +3935,49 @@ fn golden_dashboard_resource_panels() {
         80,
         28,
         &mut dashboard,
+    );
+
+    let mut agy_config = config();
+    agy_config.profiles.insert(
+        "agy".into(),
+        mj_core::config::HarnessProfile::new(HarnessKind::Antigravity, "/profiles/agy"),
+    );
+    let mut agy_quota = weekly_and_five_hour_quota("agy", 73, 48);
+    agy_quota.harness = HarnessKind::Antigravity;
+    for window in &mut agy_quota.windows {
+        window.model_scope = Some(
+            mj_client::quota::AntigravityQuotaPool::Gemini
+                .model_scope()
+                .into(),
+        );
+    }
+    let mut claude_pool = weekly_and_five_hour_quota("agy", 0, 81);
+    for window in &mut claude_pool.windows {
+        window.model_scope = Some(
+            mj_client::quota::AntigravityQuotaPool::Claude
+                .model_scope()
+                .into(),
+        );
+    }
+    agy_quota.windows.extend(claude_pool.windows);
+    let mut dashboard = DashboardState::new(
+        agy_config,
+        State::default(),
+        BTreeMap::from([("agy".into(), agy_quota)]),
+    );
+    dashboard.focus = Focus::Quota;
+    dashboard.quota_index = 1;
+    append_dashboard_golden(
+        &mut output,
+        "Antigravity Gemini and Claude quota pools",
+        140,
+        28,
+        &mut dashboard,
+    );
+    dashboard.begin_profile_rename();
+    assert!(
+        matches!(&dashboard.mode, Mode::ConfigId(editor) if editor.old_id == "agy"),
+        "the Claude quota row still selects the agy profile"
     );
 
     mj_core::golden::assert_golden(

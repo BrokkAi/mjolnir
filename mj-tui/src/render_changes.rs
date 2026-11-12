@@ -257,7 +257,13 @@ impl DashboardState {
             });
         }
 
-        for (id, quota) in &self.quotas {
+        for row in self.quota_profile_rows() {
+            let Some(quota) = self.quotas.get(row.id) else {
+                continue;
+            };
+            let projected = row.pool.map(|pool| quota.for_antigravity_pool(pool));
+            let quota = projected.as_ref().unwrap_or(quota);
+            let id = row.label();
             if quota.error.is_some() {
                 continue;
             }

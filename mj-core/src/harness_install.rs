@@ -187,6 +187,27 @@ pub async fn locate(
     let built_in = bridge.is_some()
         || crate::harness_runtime::is_fallback_launch(harness, execution_policy, command, args);
     match policy {
+        _ if harness == HarnessKind::Antigravity && built_in => {
+            let executable = antigravity_program(environment).await?;
+            let home = environment
+                .get(harness.home_env())
+                .context("Antigravity staged home is missing")?;
+            let mut args: Vec<String> = harness
+                .bridge_args(execution_policy)
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            args.extend(["--gemini-dir".into(), home.clone()]);
+            Ok(Located {
+                command: executable.clone(),
+                args,
+                environment: BTreeMap::new(),
+                entrypoint: Some(executable.clone()),
+                cli_entrypoint: Some(executable),
+                managed: None,
+            })
+        }
+        _ if harness == HarnessKind::Antigravity => Ok(Located::unchosen(command, args)),
         HarnessRuntimePolicy::Image if built_in => {
             locate_in_image(harness, execution_policy, environment).await
         }
@@ -232,6 +253,39 @@ pub async fn locate(
     }
 }
 
+/// The ambient CLI used by both ACP sessions and the quota command.
+pub async fn antigravity_program(environment: &BTreeMap<String, String>) -> Result<PathBuf> {
+    let search = environment.clone();
+    tokio::task::spawn_blocking(move || -> Result<PathBuf> {
+        let path = search
+            .get("PATH")
+            .map(std::ffi::OsString::from)
+            .or_else(|| std::env::var_os("PATH"));
+        if let Some(path) = crate::program_path::find_executable_on_path("agy", path.as_deref()) {
+            return path
+                .canonicalize()
+                .context("resolve Antigravity executable");
+        }
+        let home = search
+            .get("HOME")
+            .map(PathBuf::from)
+            .or_else(crate::path_input::user_home);
+        if let Some(home) = home {
+            let bin = home.join(".local/bin");
+            if let Some(path) =
+                crate::program_path::find_executable_on_path("agy", Some(bin.as_os_str()))
+            {
+                return path
+                    .canonicalize()
+                    .context("resolve Antigravity executable");
+            }
+        }
+        bail!("Antigravity requires agy installed on this target (PATH or ~/.local/bin/agy)")
+    })
+    .await
+    .context("find target Antigravity task failed")?
+}
+
 /// The image's own programs for `harness`, by the names the agent-dev image
 /// installs on `PATH`: the ACP bridge, the native harness the launch runs, and
 /// the harness's command-line program.
@@ -243,6 +297,7 @@ fn image_programs(harness: HarnessKind) -> (&'static str, &'static str, &'static
         HarnessKind::Kimi => ("kimi", "kimi", "kimi"),
         HarnessKind::Grok => ("grok", "grok", "grok"),
         HarnessKind::OpenCode => ("opencode", "opencode", "opencode"),
+        HarnessKind::Antigravity => ("agy", "agy", "agy"),
         HarnessKind::Dsh => ("dsh-acp", "dsh-acp", "dsh-acp"),
     }
 }
@@ -329,7 +384,7 @@ async fn locate_in_image(
                 ],
             )
         }
-        HarnessKind::Kimi | HarnessKind::Grok => (
+        HarnessKind::Kimi | HarnessKind::Grok | HarnessKind::Antigravity => (
             bridge,
             harness
                 .bridge_args(execution_policy)
@@ -395,7 +450,11 @@ fn target_native_harness_is_available(
         HarnessKind::Kimi => "kimi",
         HarnessKind::Grok => "grok",
         HarnessKind::OpenCode => "opencode",
-        HarnessKind::Codex | HarnessKind::Claude | HarnessKind::Muse | HarnessKind::Dsh => {
+        HarnessKind::Codex
+        | HarnessKind::Claude
+        | HarnessKind::Muse
+        | HarnessKind::Dsh
+        | HarnessKind::Antigravity => {
             return Ok(false);
         }
     };
@@ -505,6 +564,9 @@ async fn resolve_with_environment(
     execution_policy: ExecutionPolicy,
     environment: &BTreeMap<String, String>,
 ) -> Result<ManagedHarness> {
+    if harness == HarnessKind::Antigravity {
+        bail!("Antigravity requires agy installed on this target (PATH or ~/.local/bin/agy)");
+    }
     if harness == HarnessKind::Dsh {
         bail!(
             "{} has no managed installation; launch it through its npx script",
@@ -770,7 +832,7 @@ async fn install_into(
         HarnessKind::Grok => install_grok(staging.path(), environment).await?,
         HarnessKind::Muse => install_muse_native(staging.path(), environment).await?,
         HarnessKind::OpenCode => install_opencode(staging.path(), environment).await?,
-        HarnessKind::Dsh => {
+        HarnessKind::Dsh | HarnessKind::Antigravity => {
             unreachable!("DSH has no managed installation; resolve returns before installing")
         }
     }
@@ -2600,6 +2662,10 @@ mod tests {
                     home.path().to_string_lossy().into_owned(),
                 ),
                 ("PATH".to_owned(), path.to_string_lossy().into_owned()),
+                (
+                    "MJ_ANTIGRAVITY_HOME".to_owned(),
+                    home.path().to_string_lossy().into_owned(),
+                ),
             ])
         };
         for harness in HarnessKind::ALL {
@@ -2615,7 +2681,11 @@ mod tests {
             ))
             .unwrap_err();
             assert!(
-                format!("{error:#}").contains("the daemon's image does not provide"),
+                format!("{error:#}").contains(if harness == HarnessKind::Antigravity {
+                    "agy installed on this target"
+                } else {
+                    "the daemon's image does not provide"
+                }),
                 "{}: {error:#}",
                 harness.display_name()
             );

@@ -290,31 +290,30 @@ pub(crate) async fn apply_dashboard_action(
             });
         }
         DashboardAction::OpenSubagents { parent_id } => context.open_subagents(parent_id),
-        DashboardAction::DismissQuestion {
-            session_id,
-            question,
-        } => {
+        DashboardAction::DismissNotification { session_id, target } => {
             let result_session = session_id.clone();
-            let result_question = question.clone();
+            let result_target = target.clone();
             spawn_async_job(
                 Some(context.critical_operations.clone()),
-                "question dismissal",
+                "notification dismissal",
                 context.dashboard_io_tx.clone(),
                 std::time::Duration::from_secs(30),
                 async move {
                     let mut client = daemon::connect_existing().await?;
-                    client
-                        .submit_session_command(
+                    match client
+                        .request(mj_client::daemon::DaemonAction::DismissNotification {
                             session_id,
-                            format!("dismiss-question-{}", question.completed_ordinal),
-                            mj_core::relay::RelayCommand::DismissQuestion { question },
-                            None,
-                        )
-                        .await
+                            target,
+                        })
+                        .await?
+                    {
+                        mj_client::daemon::DaemonReply::Ordinal(ordinal) => Ok(ordinal),
+                        reply => anyhow::bail!("unexpected dismissal reply: {reply:?}"),
+                    }
                 },
-                move |result| DashboardIoUpdate::QuestionDismissed {
+                move |result| DashboardIoUpdate::NotificationDismissed {
                     session_id: result_session,
-                    question: result_question,
+                    target: result_target,
                     result,
                 },
             );

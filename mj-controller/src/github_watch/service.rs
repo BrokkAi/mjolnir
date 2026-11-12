@@ -26,12 +26,16 @@ use crate::daemon::RuntimeState;
 const MAX_CLASSIFICATIONS_PER_POLL: usize = 50;
 const ITEMS_PER_PAGE: usize = 100;
 const MERGE_CLOSE_TOLERANCE_MS: i64 = 5_000;
-const CLASSIFICATION_CONCURRENCY: usize = 4;
 const REPOSITORY_CONCURRENCY: usize = 4;
 const API_TIMEOUT: Duration = Duration::from_secs(20);
 const CONFIG_RECHECK_INTERVAL: Duration = Duration::from_secs(5);
 const MIN_INTERVAL: Duration = Duration::from_secs(10);
 const MAX_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+type SessionEvidenceSnapshot = (
+    SessionContext,
+    Arc<Vec<mj_transcript::github_history::HistoryRow>>,
+);
 
 type ClassifyFuture<'a> = Pin<Box<dyn Future<Output = Result<GithubItemVerdict>> + Send + 'a>>;
 
@@ -74,20 +78,49 @@ fn is_github_events_disabled(error: &anyhow::Error) -> bool {
 
 trait GithubClassifier: Send + Sync {
     fn classify<'a>(&'a self, evidence: &'a GithubItemEvidence) -> ClassifyFuture<'a>;
+    fn set_use_gpu(&self, _: bool) {}
 }
 
-struct JevGithubClassifier;
-
-impl GithubClassifier for JevGithubClassifier {
+impl GithubClassifier for crate::github_relevance::Classifier {
+    fn set_use_gpu(&self, enabled: bool) {
+        self.set_use_gpu(enabled);
+    }
     fn classify<'a>(&'a self, evidence: &'a GithubItemEvidence) -> ClassifyFuture<'a> {
-        Box::pin(crate::github_item_verdict::classify(evidence))
+        Box::pin(self.classify(evidence))
     }
 }
 
 /// Cancellable periodic poller. Poll progress lives only in the database; a
 /// replacement daemon can resume from the same repo cursors and event keys.
 pub(crate) async fn run(state: Arc<RuntimeState>, stop: CancellationToken) -> Result<()> {
-    run_with_classifier(state, stop, Arc::new(JevGithubClassifier)).await
+    let notice_state = Arc::downgrade(&state);
+    let notices = Arc::new(crate::github_relevance::Notices::new(move |text| {
+        if let Some(state) = notice_state.upgrade() {
+            state.push_public_notice("", text);
+        }
+    }));
+    let owner_notices = notices.clone();
+    let student = Arc::new(crate::github_student::Student::new(
+        mj_core::config::data_dir(),
+        state.controller_projection().config.github.watch.use_gpu,
+        Arc::new(move |notice| owner_notices.student_notice(notice)),
+    ));
+    let result = run_with_student(state, stop, student.clone(), notices).await;
+    let shutdown = student.shutdown().await;
+    if let Err(error) = &shutdown {
+        tracing::warn!(%error, "GitHub student shutdown failed");
+    }
+    result.and(shutdown)
+}
+
+async fn run_with_student(
+    state: Arc<RuntimeState>,
+    stop: CancellationToken,
+    student: Arc<dyn crate::github_relevance::StudentOwner>,
+    notices: Arc<crate::github_relevance::Notices>,
+) -> Result<()> {
+    let classifier = crate::github_relevance::Classifier::new(student, notices);
+    run_with_classifier(state, stop, Arc::new(classifier)).await
 }
 
 async fn run_with_classifier(
@@ -97,6 +130,7 @@ async fn run_with_classifier(
 ) -> Result<()> {
     loop {
         let projection = state.controller_projection();
+        classifier.set_use_gpu(projection.config.github.watch.use_gpu);
         let mailboxes_enabled = projection.config.github_events_enabled();
         let config = projection.config.github.watch;
         let delay = if mailboxes_enabled {
@@ -112,6 +146,7 @@ async fn run_with_classifier(
             return Ok(());
         }
         let projection = state.controller_projection();
+        classifier.set_use_gpu(projection.config.github.watch.use_gpu);
         if !projection.config.github_events_enabled() {
             continue;
         }
@@ -518,7 +553,7 @@ async fn classify_recorded_items(
             // Retain failures per pair, just like classifier failures, without reloading.
             digests.insert(
                 session.id.clone(),
-                session_digest(session.id.clone())
+                session_evidence_snapshot(session.id.clone())
                     .await
                     .map_err(|e| format!("{e:#}")),
             );
@@ -526,6 +561,7 @@ async fn classify_recorded_items(
     }
     let login = api.credential_login().await?;
     let login = login.as_deref();
+    let concurrency = pending.len();
     let results = stream::iter(pending).map(|(item, session, _, attempts)| {
         let classifier = classifier.clone(); let control = api.control.clone();
         let digest = digests[&session.id].clone();
@@ -545,7 +581,7 @@ async fn classify_recorded_items(
                 }
             }
         }
-    }).buffer_unordered(CLASSIFICATION_CONCURRENCY).collect::<Vec<Result<()>>>().await;
+    }).buffer_unordered(concurrency).collect::<Vec<Result<()>>>().await;
     for result in results {
         result?;
     }
@@ -556,12 +592,12 @@ async fn classify_for_session(
     owner: &str,
     repo: &str,
     item: crate::database::GithubSeenItem,
-    session: (SessionRecord, SessionContext),
+    session: (SessionRecord, SessionEvidenceSnapshot),
     credential_login: Option<&str>,
     classifier: Arc<dyn GithubClassifier>,
     control: PollControl,
 ) -> Result<()> {
-    let (session, digest) = session;
+    let (session, (digest, history)) = session;
     let repo_label = format!("{owner}/{repo}");
     let kind = item_kind_from_watch(&item.kind);
     // Sessions share one GitHub account, so the author cannot name a session,
@@ -575,7 +611,7 @@ async fn classify_for_session(
             kind,
             number: item.number as u64,
             title: item.title.clone(),
-            body: item.body,
+            body: item.body.clone(),
             author: item.author,
             url: item.url.clone(),
         },
@@ -586,11 +622,31 @@ async fn classify_for_session(
     let bare_is_item_repo = session_github_repositories(&session).len() == 1;
     evidence.session = evidence.session.for_item(&evidence.item, bare_is_item_repo);
     // The creator already knows its item, so it is never told about it and
-    // Jev is not asked; its stored interest is false.
+    // The classifier is not asked; its stored interest is false.
     let interested = if created {
         false
     } else {
         control.check_enabled()?;
+        let original = evidence.item.clone();
+        let session_id = session.id.clone();
+        let cutoff =
+            timestamp_millis(&item.created_at).context("invalid GitHub item creation time")?;
+        let evidence = tokio::task::spawn_blocking(move || {
+            let mut base = serde_json::to_value(evidence.bounded_for_request()?)?;
+            mj_core::redact::redact_json_strings(&mut base);
+            let base = serde_json::from_value(base)?;
+            let transcript = mj_transcript::github_history::render(
+                &session_id,
+                &history,
+                cutoff,
+                &original.repo,
+                original.number,
+            )?;
+            mj_transcript::github_history::build_evidence(&original, &transcript, &base)
+                .map(|(evidence, _)| evidence)
+        })
+        .await
+        .context("build GitHub history evidence")??;
         let verdict = classifier.classify(&evidence).await?;
         control.check_enabled()?;
         verdict.interested
@@ -676,6 +732,22 @@ async fn opened_by_session(
     }))
 }
 
+async fn session_evidence_snapshot(session_id: String) -> Result<SessionEvidenceSnapshot> {
+    tokio::task::spawn_blocking(move || {
+        let history = crate::database::load_github_history_snapshot(&session_id)?;
+        let digest = crate::database::load_materialized_recent_turns(
+            &session_id,
+            mj_core::github_item::SESSION_TURNS,
+        )?
+        .map(|materialized| mj_transcript::github_item::session_digest(&materialized))
+        .unwrap_or_default();
+        Ok((digest, Arc::new(history)))
+    })
+    .await
+    .context("load GitHub session evidence snapshot")?
+}
+
+#[cfg(test)]
 async fn session_digest(session_id: String) -> Result<SessionContext> {
     tokio::task::spawn_blocking(move || {
         const TURNS: usize = mj_core::github_item::SESSION_TURNS;
@@ -1739,7 +1811,7 @@ mod tests {
         assert_eq!(
             calls.load(Ordering::SeqCst),
             0,
-            "Jev is not called after opt-out"
+            "The classifier is not called after opt-out"
         );
         assert_eq!(state.requests.load(Ordering::SeqCst), 1);
         assert!(is_github_events_disabled(
@@ -1819,6 +1891,10 @@ mod tests {
         fn classify<'a>(&'a self, evidence: &'a GithubItemEvidence) -> ClassifyFuture<'a> {
             Box::pin(async move {
                 self.calls.fetch_add(1, Ordering::SeqCst);
+                assert!(
+                    evidence.session.history.is_some(),
+                    "watcher must prepare shared history evidence"
+                );
                 let title = evidence.item.title.to_ascii_lowercase();
                 Ok(GithubItemVerdict {
                     interested: title.contains("interesting"),

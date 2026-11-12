@@ -360,6 +360,7 @@ function selectedWorkspaceId() {
   if (route.subagentParentId) {
     return sessionById(route.subagentParentId)?.workspace_id;
   }
+  if (route.workspaceId === 'notifications') return 'notifications';
   if (route.workspaceId && workspaces.some(w => w.id === route.workspaceId)) {
     return route.workspaceId;
   }
@@ -368,7 +369,7 @@ function selectedWorkspaceId() {
     if (session?.workspace_id) return session.workspace_id;
   }
 
-  return workspaces[0]?.id;
+  return route.name === 'dashboard' ? 'notifications' : workspaces[0]?.id;
 }
 
 function applyRoute() {
@@ -382,6 +383,7 @@ function applyRoute() {
     }
   }
   if (!snapshot) return;
+  if (route.name !== 'dashboard' || route.workspaceId !== 'notifications') notificationSnapshot.reset();
 
   // The dashboard names its workspace in the URL, so a reload, a Back press
   // and a shared link all return to the same one. An empty hash is the state
@@ -437,7 +439,7 @@ function applyRoute() {
       quota: 'Quota',
       settings: 'Settings',
       conversation: 'Conversation',
-    }[name] || 'MJ';
+    }[name] || 'Mjolnir';
 
   if (name === 'conversation') {
     openConversation(route.sessionId);
@@ -957,7 +959,9 @@ const dismissedRuntimeNotices = new Set();
 function renderLaunchFailures() {
   const noticeKey = notice => `${viewerState.cursor?.incarnation}:${notice.id}`;
   const notices = (snapshot.launch_failures || []).filter(
-    failure => route.name === 'dashboard' && failure.workspace_id === selectedWorkspaceId() && !dismissedLaunchFailures.has(failure.id),
+    failure => route.name === 'dashboard'
+      && (selectedWorkspaceId() === 'notifications' || failure.workspace_id === selectedWorkspaceId())
+      && !dismissedLaunchFailures.has(failure.id),
   );
   const failureCards = notices.map(failure => {
     const card = el('div', 'card');
@@ -990,7 +994,7 @@ function renderLaunchFailures() {
 
 function renderWorkspaces() {
   const parentId = route.subagentParentId;
-  const workspaces = snapshot.workspaces || [];
+  const workspaces = [{ id: 'notifications', name: 'Notifications' }, ...(snapshot.workspaces || [])];
   workspaceSelect.classList.toggle('hidden', Boolean(parentId) || !workspaces.length);
   subagentWorkspace.classList.toggle('hidden', !parentId);
   if (parentId) {
@@ -1017,6 +1021,8 @@ function renderWorkspaces() {
       }),
     );
   }
+  // Attention changes update the existing option rather than rebuilding an open picker.
+  workspaceSelect.options[0].textContent = `Notifications (${notificationRows().length})`;
   workspaceSelect.value = selectedWorkspaceId() || '';
 }
 
@@ -1125,11 +1131,17 @@ function isDashboardSession(session) {
     || isTransitioningSession(session);
 }
 
-/// Most recent top-level message first. Title and id keep rows that have not
-/// said anything yet in a stable order as new messages re-sort the list.
+function hasNotification(session) {
+  return ['needs_input', 'important', 'failed', 'unreachable'].includes(session.attention);
+}
+
+/// Notifications, unread output, then other sessions; newest message first in each band.
+/// Title and id keep ties stable as messages and attention re-sort the list.
 function orderedSessions(live) {
   return [...live].sort((left, right) =>
-    sessionMessageMs(right) - sessionMessageMs(left)
+    Number(hasNotification(right)) - Number(hasNotification(left))
+    || Number(right.attention === 'unread') - Number(left.attention === 'unread')
+    || sessionMessageMs(right) - sessionMessageMs(left)
     || String(left.title || '').localeCompare(String(right.title || ''))
     || left.id.localeCompare(right.id),
   );
@@ -1149,7 +1161,69 @@ function liveSessions() {
   return [...(viewerState.live.get(selectedWorkspaceId())?.values() || [])];
 }
 
+// Notifications retain cleared rows only for the current inbox visit.
+class NotificationSnapshot {
+  constructor() { this.entries = []; }
+  reset() { this.entries = []; }
+  update(rows, allRows = rows) {
+    const current = new Map(allRows.map(row => [row.id, row]));
+    const retained = new Set(this.entries.map(entry => entry.row.id));
+    this.entries = [
+      ...rows.filter(row => !retained.has(row.id)).map(row => ({ row })),
+      ...this.entries.map(entry => ({
+        row: current.get(entry.row.id) || {
+          ...entry.row, capabilities: {}, operation: null, transitioning: false,
+          lifecycle: 'destroyed', attention: 'inactive', configuration_issue: null, move_recovery: null,
+        },
+        excerpt: entry.excerpt,
+      })),
+    ];
+    const entriesById = new Map(this.entries.map(entry => [entry.row.id, entry]));
+    this.entries = orderedSessions(this.entries.map(entry => entry.row)).map(row => entriesById.get(row.id));
+    return this.entries;
+  }
+}
+const notificationSnapshot = new NotificationSnapshot();
+const notificationItems = new Map();
+
+function notificationRows() {
+  return [...viewerState.rows.values()].filter(row => !isSubagentSession(row)
+    && hasNotification(row));
+}
+
+function renderNotifications() {
+  const header = el('h2', '', 'Notifications');
+  const items = notificationSnapshot.update(notificationRows(), [...viewerState.rows.values()]).map(entry => {
+    const { row } = entry;
+    let item = notificationItems.get(row.id);
+    if (!item) {
+      item = el('div', 'notification-entry');
+      item.dataset.notificationId = row.id;
+      item._excerpt = el('p', 'notification-excerpt');
+      item._meta = el('p', 'dim');
+      notificationItems.set(row.id, item);
+    }
+    let card = sessionCards.get(row.id);
+    if (!card) { card = sessionCard(row); sessionCards.set(row.id, card); }
+    else updateSessionCard(card, row);
+    reconcileChildren(item, [card, item._excerpt, item._meta]);
+    const excerpt = row.pending_elicitations?.find(request => request.message)?.message || row.preview?.join('\n') || entry.excerpt;
+    entry.excerpt = excerpt;
+    item._excerpt.textContent = excerpt || '';
+    item._excerpt.hidden = !excerpt;
+    const workspace = snapshot.workspaces?.find(workspace => workspace.id === row.workspace_id);
+    const timestamp = sessionMessageMs(row);
+    const age = timestamp ? `${Math.max(0, Math.floor((serverClockMs() - timestamp) / 60000))}m ago` : 'Age unknown';
+    item._meta.textContent = `${workspace?.name || row.workspace_id} · ${age}`;
+    return item;
+  });
+  reconcileChildren(sessions, [header, ...items, ...(!items.length ? [el('p', 'dim', 'No notifications.')] : [])]);
+}
+
 function renderSessions() {
+  const notifications = !route.subagentParentId && selectedWorkspaceId() === 'notifications';
+  document.querySelector('#dashboard .page-actions').classList.toggle('hidden', notifications);
+  if (notifications) { renderNotifications(); return; }
   const allSessions = liveSessions();
   const parent = sessionById(route.subagentParentId);
   const subagentView = Boolean(route.subagentParentId);
@@ -1608,13 +1682,14 @@ function sessionCard(session) {
   return card;
 }
 
-/// Severity is served by the daemon. This viewer has no output read receipts.
+/// Severity, including unread, is served by the daemon.
 function attentionParts(session) {
   const parts = [];
   if (session.operation?.kind === 'move') parts.push(['→', 'Moving']);
   const attention = {
     needs_input: ['?', 'Input needed'],
     important: ['!', 'Important'],
+    unread: ['✓', 'Unread'],
     failed: ['×', 'Failed'],
     unreachable: ['×', 'Unreachable'],
   }[session.attention];
@@ -1692,7 +1767,28 @@ function updateSessionCard(card, session) {
   card._metaSeparators[0].hidden = !(shown[0] && shown[1]);
   card._metaSeparators[1].hidden = !((shown[0] || shown[1]) && shown[2]);
   updateSessionActivity(card, session);
+  renderNotificationDismissal(card, session, actionError);
   updateSessionMenu(card, session);
+}
+
+function renderNotificationDismissal(container, session, errorNode) {
+  let control = container.querySelector('[data-dismiss-notification]');
+  if (!session.capabilities?.dismiss_notification) {
+    control?.remove();
+    return;
+  }
+  if (!control) {
+    control = button('Dismiss notification', 'secondary');
+    control.dataset.dismissNotification = 'true';
+    container.append(control);
+  }
+  control.disabled = pendingActions.has(`dismiss-notification:${session.id}`);
+  const target = session.notification_dismissal;
+  control.onclick = event => {
+    event.stopPropagation();
+    return runSessionAction({ action: 'dismiss-notification', id: session.id }, errorNode,
+      { target });
+  };
 }
 
 function updateSessionMenu(card, session) {
@@ -1951,7 +2047,7 @@ function beginSessionPress(event) {
         activeSessionPress.id !== card.dataset.sessionId ||
         current !== card ||
         card.isConnected === false ||
-        !sessionInWorkspace(card.dataset.sessionId, selectedWorkspaceId()) ||
+        (selectedWorkspaceId() !== 'notifications' && !sessionInWorkspace(card.dataset.sessionId, selectedWorkspaceId())) ||
         !sessionMenuActions(card._session).length
       ) {
         cancelSessionPress();
@@ -2444,7 +2540,7 @@ function selectNewProfile(draft, profileId) {
 // Mirrors HarnessKind::supports_delegation_tools.
 function subagentChoiceApplies(draft = newDraft) {
   const kind = snapshot?.profiles.find(profile => profile.id === draft?.profileId)?.harness_kind;
-  return kind === 'claude' || kind === 'codex' || kind === 'dsh' || kind === 'opencode';
+  return kind === 'claude' || kind === 'codex' || kind === 'dsh' || kind === 'opencode' || kind === 'antigravity';
 }
 
 // Every top-level session's message-only server carries ask_oracle, whatever its harness.
@@ -2456,7 +2552,7 @@ function oracleChoiceApplies(draft = newDraft) {
 // do nothing there and is not offered.
 function subagentNativeOffered(draft = newDraft) {
   const kind = snapshot?.profiles.find(profile => profile.id === draft?.profileId)?.harness_kind;
-  return kind !== 'dsh';
+  return kind !== 'dsh' && kind !== 'antigravity';
 }
 
 // A policy as the delegation choice shows and submits it for the draft's
@@ -5116,6 +5212,10 @@ function renderQuota() {
     [...quotaPanel.querySelectorAll('details[open]')].map(row => row.dataset.profileId),
   );
   const profiles = snapshot.profiles || [];
+  const rows = profiles.flatMap(profile => {
+    const pools = profile.quota_pools || [];
+    return pools.length ? pools.map(pool => ({ profile, pool })) : [{ profile, pool: null }];
+  });
   if (!profiles.length) {
     quotaPanel.replaceChildren(el('p', 'dim', 'No profiles configured.'));
     return;
@@ -5137,19 +5237,24 @@ function renderQuota() {
   quotaPanel.replaceChildren(
     hint,
     heading,
-    ...profiles.map(profile => {
+    ...rows.map(({ profile, pool }) => {
       const disclosure = el('details', 'quota-profile');
-      disclosure.dataset.profileId = profile.id;
-      disclosure.open = expanded.has(profile.id);
+      const rowId = pool ? `${profile.id}:${pool}` : profile.id;
+      const displayName = pool ? `${profile.id} (${pool})` : profile.id;
+      disclosure.dataset.profileId = rowId;
+      disclosure.open = expanded.has(rowId);
       const summary = el('summary', 'quota-overview-row');
-      const quota = profile.quota;
-      const name = el('span', 'quota-profile-name', profile.id);
+      const quota = pool && profile.quota ? {
+        ...profile.quota,
+        windows: (profile.quota.windows || []).filter(window => window.pool === pool),
+      } : profile.quota;
+      const name = el('span', 'quota-profile-name', displayName);
       const hold = quotaHoldText(Math.floor(serverClockMs() / 1000), quota);
       if (hold) name.append(el('small', 'reading-mid', hold));
       else if (quota?.has_error) name.append(el('small', 'reading-low', 'probe failed'));
       else if (quota?.stale) name.append(el('small', 'reading-mid', 'stale'));
       summary.append(name);
-      const spoken = [profile.id, hold || (quota?.has_error ? 'probe failed; last reading' : quota?.stale ? 'stale reading' : '')];
+      const spoken = [displayName, hold || (quota?.has_error ? 'probe failed; last reading' : quota?.stale ? 'stale reading' : '')];
       if (quota?.windows?.length) {
         for (const label of labels) {
           const window = quota.windows.find(window => window.label === label);
@@ -8340,6 +8445,9 @@ async function persistVisibleConversationRead() {
     receipt = { through: 0, inFlight: false };
     conversationReads.set(sessionId, receipt);
   }
+  // Acknowledge what this reader has loaded and seen. Bounding it by the
+  // row's served frontier would stall: the conversation cursor advances
+  // before the row republishes, and a row update schedules no receipt.
   const through = cursor;
   if (!Number.isSafeInteger(through) || through <= Math.max(receipt.through, acknowledged)
     || receipt.inFlight) return;
@@ -8785,6 +8893,8 @@ function renderTurnControl(session) {
 }
 
 function renderConversationHeader(session) {
+  renderNotificationDismissal(document.querySelector('.conversation-header'), session,
+    document.querySelector('#conversation-error'));
   syncConversationMode(session);
   renderSessionTitle(document.querySelector('#conversation-title'), session);
   renderPromptSettings(session);
@@ -9290,7 +9400,7 @@ async function runSessionAction(dataset, errorNode, extra) {
     // back to what the session last used.
     body.profile_id = extra?.profile_id || dataset.profile;
     body.target_id = extra?.target_id || dataset.target;
-    body.workspace_id = extra?.workspace_id || dataset.workspace_id || selectedWorkspaceId();
+    body.workspace_id = extra?.workspace_id || dataset.workspace_id || sessionById(dataset.id)?.workspace_id;
     body.queue = extra?.queue || 'start';
     if (extra && Object.prototype.hasOwnProperty.call(extra, 'additional_mounts')) {
       body.additional_mounts = extra.additional_mounts;

@@ -13063,3 +13063,25 @@ async fn mbx_preparation_cancels_on_handoff_and_disconnect_before_removing_stagi
         assert!(!root.join("home/.local/bin/mbx").exists());
     }
 }
+
+#[tokio::test]
+async fn dismiss_notification_refuses_a_stale_target_before_dispatch() {
+    let state = test_runtime_state();
+    let error = state
+        .dismiss_notification(
+            "session-no-longer-current".into(),
+            mj_core::attention::NotificationDismissal::Question(
+                mj_core::assessment::InferredQuestion {
+                    turn_id: "stale".into(),
+                    completed_ordinal: 10,
+                },
+            ),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("notification is no longer current")
+    );
+}

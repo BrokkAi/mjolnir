@@ -3132,6 +3132,21 @@ fn detach_receipt_is_monotonic_and_cannot_pass_projection() {
         .unwrap(),
         2
     );
+    assert_eq!(
+        persist_read_receipt_with(
+            &mut connection,
+            "notification-dismissal",
+            DEFAULT_WORKSPACE_ID,
+            "session-1",
+            1
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions["session-1"].viewed_through_event_ordinal,
+        2
+    );
     assert!(
         persist_read_receipt_with(
             &mut connection,
@@ -3584,6 +3599,7 @@ fn deleting_an_operational_session_removes_its_prompts_and_keeps_its_context() {
         )
         .unwrap();
 
+    super::sessions::delete_session_from(&database, "session-1").unwrap();
     state.sessions.clear();
     save_state_to(&database, &state).unwrap();
 
@@ -6192,6 +6208,9 @@ fn state_reads_keep_sessions_and_subagents_in_one_snapshot_during_concurrent_cha
         } else {
             (with_child, without_child)
         };
+        if creating_child {
+            super::sessions::delete_session_from(&path, &child.id).unwrap();
+        }
         save_state_to(&path, &before).unwrap();
         let writer_path = path.clone();
         let committed = after.clone();
@@ -6201,6 +6220,9 @@ fn state_reads_keep_sessions_and_subagents_in_one_snapshot_during_concurrent_cha
                 // WAL permits this while a read transaction remains open.
                 if creating_child {
                     register_test_subagent(&writer_path, &child, &launch).unwrap();
+                }
+                if !creating_child {
+                    super::sessions::delete_session_from(&writer_path, &child.id).unwrap();
                 }
                 save_state_to(&writer_path, &committed).unwrap();
                 let writer = open(&writer_path).unwrap();
@@ -6681,6 +6703,7 @@ fn long_conversation() -> MaterializedSession {
 
 // Hard-won: 312cdbd23: stale pending content made the live window load nearly all history.
 // Hard-won: f7df24176: store queries split turns at elicitation replies and missed native prompts.
+// Hard-won: 8c2f98de2: unread output outside the transcript window lost its mark.
 #[test]
 fn actor_history_window_keeps_open_streams_and_rehydrates_old_tools() {
     let directory = tempfile::tempdir().unwrap();
@@ -6738,6 +6761,58 @@ fn actor_history_window_keeps_open_streams_and_rehydrates_old_tools() {
             full,
             "the durable source for checkpoints must stay complete"
         );
+    }
+    // Completed tool rows can push every unread item outside the actor window.
+    for interrupted in [false, true] {
+        let mut history = long_conversation();
+        let mut tool_body = materialized_session(&history.session_id).transcript[2]
+            .body
+            .clone();
+        if let TranscriptBody::Tool { call, .. } = &mut tool_body {
+            call.edit(|value| value["status"] = "completed".into());
+        } else {
+            panic!("tool fixture");
+        }
+        for item in &mut history.transcript {
+            let item = Arc::make_mut(item);
+            if !item.is_turn_start() && item.position != 2 {
+                item.body = tool_body.clone();
+                item.stable_id = format!("tool:{}", item.position);
+                item.latest_content_event_ordinal = None;
+            }
+            if interrupted && item.position == 3 {
+                item.body = TranscriptBody::System {
+                    text: "Work interrupted".into(),
+                };
+                item.stable_id = format!("{}3", mj_core::transcript::WORK_INTERRUPTED_ITEM_PREFIX);
+            }
+        }
+        let expected = if interrupted { 3 } else { 2 };
+        save_materialized_session_to(&path, &history).unwrap();
+        let mut live = history.clone();
+        let mut live_window = ProjectionWindow::of(&history);
+        live_window.trim(&mut live, PROJECTION_TAIL_ITEMS);
+        assert!(
+            !live
+                .transcript
+                .iter()
+                .any(|item| item.is_nonempty_agent_message() || item.is_work_interruption())
+        );
+        assert_eq!(live_window.latest_unread_event_ordinal, Some(expected));
+        // This valid JSON is not a TranscriptBody. Loading all history would fail.
+        open(&path).unwrap().execute("UPDATE materialized_transcript_items SET body_json = ?2 WHERE session_id = ?1 AND stable_id = 'tool:50'", params![&history.session_id, r#"{"kind":"unknown-old-row"}"#]).unwrap();
+        for _restart in 0..2 {
+            let (reloaded, window) =
+                load_materialized_actor_projection_from(&path, &history.session_id)
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(window.latest_unread_event_ordinal, Some(expected));
+            assert_eq!(window, live_window);
+            assert_eq!(reloaded.transcript, live.transcript);
+            let tail = mj_client::runtime_feed::SessionTail::of(&reloaded, &window, 0);
+            assert_eq!(tail.window.latest_unread_event_ordinal, Some(expected));
+        }
+        assert!(load_materialized_session_from(&path, &history.session_id).is_err());
     }
 }
 
@@ -7356,6 +7431,7 @@ fn a_subagent_report_is_kept_once_per_turn_and_leaves_with_its_child() {
     let mut state = load_state_from(&path).unwrap();
     state.subagents.remove(&child.id);
     state.sessions.remove(&child.id);
+    super::sessions::delete_session_from(&path, &child.id).unwrap();
     save_state_to(&path, &state).unwrap();
     assert_eq!(
         load_subagent_report_from(&path, &child.id).unwrap(),
@@ -7403,6 +7479,7 @@ fn a_parents_stopped_sub_agents_are_listed_once_and_leave_with_the_parent() {
     let mut state = load_state_from(&path).unwrap();
     state.subagents.remove(&child.id);
     state.sessions.remove(&child.id);
+    super::sessions::delete_session_from(&path, &child.id).unwrap();
     save_state_to(&path, &state).unwrap();
     assert_eq!(
         load_stopped_subagents_from(&path, &parent.id)

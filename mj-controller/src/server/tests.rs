@@ -5426,3 +5426,83 @@ async fn settings_review_autoconfigure_returns_preset_draft_without_saving() {
     assert!(reply["draft"]["review"].get("profile").is_none());
     assert_eq!(std::fs::read(&path).unwrap(), stored);
 }
+
+#[tokio::test]
+async fn github_relevance_daemon_notices_snapshot_golden() {
+    use crate::github_relevance::Notices;
+    use crate::github_student::{
+        StudentDevice, StudentDeviceFallbackReason, StudentFailureKind, StudentNotice,
+    };
+    let notices = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let capture = notices.clone();
+    let sink = Notices::new(move |text| {
+        let mut notices = capture.lock().unwrap();
+        let id = notices.len() as u64 + 1;
+        notices.push(mj_client::daemon::RuntimeNotice {
+            id,
+            session_id: String::new(),
+            text,
+        });
+    });
+    sink.observe(Some((
+        Some(StudentFailureKind::Download),
+        "private download details",
+    )));
+    sink.observe(Some((Some(StudentFailureKind::Download), "same episode")));
+    sink.observe(None);
+    for notice in [
+        StudentNotice::DeviceFallback {
+            from: StudentDevice::Cuda,
+            reason: StudentDeviceFallbackReason::Slower {
+                gpu_ms: 20,
+                cpu_ms: 10,
+            },
+        },
+        StudentNotice::DeviceFallback {
+            from: StudentDevice::CoreMl,
+            reason: StudentDeviceFallbackReason::Failed(StudentFailureKind::Load),
+        },
+        StudentNotice::DeviceFallback {
+            from: StudentDevice::DirectMl,
+            reason: StudentDeviceFallbackReason::Failed(StudentFailureKind::Inference),
+        },
+        StudentNotice::InferenceFailing {
+            cause: "private inference details".into(),
+        },
+        StudentNotice::InferenceFailing {
+            cause: "same episode".into(),
+        },
+        StudentNotice::InferenceRecovered,
+        StudentNotice::CudaLibrariesMissing {
+            missing: vec!["libcudnn.so.9".into()],
+        },
+        StudentNotice::GpuAfterRestart,
+        StudentNotice::PlatformUnsupported,
+        StudentNotice::WindowsRuntimeMissing {
+            missing: vec!["MSVCP140.dll".into()],
+        },
+    ] {
+        sink.student_notice(notice);
+    }
+    let notices = notices.lock().unwrap().clone();
+    let (app, _, _, _, _) = app_with_snapshot(move |snapshot| snapshot.notices = notices);
+    let cookie = login_cookie(&app).await;
+    let response = app
+        .oneshot(
+            Request::get("/api/snapshot")
+                .header(COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(!snapshot["notices"].to_string().contains("private"));
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "github-relevance-notices",
+        &serde_json::to_string_pretty(&snapshot["notices"]).unwrap(),
+    );
+}

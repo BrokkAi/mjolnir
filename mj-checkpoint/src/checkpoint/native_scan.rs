@@ -475,6 +475,7 @@ pub(super) fn collect_native_tree(
         HarnessKind::Grok => inside && grok_session_artifact(relative, session_id),
         HarnessKind::Muse => inside && name == "session.jsonl",
         HarnessKind::OpenCode => is_opencode_native_artifact(relative),
+        HarnessKind::Antigravity => false, // No native checkpoint adapter yet.
         HarnessKind::Dsh => is_dsh_session_record(relative, session_id),
     };
     if !selected {

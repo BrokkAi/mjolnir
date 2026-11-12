@@ -692,6 +692,7 @@ mod tests {
                     "codex",
                     HarnessKind::Codex,
                     CandidateQuota::Subscription {
+                        monthly_price_usd: None,
                         windows: Vec::new(),
                         paid_credits: None,
                         refreshed_at_epoch_seconds: 0,

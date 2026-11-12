@@ -99,9 +99,9 @@ pub(super) async fn handle_action(
             Ok(DaemonReply::FirstRunSetup(report))
         }
         DaemonAction::RunDoctor => {
-            let errors = blocking(|| {
-                // Daemon-owned work is bounded: one deadline per probe, as
-                // `mj doctor` and `mj setup` have.
+            // Not `blocking`: the doctor only reads, so it takes no upgrade
+            // admission, and a handoff abandons it instead of waiting for it.
+            let errors = tokio::task::spawn_blocking(|| {
                 let executor = crate::doctor::probe_executor();
                 let checks = crate::doctor::run_with_config_path(
                     &mj_core::config::config_path(),
@@ -109,9 +109,10 @@ pub(super) async fn handle_action(
                     crate::doctor::current_apple_platform(&executor),
                     crate::doctor::DoctorOptions { smoke: false },
                 );
-                Ok(crate::setup::actionable_errors(&checks))
+                crate::setup::actionable_errors(&checks)
             })
-            .await?;
+            .await
+            .context("daemon doctor task panicked")?;
             Ok(DaemonReply::DoctorErrors(errors))
         }
         DaemonAction::NewSessionRemoteRepairs {
@@ -282,6 +283,10 @@ pub(super) async fn handle_action(
         DaemonAction::Detach { client_id } => {
             state.attachments().remove(&client_id);
             Ok(DaemonReply::Done)
+        }
+        DaemonAction::DismissNotification { session_id, target } => {
+            let ordinal = state.dismiss_notification(session_id, target).await?;
+            Ok(DaemonReply::Ordinal(ordinal))
         }
         DaemonAction::PersistReadReceipt {
             client_id,
@@ -1120,6 +1125,9 @@ pub(super) fn upgrade_request_activity(
     if matches!(action, DaemonAction::SaveSpinnerStyle { .. }) {
         return crate::upgrade::activity("spinner style setting").map(Some);
     }
+    if matches!(action, DaemonAction::DismissNotification { .. }) {
+        return crate::upgrade::activity("notification dismissal").map(Some);
+    }
     if matches!(action, DaemonAction::SaveSidebarSize { .. }) {
         return crate::upgrade::activity("sidebar size setting").map(Some);
     }
@@ -1154,6 +1162,8 @@ pub(super) fn upgrade_request_activity(
             | DaemonAction::WarmProfileCapabilities { .. }
             | DaemonAction::ProjectCatalog { .. }
             | DaemonAction::ImportSession { .. }
+            // Read-only and repeatable; the client reports an interrupted run.
+            | DaemonAction::RunDoctor
     ) {
         Ok(None)
     } else {
@@ -1273,4 +1283,56 @@ fn available_auth(paths: Vec<PathBuf>) -> Option<PathBuf> {
             }
         },
     )
+}
+
+impl RuntimeState {
+    pub(crate) async fn dismiss_notification(
+        &self,
+        session_id: String,
+        target: mj_core::attention::NotificationDismissal,
+    ) -> Result<u64> {
+        let runtime = self.runtime_publication()?;
+        if matches!(
+            target,
+            mj_core::attention::NotificationDismissal::Question(_)
+        ) && runtime.metadata.notification_dismissals.get(&session_id) != Some(&target)
+        {
+            return Err(mj_core::refusal::Refusal::precondition(
+                "notification is no longer current",
+            )
+            .into());
+        }
+        let (through, command_ordinal) = match target {
+            mj_core::attention::NotificationDismissal::Question(question) => {
+                let through = question.completed_ordinal;
+                let ordinal = self
+                    .session_manager
+                    .session(&session_id)
+                    .await?
+                    .submit(
+                        format!("dismiss-question-{through}"),
+                        RelayCommand::DismissQuestion { question },
+                    )
+                    .await?;
+                (through, Some(ordinal))
+            }
+            mj_core::attention::NotificationDismissal::ReadThrough(through) => (through, None),
+        };
+        let workspace_id = runtime
+            .records
+            .get(&session_id)
+            .context("session missing")?
+            .workspace_id
+            .clone();
+        let frontier = blocking(move || {
+            crate::database::persist_read_receipt(
+                "notification-dismissal",
+                &workspace_id,
+                &session_id,
+                through,
+            )
+        })
+        .await?;
+        Ok(command_ordinal.unwrap_or(frontier))
+    }
 }

@@ -10,7 +10,7 @@
 │  │ No message  │  Restart agent                                                                    ▐│                │
 │  │             │  Rename session                                                    ctrl+b shift+t ▐│                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d ▐│                │
-│                │  Dismiss question — No prose question is active.                                  ▐│                │
+│                │  Dismiss notification — No dismissible notification is active.                    ▐│                │
 │                │  Interrupt turn — No turn is running.                                    ctrl+b i ▐│                │
 │                │  Interrupt all — No turn is running here or in its sub-agents.                    ▐│                │
 │                │  Session actions…                                                    . / ctrl+b . ▐│                │
@@ -51,7 +51,7 @@ Enter open · /                                                                 
 │  │ No message  │  Restart agent                                                                    ▐│                │
 │  │             │  Rename session                                                    ctrl+b shift+t ▐│                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d ▐│                │
-│                │  Dismiss question — No prose question is active.                                  ▐│                │
+│                │  Dismiss notification — No dismissible notification is active.                    ▐│                │
 │                │  Interrupt turn — No turn is running.                                    ctrl+b i ▐│                │
 │                │  Interrupt all — No turn is running here or in its sub-agents.                    ▐│                │
 │                │  Session actions…                                                    . / ctrl+b . ▐│                │
@@ -101,7 +101,7 @@ Enter open · /                                                                 
 │                │  Restart agent                                                                     │                │
 │                │  Rename session                                                    ctrl+b shift+t  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
-│                │  Dismiss question — No prose question is active.                                   │                │
+│                │  Dismiss notification — No dismissible notification is active.                     │                │
 │                │  Interrupt turn — No turn is running.                                    ctrl+b i  │                │
 │                │  Interrupt all — No turn is running here or in its sub-agents.                     │                │
 │                │  Session actions…                                                    . / ctrl+b .  │                │
@@ -197,7 +197,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │  Restart agent                                                                     │                │
 │                │  Rename session                                                    ctrl+b shift+t  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
-│                │  Dismiss question — No prose question is active.                                   │                │
+│                │  Dismiss notification — No dismissible notification is active.                     │                │
 │                │  Interrupt turn — No turn is running.                                    ctrl+b i  │                │
 │                │  Interrupt all — No turn is running here or in its sub-agents.                     │                │
 │                │  Session actions…                                                    . / ctrl+b .  │                │
@@ -437,7 +437,7 @@ Enter open                                                                      
 │  Stopped  loc  │  Restart agent                                                                    ▐│                │
 │  │ No message  │  Rename session                                                    ctrl+b shift+t ▐│                │
 │  │             │  Changed files — The session's target is not running.                    ctrl+b d ▐│                │
-│                │  Dismiss question — No prose question is active.                                  ▐│                │
+│                │  Dismiss notification — No dismissible notification is active.                    ▐│                │
 │                │  Interrupt turn — No turn is running.                                    ctrl+b i ▐│                │
 │                │  Interrupt all — No turn is running here or in its sub-agents.                    ▐│                │
 │                │  Session actions…                                                    . / ctrl+b . ▐│                │

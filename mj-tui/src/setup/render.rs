@@ -642,6 +642,7 @@ fn managed_harness_description(kind: mj_core::config::HarnessKind) -> &'static s
         HarnessKind::Muse => "Muse account; container use is supported",
         HarnessKind::OpenCode => "OpenCode provider login or an API key",
         HarnessKind::Dsh => "DeepSeek API key",
+        HarnessKind::Antigravity => "Google OAuth login",
     }
 }
 

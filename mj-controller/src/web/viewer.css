@@ -2461,3 +2461,5 @@ body[data-connection='reconnecting'] .connection {
   margin: 0;
   flex: 1 1 12rem;
 }
+
+.notification-entry { margin-bottom: 1rem; }
