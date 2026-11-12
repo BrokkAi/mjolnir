@@ -116,7 +116,7 @@ fn close_plan_scoped(
                 "{}\nrm -rf -- {} {}\n",
                 stopped
                     .map(|_| String::new())
-                    .unwrap_or_else(|| stop_worker_daemon_script(&session_worker_root)),
+                    .unwrap_or_else(|| kill_worker_daemon_script(&session_worker_root)),
                 posix_quote(&session_worker_root),
                 posix_quote(&local_nested_profile_root(session_id).to_string_lossy()),
             );
@@ -235,7 +235,7 @@ exit "$status""#;
                 "{}\nrm -rf -- {} {} {}\n",
                 stopped
                     .map(|_| String::new())
-                    .unwrap_or_else(|| stop_worker_daemon_script(&session_worker_root)),
+                    .unwrap_or_else(|| kill_worker_daemon_script(&session_worker_root)),
                 posix_quote(workspace),
                 posix_quote(&session_worker_root),
                 posix_quote(&session_profile_home),
@@ -280,7 +280,7 @@ fn borrowed_worker_cleanup_plan_scoped(
     let worker_root = worker_root(locator, child_session_id)?;
     let mut script = stopped
         .map(|_| String::new())
-        .unwrap_or_else(|| stop_worker_daemon_script(&worker_root));
+        .unwrap_or_else(|| kill_worker_daemon_script(&worker_root));
     script.push_str(&format!("rm -rf -- {}\n", posix_quote(&worker_root)));
     if matches!(locator, TargetLocator::LocalBare { .. }) {
         script.push_str(&format!(

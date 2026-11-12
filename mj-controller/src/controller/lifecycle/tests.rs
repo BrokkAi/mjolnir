@@ -276,7 +276,7 @@ fn target_cleanup_persists_destroying_and_rechecks_the_installed_archive() {
     );
     let commands = executor.commands.lock().unwrap().clone();
     assert_eq!(commands.len(), 2);
-    assert_eq!(commands[0].purpose, "stop Mjolnir worker daemon");
+    assert_eq!(commands[0].purpose, "kill retired Mjolnir worker daemon");
     assert!(commands[1].args.iter().any(|arg| arg.contains("rm -rf")));
     let stopped = &controller.state.sessions[session_id];
     assert_eq!(stopped.state, SessionState::Stopped);

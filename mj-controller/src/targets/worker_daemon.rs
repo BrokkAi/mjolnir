@@ -94,14 +94,28 @@ printf 'dead\n'
     script
 }
 
-/// Stop the detached worker daemon rooted at `worker_root`.
+/// Stop the detached worker daemon rooted at `worker_root`: TERM, then KILL
+/// after two seconds. Use this when the session continues from the root, so
+/// the worker and its harness can shut down in order.
 ///
 /// The daemon leads its own process group, so the signal goes to the group
 /// first to take the agent down with it. Shells disagree about how to write a
 /// negative PID (`dash` rejects `--`), hence the two forms before the
 /// single-process fallback for daemons predating the group leadership.
 pub fn stop_worker_daemon_script(worker_root: &str) -> String {
+    worker_daemon_stop_script(worker_root, 2)
+}
+
+/// Kill a retired worker daemon rooted at `worker_root`, and its process tree,
+/// at once. Only for retirement: the caller removes the root next, and a sealed
+/// checkpoint (or a discard) means nothing in it needs an orderly shutdown.
+pub fn kill_worker_daemon_script(worker_root: &str) -> String {
+    worker_daemon_stop_script(worker_root, 0)
+}
+
+fn worker_daemon_stop_script(worker_root: &str, term_grace_seconds: u32) -> String {
     let mut script = worker_daemon_identity_script(worker_root);
+    script.push_str(&format!("\nhel_term_grace={term_grace_seconds}\n"));
     script.push_str(
         r#"
 hel_signal() {
@@ -176,13 +190,15 @@ hel_stop() {
         hel_group=legacy
     }
     hel_snapshot_tree "$1"
-    hel_signal TERM "$1" || true
     hel_waited=0
-    while [ "$hel_waited" -lt 2 ]; do
-        hel_running "$1" || { hel_status=$?; [ "$hel_status" -eq 1 ] && return 0; return "$hel_status"; }
-        sleep 1
-        hel_waited=$((hel_waited + 1))
-    done
+    if [ "$hel_term_grace" -gt 0 ]; then
+        hel_signal TERM "$1" || true
+        while [ "$hel_waited" -lt "$hel_term_grace" ]; do
+            hel_running "$1" || { hel_status=$?; [ "$hel_status" -eq 1 ] && return 0; return "$hel_status"; }
+            sleep 1
+            hel_waited=$((hel_waited + 1))
+        done
+    fi
     hel_signal KILL "$1" || true
     hel_kill_tree
     hel_waited=0
@@ -567,54 +583,69 @@ mod tests {
     /// The harness runs in a process group of its own, so the worker leader's
     /// group empties as soon as the leader exits. The stop must still wait for
     /// the harness, or the `rm` that follows races its last writes (I2-9).
+    /// Retirement's kill must take the same tree without the TERM grace.
     // Hard-won: 2f859c8f: a harness outlived its worker group and raced removal of staged state.
     #[test]
     #[cfg(target_os = "linux")]
     fn stopping_worker_waits_for_a_harness_in_its_own_process_group() {
         use std::os::unix::process::CommandExt;
-        let outside = tempfile::tempdir().unwrap();
-        let root = outside.path().join("worker");
-        std::fs::create_dir_all(root.join("profile")).unwrap();
-        // The harness ignores TERM and keeps writing into the staged home.
-        let harness = format!(
-            "trap \"\" TERM; echo $$ > {out}/harness; while :; do echo x >> profile/state.sqlite-wal; sleep 0.05; done",
-            out = outside.path().display()
-        );
-        let mut leader = std::process::Command::new("sh")
-            .args(["-c", &format!("setsid sh -c '{harness}' & wait")])
-            .current_dir(&root)
-            .process_group(0)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
+        for sends_term in [true, false] {
+            let stop_script = if sends_term {
+                stop_worker_daemon_script
+            } else {
+                kill_worker_daemon_script
+            };
+            let outside = tempfile::tempdir().unwrap();
+            let root = outside.path().join("worker");
+            std::fs::create_dir_all(root.join("profile")).unwrap();
+            // The harness ignores TERM and keeps writing into the staged home.
+            let harness = format!(
+                "trap \"\" TERM; echo $$ > {out}/harness; while :; do echo x >> profile/state.sqlite-wal; sleep 0.05; done",
+                out = outside.path().display()
+            );
+            // The leader records a TERM, then exits as it would without the trap.
+            let leader_script = format!(
+                "trap 'echo term > {out}/leader-term' TERM; setsid sh -c '{harness}' & wait",
+                out = outside.path().display()
+            );
+            let mut leader = std::process::Command::new("sh")
+                .args(["-c", &leader_script])
+                .current_dir(&root)
+                .process_group(0)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !outside.path().join("harness").exists() {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            std::fs::write(
+                root.join(mj_core::relay::WORKER_STARTUP_FILE),
+                serde_json::to_vec(&serde_json::json!({"pid": leader.id(), "process_birth": mj_core::subprocess::process_birth_identity(leader.id()).unwrap()})).unwrap(),
+            )
             .unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !outside.path().join("harness").exists() {
-            assert!(std::time::Instant::now() < deadline);
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            let root_path = root.to_string_lossy().into_owned();
+            let script = format!("{}\nrm -rf -- \"$hel_root\"\n", stop_script(&root_path));
+            let (status, _) = run_script(&script);
+            let _ = leader.wait();
+            assert_eq!(status, 0, "the stop and the removal succeed");
+            assert!(!root.exists(), "the removal is complete");
+            let harness = std::fs::read_to_string(outside.path().join("harness")).unwrap();
+            let (_, state) = run_script(&format!("ps -o stat= -p {}", harness.trim()));
+            assert!(
+                state.is_empty() || state.starts_with('Z'),
+                "harness survived: {state}"
+            );
+            assert_eq!(
+                outside.path().join("leader-term").exists(),
+                sends_term,
+                "only the graceful stop sends TERM before KILL"
+            );
         }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        std::fs::write(
-            root.join(mj_core::relay::WORKER_STARTUP_FILE),
-            serde_json::to_vec(&serde_json::json!({"pid": leader.id(), "process_birth": mj_core::subprocess::process_birth_identity(leader.id()).unwrap()})).unwrap(),
-        )
-        .unwrap();
-        let root_path = root.to_string_lossy().into_owned();
-        let script = format!(
-            "{}\nrm -rf -- \"$hel_root\"\n",
-            stop_worker_daemon_script(&root_path)
-        );
-        let (status, _) = run_script(&script);
-        let _ = leader.wait();
-        assert_eq!(status, 0, "the stop and the removal succeed");
-        assert!(!root.exists(), "the removal is complete");
-        let harness = std::fs::read_to_string(outside.path().join("harness")).unwrap();
-        let (_, state) = run_script(&format!("ps -o stat= -p {}", harness.trim()));
-        assert!(
-            state.is_empty() || state.starts_with('Z'),
-            "harness survived: {state}"
-        );
     }
 
     /// The script runs through the target's own shell and awk. macOS awk

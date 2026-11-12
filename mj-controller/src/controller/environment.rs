@@ -128,9 +128,11 @@ impl Reclamation {
                     scope.spawn(move || {
                         permit.scope_blocking(|| -> Result<()> {
                             let root = targets::worker_root(target, &worker.session_id)?;
-                            if let Err(error) =
-                                super::worker_binary::stop_worker(permit, executor, target, &root)
-                            {
+                            // Retirement removes the root next, so the worker
+                            // gets no TERM grace: nothing in it needs flushing.
+                            if let Err(error) = super::worker_binary::kill_retired_worker(
+                                permit, executor, target, &root,
+                            ) {
                                 if !targets::is_borrowed(target)
                                     && targets::cleanup_target_is_confirmed_absent(
                                         target,
@@ -605,7 +607,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(command.purpose.clone());
-            if command.purpose == "stop Mjolnir worker daemon" {
+            if command.purpose == "kill retired Mjolnir worker daemon" {
                 if let Some(barrier) = &self.stop_barrier {
                     barrier.wait();
                 }
@@ -802,7 +804,10 @@ mod tests {
             Reclamation::acquire(environment, &Config::default(), executor.as_ref()).unwrap();
         assert_eq!(
             executor.operations.lock().unwrap().as_slice(),
-            ["stop Mjolnir worker daemon", "stop Mjolnir worker daemon"]
+            [
+                "kill retired Mjolnir worker daemon",
+                "kill retired Mjolnir worker daemon"
+            ]
         );
         authority.remove_targets(executor.as_ref()).unwrap();
         authority.finish().unwrap();

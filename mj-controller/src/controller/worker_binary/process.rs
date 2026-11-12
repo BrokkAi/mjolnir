@@ -10,11 +10,37 @@ pub(in crate::controller) fn stop_worker(
     locator: &targets::TargetLocator,
     worker_root: &str,
 ) -> Result<()> {
+    run_owned_worker_stop(owner, executor, locator, worker_root, stop_worker_command)
+}
+
+/// Kill a retired worker daemon at `worker_root` at once, without the TERM
+/// grace `stop_worker` allows. Only for retirement, where the root is removed
+/// next and nothing in it needs an orderly shutdown.
+pub(in crate::controller) fn kill_retired_worker(
+    owner: &crate::worker_lifecycle::WorkerPermit,
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    worker_root: &str,
+) -> Result<()> {
+    run_owned_worker_stop(owner, executor, locator, worker_root, |locator, root| {
+        let script = targets::kill_worker_daemon_script(root);
+        targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
+            .purpose("kill retired Mjolnir worker daemon")
+    })
+}
+
+fn run_owned_worker_stop(
+    owner: &crate::worker_lifecycle::WorkerPermit,
+    executor: &impl CommandExecutor,
+    locator: &targets::TargetLocator,
+    worker_root: &str,
+    command: impl FnOnce(&targets::TargetLocator, &str) -> CommandSpec,
+) -> Result<()> {
     ensure!(
         targets::worker_root(locator, owner.session_id())? == worker_root,
         "worker owner does not cover the selected root"
     );
-    execute_checked(executor, stop_worker_command(locator, worker_root))?;
+    execute_checked(executor, command(locator, worker_root))?;
     Ok(())
 }
 
