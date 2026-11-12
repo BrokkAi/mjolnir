@@ -599,8 +599,8 @@ pub struct ProjectionWindow {
 }
 
 impl ProjectionWindow {
-    /// Keep complete turns around the tail target. Unsettled content can still
-    /// change after a newer turn starts, so retain its turn as well.
+    /// Keep complete turns around the tail target and open text streams, which
+    /// untagged chunks address implicitly. Historical tools reload by stable ID.
     pub fn trim(&mut self, session: &mut MaterializedSession, target: usize) {
         let observed = Self::of(session);
         if self.provisional_title.is_none() {
@@ -611,16 +611,17 @@ impl ProjectionWindow {
             .or(self.latest_turn_start_position);
         let mut boundary = session.transcript.len().saturating_sub(target.max(1));
         for (index, item) in session.transcript.iter().enumerate() {
-            let mutable = match &item.body {
-                TranscriptBody::Agent { streaming, .. }
-                | TranscriptBody::Thought { streaming, .. } => *streaming,
-                TranscriptBody::Tool { call, .. } => matches!(
-                    call.get("status").and_then(serde_json::Value::as_str),
-                    Some("pending" | "in_progress")
-                ),
-                _ => false,
-            };
-            if mutable || Some(item.position) == self.latest_turn_start_position {
+            let open_stream = matches!(
+                &item.body,
+                TranscriptBody::Agent {
+                    streaming: true,
+                    ..
+                } | TranscriptBody::Thought {
+                    streaming: true,
+                    ..
+                }
+            );
+            if open_stream || Some(item.position) == self.latest_turn_start_position {
                 boundary = boundary.min(index);
             }
         }

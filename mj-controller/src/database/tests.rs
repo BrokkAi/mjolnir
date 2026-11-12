@@ -6615,17 +6615,26 @@ fn long_conversation() -> MaterializedSession {
     projection
 }
 
+// Hard-won: 312cdbd23: stale pending content made the live window load nearly all history.
 #[test]
-fn actor_history_window_matches_live_trimming_and_preserves_pending_turns() {
+fn actor_history_window_keeps_open_streams_and_rehydrates_old_tools() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("history.sqlite3");
-    let mut full = long_conversation();
+    let full = long_conversation();
     save_session_to(&path, &session(&full.session_id, "project-1")).unwrap();
-    for pending in [false, true] {
+    for pending in ["none", "tool", "stream"] {
+        let mut full = full.clone();
         if let TranscriptBody::Agent { streaming, .. } =
             &mut Arc::make_mut(&mut full.transcript[1]).body
         {
-            *streaming = pending;
+            *streaming = pending == "stream";
+        }
+        if pending == "tool" {
+            let mut tool = materialized_session(&full.session_id).transcript[2].clone();
+            if let TranscriptBody::Tool { call, .. } = &mut Arc::make_mut(&mut tool).body {
+                call["status"] = "in_progress".into();
+            }
+            full.transcript[2] = tool;
         }
         save_materialized_session_to(&path, &full).unwrap();
         let (loaded, window) = load_materialized_actor_projection_from(&path, &full.session_id)
@@ -6636,7 +6645,10 @@ fn actor_history_window_matches_live_trimming_and_preserves_pending_turns() {
         expected.trim(&mut trimmed, PROJECTION_TAIL_ITEMS);
         assert_eq!(loaded, trimmed);
         assert_eq!(window, expected);
-        assert_eq!(loaded.transcript.len(), if pending { 2500 } else { 1100 });
+        assert_eq!(
+            loaded.transcript.len(),
+            if pending == "stream" { 2500 } else { 1100 }
+        );
         assert_eq!(window.provisional_title.as_deref(), Some("request 1"));
         assert_eq!(
             load_materialized_session_from(&path, &full.session_id)
@@ -6862,6 +6874,7 @@ fn history_window_deduplicates_deliveries_after_their_row_leaves_the_live_tail()
     }
 }
 
+// Hard-won: 312cdbd23: late completion must preserve partial output after evicting an unfinished tool.
 #[test]
 fn history_window_rehydrates_late_tool_updates_before_durable_projection() {
     use agent_client_protocol::v1::schema::{
@@ -6871,7 +6884,12 @@ fn history_window_rehydrates_late_tool_updates_before_durable_projection() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("history.sqlite3");
     let mut full = long_conversation();
-    let old_tool = materialized_session(&full.session_id).transcript[2].clone();
+    let mut old_tool = materialized_session(&full.session_id).transcript[2].clone();
+    let partial_output = serde_json::json!({"partial": "old output ".repeat(10_000)});
+    if let TranscriptBody::Tool { call, .. } = &mut Arc::make_mut(&mut old_tool).body {
+        call["status"] = "in_progress".into();
+        call["rawOutput"] = partial_output.clone();
+    }
     full.transcript[2] = old_tool.clone();
     save_session_to(&path, &session(&full.session_id, "project-1")).unwrap();
     save_materialized_session_to(&path, &full).unwrap();
@@ -6941,6 +6959,13 @@ fn history_window_rehydrates_late_tool_updates_before_durable_projection() {
         panic!("tool remains a tool")
     };
     assert_eq!(call["title"], "Late result");
+    assert_eq!(call["rawOutput"], partial_output);
+    assert!(
+        !live
+            .transcript
+            .iter()
+            .any(|item| item.stable_id == old_tool.stable_id)
+    );
     assert_eq!(
         live.transcript.len() + window.omitted_items,
         saved.transcript.len()

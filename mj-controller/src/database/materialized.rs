@@ -884,20 +884,18 @@ pub(super) fn load_materialized_actor_projection_from(
             |row| row.get(0),
         )
         .optional()?;
-    // Pending tools and streams can outlive their initiating turn. Keep their
-    // turn too; the same rule is applied by ProjectionWindow::trim.
-    let mutable: Option<u64> = connection.query_row(
+    // Untagged chunks and stream-closing events need open text streams.
+    // Historical tools have stable IDs and rehydrate on their next update.
+    let streaming: Option<u64> = connection.query_row(
         "SELECT MIN(position) FROM materialized_transcript_items WHERE session_id=?1
-         AND (json_extract(body_json, '$.streaming')=1
-              OR (json_extract(body_json, '$.kind')='tool'
-                  AND json_extract(body_json, '$.call.status') IN ('pending','in_progress')))",
+         AND json_extract(body_json, '$.streaming')=1",
         [session_id],
         |row| row.get(0),
     )?;
     let boundary = desired
         .unwrap_or(0)
         .min(latest_turn.unwrap_or(0))
-        .min(mutable.unwrap_or(u64::MAX));
+        .min(streaming.unwrap_or(u64::MAX));
     let start: u64 = connection.query_row(
         "SELECT COALESCE(MAX(position),0) FROM materialized_transcript_items
          WHERE session_id=?1 AND position<=?2
