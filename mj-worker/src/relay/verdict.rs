@@ -90,6 +90,8 @@ impl RepliedVerdictState {
     }
 }
 
+// Only `apply_assessment_result` uses this, and it exists on the same platforms.
+#[cfg(any(unix, test))]
 fn glide_attention(
     glide: &Option<mj_core::activity::eot_glide::types::Probabilities>,
     action: mj_core::assessment::Action,

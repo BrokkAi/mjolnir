@@ -188,7 +188,7 @@ pub async fn locate(
         || crate::harness_runtime::is_fallback_launch(harness, execution_policy, command, args);
     match policy {
         _ if harness == HarnessKind::Antigravity && built_in => {
-            let executable = antigravity_program(environment).await?;
+            let executable = crate::program_path::antigravity_program(environment).await?;
             let home = environment
                 .get(harness.home_env())
                 .context("Antigravity staged home is missing")?;
@@ -251,39 +251,6 @@ pub async fn locate(
                 .map(Located::managed)
         }
     }
-}
-
-/// The ambient CLI used by both ACP sessions and the quota command.
-pub async fn antigravity_program(environment: &BTreeMap<String, String>) -> Result<PathBuf> {
-    let search = environment.clone();
-    tokio::task::spawn_blocking(move || -> Result<PathBuf> {
-        let path = search
-            .get("PATH")
-            .map(std::ffi::OsString::from)
-            .or_else(|| std::env::var_os("PATH"));
-        if let Some(path) = crate::program_path::find_executable_on_path("agy", path.as_deref()) {
-            return path
-                .canonicalize()
-                .context("resolve Antigravity executable");
-        }
-        let home = search
-            .get("HOME")
-            .map(PathBuf::from)
-            .or_else(crate::path_input::user_home);
-        if let Some(home) = home {
-            let bin = home.join(".local/bin");
-            if let Some(path) =
-                crate::program_path::find_executable_on_path("agy", Some(bin.as_os_str()))
-            {
-                return path
-                    .canonicalize()
-                    .context("resolve Antigravity executable");
-            }
-        }
-        bail!("Antigravity requires agy installed on this target (PATH or ~/.local/bin/agy)")
-    })
-    .await
-    .context("find target Antigravity task failed")?
 }
 
 /// The image's own programs for `harness`, by the names the agent-dev image

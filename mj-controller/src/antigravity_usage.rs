@@ -13,7 +13,7 @@ pub(crate) async fn query(
     environment: &HashMap<String, String>,
 ) -> Result<Vec<QuotaWindow>> {
     let environment = environment.clone().into_iter().collect::<BTreeMap<_, _>>();
-    let program = mj_core::harness_install::antigravity_program(&environment).await?;
+    let program = mj_core::program_path::antigravity_program(&environment).await?;
     let source = harness_authentication_marker(HarnessKind::Antigravity, home);
     let staged = tokio::task::spawn_blocking(move || -> Result<tempfile::TempDir> {
         let staged = tempfile::tempdir().context("stage Antigravity quota login")?;

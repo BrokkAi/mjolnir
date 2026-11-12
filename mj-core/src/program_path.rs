@@ -1,5 +1,6 @@
 //! Finding a program on a PATH value the way the operating system would run it.
 
+use anyhow::{Context, bail};
 use std::ffi::OsStr;
 use std::path::PathBuf;
 
@@ -81,6 +82,41 @@ pub fn find_executable_on_path(program: &str, path: Option<&OsStr>) -> Option<Pa
             .map(|name| directory.join(name))
             .find(|candidate| is_executable_file(candidate))
     })
+}
+
+/// The person's own Antigravity CLI (`agy`), used by both ACP sessions and the
+/// quota command. Mjolnir installs no Antigravity, so this is a search, not an
+/// installation, and it lives here rather than in the Unix-only installer.
+pub async fn antigravity_program(
+    environment: &std::collections::BTreeMap<String, String>,
+) -> anyhow::Result<PathBuf> {
+    let search = environment.clone();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<PathBuf> {
+        let path = search
+            .get("PATH")
+            .map(std::ffi::OsString::from)
+            .or_else(|| std::env::var_os("PATH"));
+        if let Some(path) = find_executable_on_path("agy", path.as_deref()) {
+            return path
+                .canonicalize()
+                .context("resolve Antigravity executable");
+        }
+        let home = search
+            .get("HOME")
+            .map(PathBuf::from)
+            .or_else(crate::path_input::user_home);
+        if let Some(home) = home {
+            let bin = home.join(".local/bin");
+            if let Some(path) = find_executable_on_path("agy", Some(bin.as_os_str())) {
+                return path
+                    .canonicalize()
+                    .context("resolve Antigravity executable");
+            }
+        }
+        bail!("Antigravity requires agy installed on this target (PATH or ~/.local/bin/agy)")
+    })
+    .await
+    .context("find target Antigravity task failed")?
 }
 
 #[cfg(test)]
