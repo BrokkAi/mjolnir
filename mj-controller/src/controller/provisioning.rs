@@ -712,6 +712,13 @@ impl Controller {
             } else {
                 Some(backend_session_bundle(&session, &self.config, executor)?)
             };
+            if let Some(bundle) = bundle.as_mut() {
+                super::backend::apply_session_history_cutoff(
+                    &session,
+                    &self.config,
+                    bundle,
+                )?;
+            }
             let container_github_token =
                 github_token.filter(|_| {
                     !session.no_github_credentials && configure_github_token_environment(&mut target)
@@ -788,6 +795,10 @@ impl Controller {
                     .as_ref()
                     .context("project bundle disappeared during provisioning")
                     .and_then(|bundle| {
+                        if matches!(target, targets::TargetTemplate::LocalBare) {
+                            let (_, worker_root) = self.worker_placement(session_id)?;
+                            return targets::provision_local_bundle_plan(bundle, &worker_root, github_token);
+                        }
                         targets::provision_plan_named(
                             &target,
                             session_id,
