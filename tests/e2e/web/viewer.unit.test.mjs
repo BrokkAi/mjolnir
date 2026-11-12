@@ -1552,20 +1552,15 @@ test('conversation receipts require a visible focused caught-up conversation and
   assert.equal(sent.length, 2, 'older loaded cursors never move the frontier back');
   context.cursor = 50;
   context.session.unread_frontier = 44;
-  const masked = vm.runInContext('persistVisibleConversationRead()', context);
-  assert.equal(sent[2][1], 44, 'marks the served frontier even behind working, not unseen or state-only events');
+  const loaded = vm.runInContext('persistVisibleConversationRead()', context);
+  // Hard-won: 6a0981b02: receipts bounded by the row's lagging frontier left seen output unread.
+  assert.equal(sent[2][1], 50, 'acknowledges everything loaded and seen, even before the row republishes');
   finish();
-  await masked;
-  context.session.unread_frontier = null;
-  context.session.notification_dismissal = { read_through: 45 };
-  const important = vm.runInContext('persistVisibleConversationRead()', context);
-  assert.equal(sent[3][1], 45, 'viewing still acknowledges the served Important completion');
-  finish();
-  await important;
-  context.cursor = 44;
+  await loaded;
+  context.cursor = 51;
   context.route.name = 'sessions';
   await vm.runInContext('persistVisibleConversationRead()', context);
-  assert.equal(sent.length, 4, 'closed conversations do not read');
+  assert.equal(sent.length, 3, 'closed conversations do not read');
 });
 
 
