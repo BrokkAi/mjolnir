@@ -573,6 +573,32 @@ pub(crate) fn daemon_runs_this_build(identity: &DaemonIdentity) -> Result<Option
     }))
 }
 
+/// A session is an overlay on the account's login environment. Reconstruct that
+/// base instead of maintaining a second list of target, profile, harness and
+/// shell overrides here. The existing identity also covers older workers.
+fn configure_host_daemon_environment(command: &mut std::process::Command) -> Result<()> {
+    if std::env::var_os("MJ_SESSION_ID").is_some()
+        || std::env::var_os("MJ_SESSION_BASH_ENV").is_some()
+    {
+        let mut environment = mj_core::login_environment::discover()
+            .context("restore account login environment for the daemon")?;
+        for name in ["MJ_CONFIG_DIR", "MJ_DATA_DIR", "MJ_INSTANCE"] {
+            // Absence is significant too: a login script must not redirect the
+            // instance selected by this client.
+            environment.remove(name);
+        }
+        command.env_clear().envs(environment);
+        for name in ["MJ_CONFIG_DIR", "MJ_DATA_DIR", "MJ_INSTANCE"] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+    }
+    // The instance owns this directory, unlike a disposable session checkout.
+    command.current_dir(data_dir());
+    Ok(())
+}
+
 /// Start `mj daemon-run` where `[daemon] runtime` says: a detached process on
 /// this computer, or a process in this instance's daemon container. Either way
 /// the result is a host PID the caller follows until the daemon answers.
@@ -616,6 +642,7 @@ async fn launch_daemon(log_path: &Path) -> Result<LaunchedDaemon> {
                 .unwrap_or(0);
             let executable = daemon_launch_executable()?;
             let mut command = std::process::Command::new(executable);
+            configure_host_daemon_environment(&mut command)?;
             command
                 .arg("daemon-run")
                 // This switch makes the invoking development client authoritative. It
@@ -2185,6 +2212,79 @@ mod tests {
         drop(client);
         task.await.unwrap();
     }
+    // Hard-won: #1524: a session-launched daemon inherited staged profile homes.
+    #[cfg(unix)]
+    #[test]
+    fn host_daemon_environment_restores_login_and_preserves_instance() {
+        const CHILD: &str = "MJ_TEST_DAEMON_ENVIRONMENT_CHILD";
+        const TEST: &str =
+            "daemon::tests::host_daemon_environment_restores_login_and_preserves_instance";
+        if let Ok(mode) = std::env::var(CHILD) {
+            let mut command = std::process::Command::new("/usr/bin/env");
+            configure_host_daemon_environment(&mut command).unwrap();
+            let output = mj_core::subprocess::run_with_input(&mut command, b"").unwrap();
+            assert!(output.status.success());
+            let output = String::from_utf8(output.stdout).unwrap();
+            let environment: std::collections::BTreeMap<_, _> = output
+                .lines()
+                .filter_map(|line| line.split_once('='))
+                .collect();
+            for name in ["MJ_CONFIG_DIR", "MJ_DATA_DIR", "MJ_INSTANCE"] {
+                assert_eq!(
+                    environment.get(name).copied(),
+                    Some(std::env::var(name).unwrap().as_str())
+                );
+            }
+            if mode == "session" {
+                for name in [
+                    "MJ_SESSION_ID",
+                    "MJ_SESSION_BASH_ENV",
+                    "MJ_PROFILE_CUSTOM",
+                    "BASH_ENV",
+                ] {
+                    assert!(!environment.contains_key(name), "leaked {name}");
+                }
+                assert_ne!(environment.get("CODEX_HOME"), Some(&"/session/profile"));
+                assert_ne!(environment.get("HOME"), Some(&"/session/home"));
+                assert_ne!(environment.get("TMPDIR"), Some(&"/session/tmp"));
+            } else {
+                assert_eq!(environment.get("CODEX_HOME"), Some(&"/user/custom-codex"));
+            }
+            assert_eq!(command.get_current_dir(), Some(data_dir().as_path()));
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        for mode in ["session", "ordinary"] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--exact", TEST])
+                .env(CHILD, mode)
+                .env("MJ_CONFIG_DIR", directory.path())
+                .env("MJ_DATA_DIR", directory.path())
+                .env("MJ_INSTANCE", "1524-daemon-env")
+                .env_remove("MJ_SESSION_ID")
+                .env_remove("MJ_SESSION_BASH_ENV")
+                .env("CODEX_HOME", "/user/custom-codex");
+            if mode == "session" {
+                command
+                    .env("MJ_SESSION_ID", "old-worker-session")
+                    .env("MJ_SESSION_BASH_ENV", "/session/bash-env")
+                    .env("MJ_PROFILE_CUSTOM", "profile-value")
+                    .env("CODEX_HOME", "/session/profile")
+                    .env("HOME", "/session/home")
+                    .env("TMPDIR", "/session/tmp")
+                    .env("BASH_ENV", "/session/bash-env");
+            }
+            let output = mj_core::subprocess::run_with_input(&mut command, b"").unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn detached_daemon_can_launch_after_its_client_binary_is_removed() {
