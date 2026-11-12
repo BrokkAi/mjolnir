@@ -3429,13 +3429,21 @@ mod executor_tests {
             }
             .expect_err("a server that never lets the command in fails after the bound");
             let message = format!("{error:#}");
-            assert!(started.elapsed() < Duration::from_secs(10), "{message}");
+            let elapsed = started.elapsed();
+            assert!(elapsed < Duration::from_secs(10), "{message}");
             for needle in ["build@10.0.0.1", "MaxStartups", "firewall", "kex_exchange"] {
                 assert!(message.contains(needle), "{needle} missing: {message}");
             }
+            // Each attempt spawns several processes, so how many fit in the
+            // bound depends on the machine. Check that the caller retried and
+            // that the bound, not an attempt count, ended the retries.
             assert!(
-                attempts(directory.path()) > 3,
+                attempts(directory.path()) >= 2,
                 "cancellable: {cancellable}, retried within the bound"
+            );
+            assert!(
+                elapsed >= Duration::from_millis(400),
+                "cancellable: {cancellable}, stopped before the bound after {elapsed:?}"
             );
         }
     }
