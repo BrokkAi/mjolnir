@@ -76,3 +76,11 @@ jemalloc is now built with `stats` and `profiling` (inactive by default; `_RJEM_
 Resident plus swap of a fresh daemon at 10–24 minutes fell from 3.0–3.6 GB to 2.3–2.6 GB.
 
 The decoded windows are the largest remaining owner. Their JSON totals ~100 MiB for 60 sessions, but `serde_json` is built with `preserve_order` (enabled by agent-client-protocol), so every object is an `IndexMap` and small structures expand 10x or more. A third of the window JSON comes from two pins: one session's current turn of 7,964 items kept whole, and four turns kept whole for tools stuck `in_progress`. Bounding the current-turn pin, or holding tool calls in a cheaper form than `Value`, are design changes rather than retention fixes.
+
+Follow-up fixes and checks, same day: published browser rows are shared between the projector's cursor baseline and the `conversations` snapshot (403bb1bc7), and relay assessment history is held behind `Arc` so copy-on-write operational-state clones share it (56a4be071). A re-profile after both measured a 1.36 GB sampled live heap at 15 minutes. Remaining owners and why each is not a quick fix:
+
+- Browser projector full-window entry cache (~200 MB): converting only the rendered suffix changes output, because `rich_presentation_key` and `restart_collapse_window_start_seq` (mj-client/src/transcript.rs) are computed over the whole window. Needs a separate whole-window topology pass.
+- `publish_view` operational-state copies (~37 MB before the `Arc` change): the remainder is copy-on-write clones of other operational fields kept by older published views.
+- `record_index` groups (~16–20 MB): six indexes over ~25,500 sessions; sharing the id strings would save ~5 MB.
+- `decode_relay_response` (~27–33 MB): the relay data that makes up each session's operational state; overlaps the `publish_view` figure.
+- Subagent reports (~37 MB): periodic report reconciliation reads the report and the completed turn from one snapshot; moving the message to on-demand reads needs re-observation logic.
