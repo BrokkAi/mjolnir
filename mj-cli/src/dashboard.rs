@@ -588,6 +588,14 @@ fn enqueue_materialized_projection(
 /// The top level of the Git worktree `mj` was started in, or `None` outside
 /// one. The new-session wizard offers it as the local project.
 fn launch_repository_top_level() -> Option<std::path::PathBuf> {
+    if mj_core::config::DaemonConfig::load_placement(&mj_core::config::config_path())
+        .ok()?
+        .runtime
+        == mj_core::config::DaemonRuntime::Ssh
+    {
+        return None;
+    }
+
     let directory = std::env::current_dir().ok()?;
     let output = std::process::Command::new("git")
         .args(["rev-parse", "--show-toplevel"])

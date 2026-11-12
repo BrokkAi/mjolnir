@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Real localhost OpenSSH control transport with separate client/remote roots."""
 
+import signal
 import argparse
 import os, pathlib, socket, subprocess, tempfile, time, json
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--mj", required=True)
 parser.add_argument("--instance", required=True)
-parser.add_argument("--scenario", choices=["control"], required=True)
+parser.add_argument("--scenario", choices=["control", "dispatch"], required=True)
 options = parser.parse_args()
 assert options.instance != "default", "a named isolated instance is required"
 binary = str(pathlib.Path(options.mj).resolve())
@@ -60,7 +61,9 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
     )
     with (p / "log").open("w") as log:
         child = subprocess.Popen(
-            ["/usr/sbin/sshd", "-D", "-e", "-f", str(p / "sshd")], stderr=log
+            ["/usr/sbin/sshd", "-D", "-e", "-f", str(p / "sshd")],
+            stderr=log,
+            start_new_session=True,
         )
         try:
             for i in range(100):
@@ -74,32 +77,126 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
                 MJ_CONFIG_DIR=str(p / "client-config"),
                 MJ_DATA_DIR=str(p / "client-data"),
             )
-            command = [binary, "--instance", options.instance, "sessions"]
-            for phase in range(2):
-                result = subprocess.run(
-                    command, env=client_env, text=True, capture_output=True, timeout=120
+            if options.scenario == "dispatch":
+                base = [binary, "--instance", options.instance]
+                subprocess.run(
+                    [
+                        str(wrapper),
+                        "--instance",
+                        options.instance,
+                        "daemon",
+                        "endpoint",
+                        "--json",
+                    ],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
                 )
-                assert result.returncode == 0, result.stderr
-                assert not list((p / "client-data").rglob("daemon.json"))
-                assert not list((p / "client-data").rglob("*.db"))
-                if phase == 0:
-                    subprocess.run(
+                before = json.loads(
+                    subprocess.check_output(
                         [
                             str(wrapper),
                             "--instance",
                             options.instance,
                             "daemon",
-                            "restart",
-                        ],
-                        check=True,
+                            "endpoint",
+                            "--json",
+                            "--existing",
+                        ]
+                    )
+                )["instance_id"]
+                for action in ["status", "restart", "status", "stop", "status"]:
+                    result = subprocess.run(
+                        base + ["daemon", action],
+                        env=client_env,
+                        text=True,
+                        capture_output=True,
                         timeout=120,
                     )
-            print(
-                "PASS: SSH sessions before/after remote restart; no client metadata/store"
-            )
+                    assert result.returncode == 0, result.stderr
+                    if action == "restart":
+                        after = json.loads(
+                            subprocess.check_output(
+                                [
+                                    str(wrapper),
+                                    "--instance",
+                                    options.instance,
+                                    "daemon",
+                                    "endpoint",
+                                    "--json",
+                                    "--existing",
+                                ]
+                            )
+                        )["instance_id"]
+                        assert before != after, (
+                            "remote restart did not replace the daemon"
+                        )
+                    if action == "stop":
+                        stopped = subprocess.run(
+                            [
+                                str(wrapper),
+                                "--instance",
+                                options.instance,
+                                "daemon",
+                                "endpoint",
+                                "--json",
+                                "--existing",
+                            ],
+                            capture_output=True,
+                        )
+                        assert stopped.returncode != 0, (
+                            "remote daemon still runs after forwarded stop"
+                        )
+                    if action == "status":
+                        assert "Client build:" in result.stdout, result.stdout
+                result = subprocess.run(
+                    base + ["go"], env=client_env, text=True, capture_output=True
+                )
+                assert result.returncode != 0
+                assert (
+                    "SSH daemon launches require an explicit remote path"
+                    in result.stderr
+                ), result.stderr
+                # No client filesystem lookup may reject this opaque remote path.
+                result = subprocess.run(
+                    base + ["go", "--path", "/remote-only/project"],
+                    env=client_env,
+                    text=True,
+                    capture_output=True,
+                )
+                assert "needs an interactive terminal" in result.stderr, result.stderr
+                assert not list((p / "client-data").rglob("*.db"))
+                print("PASS: remote lifecycle dispatch and explicit path handling")
+            else:
+                command = [binary, "--instance", options.instance, "sessions"]
+                for phase in range(2):
+                    result = subprocess.run(
+                        command,
+                        env=client_env,
+                        text=True,
+                        capture_output=True,
+                        timeout=120,
+                    )
+                    assert result.returncode == 0, result.stderr
+                    assert not list((p / "client-data").rglob("daemon.json"))
+                    assert not list((p / "client-data").rglob("*.db"))
+                    if phase == 0:
+                        subprocess.run(
+                            [
+                                str(wrapper),
+                                "--instance",
+                                options.instance,
+                                "daemon",
+                                "restart",
+                            ],
+                            check=True,
+                            timeout=120,
+                        )
+                print(
+                    "PASS: SSH sessions before/after remote restart; no client metadata/store"
+                )
         finally:
             subprocess.run(
                 [str(wrapper), "--instance", options.instance, "daemon", "stop"]
             )
-            child.terminate()
+            os.killpg(child.pid, signal.SIGTERM)
             child.wait()

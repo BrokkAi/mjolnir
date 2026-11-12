@@ -2090,10 +2090,10 @@ async fn listed_workspaces_without_starting() -> Option<Vec<mj_core::workspace::
 /// store that does not exist yet has none; one that cannot be read answers
 /// `None`.
 fn stored_workspaces_on_this_computer() -> Option<Vec<mj_core::workspace::WorkspaceRecord>> {
-    let placement = mj_core::config::Config::load_from(&mj_core::config::config_path())
-        .map(|config| config.daemon.runtime)
-        .unwrap_or_default();
-    if placement.engine().is_some() {
+    let placement = mj_core::config::DaemonConfig::load_placement(&mj_core::config::config_path())
+        .ok()?
+        .runtime;
+    if placement != mj_core::config::DaemonRuntime::Host {
         return None;
     }
     if !mj_controller::database::database_path().exists() {
@@ -2194,9 +2194,16 @@ fn workspace_name_for_directory(directory: &std::path::Path) -> String {
 }
 
 fn suggested_workspace_name(workspaces: &[daemon::WorkspaceListing]) -> Result<String> {
-    let base = workspace_name_for_directory(
-        &std::env::current_dir().context("read current directory for workspace name")?,
-    );
+    let base = if mj_core::config::DaemonConfig::load_placement(&mj_core::config::config_path())?
+        .runtime
+        == mj_core::config::DaemonRuntime::Ssh
+    {
+        "workspace".to_owned()
+    } else {
+        workspace_name_for_directory(
+            &std::env::current_dir().context("read current directory for workspace name")?,
+        )
+    };
     // The store keeps the name `default` for sessions made before a
     // workspace was required, even while that workspace is not listed.
     let names = workspaces
