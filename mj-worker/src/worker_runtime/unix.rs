@@ -273,7 +273,15 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         (None, None)
     };
 
-    let (acp_activity, step_clock, tools_in_flight, turn_context, accepted_config) = {
+    let (
+        acp_activity,
+        step_clock,
+        tools_in_flight,
+        turn_context,
+        accepted_config,
+        login_identity,
+        operator_away,
+    ) = {
         let relay = relay.lock().expect("relay lock poisoned");
         (
             relay.acp_activity_clock(),
@@ -281,6 +289,8 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
             relay.tools_in_flight(),
             relay.turn_context(),
             Arc::new(Mutex::new(accepted_config)),
+            relay.login_identity.clone(),
+            relay.operator_away.clone(),
         )
     };
     let shell_cleanup = user_shells.completion_tracker();
@@ -318,12 +328,9 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         &mut additional_directories,
     );
     let acp_spec = LaunchSpec {
-        operator_away: relay
-            .lock()
-            .expect("relay state lock poisoned")
-            .operator_away
-            .clone(),
+        operator_away,
         imported_logins: None,
+        login_identity,
         clear_context_request: None,
         context_restore: None,
         goal_recovery,
@@ -2349,7 +2356,8 @@ pub(super) async fn serve_client_with_memory(
                 // command ledger.
                 let operation = envelope.request.method_name();
                 let login_installed = matches!(&envelope.request, RelayRequest::InstallCredentials { .. });
-                let response = credential_response(envelope, &credentials, &relay_root).await;
+                let login_identity = relay.lock().expect("relay state lock poisoned").login_identity.clone();
+                let response = credential_response(envelope, &credentials, &relay_root, &login_identity).await;
                 if login_installed && matches!(response.body, RelayResponseBody::Ok { .. }) {
                     wake_dispatch(&relay, &dispatch_wake)?;
                 }

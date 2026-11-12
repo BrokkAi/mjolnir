@@ -284,6 +284,7 @@ pub struct DurableRelay {
     verdict_harness: Option<mj_core::config::HarnessKind>,
     #[cfg_attr(not(unix), allow(dead_code))] // The worker control runtime is Unix-only.
     pub(crate) authentication_login_path: Option<PathBuf>,
+    pub(crate) login_identity: crate::acp::ClaudeLoginIdentity,
     replied_verdict: verdict::RepliedVerdictState,
     /// Adapter-owned tasks, keyed by their owning session and task identity.
     air_tasks: BTreeMap<String, AirTaskEntry>,
@@ -613,6 +614,7 @@ impl DurableRelay {
             managed_subagent: false,
             verdict_harness: None,
             authentication_login_path: None,
+            login_identity: Default::default(),
             replied_verdict: Default::default(),
             air_tasks: BTreeMap::new(),
             claude_pending_stops: BTreeMap::new(),

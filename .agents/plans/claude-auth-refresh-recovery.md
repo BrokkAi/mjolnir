@@ -11,7 +11,8 @@ Issue #1515 reports Claude turns failing with Authentication required between a 
 - [x] (2026-11-12) Claimed #1515 and traced credential synchronization, prompt completion, and durable retry admission.
 - [x] (2026-11-12) Recorded access-token evidence on failed turns and implemented worker-owned durable recovery, with install wakes and startup checks.
 - [x] (2026-11-12) Covered both socket delivery orders, restart, duplicate wakes, unchanged tokens, newer input, cancellations, questions and pending checkpoints.
-- [x] (2026-11-12) Passed formatting, affected-crate validation and workspace Clippy; prepared the validated review follow-up for publication.
+- [x] (2026-11-12) Validated the previous iteration and resolved its review findings.
+- [x] (2026-11-12) Validated cached-identity prompt progress, recovery and all worker startup cases; final full worker suites, workspace Clippy and formatting passed. Prepared final review/publication.
 
 ## Surprises & Discoveries
 
@@ -25,7 +26,9 @@ Decision: retain only a hash of the access token, never credential bytes, in the
 
 ## Outcomes & Retrospective
 
-The first full validation passed: controller 2569 passed/19 ignored, core 638 passed/3 ignored, worker 831 passed/11 ignored, plus integration suites. Review identified awaited filesystem reads in the coordinator and before prompt dispatch. Both are corrected and covered with real stalled-file fixtures. The final worker run passed 834 tests and all integration suites. An earlier run’s unchanged `work_facts::tests::the_status_and_the_subject_reads_run_together_and_agree_on_the_commit` fixture failed once, then passed immediately in isolation and in the final full run. Eleven worker tests remain intentionally ignored. Workspace `cargo clippy --all-targets -- -D warnings`, rustfmt and diff checks passed. Implementation and validation are complete; the prepared follow-up follows the repository’s review and push workflow. Installation is outside this request.
+Implementation and validation are complete. The core/controller full suites passed (638/2569 tests, 3/19 intentionally ignored). The final cached-identity worker run passed all 834 library tests (11 intentionally ignored), its binary tests and all integration suites. Workspace Clippy with warnings denied, rustfmt and diff checks passed.
+
+Review removed both I/O hazards and the unnecessary per-prompt prerequisite: startup observation is independent, installations publish the shared identity, and dispatch only samples memory. A full run caught reentrant relay locking in the launch initializer; all launch facts are now captured under one guard before constructing `LaunchSpec`, and all six affected startup regressions pass. An earlier unchanged Git rendezvous fixture failed once, then passed in isolation and subsequent full runs. The result is prepared for the repository’s final review and push workflow. Installation is outside this request.
 
 ## Context and Orientation
 
@@ -33,7 +36,9 @@ The first full validation passed: controller 2569 passed/19 ignored, core 638 pa
 
 ## Plan of Work
 
-Capture the staged Claude access-token fingerprint immediately before sending a prompt. Attach it only to an authentication failure. Add a generated authentication retry whose identity includes the failed completion ordinal. In the relay, require that completion to remain current, the access token to differ, and normal submission/activity guards to permit continuing; newer input, cancellation, questions, goals, and barriers must win. Recheck after runtime events, credential-install dispatch wakes and background judgments. A supervised reader handles file I/O independently and coalesces pending checks with a watch channel; each read uses a named read-only thread outside Tokio’s shutdown-waited blocking pool, with results and failures returned over a channel; returned results are revalidated against relay state. Prompt preparation reads inside the existing cancellable turn loop, before dispatch; cancelling an unsent prompt records no native history. On restart, recheck persisted failures. Emit an automatic-recovery notice in the transcript. Do not replay the original prompt or synthesize new authorization.
+Sample the shared `ClaudeLoginIdentity` at prompt dispatch and attach that fingerprint only to an authentication failure. Prompts never read the credential file or wait for optional recovery evidence. A supervised, read-only startup task initializes the identity without delaying work. Each successful credential installation publishes the access-token fingerprint from the installed bytes before acknowledging its request. An installation mutex gives file commit and identity publication one order across concurrent clients; a revision check prevents a delayed startup sample from replacing an installed identity.
+
+The relay alone decides whether a failed completion remains eligible and whether the current identity differs. Its generated retry ID includes the completion ordinal. Newer input, cancellation, questions, goals, activity and checkpoint barriers take precedence. Recheck this decision after runtime events, installation wakes, startup observation and background judgments. The startup read uses a named thread outside Tokio’s shutdown-waited blocking pool, reports errors/panics, and is supervised through its async result. On restart, recheck persisted failures using the new startup observation. A recovery posts a transcript notice and supplies no new authorization.
 
 ## Concrete Steps
 
@@ -41,7 +46,7 @@ Work from the repository root on the current master branch. Use normal Cargo sto
 
 ## Validation and Acceptance
 
-Regression cases must prove that a failed Claude prompt resumes exactly once after the token changes, whether delivery preceded or followed failure, and that reopening the durable relay retains this behavior. Unchanged credentials, refresh-token removal with the same access token, unrelated errors, and newer user input must not produce a retry. A bridge fixture must prove the diagnostic captures the original token rather than the token at failure time. Existing generated-prompt tests must continue to exclude the retry from authorization.
+Regression cases must prove that a failed Claude prompt resumes exactly once after the token changes, whether delivery preceded or followed failure, and that reopening the durable relay retains this behavior. Unchanged credentials, refresh-token removal with the same access token, unrelated errors, and newer user input must not produce a retry. A bridge fixture must prove the diagnostic captures the dispatch-time identity rather than a newer installation published before failure. A blocked startup observation must not delay primary prompts or runtime shutdown; a stale observation must not overwrite an installation. Existing generated-prompt tests must continue to exclude the retry from authorization.
 
 ## Idempotence and Recovery
 
@@ -64,3 +69,7 @@ Revision 2026-11-12: addressed review responsiveness findings with a supervised 
 Revision 2026-11-12: finalized validation evidence, including the isolated rerun of the unchanged Git rendezvous fixture; formatting and workspace Clippy passed. The implementation is complete and prepared for final review/publication.
 
 Revision 2026-11-12: final review exposed runtime-drop waiting on cancelled Tokio blocking jobs. The credential reader now uses an independent read-only thread and reports panics/errors. A real runtime-drop regression keeps its FIFO blocked until shutdown is observed. All 834 worker tests (11 ignored), worker integration suites, workspace Clippy and formatting passed on the final implementation.
+
+Revision 2026-11-12: removed per-prompt filesystem reads after review identified that supplemental evidence could delay all Claude work. Added one shared cached identity: installations publish it in commit order, initial observations carry a revision guard, and dispatch samples it without I/O. Replaced the preparation cancellation path and watch-driven rereads with direct recovery checks. Validation of this simplification is in progress.
+
+Revision 2026-11-12: finalized the cached-identity design. Startup exposed duplicate relay locks held across struct initialization; collecting all launch facts under one guard removes that deadlock structurally. Final full worker validation (834 passed/11 ignored plus integrations), workspace Clippy, rustfmt and diff checks passed.

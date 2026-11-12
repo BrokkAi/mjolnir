@@ -67,26 +67,26 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
     let mut session_configured = false;
     let mut kimi_poll = tokio::time::interval(KIMI_TASK_POLL_INTERVAL);
     kimi_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let (authentication_checks, mut checks) = watch::channel::<Option<(u64, PathBuf)>>(None);
-    let (authentication_results, mut login_results) = mpsc::unbounded_channel();
     let mut login_reads = tokio::task::JoinSet::new();
-    login_reads.spawn(
-        async move {
-            // One reader owns the file work. Changes arriving during a read stay
-            // in the watch channel and are checked again after that read finishes.
-            while checks.changed().await.is_ok() {
-                let Some((ordinal, path)) = checks.borrow_and_update().clone() else {
-                    continue;
-                };
-                let login = crate::acp::read_claude_login_fingerprint(path).await;
-                if authentication_results.send((ordinal, login)).is_err() {
-                    break;
-                }
+    let initial_login = {
+        let state = relay.lock().expect("relay state lock poisoned");
+        state
+            .authentication_login_path
+            .clone()
+            .map(|path| (state.login_identity.snapshot().0, path))
+    };
+    if let Some((revision, path)) = initial_login {
+        login_reads.spawn(
+            async move {
+                (
+                    revision,
+                    crate::acp::read_claude_login_fingerprint(path).await,
+                )
             }
-        }
-        .with_current_subscriber(),
-    );
-    schedule_authentication_check(&relay, &authentication_checks);
+            .with_current_subscriber(),
+        );
+    }
+    recover_authentication(&relay)?;
     dispatch_pending(
         &relay,
         &commands,
@@ -245,7 +245,7 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
                         verdict_tasks.shutdown().await;
                         return Ok(());
                     }
-                    schedule_authentication_check(&relay, &authentication_checks);
+                    recover_authentication(&relay)?;
                     dispatch_pending(
                         &relay,
                         &commands,
@@ -282,7 +282,7 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
                     verdict_tasks.shutdown().await;
                     return Ok(());
                 }
-                schedule_authentication_check(&relay, &authentication_checks);
+                recover_authentication(&relay)?;
                 dispatch_pending(
                     &relay,
                     &commands,
@@ -335,23 +335,16 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
                     .await?;
             }
             _ = verdict_poll.tick(), if verdict.is_some() => {}
-            Some((ordinal, result)) = login_results.recv() => {
-                match result {
-                    Ok(Some(login)) => {
-                        let admitted = relay.lock().expect("relay state lock poisoned")
-                            .submit_authentication_retry(ordinal, &login)?;
-                        if admitted {
-                            dispatch_pending(&relay, &commands, &mut in_flight, session_configured, &mut user_shells)?;
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(error) => tracing::warn!(%error, "could not check the Claude login for authentication recovery"),
-                }
-            }
             result = login_reads.join_next(), if !login_reads.is_empty() => {
                 match result {
+                    Some(Ok((revision, Ok(login)))) => {
+                        relay.lock().expect("relay state lock poisoned").login_identity.observe(revision, login);
+                        recover_authentication(&relay)?;
+                        dispatch_pending(&relay, &commands, &mut in_flight, session_configured, &mut user_shells)?;
+                    }
+                    Some(Ok((_, Err(error)))) => tracing::warn!(%error, "could not initialize the Claude login identity"),
                     Some(Err(error)) => return Err(error).context("Claude login reader failed"),
-                    _ => bail!("Claude login reader stopped before the worker coordinator"),
+                    None => unreachable!("guarded login read task"),
                 }
             }
             result = verdict_tasks.join_next(), if !verdict_tasks.is_empty() && !held => {
@@ -403,7 +396,7 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
                     }
                     _ => {}
                 }
-                schedule_authentication_check(&relay, &authentication_checks);
+                recover_authentication(&relay)?;
             }
             result = locator_tasks.join_next(), if !locator_tasks.is_empty() && !held => {
                 match result {
@@ -429,26 +422,16 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
     }
 }
 
-/// Ask the supervised reader without parking the coordinator. Both completion
-/// and installs reach here, so neither ordering can strand a failed turn.
-fn schedule_authentication_check(
-    relay: &Arc<RelayCell>,
-    checks: &watch::Sender<Option<(u64, PathBuf)>>,
-) {
-    let pending = {
-        let relay = relay.lock().expect("relay state lock poisoned");
-        relay
-            .authentication_retry_identity()
-            .and_then(|(ordinal, _)| {
-                relay
-                    .authentication_login_path
-                    .clone()
-                    .map(|path| (ordinal, path))
-            })
-    };
-    if let Some(pending) = pending {
-        checks.send_replace(Some(pending));
+/// Consult the same identity that credential installation publishes. This is
+/// supplemental evidence; neither dispatch nor recovery waits on filesystem I/O.
+fn recover_authentication(relay: &Arc<RelayCell>) -> Result<()> {
+    let mut state = relay.lock().expect("relay state lock poisoned");
+    if let Some((ordinal, _)) = state.authentication_retry_identity()
+        && let Some(login) = state.login_identity.snapshot().1
+    {
+        state.submit_authentication_retry(ordinal, &login)?;
     }
+    Ok(())
 }
 
 /// What observing a sub-agent's finishing prompt needs from its coordinator:

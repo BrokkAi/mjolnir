@@ -499,6 +499,7 @@ async fn credential_request(
         },
         &Ok(endpoint.clone()),
         &endpoint.home,
+        &Default::default(),
     )
     .await;
     match response.body {
@@ -1821,6 +1822,7 @@ async fn authentication_recovery_handles_both_orders_of_install_and_failure() {
         let mut durable = DurableRelay::open(&root, SESSION_ID, "test").unwrap();
         durable.set_turn_verdict_harness(HarnessKind::Claude);
         durable.authentication_login_path = Some(path.clone());
+        let initial_revision = durable.login_identity.snapshot().0;
         let relay = Arc::new(RelayCell::new(durable));
         let (events, event_rx) = mpsc::channel(16);
         let (wakes, wake_rx) = mpsc::channel(1);
@@ -1927,6 +1929,12 @@ async fn authentication_recovery_handles_both_orders_of_install_and_failure() {
         )
         .await;
         if install_first {
+            // A startup sample that predates the push cannot overwrite the
+            // identity published with the successful install.
+            relay.lock().unwrap().login_identity.observe(
+                initial_revision,
+                Some(mj_core::credentials::credential_fingerprint(b"old-access")),
+            );
             events.send(failed).await.unwrap();
         }
         let CommandRequest::Prompt {
@@ -6013,6 +6021,7 @@ async fn daemon_restart_records_one_marker_after_recovering_in_flight_work() {
     );
 }
 
+// Hard-won: #1515: two relay locks in LaunchSpec field initializers deadlocked startup.
 #[tokio::test]
 async fn first_daemon_start_does_not_record_a_restart_marker() {
     let temp = tempfile::tempdir().unwrap();

@@ -67,6 +67,7 @@ for line in sys.stdin:
             LaunchSpec {
                 operator_away: Default::default(),
                 imported_logins: None,
+                login_identity: Default::default(),
                 bridge_spec_path: None,
                 subagent_policy: mj_core::subagent::SubagentPolicy::Native,
                 managed_subagent: false,
@@ -219,6 +220,7 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
     let mut spec = LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
+        login_identity: Default::default(),
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
@@ -1019,6 +1021,7 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
     let mut spec = LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
+        login_identity: Default::default(),
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
@@ -1109,6 +1112,7 @@ fn project_history_mcp_and_non_claude_file_memory_are_delivered() {
     let mut spec = LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
+        login_identity: Default::default(),
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
@@ -1222,6 +1226,7 @@ fn a_child_socket_serves_handback_and_hides_native_tools() {
     let mut spec = LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
+        login_identity: Default::default(),
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::None,
         managed_subagent: false,
@@ -1364,6 +1369,7 @@ async fn air_tasks_from_root_and_child_sessions_stop_through_the_owning_adapter(
         let spec = LaunchSpec {
             operator_away: Default::default(),
             imported_logins: None,
+            login_identity: Default::default(),
             bridge_spec_path: None,
             tools_in_flight: Default::default(),
             turn_context: Default::default(),
@@ -1706,7 +1712,11 @@ fn only_a_finished_turn_that_produced_nothing_counts_as_unanswered() {
 
 /// Answers `initialize` and `session/new`, then fails the first
 /// `session/prompt` with a JSON-RPC error and completes the second.
-async fn scripted_bridge(stream: tokio::io::DuplexStream, login_path: PathBuf) -> usize {
+async fn scripted_bridge(
+    stream: tokio::io::DuplexStream,
+    login_path: PathBuf,
+    login_identity: ClaudeLoginIdentity,
+) -> usize {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let (read, mut write) = tokio::io::split(stream);
@@ -1746,6 +1756,9 @@ async fn scripted_bridge(stream: tokio::io::DuplexStream, login_path: PathBuf) -
                         br#"{"claudeAiOauth":{"accessToken":"new-access","expiresAt":2000}}"#,
                     )
                     .unwrap();
+                    login_identity.installed(Some(mj_core::credentials::credential_fingerprint(
+                        b"new-access",
+                    )));
                     serde_json::json!({
                         "jsonrpc": "2.0",
                         "id": id,
@@ -1863,6 +1876,7 @@ async fn answer_to_ext_request(
     let spec = LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
+        login_identity: Default::default(),
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
@@ -2069,6 +2083,7 @@ async fn answer_architecture_form(harness: HarnessKind, finish_before_answer: bo
     let spec = LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
+        login_identity: Default::default(),
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
@@ -2587,6 +2602,7 @@ async fn policy_is_enforced_before_session_is_reported(
     let spec = LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
+        login_identity: Default::default(),
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
@@ -2848,6 +2864,7 @@ async fn guardian_muse_offering_only_allow_all_fails(plan: bool) {
     let spec = LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
+        login_identity: Default::default(),
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
@@ -2921,6 +2938,7 @@ async fn a_mode_the_harness_acknowledges_but_does_not_apply_fails_the_session() 
     let spec = LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
+        login_identity: Default::default(),
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
@@ -3187,7 +3205,15 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
         br#"{"claudeAiOauth":{"accessToken":"old-access","expiresAt":1000}}"#,
     )
     .unwrap();
-    let bridge = tokio::spawn(scripted_bridge(bridge_stream, login_path));
+    let login_identity = ClaudeLoginIdentity::default();
+    login_identity.installed(Some(mj_core::credentials::credential_fingerprint(
+        b"old-access",
+    )));
+    let bridge = tokio::spawn(scripted_bridge(
+        bridge_stream,
+        login_path,
+        login_identity.clone(),
+    ));
     let (client_read, client_write) = tokio::io::split(client_stream);
     let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
 
@@ -3196,6 +3222,7 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
     let spec = LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
+        login_identity,
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
@@ -3618,6 +3645,7 @@ pub(super) fn silent_bridge_spec(stall_policy: mj_core::activity::StallPolicy) -
     LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
+        login_identity: Default::default(),
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
@@ -4206,6 +4234,7 @@ async fn exercise_image_steering(with_images: bool, steering_outcome: &'static s
     let spec = LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
+        login_identity: Default::default(),
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
@@ -4454,91 +4483,73 @@ async fn a_stalled_login_read_does_not_hold_runtime_shutdown() {
         .unwrap();
 }
 
-// Hard-won: #1515: a blocked login read prevented pre-prompt cancellation.
+// Hard-won: #1515: supplemental credential evidence became a prerequisite for every prompt.
 #[cfg(unix)]
 #[tokio::test]
-async fn a_stalled_login_read_can_be_cancelled_before_sending_the_prompt() {
-    for targeted in [false, true] {
-        let home = tempfile::tempdir().unwrap();
-        let gate = crate::test_support::stalled_read_file(&home.path().join(".credentials.json"));
-        let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
-        let bridge = tokio::spawn(scripted_bridge(
-            bridge_stream,
-            home.path().join("unexpected-login"),
-        ));
-        let (read, write) = tokio::io::split(client_stream);
-        let transport = ByteStreams::new(write.compat_write(), read.compat());
-        let (requests, mut request_rx) = mpsc::channel(4);
-        let (events, mut event_rx) = mpsc::channel(64);
-        let mut spec = silent_bridge_spec(mj_core::activity::StallPolicy {
-            silence: None,
-            tool_call: None,
-        });
-        spec.harness = HarnessKind::Claude;
-        spec.environment.insert(
-            "CLAUDE_CONFIG_DIR".into(),
-            home.path().to_string_lossy().into_owned(),
-        );
-        let step_clock = spec.step_clock.clone();
-        let opened = Arc::new(Mutex::new(None));
-        let driver_opened = opened.clone();
-        let driver = tokio::spawn(async move {
-            drive(
-                transport,
-                spec,
-                &mut request_rx,
-                events,
-                driver_opened,
-                false,
-            )
-            .await
-        });
-        requests
-            .send(CommandRequest::Prompt {
-                request_id: "preparing".into(),
-                prompt: vec![ContentBlock::from("work")],
-            })
-            .await
-            .unwrap();
-        requests
-            .send(if targeted {
-                CommandRequest::CancelTurnFor {
-                    request_id: "cancel-preparation".into(),
-                    active_prompt_id: "preparing".into(),
-                }
-            } else {
-                CommandRequest::Cancel {
-                    request_id: "cancel-preparation".into(),
-                    steering_prompt: None,
-                }
-            })
-            .await
-            .unwrap();
-        wait_for_runtime_event(&mut event_rx, |event| matches!(event,
-            RuntimeEvent::PromptFinished { request_id, stop_reason, .. } if request_id == "preparing" && stop_reason == "Cancelled"
-        )).await;
-        assert!(
-            !opened
-                .lock()
-                .unwrap()
-                .as_ref()
-                .unwrap()
-                .native_session_used
-                .load(Ordering::Acquire)
-        );
-        assert_eq!(step_clock.started_at_ms(), None);
-        drop(requests);
-        crate::test_support::wait_for("runtime shutdown during a login read", driver)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            bridge.await.unwrap(),
-            0,
-            "a cancelled preparation must send no ACP prompt"
-        );
-        drop(gate);
-    }
+async fn a_prompt_does_not_wait_for_a_stalled_login_observation() {
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join(".credentials.json");
+    let gate = crate::test_support::stalled_read_file(&path);
+    let observation = tokio::spawn(read_claude_login_fingerprint(path));
+    let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
+    let identity = ClaudeLoginIdentity::default();
+    let bridge = tokio::spawn(scripted_bridge(
+        bridge_stream,
+        home.path().join("harness-login"),
+        identity.clone(),
+    ));
+    let (read, write) = tokio::io::split(client_stream);
+    let transport = ByteStreams::new(write.compat_write(), read.compat());
+    let (requests, mut request_rx) = mpsc::channel(4);
+    let (events, mut event_rx) = mpsc::channel(64);
+    let mut spec = silent_bridge_spec(mj_core::activity::StallPolicy {
+        silence: None,
+        tool_call: None,
+    });
+    spec.harness = HarnessKind::Claude;
+    spec.login_identity = identity;
+    spec.environment.insert(
+        "CLAUDE_CONFIG_DIR".into(),
+        home.path().to_string_lossy().into_owned(),
+    );
+    let driver = tokio::spawn(async move {
+        drive(
+            transport,
+            spec,
+            &mut request_rx,
+            events,
+            Arc::new(Mutex::new(None)),
+            false,
+        )
+        .await
+    });
+    requests
+        .send(CommandRequest::Prompt {
+            request_id: "native-work".into(),
+            prompt: vec![ContentBlock::from("work")],
+        })
+        .await
+        .unwrap();
+    wait_for_runtime_event(&mut event_rx, |event| matches!(event,
+        RuntimeEvent::PromptFinished { request_id, stop_reason, diagnostic:Some(diagnostic), .. }
+            if request_id == "native-work" && stop_reason == "error" && diagnostic.login_fingerprint.is_none()
+    )).await;
+    drop(requests);
+    crate::test_support::wait_for(
+        "prompt dispatch with unavailable credential evidence",
+        driver,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        bridge.await.unwrap(),
+        1,
+        "the harness must receive the prompt without waiting for metadata"
+    );
+    observation.abort();
+    assert!(observation.await.unwrap_err().is_cancelled());
+    drop(gate);
 }
 
 // Hard-won: 410851f: A Kimi bridge restarted unnecessarily after it acknowledged cancellation.
@@ -4559,6 +4570,7 @@ async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {
     let spec = LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
+        login_identity: Default::default(),
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
@@ -4702,6 +4714,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
     let spec = LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
+        login_identity: Default::default(),
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
@@ -4799,6 +4812,7 @@ async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
         LaunchSpec {
             operator_away: Default::default(),
             imported_logins: None,
+            login_identity: Default::default(),
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             managed_subagent: false,
@@ -5138,6 +5152,7 @@ mod terminals {
         let spec = LaunchSpec {
             operator_away: Default::default(),
             imported_logins: None,
+            login_identity: Default::default(),
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             managed_subagent: false,
@@ -5579,6 +5594,7 @@ for line in sys.stdin:
         LaunchSpec {
             operator_away: Default::default(),
             imported_logins: None,
+            login_identity: Default::default(),
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             managed_subagent: false,
@@ -5761,6 +5777,7 @@ for line in sys.stdin:
     let spec = LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
+        login_identity: Default::default(),
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
@@ -5927,6 +5944,7 @@ while True:
     let spec = LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
+        login_identity: Default::default(),
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
@@ -6078,6 +6096,7 @@ while True:
     let spec = LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
+        login_identity: Default::default(),
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
@@ -6188,6 +6207,7 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
     let spec = LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
+        login_identity: Default::default(),
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
@@ -6273,6 +6293,7 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
         let spec = LaunchSpec {
             operator_away: Default::default(),
             imported_logins: None,
+            login_identity: Default::default(),
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             managed_subagent: false,
@@ -6522,6 +6543,7 @@ fn reload_fallback_spec(harness: HarnessKind) -> LaunchSpec {
     LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
+        login_identity: Default::default(),
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
@@ -6608,6 +6630,7 @@ fn resume_failures_report_a_missing_native_session_per_harness() {
         LaunchSpec {
             operator_away: Default::default(),
             imported_logins: None,
+            login_identity: Default::default(),
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             managed_subagent: false,
@@ -6766,6 +6789,7 @@ fn missing_native_session_spec(
     LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
+        login_identity: Default::default(),
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
@@ -7152,6 +7176,7 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
         let spec = LaunchSpec {
             operator_away: Default::default(),
             imported_logins: None,
+            login_identity: Default::default(),
             bridge_spec_path: None,
             tools_in_flight: Default::default(),
             turn_context: Default::default(),
@@ -7608,6 +7633,7 @@ async fn kimi_permission_form_shows_the_command_streamed_as_tool_content() {
     let spec = LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
+        login_identity: Default::default(),
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
@@ -8017,6 +8043,7 @@ async fn launcher_lines_before_the_first_frame_do_not_break_initialize() {
     let spec = LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
+        login_identity: Default::default(),
         bridge_spec_path: None,
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
