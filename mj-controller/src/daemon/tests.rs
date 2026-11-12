@@ -12240,7 +12240,7 @@ async fn daemon_upload_exchange() {
     };
     let server_metadata = metadata.clone();
     let server = tokio::spawn(async move {
-        for authenticated in [true, false, true] {
+        for authenticated in [true, false, true, false] {
             let (stream, _) = listener.accept().await.unwrap();
             let result = serve_client(
                 stream,
@@ -12250,6 +12250,12 @@ async fn daemon_upload_exchange() {
             )
             .await;
             assert_eq!(result.is_ok(), authenticated);
+            assert_eq!(
+                std::fs::read_dir(mj_core::config::data_dir().join("uploads"))
+                    .unwrap()
+                    .count(),
+                0
+            );
         }
     });
     let mut partial = TcpStream::connect(metadata.address).await.unwrap();
@@ -12261,7 +12267,7 @@ async fn daemon_upload_exchange() {
             token: metadata.token.clone(),
             action: DaemonAction::UploadChunk {
                 bytes: vec![0; 96 * 1024],
-                finished: false,
+                sha256: None,
             },
         },
     )
@@ -12277,7 +12283,7 @@ async fn daemon_upload_exchange() {
             token: "wrong-token".into(),
             action: DaemonAction::UploadChunk {
                 bytes: vec![0; 96 * 1024],
-                finished: false,
+                sha256: None,
             },
         },
     )
@@ -12299,14 +12305,15 @@ async fn daemon_upload_exchange() {
     bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
     let reference =
         mj_core::attachment::AttachmentRef::new(&bytes, "image/png".into(), 256, 256).unwrap();
-    let mut client = DaemonClient::connect(metadata).await.unwrap();
-    let mut output = String::new();
+    let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
+    let mut output = String::from("interrupted upload: no blob remains\n");
     for label in ["install 196608 bytes", "repeat content-addressed install"] {
+        let blob = client.upload(&mut bytes.as_slice()).await.unwrap();
         let reply = client
             .request(DaemonAction::InstallAttachment {
                 session_id: "upload-session".into(),
                 reference: reference.clone(),
-                bytes: bytes.clone(),
+                blob,
             })
             .await
             .unwrap();
@@ -12324,11 +12331,12 @@ async fn daemon_upload_exchange() {
     );
     let mut corrupt = bytes;
     corrupt[100] ^= 1;
+    let blob = client.upload(&mut corrupt.as_slice()).await.unwrap();
     let error = client
         .request(DaemonAction::InstallAttachment {
             session_id: "upload-session".into(),
             reference,
-            bytes: corrupt,
+            blob,
         })
         .await
         .unwrap_err();
@@ -12342,6 +12350,30 @@ async fn daemon_upload_exchange() {
         output,
         include_str!("../../tests/golden/daemon-upload-exchange.txt")
     );
+    client
+        .upload(&mut b"unconsumed blob".as_slice())
+        .await
+        .unwrap();
     drop(client);
+    let mut corrupt_digest = TcpStream::connect(metadata.address).await.unwrap();
+    write_frame(
+        &mut corrupt_digest,
+        &RequestEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: 1,
+            token: metadata.token,
+            action: DaemonAction::UploadChunk {
+                bytes: vec![1; 96 * 1024],
+                sha256: Some("wrong".into()),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        read_frame::<ResponseEnvelope>(&mut corrupt_digest)
+            .await
+            .is_err()
+    );
     server.await.unwrap();
 }

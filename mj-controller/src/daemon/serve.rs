@@ -181,9 +181,16 @@ pub(super) async fn serve_client(
     state: Arc<RuntimeState>,
     cancellation: CancellationToken,
 ) -> Result<()> {
-    let mut upload: Option<(u64, Vec<u8>)> = None;
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncWriteExt;
+    let root = mj_core::config::data_dir().join("uploads");
+    tokio::fs::create_dir_all(&root).await?;
+    let directory = blocking(move || Ok(tempfile::tempdir_in(root)?)).await?;
+    let mut blobs = std::collections::HashMap::new();
+    let mut upload = None;
+
     loop {
-        let mut request: RequestEnvelope = match read_frame(&mut stream).await {
+        let request: RequestEnvelope = match read_frame(&mut stream).await {
             Ok(request) => request,
             Err(error)
                 if error.downcast_ref::<std::io::Error>().is_some_and(|io| {
@@ -199,7 +206,7 @@ pub(super) async fn serve_client(
             }
             Err(error) => return Err(error),
         };
-        if let DaemonAction::UploadChunk { bytes, finished } = &request.action {
+        if let DaemonAction::UploadChunk { bytes, sha256 } = &request.action {
             ensure!(
                 request.token == metadata.token,
                 "daemon authentication failed"
@@ -208,17 +215,51 @@ pub(super) async fn serve_client(
                 request.protocol_version == PROTOCOL_VERSION,
                 "incompatible upload protocol"
             );
-            let (id, body) = upload.get_or_insert_with(|| (request.request_id, Vec::new()));
-            ensure!(*id == request.request_id, "interleaved upload request");
-            body.extend_from_slice(bytes);
-            if !finished {
-                continue;
+            if upload.is_none() {
+                let root = directory.path().to_owned();
+                let (file, path) =
+                    blocking(move || Ok(tempfile::NamedTempFile::new_in(root)?.into_parts()))
+                        .await?;
+                let id = path
+                    .file_name()
+                    .context("blob filename missing")?
+                    .to_string_lossy()
+                    .into_owned();
+                let file = tokio::fs::File::from_std(file);
+                upload = Some((request.request_id, id, path, file, Sha256::new()));
             }
-            let (_, body) = upload.take().expect("upload exists");
-            request.action = tokio::task::spawn_blocking(move || serde_json::from_slice(&body))
-                .await
-                .context("upload decoder task failed")??;
-            ensure!(request.action.is_upload(), "invalid upload action");
+            let (request_id, _, _, file, digest) = upload.as_mut().expect("upload exists");
+            ensure!(
+                *request_id == request.request_id,
+                "interleaved upload request"
+            );
+            file.write_all(bytes).await?;
+            digest.update(bytes);
+            if let Some(expected) = sha256 {
+                let (_, id, path, mut file, digest) = upload.take().expect("upload exists");
+                file.flush().await?;
+                drop(file);
+                ensure!(
+                    digest
+                        .finalize()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+                        == *expected,
+                    "upload SHA-256 mismatch"
+                );
+                blobs.insert(id.clone(), path);
+                write_response(
+                    &mut stream,
+                    ResponseEnvelope {
+                        protocol_version: request.protocol_version,
+                        request_id: request.request_id,
+                        result: Ok(DaemonReply::BlobUploaded(id)),
+                    },
+                )
+                .await?;
+            }
+            continue;
         } else {
             ensure!(upload.is_none(), "interrupted upload request");
         }
@@ -259,13 +300,35 @@ pub(super) async fn serve_client(
         } else {
             // Lifecycle actions contain large checkpoint/restore futures. Keep
             // them off the connection task's stack, including in debug builds.
-            let action = Box::pin(handle_action(
-                request.action,
-                &metadata,
-                &state,
-                &cancellation,
-            ));
-            action.await.map_err(|error| format!("{error:#}"))
+            if let DaemonAction::InstallAttachment {
+                session_id,
+                reference,
+                blob,
+            } = request.action
+            {
+                match blobs.remove(&blob) {
+                    Some(path) => blocking(move || {
+                        let bytes = std::fs::read(&path)?;
+                        let result = mj_core::attachment::AttachmentStore::controller(&session_id)?
+                            .install(&reference, &bytes);
+                        drop(path);
+                        result?;
+                        Ok(DaemonReply::AttachmentInstalled(reference))
+                    })
+                    .await
+                    .map_err(|error| format!("{error:#}")),
+                    None => Err("unknown upload blob".into()),
+                }
+            } else {
+                Box::pin(handle_action(
+                    request.action,
+                    &metadata,
+                    &state,
+                    &cancellation,
+                ))
+                .await
+                .map_err(|error| format!("{error:#}"))
+            }
         };
         // Echo the caller's protocol version: replies must stay readable in the
         // client's own dialect, and the shapes it can receive here are frozen.

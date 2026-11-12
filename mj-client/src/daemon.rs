@@ -685,17 +685,16 @@ pub struct DraftPreview {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "action", content = "arguments")]
 pub enum DaemonAction {
-    /// Authenticated fragments of one upload action; all share a request ID.
+    /// Raw file fragments. Completion supplies the SHA-256 of all bytes.
     UploadChunk {
         #[serde(with = "chunk_bytes")]
         bytes: Vec<u8>,
-        finished: bool,
+        sha256: Option<String>,
     },
     InstallAttachment {
         session_id: String,
         reference: mj_core::attachment::AttachmentRef,
-        #[serde(with = "chunk_bytes")]
-        bytes: Vec<u8>,
+        blob: String,
     },
     RecordOperatorActivity,
     SetOperatorAway {
@@ -1165,14 +1164,6 @@ impl DaemonRefusal {
     }
 }
 
-impl DaemonAction {
-    /// Upload actions travel in authenticated request fragments, using the same
-    /// chunk size and base64 convention as chunked replies.
-    pub fn is_upload(&self) -> bool {
-        matches!(self, Self::InstallAttachment { .. })
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResponseEnvelope {
@@ -1184,6 +1175,7 @@ pub struct ResponseEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "reply", content = "value")]
 pub enum DaemonReply {
+    BlobUploaded(String),
     AttachmentInstalled(mj_core::attachment::AttachmentRef),
     LifecycleAccepted(LifecycleReceipt),
     /// Only a captured operation result may report this failure.
@@ -1764,43 +1756,70 @@ impl DaemonClient {
         }
     }
 
+    /// Streams raw bytes on this connection. The returned blob is connection-scoped;
+    /// consume it before disconnecting. Delivery failures are never replayed.
+    pub async fn upload(
+        &mut self,
+        reader: &mut (impl tokio::io::AsyncRead + Unpin),
+    ) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        let mut digest = Sha256::new();
+        let request_id = self.next_request_id;
+        self.next_request_id += 1;
+        let mut buffer = vec![0; 64 * 1024];
+        loop {
+            let n = reader.read(&mut buffer).await?;
+            digest.update(&buffer[..n]);
+            write_frame(
+                &mut self.stream,
+                &RequestEnvelope {
+                    protocol_version: self.metadata.protocol_version,
+                    request_id,
+                    token: self.metadata.token.clone(),
+                    action: DaemonAction::UploadChunk {
+                        bytes: buffer[..n].to_vec(),
+                        sha256: (n == 0).then(|| {
+                            digest
+                                .clone()
+                                .finalize()
+                                .iter()
+                                .map(|byte| format!("{byte:02x}"))
+                                .collect::<String>()
+                        }),
+                    },
+                },
+            )
+            .await?;
+            if n == 0 {
+                break;
+            }
+        }
+        let response = read_response(&mut self.stream).await?;
+        ensure!(
+            response.request_id == request_id
+                && response.protocol_version == self.metadata.protocol_version,
+            "daemon crossed upload response"
+        );
+        match response.result.map_err(anyhow::Error::msg)? {
+            DaemonReply::BlobUploaded(blob) => Ok(blob),
+            reply => bail!("unexpected blob upload reply {reply:?}"),
+        }
+    }
+
     async fn request_once(&mut self, action: DaemonAction) -> Result<DaemonReply> {
         let protocol_version = self.metadata.protocol_version;
         let request_id = self.next_request_id;
         self.next_request_id += 1;
-        let chunked = action.is_upload();
-        if chunked {
-            let body = tokio::task::spawn_blocking(move || serde_json::to_vec(&action))
-                .await
-                .context("upload encoder task failed")??;
-            let mut chunks = body.chunks(64 * 1024).peekable();
-            while let Some(bytes) = chunks.next() {
-                write_frame(
-                    &mut self.stream,
-                    &RequestEnvelope {
-                        protocol_version,
-                        request_id,
-                        token: self.metadata.token.clone(),
-                        action: DaemonAction::UploadChunk {
-                            bytes: bytes.to_vec(),
-                            finished: chunks.peek().is_none(),
-                        },
-                    },
-                )
-                .await?;
-            }
-        } else {
-            write_frame(
-                &mut self.stream,
-                &RequestEnvelope {
-                    protocol_version,
-                    request_id,
-                    token: self.metadata.token.clone(),
-                    action,
-                },
-            )
-            .await?;
-        }
+        write_frame(
+            &mut self.stream,
+            &RequestEnvelope {
+                protocol_version,
+                request_id,
+                token: self.metadata.token.clone(),
+                action,
+            },
+        )
+        .await?;
         let response = read_response(&mut self.stream).await?;
         ensure!(
             response.protocol_version == protocol_version,
