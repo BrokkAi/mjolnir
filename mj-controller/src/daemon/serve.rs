@@ -321,6 +321,59 @@ pub(super) async fn serve_client(
             // stop should not be refused.
             Err("daemon is shutting down; retry to reach a fresh daemon".to_owned())
         } else {
+            if let DaemonAction::LoginTerminal {
+                profile_id,
+                cols,
+                rows,
+            } = &request.action
+            {
+                let prepared = (|| -> Result<portable_pty::CommandBuilder> {
+                    let config = state.with_config(Clone::clone);
+                    let profile = config
+                        .profiles
+                        .get(profile_id)
+                        .context("unknown login profile")?;
+                    anyhow::ensure!(profile.enabled, "login profile is disabled");
+                    let mut command = portable_pty::CommandBuilder::new(std::env::current_exe()?);
+                    if let Some(instance) = mj_core::config::instance_name() {
+                        command.args(["--instance", &instance]);
+                    }
+                    command.args(["login", "--daemon-local", "--profile", profile_id]);
+                    for (name, value) in profile.environment.resolved() {
+                        command.env(name, value);
+                    }
+                    command.env("MJ_LOGIN_TERMINAL", "1");
+                    command.env("MJ_CONFIG_DIR", mj_core::config::config_dir());
+                    command.env("MJ_DATA_DIR", mj_core::config::data_dir());
+                    Ok(command)
+                })();
+                let command = match prepared {
+                    Ok(command) => command,
+                    Err(error) => {
+                        write_response(
+                            &mut stream,
+                            ResponseEnvelope {
+                                protocol_version: request.protocol_version,
+                                request_id,
+                                result: Err(format!("{error:#}")),
+                            },
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                };
+                write_response(
+                    &mut stream,
+                    ResponseEnvelope {
+                        protocol_version: request.protocol_version,
+                        request_id,
+                        result: Ok(DaemonReply::LoginTerminalReady),
+                    },
+                )
+                .await?;
+                return crate::login_terminal::serve(stream, command, *cols, *rows, cancellation)
+                    .await;
+            }
             if request.action.is_cancellable_machine_action() {
                 let cancelled = Arc::new(AtomicBool::new(false));
                 let guard =

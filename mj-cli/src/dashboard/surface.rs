@@ -171,6 +171,10 @@ impl DashboardContext {
     /// terminal output. That is why the loop does not track which mutations
     /// were visible; it only paces how often background changes are drawn.
     pub(crate) fn draw(&mut self) -> Result<()> {
+        if let Some(login) = &self.login {
+            self.drawn_chat_sessions.clear();
+            return self.terminal.draw(|frame| login.render(frame));
+        }
         if let Some(splash) = &self.splash {
             if !splash.finished() {
                 // Nothing behind the splash has been seen, so nothing is

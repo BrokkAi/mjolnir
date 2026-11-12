@@ -8,6 +8,9 @@ pub(super) async fn handle_action(
 ) -> Result<DaemonReply> {
     let _work = upgrade_request_activity(&action)?;
     match action {
+        DaemonAction::LoginTerminal { .. } => {
+            bail!("login requires a dedicated terminal connection")
+        }
         action @ (DaemonAction::PreflightNewSession { .. }
         | DaemonAction::ValidateProjectDirectory { .. }
         | DaemonAction::CompletePath { .. }
@@ -1094,7 +1097,9 @@ pub(super) fn upgrade_request_activity(
     if matches!(action, DaemonAction::SetOperatorAway { .. }) {
         return crate::upgrade::activity("operator away setting").map(Some);
     }
-    if action.is_cancellable_machine_action() {
+    if matches!(action, DaemonAction::LoginTerminal { .. })
+        || action.is_cancellable_machine_action()
+    {
         return Ok(None);
     }
     if matches!(

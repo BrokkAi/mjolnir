@@ -1,6 +1,7 @@
 //! Authenticated local daemon protocol and client transport.
 mod chunk_bytes;
 pub mod connector;
+pub mod login_terminal;
 pub mod ssh;
 use crate::executable::describe_running_daemon_and_client_builds;
 use crate::session::{ManagedSessionView, ViewError};
@@ -705,6 +706,11 @@ pub enum DaemonAction {
     ProveIdentity {
         nonce: String,
     },
+    LoginTerminal {
+        profile_id: String,
+        cols: u16,
+        rows: u16,
+    },
     PreflightNewSession {
         request: NewSessionPreflightRequest,
     },
@@ -1241,6 +1247,7 @@ pub enum DaemonReply {
     IdentityProof {
         mac: Vec<u8>,
     },
+    LoginTerminalReady,
     NewSessionPreflight(PreflightNew),
     PathCompletion(mj_core::path_completion::PathCompletion),
     ProjectDirectories(Vec<(std::path::PathBuf, bool)>),
@@ -1707,12 +1714,18 @@ fn read_metadata_at(path: &std::path::Path) -> Result<DaemonMetadata> {
     Ok(metadata)
 }
 
-pub async fn write_frame<T: Serialize>(stream: &mut TcpStream, value: &T) -> Result<()> {
+pub async fn write_frame<T: Serialize>(
+    stream: &mut (impl tokio::io::AsyncWrite + Unpin),
+    value: &T,
+) -> Result<()> {
     let body = serde_json::to_vec(value)?;
     write_encoded_frame(stream, &body).await
 }
 
-pub async fn write_encoded_frame(stream: &mut TcpStream, body: &[u8]) -> Result<()> {
+pub async fn write_encoded_frame(
+    stream: &mut (impl tokio::io::AsyncWrite + Unpin),
+    body: &[u8],
+) -> Result<()> {
     ensure!(
         body.len() <= MAX_FRAME_BYTES,
         "daemon frame is too large: {} bytes exceeds {MAX_FRAME_BYTES}",
@@ -1724,7 +1737,9 @@ pub async fn write_encoded_frame(stream: &mut TcpStream, body: &[u8]) -> Result<
     Ok(())
 }
 
-pub async fn read_frame<T: for<'de> Deserialize<'de>>(stream: &mut TcpStream) -> Result<T> {
+pub async fn read_frame<T: for<'de> Deserialize<'de>>(
+    stream: &mut (impl tokio::io::AsyncRead + Unpin),
+) -> Result<T> {
     let length = stream.read_u32().await? as usize;
     ensure!(
         length <= MAX_FRAME_BYTES,
@@ -3436,7 +3451,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Authenticated chunked client uploads and daemon-owned attachment installation.
 // Daemon-owned voice credential discovery and uploaded-audio transcription.
 // Version 92: streamed uploads, client imports and daemon voice actions.
-pub const PROTOCOL_VERSION: u32 = 92;
+// Version 93: authenticated daemon-owned login terminal streams.
+pub const PROTOCOL_VERSION: u32 = 93;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
