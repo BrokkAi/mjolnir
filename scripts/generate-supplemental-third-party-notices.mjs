@@ -42,6 +42,10 @@ const auditedLinksPackages = new Set([
   // script does not link or ship a native library.
   "rayon-core",
   "ring",
+  // Dynamic ORT payloads are pinned downloads with their own cached notices.
+  "ort-sys",
+  // The tokenizer statically links Oniguruma; its BSD notice is below.
+  "onig_sys",
   // rusqlite selects sqlite-wasm-rs only for wasm32-unknown-unknown. Official
   // Mjolnir archives target native platforms, so its compiled SQLite payload
   // is not present in any release artifact.
@@ -295,6 +299,24 @@ async function main() {
       "Zstandard native compression library",
       "statically linked for checkpoint archive compression",
     ),
+    await legalFile(
+      metadata,
+      "onig_sys",
+      "69.9.3",
+      "oniguruma/COPYING",
+      "Oniguruma tokenizer regular-expression engine",
+      "statically linked into the GitHub relevance tokenizer",
+    ),
+    {
+      component: "Downloaded GitHub relevance inference runtime",
+      source: "mj-controller/src/github_student/runtime.json (official ONNX Runtime GitHub and Microsoft NuGet artifacts)",
+      scope: "downloaded, verified and atomically cached at first preparation; not bundled in release archives",
+      text: [
+        "ONNX Runtime 1.23.0 is MIT licensed. Its LICENSE and ThirdPartyNotices.txt accompany the verified native library in the Mjolnir data-directory cache.",
+        "GPU-eligible Windows hosts additionally download Microsoft.ML.OnnxRuntime.DirectML 1.23.0 and Microsoft.AI.DirectML 1.15.4. Their LICENSE, ThirdPartyNotices.txt, DirectML-LICENSE.txt and DirectML-LICENSE-CODE.txt accompany the cached DLLs.",
+        "Only the official URL, size and SHA-256 pinned in runtime.json are accepted. The ORT main library is never selected from the system or PATH. Linux CUDA uses administrator-installed CUDA 12 and cuDNN 9 dependencies.",
+      ].join("\n"),
+    },
     await sqliteNativePayload(metadata),
     await embeddedFontsNotice(),
   ];

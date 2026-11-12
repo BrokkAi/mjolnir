@@ -190,6 +190,7 @@ fn documentation_dashboard() -> DashboardState {
             "kimi-1".into(),
             ProfileQuota {
                 paid_credits: None,
+                monthly_price_usd: None,
                 banked_resets: None,
                 profile_id: "kimi-1".into(),
                 harness: HarnessKind::Kimi,
@@ -351,6 +352,7 @@ fn profile_quota(
 ) -> ProfileQuota {
     ProfileQuota {
         paid_credits: None,
+        monthly_price_usd: None,
         banked_resets: None,
         profile_id: profile_id.into(),
         harness,

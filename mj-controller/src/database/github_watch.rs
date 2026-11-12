@@ -708,6 +708,47 @@ pub(crate) fn seed_github_repo_start(owner: &str, repo: &str, at: &str) -> Resul
     })
 }
 
+/// One read-only snapshot shared by all pairs for a session in a poll. Raw JSON
+/// preserves persisted tool-call field order for the frozen Python renderer.
+#[allow(dead_code)] // Wired by the relevance-policy integration milestone.
+pub(crate) fn load_github_history_snapshot(
+    session_id: &str,
+) -> Result<Vec<mj_transcript::github_history::HistoryRow>> {
+    load_github_history_snapshot_from(&database_path(), session_id)
+}
+
+fn load_github_history_snapshot_from(
+    path: &std::path::Path,
+    session_id: &str,
+) -> Result<Vec<mj_transcript::github_history::HistoryRow>> {
+    let connection = open_reader(path)?;
+    let mut statement = connection.prepare("SELECT stable_id, position, created_at_ms, last_changed_at_ms, body_json FROM materialized_transcript_items WHERE session_id=?1 ORDER BY position, stable_id")?;
+    let rows = statement
+        .query_map(params![session_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.into_iter()
+        .map(
+            |(stable_id, position, created_at_ms, last_changed_at_ms, body)| {
+                Ok(mj_transcript::github_history::HistoryRow {
+                    stable_id,
+                    position,
+                    created_at_ms,
+                    last_changed_at_ms,
+                    body: serde_json::from_str(&body)?,
+                })
+            },
+        )
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -874,6 +915,65 @@ mod tests {
                 window(100_000, Some(200_000)),
                 window(400_000, None),
             ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod history_snapshot_tests {
+    use super::*;
+    // Hard-won: #1505: rows edited after item creation must never leak into historical evidence.
+    #[test]
+    fn github_history_snapshot_retains_cutoff_metadata_and_raw_call_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.sqlite");
+        save_session_to(
+            &path,
+            &super::super::tests::session("session-1", "project-1"),
+        )
+        .unwrap();
+        let connection = open_reader(&path).unwrap();
+        for (id, position, created, changed, body) in [
+            (
+                "z",
+                1,
+                1000,
+                1000,
+                r#"{"kind":"tool","call":{"title":"first","kind":"execute","toolCallId":"c"}}"#,
+            ),
+            (
+                "a",
+                1,
+                1000,
+                1000,
+                r#"{"kind":"user","content":[{"type":"text","text":"before\r\ncutoff"}]}"#,
+            ),
+            (
+                "edited",
+                2,
+                1000,
+                3000,
+                r#"{"kind":"agent","chunks":[{"content":{"type":"text","text":"future secret"}}]}"#,
+            ),
+            ("thought", 3, 1000, 3000, r#"{"kind":"thought"}"#),
+            ("later", 4, 3000, 3000, r#"{"kind":"user","content":[]}"#),
+            (
+                "notice",
+                5,
+                1000,
+                1000,
+                r#"{"kind":"message","event":{"body":{"type":"new_github_item","number":42,"repo":"OWNER/REPO"}}}"#,
+            ),
+        ] {
+            connection.execute("INSERT INTO materialized_transcript_items(session_id,stable_id,position,created_at_ms,last_changed_at_ms,body_json) VALUES ('session-1',?1,?2,?3,?4,?5)",params![id,position,created,changed,body]).unwrap();
+        }
+        let rows = load_github_history_snapshot_from(&path, "session-1").unwrap();
+        let rendered =
+            mj_transcript::github_history::render("session-1", &rows, 2000, "owner/repo", 42)
+                .unwrap();
+        assert_eq!(
+            rendered,
+            "Session transcript as of 1970-01-01T00:00:02.000Z (UTC)\nSession id: session-1\nTranscript rows included: 2; withheld because changed after cutoff: 2; excluded because created later: 1; item-specific GitHub mailbox notices removed: 1.\nRows come only from Mjolnir materialized transcript records; timestamps are row creation times.\n\n[1970-01-01T00:00:01.000Z] USER\nbefore\ncutoff\n\n[1970-01-01T00:00:01.000Z] TOOL EXECUTE\nTITLE: first\nCALL: {\"title\":\"first\",\"kind\":\"execute\",\"toolCallId\":\"c\"}\n"
         );
     }
 }

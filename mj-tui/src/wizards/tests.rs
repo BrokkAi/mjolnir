@@ -1768,6 +1768,7 @@ fn new_session_profile_step_shows_weekly_and_five_hour_percentages() {
         "claude-1".to_string(),
         ProfileQuota {
             paid_credits: None,
+            monthly_price_usd: None,
             banked_resets: None,
             profile_id: "claude-1".into(),
             harness: HarnessKind::Claude,

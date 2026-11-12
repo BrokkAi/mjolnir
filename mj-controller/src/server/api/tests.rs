@@ -2414,6 +2414,7 @@ fn model_candidate_with_efforts(
             observed_at: 1,
         },
         quota: crate::server::api::CandidateQuota::Subscription {
+            monthly_price_usd: None,
             refreshed_at_epoch_seconds: 0,
             paid_credits: None,
             windows: vec![crate::quota::QuotaWindow {
@@ -2650,9 +2651,9 @@ async fn start_without_a_profile_selects_from_all_configured_profiles_by_quota()
     save_global_default(&preferences, "codex-1", "podman");
     let eligible_candidates = SubagentCandidates {
         offered: vec![
-            model_candidate("codex-1", 5, "luna"),
+            model_candidate("codex-1", 0, "luna"),
             model_candidate_with_efforts("quota-wrong-effort", 99, "luna", &["low"]),
-            model_candidate("quota-winner", 92, "luna"),
+            model_candidate("quota-winner", 0, "luna"),
         ],
         unavailable: Vec::new(),
     };
@@ -2778,7 +2779,7 @@ async fn subagent_model_selection_uses_any_enabled_profile() {
 }
 
 #[tokio::test]
-async fn start_without_a_profile_uses_the_saved_default_to_break_quota_ties() {
+async fn start_without_a_profile_load_balances_with_and_without_explicit_effort() {
     let directory = tempfile::tempdir().unwrap();
     let preferences = directory.path().join("go.json");
     save_global_default(&preferences, "codex-1", "podman");
@@ -2792,27 +2793,54 @@ async fn start_without_a_profile_uses_the_saved_default_to_break_quota_ties() {
         }),
         ..FakeBackend::default()
     });
-    let (app, mut actions, _, _) = api_app_with_preferences(backend, |_| {}, preferences);
-
-    let response = tokio::spawn(app.oneshot(start_request(
-        r#"{"bundle_id":"hel","model":"luna"}"#.into(),
-    )));
-    let request = actions.recv().await.unwrap();
-    let ControllerAction::New { profile_id, .. } = &request.action else {
-        panic!("expected a New action, got {:?}", request.action);
-    };
-    assert_eq!(profile_id, "codex-1");
-    request
-        .reply
-        .send(ActionOutcome::Accepted {
-            session_id: Some("session-2".into()),
-            notice: None,
-        })
-        .unwrap();
-    assert_eq!(
-        response.await.unwrap().unwrap().status(),
-        StatusCode::CREATED
+    let (app, mut actions, _, _) = api_app_with_preferences(
+        backend,
+        |snapshot| {
+            snapshot.profiles.push(crate::server::ViewerProfile {
+                id: "claude4".into(),
+                harness_kind: "codex".into(),
+                capabilities_key: String::new(),
+                quota: None,
+            });
+        },
+        preferences,
     );
+
+    for effort in ["", ",\"effort\":\"high\""] {
+        let mut selected = std::collections::BTreeSet::new();
+        // Exercise both session-selection paths through the public API. With
+        // equal weights, missing either account in 64 draws has probability 2^-63.
+        for _ in 0..64 {
+            let mut response = tokio::spawn(app.clone().oneshot(start_request(format!(
+                "{{\"bundle_id\":\"hel\",\"model\":\"luna\"{effort}}}"
+            ))));
+            let request = tokio::select! {
+                request = actions.recv() => request.unwrap(),
+                early = &mut response => panic!("start returned before its action: {:?}", early.unwrap().unwrap().status()),
+            };
+            let ControllerAction::New { profile_id, .. } = &request.action else {
+                panic!("expected a New action, got {:?}", request.action);
+            };
+            assert!(["codex-1", "claude4"].contains(&profile_id.as_str()));
+            selected.insert(profile_id.clone());
+            request
+                .reply
+                .send(ActionOutcome::Accepted {
+                    session_id: Some("session-2".into()),
+                    notice: None,
+                })
+                .unwrap();
+            assert_eq!(
+                response.await.unwrap().unwrap().status(),
+                StatusCode::CREATED
+            );
+        }
+        assert_eq!(
+            selected.len(),
+            2,
+            "model-first launches must spread across accounts, even with a saved default"
+        );
+    }
 }
 
 #[tokio::test]
@@ -2853,7 +2881,7 @@ async fn start_without_a_saved_default_selects_a_model_with_an_explicit_target()
     else {
         panic!("expected a New action, got {:?}", request.action);
     };
-    assert_eq!(profile_id, "alpha", "ties without an anchor use profile id");
+    assert!(["alpha", "zeta"].contains(&profile_id.as_str()));
     assert_eq!(target_id, "podman");
     request
         .reply

@@ -77,6 +77,7 @@ fn child_progress_uses_the_published_turn_and_report_together() {
 fn quota(profile_id: &str, harness: HarnessKind, remaining: &[u8]) -> ProfileQuota {
     ProfileQuota {
         paid_credits: None,
+        monthly_price_usd: None,
         banked_resets: None,
         profile_id: profile_id.into(),
         harness,
@@ -104,6 +105,7 @@ fn quota(profile_id: &str, harness: HarnessKind, remaining: &[u8]) -> ProfileQuo
 fn usage_priced(profile_id: &str) -> ProfileQuota {
     ProfileQuota {
         paid_credits: None,
+        monthly_price_usd: None,
         banked_resets: None,
         profile_id: profile_id.into(),
         harness: HarnessKind::Codex,
