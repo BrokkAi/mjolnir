@@ -44,91 +44,6 @@ pub enum EntryCollapse {
     },
 }
 
-/// Content-independent inputs to the shared collapse rules. Source handles
-/// retain canonical items, never a second copy of their tool output.
-#[derive(Clone)]
-struct EntryFacts {
-    start_seq: u64,
-    seq: u64,
-    role: ChatRole,
-    revision: u64,
-    tool_status: Option<ToolStatus>,
-    raw_only: bool,
-    ended_after_interrupt: bool,
-    restart: bool,
-    source: TranscriptSource,
-}
-
-impl EntryFacts {
-    fn of(entry: &ChatEntry) -> Self {
-        Self {
-            start_seq: entry.start_seq,
-            seq: entry.seq,
-            role: entry.role,
-            revision: entry.revision,
-            tool_status: entry.tool_status,
-            raw_only: entry.raw_only,
-            ended_after_interrupt: entry.ended_after_interrupt,
-            restart: entry.is_session_restart(),
-            source: entry.source.clone(),
-        }
-    }
-
-    fn from_item(item: &Arc<TranscriptItem>, frontier: u64) -> Self {
-        let role = entry_role(item);
-        let (status, raw_only) = match &item.body {
-            TranscriptBody::Tool { call, .. } => {
-                let outputs = TerminalOutputs::of([item.as_ref()]);
-                (
-                    Some(tool_status(&call.typed_status())),
-                    call.is_fallback() && {
-                        let records = outputs.for_tool(&item.stable_id);
-                        !records.is_empty()
-                            && records.iter().all(TerminalOutputRecord::exited_cleanly)
-                    },
-                )
-            }
-            TranscriptBody::TerminalOutput { record } => (None, record.exited_cleanly()),
-            _ => (None, false),
-        };
-        // Use the entry's existing legacy-text/source predicate too. Only
-        // System-role text can affect it; no tool content is materialized.
-        let mut marker = ChatEntry::plain(
-            item.position,
-            role,
-            match &item.body {
-                TranscriptBody::System { text } => text.clone(),
-                TranscriptBody::User { content } if role == ChatRole::System => {
-                    materialized_content_text(content)
-                }
-                _ => String::new(),
-            },
-        );
-        marker.source = TranscriptSource(Some(item.clone()));
-        let restart = marker.is_session_restart();
-        Self {
-            start_seq: item.position,
-            seq: item_update_ordinal(item, frontier),
-            role,
-            revision: u64::try_from(item.last_changed_at_ms).unwrap_or_default(),
-            tool_status: status,
-            raw_only,
-            ended_after_interrupt: false,
-            restart,
-            source: TranscriptSource(Some(item.clone())),
-        }
-    }
-
-    fn is_session_restart(&self) -> bool {
-        self.restart
-    }
-}
-
-fn entry_facts(entries: &[ChatEntry]) -> Vec<EntryFacts> {
-    entries.iter().map(EntryFacts::of).collect()
-}
-
-pub const BROWSER_TRANSCRIPT_LINES: usize = 1_000;
 pub const BROWSER_LINE_BYTES: usize = 4 * 1024;
 
 /// Interpret the durable mailbox list shared by historical and live clients.
@@ -232,26 +147,7 @@ fn browser_transcript_collapsed(
         .into_iter()
         .map(|entry| browser_entry(&entry))
         .collect::<Vec<_>>();
-    let mut remaining = BROWSER_TRANSCRIPT_LINES;
-    for entry in entries.iter_mut().rev() {
-        if entry.role != "message" && entry.lines.len() > remaining {
-            let omitted = entry
-                .lines
-                .len()
-                .saturating_sub(remaining.saturating_sub(1));
-            if remaining == 0 {
-                entry.lines.clear();
-            } else {
-                entry.lines.drain(..omitted);
-                entry
-                    .lines
-                    .insert(0, format!("[… {omitted} earlier lines omitted …]"));
-                entry.lines.truncate(remaining);
-            }
-        }
-        remaining = remaining.saturating_sub(entry.lines.len());
-        // Derive disclosures after clipping so hidden detail cannot bypass
-        // the browser transcript's line budget.
+    for entry in &mut entries {
         entry.mailbox_events = mailbox_event_lines(
             if entry.role == "system" {
                 ChatRole::System
@@ -262,11 +158,6 @@ fn browser_transcript_collapsed(
         );
     }
     entries.retain(|entry| !entry.lines.is_empty());
-    if remaining == 0 {
-        while entries.first().is_some_and(|entry| entry.lines.is_empty()) {
-            entries.remove(0);
-        }
-    }
     // A collapse can remove an entry a viewer already received even when
     // older, unrelated entries remain in the window. Move the reset
     // boundary to the newest replacement marker so the append-only web
@@ -346,24 +237,12 @@ pub fn materialized_chat_entries_reusing(
     skip: usize,
     previous: Vec<ChatEntry>,
 ) -> Vec<ChatEntry> {
-    materialized_chat_entries_selected(session, skip, false, previous)
-}
-
-fn materialized_chat_entries_selected(
-    session: &MaterializedSession,
-    skip: usize,
-    messages: bool,
-    previous: Vec<ChatEntry>,
-) -> Vec<ChatEntry> {
     let mut previous = previous.into_iter().peekable();
     let mut entries = session
         .transcript
         .iter()
-        .enumerate()
-        .filter(|(index, item)| {
-            *index >= skip || (messages && matches!(item.body, TranscriptBody::Message { .. }))
-        })
-        .map(|(_, item)| {
+        .skip(skip)
+        .map(|item| {
             // A bounded canonical tail slides forward as messages arrive.
             // Align by durable position so appending one message does not
             // reparse every unchanged tool body in the window.
@@ -421,14 +300,6 @@ pub fn apply_entry_list_rules(entries: &mut [ChatEntry]) {
 /// the next prompt ends; it ended after the interruption when its item last
 /// changed after that turn's "Interrupted" marker was recorded.
 pub fn mark_tools_ended_after_interrupt(entries: &mut [ChatEntry]) {
-    let mut facts = entry_facts(entries);
-    mark_tools_ended_after_interrupt_facts(&mut facts);
-    for (entry, fact) in entries.iter_mut().zip(facts) {
-        entry.ended_after_interrupt = fact.ended_after_interrupt;
-    }
-}
-
-fn mark_tools_ended_after_interrupt_facts(entries: &mut [EntryFacts]) {
     let mut interrupted_at = None;
     for entry in entries.iter_mut().rev() {
         let Some(item) = entry.source.0.as_ref() else {
@@ -460,14 +331,6 @@ fn mark_tools_ended_after_interrupt_facts(entries: &mut [EntryFacts]) {
 /// remove this duplicate at the source; this pass keeps transcripts projected
 /// by an older Hel release equally quiet after an upgrade.
 pub fn suppress_duplicate_standalone_terminal_output(entries: &mut [ChatEntry]) {
-    let mut facts = entry_facts(entries);
-    suppress_duplicate_standalone_terminal_output_facts(&mut facts);
-    for (entry, fact) in entries.iter_mut().zip(facts) {
-        entry.raw_only = fact.raw_only;
-    }
-}
-
-fn suppress_duplicate_standalone_terminal_output_facts(entries: &mut [EntryFacts]) {
     if !entries.iter().any(|entry| {
         entry
             .source
@@ -908,14 +771,6 @@ pub fn rich_presentation_key(
     collapse: &[EntryCollapse],
     last_compaction_seq: u64,
 ) -> String {
-    rich_presentation_key_facts(&entry_facts(entries), collapse, last_compaction_seq)
-}
-
-fn rich_presentation_key_facts(
-    entries: &[EntryFacts],
-    collapse: &[EntryCollapse],
-    last_compaction_seq: u64,
-) -> String {
     let mut digest = Sha256::new();
     digest.update(b"rich-presentation-v2");
     let mut index = 0;
@@ -1060,23 +915,11 @@ pub fn tool_state_name(entry: &ChatEntry) -> &'static str {
     }
 }
 
-fn completed_tool(role: ChatRole, status: Option<ToolStatus>) -> bool {
-    role == ChatRole::Tool && status == Some(ToolStatus::Completed)
-}
-
-fn is_completed_tool_facts(entry: &EntryFacts) -> bool {
-    completed_tool(entry.role, entry.tool_status)
-}
-
 pub fn is_completed_tool(entry: &ChatEntry) -> bool {
-    completed_tool(entry.role, entry.tool_status)
+    entry.role == ChatRole::Tool && entry.tool_status == Some(ToolStatus::Completed)
 }
 
 pub fn collapse_revision_fingerprint(entries: &[ChatEntry]) -> u64 {
-    collapse_revision_fingerprint_facts(&entry_facts(entries))
-}
-
-fn collapse_revision_fingerprint_facts(entries: &[EntryFacts]) -> u64 {
     entries.iter().fold(0u64, |accumulated, entry| {
         accumulated.wrapping_mul(31).wrapping_add(entry.revision)
     })
@@ -1090,13 +933,6 @@ fn collapse_revision_fingerprint_facts(entries: &[EntryFacts]) -> u64 {
 /// transcript or its cursors.
 pub fn collapsed_session_restart_states(
     entries: &[ChatEntry],
-    mode: TranscriptRenderMode,
-) -> Vec<bool> {
-    collapsed_session_restart_states_facts(&entry_facts(entries), mode)
-}
-
-fn collapsed_session_restart_states_facts(
-    entries: &[EntryFacts],
     mode: TranscriptRenderMode,
 ) -> Vec<bool> {
     let mut hidden = vec![false; entries.len()];
@@ -1124,14 +960,6 @@ fn collapsed_session_restart_states_facts(
 /// client never retains a hidden entry in its append-only DOM.
 pub fn restart_collapse_window_start_seq(
     entries: &[ChatEntry],
-    collapsed_restarts: &[bool],
-    mode: TranscriptRenderMode,
-) -> Option<u64> {
-    restart_collapse_window_start_seq_facts(&entry_facts(entries), collapsed_restarts, mode)
-}
-
-fn restart_collapse_window_start_seq_facts(
-    entries: &[EntryFacts],
     collapsed_restarts: &[bool],
     mode: TranscriptRenderMode,
 ) -> Option<u64> {
@@ -1174,15 +1002,6 @@ pub fn entry_collapse_states(
     tools: ToolOutput,
     expanded_tool_calls: &BTreeSet<u64>,
 ) -> Vec<EntryCollapse> {
-    entry_collapse_states_facts(&entry_facts(entries), mode, tools, expanded_tool_calls)
-}
-
-fn entry_collapse_states_facts(
-    entries: &[EntryFacts],
-    mode: TranscriptRenderMode,
-    tools: ToolOutput,
-    expanded_tool_calls: &BTreeSet<u64>,
-) -> Vec<EntryCollapse> {
     let mut states = vec![EntryCollapse::None; entries.len()];
     if mode == TranscriptRenderMode::Rich {
         for (index, entry) in entries.iter().enumerate() {
@@ -1195,7 +1014,7 @@ fn entry_collapse_states_facts(
         }
     }
     if mode != TranscriptRenderMode::Rich {
-        for (index, hidden) in collapsed_session_restart_states_facts(entries, mode)
+        for (index, hidden) in collapsed_session_restart_states(entries, mode)
             .into_iter()
             .enumerate()
         {
@@ -1210,7 +1029,7 @@ fn entry_collapse_states_facts(
     let streak_member = |index: usize| {
         tools == ToolOutput::Grouped
             && (entries[index].role == ChatRole::Thought
-                || (is_completed_tool_facts(&entries[index])
+                || (is_completed_tool(&entries[index])
                     && !entries[index].ended_after_interrupt
                     && !expanded_tool_calls.contains(&entries[index].start_seq)))
     };
@@ -1241,7 +1060,7 @@ fn entry_collapse_states_facts(
             .count();
         let tools = members
             .iter()
-            .filter(|entry| is_completed_tool_facts(entry))
+            .filter(|entry| is_completed_tool(entry))
             .count();
         let tool_precedes_thought = members
             .iter()
@@ -1252,7 +1071,7 @@ fn entry_collapse_states_facts(
             // A member's update does not bump the head's revision, so fold the
             // streak's revisions into the head's state: its cached rows then
             // drop whenever any member changes.
-            let fingerprint = collapse_revision_fingerprint_facts(members);
+            let fingerprint = collapse_revision_fingerprint(members);
             states[start] = EntryCollapse::Summary { end, fingerprint };
             // Omitted members render nothing either way, so one state covers
             // everything the head speaks for.
@@ -1263,7 +1082,7 @@ fn entry_collapse_states_facts(
     // Apply restart coalescing last: unlike tool streaks, restart markers are
     // never streak members, but keeping this pass last makes that invariant
     // explicit if more Rich collapse rules are added later.
-    for (index, hidden) in collapsed_session_restart_states_facts(entries, mode)
+    for (index, hidden) in collapsed_session_restart_states(entries, mode)
         .into_iter()
         .enumerate()
     {
@@ -1377,10 +1196,7 @@ pub fn materialized_browser_transcript(session: &MaterializedSession) -> Browser
 /// Owned by one session's supervised background projection task.
 #[derive(Default)]
 pub struct BrowserTranscriptProjector {
-    facts: Vec<EntryFacts>,
     entries: Vec<ChatEntry>,
-    // Sparse Message entries precede this independently retained suffix.
-    suffix_start: Option<u64>,
     /// The entries this projector last published, by id.
     published: BTreeMap<String, Arc<BrowserTranscriptEntry>>,
 }
@@ -1408,172 +1224,14 @@ impl BrowserTranscriptProjector {
     /// the cursor it was published with, so a browser polling with `after_seq`
     /// is not sent it again. A changed entry gets the new frontier. This holds
     /// for every item kind and for changes the item itself does not record:
-    /// a tool call marked ended by a later interrupt, or lines trimmed from
-    /// the oldest entry as the window slides.
+    /// a tool call marked ended by a later interrupt, or changes to collapse
+    /// groups as the window slides.
     pub fn project(&mut self, session: &MaterializedSession) -> BrowserTranscript {
-        let count = session.transcript.len();
-        let mut start = self
-            .suffix_start
-            .and_then(|position| {
-                session
-                    .transcript
-                    .iter()
-                    .position(|item| item.position >= position)
-            })
-            .unwrap_or(count.saturating_sub(1));
-        self.entries = materialized_chat_entries_selected(
-            session,
-            start,
-            true,
-            std::mem::take(&mut self.entries),
-        );
+        self.entries =
+            materialized_chat_entries_reusing(session, 0, std::mem::take(&mut self.entries));
         release_raw_view_detail(&mut self.entries);
-        let mut converted = self.entries.iter().peekable();
-        let mut previous = std::mem::take(&mut self.facts).into_iter().peekable();
-        self.facts = session
-            .transcript
-            .iter()
-            .map(|item| {
-                if converted
-                    .peek()
-                    .is_some_and(|entry| entry.start_seq == item.position)
-                {
-                    return EntryFacts::of(converted.next().expect("matched entry"));
-                }
-                while previous
-                    .peek()
-                    .is_some_and(|fact| fact.start_seq < item.position)
-                {
-                    previous.next();
-                }
-                if previous
-                    .peek()
-                    .is_some_and(|fact| fact.start_seq == item.position)
-                {
-                    let mut fact = previous.next().expect("matched fact");
-                    if fact.source.is(item) || fact.source.0.as_deref() == Some(item.as_ref()) {
-                        fact.source = TranscriptSource(Some(item.clone()));
-                        fact.seq = item_update_ordinal(item, session.applied_event_ordinal);
-                        return fact;
-                    }
-                }
-                EntryFacts::from_item(item, session.applied_event_ordinal)
-            })
-            .collect();
-        suppress_duplicate_standalone_terminal_output_facts(&mut self.facts);
-        mark_tools_ended_after_interrupt_facts(&mut self.facts);
-        let collapse = entry_collapse_states_facts(
-            &self.facts,
-            TranscriptRenderMode::Rich,
-            ToolOutput::Grouped,
-            &BTreeSet::new(),
-        );
-        let restarts =
-            collapsed_session_restart_states_facts(&self.facts, TranscriptRenderMode::Rich);
-        let boundary = restart_collapse_window_start_seq_facts(
-            &self.facts,
-            &restarts,
-            TranscriptRenderMode::Rich,
-        );
-        let mut transcript = loop {
-            // A synthetic row needs every member, including members preceding
-            // the candidate suffix. Never cut through a collapsed group.
-            for (index, state) in collapse.iter().enumerate().take(start) {
-                if matches!(state, EntryCollapse::Summary { end, .. } if *end > start) {
-                    start = index;
-                    break;
-                }
-            }
-            self.entries = materialized_chat_entries_selected(
-                session,
-                start,
-                true,
-                std::mem::take(&mut self.entries),
-            );
-            release_raw_view_detail(&mut self.entries);
-            let indices = self
-                .facts
-                .iter()
-                .enumerate()
-                .filter(|(index, fact)| *index >= start || fact.role == ChatRole::Message)
-                .map(|(index, _)| index)
-                .collect::<Vec<_>>();
-            let sparse_collapse = indices
-                .iter()
-                .map(|&index| match collapse[index] {
-                    EntryCollapse::Summary { end, fingerprint } => EntryCollapse::Summary {
-                        end: indices.partition_point(|&member| member < end),
-                        fingerprint,
-                    },
-                    state => state,
-                })
-                .collect::<Vec<_>>();
-            for (entry, &index) in self.entries.iter_mut().zip(&indices) {
-                entry.raw_only = self.facts[index].raw_only;
-                entry.ended_after_interrupt = self.facts[index].ended_after_interrupt;
-            }
-            // Use the full-window decisions: sparse gaps must never join groups.
-            let rendered = browser_transcript_collapsed(
-                &self.entries,
-                &sparse_collapse,
-                session.applied_event_ordinal,
-                0,
-                None,
-                boundary,
-            );
-            if start == 0
-                || rendered
-                    .entries
-                    .iter()
-                    .filter(|entry| entry.id >= self.facts[start].start_seq)
-                    .map(|entry| entry.lines.len())
-                    .sum::<usize>()
-                    >= BROWSER_TRANSCRIPT_LINES
-            {
-                break rendered;
-            }
-            start = count.saturating_sub((count - start).max(1).saturating_mul(2));
-        };
-        transcript.presentation_key = rich_presentation_key_facts(&self.facts, &collapse, 0);
-        transcript.window_start_seq = transcript
-            .window_start_seq
-            .max(boundary.unwrap_or_default());
-        // Discard converted content preceding the oldest surviving row, but
-        // retain the complete group that owns a surviving synthetic row.
-        if let Some(first_id) = transcript
-            .entries
-            .iter()
-            .filter(|entry| {
-                entry.id
-                    >= self
-                        .facts
-                        .get(start)
-                        .map_or(u64::MAX, |fact| fact.start_seq)
-            })
-            .map(|entry| entry.id)
-            .min()
-        {
-            let mut keep = self
-                .facts
-                .iter()
-                .position(|fact| fact.start_seq == first_id)
-                .unwrap_or(start);
-            for (index, state) in collapse.iter().enumerate().take(keep) {
-                if matches!(state, EntryCollapse::Summary { end, .. } if *end > keep) {
-                    keep = index;
-                    break;
-                }
-            }
-            self.suffix_start = self.facts.get(keep).map(|fact| fact.start_seq);
-            self.entries.retain(|entry| {
-                entry.role == ChatRole::Message || entry.start_seq >= self.facts[keep].start_seq
-            });
-        } else {
-            // No row survives in Rich mode (for example only successful
-            // standalone terminal output): retain no converted content.
-            self.entries.retain(|entry| entry.role == ChatRole::Message);
-            self.suffix_start = None;
-        }
+        let mut transcript =
+            browser_transcript(&self.entries, session.applied_event_ordinal, 0, None);
         let first = self.published.is_empty();
         for entry in &mut transcript.entries {
             // Freshly rendered rows have one owner until publication below.
@@ -1636,234 +1294,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // Reference: full-window conversion and publication before suffix caching.
-    #[derive(Default)]
-    struct FullWindowProjector {
-        entries: Vec<ChatEntry>,
-        published: BTreeMap<String, Arc<BrowserTranscriptEntry>>,
-    }
-    impl FullWindowProjector {
-        /// Projects `session` for the browser, with an exact update cursor on
-        /// every entry.
-        ///
-        /// An entry that looks exactly as it did in the previous projection keeps
-        /// the cursor it was published with, so a browser polling with `after_seq`
-        /// is not sent it again. A changed entry gets the new frontier. This holds
-        /// for every item kind and for changes the item itself does not record:
-        /// a tool call marked ended by a later interrupt, or lines trimmed from
-        /// the oldest entry as the window slides.
-        pub fn project(&mut self, session: &MaterializedSession) -> BrowserTranscript {
-            self.entries =
-                materialized_chat_entries_reusing(session, 0, std::mem::take(&mut self.entries));
-            let mut transcript =
-                browser_transcript(&self.entries, session.applied_event_ordinal, 0, None);
-            let first = self.published.is_empty();
-            for entry in &mut transcript.entries {
-                // Freshly rendered rows have one owner until publication below.
-                let entry = Arc::get_mut(entry).expect("unpublished browser row");
-                match self.published.get(&entry.identity()) {
-                    Some(previous) if same_rendering(previous, entry) => {
-                        entry.updated_seq = previous.updated_seq;
-                    }
-                    Some(_) => entry.updated_seq = transcript.latest_seq,
-                    None if !first => {
-                        entry.updated_seq = entry.updated_seq.max(transcript.latest_seq)
-                    }
-                    None => {}
-                }
-            }
-            self.published = transcript
-                .entries
-                .iter()
-                .map(|entry| (entry.identity(), entry.clone()))
-                .collect();
-            transcript
-        }
-    }
-
-    // Hard-won: 27bd415fa: a window whose rows are all hidden kept every converted entry.
-    #[test]
-    fn browser_projector_retains_nothing_when_no_row_survives() {
-        let mut session = MaterializedSession::empty("all-hidden");
-        for position in 1..=2_000 {
-            session.transcript.push(item(
-                position,
-                TranscriptBody::TerminalOutput {
-                    record: TerminalOutputRecord {
-                        terminal_id: format!("clean-{position}"),
-                        output: "raw only\n".repeat(20),
-                        truncated: false,
-                        exit_code: Some(0),
-                        signal: None,
-                    },
-                },
-            ));
-        }
-        session.applied_event_ordinal = 2_001;
-        let mut reference = FullWindowProjector::default();
-        let mut projector = BrowserTranscriptProjector::default();
-        for _ in 0..2 {
-            assert_eq!(
-                serde_json::to_value(projector.project(&session)).unwrap(),
-                serde_json::to_value(reference.project(&session)).unwrap()
-            );
-            assert!(projector.entries.is_empty());
-        }
-    }
-
-    // Hard-won: 27bd415fa: old Messages retained the intervening window.
-    #[test]
-    fn browser_suffix_matches_full_window_across_topology_and_content_changes() {
-        let mut session = MaterializedSession::empty("suffix-topology");
-        let tool = |position, content| {
-            item(
-                position,
-                TranscriptBody::Tool {
-                    call: json!({"toolCallId":format!("tool-{position}"), "title":"command", "status":"completed", "content":content,
-                "rawOutput":{"exit_code":3,"output":"legacy duplicate"}}).into(),
-                    terminal_outputs: Vec::new(),
-                    terminal_refs: Vec::new(),
-                    presentation: None,
-                },
-            )
-        };
-        session.transcript.push(tool(1, json!([])));
-        session.transcript.push(tool(2, json!([])));
-        for position in [3, 5] {
-            session.transcript.push(item(
-                position,
-                TranscriptBody::System {
-                    text: SESSION_RESTART_TEXT.into(),
-                },
-            ));
-            session.transcript.push(item(
-                position + 1,
-                TranscriptBody::TerminalOutput {
-                    record: TerminalOutputRecord {
-                        terminal_id: format!("clean-{position}"),
-                        output: "raw only".into(),
-                        truncated: false,
-                        exit_code: Some(0),
-                        signal: None,
-                    },
-                },
-            ));
-        }
-        for position in 7..=3_000 {
-            session.transcript.push(item(position, TranscriptBody::User {
-                content: vec![json!({"type":"text","text":format!("prompt {position}\n{}", "支持 line\n".repeat(8))})],
-            }));
-        }
-        session.transcript.push(tool(3_001, json!([])));
-        let mut interrupt = item(
-            3_002,
-            TranscriptBody::System {
-                text: "Interrupted".into(),
-            },
-        );
-        Arc::make_mut(&mut interrupt).stable_id = format!("{TURN_INTERRUPTED_ITEM_PREFIX}test");
-        Arc::make_mut(&mut interrupt).created_at_ms = 10;
-        Arc::make_mut(&mut session.transcript[3_000]).last_changed_at_ms = 20;
-        session.transcript.push(interrupt);
-        session.transcript.push(item(
-            3_003,
-            TranscriptBody::TerminalOutput {
-                record: TerminalOutputRecord {
-                    terminal_id: "legacy".into(),
-                    output: "legacy duplicate".into(),
-                    truncated: false,
-                    exit_code: Some(3),
-                    signal: None,
-                },
-            },
-        ));
-        // The malformed completed tool must break a streak, just as the typed
-        // full converter does; the raw status alone cannot establish this.
-        session.transcript.push(tool(3_004, json!([null])));
-        session.applied_event_ordinal = 4_000;
-        let mut reference = FullWindowProjector::default();
-        let mut projector = BrowserTranscriptProjector::default();
-        for round in 0..3 {
-            assert_eq!(
-                serde_json::to_vec(&projector.project(&session)).unwrap(),
-                serde_json::to_vec(&reference.project(&session)).unwrap()
-            );
-            assert!(projector.entries.len() < 200);
-            assert!(
-                projector
-                    .entries
-                    .iter()
-                    .all(|entry| entry.tool_content.is_empty() && entry.tool_input.is_none())
-            );
-            // Equal content with a new Arc exercises field-equality reuse.
-            session.transcript[0] = Arc::new((*session.transcript[0]).clone());
-            session.applied_event_ordinal += 1;
-            if round == 1
-                && let TranscriptBody::Tool { call, .. } =
-                    &mut Arc::make_mut(&mut session.transcript[0]).body
-            {
-                call.edit(|value| value["content"] = json!([null]));
-            }
-            if round == 0 {
-                let changed = Arc::make_mut(session.transcript.last_mut().unwrap());
-                if let TranscriptBody::Tool { call, .. } = &mut changed.body {
-                    call.edit(|value| value["content"] = json!([]));
-                }
-                changed.last_changed_at_ms += 1;
-            }
-        }
-        // Messages split tool groups and restart runs; change their placement
-        // and content over successive projections, including rebuilt Arcs.
-        for position in [399, 400, 402, 403, 1_499, 1_500, 1_502, 1_503] {
-            session.transcript[position - 1] = tool(position as u64, json!([]));
-        }
-        for position in [100, 101, 103, 104] {
-            session.transcript[position - 1] = item(
-                position as u64,
-                TranscriptBody::System {
-                    text: SESSION_RESTART_TEXT.into(),
-                },
-            );
-        }
-        for round in 0..4 {
-            for index in [0, 2, 4, 12, 101, 400, 1_500, 2_800] {
-                session.transcript[index] = item(
-                    index as u64 + 1,
-                    TranscriptBody::Message {
-                        event: Box::new(mj_core::mailbox::MailboxEvent {
-                            key: format!("message-{index}-{round}"),
-                            source: "session_message".into(),
-                            wake: false,
-                            created_at_ms: 1,
-                            body: mj_core::mailbox::MailboxEventBody::ParentMessage {
-                                text: format!(
-                                    "message {index} round {round}\nMailbox events:\n  - payload"
-                                ),
-                            },
-                        }),
-                    },
-                );
-            }
-            session.applied_event_ordinal += 1;
-            assert_eq!(
-                serde_json::to_vec(&projector.project(&session)).unwrap(),
-                serde_json::to_vec(&reference.project(&session)).unwrap()
-            );
-            assert!(projector.entries.len() < 200);
-            assert!(
-                projector
-                    .entries
-                    .iter()
-                    .all(|entry| entry.tool_content.is_empty() && entry.tool_input.is_none())
-            );
-            session.transcript = session
-                .transcript
-                .iter()
-                .map(|item| Arc::new((**item).clone()))
-                .collect();
-        }
-    }
-
     #[test]
     fn golden_mailbox_browser_transcript() {
         // Use the actual delivery projection's golden text as browser input.
@@ -1888,24 +1318,6 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "mailbox-browser-transcript",
             &serde_json::to_string_pretty(&browser).unwrap(),
-        );
-    }
-
-    #[test]
-    fn mailbox_disclosures_respect_the_browser_line_budget() {
-        let entry = ChatEntry::plain(
-            2,
-            ChatRole::System,
-            format!(
-                "Mailbox events:\n  - Child report\n{}",
-                "    large report line\n".repeat(BROWSER_TRANSCRIPT_LINES + 1),
-            ),
-        );
-        let browser = browser_transcript(&[entry], 2, 0, None);
-        assert_eq!(browser.entries[0].lines.len(), BROWSER_TRANSCRIPT_LINES);
-        assert!(
-            browser.entries[0].mailbox_events.is_empty(),
-            "clipped events must not retain hidden report text"
         );
     }
 

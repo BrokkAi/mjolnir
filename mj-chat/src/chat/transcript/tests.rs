@@ -1737,7 +1737,7 @@ fn transcript_snapshot_tail_counts_only_nonempty_rows() {
 }
 
 #[test]
-fn browser_transcript_is_bounded_utf8_safe_and_supports_deltas() {
+fn browser_transcript_preserves_rows_is_utf8_safe_and_supports_deltas() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.entries.push(ChatEntry::plain(
         1,
@@ -1760,15 +1760,10 @@ fn browser_transcript_is_bounded_utf8_safe_and_supports_deltas() {
             .iter()
             .map(|entry| entry.lines.len())
             .sum::<usize>(),
-        BROWSER_TRANSCRIPT_LINES
+        1_006
     );
     assert_eq!(full.entries.last().unwrap().role, "thought");
-    assert!(
-        full.entries[0]
-            .lines
-            .first()
-            .is_some_and(|line| line.contains("earlier lines omitted"))
-    );
+    assert_eq!(full.entries[0].lines[0], "line 0");
     let truncated = &full.entries.last().unwrap().lines[0];
     assert!(truncated.ends_with("… [truncated]"));
     assert!(truncated.len() <= BROWSER_LINE_BYTES);
