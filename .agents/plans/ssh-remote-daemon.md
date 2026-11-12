@@ -26,7 +26,7 @@ This is private-network operation with working SSH authentication and host trust
 - [ ] Implement and validate milestone 4: dashboard setup, probes, settings and cache work (deferred to follow-up under the parent-approved milestone-3 budget fallback).
 - [ ] Implement and validate milestone 5: explicit remote paths, attachment uploads, client-side import upload and daemon-side voice transcription.
 - [ ] Remove the native desktop shell (`mj-desktop`, `mj app`, `mj-cli/src/desktop.rs`, release packaging); independent of the other milestones.
-- [ ] Implement and validate milestone 6: matching-build PowerShell go script.
+- [ ] (2026-11-12, docs worker) Milestone 6 implemented: paired clean locked worktrees, shared Windows replacement/PATH functions, SHA fetch fallback and same_source gate. Native Windows parser and twice-run acceptance remain outstanding (pwsh unavailable here).
 - [ ] Implement milestone 7: user documentation, final validation, platform dispatch and real Windows acceptance.
 
 ## Surprises & Discoveries
@@ -265,3 +265,5 @@ Dispatch acceptance (2026-11-12): real localhost sshd passes forwarded daemon st
 Review fixes (2026-11-12): explicitly unaccepted requests refresh with Start discovery so remote connect_or_start waits through handoff; observation remains Existing. Each DaemonClient retains an Arc to its SSH lease, and serialized refresh replaces only the connector's reference, preserving other clients' in-flight delivery. OpenSSH 10.2p1's exact "debug1: Local forwarding listening on 127.0.0.1 port <port>." line gates credentials; verbose debug lines are excluded from tunnel-exit errors. Wildcard HTTP advertisements receive the actionable unreachable-viewer error. The HTTP fixture now uses a specific host interface address and corresponding TLS certificate.
 
 Validation: client and CLI crate suites, workspace clippy with warnings denied, rustfmt check, daemon_endpoint.py, and all three real-sshd scenarios pass. Control runs the ignored real SSH integration regression, proving the old tunnel still accepts connections after refresh until its clients release their references, and that a competing listener receives no connection. HTTP strace proves use of the advertised non-loopback address; wildcard HTTP refusal preserves control-token access. This verifies lease lifetime rather than a barrier-controlled in-flight daemon response.
+
+Milestone 6 discovery (2026-11-12): root install.ps1 now exposes -FunctionsOnly for shared destination, staged replacement and PATH functions while retaining standalone download installation. The development command uses -SshHost because PowerShell reserves $Host. flock and an exclusive Windows file handle serialize reused build worktrees; normal Cargo storage is preserved. No PowerShell parser is installed on this Linux host.
