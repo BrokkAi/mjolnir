@@ -370,6 +370,22 @@ test('phone task details open full width and scroll within forty percent of the 
 });
 
 
+// A phone keyboard cannot type Shift+Enter, so its Enter key must start a new
+// line and only the Send button sends.
+test('phone composer Enter key starts a new line and Send sends', async ({ page }) => {
+  const state = await mount(page);
+  const composer = page.locator('#prompt-text');
+  await expect(composer).toHaveAttribute('enterkeyhint', 'enter');
+  await composer.click();
+  await page.keyboard.type('first line');
+  await page.keyboard.press('Enter');
+  await page.keyboard.type('second line');
+  expect(state.actions.filter(action => action.action === 'prompt')).toEqual([]);
+  await page.locator('#send-button').click();
+  await expect.poll(() => state.actions.filter(action => action.action === 'prompt').map(action => action.text))
+    .toEqual(['first line\nsecond line']);
+});
+
 test('delivered messages in one batch keep separate prose rows after reload', async ({ page }) => {
   const state = await mount(page);
   const messages = [
