@@ -978,7 +978,14 @@ pub(crate) async fn run_server(
                     let config = controller.config.clone();
                     let project_validation = project_directory.is_some();
                     let task_termination = termination.clone();
-                    let Ok(upgrade_task) = crate::upgrade::activity("project preflight") else { continue };
+                    // Disposable reads are cancelled with the server during
+                    // handoff. Only confirmed Git repairs mutate machine state.
+                    let upgrade_task = if remote_repairs.is_empty() {
+                        None
+                    } else {
+                        let Ok(work) = crate::upgrade::activity("new-session preflight remote repairs") else { continue };
+                        Some(work)
+                    };
                     preflight_jobs.spawn(async move {
                         let _upgrade_task = upgrade_task;
                         let cancelled = Arc::new(AtomicBool::new(false));

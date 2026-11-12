@@ -9,6 +9,22 @@ pub(super) async fn execute(
     let config = state.with_config(Clone::clone);
     tokio::task::spawn_blocking(move || {
         let executor = CancellableProcessExecutor::new(cancelled);
+        // Preserve the dashboard's existing command deadlines, including the
+        // bound on preflight when it applies confirmed Git repairs.
+        let executor = match &action {
+            DaemonAction::CompletePath { .. } => executor.with_deadline(Duration::from_secs(5)),
+            DaemonAction::DiscoverProjects { .. } => {
+                executor.with_deadline(Duration::from_secs(15))
+            }
+            DaemonAction::ResolveContainerPath { .. }
+            | DaemonAction::ResolveSetupPath { .. }
+            | DaemonAction::ValidateMountSource { .. }
+            | DaemonAction::ValidateProjectDirectory { .. }
+            | DaemonAction::PreflightNewSession { .. } => {
+                executor.with_deadline(Duration::from_secs(30))
+            }
+            _ => executor,
+        };
         let controller = crate::controller::config_only_controller(config);
         match action {
             DaemonAction::PreflightNewSession { request } => {

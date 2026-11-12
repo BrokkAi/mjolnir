@@ -36,6 +36,8 @@ The suggested disposable sshd exists as `LocalSshd` in `mj-core/src/targets/ssh.
 
 No existing checked-in control-daemon exchange golden was located by searching daemon modules and golden filenames. Existing HTTP goldens include `mj-controller/tests/golden/phone-new-session-preflight.txt` and `viewer-settings-exchange.txt`. Milestone 3 establishes one real control exchange golden and extends it in later milestones, while extending those existing HTTP cases for shared behavior. Do not invent a nonexistent baseline test.
 
+The shared HTTP preflight previously held admission even for disposable reads. The milestone-3 follow-up restricts its admission to confirmed Git repairs and preserves each moved action's existing dashboard subprocess deadline, so an admitted repair preflight remains bounded.
+
 Control requests previously correlated replies but had no generic cancellation mechanism: `serve_client` awaited each action without observing disconnect. Milestone 3 now owns disposable work on a dedicated connection, reuses `ProcessCancellationGuard`, and awaits executor teardown after EOF or handoff. A real OpenSSH proxy fixture emits 128 KiB of stderr before its readiness barrier; the superseded-completion test verifies connection closure terminates its process.
 
 ## Decision Log
