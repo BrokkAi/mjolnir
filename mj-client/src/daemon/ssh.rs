@@ -73,6 +73,117 @@ pub async fn discover(
     Ok(endpoint)
 }
 
+/// Process-private transport ownership. Dropping the lease stops and reaps SSH;
+/// it never stops the remote daemon.
+pub struct SshLease {
+    pub local_addr: std::net::SocketAddr,
+    pub endpoint: DaemonEndpoint,
+    child: mj_core::subprocess::SupervisedChild,
+}
+
+impl SshLease {
+    /// Credentials for the forwarded connection, never persisted to disk.
+    /// PID zero deliberately carries no local process authority.
+    pub fn metadata(&self) -> super::DaemonMetadata {
+        super::DaemonMetadata {
+            protocol_version: self.endpoint.protocol_version,
+            pid: 0,
+            address: self.local_addr,
+            token: self.endpoint.token.clone(),
+            started_at: String::new(),
+            build_version: self.endpoint.build_version.clone(),
+            instance_id: self.endpoint.instance_id.clone(),
+            placement: super::DaemonPlacement::Host,
+        }
+    }
+
+    pub async fn terminate(&mut self) -> Result<()> {
+        self.child.terminate().await?;
+        Ok(())
+    }
+}
+
+/// Discover and authenticate a supervised tunnel. Cancellation (including
+/// dropping this future) releases the process group without remote teardown.
+pub async fn open(
+    placement: &DaemonConfig,
+    remote_instance: &str,
+    intent: DiscoveryIntent,
+    cancel: impl std::future::Future<Output = ()>,
+) -> Result<SshLease> {
+    tokio::pin!(cancel);
+    tokio::select! {
+        result = open_with_port(placement, remote_instance, intent, select_port) => result,
+        () = &mut cancel => bail!("SSH daemon connection cancelled"),
+    }
+}
+
+fn select_port() -> Result<u16> {
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+    Ok(listener.local_addr()?.port())
+}
+
+async fn open_with_port(
+    placement: &DaemonConfig,
+    remote_instance: &str,
+    intent: DiscoveryIntent,
+    mut port: impl FnMut() -> Result<u16>,
+) -> Result<SshLease> {
+    let endpoint = discover(placement, remote_instance, intent).await?;
+    loop {
+        let local_addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port()?));
+        let mut command = tokio::process::Command::new("ssh");
+        command
+            .args([
+                "-N",
+                "-o",
+                "ExitOnForwardFailure=yes",
+                "-o",
+                "BatchMode=yes",
+            ])
+            .args(&placement.ssh_args)
+            .arg("-L")
+            .arg(format!(
+                "127.0.0.1:{}:127.0.0.1:{}",
+                local_addr.port(),
+                endpoint.control_address.port()
+            ))
+            .arg(placement.host.as_deref().context("missing SSH host")?);
+        let child = mj_core::subprocess::SupervisedChild::spawn(&mut command)?;
+        let mut lease = SshLease {
+            local_addr,
+            endpoint: endpoint.clone(),
+            child,
+        };
+        let metadata = lease.metadata();
+        let ready = async {
+            loop {
+                if let Ok(mut client) = super::DaemonClient::connect(metadata.clone()).await
+                    && matches!(
+                        client.request_once(super::DaemonAction::Ping).await,
+                        Ok(super::DaemonReply::Pong)
+                    )
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        };
+        tokio::select! {
+            () = ready => return Ok(lease),
+            status = lease.child.wait() => {
+                let status = status?;
+                let stderr = String::from_utf8_lossy(&lease.child.stderr()).into_owned();
+                let collision = stderr.lines().any(|line|
+                    (line.contains("bind") && line.contains("Address already in use"))
+                    || line.contains("cannot listen to port"));
+                if collision { continue; }
+                bail!("SSH daemon tunnel exited ({status}): {}", stderr.trim());
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// Run against a disposable sshd with a real, matching mj, never a live
@@ -100,6 +211,38 @@ mod tests {
         .unwrap();
         assert_eq!(existing.token, endpoint.token);
         assert_eq!(existing.instance_id, endpoint.instance_id);
+        let mut lease = super::open(
+            &placement,
+            "ssh-discovery-e2e",
+            super::DiscoveryIntent::Existing,
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(lease.endpoint.instance_id, endpoint.instance_id);
+        lease.terminate().await.unwrap();
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let occupied_port = occupied.local_addr().unwrap().port();
+        let mut first = true;
+        let mut second = super::open_with_port(
+            &placement,
+            "ssh-discovery-e2e",
+            super::DiscoveryIntent::Existing,
+            || {
+                if first {
+                    first = false;
+                    Ok(occupied_port)
+                } else {
+                    super::select_port()
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!first);
+        assert_ne!(second.local_addr.port(), occupied_port);
+        assert_eq!(second.endpoint.instance_id, endpoint.instance_id);
+        second.terminate().await.unwrap();
         let mut missing = placement.clone();
         missing.remote_command = Some("/missing/mj-discovery-test".into());
         let error = super::discover(
