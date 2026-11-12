@@ -18,8 +18,7 @@ static GLOBAL_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemall
 // contend. `_RJEM_MALLOC_CONF` still overrides this per process.
 #[cfg(target_os = "linux")]
 #[unsafe(export_name = "_rjem_malloc_conf")]
-static JEMALLOC_CONF: Option<&'static std::ffi::c_char> =
-    Some(unsafe { &*c"narenas:8".as_ptr() });
+static JEMALLOC_CONF: Option<&'static std::ffi::c_char> = Some(unsafe { &*c"narenas:8".as_ptr() });
 
 mod acp;
 #[cfg(unix)]
