@@ -45,6 +45,8 @@ Profile discovery cannot simply return a `Config`: `Environment` serializes sour
 
 The existing `with_environment_sources_only` helper already supports reading daemon discovery projections without resolving client references. Discovery and availability wire payloads now use it; the real control exchange uses a separate client configuration/resolver and proves daemon-only secret readiness without transmitting resolved values. Availability still uses its existing configuration-file owner to reconcile newly discovered entries.
 
+Review caught that availability staleness compared resolved `Environment` maps against source-only replies. It now compares the serialized configuration sources, retaining daemon readiness until a source edit changes the profile. A wire-roundtrip dashboard-transition regression covers both unchanged sources and later edits.
+
 ## Decision Log
 
 

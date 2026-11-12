@@ -173,7 +173,13 @@ impl DashboardState {
     pub(crate) fn profile_missing(&self, id: &str) -> Option<&str> {
         let current = self.config.profiles.get(id)?;
         let (checked, missing) = self.availability.profiles.get(id)?;
-        (checked == current).then_some(missing.as_deref()).flatten()
+        // Readiness came from the daemon. Its projection retains sources only,
+        // while the installed profile may also hold locally resolved values.
+        let checked_sources = serde_json::to_value(checked).expect("profile serializes");
+        let current_sources = serde_json::to_value(current).expect("profile serializes");
+        (checked_sources == current_sources)
+            .then_some(missing.as_deref())
+            .flatten()
     }
 
     /// The index in `config.targets` of `wanted` when it is offered, or of
@@ -515,4 +521,46 @@ fn sentence(text: &str, then: &str) -> String {
         }
     }
     sentence
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{answer_availability, availability_answer};
+
+    // Hard-won: 471c11891: source-only daemon replies lost readiness when installed environments held resolved values.
+    #[test]
+    fn source_only_profile_readiness_survives_wire_transport_until_sources_change() {
+        let mut config = crate::test_support::config();
+        let id = config.profiles.keys().next().unwrap().clone();
+        config.profiles.get_mut(&id).unwrap().environment =
+            [("CONFIGURED_KEY".to_owned(), "value".to_owned())]
+                .into_iter()
+                .collect();
+        let mut dashboard = DashboardState::new(config, Default::default(), BTreeMap::new());
+        answer_availability(&mut dashboard, |dashboard| {
+            let mut answer = availability_answer(dashboard, &[], &[]);
+            answer.profiles.get_mut(&id).unwrap().1 = Some("daemon credential missing".into());
+            let wire =
+                serde_json::to_value(mj_client::daemon::DaemonReply::Availability(answer)).unwrap();
+            let mj_client::daemon::DaemonReply::Availability(answer) =
+                serde_json::from_value(wire).unwrap()
+            else {
+                panic!("availability reply")
+            };
+            assert_ne!(answer.profiles[&id].0, dashboard.config.profiles[&id]);
+            answer
+        });
+        assert_eq!(
+            dashboard.profile_missing(&id),
+            Some("daemon credential missing")
+        );
+        assert!(!dashboard.profile_offered(&id));
+        dashboard.config.profiles.get_mut(&id).unwrap().environment =
+            [("CONFIGURED_KEY".to_owned(), "changed".to_owned())]
+                .into_iter()
+                .collect();
+        assert_eq!(dashboard.profile_missing(&id), None);
+        assert!(dashboard.profile_offered(&id));
+    }
 }
