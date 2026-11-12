@@ -648,7 +648,7 @@ fn materialized_session(session_id: &str) -> MaterializedSession {
                 created_at_ms: 1_200,
                 last_changed_at_ms: 1_400,
                 body: TranscriptBody::Tool {
-                    call: serde_json::json!({
+                    call: (serde_json::json!({
                         "toolCallId": "call-1",
                         "title": "Edit files",
                         "kind": "edit",
@@ -661,7 +661,8 @@ fn materialized_session(session_id: &str) -> MaterializedSession {
                         "rawInput": {"path": "src/main.rs"},
                         "rawOutput": {"changed": true},
                         "_meta": {"provider": "test"}
-                    }),
+                    }))
+                    .into(),
                     terminal_outputs: Vec::new(),
                     terminal_refs: Vec::new(),
                     presentation: None,
@@ -2226,6 +2227,32 @@ fn materialized_session_round_trip_preserves_typed_projection() {
     let loaded = load_materialized_session_from(&database, "session-1")
         .unwrap()
         .unwrap();
+    // Both durable rows and buffered wire envelopes must keep ACP JSON bytes.
+    for (before, after) in materialized.transcript.iter().zip(&loaded.transcript) {
+        if let TranscriptBody::Tool { call, .. } = &before.body {
+            let expected = serde_json::to_string(&call.value()).unwrap();
+            let TranscriptBody::Tool {
+                call: loaded_call, ..
+            } = &after.body
+            else {
+                panic!("tool body changed during store round trip");
+            };
+            assert_eq!(serde_json::to_string(loaded_call).unwrap(), expected);
+            let wire = mj_client::runtime_feed::TranscriptChange::Items(
+                mj_client::runtime_feed::TranscriptItems {
+                    header: None,
+                    window: None,
+                    upserts: vec![Arc::clone(after)],
+                    removes: vec![],
+                },
+            );
+            let bytes = serde_json::to_string(&wire).unwrap();
+            let decoded: mj_client::runtime_feed::TranscriptChange =
+                serde_json::from_str(&bytes).unwrap();
+            assert_eq!(serde_json::to_string(&decoded).unwrap(), bytes);
+            assert!(bytes.contains(&format!("\"call\":{expected}")));
+        }
+    }
     assert_eq!(loaded, materialized);
     assert_eq!(loaded.last_activity_at_ms(), Some(1_500));
 }
@@ -2383,7 +2410,7 @@ fn tool_item(position: u64, path: &str, old_text: &str, new_text: &str) -> Arc<T
         created_at_ms: 1_000,
         last_changed_at_ms: 1_000,
         body: TranscriptBody::Tool {
-            call: serde_json::json!({
+            call: (serde_json::json!({
                 "toolCallId": format!("call-{position}"),
                 "title": "Edit files",
                 "kind": "edit",
@@ -2401,7 +2428,8 @@ fn tool_item(position: u64, path: &str, old_text: &str, new_text: &str) -> Arc<T
                 ],
                 "rawInput": {"file_text": "y".repeat(64 * 1024)},
                 "rawOutput": {"formatted_output": "z".repeat(64 * 1024)},
-            }),
+            }))
+            .into(),
             terminal_outputs: Vec::new(),
             terminal_refs: Vec::new(),
             presentation: None,
@@ -2431,7 +2459,7 @@ fn releasing_a_diff_written_before_patches_keeps_its_stat() {
         created_at_ms: 1_000,
         last_changed_at_ms: 1_000,
         body: TranscriptBody::Tool {
-            call: serde_json::json!({
+            call: (serde_json::json!({
                 "toolCallId": "call-10",
                 "title": "Edit files",
                 "kind": "edit",
@@ -2443,7 +2471,8 @@ fn releasing_a_diff_written_before_patches_keeps_its_stat() {
                     "oldText": old_text,
                     "newText": new_text,
                 }],
-            }),
+            }))
+            .into(),
             terminal_outputs: Vec::new(),
             terminal_refs: Vec::new(),
             presentation: None,
@@ -2544,6 +2573,7 @@ fn a_checkpoint_releases_the_tool_output_it_covers_and_keeps_the_diffstat() {
     let TranscriptBody::Tool { call, .. } = &after.transcript[1].body else {
         panic!("expected a tool call");
     };
+    let call = call.value();
     assert!(call.get("rawInput").is_none());
     assert!(call.get("rawOutput").is_none());
     assert_eq!(
@@ -5450,7 +5480,9 @@ fn a_turn_summary_counts_the_tool_calls_the_turn_made() {
         item(
             position,
             TranscriptBody::Tool {
-                call: serde_json::json!({"toolCallId": format!("call-{position}"), "title": "Read"}),
+                call:
+                    (serde_json::json!({"toolCallId": format!("call-{position}"), "title": "Read"}))
+                        .into(),
                 terminal_outputs: Vec::new(),
                 terminal_refs: Vec::new(),
                 presentation: None,
@@ -5821,7 +5853,7 @@ fn filtered_transcript_pages_include_ties_and_advance_across_gaps() {
     item.stable_id = "tool:call-7".into();
     item.latest_content_event_ordinal = None;
     item.body = TranscriptBody::Tool {
-        call: serde_json::json!({"toolCallId": "call-7", "status": "completed"}),
+        call: serde_json::json!({"toolCallId": "call-7", "status": "completed"}).into(),
         terminal_outputs: Vec::new(),
         terminal_refs: Vec::new(),
         presentation: None,
@@ -6645,7 +6677,7 @@ fn actor_history_window_keeps_open_streams_and_rehydrates_old_tools() {
         if pending == "tool" {
             let mut tool = materialized_session(&full.session_id).transcript[2].clone();
             if let TranscriptBody::Tool { call, .. } = &mut Arc::make_mut(&mut tool).body {
-                call["status"] = "in_progress".into();
+                call.edit(|value| value["status"] = "in_progress".into());
             }
             full.transcript[2] = tool;
         }
@@ -6907,8 +6939,10 @@ fn history_window_rehydrates_late_tool_updates_before_durable_projection() {
         let output = "old output ".repeat(10_000);
         let raw_output = serde_json::json!({"partial": output});
         if let TranscriptBody::Tool { call, .. } = &mut Arc::make_mut(&mut old_tool).body {
-            call["status"] = "completed".into();
-            call["rawOutput"] = raw_output.clone();
+            call.edit(|value| {
+                value["status"] = "completed".into();
+                value["rawOutput"] = raw_output.clone();
+            });
         }
         full.transcript[2] = old_tool.clone();
         save_session_to(&path, &session(&full.session_id, "project-1")).unwrap();
@@ -6986,6 +7020,7 @@ fn history_window_rehydrates_late_tool_updates_before_durable_projection() {
         else {
             panic!("tool remains a tool")
         };
+        let call = call.value();
         assert_eq!(call["title"], "Late result");
         assert_eq!(call["rawOutput"], raw_output);
         assert!(terminal_refs.is_empty());
@@ -7024,12 +7059,14 @@ fn history_window_keeps_pending_turn_for_late_completion() {
                 ..
             } = &mut Arc::make_mut(&mut tool).body
             {
-                call["status"] = "pending".into();
-                call["rawOutput"] = if raw_earlier {
-                    raw.clone()
-                } else {
-                    serde_json::Value::Null
-                };
+                call.edit(|value| {
+                    value["status"] = "pending".into();
+                    value["rawOutput"] = if raw_earlier {
+                        raw.clone()
+                    } else {
+                        serde_json::Value::Null
+                    };
+                });
                 assert!(terminal_refs.is_empty());
             }
             full.transcript[2] = tool.clone();
@@ -7052,7 +7089,7 @@ fn history_window_keeps_pending_turn_for_late_completion() {
                 (
                     format!("tool:{}", fallback.tool_call_id),
                     TranscriptBody::Tool {
-                        call: serde_json::to_value(fallback).unwrap(),
+                        call: serde_json::to_value(fallback).unwrap().into(),
                         terminal_outputs: vec![record],
                         terminal_refs: vec!["late-terminal".into()],
                         presentation: None,

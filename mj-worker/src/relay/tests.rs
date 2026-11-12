@@ -6817,7 +6817,7 @@ fn late_claude_tool_status_preserves_the_transcript_without_opening_a_turn() {
         transcript.iter().any(|item| matches!(
             &item.body,
             TranscriptBody::Tool { call, .. }
-                if call["toolCallId"] == "background-terminal" && call["status"] == "failed"
+                if call.id() == Some("background-terminal") && call.raw_status() == Some("failed")
         )),
         "{transcript:#?}"
     );

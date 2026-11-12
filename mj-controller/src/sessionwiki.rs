@@ -321,7 +321,7 @@ impl MjolnirAdapter {
         let mut evidence = provenance::Evidence::default();
         for item in &projection.transcript {
             if let mj_core::state::TranscriptBody::Tool { call, .. } = &item.body {
-                evidence.observe(call, item.created_at_ms);
+                evidence.observe(&call.value(), item.created_at_ms);
             }
         }
         Ok(IndexedTranscript {

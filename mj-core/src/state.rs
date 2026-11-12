@@ -637,10 +637,9 @@ impl ProjectionWindow {
                     | TranscriptBody::Thought {
                         streaming: true, ..
                     } => true,
-                    TranscriptBody::Tool { call, .. } => matches!(
-                        call.get("status").and_then(serde_json::Value::as_str),
-                        Some("pending" | "in_progress")
-                    ),
+                    TranscriptBody::Tool { call, .. } => {
+                        matches!(call.raw_status(), Some("pending" | "in_progress"))
+                    }
                     _ => false,
                 });
             keep[start..end].fill(unsettled);

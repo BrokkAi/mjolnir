@@ -207,6 +207,7 @@ fn agent_activity_text(item: &TranscriptItem) -> Option<Arc<str>> {
             mj_core::transcript::materialized_chunks_text(chunks)
         }
         TranscriptBody::Tool { call, .. } => call
+            .value()
             .get("title")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("[invalid tool call]")

@@ -78,16 +78,14 @@ impl EntryFacts {
         let role = entry_role(item);
         let (status, raw_only) = match &item.body {
             TranscriptBody::Tool { call, .. } => {
-                let call = decode_tool_call(item, call);
                 let outputs = TerminalOutputs::of([item.as_ref()]);
                 (
-                    Some(
-                        call.as_ref()
-                            .map_or(ToolStatus::Pending, |call| tool_status(&call.status)),
-                    ),
-                    call.as_ref().is_some_and(|call| {
-                        tool_raw_only(call, &outputs.for_tool(&item.stable_id))
-                    }),
+                    Some(tool_status(&call.typed_status())),
+                    call.is_fallback() && {
+                        let records = outputs.for_tool(&item.stable_id);
+                        !records.is_empty()
+                            && records.iter().all(TerminalOutputRecord::exited_cleanly)
+                    },
                 )
             }
             TranscriptBody::TerminalOutput { record } => (None, record.exited_cleanly()),
@@ -492,12 +490,13 @@ fn suppress_duplicate_standalone_terminal_output_facts(entries: &mut [EntryFacts
         let TranscriptBody::TerminalOutput { record } = &item.body else {
             continue;
         };
+        let digest = record.raw_result_digest();
         entry.raw_only = record.exited_cleanly()
             || tools.iter().any(|tool| {
                 let TranscriptBody::Tool { call, .. } = &tool.body else {
                     unreachable!("filtered to tool transcript items above");
                 };
-                record.matches_tool_raw_result(call)
+                call.matches_raw_result(record, &digest)
             });
     }
 }
@@ -596,8 +595,11 @@ pub fn materialized_chat_entry_with_diffstats(
     )
 }
 
-fn decode_tool_call(item: &TranscriptItem, call: &serde_json::Value) -> Option<ToolCall> {
-    ToolCall::deserialize(call)
+fn decode_tool_call(
+    item: &TranscriptItem,
+    call: &mj_core::transcript::OpaqueToolCall,
+) -> Option<ToolCall> {
+    call.decode()
         .map_err(|error| {
             tracing::warn!(stable_id = %item.stable_id, %error,
             "could not decode a stored tool call; rendering it as invalid");
@@ -1718,7 +1720,7 @@ mod tests {
                 position,
                 TranscriptBody::Tool {
                     call: json!({"toolCallId":format!("tool-{position}"), "title":"command", "status":"completed", "content":content,
-                "rawOutput":{"exit_code":3,"output":"legacy duplicate"}}),
+                "rawOutput":{"exit_code":3,"output":"legacy duplicate"}}).into(),
                     terminal_outputs: Vec::new(),
                     terminal_refs: Vec::new(),
                     presentation: None,
@@ -1800,12 +1802,12 @@ mod tests {
                 && let TranscriptBody::Tool { call, .. } =
                     &mut Arc::make_mut(&mut session.transcript[0]).body
             {
-                call["content"] = json!([null]);
+                call.edit(|value| value["content"] = json!([null]));
             }
             if round == 0 {
                 let changed = Arc::make_mut(session.transcript.last_mut().unwrap());
                 if let TranscriptBody::Tool { call, .. } = &mut changed.body {
-                    call["content"] = json!([]);
+                    call.edit(|value| value["content"] = json!([]));
                 }
                 changed.last_changed_at_ms += 1;
             }
@@ -1992,7 +1994,7 @@ mod tests {
             let mut item = item(
                 2,
                 TranscriptBody::Tool {
-                    call: json!({"toolCallId":"tool-2", "title":"cargo test", "status":status, "kind":"execute"}),
+                    call: json!({"toolCallId":"tool-2", "title":"cargo test", "status":status, "kind":"execute"}).into(),
                     terminal_outputs: Vec::new(),
                     terminal_refs: Vec::new(),
                     presentation: None,
@@ -2125,7 +2127,7 @@ mod tests {
             },
         ));
         session.transcript.push(item(2, TranscriptBody::Tool {
-            call: json!({"toolCallId":"tool-2", "title":"Read file", "status":"completed", "kind":"read"}),
+            call: json!({"toolCallId":"tool-2", "title":"Read file", "status":"completed", "kind":"read"}).into(),
             terminal_outputs: Vec::new(), terminal_refs: Vec::new(), presentation: None,
         }));
         session.transcript.push(item(
@@ -2159,7 +2161,7 @@ mod tests {
         else {
             unreachable!()
         };
-        call["status"] = json!("failed");
+        call.edit(|value| value["status"] = json!("failed"));
         session.applied_event_ordinal = 5;
         let third = assert_projection(&mut projector, &session);
         let sent = third
@@ -2176,7 +2178,7 @@ mod tests {
     fn parked_output_preserves_entry_reuse_across_prefix_and_tail() {
         let mut session = MaterializedSession::empty("parked-tail");
         session.transcript.push(item(1, TranscriptBody::Tool {
-            call: json!({"toolCallId":"owner", "title":"Execute", "status":"completed", "kind":"execute"}),
+            call: json!({"toolCallId":"owner", "title":"Execute", "status":"completed", "kind":"execute"}).into(),
             terminal_outputs: Vec::new(), terminal_refs: vec!["parked".into()], presentation: None,
         }));
         for position in 2..=300 {
@@ -2229,7 +2231,7 @@ mod tests {
         let mut session = MaterializedSession::empty("sliding-tail");
         for position in 1..=3 {
             session.transcript.push(item(position, TranscriptBody::Tool {
-                call: json!({"toolCallId": format!("tool-{position}"), "title": "Edit file", "status": "completed", "kind": "edit"}),
+                call: json!({"toolCallId": format!("tool-{position}"), "title": "Edit file", "status": "completed", "kind": "edit"}).into(),
                 terminal_outputs: Vec::new(), terminal_refs: Vec::new(), presentation: None,
             }));
         }
@@ -2262,7 +2264,7 @@ mod tests {
         ));
         for position in 2..=3 {
             session.transcript.push(item(position, TranscriptBody::Tool {
-                call: json!({"toolCallId":format!("tool-{position}"), "title":"Read file", "status":"in_progress", "kind":"read", "content":[{"type":"content", "content":{"type":"text", "text":"x".repeat(80_000)}}]}),
+                call: json!({"toolCallId":format!("tool-{position}"), "title":"Read file", "status":"in_progress", "kind":"read", "content":[{"type":"content", "content":{"type":"text", "text":"x".repeat(80_000)}}]}).into(),
                 terminal_outputs: Vec::new(), terminal_refs: Vec::new(), presentation: None,
             }));
         }
@@ -2273,7 +2275,7 @@ mod tests {
             let TranscriptBody::Tool { call, .. } = &mut Arc::make_mut(entry).body else {
                 unreachable!()
             };
-            call["status"] = json!("completed");
+            call.edit(|value| value["status"] = json!("completed"));
         }
         session.applied_event_ordinal = 4;
         assert_projection(&mut projector, &session);

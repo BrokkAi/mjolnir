@@ -205,7 +205,7 @@ impl ProjectionIndex {
                 terminal_refs,
                 ..
             } => {
-                let mut terminal_ids = tool_call_terminal_ids(call);
+                let mut terminal_ids = call.terminal_ids().to_vec();
                 terminal_ids.extend(terminal_refs.iter().cloned());
                 for terminal_id in terminal_ids {
                     self.terminal_referrers
@@ -234,7 +234,7 @@ impl ProjectionIndex {
             ..
         } = &item.body
         {
-            let mut terminal_ids = tool_call_terminal_ids(call);
+            let mut terminal_ids = call.terminal_ids().to_vec();
             terminal_ids.extend(terminal_refs.iter().cloned());
             for terminal_id in terminal_ids {
                 if let Some(referrers) = self.terminal_referrers.get_mut(&terminal_id) {
