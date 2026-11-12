@@ -331,6 +331,7 @@ test('session titles stay blue while truly idle and clear blue when activity res
   delete context.session.attention;
   vm.runInContext('renderSessionTitle(node, session)', context);
   assert.ok(!classes.has('idle-title'), 'unknown activity is not confirmed idle');
+
 });
 
 test('project preflight prevents duplicate checks and ignores a cancelled wizard response', async () => {
@@ -1472,6 +1473,30 @@ test('review settings action renders a button that sends its action id', () => {
   assert.equal(control.textContent, 'Autoconfigure');
   control.onclick();
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{page: ['review'], edit: {kind: 'action', id: 'review.autoconfigure'}}]);
+  const controls = [];
+  context.pendingActions = new Set();
+  context.container = {
+    querySelector: () => controls[0],
+    append: control => controls.push(control),
+  };
+  context.button = label => ({ textContent: label, dataset: {}, remove: () => controls.pop() });
+  context.runSessionAction = (dataset, error, extra) => calls.push({ dataset, extra });
+  context.session = { id: 's', capabilities: {}, notification_dismissal: { read_through: 10 } };
+  vm.runInContext(sourceBetween('function renderNotificationDismissal(', '\nfunction updateSessionMenu('), context);
+  vm.runInContext('renderNotificationDismissal(container, session, null)', context);
+  assert.equal(controls.length, 0, 'no dismissal control without capability');
+  context.session.capabilities.dismiss_notification = true;
+  vm.runInContext('renderNotificationDismissal(container, session, null)', context);
+  assert.equal(controls[0].textContent, 'Dismiss notification');
+  context.session.notification_dismissal = { read_through: 11 };
+  controls[0].onclick({ stopPropagation() {} });
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[1])), { dataset: { action: 'dismiss-notification', id: 's' }, extra: { target: { read_through: 10 } } });
+  context.pendingActions.add('dismiss-notification:s');
+  vm.runInContext('renderNotificationDismissal(container, session, null)', context);
+  assert.equal(controls[0].disabled, true);
+  context.session.capabilities.dismiss_notification = false;
+  vm.runInContext('renderNotificationDismissal(container, session, null)', context);
+  assert.equal(controls.length, 0, 'withdrawing capability removes dismissal control');
 });
 
 

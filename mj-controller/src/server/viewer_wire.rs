@@ -58,6 +58,7 @@ pub(super) struct MetadataDigests(pub(super) [Option<[u8; 32]>; METADATA_FIELDS.
 /// from the row route.
 const SUMMARY_FIELDS: &[&str] = &[
     "attention",
+    "notification_dismissal",
     "id",
     "workspace_id",
     "bundle_id",

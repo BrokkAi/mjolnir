@@ -13,7 +13,7 @@
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
-│                │  Dismiss question — No prose question is active.                                   │                │
+│                │  Dismiss notification — No dismissible notification is active.                     │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │› Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
@@ -55,7 +55,7 @@ menu popup action: None
 │                   │                                                                                                  │                   │
 │                   │  Content  ─────────────────────────────────────────────────────────────────────────────────────  │                   │
 │                   │  Changed files — The session's target is not running.                                  ctrl+b d  │                   │
-│                   │  Dismiss question — No prose question is active.                                                 │                   │
+│                   │  Dismiss notification — No dismissible notification is active.                                   │                   │
 │                   │  Organize  ────────────────────────────────────────────────────────────────────────────────────  │                   │
 │                   │  Rename…                                                                         ctrl+b shift+t  │                   │
 │                   │  Pin…                                                                                            │                   │
@@ -97,7 +97,7 @@ menu popup action: None
 │          │                                                       │           │
 │          │  Content  ──────────────────────────────────────────  │  conversat│
 │          │  Changed files — The session's target is …  ctrl+b d  │           │
-│          │  Dismiss question — No prose question is active.      │           │
+│          │  Dismiss notification — No dismissible notificati…    │           │
 │          │  Organize  ─────────────────────────────────────────  │           │
 │          │  Rename…                              ctrl+b shift+t  │           │
 │          │  Pin…                                                 │           │
@@ -224,7 +224,7 @@ first Escape action: None
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
-│                │  Dismiss question — No prose question is active.                                   │                │
+│                │  Dismiss notification — No dismissible notification is active.                     │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │  Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │

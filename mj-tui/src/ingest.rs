@@ -50,8 +50,7 @@ pub(crate) struct SessionDetail {
     pub(crate) current_turn_started_at: Option<u64>,
     pub(crate) awaiting_input: bool,
     pub(crate) question_message: Option<String>,
-    pub(crate) dismissible_question: Option<mj_core::assessment::InferredQuestion>,
-    pub(crate) question_dismissal: Option<QuestionDismissal>,
+    pub(crate) notification_dismissal: Option<NotificationDismissalState>,
     pub(crate) last_activity_at_ms: Option<u64>,
     pub(crate) last_agent_message: Option<Arc<str>>,
     pub(crate) last_user_message: Option<Arc<str>>,
@@ -87,10 +86,10 @@ pub(crate) struct SessionDetail {
 }
 
 #[derive(Debug)]
-pub(crate) enum QuestionDismissal {
-    Submitting(mj_core::assessment::InferredQuestion),
+pub(crate) enum NotificationDismissalState {
+    Submitting(mj_core::attention::NotificationDismissal),
     Accepted {
-        question: mj_core::assessment::InferredQuestion,
+        target: mj_core::attention::NotificationDismissal,
         ordinal: u64,
     },
 }
@@ -107,10 +106,6 @@ impl SessionDetail {
             .iter()
             .filter(|ordinal| **ordinal > through)
             .count();
-    }
-
-    pub(crate) fn has_unread(&self) -> bool {
-        self.unread_agent_messages > 0 || self.unread_interruptions > 0
     }
 
     pub(crate) fn clear_unread(&mut self) {
@@ -249,7 +244,6 @@ pub struct PreparedMaterializedSessionDetail {
     pub(crate) applied_event_ordinal: u64,
     pub(crate) current_turn_started_at: Option<u64>,
     pub(crate) awaiting_input: bool,
-    pub(crate) dismissible_question: Option<mj_core::assessment::InferredQuestion>,
     pub(crate) last_activity_at_ms: Option<u64>,
     pub(crate) last_agent_message: Option<Arc<str>>,
     pub(crate) last_user_message: Option<Arc<str>>,
@@ -455,13 +449,6 @@ impl PreparedMaterializedSessionDetail {
             .collect();
         let unanswered_input = session.unanswered_input_outcome(assessment, None);
         let awaiting_input = unanswered_input.is_some();
-        let dismissible_question = awaiting_input
-            .then(|| {
-                assessment
-                    .filter(|a| unanswered_input.is_some_and(|outcome| a.applies_to(outcome)))
-                    .and_then(|a| a.inferred_question())
-            })
-            .flatten();
         let pending_elicitations = session.pending_elicitations.clone();
         let session_id = session.session_id.clone();
         let applied_event_ordinal = session.applied_event_ordinal;
@@ -480,7 +467,6 @@ impl PreparedMaterializedSessionDetail {
             applied_event_ordinal,
             current_turn_started_at,
             awaiting_input,
-            dismissible_question,
             last_activity_at_ms,
             last_agent_message: last_agent_message
                 .as_ref()
@@ -541,6 +527,15 @@ impl DashboardState {
             self.served_attention
                 .insert(session_id.to_owned(), attention);
         }
+    }
+    pub fn set_notification_dismissals(
+        &mut self,
+        targets: mj_core::snapshot_map::SnapshotMap<
+            String,
+            mj_core::attention::NotificationDismissal,
+        >,
+    ) {
+        self.notification_dismissals = targets;
     }
     pub fn set_session_attention(
         &mut self,
@@ -1234,11 +1229,10 @@ impl DashboardState {
         detail.materialized_applied_event_ordinal = Some(prepared.applied_event_ordinal);
         detail.current_turn_started_at = prepared.current_turn_started_at;
         detail.awaiting_input = prepared.awaiting_input;
-        detail.dismissible_question = prepared.dismissible_question;
-        if matches!(&detail.question_dismissal,
-            Some(QuestionDismissal::Accepted { ordinal, .. }) if prepared.applied_event_ordinal >= *ordinal)
+        if matches!(&detail.notification_dismissal,
+            Some(NotificationDismissalState::Accepted { ordinal, .. }) if prepared.applied_event_ordinal >= *ordinal)
         {
-            detail.question_dismissal = None;
+            detail.notification_dismissal = None;
         }
         detail.last_activity_at_ms = prepared.last_activity_at_ms;
         detail.last_agent_message = prepared.last_agent_message;
@@ -1303,43 +1297,46 @@ impl DashboardState {
         true
     }
 
-    pub(crate) fn question_dismissal_pending(&self, session_id: &str) -> bool {
+    pub(crate) fn notification_dismissal_pending(&self, session_id: &str) -> bool {
         self.session_details
             .get(session_id)
-            .is_some_and(|detail| detail.question_dismissal.is_some())
+            .is_some_and(|detail| detail.notification_dismissal.is_some())
     }
 
-    pub(crate) fn begin_dismiss_question(&mut self) -> crate::DashboardAction {
+    pub(crate) fn notification_dismissal_target(
+        &self,
+        session_id: &str,
+    ) -> Option<mj_core::attention::NotificationDismissal> {
+        self.notification_dismissals.get(session_id).cloned()
+    }
+
+    pub(crate) fn begin_dismiss_notification(&mut self) -> crate::DashboardAction {
         let Some(session_id) = self.command_session_id().map(str::to_owned) else {
             return crate::DashboardAction::None;
         };
-        let Some(detail) = self.session_details.get_mut(&session_id) else {
+        let Some(target) = self.notification_dismissal_target(&session_id) else {
             return crate::DashboardAction::None;
         };
-        let Some(question) = detail.dismissible_question.clone() else {
-            return crate::DashboardAction::None;
-        };
-        detail.question_dismissal = Some(QuestionDismissal::Submitting(question.clone()));
-        crate::DashboardAction::DismissQuestion {
-            session_id,
-            question,
-        }
+        let detail = self.session_details.entry(session_id.clone()).or_default();
+        detail.notification_dismissal =
+            Some(NotificationDismissalState::Submitting(target.clone()));
+        crate::DashboardAction::DismissNotification { session_id, target }
     }
 
-    pub fn question_dismissal_finished(
+    pub fn notification_dismissal_finished(
         &mut self,
         session_id: &str,
-        question: mj_core::assessment::InferredQuestion,
+        target: mj_core::attention::NotificationDismissal,
         result: Result<u64, String>,
     ) {
         let Some(detail) = self.session_details.get_mut(session_id) else {
             return;
         };
-        let current = match &detail.question_dismissal {
-            Some(QuestionDismissal::Submitting(current))
-            | Some(QuestionDismissal::Accepted {
-                question: current, ..
-            }) => current == &question,
+        let current = match &detail.notification_dismissal {
+            Some(NotificationDismissalState::Submitting(current))
+            | Some(NotificationDismissalState::Accepted {
+                target: current, ..
+            }) => current == &target,
             None => false,
         };
         if !current {
@@ -1347,15 +1344,25 @@ impl DashboardState {
         }
         match result {
             Ok(ordinal) => {
-                detail.question_dismissal = detail
+                if matches!(
+                    target,
+                    mj_core::attention::NotificationDismissal::ReadThrough(_)
+                ) {
+                    detail.update_unread(ordinal);
+                    if let Some(record) = self.state.sessions.get_mut(session_id) {
+                        record.viewed_through_event_ordinal =
+                            record.viewed_through_event_ordinal.max(ordinal);
+                    }
+                }
+                detail.notification_dismissal = detail
                     .materialized_applied_event_ordinal
                     .is_none_or(|applied| applied < ordinal)
-                    .then_some(QuestionDismissal::Accepted { question, ordinal });
-                self.set_notice("Question dismissed.");
+                    .then_some(NotificationDismissalState::Accepted { target, ordinal });
+                self.set_notice("Notification dismissed.");
             }
             Err(error) => {
-                detail.question_dismissal = None;
-                self.set_notice(format!("Could not dismiss question: {error}"));
+                detail.notification_dismissal = None;
+                self.set_notice(format!("Could not dismiss notification: {error}"));
             }
         }
     }

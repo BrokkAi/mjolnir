@@ -471,7 +471,7 @@ mod tests {
                 "asks".into(),
                 mj_core::attention::SessionAttention::NeedsInput,
             ),
-            ("done".into(), mj_core::attention::SessionAttention::Idle),
+            ("done".into(), mj_core::attention::SessionAttention::Unread),
         ]));
         dashboard.set_current_session(None);
         dashboard

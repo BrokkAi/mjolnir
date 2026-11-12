@@ -75,7 +75,7 @@ pub(crate) fn presentation_attention(
     session_id: &str,
 ) -> AttentionLevel {
     use mj_core::attention::SessionAttention;
-    let level = match dashboard
+    match dashboard
         .served_attention
         .get(session_id)
         .copied()
@@ -83,21 +83,12 @@ pub(crate) fn presentation_attention(
     {
         SessionAttention::NeedsInput => AttentionLevel::Waiting,
         SessionAttention::Important => AttentionLevel::Important,
+        SessionAttention::Unread => AttentionLevel::Unread,
         SessionAttention::Failed => AttentionLevel::Failed,
         SessionAttention::Unreachable => AttentionLevel::Unreachable,
         SessionAttention::Working => AttentionLevel::Working,
         SessionAttention::Idle => AttentionLevel::Idle,
         SessionAttention::Inactive | SessionAttention::Unknown => AttentionLevel::Inactive,
-    };
-    if level == AttentionLevel::Idle
-        && dashboard
-            .session_details
-            .get(session_id)
-            .is_some_and(SessionDetail::has_unread)
-    {
-        AttentionLevel::Unread
-    } else {
-        level
     }
 }
 
@@ -1193,12 +1184,18 @@ impl DashboardState {
             .collect::<Vec<_>>();
         let mut receipts = Vec::new();
         for session_id in listed {
+            if !matches!(
+                self.served_attention.get(&session_id),
+                Some(
+                    mj_core::attention::SessionAttention::Unread
+                        | mj_core::attention::SessionAttention::Important
+                )
+            ) {
+                continue;
+            }
             let Some(detail) = self.session_details.get_mut(&session_id) else {
                 continue;
             };
-            if !detail.has_unread() {
-                continue;
-            }
             let Some(through) = detail.materialized_applied_event_ordinal else {
                 continue;
             };
@@ -1473,7 +1470,8 @@ mod verdict_tests {
             (SessionAttention::Important, AttentionLevel::Important),
             (SessionAttention::Working, AttentionLevel::Working),
             (SessionAttention::Inactive, AttentionLevel::Inactive),
-            (SessionAttention::Idle, AttentionLevel::Unread),
+            (SessionAttention::Unread, AttentionLevel::Unread),
+            (SessionAttention::Idle, AttentionLevel::Idle),
         ] {
             dashboard.set_session_attention(mj_core::snapshot_map::SnapshotMap::from([(
                 "session".to_owned(),

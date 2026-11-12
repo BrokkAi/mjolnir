@@ -120,7 +120,7 @@ impl CommandPalette {
 
 const SESSION_MENU_COMMANDS: &[CommandId] = &[
     CommandId::ChangedFiles,
-    CommandId::DismissQuestion,
+    CommandId::DismissNotification,
     CommandId::RenameSession,
     CommandId::PinSession,
     CommandId::UnpinSession,
@@ -780,7 +780,9 @@ fn palette_lines(dashboard: &DashboardState, palette: &CommandPalette) -> Vec<Pa
         let mut section = None;
         for (index, entry) in palette.entries.iter().enumerate() {
             let next = match entry.id {
-                CommandId::OpenSession | CommandId::ChangedFiles | CommandId::DismissQuestion => 0,
+                CommandId::OpenSession
+                | CommandId::ChangedFiles
+                | CommandId::DismissNotification => 0,
                 CommandId::RenameSession
                 | CommandId::PinSession
                 | CommandId::UnpinSession
@@ -1722,6 +1724,18 @@ mod tests {
         let project = |dashboard: &mut DashboardState,
                        materialized: &mj_core::state::MaterializedSession,
                        assessment: &mj_core::assessment::TurnAssessment| {
+            dashboard.set_notification_dismissals(
+                assessment
+                    .inferred_question()
+                    .map(|question| {
+                        (
+                            materialized.session_id.clone(),
+                            mj_core::attention::NotificationDismissal::Question(question),
+                        )
+                    })
+                    .into_iter()
+                    .collect(),
+            );
             dashboard.apply_prepared_materialized_session(
                 crate::PreparedMaterializedSessionDetail::from_assessed_materialized(
                     materialized.clone(),
@@ -1736,14 +1750,14 @@ mod tests {
         dashboard.begin_session_palette();
         let lines = drawn(&mut dashboard, 120, 40);
         append_golden_state(&mut output, "active prose question", 120, 40, &lines);
-        let dismiss = point(&lines, "Dismiss question");
+        let dismiss = point(&lines, "Dismiss notification");
         dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), dismiss));
         let action =
             dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), dismiss));
         append_golden_value(&mut output, "dismiss exact question", &action);
-        let DashboardAction::DismissQuestion {
+        let DashboardAction::DismissNotification {
             session_id,
-            question,
+            target: question,
         } = action
         else {
             panic!("dismissal action");
@@ -1751,7 +1765,7 @@ mod tests {
         dashboard.begin_session_palette();
         let lines = drawn(&mut dashboard, 120, 40);
         append_golden_state(&mut output, "dismissal in flight", 120, 40, &lines);
-        dashboard.question_dismissal_finished(
+        dashboard.notification_dismissal_finished(
             &session_id,
             question.clone(),
             Err("Worker disconnected".into()),
@@ -1762,16 +1776,16 @@ mod tests {
             crate::AttentionLevel::Waiting
         );
         assert_eq!(
-            (spec(CommandId::DismissQuestion).available)(&dashboard),
+            (spec(CommandId::DismissNotification).available)(&dashboard),
             Availability::Ready
         );
         assert!(matches!(
-            dashboard.dispatch_command(CommandId::DismissQuestion),
-            DashboardAction::DismissQuestion { .. }
+            dashboard.dispatch_command(CommandId::DismissNotification),
+            DashboardAction::DismissNotification { .. }
         ));
-        dashboard.question_dismissal_finished(&session_id, question.clone(), Ok(5));
+        dashboard.notification_dismissal_finished(&session_id, question.clone(), Ok(5));
         assert_ne!(
-            (spec(CommandId::DismissQuestion).available)(&dashboard),
+            (spec(CommandId::DismissNotification).available)(&dashboard),
             Availability::Ready,
             "an acknowledgement alone must not enable another request before publication"
         );
@@ -1781,12 +1795,20 @@ mod tests {
         crate::test_support::serve_attention(
             &mut dashboard,
             &[&session_id],
-            mj_core::attention::SessionAttention::Idle,
+            mj_core::attention::SessionAttention::Unread,
         );
         project(&mut dashboard, &materialized, &assessment);
         assert_ne!(
             dashboard.attention_level(&session_id),
             crate::AttentionLevel::Waiting
+        );
+        dashboard.set_notification_dismissals(
+            [(
+                session_id.clone(),
+                mj_core::attention::NotificationDismissal::ReadThrough(2),
+            )]
+            .into_iter()
+            .collect(),
         );
         dashboard.begin_session_palette();
         let lines = drawn(&mut dashboard, 120, 40);
@@ -1809,17 +1831,17 @@ mod tests {
         );
         project(&mut dashboard, &materialized, &assessment);
         assert_eq!(
-            (spec(CommandId::DismissQuestion).available)(&dashboard),
+            (spec(CommandId::DismissNotification).available)(&dashboard),
             Availability::Ready
         );
-        let DashboardAction::DismissQuestion { question: next, .. } =
-            dashboard.dispatch_command(CommandId::DismissQuestion)
+        let DashboardAction::DismissNotification { target: next, .. } =
+            dashboard.dispatch_command(CommandId::DismissNotification)
         else {
             panic!("new dismissal");
         };
-        dashboard.question_dismissal_finished(&session_id, question, Ok(5));
+        dashboard.notification_dismissal_finished(&session_id, question, Ok(5));
         assert!(
-            dashboard.question_dismissal_pending(&session_id),
+            dashboard.notification_dismissal_pending(&session_id),
             "an old callback cannot finish the new request"
         );
         assessment.status = mj_core::assessment::Status::Superseded;
@@ -1831,13 +1853,49 @@ mod tests {
             mj_core::attention::SessionAttention::Idle,
         );
         project(&mut dashboard, &materialized, &assessment);
-        dashboard.question_dismissal_finished(&session_id, next, Ok(10));
-        assert!(!dashboard.question_dismissal_pending(&session_id));
+        dashboard.notification_dismissal_finished(&session_id, next, Ok(10));
+        assert!(!dashboard.notification_dismissal_pending(&session_id));
         append_golden_value(
             &mut output,
             "publication before acknowledgement",
             dashboard.notice(),
         );
+
+        dashboard.set_notification_dismissals(
+            [(
+                session_id.clone(),
+                mj_core::attention::NotificationDismissal::ReadThrough(12),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        dashboard
+            .set_session_attention_for(&session_id, mj_core::attention::SessionAttention::Unread);
+        let detail = dashboard.session_details.get_mut(&session_id).unwrap();
+        detail.agent_message_latest_content_ordinals = vec![12];
+        detail.unread_agent_messages = 1;
+        assert_eq!(
+            dashboard.attention_level(&session_id),
+            crate::dashboard_sessions::AttentionLevel::Unread
+        );
+        let DashboardAction::DismissNotification { target, .. } =
+            dashboard.dispatch_command(CommandId::DismissNotification)
+        else {
+            panic!("unread dismissal");
+        };
+        assert_eq!(
+            target,
+            mj_core::attention::NotificationDismissal::ReadThrough(12)
+        );
+        dashboard.notification_dismissal_finished(&session_id, target, Ok(12));
+        dashboard
+            .set_session_attention_for(&session_id, mj_core::attention::SessionAttention::Idle);
+        dashboard.set_notification_dismissals(Default::default());
+        assert_eq!(
+            dashboard.attention_level(&session_id),
+            crate::dashboard_sessions::AttentionLevel::Idle
+        );
+        append_golden_value(&mut output, "unread dismissed", dashboard.notice());
 
         mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "session-action-menu", &output);
     }

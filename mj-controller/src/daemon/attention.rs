@@ -59,6 +59,7 @@ pub(super) fn update(previous: &RuntimeProjection, next: &mut RuntimeProjection)
             .collect()
     };
     if ids.is_empty() {
+        next.metadata.notification_dismissals = previous.metadata.notification_dismissals.clone();
         next.metadata.session_attention = previous.metadata.session_attention.clone();
         return;
     }
@@ -78,9 +79,20 @@ pub(super) fn update(previous: &RuntimeProjection, next: &mut RuntimeProjection)
             }
         }
     }
-    let states = project_ids(next, ids.clone());
+    let (states, targets) = project_states(next, ids.clone());
     next.metadata.session_attention = previous.metadata.session_attention.clone();
+    next.metadata.notification_dismissals = previous.metadata.notification_dismissals.clone();
     for id in ids {
+        let target = targets.get(&id).cloned();
+        if let Some(target) = target {
+            if next.metadata.notification_dismissals.get(&id) != Some(&target) {
+                next.metadata
+                    .notification_dismissals
+                    .insert(id.clone(), target);
+            }
+        } else {
+            next.metadata.notification_dismissals.remove(&id);
+        }
         if let Some(state) = states.get(&id) {
             if next.metadata.session_attention.get(&id) != Some(state) {
                 next.metadata.session_attention.insert(id, *state);
@@ -91,10 +103,66 @@ pub(super) fn update(previous: &RuntimeProjection, next: &mut RuntimeProjection)
     }
 }
 
+fn dismissal(
+    runtime: &RuntimeProjection,
+    id: &str,
+    attention: SessionAttention,
+) -> Option<mj_core::attention::NotificationDismissal> {
+    use mj_core::attention::NotificationDismissal;
+    if attention == SessionAttention::Unread {
+        return runtime
+            .transcripts
+            .get(id)?
+            .latest_agent_content_ordinal
+            .map(NotificationDismissal::ReadThrough);
+    }
+    let live = runtime.sessions.get(id)?.operational.as_deref()?;
+    let assessment = live.assessment.as_deref()?;
+    match attention {
+        SessionAttention::Important => Some(NotificationDismissal::ReadThrough(
+            assessment.completed_ordinal,
+        )),
+        SessionAttention::NeedsInput
+            if live.relay_protocol_version.is_some_and(|version| {
+                version >= mj_core::relay::RELAY_DISMISS_QUESTION_PROTOCOL
+            }) =>
+        {
+            let tail = runtime.transcripts.get(id)?;
+            if !tail.header.pending_elicitations.is_empty()
+                || runtime.metadata.reviews.iter().any(|review| {
+                    review.session_id == id && !matches!(review.phase, TurnReviewPhase::Resolved(_))
+                })
+            {
+                return None;
+            }
+            let outcome = tail
+                .header
+                .unanswered_input_outcome(Some(assessment), tail.latest_user_position)?;
+            assessment
+                .applies_to(outcome)
+                .then(|| assessment.inferred_question())
+                .flatten()
+                .map(NotificationDismissal::Question)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
 fn project_ids(
     runtime: &RuntimeProjection,
     ids: BTreeSet<String>,
 ) -> BTreeMap<String, SessionAttention> {
+    project_states(runtime, ids).0
+}
+
+fn project_states(
+    runtime: &RuntimeProjection,
+    ids: BTreeSet<String>,
+) -> (
+    BTreeMap<String, SessionAttention>,
+    BTreeMap<String, mj_core::attention::NotificationDismissal>,
+) {
     use SessionAttention::*;
     let mut reviews = BTreeMap::new();
     for review in &runtime.metadata.reviews {
@@ -260,6 +328,17 @@ fn project_ids(
             } else {
                 Unknown
             };
+            let state = if state == Idle
+                && runtime
+                    .transcripts
+                    .get(id)
+                    .and_then(|tail| tail.latest_agent_content_ordinal)
+                    .is_some_and(|ordinal| ordinal > record.viewed_through_event_ordinal)
+            {
+                Unread
+            } else {
+                state
+            };
             (id.clone(), state)
         })
         .collect();
@@ -277,7 +356,12 @@ fn project_ids(
         };
         attention.insert(id.clone(), state);
     }
-    attention
+    let targets = attention
+        .iter()
+        .filter(|(id, _)| !questions.contains(id.as_str()))
+        .filter_map(|(id, state)| dismissal(runtime, id, *state).map(|target| (id.clone(), target)))
+        .collect();
+    (attention, targets)
 }
 
 #[cfg(test)]
@@ -408,6 +492,16 @@ mod tests {
                 _ => next.metadata.reviews.clear(),
             }
             update(&published, &mut next);
+            assert_eq!(
+                next.metadata
+                    .notification_dismissals
+                    .iter()
+                    .collect::<BTreeMap<_, _>>(),
+                project_states(&next, next.records.keys().cloned().collect())
+                    .1
+                    .iter()
+                    .collect::<BTreeMap<_, _>>()
+            );
             let expected = project(&next);
             assert_eq!(
                 next.metadata
@@ -436,6 +530,138 @@ mod tests {
             }
             published = next.clone();
         }
+    }
+
+    #[test]
+    fn unread_tracks_content_and_cursor_only_changes_incrementally_without_overriding_attention() {
+        use mj_core::attention::NotificationDismissal;
+        use mj_core::transcript::{TranscriptBody, TranscriptItem};
+        let mut next = runtime();
+        let mut relay = mj_core::relay::RelaySnapshot::new("parent".into());
+        relay.execution = mj_core::relay::RelayExecutionState::Idle;
+        next.sessions.get_mut("parent").unwrap().operational =
+            Some(relay.operational_state().into());
+        let mut materialized = MaterializedSession::empty("parent");
+        let item = |ordinal| {
+            std::sync::Arc::new(TranscriptItem {
+                stable_id: "agent".into(),
+                position: 1,
+                latest_content_event_ordinal: Some(ordinal),
+                created_at_ms: 0,
+                last_changed_at_ms: 0,
+                body: TranscriptBody::Agent {
+                    chunks: vec![serde_json::json!({"content": {"type": "text", "text": "Ready"}})],
+                    streaming: false,
+                },
+            })
+        };
+        materialized.transcript.push(item(10));
+        next.transcripts.insert(
+            "parent".into(),
+            mj_client::runtime_feed::SessionTail::of(
+                &materialized,
+                &ProjectionWindow::of(&materialized),
+                0,
+            ),
+        );
+        let mut previous = RuntimeProjection::default();
+        update(&previous, &mut next);
+        assert_eq!(
+            next.metadata.session_attention["parent"],
+            SessionAttention::Unread
+        );
+        assert_eq!(
+            next.metadata.notification_dismissals["parent"],
+            NotificationDismissal::ReadThrough(10)
+        );
+        assert!(
+            next.transcripts["parent"].items.is_empty(),
+            "content watermark survives tail trimming"
+        );
+        previous = next.clone();
+        next.records
+            .get_mut("parent")
+            .unwrap()
+            .viewed_through_event_ordinal = 10;
+        update(&previous, &mut next);
+        assert_eq!(
+            next.metadata.session_attention["parent"],
+            SessionAttention::Idle
+        );
+        assert!(!next.metadata.notification_dismissals.contains_key("parent"));
+        assert!(std::ptr::eq(
+            previous.metadata.session_attention.get("child").unwrap(),
+            next.metadata.session_attention.get("child").unwrap()
+        ));
+        previous = next.clone();
+        materialized.transcript[0] = item(11);
+        next.transcripts.get_mut("parent").unwrap().publish(
+            &materialized,
+            &ProjectionWindow::of(&materialized),
+            0,
+        );
+        update(&previous, &mut next);
+        assert_eq!(
+            next.metadata.session_attention["parent"],
+            SessionAttention::Unread
+        );
+        assert_eq!(
+            next.metadata.notification_dismissals["parent"],
+            NotificationDismissal::ReadThrough(11)
+        );
+        previous = next.clone();
+        let mut working = relay.operational_state();
+        working.activity = Some(mj_core::activity::ActivityState::Turn {
+            started_at_ms: Some(1),
+            last_activity_at_ms: None,
+        });
+        next.sessions.get_mut("parent").unwrap().operational = Some(working.into());
+        update(&previous, &mut next);
+        assert_eq!(
+            next.metadata.session_attention["parent"],
+            SessionAttention::Working
+        );
+        assert!(!next.metadata.notification_dismissals.contains_key("parent"));
+        previous = next.clone();
+        next.sessions.get_mut("parent").unwrap().operational =
+            Some(relay.operational_state().into());
+        materialized
+            .pending_elicitations
+            .push(mj_core::elicitation::ElicitationRequest {
+                id: "form".into(),
+                message: "Choose".into(),
+                title: None,
+                description: None,
+                fields: vec![],
+                tool_permission: None,
+            });
+        next.transcripts.get_mut("parent").unwrap().publish(
+            &materialized,
+            &ProjectionWindow::of(&materialized),
+            0,
+        );
+        update(&previous, &mut next);
+        assert_eq!(
+            next.metadata.session_attention["parent"],
+            SessionAttention::NeedsInput
+        );
+        assert!(!next.metadata.notification_dismissals.contains_key("parent"));
+        previous = next.clone();
+        next.sessions.get_mut("parent").unwrap().connected = false;
+        update(&previous, &mut next);
+        assert_eq!(
+            next.metadata.session_attention["parent"],
+            SessionAttention::Unreachable
+        );
+        assert!(!next.metadata.notification_dismissals.contains_key("parent"));
+        previous = next.clone();
+        next.records.get_mut("parent").unwrap().state = SessionState::Error;
+        update(&previous, &mut next);
+        assert_eq!(
+            next.metadata.session_attention["parent"],
+            SessionAttention::Failed
+        );
+        assert!(!next.metadata.notification_dismissals.contains_key("parent"));
     }
 
     fn runtime() -> RuntimeProjection {
@@ -488,8 +714,10 @@ mod tests {
         let publish = |runtime: &mut RuntimeProjection,
                        materialized: &MaterializedSession,
                        relay: &mj_core::relay::RelaySnapshot| {
-            runtime.sessions.get_mut("parent").unwrap().operational =
-                Some(relay.operational_state().into());
+            let mut operational = relay.operational_state();
+            operational.relay_protocol_version =
+                Some(mj_core::relay::RELAY_DISMISS_QUESTION_PROTOCOL);
+            runtime.sessions.get_mut("parent").unwrap().operational = Some(operational.into());
             let window = ProjectionWindow::of(materialized);
             if let Some(tail) = runtime.transcripts.get_mut("parent") {
                 tail.publish(materialized, &window, 0);
@@ -519,6 +747,12 @@ mod tests {
         relay.assessment = Some(std::sync::Arc::new(assessment.clone()));
         publish(&mut runtime, &materialized, &relay);
         assert_eq!(project(&runtime)["parent"], SessionAttention::NeedsInput);
+        assert!(matches!(
+            project_states(&runtime, BTreeSet::from(["parent".into()]))
+                .1
+                .get("parent"),
+            Some(mj_core::attention::NotificationDismissal::Question(_))
+        ));
         materialized
             .transcript
             .push(std::sync::Arc::new(TranscriptItem {
@@ -546,6 +780,12 @@ mod tests {
         relay.assessment = Some(std::sync::Arc::new(assessment));
         publish(&mut runtime, &materialized, &relay);
         assert_eq!(project(&runtime)["parent"], SessionAttention::Important);
+        assert_eq!(
+            project_states(&runtime, BTreeSet::from(["parent".into()]))
+                .1
+                .get("parent"),
+            Some(&mj_core::attention::NotificationDismissal::ReadThrough(10))
+        );
         runtime
             .records
             .get_mut("parent")

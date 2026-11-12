@@ -165,6 +165,7 @@ fn runtime_state_update(
         subagents: snapshot.subagents,
         launch_recency: metadata.launch_recency.into_inner(),
         session_attention: metadata.session_attention,
+        notification_dismissals: metadata.notification_dismissals,
         recent_launch: metadata.recent_launch,
         container_upgrade_sessions: metadata.container_upgrade_sessions,
         storage: metadata.storage.into_inner(),

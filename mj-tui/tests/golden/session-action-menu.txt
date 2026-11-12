@@ -13,7 +13,7 @@
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
-│                │  Dismiss question — No prose question is active.                                   │                │
+│                │  Dismiss notification — No dismissible notification is active.                     │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │› Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
@@ -55,7 +55,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
-│                │  Dismiss question — No prose question is active.                                   │                │
+│                │  Dismiss notification — No dismissible notification is active.                     │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │› Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
@@ -96,7 +96,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
-│                │  Dismiss question — No prose question is active.                                   │                │
+│                │  Dismiss notification — No dismissible notification is active.                     │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │› Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
@@ -136,7 +136,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
-│                │  Dismiss question — No prose question is active.                                   │                │
+│                │  Dismiss notification — No dismissible notification is active.                     │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │› Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
@@ -177,7 +177,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
-│                │  Dismiss question — No prose question is active.                                   │                │
+│                │  Dismiss notification — No dismissible notification is active.                     │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │› Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
@@ -218,7 +218,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
-│                │  Dismiss question — No prose question is active.                                   │                │
+│                │  Dismiss notification — No dismissible notification is active.                     │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │› Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
@@ -305,7 +305,7 @@ selection after disabled click: Some(ContainerSettings)
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
-│                │  Dismiss question — No prose question is active.                                   │                │
+│                │  Dismiss notification — No dismissible notification is active.                     │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │  Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
@@ -346,7 +346,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
-│                │› Dismiss question                                                                  │                │
+│                │› Dismiss notification                                                              │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │  Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
@@ -361,7 +361,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │  ────────────────────────────────────────────────────────────────────────────────  │  ──────────────╮
 │                │  Copy session ID                                                                   │                │
 │                │  Destroy…                                                                          │                │
-│                │Dismiss this question without sending input or granting approval.                   │  ──────────────╯
+│                │Dismiss this notification without sending input or granting approval.               │  ──────────────╯
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ─────── ▁   ▄ ╮
 │                                                                                                                      │
 │                                                                                                        ──────────────╯
@@ -372,7 +372,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
-dismiss exact question: DismissQuestion { session_id: "session-1", question: InferredQuestion { turn_id: "prompt-1", completed_ordinal: 3 } }
+dismiss exact question: DismissNotification { session_id: "session-1", target: Question(InferredQuestion { turn_id: "prompt-1", completed_ordinal: 3 }) }
 === dismissal in flight (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default ?1                         ≡ ││                                                                              │
@@ -388,7 +388,7 @@ dismiss exact question: DismissQuestion { session_id: "session-1", question: Inf
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
-│                │  Dismiss question — Dismissing question.                                           │                │
+│                │  Dismiss notification — Dismissing notification.                                   │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │› Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
@@ -414,7 +414,7 @@ dismiss exact question: DismissQuestion { session_id: "session-1", question: Inf
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
-dismissal failure: Some("Could not dismiss question: Worker disconnected")
+dismissal failure: Some("Could not dismiss notification: Worker disconnected")
 === question dismissed (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default ✓1                         ≡ ││                                                                              │
@@ -430,9 +430,9 @@ dismissal failure: Some("Could not dismiss question: Worker disconnected")
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
-│                │  Dismiss question — No prose question is active.                                   │                │
+│                │› Dismiss notification                                                              │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
-│                │› Rename…                                                           ctrl+b shift+t  │                │
+│                │  Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
 │                │  Unpin — This session is not pinned.                                               │                │
 │                │  Change Workspace › — There is no other workspace.                                 │                │
@@ -445,7 +445,7 @@ dismissal failure: Some("Could not dismiss question: Worker disconnected")
 │                │  ────────────────────────────────────────────────────────────────────────────────  │  ──────────────╮
 │                │  Copy session ID                                                                   │                │
 │                │  Destroy…                                                                          │                │
-│                │Give the selected session your own title.                                           │  ──────────────╯
+│                │Dismiss this notification without sending input or granting approval.               │  ──────────────╯
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ─────── ▁   ▄ ╮
 │                                                                                                                      │
 │                                                                                                        ──────────────╯
@@ -455,5 +455,6 @@ dismissal failure: Some("Could not dismiss question: Worker disconnected")
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-Question dismissed.
-publication before acknowledgement: Some("Question dismissed.")
+Notification dismissed.
+publication before acknowledgement: Some("Notification dismissed.")
+unread dismissed: Some("Notification dismissed.")

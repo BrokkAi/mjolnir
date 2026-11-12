@@ -300,6 +300,8 @@ pub struct RuntimeContainerCapacity {
 /// Configuration and bounded active-operation views are separate from history.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeMetadata {
+    #[serde(default)]
+    pub notification_dismissals: SnapshotMap<String, mj_core::attention::NotificationDismissal>,
     pub session_attention: SnapshotMap<String, mj_core::attention::SessionAttention>,
     #[serde(default)]
     pub operator_presence: mj_core::state::OperatorPresence,
@@ -424,6 +426,7 @@ pub type TailKey = (u64, String);
 /// changed rather than the whole tail.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionTail {
+    pub latest_agent_content_ordinal: Option<u64>,
     /// Daemon-local fact retained before trimming items or clearing the header
     /// transcript. Clients consume served attention, not this watermark.
     pub latest_user_position: Option<u64>,
@@ -438,6 +441,7 @@ impl SessionTail {
     /// what `materialized.transcript` already leaves out.
     pub fn of(materialized: &MaterializedSession, window: &ProjectionWindow, limit: usize) -> Self {
         let mut tail = Self {
+            latest_agent_content_ordinal: None,
             latest_user_position: materialized.latest_user_position(),
             header: transcript_header(materialized),
             window: window.clone(),
@@ -458,6 +462,12 @@ impl SessionTail {
         limit: usize,
     ) {
         self.latest_user_position = materialized.latest_user_position();
+        self.latest_agent_content_ordinal = materialized
+            .transcript
+            .iter()
+            .filter(|item| item.is_nonempty_agent_message())
+            .filter_map(|item| item.latest_content_event_ordinal)
+            .max();
         let start = materialized.transcript.len().saturating_sub(limit);
         // The daemon calls this for every view it publishes, so it walks the
         // held items and the published ones side by side in key order, and
@@ -644,6 +654,7 @@ impl SessionTail {
             header,
             window,
             items: map,
+            latest_agent_content_ordinal: None,
             latest_user_position: None,
         }
     }
@@ -1081,7 +1092,11 @@ mod tests {
             "s".into(),
             SessionTail::from_parts(*header, fetched_window, fetched),
         );
-        assert_eq!(replica.projection.transcripts["s"], daemon);
+        // Daemon-local watermarks are deliberately absent from the transport.
+        assert_eq!(
+            SessionTailReply::of(&replica.projection.transcripts["s"]),
+            SessionTailReply::of(&daemon)
+        );
         let mut with_answer = daemon.clone();
         with_answer.header.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
             work_facts: None,
@@ -1165,7 +1180,12 @@ mod tests {
                 })
                 .unwrap();
             let held = &replica.projection.transcripts["s"];
-            assert_eq!(held, &daemon, "after step {}", sequence - 1);
+            assert_eq!(
+                SessionTailReply::of(held),
+                SessionTailReply::of(&daemon),
+                "after step {}",
+                sequence - 1
+            );
             assert_eq!(held.materialized(), daemon.materialized());
             for (key, now) in held.items.iter() {
                 if let Some(before) = held_before.items.get(key)

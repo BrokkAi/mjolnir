@@ -271,6 +271,7 @@ impl ViewerSnapshot {
                     .for_session(state.effective_review_or_off(&session.id));
                 ViewerSession {
                     attention: Default::default(),
+                    notification_dismissal: None,
                     oracle: session.oracle,
                     oracle_choice: session.oracle_choice.clone().map(|v| *v),
                     subagents: session.subagents.clone().unwrap_or_default(),
@@ -384,6 +385,7 @@ impl ViewerSnapshot {
                     // widens these once it knows whether the session manager holds
                     // the session and what the agent has advertised.
                     capabilities: ViewerSessionCapabilities {
+                        dismiss_notification: false,
                         clear_context: false,
                         open: false,
                         read_history: false,
@@ -540,6 +542,8 @@ impl ViewerSession {
 pub struct ViewerSession {
     #[serde(default)]
     pub attention: mj_core::attention::SessionAttention,
+    #[serde(default)]
+    pub notification_dismissal: Option<mj_core::attention::NotificationDismissal>,
     #[serde(default = "oracle_default_enabled")]
     pub oracle: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1291,6 +1295,8 @@ pub struct ViewerSessionCapabilities {
     pub suspend: bool,
     pub destroy: bool,
     pub rename: bool,
+    #[serde(default)]
+    pub dismiss_notification: bool,
     pub resume: bool,
     /// Prepare and confirm a daemon-owned move to a compatible profile or
     /// target. The browser must never compose Stop and Resume itself.

@@ -26,6 +26,7 @@ pub(super) fn controller_action_session_id(action: &ControllerAction) -> Option<
         | ControllerAction::RemoveQueuedPrompt { session_id, .. }
         | ControllerAction::RespondElicitation { session_id, .. }
         | ControllerAction::Rename { session_id, .. }
+        | ControllerAction::DismissNotification { session_id, .. }
         | ControllerAction::TurnControl { session_id, .. }
         | ControllerAction::InterruptTurn { session_id }
         | ControllerAction::SetConfig { session_id, .. }

@@ -274,6 +274,10 @@ pub(super) async fn handle_action(
             state.attachments().remove(&client_id);
             Ok(DaemonReply::Done)
         }
+        DaemonAction::DismissNotification { session_id, target } => {
+            let ordinal = state.dismiss_notification(session_id, target).await?;
+            Ok(DaemonReply::Ordinal(ordinal))
+        }
         DaemonAction::PersistReadReceipt {
             client_id,
             workspace_id,
@@ -1086,6 +1090,9 @@ pub(super) fn upgrade_request_activity(
     {
         return crate::upgrade::activity("new-session preflight remote repairs").map(Some);
     }
+    if matches!(action, DaemonAction::DismissNotification { .. }) {
+        return crate::upgrade::activity("notification dismissal").map(Some);
+    }
     if matches!(action, DaemonAction::SaveSidebarSize { .. }) {
         return crate::upgrade::activity("sidebar size setting").map(Some);
     }
@@ -1239,4 +1246,53 @@ fn available_auth(paths: Vec<PathBuf>) -> Option<PathBuf> {
             }
         },
     )
+}
+
+impl RuntimeState {
+    pub(crate) async fn dismiss_notification(
+        &self,
+        session_id: String,
+        target: mj_core::attention::NotificationDismissal,
+    ) -> Result<u64> {
+        let runtime = self.runtime_publication()?;
+        if matches!(
+            target,
+            mj_core::attention::NotificationDismissal::Question(_)
+        ) && runtime.metadata.notification_dismissals.get(&session_id) != Some(&target)
+        {
+            return Err(mj_core::refusal::Refusal::precondition(
+                "notification is no longer current",
+            )
+            .into());
+        }
+        match target {
+            mj_core::attention::NotificationDismissal::Question(question) => {
+                self.session_manager
+                    .session(&session_id)
+                    .await?
+                    .submit(
+                        format!("dismiss-question-{}", question.completed_ordinal),
+                        RelayCommand::DismissQuestion { question },
+                    )
+                    .await
+            }
+            mj_core::attention::NotificationDismissal::ReadThrough(through) => {
+                let workspace_id = runtime
+                    .records
+                    .get(&session_id)
+                    .context("session missing")?
+                    .workspace_id
+                    .clone();
+                blocking(move || {
+                    crate::database::persist_read_receipt(
+                        "notification-dismissal",
+                        &workspace_id,
+                        &session_id,
+                        through,
+                    )
+                })
+                .await
+            }
+        }
+    }
 }

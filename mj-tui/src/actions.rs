@@ -55,7 +55,7 @@ pub enum CommandId {
     ResumeDialog,
     RenameSession,
     ChangedFiles,
-    DismissQuestion,
+    DismissNotification,
     ContainerSettings,
     MoveSession,
     CopySessionId,
@@ -280,31 +280,18 @@ fn selected_session_ready(dashboard: &DashboardState) -> Availability {
     }
 }
 
-fn dismiss_question_available(dashboard: &DashboardState) -> Availability {
+fn dismiss_notification_available(dashboard: &DashboardState) -> Availability {
     let Some(session) = dashboard.command_session() else {
         return Availability::Hidden;
     };
-    if dashboard.question_dismissal_pending(&session.id) {
-        return Availability::Blocked("Dismissing question");
+    if dashboard.notification_dismissal_pending(&session.id) {
+        return Availability::Blocked("Dismissing notification");
     }
-    let Some(detail) = dashboard.session_details.get(&session.id) else {
-        return Availability::Blocked("No prose question is active");
-    };
-    if !session.state.is_active()
-        || detail.dismissible_question.is_none()
-        || !detail.pending_elicitations.is_empty()
-        || detail.current_turn_started_at.is_some()
-        || !detail.queued_prompts.is_empty()
+    if dashboard
+        .notification_dismissal_target(&session.id)
+        .is_none()
     {
-        return Availability::Blocked("No prose question is active");
-    }
-    if !detail.activity.dismiss_question_supported {
-        return Availability::Blocked("This worker does not support question dismissal yet");
-    }
-    if dashboard.session_operations.contains_key(&session.id)
-        || dashboard.unreachable_sessions.contains(&session.id)
-    {
-        return Availability::Blocked("Wait for the session to reconnect");
+        return Availability::Blocked("No dismissible notification is active");
     }
     Availability::Ready
 }
@@ -1015,16 +1002,16 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         available: live_session,
     },
     CommandSpec {
-        id: CommandId::DismissQuestion,
-        label: "Dismiss question",
-        description: "Dismiss this question without sending input or granting approval.",
+        id: CommandId::DismissNotification,
+        label: "Dismiss notification",
+        description: "Dismiss this notification without sending input or granting approval.",
         scope: Scope::Session,
         pane_keys: &[],
         action: None,
         footer: no_footer,
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
-        available: dismiss_question_available,
+        available: dismiss_notification_available,
     },
     CommandSpec {
         id: CommandId::InterruptTurn,
@@ -1605,7 +1592,7 @@ pub(crate) fn available(dashboard: &DashboardState, scope_filter: Option<Scope>)
                         | CommandId::RenameSession
                         | CommandId::ContainerSettings
                         | CommandId::ChangedFiles
-                        | CommandId::DismissQuestion
+                        | CommandId::DismissNotification
                         | CommandId::MoveSession
                         | CommandId::ChangeWorkspace
                         | CommandId::DestroySession
@@ -1690,7 +1677,7 @@ impl DashboardState {
                     | CommandId::RenameSession
                     | CommandId::ContainerSettings
                     | CommandId::ChangedFiles
-                    | CommandId::DismissQuestion
+                    | CommandId::DismissNotification
                     | CommandId::MoveSession
                     | CommandId::ChangeWorkspace
                     | CommandId::SuspendSession
@@ -1852,8 +1839,8 @@ impl DashboardState {
                 DashboardAction::None
             }
             CommandId::ChangedFiles => self.begin_changed_files(),
-            CommandId::DismissQuestion => match dismiss_question_available(self) {
-                Availability::Ready => self.begin_dismiss_question(),
+            CommandId::DismissNotification => match dismiss_notification_available(self) {
+                Availability::Ready => self.begin_dismiss_notification(),
                 Availability::Blocked(reason) => {
                     self.set_notice(sentence(reason));
                     DashboardAction::None

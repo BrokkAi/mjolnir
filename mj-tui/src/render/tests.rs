@@ -3234,6 +3234,7 @@ fn golden_dashboard_session_render() {
     let mut dashboard = dashboard_with_session(running_session());
     apply_materialized_transcript(&mut dashboard, numbered_conversation(2));
     clear_session_activity(&mut dashboard, "session-1");
+    dashboard.set_session_attention_for("session-1", mj_core::attention::SessionAttention::Unread);
     dashboard
         .session_details
         .get_mut("session-1")

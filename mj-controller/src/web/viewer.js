@@ -1615,6 +1615,7 @@ function attentionParts(session) {
   const attention = {
     needs_input: ['?', 'Input needed'],
     important: ['!', 'Important'],
+    unread: ['✓', 'Unread'],
     failed: ['×', 'Failed'],
     unreachable: ['×', 'Unreachable'],
   }[session.attention];
@@ -1692,7 +1693,28 @@ function updateSessionCard(card, session) {
   card._metaSeparators[0].hidden = !(shown[0] && shown[1]);
   card._metaSeparators[1].hidden = !((shown[0] || shown[1]) && shown[2]);
   updateSessionActivity(card, session);
+  renderNotificationDismissal(card, session, actionError);
   updateSessionMenu(card, session);
+}
+
+function renderNotificationDismissal(container, session, errorNode) {
+  let control = container.querySelector('[data-dismiss-notification]');
+  if (!session.capabilities?.dismiss_notification) {
+    control?.remove();
+    return;
+  }
+  if (!control) {
+    control = button('Dismiss notification', 'secondary');
+    control.dataset.dismissNotification = 'true';
+    container.append(control);
+  }
+  control.disabled = pendingActions.has(`dismiss-notification:${session.id}`);
+  const target = session.notification_dismissal;
+  control.onclick = event => {
+    event.stopPropagation();
+    return runSessionAction({ action: 'dismiss-notification', id: session.id }, errorNode,
+      { target });
+  };
 }
 
 function updateSessionMenu(card, session) {
@@ -8785,6 +8807,8 @@ function renderTurnControl(session) {
 }
 
 function renderConversationHeader(session) {
+  renderNotificationDismissal(document.querySelector('.conversation-header'), session,
+    document.querySelector('#conversation-error'));
   syncConversationMode(session);
   renderSessionTitle(document.querySelector('#conversation-title'), session);
   renderPromptSettings(session);

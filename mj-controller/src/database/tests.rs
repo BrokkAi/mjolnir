@@ -3132,6 +3132,21 @@ fn detach_receipt_is_monotonic_and_cannot_pass_projection() {
         .unwrap(),
         2
     );
+    assert_eq!(
+        persist_read_receipt_with(
+            &mut connection,
+            "notification-dismissal",
+            DEFAULT_WORKSPACE_ID,
+            "session-1",
+            1
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions["session-1"].viewed_through_event_ordinal,
+        2
+    );
     assert!(
         persist_read_receipt_with(
             &mut connection,

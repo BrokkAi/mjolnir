@@ -1202,9 +1202,10 @@ fn subagent_scope_filters_attention_without_selecting_an_idle_child() {
         .unwrap()
         .unread_agent_messages = 1;
 
+    dashboard.set_session_attention_for("e-unread", mj_core::attention::SessionAttention::Unread);
     crate::test_support::serve_attention(
         &mut dashboard,
-        &["a-idle", "b-parked", "e-unread"],
+        &["a-idle", "b-parked"],
         mj_core::attention::SessionAttention::Idle,
     );
     crate::test_support::serve_attention(
@@ -1485,7 +1486,12 @@ fn mark_all_read_leaves_another_workspaces_session_unread() {
             id,
             vec![agent_message(4, "unread response")],
         );
-        assert!(dashboard.session_details[id].has_unread(), "{id}");
+        dashboard.set_session_attention_for(id, mj_core::attention::SessionAttention::Unread);
+        assert_eq!(
+            dashboard.attention_level(id),
+            AttentionLevel::Unread,
+            "{id}"
+        );
     }
 
     assert_eq!(
@@ -1495,7 +1501,7 @@ fn mark_all_read_leaves_another_workspaces_session_unread() {
         }
     );
     assert!(
-        dashboard.session_details["remote"].has_unread(),
+        dashboard.attention_level("remote") == AttentionLevel::Unread,
         "a session in another workspace keeps its unread marker"
     );
     assert_eq!(
@@ -2039,7 +2045,7 @@ fn dashboard_with_attention_mix() -> DashboardState {
             "remote".into(),
             mj_core::attention::SessionAttention::NeedsInput,
         ),
-        ("done".into(), mj_core::attention::SessionAttention::Idle),
+        ("done".into(), mj_core::attention::SessionAttention::Unread),
         ("quiet".into(), mj_core::attention::SessionAttention::Idle),
     ]));
     dashboard.set_workspace_names(BTreeMap::from([
@@ -2239,7 +2245,7 @@ fn viewing_one_failure_reveals_the_five_unread_sessions_without_relabeling_them(
         crate::test_support::serve_attention(
             &mut dashboard,
             &[&id],
-            mj_core::attention::SessionAttention::Idle,
+            mj_core::attention::SessionAttention::Unread,
         );
     }
     crate::test_support::serve_attention(
@@ -2250,7 +2256,7 @@ fn viewing_one_failure_reveals_the_five_unread_sessions_without_relabeling_them(
     crate::test_support::serve_attention(
         &mut dashboard,
         &["done-0", "done-1", "done-2", "done-3", "done-4"],
-        mj_core::attention::SessionAttention::Idle,
+        mj_core::attention::SessionAttention::Unread,
     );
     dashboard.select_active_session("failed");
     assert_eq!(
@@ -2857,7 +2863,7 @@ fn golden_attention_navigation() {
         .unread_agent_messages = 0;
     crate::test_support::serve_attention(
         &mut folded,
-        &["asks", "remote"],
+        &["asks", "remote", "done"],
         mj_core::attention::SessionAttention::Idle,
     );
     let action = chord(&mut folded, CommandId::NextAttention);
@@ -3178,11 +3184,11 @@ fn dashboard_with_an_unread_reply_off_screen() -> DashboardState {
     );
     reply.execution = MaterializedExecutionState::Idle;
     dashboard.apply_materialized_session(&reply);
-    // Attention is a separate host publication; the transcript supplies unread state.
+    // Attention, including unread, arrives in the host publication.
     crate::test_support::serve_attention(
         &mut dashboard,
         &["beta"],
-        mj_core::attention::SessionAttention::Idle,
+        mj_core::attention::SessionAttention::Unread,
     );
     dashboard
 }

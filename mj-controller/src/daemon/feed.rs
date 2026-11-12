@@ -339,6 +339,7 @@ impl RuntimeState {
         }
         full.sessions = sessions;
         history.publish(full.clone())?;
+        source.metadata.notification_dismissals = full.metadata.notification_dismissals.clone();
         source.metadata.session_attention = full.metadata.session_attention.clone();
         history.attention_source = source;
         history.native_owners = native_owners;
