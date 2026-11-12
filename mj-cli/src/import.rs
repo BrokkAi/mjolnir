@@ -14,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::{ArgGroup, Args, Subcommand};
-use mj_core::config::{Config, HarnessKind, sessions_dir};
+use mj_core::config::{Config, HarnessKind};
 use mj_core::state::{SessionRecord, State};
 
 use mj_controller::controller::Controller;
@@ -72,6 +72,9 @@ pub(crate) struct NativeImportArgs {
     /// Existing configured bundle to associate with the imported session.
     #[arg(long)]
     bundle: Option<String>,
+    /// Project directory on the daemon host (defaults to the recorded directory).
+    #[arg(long)]
+    path: Option<PathBuf>,
     /// Title displayed in Mjolnir's dashboard.
     #[arg(long)]
     title: Option<String>,
@@ -220,6 +223,7 @@ pub(crate) fn import_named_native_session(
             latest: false,
             profile: None,
             bundle: None,
+            path: None,
             title: None,
             allow_dirty_local: false,
             allow_omitted_non_git: false,
@@ -297,6 +301,7 @@ fn import_native(
     // the configuration file.
     let (bundle_id, bundle) =
         resolve_import_bundle(&mut config, &transcript, &targets, args.bundle.as_deref())?;
+    let archive_directory = tempfile::tempdir().context("create import staging directory")?;
     let imported = import_native_session(
         &config,
         &mut state,
@@ -309,7 +314,7 @@ fn import_native(
             bundle_id: &bundle_id,
             profile_id: source.profile_id.as_deref(),
             title: args.title.as_deref(),
-            archive_directory: &sessions_dir(),
+            archive_directory: archive_directory.path(),
         },
         None,
     )?;
@@ -318,6 +323,9 @@ fn import_native(
         .get_mut(&imported.session_id)
         .context("import did not add its session to controller state")?;
     session.workspace_id = workspace_id.to_owned();
+    if let Some(path) = args.path {
+        session.project_directory = Some(path);
+    }
     let (review, review_notice) = import_review(&config, review);
     session.review = review;
     persist_imported_session(
@@ -446,17 +454,29 @@ fn confirm_import_safety(
 }
 
 pub(crate) fn persist_imported_session(
-    session: &SessionRecord,
+    session: &mut SessionRecord,
     bundle: Option<crate::daemon::ImportedBundle>,
 ) -> Result<()> {
-    let session = session.clone();
+    let prepared = session.clone();
     tokio::runtime::Handle::try_current().context(IMPORT_RUNTIME_CONTEXT)?;
-    mj_core::runtime::block_on(async {
-        crate::daemon::connect_or_start()
+    *session = mj_core::runtime::block_on(async {
+        let mut client = crate::daemon::connect_or_start().await?;
+        let session = prepared;
+        let session_id = session.id.clone();
+        let path = &session
+            .checkpoint
+            .as_ref()
+            .context("import has no archive")?
+            .archive_path;
+        let mut file = tokio::fs::File::open(path).await?;
+        let blob = client.upload(&mut file).await?;
+        client.import_session(session, bundle, blob).await?;
+        client
+            .session_record(session_id)
             .await?
-            .persist_imported_session(session, bundle)
-            .await
-    })?
+            .context("imported session disappeared")
+    })??;
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -481,6 +501,7 @@ pub(crate) struct ImportBundlePrompt {
 
 pub(crate) struct DashboardImportSuccess {
     pub(crate) harness: &'static str,
+    pub(crate) _archive_directory: tempfile::TempDir,
     pub(crate) session_id: String,
     pub(crate) controller: Controller,
 }
@@ -864,6 +885,7 @@ fn import_session_from_profile(
         progress: &archive_progress,
         include_untracked: false,
     };
+    let archive_directory = tempfile::tempdir().context("create import staging directory")?;
     let imported = import_native_session(
         &controller.config,
         &mut controller.state,
@@ -876,7 +898,7 @@ fn import_session_from_profile(
             bundle_id: &bundle_id,
             profile_id: Some(profile_id),
             title: Some(display_title),
-            archive_directory: &sessions_dir(),
+            archive_directory: archive_directory.path(),
         },
         Some(&control),
     )?;
@@ -889,6 +911,7 @@ fn import_session_from_profile(
     report(4, Some(4), "Finalizing imported session…", true);
     Ok(DashboardImportTaskResult::Imported(Box::new(
         DashboardImportSuccess {
+            _archive_directory: archive_directory,
             harness: profile.kind.display_name(),
             session_id: imported.session_id,
             controller,

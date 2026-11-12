@@ -12341,6 +12341,19 @@ async fn daemon_upload_exchange() {
         .await
         .unwrap_err();
     output.push_str(&format!("corrupt payload: {error}\n"));
+    let error = client
+        .request(DaemonAction::ImportSession {
+            blob: "another-connections-blob".into(),
+            session: Box::new(runtime_test_session(
+                "import-session",
+                "default",
+                SessionState::Stopped,
+            )),
+            bundle: None,
+        })
+        .await
+        .unwrap_err();
+    output.push_str(&format!("import unknown blob: {error}\n"));
     let reply = client.request(DaemonAction::Ping).await.unwrap();
     output.push_str(&format!(
         "connection after refusal: {}\n",

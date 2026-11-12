@@ -1062,9 +1062,6 @@ async fn run_command(
             setup(args).map(|()| DashboardExit::Normal)
         }
         Some(Command::Import(args)) => {
-            if daemon::container::exec_in_container(&container_forwarded_args()).await? {
-                return Ok(DashboardExit::Normal);
-            }
             let workspace_id =
                 resolve_store_workspace(args.workspace().or(requested_workspace).as_deref())
                     .await?;

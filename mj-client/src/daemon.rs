@@ -817,7 +817,8 @@ pub enum DaemonAction {
         workspace_id: String,
         layout: mj_core::workspace::ConversationLayout,
     },
-    PersistImportedSession {
+    ImportSession {
+        blob: String,
         session: Box<SessionRecord>,
         /// A project the import synthesized. The daemon writes it with the
         /// session, so a client never edits the daemon's configuration.
@@ -2199,13 +2200,15 @@ impl DaemonClient {
         }
     }
 
-    pub async fn persist_imported_session(
+    pub async fn import_session(
         &mut self,
         session: SessionRecord,
         bundle: Option<ImportedBundle>,
+        blob: String,
     ) -> Result<()> {
         match self
-            .request(DaemonAction::PersistImportedSession {
+            .request(DaemonAction::ImportSession {
+                blob,
                 session: Box::new(session),
                 bundle,
             })

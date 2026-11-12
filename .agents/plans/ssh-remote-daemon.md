@@ -24,6 +24,8 @@ This is private-network operation with working SSH authentication and host trust
 - [ ] Implement and validate milestone 6: matching-build PowerShell go script.
 - [ ] Implement milestone 7: user documentation, final validation, platform dispatch and real Windows acceptance.
 
+- [ ] (2026-11-12, import child) Transport checkpoint: CLI and dashboard stage archives in retained client tempdirs, upload on the consuming connection, and register a daemon-owned archive through admitted ImportSession. Import-only container forwarding removed. Dialog path selection, cancellable upload, coherent daemon project-path remapping, and separated-directory CLI acceptance remain outstanding. Validation evidence is recorded in the child report.
+
 ## Surprises & Discoveries
 
 The existing `mj-voice-worker` combines microphone capture, WAV encoding and an HTTP transcription call in one operation requiring `--codex-auth`. It has no capture-only or supplied-audio transcription mode (`voice-worker/src/main.rs`, `backend.rs::run`, `backend.rs::transcribe`). The parent resolved the split below before implementation.
@@ -237,3 +239,5 @@ Revision note (2026-11-12): Initial plan written from verified research and sett
 Blob interface (2026-11-12): `DaemonClient::upload(&mut (impl AsyncRead + Unpin)) -> Result<String>` streams 64 KiB raw fragments and a completion SHA-256, without replay. The returned opaque ID belongs to that authenticated connection; a subsequent `InstallAttachment { session_id, reference, blob }` consumes it. New import/audio consumers must use this same connection and consume the daemon file, rather than put bytes in actions. `UploadChunk { bytes, sha256: Option<String> }` uses `None` for fragments and `Some` for completion. Connection-owned temporary directories beneath daemon `data_dir()/uploads` remove incomplete/unconsumed files on disconnect; daemon startup removes crash leftovers. Protocol stays 88 for parent renumbering.
 
 Discovery (2026-11-12, blob checkpoint): the full controller suite leaks `sleep 600` from `daemon::tests::child_close_yields_handoff_and_replays_its_durable_request_with_the_final_journal` (blocked phase) and `session_manager::tests::retirement_ends_a_connect_that_never_answers`, identified by the orphan subprocess environment. The checkpoint run terminated its own orphan process groups after validation.
+
+Discovery (2026-11-12, import child): the dashboard applies the prepared SessionRecord after persistence; after moving installation to the daemon, fetch that record back before applying it or the UI retains a deleted client staging path.

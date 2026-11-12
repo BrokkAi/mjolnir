@@ -1204,7 +1204,7 @@ pub(crate) fn spawn_imported_session_apply(
         "saving imported session",
         updates,
         move || {
-            let session = imported
+            let mut session = imported
                 .controller
                 .state
                 .sessions
@@ -1217,13 +1217,11 @@ pub(crate) fn spawn_imported_session_apply(
                 .get(&session.bundle_id)
                 .cloned()
                 .context("import worker did not return its session bundle")?;
-            persist_imported_session(
-                &session,
-                Some(crate::daemon::ImportedBundle {
-                    bundle_id: session.bundle_id.clone(),
-                    bundle: bundle.clone(),
-                }),
-            )?;
+            let imported_bundle = crate::daemon::ImportedBundle {
+                bundle_id: session.bundle_id.clone(),
+                bundle: bundle.clone(),
+            };
+            persist_imported_session(&mut session, Some(imported_bundle))?;
             Ok(ImportedDashboardSessionApply {
                 harness: imported.harness,
                 native_session_id: pending.native_session_id,

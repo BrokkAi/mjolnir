@@ -319,6 +319,52 @@ pub(super) async fn serve_client(
                     .map_err(|error| format!("{error:#}")),
                     None => Err("unknown upload blob".into()),
                 }
+            } else if let DaemonAction::ImportSession {
+                blob,
+                mut session,
+                bundle,
+            } = request.action
+            {
+                match blobs.remove(&blob) {
+                    Some(path) => {
+                        let result = blocking(move || {
+                            anyhow::ensure!(session.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'), "invalid imported session id");
+                            let verified = mj_checkpoint::archive::verify_archive_streaming(&path)?;
+                            let checkpoint = session.checkpoint.as_mut().context("imported session has no checkpoint")?;
+                            anyhow::ensure!(verified.archive_sha256 == checkpoint.sha256, "import archive digest mismatch");
+                            let directory = mj_core::config::sessions_dir();
+                            std::fs::create_dir_all(&directory)?;
+                            let destination = directory.join(format!("{}.hel.zip", session.id));
+                            checkpoint.archive_path = destination.clone();
+                            let mut output = std::fs::OpenOptions::new().write(true).create_new(true).open(&destination)?;
+                            let registered = (|| -> Result<()> {
+                                std::io::copy(&mut std::fs::File::open(&path)?, &mut output)?;
+                                if let Some(imported) = bundle {
+                                    let ImportedBundle { bundle_id, bundle } = imported;
+                                    Config::update(|config| {
+                                        if let Some(existing) = config.bundles.get(&bundle_id) {
+                                            anyhow::ensure!(existing == &bundle, "bundle {bundle_id:?} changed during import; retry the import");
+                                        } else {
+                                            config.bundles.insert(bundle_id.clone(), bundle);
+                                        }
+                                        Ok(())
+                                    })?;
+                                }
+                                crate::import::persist_imported_session_locally(&session)
+                            })();
+                            if registered.is_err() {
+                                std::fs::remove_file(&destination).context("remove failed import archive")?;
+                            }
+                            registered?;
+                            Ok(DaemonReply::Done)
+                        }).await;
+                        if result.is_ok() {
+                            refresh_runtime_controller(&state).await;
+                        }
+                        result.map_err(|error| format!("{error:#}"))
+                    }
+                    None => Err("unknown upload blob".into()),
+                }
             } else {
                 Box::pin(handle_action(
                     request.action,

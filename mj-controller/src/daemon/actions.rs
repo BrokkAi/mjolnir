@@ -336,28 +336,7 @@ pub(super) async fn handle_action(
             blocking(move || crate::database::save_workspace_layout(&workspace_id, layout)).await?;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::PersistImportedSession { session, bundle } => {
-            blocking(move || {
-                if let Some(imported) = bundle {
-                    let ImportedBundle { bundle_id, bundle } = imported;
-                    Config::update(|config| {
-                        if let Some(existing) = config.bundles.get(&bundle_id) {
-                            anyhow::ensure!(
-                                existing == &bundle,
-                                "bundle {bundle_id:?} changed during import; retry the import"
-                            );
-                        } else {
-                            config.bundles.insert(bundle_id.clone(), bundle);
-                        }
-                        Ok(())
-                    })?;
-                }
-                crate::import::persist_imported_session_locally(&session)
-            })
-            .await?;
-            refresh_runtime_controller(state).await;
-            Ok(DaemonReply::Done)
-        }
+        DaemonAction::ImportSession { .. } => bail!("blob action outside connection transport"),
         DaemonAction::SessionProjectSource { session_id } => {
             let controller = state.with_controller(|controller| crate::controller::Controller {
                 config: controller.config.clone(),
