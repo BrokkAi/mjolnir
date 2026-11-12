@@ -1,6 +1,7 @@
 //! Authenticated local daemon protocol and client transport.
 mod chunk_bytes;
 pub mod connector;
+pub mod login_terminal;
 pub mod ssh;
 use crate::executable::describe_running_daemon_and_client_builds;
 use crate::session::{ManagedSessionView, ViewError};
@@ -709,12 +710,38 @@ pub enum DaemonAction {
     ProveIdentity {
         nonce: String,
     },
+    LoginTerminal {
+        profile_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    PreviewBuildCache {
+        machine: mj_core::config::Machine,
+    },
+    InstallMbx {
+        machine: mj_core::config::Machine,
+    },
     PreflightNewSession {
         request: NewSessionPreflightRequest,
     },
     ValidateProjectDirectory {
         target_id: String,
         directory: PathBuf,
+    },
+    CheckpointArchiveSizes {
+        paths: std::collections::BTreeMap<String, PathBuf>,
+    },
+    SaveSpinnerStyle {
+        style: mj_core::config::SpinnerStyle,
+    },
+    TestTarget {
+        target_id: String,
+    },
+    ProfileLoginStatuses,
+    CheckAvailability,
+    DiscoverSetup {
+        scope: crate::discovery::DetectScope,
+        machines: Vec<(String, mj_core::config::Machine)>,
     },
     CompletePath {
         host: mj_core::path_completion::CompletionHost,
@@ -1245,6 +1272,18 @@ pub enum DaemonReply {
     IdentityProof {
         mac: Vec<u8>,
     },
+    LoginTerminalReady,
+    BuildCachePreview(Option<mj_core::state::BuildCachePreview>, bool),
+    MbxInstalled(String),
+    CheckpointArchiveSizes(
+        std::collections::BTreeMap<String, std::result::Result<Option<u64>, String>>,
+    ),
+    SetupDiscovery(Box<crate::discovery::SetupDetection>),
+    Availability(
+        #[serde(deserialize_with = "deserialize_availability")]
+        crate::availability::AvailabilityChecked,
+    ),
+    ProfileLoginStatuses(std::collections::BTreeMap<String, mj_core::credentials::LoginStatus>),
     NewSessionPreflight(PreflightNew),
     PathCompletion(mj_core::path_completion::PathCompletion),
     ProjectDirectories(Vec<(std::path::PathBuf, bool)>),
@@ -1711,12 +1750,18 @@ fn read_metadata_at(path: &std::path::Path) -> Result<DaemonMetadata> {
     Ok(metadata)
 }
 
-pub async fn write_frame<T: Serialize>(stream: &mut TcpStream, value: &T) -> Result<()> {
+pub async fn write_frame<T: Serialize>(
+    stream: &mut (impl tokio::io::AsyncWrite + Unpin),
+    value: &T,
+) -> Result<()> {
     let body = serde_json::to_vec(value)?;
     write_encoded_frame(stream, &body).await
 }
 
-pub async fn write_encoded_frame(stream: &mut TcpStream, body: &[u8]) -> Result<()> {
+pub async fn write_encoded_frame(
+    stream: &mut (impl tokio::io::AsyncWrite + Unpin),
+    body: &[u8],
+) -> Result<()> {
     ensure!(
         body.len() <= MAX_FRAME_BYTES,
         "daemon frame is too large: {} bytes exceeds {MAX_FRAME_BYTES}",
@@ -1728,7 +1773,9 @@ pub async fn write_encoded_frame(stream: &mut TcpStream, body: &[u8]) -> Result<
     Ok(())
 }
 
-pub async fn read_frame<T: for<'de> Deserialize<'de>>(stream: &mut TcpStream) -> Result<T> {
+pub async fn read_frame<T: for<'de> Deserialize<'de>>(
+    stream: &mut (impl tokio::io::AsyncRead + Unpin),
+) -> Result<T> {
     let length = stream.read_u32().await? as usize;
     ensure!(
         length <= MAX_FRAME_BYTES,
@@ -3443,7 +3490,9 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Version 93: Antigravity harness identities in session and profile snapshots.
 // Version 94: served unread attention, notification dismissal targets and
 // unread frontiers.
-pub const PROTOCOL_VERSION: u32 = 94;
+// Version 95: authenticated daemon-owned login terminal streams.
+// Version 95: milestone-4 setup discovery, availability, login status and machine actions.
+pub const PROTOCOL_VERSION: u32 = 95;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
@@ -3525,8 +3574,8 @@ impl DaemonClient {
 }
 
 impl DaemonAction {
-    /// These disposable machine reads use a dedicated connection. Closing it
-    /// cancels subprocesses; daemon handoff may abandon the read as well.
+    /// Disposable machine work uses dedicated connections. Closing one or
+    /// handing off the daemon cancels it; interrupted installs can be rerun.
     pub fn is_cancellable_machine_action(&self) -> bool {
         if let Self::PreflightNewSession { request } = self
             && !request.remote_repairs.is_empty()
@@ -3535,7 +3584,14 @@ impl DaemonAction {
         }
         matches!(
             self,
-            Self::PreflightNewSession { .. }
+            Self::InstallMbx { .. }
+                | Self::PreviewBuildCache { .. }
+                | Self::CheckpointArchiveSizes { .. }
+                | Self::TestTarget { .. }
+                | Self::ProfileLoginStatuses
+                | Self::CheckAvailability
+                | Self::DiscoverSetup { .. }
+                | Self::PreflightNewSession { .. }
                 | Self::ValidateProjectDirectory { .. }
                 | Self::CompletePath { .. }
                 | Self::CheckProjectDirectories { .. }
@@ -3617,6 +3673,12 @@ async fn reconnect_after_upload_refusal() -> Result<DaemonClient> {
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
+}
+
+fn deserialize_availability<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<crate::availability::AvailabilityChecked, D::Error> {
+    mj_core::config::with_environment_sources_only(|| serde::Deserialize::deserialize(deserializer))
 }
 
 #[cfg(test)]

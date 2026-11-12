@@ -171,6 +171,10 @@ impl DashboardContext {
     /// terminal output. That is why the loop does not track which mutations
     /// were visible; it only paces how often background changes are drawn.
     pub(crate) fn draw(&mut self) -> Result<()> {
+        if let Some(login) = &self.login {
+            self.drawn_chat_sessions.clear();
+            return self.terminal.draw(|frame| login.render(frame));
+        }
         if let Some(splash) = &self.splash {
             if !splash.finished() {
                 // Nothing behind the splash has been seen, so nothing is
@@ -381,8 +385,6 @@ impl DashboardContext {
                 continue;
             }
             if let Some(target) = target {
-                self.checkpoint_archive_targets_seen
-                    .insert(id.clone(), target.clone());
                 changed_targets.insert(id.clone(), target.clone());
             } else {
                 self.checkpoint_archive_targets_seen.remove(id);

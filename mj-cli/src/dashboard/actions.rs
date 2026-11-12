@@ -1,7 +1,7 @@
 //! What the dashboard does with the work its key handling asks for.
 //!
 //! Every arm here either updates UI state directly or starts a background job,
-//! except `SetupLogin`, which hands the terminal to `mj login` and waits for it.
+//! including `SetupLogin`, whose terminal connection runs in a background task.
 
 use mj_client::daemon::{DaemonAction as MachineAction, DaemonReply as MachineReply};
 use std::sync::Arc;
@@ -12,20 +12,19 @@ use mj_core::config::is_bare_project_target;
 use mj_core::state::{MoveSelection, MoveSessionRequest};
 
 use mj_controller::controller::ResumeRepositorySourceReceipt;
-use mj_controller::targets::CancellableProcessExecutor;
 use mj_tui::WebViewerAccess;
 use mj_tui::{DashboardAction, SessionOperationKind};
 
 use crate::daemon;
 use crate::dashboard::io::{
     ConfigRenameRequest, ContainerSettingsRequest, DashboardIoUpdate, LifecycleOperationRequest,
-    ResumeRepositoryPreflightApply, config_only_controller, report, spawn_async_job,
-    spawn_cancellable_io, spawn_cancellable_io_with_token, spawn_clipboard_read,
-    spawn_config_rename, spawn_create_bundle, spawn_dashboard_change_workspace,
-    spawn_dashboard_container_settings, spawn_dashboard_create_session, spawn_dashboard_rename,
-    spawn_lifecycle_operation, spawn_remove_bundle, spawn_workspace_close,
-    spawn_workspace_close_cancel, spawn_workspace_create, spawn_workspace_draft_recovery,
-    spawn_workspace_management_load, spawn_workspace_rename,
+    ResumeRepositoryPreflightApply, report, spawn_async_job, spawn_cancellable_io,
+    spawn_cancellable_io_with_token, spawn_clipboard_read, spawn_config_rename,
+    spawn_create_bundle, spawn_dashboard_change_workspace, spawn_dashboard_container_settings,
+    spawn_dashboard_create_session, spawn_dashboard_rename, spawn_lifecycle_operation,
+    spawn_remove_bundle, spawn_workspace_close, spawn_workspace_close_cancel,
+    spawn_workspace_create, spawn_workspace_draft_recovery, spawn_workspace_management_load,
+    spawn_workspace_rename,
 };
 use crate::dashboard::{DashboardContext, QUOTA_REFRESH_NOTICE, resume_progress_notice};
 use crate::import::{DashboardImportSafety, PendingDashboardImport};
@@ -492,17 +491,12 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
                 "previewing the build cache",
                 context.dashboard_io_tx.clone(),
-                move |cancelled| {
-                    // Several host commands, one of which may be an SSH
-                    // round trip each.
-                    let executor = CancellableProcessExecutor::new(cancelled)
-                        .with_deadline(std::time::Duration::from_secs(60));
-                    let result =
-                        mj_controller::controller::preview_build_cache(&machine, &executor)?;
-                    let install_mbx_available = result.as_ref().is_some_and(|preview| {
-                        mj_controller::controller::mbx_install_kind(preview).is_some()
-                    });
-                    Ok((result, install_mbx_available))
+                move |cancelled| match super::io::machine_request(
+                    MachineAction::PreviewBuildCache { machine: *machine },
+                    cancelled,
+                )? {
+                    MachineReply::BuildCachePreview(preview, available) => Ok((preview, available)),
+                    reply => anyhow::bail!("unexpected build cache reply: {reply:?}"),
                 },
                 move |result| match result {
                     Ok((result, install_mbx_available)) => DashboardIoUpdate::BuildCachePreviewed {
@@ -532,59 +526,38 @@ pub(crate) async fn apply_dashboard_action(
             {
                 return Ok(());
             }
-            let operation_label = format!("installing mbx on machine {machine_id}");
+            let tracker = context.critical_operations.clone();
             spawn_cancellable_io_with_token(
-                context.critical_operations.clone(),
-                operation_label,
+                tracker,
+                "installing mbx",
                 context.dashboard_io_tx.clone(),
                 move |cancelled| {
-                    let install_executor = CancellableProcessExecutor::new(cancelled.clone())
-                        .with_deadline(std::time::Duration::from_secs(240));
-                    let install_result = mj_controller::controller::install_mbx(
-                        &machine,
-                        &install_executor,
+                    let install_result = super::io::machine_request(
+                        MachineAction::InstallMbx {
+                            machine: *machine.clone(),
+                        },
+                        cancelled.clone(),
                     )
-                    .map(|result| {
-                        let verb = match result.kind {
-                            mj_controller::controller::MbxInstallKind::Install => "Installed",
-                            mj_controller::controller::MbxInstallKind::Upgrade => "Upgraded",
-                        };
-                        let profile = if result.profile_changed {
-                            format!("updated {}", result.profile_file)
-                        } else {
-                            format!(
-                                "left {} unchanged because its marked PATH block already exists",
-                                result.profile_file
-                            )
-                        };
-                        let mut message = format!(
-                            "{verb} mbx at {} (version {}). {profile}. New login shells will pick up the PATH change.",
-                            result.program.display(),
-                            result.version
-                        );
-                        if let Some(warning) = result.profile_warning {
-                            message.push(' ');
-                            message.push_str(&warning);
-                        }
-                        if let Some(path_line) = result.manual_path_line {
-                            message.push(' ');
-                            message.push_str(&path_line);
-                        }
-                        message
+                    .and_then(|reply| match reply {
+                        MachineReply::MbxInstalled(message) => Ok(message),
+                        reply => anyhow::bail!("unexpected mbx install reply: {reply:?}"),
                     })
-                    .map_err(|error| format!("{error:#}"));
-                    let preview_executor = CancellableProcessExecutor::new(cancelled)
-                        .with_deadline(std::time::Duration::from_secs(60));
-                    let preview_result =
-                        mj_controller::controller::preview_build_cache(&machine, &preview_executor)
-                            .map_err(|error| format!("{error:#}"));
-                    let install_mbx_available = preview_result
-                        .as_ref()
-                        .ok()
-                        .and_then(Option::as_ref)
-                        .is_some_and(|preview| {
-                            mj_controller::controller::mbx_install_kind(preview).is_some()
-                        });
+                    .map_err(|error| {
+                        format!("mbx installation interrupted — run Install again: {error:#}")
+                    });
+                    let (preview_result, install_mbx_available) = match super::io::machine_request(
+                        MachineAction::PreviewBuildCache { machine: *machine },
+                        cancelled,
+                    ) {
+                        Ok(MachineReply::BuildCachePreview(preview, available)) => {
+                            (Ok(preview), available)
+                        }
+                        Ok(reply) => (
+                            Err(format!("unexpected build cache reply: {reply:?}")),
+                            false,
+                        ),
+                        Err(error) => (Err(format!("{error:#}")), false),
+                    };
                     Ok(MbxInstallCompletion {
                         install_result,
                         preview_result,
@@ -669,16 +642,20 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::SetupLogin {
             generation,
             profile_id,
-        } => {
-            let result = run_setup_login(context, &profile_id).await;
-            context.loop_stalls.forget_pass();
-            context
-                .dashboard
-                .setup_login_finished(generation, &profile_id, result);
-        }
+        } => match super::login_terminal::ActiveLogin::start(&profile_id, generation) {
+            Ok(login) => context.login = Some(login),
+            Err(error) => context.dashboard.setup_login_finished(
+                generation,
+                &profile_id,
+                Err(format!("{error:#}")),
+            ),
+        },
         // One key refreshes both panes, so it runs both requests rather than
         // leaving the user to focus each pane in turn.
         DashboardAction::RefreshAll => {
+            // Revisit unanswered archive paths even when the dialog's rows did not change.
+            context.checkpoint_archive_records.clear();
+            context.controller_changed = true;
             context.request_quota_refresh();
             context.request_capacity_refresh();
             context.dashboard.set_notice(QUOTA_REFRESH_NOTICE);
@@ -788,19 +765,17 @@ pub(crate) async fn apply_dashboard_action(
             }
         }
         DashboardAction::TestTarget { target_id } => {
-            let config = context.controller.config.clone();
             let reported_id = target_id.clone();
             let (cancelled, _) = spawn_cancellable_io_with_token(
                 context.critical_operations.clone(),
                 format!("testing target {target_id}"),
                 context.dashboard_io_tx.clone(),
-                move |cancelled| {
-                    if cancelled.load(Ordering::Acquire) {
-                        anyhow::bail!("target test cancelled");
-                    }
-                    let executor = CancellableProcessExecutor::new(cancelled)
-                        .with_deadline(std::time::Duration::from_secs(15));
-                    config_only_controller(config).test_target(&target_id, &executor)
+                move |cancelled| match crate::dashboard::io::machine_request(
+                    MachineAction::TestTarget { target_id },
+                    cancelled,
+                )? {
+                    MachineReply::Done => Ok(()),
+                    reply => bail!("unexpected target test reply: {reply:?}"),
                 },
                 move |result| DashboardIoUpdate::TargetTest {
                     target_id: reported_id,
@@ -2279,63 +2254,6 @@ async fn dispatch_restart(
     daemon
         .restart_session_with_ack(session_id, acknowledge_container_recreation)
         .await
-}
-
-/// Run `mj login` for one profile with the dashboard's terminal handed over.
-///
-/// The interactive child must own standard input for browser and device-code
-/// prompts, so the event stream is dropped before the child starts and the
-/// terminal is restored on every path, including a failed spawn.
-async fn run_setup_login(context: &mut DashboardContext, profile_id: &str) -> Result<(), String> {
-    let executable =
-        std::env::current_exe().map_err(|error| format!("find the mj executable: {error}"))?;
-    // The event stream must be gone before the child owns stdin. Crossterm
-    // stops its reader thread when the stream is dropped, so releasing the
-    // last handle here (rather than after the child) is what makes the
-    // handover safe.
-    let events = context.events.take();
-    drop(events);
-    if let Err(error) = context.terminal.suspend() {
-        context.events = Some(crossterm::event::EventStream::new());
-        return Err(format!("{error:#}"));
-    }
-    let profile = profile_id.to_owned();
-    // Ctrl+C belongs to the login child, not to the dashboard's shutdown
-    // coordinator, while the terminal is handed over.
-    let _interrupts = mj_controller::termination::suppress_interrupts();
-    // The interactive child cannot run on a runtime worker. The dashboard
-    // waits for the handover, but the Tokio worker remains available for the
-    // daemon's other tasks.
-    let joined = tokio::task::spawn_blocking(move || {
-        std::process::Command::new(executable)
-            .args([
-                "--instance",
-                &mj_core::config::instance_name().unwrap_or_else(|| "default".to_owned()),
-                "login",
-                "--profile",
-                &profile,
-            ])
-            .status()
-    })
-    .await;
-    // Restore the terminal on every path: a failed spawn or a panicking child
-    // must not leave the dashboard on the primary screen with no input.
-    let resumed = context.terminal.resume();
-    context.events = Some(crossterm::event::EventStream::new());
-    if let Err(error) = resumed {
-        context.request_shutdown();
-        return Err(format!("{error:#}"));
-    }
-    let status = joined
-        .map_err(|error| format!("sign-in task failed: {error}"))?
-        .map_err(|error| format!("could not start `mj login --profile {profile_id}`: {error}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "`mj login --profile {profile_id}` exited with {status}; rerun it from a shell for the full output"
-        ))
-    }
 }
 
 #[cfg(test)]

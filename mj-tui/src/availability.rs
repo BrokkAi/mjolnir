@@ -12,58 +12,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use mj_core::config::{
-    HarnessProfile, Machine, TargetTemplate, runtime_kind_name, target_machine_id,
+use mj_core::config::{HarnessProfile, TargetTemplate, runtime_kind_name, target_machine_id};
+
+use crate::{DashboardAction, DashboardState, Mode};
+
+pub use mj_client::availability::{
+    AvailabilityChecked, LocalEngine, MachineFinding, MachineRuntimeProbe,
 };
-
-use crate::{DashboardAction, DashboardState, Mode, RejectedRuntime};
-
-/// What probing one machine found.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MachineRuntimeProbe {
-    pub machine_id: String,
-    /// The machine as it was probed.
-    pub machine: Machine,
-    pub finding: MachineFinding,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MachineFinding {
-    /// The machine answered.
-    Answered {
-        /// The runtimes it can run, under the ids they would like.
-        runtimes: Vec<(String, TargetTemplate)>,
-        /// The runtimes it cannot run, with why.
-        rejected: Vec<RejectedRuntime>,
-    },
-    /// The machine did not answer, so what it runs is unknown.
-    Unreachable { detail: String, remediation: String },
-}
-
-/// One of this computer's container engines, as a check found it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LocalEngine {
-    /// Why it cannot run sessions, or `None` when it can.
-    pub missing: Option<String>,
-    /// Whether its command is on this computer at all. A standard runtime
-    /// for an engine that was never installed is left out without a word;
-    /// one that is installed but not working is named.
-    pub installed: bool,
-}
-
-/// What one availability check found and changed.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AvailabilityChecked {
-    /// Every configured profile as it was checked, and why it is missing.
-    pub profiles: BTreeMap<String, (HarnessProfile, Option<String>)>,
-    /// This computer's engines, by runtime kind (`podman`, `docker`,
-    /// `apple-container`).
-    pub local: BTreeMap<String, LocalEngine>,
-    /// What each SSH and EC2 machine can run.
-    pub machines: Vec<MachineRuntimeProbe>,
-    pub added_profiles: Vec<String>,
-    pub added_runtimes: BTreeMap<String, Vec<String>>,
-}
 
 /// The dashboard's latest answers. Each answer applies only while what it
 /// describes is configured unchanged; an edited profile or machine has no
@@ -218,7 +173,13 @@ impl DashboardState {
     pub(crate) fn profile_missing(&self, id: &str) -> Option<&str> {
         let current = self.config.profiles.get(id)?;
         let (checked, missing) = self.availability.profiles.get(id)?;
-        (checked == current).then_some(missing.as_deref()).flatten()
+        // Readiness came from the daemon. Its projection retains sources only,
+        // while the installed profile may also hold locally resolved values.
+        let checked_sources = serde_json::to_value(checked).expect("profile serializes");
+        let current_sources = serde_json::to_value(current).expect("profile serializes");
+        (checked_sources == current_sources)
+            .then_some(missing.as_deref())
+            .flatten()
     }
 
     /// The index in `config.targets` of `wanted` when it is offered, or of
@@ -560,4 +521,46 @@ fn sentence(text: &str, then: &str) -> String {
         }
     }
     sentence
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{answer_availability, availability_answer};
+
+    // Hard-won: 471c11891: source-only daemon replies lost readiness when installed environments held resolved values.
+    #[test]
+    fn source_only_profile_readiness_survives_wire_transport_until_sources_change() {
+        let mut config = crate::test_support::config();
+        let id = config.profiles.keys().next().unwrap().clone();
+        config.profiles.get_mut(&id).unwrap().environment =
+            [("CONFIGURED_KEY".to_owned(), "value".to_owned())]
+                .into_iter()
+                .collect();
+        let mut dashboard = DashboardState::new(config, Default::default(), BTreeMap::new());
+        answer_availability(&mut dashboard, |dashboard| {
+            let mut answer = availability_answer(dashboard, &[], &[]);
+            answer.profiles.get_mut(&id).unwrap().1 = Some("daemon credential missing".into());
+            let wire =
+                serde_json::to_value(mj_client::daemon::DaemonReply::Availability(answer)).unwrap();
+            let mj_client::daemon::DaemonReply::Availability(answer) =
+                serde_json::from_value(wire).unwrap()
+            else {
+                panic!("availability reply")
+            };
+            assert_ne!(answer.profiles[&id].0, dashboard.config.profiles[&id]);
+            answer
+        });
+        assert_eq!(
+            dashboard.profile_missing(&id),
+            Some("daemon credential missing")
+        );
+        assert!(!dashboard.profile_offered(&id));
+        dashboard.config.profiles.get_mut(&id).unwrap().environment =
+            [("CONFIGURED_KEY".to_owned(), "changed".to_owned())]
+                .into_iter()
+                .collect();
+        assert_eq!(dashboard.profile_missing(&id), None);
+        assert!(dashboard.profile_offered(&id));
+    }
 }

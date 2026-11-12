@@ -1499,7 +1499,7 @@ pub struct ArchiveSpacePreview {
 /// What a container target's host resolves for its blank build cache
 /// settings right now. Settings shows this beside each "automatic" field so
 /// the values a session would actually run with are visible before one starts.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildCachePreview {
     /// The host's own mbx version, or `None` when it has none on `PATH`.
     pub native_mbx: Option<String>,
@@ -1532,7 +1532,7 @@ pub struct BuildCachePreview {
 /// native builds the user ran themselves are counted together, since they
 /// share one cache. They answer whether the cache is being used at all, not
 /// what one session got out of it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildCacheStats {
     /// Builds that went through mbx. Zero means nothing has used the shim.
     pub builds: u64,
@@ -1545,7 +1545,7 @@ pub struct BuildCacheStats {
 }
 
 /// Why a target's sessions run without the build cache.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BuildCacheOff {
     /// This machine's own `enabled = false`.
     TurnedOff,
@@ -1571,7 +1571,7 @@ impl std::fmt::Display for BuildCacheOff {
 }
 
 /// Where a machine build cache budget comes from.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BuildCacheLimit {
     /// An explicit mj machine setting written to shared mbx configuration.
     Size(String),
@@ -1584,7 +1584,7 @@ pub enum BuildCacheLimit {
     MbxDefault(Option<String>),
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BuildCacheApplication {
     #[default]
     Pending,

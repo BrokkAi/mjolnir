@@ -2790,21 +2790,34 @@ function renderNewForm() {
         if (!newDraft.projectDirectory && !Object.hasOwn(newDraft.projectDirectories, newDraft.targetId)) {
           newDraft.projectDirectory = recents[0] || '';
         }
-        if (recents.length) {
-          const recentList = el('div', 'recent-projects');
-          recentList.append(el('p', 'dim', 'Recent projects on this host'));
-          for (const directory of recents) {
-            const pick = el('button', 'secondary recent-project', directory);
-            pick.type = 'button';
-            pick.onclick = () => {
-              newDraft.projectDirectory = directory;
-              newDraft.projectDirectories[newDraft.targetId] = directory;
-              newDraft.preflighted = false;
-              document.querySelector('#new-project-directory').value = directory;
-            };
-            recentList.append(pick);
+        // Only the ten most recent projects earn a row in the picker; older
+        // entries stay reachable by typing the path or browsing folders.
+        const shownRecents = recents.slice(0, 10);
+        if (shownRecents.length) {
+          const field = el('label', 'field');
+          field.append(el('span', '', 'Recent projects on this host'));
+          const select = el('select');
+          select.id = 'new-recent-project';
+          const placeholder = el('option', '', 'Choose a recent project…');
+          placeholder.value = '';
+          placeholder.disabled = true;
+          placeholder.hidden = true;
+          select.append(placeholder);
+          for (const directory of shownRecents) {
+            const option = el('option', '', directory);
+            option.value = directory;
+            select.append(option);
           }
-          body.append(recentList);
+          select.value = shownRecents.includes(newDraft.projectDirectory) ? newDraft.projectDirectory : '';
+          select.onchange = () => {
+            if (!select.value) return;
+            newDraft.projectDirectory = select.value;
+            newDraft.projectDirectories[newDraft.targetId] = select.value;
+            newDraft.preflighted = false;
+            document.querySelector('#new-project-directory').value = select.value;
+          };
+          field.append(select);
+          body.append(field);
         }
         body.append(
           pathField(
@@ -2815,6 +2828,8 @@ function renderNewForm() {
               newDraft.projectDirectory = value;
               newDraft.projectDirectories[newDraft.targetId] = value;
               newDraft.preflighted = false;
+              const picker = document.querySelector('#new-recent-project');
+              if (picker) picker.value = shownRecents.includes(value) ? value : '';
             },
             {
               host: () => newDraft.targetId,
