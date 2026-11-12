@@ -3897,6 +3897,7 @@ async fn live_state_and_the_service_worker_are_never_stored() {
 #[tokio::test]
 async fn shell_assets_revalidate_with_strong_content_etags() {
     for path in [
+        "/push-sync.js",
         "/",
         "/viewer.css",
         "/viewer.js",

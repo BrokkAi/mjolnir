@@ -126,6 +126,8 @@ pub(super) fn router(options: ServerOptions) -> Router {
     };
     let upgrade_gate = state.upgrade_gate.clone();
     let protected = Router::new()
+        .route("/api/push/key", get(push_key))
+        .route("/api/push/status", get(push_device_status))
         .route("/api/snapshot", get(snapshot))
         .route("/api/sessions/{session_id}/row", get(session_row))
         .route("/api/conversations/{session_id}", get(conversation))
@@ -195,6 +197,7 @@ pub(super) fn router(options: ServerOptions) -> Router {
         .route("/login", get(viewer))
         .route("/viewer.css", get(viewer_css))
         .route("/viewer.js", get(viewer_js))
+        .route("/push-sync.js", get(push_sync_js))
         .route("/markdown.js", get(markdown_js))
         .route("/tool-output.js", get(tool_output_js))
         .route("/manifest.webmanifest", get(manifest))

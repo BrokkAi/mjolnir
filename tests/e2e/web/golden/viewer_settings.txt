@@ -3,6 +3,14 @@ Settings
 
 Changes stay in this draft until you save.
 
+Notifications on this device
+
+The app is preparing notifications. Reload and try again.
+
+Enable notifications on this device Disable notifications Send test notification
+
+Use an HTTPS address. On iOS 16.4 or later, add Mjolnir to the Home Screen and open it there first.
+
 SETUP
 Agent Profiles
 claude
@@ -50,6 +58,14 @@ Changes stay in this draft until you save.
 
 To sign this profile in, save it, then run `mj login --profile claude` in a terminal.
 
+Notifications on this device
+
+The app is preparing notifications. Reload and try again.
+
+Enable notifications on this device Disable notifications Send test notification
+
+Use an HTTPS address. On iOS 16.4 or later, add Mjolnir to the Home Screen and open it there first.
+
 Enabled
 Type
 Codex
@@ -86,6 +102,14 @@ Continuation
 
 Continue an unfinished request up to three times per message, and resume a session after its quota resets.
 
+Notifications on this device
+
+The app is preparing notifications. Reload and try again.
+
+Enable notifications on this device Disable notifications Send test notification
+
+Use an HTTPS address. On iOS 16.4 or later, add Mjolnir to the Home Screen and open it there first.
+
 Enabled
 
 Unsaved changes. Save writes them to the configuration file.
@@ -99,6 +123,14 @@ Settings
 Sub-agents
 
 Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.
+
+Notifications on this device
+
+The app is preparing notifications. Reload and try again.
+
+Enable notifications on this device Disable notifications Send test notification
+
+Use an HTTPS address. On iOS 16.4 or later, add Mjolnir to the Home Screen and open it there first.
 
 Maximum concurrent children
 
@@ -132,6 +164,14 @@ Sub-agents
 
 Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.
 
+Notifications on this device
+
+The app is preparing notifications. Reload and try again.
+
+Enable notifications on this device Disable notifications Send test notification
+
+Use an HTTPS address. On iOS 16.4 or later, add Mjolnir to the Home Screen and open it there first.
+
 Maximum concurrent children
 
 Enter a whole number from 1 to 64.
@@ -163,6 +203,14 @@ Settings
 Sub-agents
 
 Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.
+
+Notifications on this device
+
+The app is preparing notifications. Reload and try again.
+
+Enable notifications on this device Disable notifications Send test notification
+
+Use an HTTPS address. On iOS 16.4 or later, add Mjolnir to the Home Screen and open it there first.
 
 Maximum concurrent children
 
@@ -200,6 +248,14 @@ Settings
 Sub-agents
 
 Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.
+
+Notifications on this device
+
+The app is preparing notifications. Reload and try again.
+
+Enable notifications on this device Disable notifications Send test notification
+
+Use an HTTPS address. On iOS 16.4 or later, add Mjolnir to the Home Screen and open it there first.
 
 Maximum concurrent children
 
@@ -239,6 +295,14 @@ Settings
 Sub-agents
 
 Set Straightforward to enable Mjolnir sub-agents. Subtle and Oracle are optional.
+
+Notifications on this device
+
+The app is preparing notifications. Reload and try again.
+
+Enable notifications on this device Disable notifications Send test notification
+
+Use an HTTPS address. On iOS 16.4 or later, add Mjolnir to the Home Screen and open it there first.
 
 Maximum concurrent children
 Straightforward model

@@ -82,6 +82,12 @@
       <div id="launch-failures" aria-live="polite"></div>
 
       <section id="dashboard" class="page">
+        <aside id="notification-offer" hidden>
+          <span id="notification-offer-text"></span>
+          <button type="button" id="notification-offer-enable">Enable</button>
+          <button type="button" id="notification-offer-dismiss" class="secondary">Not now</button>
+          <span id="notification-offer-error" role="alert"></span>
+        </aside>
         <div class="row page-actions">
           <button data-route="new">New session</button>
           <button data-route="resume" class="secondary">Resume a session</button>
@@ -156,6 +162,14 @@
         <h2 id="settings-heading">Settings</h2>
         <p id="settings-help" class="dim"></p>
         <div id="settings-notices"></div>
+        <fieldset id="device-notifications">
+          <legend>Notifications on this device</legend>
+          <p id="device-notification-state" role="status">Checking notification support…</p>
+          <button type="button" id="device-notification-enable">Enable notifications on this device</button>
+          <button type="button" id="device-notification-disable" class="secondary">Disable notifications</button>
+          <button type="button" id="device-notification-test" class="secondary">Send test notification</button>
+          <p class="dim">Use an HTTPS address. On iOS 16.4 or later, add Mjolnir to the Home Screen and open it there first.</p>
+        </fieldset>
         <div id="settings"></div>
         <div id="settings-entry-actions" class="row"></div>
         <p id="settings-error" role="alert"></p>
@@ -306,6 +320,7 @@
       </section>
     </main>
 
+    <script src="/push-sync.js"></script>
     <script type="module" src="/viewer.js"></script>
   </body>
 </html>

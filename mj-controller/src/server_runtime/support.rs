@@ -11,7 +11,11 @@ pub(super) fn feed_stopped(shutting_down: bool, reason: &'static str) -> Option<
 
 pub(super) fn controller_action_session_id(action: &ControllerAction) -> Option<String> {
     match action {
-        ControllerAction::New { .. }
+        ControllerAction::PushSubscribe { .. }
+        | ControllerAction::PushRenew { .. }
+        | ControllerAction::PushUnsubscribe { .. }
+        | ControllerAction::PushTest { .. }
+        | ControllerAction::New { .. }
         | ControllerAction::RecordOperatorActivity
         | ControllerAction::SetOperatorAway { .. } => None,
         ControllerAction::Prompt { session_id, .. }

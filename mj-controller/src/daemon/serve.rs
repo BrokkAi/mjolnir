@@ -14,16 +14,26 @@ pub(super) fn spawn_phone_server(
     state.set_phone_status(WebViewerStatus::Starting);
     let workspaces = state.workspaces();
     tokio::spawn(async move {
-        match crate::server_runtime::run_server(
+        let push = crate::web_push::run(state.clone());
+        let server = crate::server_runtime::run_server(
             (&config).into(),
             cancellation.clone(),
             worker,
             state.clone(),
             workspaces,
             services,
-        )
-        .await
-        {
+        );
+        tokio::pin!(server);
+        tokio::pin!(push);
+        let result = tokio::select! {
+            result = &mut server => result,
+            result = &mut push => {
+                if let Err(error) = result { tracing::error!(error=format!("{error:#}"), "Web Push service stopped"); }
+                // The HTTP server still drains accepted control work on shutdown.
+                server.await
+            }
+        };
+        match result {
             Ok(()) if cancellation.is_cancelled() => {}
             Ok(()) => {
                 state.set_phone_status(WebViewerStatus::Stopped);
