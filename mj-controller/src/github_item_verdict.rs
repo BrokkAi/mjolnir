@@ -1,5 +1,9 @@
 //! Controller-side Jev client for GitHub item interest and ownership.
 
+#[path = "github_item_glide.rs"]
+mod glide;
+pub use glide::classify_probability;
+
 use anyhow::{Context, Result};
 use mj_core::github_item::{GithubItemEvidence, GithubItemVerdict, MAX_BODY_BYTES};
 use serde_json::json;
