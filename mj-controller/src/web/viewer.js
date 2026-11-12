@@ -9678,16 +9678,27 @@ promptText.addEventListener('drop', e => {
   const text = e.dataTransfer?.getData('text/plain') || '';
   if (text) insertComposerText(text);
 });
+// A touch keyboard has no Shift+Enter, so where touch is the primary input
+// its Enter key starts a new line and the Send button sends. This one query
+// decides both the key label the keyboard shows and what Enter does.
+const touchComposer = window.matchMedia('(hover: none) and (pointer: coarse)');
+function syncComposerEnterKey() {
+  promptText.setAttribute('enterkeyhint', touchComposer.matches ? 'enter' : 'send');
+}
+syncComposerEnterKey();
+touchComposer.addEventListener('change', syncComposerEnterKey);
 // An active IME composition steers its candidate with Enter and the arrows,
 // so the composer must not read those keys until the composition ends.
 promptText.addEventListener('keydown', e => {
   if (e.isComposing || e.keyCode === 229) return;
   // The palette owns the arrows, Tab and Enter while it is open, and gives
-  // them back the moment it closes.
+  // them back the moment it closes. On a touch keyboard Enter is the only way
+  // to start a new line, so it stays a return key and a tap picks a row.
   if (paletteMatches.length) {
     if (e.key === 'ArrowDown' && moveCommandSelection(1)) return e.preventDefault();
     if (e.key === 'ArrowUp' && moveCommandSelection(-1)) return e.preventDefault();
-    if ((e.key === 'Tab' || e.key === 'Enter') && !e.shiftKey && acceptCommandSelection()) {
+    const accepts = e.key === 'Tab' || (e.key === 'Enter' && !touchComposer.matches);
+    if (accepts && !e.shiftKey && acceptCommandSelection()) {
       return e.preventDefault();
     }
     if (e.key === 'Escape') {
@@ -9710,7 +9721,8 @@ promptText.addEventListener('keydown', e => {
   }
   if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
     e.preventDefault();
-    submitPrompt();
+    if (touchComposer.matches) insertComposerLineBreak();
+    else submitPrompt();
     return;
   }
   if (e.key === 'Enter' && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
