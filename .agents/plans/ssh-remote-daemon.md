@@ -34,8 +34,8 @@ This is private-network operation with working SSH authentication and host trust
 - [ ] Implement and validate milestone 5: explicit remote paths, attachment uploads, client-side import upload and daemon-side voice transcription.
 - [ ] (2026-11-12, blob child) Disk-spooled raw blobs replace serialized-action uploads; attachments migrated. UTC full suites pass (409 chat, 59 client, 2566 controller; 21 ignored); workspace Clippy and formatting pass. Import and voice are integrated below. Remaining milestone 5 validation belongs to parent: explicit remote paths, attachment uploads, client-side import upload and daemon-side voice transcription.
 - [ ] Remove the native desktop shell (`mj-desktop`, `mj app`, `mj-cli/src/desktop.rs`, release packaging); independent of the other milestones.
-- [ ] Implement and validate milestone 6: matching-build PowerShell go script.
-- [ ] Implement milestone 7: user documentation, final validation, platform dispatch and real Windows acceptance.
+- [ ] (2026-11-12, docs worker) Milestone 6 implemented: paired clean locked worktrees, shared Windows replacement/PATH functions, SHA fetch fallback and same_source gate. Native Windows parser and twice-run acceptance remain outstanding (pwsh unavailable here).
+- [ ] (2026-11-12, docs worker) Milestone 7 guide and navigation implemented, including explicit pending login/import/voice behavior. Diff and navigation syntax checks pass; docs dependencies, native Windows acceptance and parent-owned platform dispatch remain outstanding.
 
 - [ ] (2026-11-12, retry follow-up) Pair-level upload replay implemented for attachment/import; real-connection refusal/lost-ACK regression passes, client/chat suites and CLI integration tests pass, workspace Clippy passes. CLI ACP-login ETXTBSY failure passed targeted rerun. Composer preparation/concurrency implemented in attachment lane.
 
@@ -108,7 +108,7 @@ Decision (parent reaffirming user design, 2026-11-12, review follow-up): User ca
 ## Outcomes & Retrospective
 
 
-Planning is complete; no product code, installation, daemon operation or commit is part of this assignment. Implementation and measured acceptance remain unchecked. The main implementation risk is incomplete removal of client filesystem assumptions; use the inventory embedded below and the real separated-directory test rather than declaring success after tunneling Ping.
+Planning and the milestone 6–7 script/documentation implementation are complete; native Windows acceptance remains outstanding. Implementation and measured acceptance remain unchecked. The main implementation risk is incomplete removal of client filesystem assumptions; use the inventory embedded below and the real separated-directory test rather than declaring success after tunneling Ping.
 
 ## Context and Orientation
 
@@ -322,3 +322,21 @@ Integration validation: `final-tests.log` and `final-clippy.log` in integration 
 Review correction (2026-11-12): both reviewers identified cancellation ignored during reconnect after explicit UpgradePending. Reconnect/backoff now races the same cancellation future; accepted consumption still cannot be cancelled. Extended the real TCP upload regression with a permanently pending reconnect and cancellation notification; focused regression passes, workspace Clippy passes (`review-test.log`, `review-clippy.log`). No overrides.
 
 Merge integration (2026-11-12): combined SSH placement and streamed client uploads at protocol 92. Identity proof remains the sole unauthenticated action; import runs on the client and asks its connector whether placement is SSH before interpreting daemon profile paths. Both milestone histories are retained. Workspace build, targeted client/controller/import tests, all six requested crate suites, workspace Clippy with warnings denied, formatting, rebuilt CLI, SSH control/HTTP/dispatch and daemon endpoint regressions passed. The upload exchange fixture now boxes checkpoint metadata to match master.
+
+Milestone 6 discovery (2026-11-12): root install.ps1 now exposes -FunctionsOnly for shared destination, staged replacement and PATH functions while retaining standalone download installation. The development command uses -SshHost because PowerShell reserves $Host. flock and an exclusive Windows file handle serialize reused build worktrees; normal Cargo storage is preserved. No PowerShell parser is installed on this Linux host.
+
+Milestone 7 discovery (2026-11-12): docs/node_modules and pwsh are absent; no tools installed. Human guide distinguishes settled login/import/voice design from completed implementation. Validate Windows with the PowerShell parser and two runs at one SHA in the isolated remote-dev instance; site validation requires npm ci then npm run build in docs/.
+
+Go-command review follow-up (2026-11-12): parent settled the host-mismatch finding
+by extending the existing SSH status output with Daemon host and Daemon instance.
+Client config names the authoritative path for the repair message; PowerShell
+reads those lines rather than interpreting TOML. The script checks placement
+before startup/handoff and before success. Real SSH dispatch assertions cover
+these status fields, including stopped-daemon status.
+
+Go-command follow-up validation (2026-11-12): requested daemon tests, matching
+client/CLI dev build, isolated ssh-go-dispatch scenario, workspace Clippy with
+warnings denied, rustfmt check and diff checks all pass. Logs and exact commands
+are under .agents/docs/ssh-remote-daemon/windows-validation.md and go-*.log.
+The previous host-mismatch review decision is implemented; native Windows parser
+and twice-run acceptance remain outstanding because pwsh is absent here.

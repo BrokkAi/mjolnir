@@ -95,6 +95,7 @@ export default defineConfig({
           items: [
             { label: 'Terminal surface', slug: 'terminal-surface' },
             { label: 'Daemon in a container', slug: 'daemon-container' },
+            { label: 'Daemon over SSH', slug: 'daemon-ssh' },
             { label: 'Web viewer', slug: 'web-viewer' },
             { label: 'Code review', slug: 'turn-review' },
             { label: 'Durability and recovery', slug: 'durability' },

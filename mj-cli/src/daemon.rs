@@ -38,6 +38,12 @@ pub(crate) async fn run_where_daemon_lives(args: &[String], interactive: bool) -
         mj_core::config::instance_name().unwrap_or_else(|| "default".to_owned())
     });
     if args == ["daemon", "status"] {
+        println!("Daemon host: {host}");
+        println!("Daemon instance: {instance}");
+        println!(
+            "Client config: {}",
+            mj_core::config::config_path().display()
+        );
         let client = this_build();
         println!("Client build: {}", client.published());
         match mj_client::daemon::ssh::discover(
