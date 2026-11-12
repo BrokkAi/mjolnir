@@ -90,7 +90,7 @@ pub enum RemoteSessionRequest {
         /// Which reviewing role the action drives; `None` is the default one.
         role: Option<String>,
         action: ReviewerAction,
-        reply: oneshot::Sender<std::result::Result<ReviewerOutcome, String>>,
+        reply: oneshot::Sender<anyhow::Result<ReviewerOutcome>>,
     },
 }
 
@@ -164,7 +164,7 @@ impl RemoteSessionRequest {
                 let _ = reply.send(Err(message.to_owned()));
             }
             Self::Reviewer { reply, .. } => {
-                let _ = reply.send(Err(message.to_owned()));
+                let _ = reply.send(Err(anyhow::anyhow!("{message}")));
             }
         }
     }

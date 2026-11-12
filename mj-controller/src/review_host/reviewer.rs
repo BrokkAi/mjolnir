@@ -276,6 +276,7 @@ pub fn resolution_notice(
             _ => return None,
         },
         Resolution::Cancelled => match last_verdict {
+            Some(ReviewVerdict::Clean) => "Review cancelled: stopped waiting for approval recording. The worker may already have recorded approval; if it did, the push is allowed. Otherwise, request review again.".into(),
             Some(ReviewVerdict::Failed { reason }) => {
                 format!(
                     "Review failed: {}. The change stays unreviewed",

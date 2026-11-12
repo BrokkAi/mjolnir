@@ -169,8 +169,7 @@ pub(super) async fn forward_in_process_session_request(
                         .reviewer(action)
                         .await
                 } => result,
-            }
-            .map_err(|error| format!("{error:#}"));
+            };
             let _ = reply.send(result);
         }
     }
