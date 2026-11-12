@@ -238,6 +238,22 @@ pub fn provision_plan_named(
     })
 }
 
+/// An independent bundle workspace on the controller's host. The controller
+/// supplies the recorded worker root so provisioning and restoration agree.
+pub(crate) fn provision_local_bundle_plan(
+    bundle: &ProjectBundleSpec,
+    worker_root: &str,
+    github_token: Option<&str>,
+) -> Result<CommandPlan> {
+    bundle.validate()?;
+    Ok(CommandPlan {
+        description: "provision local bundle workspace".into(),
+        commands: clone_commands(bundle, worker_root, github_token, |args| {
+            CommandSpec::new(args[0].clone(), args[1..].to_vec())
+        }),
+    })
+}
+
 /// Build the no-op infrastructure plan for an existing bare project.
 /// The wizard validates the project for early feedback; worker/ACP startup is
 /// authoritative if it changes before launch. Worker state is installed later

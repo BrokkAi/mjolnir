@@ -4174,6 +4174,92 @@ fn in_place_move_with_pre_v32_worker_stops_children_and_reports_fallback() {
 }
 
 #[cfg(unix)]
+#[test]
+fn profile_move_preserves_a_workspace_without_later_history() {
+    let name = test_name("profile_move_preserves_a_workspace_without_later_history");
+    if std::env::var_os("MJ_CUTOFF_MOVE_CHILD").is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(name)
+            .env("MJ_CUTOFF_MOVE_CHILD", "1")
+            .env(LATCH_CHECKPOINT_ONLY, "1")
+            .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+    let git = crate::controller::test_support::test_git;
+    let base = git(&fixture.checkout, &["rev-parse", "HEAD"]);
+    git(&fixture.checkout, &["remote", "remove", "origin"]);
+    git(
+        &fixture.checkout,
+        &["commit", "--allow-empty", "-m", "session work"],
+    );
+    let head = git(&fixture.checkout, &["rev-parse", "HEAD"]);
+    let bundle = crate::controller::test_support::local_bundle(&fixture.checkout);
+    fixture
+        .controller
+        .config
+        .bundles
+        .insert("project".into(), bundle);
+    let record = fixture
+        .controller
+        .state
+        .sessions
+        .get_mut(LATCH_RELAY_SESSION)
+        .unwrap();
+    record.bundle_id = "project".into();
+    record.checkout = Some(mj_core::remote_git::ExactCheckout {
+        repository_id: "project".into(),
+        commit: base.clone(),
+        branch: Some("main".into()),
+        no_later_history: true,
+    });
+    record.launch_base = Some(base);
+    record.state = SessionState::Closing;
+    crate::database::save_session(record).unwrap();
+    let mut operation = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
+    operation.phase = MovePhase::ResumingDestination;
+    operation.checkpoint = Some(fixture.checkpoint.clone());
+    operation.recovery_session =
+        Some(fixture.controller.state.sessions[LATCH_RELAY_SESSION].clone());
+    crate::database::save_move_operation(&operation).unwrap();
+    let executor = RecordingProcessExecutor::default();
+    run_in_place_move(
+        &mut fixture.controller,
+        &mut operation,
+        &fixture.worker_root,
+        &executor,
+    )
+    .unwrap();
+    assert_eq!(git(&fixture.checkout, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git(&fixture.checkout, &["remote"]), "");
+    assert_eq!(
+        git(
+            &fixture.checkout,
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/remotes",
+                "refs/tags"
+            ]
+        ),
+        ""
+    );
+    assert!(
+        executor
+            .purposes()
+            .iter()
+            .any(|purpose| purpose == "verify workspace history cutoff")
+    );
+    assert_eq!(
+        std::fs::read(fixture.checkout.join("untracked.txt")).unwrap(),
+        b"agent work"
+    );
+}
+
+#[cfg(unix)]
 // Hard-won: 6b51b56d6: profile-only Move deleted native state and provisioned the same worker again.
 #[test]
 fn in_place_profile_move_retains_native_state_and_installed_worker() {

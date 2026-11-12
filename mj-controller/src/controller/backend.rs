@@ -650,15 +650,25 @@ pub(super) fn backend_session_bundle(
     let bundle = session
         .project_bundle(config)
         .context("session bundle is missing")?;
-    let mut spec = backend_bundle_with_sources(
+    backend_bundle_with_sources(
         bundle,
         session
             .project
             .as_ref()
             .map(|project| &project.network_sources),
         executor,
-    )?;
+    )
+}
+
+pub(super) fn apply_session_history_cutoff(
+    session: &SessionRecord,
+    config: &mj_core::config::Config,
+    spec: &mut ProjectBundleSpec,
+) -> Result<()> {
     if let Some(cutoff) = session_history_cutoff(session)? {
+        let bundle = session
+            .project_bundle(config)
+            .context("session bundle is missing")?;
         let checkout = session
             .checkout
             .as_ref()
@@ -674,10 +684,10 @@ pub(super) fn backend_session_bundle(
         spec.repositories
             .iter_mut()
             .find(|repository| repository.destination == destination)
-            .expect("bundle spec mirrors the bundle")
+            .context("cutoff repository is missing from the workspace bundle")?
             .history_cutoff = Some(cutoff);
     }
-    Ok(spec)
+    Ok(())
 }
 
 /// The history a session created with `no_later_history` starts with: its

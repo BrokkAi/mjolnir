@@ -6,6 +6,92 @@ use anyhow::{Context, Result, ensure};
 use super::Controller;
 
 impl Controller {
+    /// Restores and retained profile switches share the launch cutoff policy.
+    /// This runs after checkpoint restoration and before starting the worker.
+    pub(super) fn verify_history_cutoff_workspace(
+        &self,
+        session_id: &str,
+        backend: &targets::TargetLocator,
+        executor: &impl CommandExecutor,
+        manifest: Option<&mj_checkpoint::archive::ArchiveManifest>,
+    ) -> Result<()> {
+        let session = self
+            .state
+            .sessions
+            .get(session_id)
+            .context("session is missing")?;
+        let Some(cutoff) = super::backend::session_history_cutoff(session)? else {
+            return Ok(());
+        };
+        let checkout = session
+            .checkout
+            .as_ref()
+            .context("cutoff checkout is missing")?;
+        let repository = session
+            .project_bundle(&self.config)
+            .context("session bundle is missing")?
+            .repositories
+            .iter()
+            .find(|repo| repo.id == checkout.repository_id)
+            .context("cutoff repository is missing")?;
+        let workspace_directory = mj_core::target_path::join(
+            std::path::Path::new(&workspace_root(
+                backend,
+                session.container_workspace.as_deref(),
+            )),
+            &repository.destination,
+        );
+        let directory = session
+            .checkout()
+            .project_directory()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or(workspace_directory);
+        let checked = |arguments: &[&str]| -> Result<String> {
+            let mut args = vec![
+                "git".into(),
+                "-C".into(),
+                directory.to_string_lossy().into_owned(),
+            ];
+            args.extend(arguments.iter().map(|argument| (*argument).to_owned()));
+            let output = executor.execute(&targets::command_on_locator(
+                backend,
+                session_id,
+                args,
+                "verify workspace history cutoff",
+            )?)?;
+            ensure!(
+                output.status == 0,
+                "repository {}: Git {} failed: {}",
+                directory.display(),
+                arguments[0],
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+        };
+        // The checkpoint identifies the session's other branches, stashes
+        // and review points; they need not be ancestors of its current HEAD.
+        let session_refs = manifest
+            .into_iter()
+            .flat_map(|archive| &archive.repositories)
+            .filter(|repository| repository.metadata.id == checkout.repository_id)
+            .flat_map(|repository| {
+                repository.metadata.saved_refs.values().cloned().chain(
+                    repository
+                        .metadata
+                        .stash_stack
+                        .iter()
+                        .map(|stash| stash.commit.clone()),
+                )
+            })
+            .collect::<Vec<_>>();
+        configure_workspace_without_origin(
+            &checked,
+            &cutoff.head,
+            cutoff.base.as_deref().unwrap_or(&cutoff.head),
+            &session_refs,
+        )
+    }
+
     /// Fresh workspaces start at the remote's advertised default branch. A
     /// matching marker makes retries harmless without resetting session work.
     pub(super) fn initialize_network_workspaces(
@@ -150,7 +236,7 @@ fn initialize_workspace(
             None => checkout.commit.clone(),
         };
         if checkout.no_later_history {
-            return configure_workspace_without_origin(&checked, &base);
+            return configure_workspace_without_origin(&checked, &checkout.commit, &base, &[]);
         }
         return configure_workspace(&git, &checked, &base);
     }
@@ -236,8 +322,52 @@ fn configure_workspace(
 /// `git remote` list it.
 fn configure_workspace_without_origin(
     checked: &impl Fn(&[&str]) -> Result<String>,
+    head: &str,
     base: &str,
+    session_refs: &[String],
 ) -> Result<()> {
+    // Checkpoint restore writes archived origin configuration, but performs
+    // no network fetch. Remove it before the worker can issue Git commands.
+    for remote in checked(&["remote"])?.lines() {
+        checked(&["remote", "remove", remote])?;
+    }
+    ensure!(
+        checked(&["remote"])?.is_empty(),
+        "history cutoff workspace still has a remote"
+    );
+    ensure!(
+        checked(&[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/remotes",
+            "refs/tags"
+        ])?
+        .is_empty(),
+        "history cutoff workspace contains remote refs or tags"
+    );
+    ensure!(
+        checked(&["rev-parse", "--is-shallow-repository"])? == "false",
+        "history cutoff workspace is shallow"
+    );
+    let mut ancestry = vec!["rev-list", "HEAD", head, base];
+    ancestry.extend(session_refs.iter().map(String::as_str));
+    let allowed = checked(&ancestry)?;
+    let allowed = allowed.lines().collect::<std::collections::HashSet<_>>();
+    // Inspect stored objects too: deleting refs alone leaves later history
+    // available to an agent that knows the object ID.
+    let objects = checked(&[
+        "cat-file",
+        "--batch-all-objects",
+        "--batch-check=%(objectname) %(objecttype)",
+    ])?;
+    for object in objects.lines() {
+        if let Some(commit) = object.strip_suffix(" commit") {
+            ensure!(
+                allowed.contains(commit),
+                "history cutoff workspace contains commit {commit} outside the session and launch base ancestry"
+            );
+        }
+    }
     for (key, value) in [("mj.baseCommit", base), ("mj.remoteWorkspace", "true")] {
         checked(&["config", "--local", "--replace-all", key, value])?;
     }
@@ -1210,10 +1340,13 @@ mod tests {
                 fetch: self.host.path().to_path_buf(),
                 push: self.host.path().to_path_buf(),
             };
-            for command in
-                targets::clone_commands(&bundle, &self.workspace.to_string_lossy(), None, |args| {
-                    CommandSpec::new(args[0].clone(), args[1..].to_vec())
-                })
+            for command in targets::provision_local_bundle_plan(
+                &bundle,
+                &self.workspace.to_string_lossy(),
+                None,
+            )
+            .unwrap()
+            .commands
             {
                 let output = if command.program == "git" {
                     transport.execute(&command)
@@ -1278,6 +1411,179 @@ mod tests {
         reachable.sort();
         reachable.dedup();
         (present, reachable)
+    }
+
+    #[test]
+    #[cfg_attr(windows, ignore = "local bare Git fixture")]
+    fn cutoff_workspace_survives_profile_move_and_checkpoint_resume() {
+        use mj_checkpoint::archive::{
+            GitCollectionSpec, GitHistoryMode, SystemGit, collect_git_snapshot,
+            restore_git_snapshot,
+        };
+        let fixture = CutoffFixture::new();
+        fixture.clone(Some(&fixture.base), None);
+        fixture
+            .initialize(Some(&fixture.base), Some("town/run-123"))
+            .unwrap();
+        test_git(&fixture.directory, &["config", "user.name", "Session"]);
+        test_git(
+            &fixture.directory,
+            &["config", "user.email", "session@example.invalid"],
+        );
+        std::fs::write(fixture.directory.join("session.txt"), "session work").unwrap();
+        test_git(&fixture.directory, &["add", "session.txt"]);
+        test_git(&fixture.directory, &["commit", "-qm", "session work"]);
+        let session_head = test_git(&fixture.directory, &["rev-parse", "HEAD"]);
+        std::fs::write(fixture.directory.join("session.txt"), "dirty session work").unwrap();
+        let mut config = resume_compatibility_config();
+        let mut bundle = local_bundle(fixture.host.path());
+        bundle.repositories[0].destination = "project".into();
+        config.bundles.insert("project".into(), bundle.clone());
+        let mut session = super::super::test_support::checkpoint_test_session(EXACT_SESSION);
+        session.bundle_id = "project".into();
+        session.checkout = Some(fixture.selection(Some("town/run-123")));
+        session.launch_base = Some(fixture.base.clone());
+        session.container_workspace = None;
+        let mut controller = Controller {
+            config,
+            state: Default::default(),
+        };
+        controller.config.targets.insert(
+            "cutoff-local-bare".into(),
+            mj_core::config::TargetTemplate::LocalBare,
+        );
+        assert_eq!(
+            mj_client::target::resume_compatibility(
+                &session,
+                &controller.config,
+                "cutoff-local-bare"
+            )
+            .unwrap(),
+            mj_client::target::ResumePlan::InPlace
+        );
+        controller
+            .state
+            .sessions
+            .insert(EXACT_SESSION.into(), session.clone());
+        // The retained profile-only Move checks the existing workspace, without
+        // positioning HEAD or requiring the agent's working tree to be clean.
+        controller
+            .verify_history_cutoff_workspace(
+                EXACT_SESSION,
+                &fixture.locator(),
+                &ProcessExecutor,
+                None,
+            )
+            .unwrap();
+        let mut snapshot = collect_git_snapshot(
+            &SystemGit,
+            &fixture.directory,
+            &GitCollectionSpec {
+                id: "project".into(),
+                relative_destination: "project".into(),
+                history: GitHistoryMode::CloneFrom(fixture.head.clone()),
+                origin_override: Some("https://fetch.example.test/repo.git".into()),
+            },
+        )
+        .unwrap();
+        snapshot.metadata.remote_workspace = true;
+        snapshot.metadata.base_commit = fixture.base.clone();
+        // Reconstructed Resume and cross-target Move prepare their archived
+        // bundle with the same policy before importing the session delta.
+        let mut spec = targets::ProjectBundleSpec {
+            primary: "project".into(),
+            repositories: vec![targets::RepositorySpec {
+                url: Some("https://fetch.example.test/repo.git".into()),
+                push_urls: vec![],
+                destination: "project".into(),
+                git_ref: None,
+                reference: None,
+                history_cutoff: None,
+            }],
+        };
+        super::super::backend::apply_session_history_cutoff(
+            &session,
+            &controller.config,
+            &mut spec,
+        )
+        .unwrap();
+        assert_eq!(
+            spec.repositories[0].history_cutoff.as_ref().unwrap().head,
+            fixture.head
+        );
+        std::fs::remove_dir_all(&fixture.directory).unwrap();
+        fixture.clone(Some(&fixture.base), None);
+        restore_git_snapshot(&SystemGit, &fixture.directory, &snapshot).unwrap();
+        assert!(!test_git(&fixture.directory, &["remote"]).is_empty());
+        controller
+            .verify_history_cutoff_workspace(
+                EXACT_SESSION,
+                &fixture.locator(),
+                &ProcessExecutor,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            test_git(&fixture.directory, &["rev-parse", "HEAD"]),
+            session_head
+        );
+        assert_eq!(
+            std::fs::read_to_string(fixture.directory.join("session.txt")).unwrap(),
+            "dirty session work"
+        );
+        assert_eq!(test_git(&fixture.directory, &["remote"]), "");
+        assert_eq!(
+            test_git(
+                &fixture.directory,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname)",
+                    "refs/remotes",
+                    "refs/tags"
+                ]
+            ),
+            ""
+        );
+        for later in &fixture.later {
+            assert!(!has_object(&fixture.directory, later));
+        }
+        let (present, reachable) = inventory(&fixture.directory, &[&session_head, &fixture.base]);
+        assert_eq!(present, reachable);
+        test_git(&fixture.directory, &["tag", "unexpected"]);
+        let error = controller
+            .verify_history_cutoff_workspace(
+                EXACT_SESSION,
+                &fixture.locator(),
+                &ProcessExecutor,
+                None,
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("remote refs or tags"),
+            "{error:#}"
+        );
+        test_git(&fixture.directory, &["tag", "-d", "unexpected"]);
+        test_git(
+            &fixture.directory,
+            &[
+                "fetch",
+                "--no-tags",
+                fixture.host.path().to_str().unwrap(),
+                &fixture.later[0],
+            ],
+        );
+        let error = controller
+            .verify_history_cutoff_workspace(
+                EXACT_SESSION,
+                &fixture.locator(),
+                &ProcessExecutor,
+                None,
+            )
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("outside the session"),
+            "{error:#}"
+        );
     }
 
     #[test]

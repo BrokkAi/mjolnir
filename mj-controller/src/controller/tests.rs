@@ -1288,11 +1288,6 @@ fn registration_without_later_history_records_a_cutoff_and_refuses_what_it_canno
             base: Some(base.into()),
         })
     );
-    let error = super::resume::ensure_full_history_allowed(&stored).unwrap_err();
-    assert!(
-        format!("{error:#}").contains("started without later history"),
-        "{error:#}"
-    );
 
     // Any other repository in the bundle would start with its whole history.
     let bundle = controller.config.bundles.get_mut("project").unwrap();
