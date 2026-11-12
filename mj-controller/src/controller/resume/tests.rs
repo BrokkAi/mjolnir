@@ -690,12 +690,59 @@ fn repository_preflight_checks_declared_boundary_without_importing_delta_bundle(
         ]
     );
     let source_check = &commands[1];
-    assert!(
-        source_check
-            .args
-            .iter()
-            .any(|argument| argument == "credential.helper=")
-    );
+    // Ask real Git which helper answers under the check's own configuration.
+    // A host that rewrites github.com to a mirror makes Git ask about the
+    // mirror; the token must reach only GitHub, and the host's helper must
+    // still answer for the mirror.
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join(".gitconfig");
+    std::fs::write(
+        &config,
+        "[credential]\n\thelper = \"!f() { echo username=host; echo password=host-helper; }; f\"\n",
+    )
+    .unwrap();
+    let config_arguments = source_check
+        .args
+        .iter()
+        .take_while(|argument| *argument != "-C")
+        .cloned();
+    let fill = |host: &str| {
+        let mut command = CommandSpec::new(
+            "git",
+            config_arguments
+                .clone()
+                .chain(["credential".to_owned(), "fill".to_owned()]),
+        )
+        .with_sensitive_stdin(format!("protocol=https\nhost={host}\n\n").into_bytes());
+        command.clear_env = true;
+        command.env.extend(source_check.env.clone());
+        command.env.extend([
+            ("PATH".into(), std::env::var("PATH").unwrap()),
+            (
+                "HOME".into(),
+                directory.path().to_string_lossy().into_owned(),
+            ),
+            (
+                "GIT_CONFIG_GLOBAL".into(),
+                config.to_string_lossy().into_owned(),
+            ),
+            ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ]);
+        let output = ProcessExecutor.execute(&command).unwrap();
+        assert_eq!(
+            output.status,
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    // Hard-won: #1460: the base-commit check handed the GitHub token to any host Git asked about.
+    let github = fill("github.com");
+    assert!(github.contains("password=secret-token\n"), "{github}");
+    let mirror = fill("mirror.example");
+    assert!(mirror.contains("password=host-helper\n"), "{mirror}");
+    assert!(!mirror.contains("secret-token"), "{mirror}");
     assert_eq!(
         source_check
             .env
