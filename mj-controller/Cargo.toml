@@ -23,7 +23,7 @@ sysinfo.workspace = true
 signal-hook = "0.3"
 mj-core.workspace = true
 mj-review.workspace = true
-mj-transcript.workspace = true
+mj-transcript = { workspace = true, features = ["github-history"] }
 mj-checkpoint.workspace = true
 mj-client.workspace = true
 agent-client-protocol.workspace = true
