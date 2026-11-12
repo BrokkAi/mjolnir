@@ -4,12 +4,15 @@ import proxy from "../src/index.ts";
 import questions from "../../../mj-core/src/activity/handback_questions.json" with { type: "json" };
 import state from "./fixtures/handback-worker.json" with { type: "json" };
 
+let allowed = true;
+const limited: string[] = [];
 const environment = { FASTINO_API_KEY: "fastino-test-key", TYPESAFE_API_KEY: "",
-  TURN_RATE_LIMITER: { async limit(): Promise<never> { throw Error("must not rate limit GLiDE"); } } };
+  TURN_RATE_LIMITER: { async limit({ key }: { key: string }) { limited.push(key); return { success: allowed }; } } };
 const scores = { unfinished: 0.5, needs_parent_input: 0.1, blocked: 0.1, permitted_stop: 0.1, finished: 0.1, unclear: 0.1 };
 function request(body: unknown = state) {
   return new Request("https://proxy.example/v1/handback-verdict", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    method: "POST", headers: { "Content-Type": "application/json", "CF-Connecting-IP": "192.0.2.7" },
+    body: typeof body === "string" ? body : JSON.stringify(body),
   });
 }
 test("worker evidence builds the exact GLiDE request with server-owned questions", async t => {
@@ -43,4 +46,17 @@ test("malformed and incomplete distributions fail visibly", async t => {
     mock.mock.restore();
   }
   assert.equal((await proxy.fetch(request({ model: "client-model", state, questions }), environment)).status, 400);
+});
+// Hard-won: e44bee684: the paid GLiDE route ran before the proxy's IP rate limit and body bound
+test("the paid route is rate limited per IP and body bounded before any provider call", async t => {
+  const mock = t.mock.method(globalThis, "fetch", async () => { throw Error("provider must not be called"); });
+  allowed = false;
+  limited.length = 0;
+  const refused = await proxy.fetch(request(), environment);
+  assert.equal(refused.status, 429);
+  assert.deepEqual(limited, ["192.0.2.7"]);
+  allowed = true;
+  const oversized = await proxy.fetch(request(JSON.stringify({ ...state, transcript_summary: "x".repeat(70 * 1024) })), environment);
+  assert.equal(oversized.status, 413);
+  assert.equal(mock.mock.callCount(), 0);
 });

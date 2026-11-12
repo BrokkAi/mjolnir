@@ -1590,7 +1590,12 @@ impl DurableRelay {
             &self.activity_facts(),
             epoch_millis(),
         );
-        evidence.assistant_text_tail = report.to_owned();
+        // The report goes whole into the authorization history above; the
+        // tail field keeps the bound every classifier route enforces.
+        evidence.assistant_text_tail = mj_transcript::turn_context::tail(
+            report,
+            mj_core::activity::verdict::ASSISTANT_TEXT_BYTES,
+        );
         evidence.final_tool_calls.clear();
         evidence.tools_in_flight.clear();
         evidence.completion = Some(mj_core::activity::verdict::CompletionEvidence::bounded(

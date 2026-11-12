@@ -159,12 +159,14 @@ fn handback_attempt_survives_restart_and_reminders_but_new_assignment_gets_a_che
             .iter()
             .all(|message| message.role == "user")
     );
-    assert!(
-        relay
-            .prepare_handback_check("Follow-up report")
-            .unwrap()
-            .is_some()
-    );
+    // Hard-won: e44bee684: a report over 2,048 bytes broke the proxy's tail bound, so the check was spent unchecked
+    let long_report = format!("Follow-up report. {}Remaining: none.", "é".repeat(3000));
+    let (_, _, evidence) = relay
+        .prepare_handback_check(&long_report)
+        .unwrap()
+        .expect("follow-up assignment is checked");
+    assert!(evidence.assistant_text_tail.len() <= mj_core::activity::verdict::ASSISTANT_TEXT_BYTES);
+    assert!(evidence.assistant_text_tail.ends_with("Remaining: none."));
     finish_prompt(&mut relay, "person-after-assignment");
 
     // Hard-won: 9130f139e: parent follow-ups delivered through the mailbox bypassed the handback check

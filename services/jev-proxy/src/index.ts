@@ -348,32 +348,28 @@ async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | 
   }
 }
 
+/// GLiDE's handback categories for one report. Provider errors, including
+/// backpressure and its Retry-After, pass through without retries.
+async function handbackVerdict(state: unknown, key: string): Promise<Response> {
+  const response = await glide(state, handbackQuestions, key);
+  if (!response.ok) return response;
+  try {
+    const value: unknown = await response.json();
+    const answers = object(value) && object(value.answers) ? value.answers : {};
+    const answer = object(answers.handback) ? answers.handback : {};
+    const scores = answer.probabilities;
+    const allowed = Object.keys(handbackQuestions.handback.criteria);
+    if (!object(scores) || Object.keys(scores).length !== allowed.length
+      || !allowed.every(k => probability(scores[k]))
+      || Math.abs((Object.values(scores) as number[]).reduce((a,b) => a+b,0)-1) > 0.03) return error("invalid_upstream_response", 502);
+    return json({ probabilities: scores });
+  } catch { return error("invalid_upstream_response", 502); }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname === "/v1/handback-verdict" && !url.search) {
-      if (request.method !== "POST") return error("method_not_allowed", 405, { Allow: "POST" });
-      if (request.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() !== "application/json") return error("unsupported_media_type", 415);
-      const key = env.FASTINO_API_KEY?.trim();
-      if (!key) return error("service_unavailable", 503);
-      let state: unknown;
-      try { state = await request.json(); } catch { return error("invalid_json", 400); }
-      if (!evidenceV6(state)) return error("invalid_evidence", 400);
-      const response = await glide(state, handbackQuestions, key);
-      // Preserve provider backpressure, including Retry-After, without retrying.
-      if (!response.ok) return response;
-      try {
-        const value: unknown = await response.json();
-        const answers = object(value) && object(value.answers) ? value.answers : {};
-        const answer = object(answers.handback) ? answers.handback : {};
-        const scores = answer.probabilities;
-        const allowed = Object.keys(handbackQuestions.handback.criteria);
-        if (!object(scores) || Object.keys(scores).length !== allowed.length
-          || !allowed.every(k => probability(scores[k]))
-          || Math.abs((Object.values(scores) as number[]).reduce((a,b) => a+b,0)-1) > 0.03) return error("invalid_upstream_response", 502);
-        return json({ probabilities: scores });
-      } catch { return error("invalid_upstream_response", 502); }
-    }
+    const handback = url.pathname === "/v1/handback-verdict";
     const search = url.pathname === "/v1/help-search";
     const questionLocator = url.pathname === "/v1/question-locator";
     const afkQuestion = url.pathname === "/v1/afk-question-verdict";
@@ -382,12 +378,13 @@ export default {
     const effort = url.pathname === "/v1/effort-verdict";
     const continuationV2 = url.pathname === "/v2/continuation-verdict";
     const continuation = continuationV2 || url.pathname === "/v1/continuation-verdict";
-    if ((!afkQuestion && !search && !questionLocator && !githubItem && !githubItemV2 && !effort && !continuation && url.pathname !== "/v1/turn-verdict" && url.pathname !== "/v2/turn-verdict" && url.pathname !== "/v3/turn-verdict" && url.pathname !== "/v4/turn-verdict" && url.pathname !== "/v5/turn-verdict" && url.pathname !== "/v6/turn-verdict" && url.pathname !== "/v7/turn-verdict") || url.search) return error("not_found", 404);
+    if ((!handback && !afkQuestion && !search && !questionLocator && !githubItem && !githubItemV2 && !effort && !continuation && url.pathname !== "/v1/turn-verdict" && url.pathname !== "/v2/turn-verdict" && url.pathname !== "/v3/turn-verdict" && url.pathname !== "/v4/turn-verdict" && url.pathname !== "/v5/turn-verdict" && url.pathname !== "/v6/turn-verdict" && url.pathname !== "/v7/turn-verdict") || url.search) return error("not_found", 404);
     if (request.method !== "POST") return error("method_not_allowed", 405, { Allow: "POST" });
     if (request.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
       return error("unsupported_media_type", 415);
     }
-    const key = env.TYPESAFE_API_KEY?.trim();
+    // Handback checks call Fastino; every other route calls TypeSafe.
+    const key = (handback ? env.FASTINO_API_KEY : env.TYPESAFE_API_KEY)?.trim();
     const ip = request.headers.get("CF-Connecting-IP");
     const limiter = effort ? env.EFFORT_RATE_LIMITER : (githubItem || githubItemV2) ? env.GITHUB_ITEM_RATE_LIMITER : continuation ? env.CONTINUATION_RATE_LIMITER : search ? env.HELP_RATE_LIMITER : env.TURN_RATE_LIMITER;
     if (!key || !ip || !limiter) return error("service_unavailable", 503);
@@ -403,6 +400,7 @@ export default {
     } catch (cause) {
       return cause instanceof BodyTooLarge ? error("body_too_large", 413) : error("invalid_json", 400);
     }
+    if (handback) return evidenceV6(state) ? handbackVerdict(state, key) : error("invalid_evidence", 400);
     if (githubItem) return githubItemRequest(state) ? classify(state, key) : error("invalid_github_item_request", 400);
     if (githubItemV2) return githubItemRequestV2(state) ? classify(state, key, 1, false, true) : error("invalid_github_item_request", 400);
     if (questionLocator) return questionLocatorRequest(state) ? classify(state, key) : error("invalid_evidence", 400);
