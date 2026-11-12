@@ -27,7 +27,7 @@ This is private-network operation with working SSH authentication and host trust
 - [ ] Implement and validate milestone 5: explicit remote paths, attachment uploads, client-side import upload and daemon-side voice transcription.
 - [ ] Remove the native desktop shell (`mj-desktop`, `mj app`, `mj-cli/src/desktop.rs`, release packaging); independent of the other milestones.
 - [ ] (2026-11-12, docs worker) Milestone 6 implemented: paired clean locked worktrees, shared Windows replacement/PATH functions, SHA fetch fallback and same_source gate. Native Windows parser and twice-run acceptance remain outstanding (pwsh unavailable here).
-- [ ] Implement milestone 7: user documentation, final validation, platform dispatch and real Windows acceptance.
+- [ ] (2026-11-12, docs worker) Milestone 7 guide and navigation implemented, including explicit pending login/import/voice behavior. Diff and navigation syntax checks pass; docs dependencies, native Windows acceptance and parent-owned platform dispatch remain outstanding.
 
 ## Surprises & Discoveries
 
@@ -88,7 +88,7 @@ Decision (user, 2026-11-12): Settings → Login no longer runs `mj login` as a s
 ## Outcomes & Retrospective
 
 
-Planning is complete; no product code, installation, daemon operation or commit is part of this assignment. Implementation and measured acceptance remain unchecked. The main implementation risk is incomplete removal of client filesystem assumptions; use the inventory embedded below and the real separated-directory test rather than declaring success after tunneling Ping.
+Planning and the milestone 6–7 script/documentation implementation are complete; native Windows acceptance remains outstanding. Implementation and measured acceptance remain unchecked. The main implementation risk is incomplete removal of client filesystem assumptions; use the inventory embedded below and the real separated-directory test rather than declaring success after tunneling Ping.
 
 ## Context and Orientation
 
@@ -267,3 +267,5 @@ Review fixes (2026-11-12): explicitly unaccepted requests refresh with Start dis
 Validation: client and CLI crate suites, workspace clippy with warnings denied, rustfmt check, daemon_endpoint.py, and all three real-sshd scenarios pass. Control runs the ignored real SSH integration regression, proving the old tunnel still accepts connections after refresh until its clients release their references, and that a competing listener receives no connection. HTTP strace proves use of the advertised non-loopback address; wildcard HTTP refusal preserves control-token access. This verifies lease lifetime rather than a barrier-controlled in-flight daemon response.
 
 Milestone 6 discovery (2026-11-12): root install.ps1 now exposes -FunctionsOnly for shared destination, staged replacement and PATH functions while retaining standalone download installation. The development command uses -SshHost because PowerShell reserves $Host. flock and an exclusive Windows file handle serialize reused build worktrees; normal Cargo storage is preserved. No PowerShell parser is installed on this Linux host.
+
+Milestone 7 discovery (2026-11-12): docs/node_modules and pwsh are absent; no tools installed. Human guide distinguishes settled login/import/voice design from completed implementation. Validate Windows with the PowerShell parser and two runs at one SHA in the isolated remote-dev instance; site validation requires npm ci then npm run build in docs/.
