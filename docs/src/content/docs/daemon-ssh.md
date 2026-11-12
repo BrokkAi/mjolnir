@@ -97,7 +97,9 @@ viewer for this mode.
 its terminal in a dashboard pane. Press **Ctrl+]** to close the pane. Browser
 OAuth callbacks to `localhost` on the Linux computer may not complete from your
 desktop. Paste-code and API-key methods avoid that callback; available methods
-depend on the harness.
+depend on the harness. When the daemon's machine has no desktop, the Codex
+ChatGPT sign-in uses a device code: the pane shows a web address and a code,
+and you finish signing in from a browser on any computer.
 
 **Import** reads your harness history on the client computer and uploads it to
 the daemon. Choose the project path on the daemon's machine in the import dialog,
