@@ -10,7 +10,8 @@ New harness kinds must require no schema changes. Unsupported sessions remain st
 
 - [x] 2026-11-12: traced snapshot deletion and explicit deletion APIs; implemented revision 126 and snapshot ownership change.
 - [x] Migration regression, 42 schema integration tests, 30 prior database failures, and final workspace clippy passed.
-- [ ] Final controller suite and commit review.
+- [x] Final controller suite: 2570 passed, 20 ignored; one unrelated worker-stop fixture failed with OS Text file busy and has a focused retry pending. Store review had no findings.
+- [ ] Collect focused worker-stop retry and combined login-fix rereview.
 
 ## Surprises & Discoveries
 
@@ -22,7 +23,7 @@ Remove absence-based session deletion; snapshots only own present records. Prese
 
 ## Outcomes & Retrospective
 
-Revision 126 and snapshot ownership changes pass focused validation. Historical fixture rewinds now restore the removed constraints; explicit deletion replaces snapshot absence in deletion fixtures. Final controller suite is queued.
+Revision 126 and snapshot ownership changes pass focused validation. Historical fixture rewinds now restore the removed constraints; explicit deletion replaces snapshot absence in deletion fixtures. Full controller validation passed all store cases; the only failure was an unrelated executable-busy worker-stop fixture. Workspace clippy also passed after the concurrent login correction.
 
 ## Context and Orientation
 
