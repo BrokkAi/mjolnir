@@ -1,4 +1,4 @@
-# Store terminal output once and join it when reading
+# Attach terminal output only to live owners and join parked output when reading
 
 This ExecPlan is a living document. The sections `Progress`, `Surprises & Discoveries`, `Decision Log`, and `Outcomes & Retrospective` must be kept up to date as work proceeds. It follows `.agents/PLANS.md` from the repository root.
 
@@ -10,15 +10,19 @@ Separately, the daemon gains SQLite planner statistics: the store has never been
 
 ## Progress
 
-- [ ] M1: `PRAGMA optimize=0x10012` on the writer connection after migrations; measure first-run cost on copies of the largest tables.
-- [ ] M2: one terminal-output accessor; convert every reader; no behavior change.
-- [ ] M3: lazy terminal outputs in the projector, window closure, removal of the reverse scan.
+- [x] (2026-11-12) M1: `PRAGMA optimize=0x10012` on the writer connection after migrations (`02c10fb8d`). Workspace Clippy and 248 database tests passed. First run on a 5.4 GB copy of the five largest tables took 26.8 s; a repeat took 0.00 s.
+- [x] (2026-11-12) M2: one terminal-output accessor (`TerminalOutputs` in `mj-core/src/transcript.rs`), all readers converted, presentation-only hydration of tools in page reads (`e13ed5c7c`). Existing goldens unchanged.
+- [x] (2026-11-12) M3 (revised): store reverse scan and `HistoricalReferences.terminals` deleted; live-owner attachment, Kimi matching, fallback finalization and ACP metadata unchanged (`ea047e98d`). Final run: 98 transcript, 54 client unit + integration, 774 selected controller and 21 selected core tests; workspace Clippy, fmt and diff checks passed.
+- [ ] Decide whether the first-run `optimize` cost needs a change before install.
 - [ ] Review, push, install, profile.
 
 ## Surprises & Discoveries
 
 - Observation: the worker records exactly one `TerminalOutput` per terminal, when it closes, carrying the tail-capped final output.
   Evidence: `mj-worker/src/worker_runtime/unix/dispatch.rs`, `RuntimeEvent::TerminalClosed`.
+- Observation: a second producer writes terminal output: ACP display-terminal metadata on tool calls and updates, streamed incrementally into the tool's own `terminal_outputs`.
+  Evidence: `mj-transcript/src/projection/terminals.rs:6–108` (`apply_terminal_metadata`), called from `session_update.rs:53,72,127`; protected by `terminal_metadata_retains_bounded_unicode_output_across_restore_and_late_exit`.
+- Observation: more readers than first listed: `mj-chat/src/chat/transcript.rs:315`, `mj-controller/src/server/api/turns.rs:57,436`, `mj-controller/src/database/events.rs:671`, and canonical tool-body consumers (`summary.rs`, archive validation, `handoff/claude.rs`).
 - Observation: in the three largest live sessions every terminal has exactly one referring item (39,443 terminals, 0 with more than one referrer), although `ProjectionIndex::terminal_referrers` allows a set.
 
 ## Decision Log
@@ -28,6 +32,12 @@ Separately, the daemon gains SQLite planner statistics: the store has never been
   Date/Author: 2026-11-12, user + parent agent.
 - Decision: terminal output is always stored as the standalone `terminal:<id>` item (`TranscriptBody::TerminalOutput`). The projector never copies it into a tool and never removes it because a tool claimed it.
   Rationale: removes owner lookup at projection time, the reverse scan, and the ordering-dependent claim logic that produced findings in three review rounds.
+- Decision (amends the previous one): ACP display-terminal metadata (`apply_terminal_metadata` in `mj-transcript/src/projection/terminals.rs`: `terminal_output`, `terminal_output_delta`, `terminal_exit`) keeps writing `Tool.terminal_outputs` with its existing snapshot, delta, restore and UTF-8 rules. "Always standalone" applies to `RelayObservation::TerminalOutput` only. The accessor resolves each terminal ID by preferring a standalone `terminal:<id>` record over an embedded one; otherwise it yields the embedded record. Order: embedded order, then standalone records for referenced IDs not embedded, in `terminal_refs` order.
+  Rationale: metadata output arrives on the owning tool's own update, so there is no owner lookup to remove; moving it out would make every streamed delta write a second item. The worker's close-time record is final, so it wins when both exist. Embedded records are therefore a live form, not only legacy.
+  Date/Author: 2026-11-12, parent agent, after the implementer found the second producer.
+- Decision (supersedes "always standalone" and the window-closure decision): reconcile only for watched tools. When `RelayObservation::TerminalOutput` arrives, the projector attaches it to referring tools that are in the live projection (`ProjectionIndex::terminal_referrers`, in memory) and to a window-local Kimi raw-result owner, exactly as today; otherwise it parks the output as `terminal:<id>`, and a later tool naming the terminal still claims it by key. The store reverse scan in `load_projection_references_from` and the `terminals` set from `historical_references` are deleted. Readers join parked output to its tool through `terminal_refs` with the accessor; page and API builders that return tools fetch the referenced `terminal:<id>` items by key as presentation context. No window closure is needed: a retained tool can only reference a parked item when its owner was evicted, and then the owner is not retained either.
+  Rationale: the implementer found that transcript consumers are incremental and render each item from its own data (cursor-paged and role-filtered transcript API in `database/materialized.rs:607–750` and `server/api/turns.rs:424–444`, the browser projector cache, TUI chat entries). Under full lazy storage, output arrival never changes the tool item, so consumers that already rendered the tool would never show its output without tracking dependencies between items. Owners of running terminals are pending tools, which the window keeps live, so the in-memory index covers nearly every case. Accepted trade-off: whether output is attached or parked still depends on whether the owner was live; late output for an evicted owner shows as a standalone block in the live view and under the tool in history views.
+  Date/Author: 2026-11-12, user decision ("switch") on the parent agent's recommendation.
 - Decision: one accessor type in `mj-core/src/transcript.rs`, built from the items a reader holds, answers "which output records belong to this tool" and "is this standalone terminal item shown under a tool". Every reader uses it; nobody reads `terminal_outputs` directly except the accessor.
   Rationale: AGENTS.md shared-interpretation rule; makes M3 a change to one function plus the projector. A SQL view would not reach the in-memory readers (actor window → runtime feed → mj-client), which are the hot path.
 - Decision: keep reading the legacy embedded form (`Tool.terminal_outputs`) through the accessor; no data migration.
@@ -36,6 +46,10 @@ Separately, the daemon gains SQLite planner statistics: the store has never been
   Rationale: both are key lookups or window-local, no history scan; matching semantics stay as they are (`matches_tool_raw_result` accepts completed/failed only).
 - Decision: any item set the daemon keeps live is closed under terminal references. `ProjectionWindow::trim` and the actor loader keep every `terminal:<id>` item referenced by a retained tool. Readers that page history build the accessor over everything they hold.
   Rationale: a kept old unsettled turn can reference a terminal item positioned in a dropped later turn. Terminal items are normally newer than their tool, so newest-first tails and pages already contain them; output-before-tool orderings appear once the older page loads.
+
+- Decision: page and history reads hydrate the tools they return with joined terminal records (primary-key reads of `terminal:<id>`), presentation only, never written back; `TranscriptHistoryPage` is a public wire type, so hydration keeps remote clients correct without a wire field. Clients suppress a standalone item whose terminal a held tool shows. Archive validation reads the accessor's raw embedded view so shadowed embedded records are still validated.
+  Rationale: role-filtered and cursor-paged readers cannot see parked items; hydration preserves page shape, cursors, filters and the response format.
+  Date/Author: 2026-11-12, implementer proposal approved by the parent agent.
 
 ## Outcomes & Retrospective
 
