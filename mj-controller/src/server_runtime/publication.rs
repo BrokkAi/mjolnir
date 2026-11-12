@@ -87,6 +87,19 @@ impl ViewerPublication {
             }
             self.dirty.insert(id.clone());
         }
+        for (id, _) in self
+            .runtime
+            .metadata
+            .session_attention
+            .changes(&next.metadata.session_attention)
+        {
+            self.dirty.insert(id.clone());
+            for runtime in [&self.runtime, next] {
+                if let Some(native) = runtime.native_agents.get(id) {
+                    self.dirty.insert(native.agent.owner_session_id.clone());
+                }
+            }
+        }
         self.runtime = next.clone();
     }
 
@@ -173,6 +186,31 @@ impl ViewerPublication {
             }),
             &mut self.engines,
         );
+        for id in snapshot.sessions.0.keys().cloned().collect::<Vec<_>>() {
+            let row = snapshot.sessions.0.get_mut(&id).expect("selected row");
+            row.attention = self
+                .runtime
+                .metadata
+                .session_attention
+                .get(&id)
+                .copied()
+                .unwrap_or_default();
+            row.native_subagent_attention = row
+                .native_subagents
+                .iter()
+                .map(|native| {
+                    (
+                        native.session_id.clone(),
+                        self.runtime
+                            .metadata
+                            .session_attention
+                            .get(&native.view_id())
+                            .copied()
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect();
+        }
         for id in &self.dirty {
             match snapshot.sessions.0.get(id) {
                 Some(row) => {

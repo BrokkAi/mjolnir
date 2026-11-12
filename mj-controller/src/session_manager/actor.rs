@@ -155,6 +155,7 @@ pub(super) async fn run_session_actor(
                     publish_view(
                         &target.session_id,
                         ManagedSessionView {
+                            attention: Default::default(),
                             snapshot: Some(connection.snapshot()),
                             connected: true,
                             error: None,
@@ -195,7 +196,7 @@ pub(super) async fn run_session_actor(
                 if lifecycle.return_lease(returned.lease_id) {
                     // A dropped lease returns no connection; `submit_actor_command`
                     // reconnects on demand, so the drain needs no special case.
-                    connection = returned.connection;
+                    connection = returned.connection.map(|connection| *connection);
                     failures = 0;
                     schedule.after(SESSION_SYNC_INTERVAL);
                     // A lease syncs the connection it borrowed, so this actor's
@@ -206,6 +207,7 @@ pub(super) async fn run_session_actor(
                         publish_view(
                             &target.session_id,
                             ManagedSessionView {
+                                attention: Default::default(),
                                 snapshot: Some(returned.snapshot()),
                                 connected: true,
                                 error: None,
@@ -304,6 +306,7 @@ pub(super) async fn run_session_actor(
                             publish_view(
                                 &target.session_id,
                                 ManagedSessionView {
+                                    attention: Default::default(),
                                     snapshot: Some(snapshot),
                                     connected: true,
                                     error: None,
@@ -368,6 +371,7 @@ pub(super) async fn run_session_actor(
                             publish_view(
                                 &target.session_id,
                                 ManagedSessionView {
+                                    attention: Default::default(),
                                     snapshot,
                                     connected: false,
                                     error: Some(if integrity {
@@ -404,6 +408,7 @@ pub(super) async fn run_session_actor(
                             publish_view(
                                 &target.session_id,
                                 ManagedSessionView {
+                                    attention: Default::default(),
                                     snapshot,
                                     connected: false,
                                     error: Some(ViewError::Unreachable(match last_error {
@@ -469,6 +474,7 @@ pub(super) async fn run_session_actor(
                                     publish_view(
                                         &target.session_id,
                                         ManagedSessionView {
+                                            attention: Default::default(),
                                             snapshot,
                                             connected: false,
                                             error: Some(ViewError::Unreachable(format!(
@@ -490,6 +496,7 @@ pub(super) async fn run_session_actor(
                                     publish_view(
                                         &target.session_id,
                                         ManagedSessionView {
+                                            attention: Default::default(),
                                             snapshot,
                                             connected: false,
                                             error: Some(ViewError::Unreachable(
@@ -511,6 +518,7 @@ pub(super) async fn run_session_actor(
                                     publish_view(
                                         &target.session_id,
                                         ManagedSessionView {
+                                            attention: Default::default(),
                                             snapshot,
                                             connected: false,
                                             error: Some(ViewError::Unreachable(format!(
@@ -531,6 +539,7 @@ pub(super) async fn run_session_actor(
                                     publish_view(
                                         &target.session_id,
                                         ManagedSessionView {
+                                            attention: Default::default(),
                                             snapshot,
                                             connected: false,
                                             error: Some(ViewError::Unreachable(format!(
@@ -554,6 +563,7 @@ pub(super) async fn run_session_actor(
                                 Ok(WorkerRecoveryOutcome::TargetMissing) => {
                                     let snapshot = view_tx.borrow().snapshot.clone();
                                     publish_view(&target.session_id, ManagedSessionView {
+                                        attention: Default::default(),
                                         snapshot,
                                         connected: false,
                                         error: Some(ViewError::TargetMissing(
@@ -567,6 +577,7 @@ pub(super) async fn run_session_actor(
                                     publish_view(
                                         &target.session_id,
                                         ManagedSessionView {
+                                            attention: Default::default(),
                                             snapshot,
                                             connected: false,
                                             error: Some(ViewError::TargetMissing(format!(
@@ -587,6 +598,7 @@ pub(super) async fn run_session_actor(
                                     publish_view(
                                         &target.session_id,
                                         ManagedSessionView {
+                                            attention: Default::default(),
                                             snapshot,
                                             connected: false,
                                             error: Some(ViewError::Unreachable(format!(
@@ -732,6 +744,7 @@ pub(super) async fn run_session_actor(
                                         publish_view(
                                             &target.session_id,
                                             ManagedSessionView {
+                                                attention: Default::default(),
                                                 snapshot: Some(snapshot),
                                                 connected: true,
                                                 error: None,
@@ -855,6 +868,7 @@ pub(super) async fn run_session_actor(
                             Ok(ref snapshot) => publish_view(
                                 &target.session_id,
                                 ManagedSessionView {
+                                    attention: Default::default(),
                                     snapshot: Some(snapshot.clone()),
                                     connected: true,
                                     error: None,
@@ -902,6 +916,7 @@ pub(super) async fn run_session_actor(
                             Ok(snapshot) => publish_view(
                                 &target.session_id,
                                 ManagedSessionView {
+                                    attention: Default::default(),
                                     snapshot: Some(snapshot.clone()),
                                     connected: true,
                                     error: None,
@@ -975,6 +990,7 @@ pub(super) async fn run_session_actor(
                             Ok(ref snapshot) => publish_view(
                                 &target.session_id,
                                 ManagedSessionView {
+                                    attention: Default::default(),
                                     snapshot: Some(snapshot.clone()),
                                     connected: true,
                                     error: None,
@@ -1238,6 +1254,7 @@ pub(super) async fn deliver_submit(
         Ok(snapshot) => publish_view(
             &target.session_id,
             ManagedSessionView {
+                attention: Default::default(),
                 snapshot: Some(snapshot),
                 connected: true,
                 error: None,

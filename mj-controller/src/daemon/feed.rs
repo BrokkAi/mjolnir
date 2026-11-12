@@ -305,6 +305,20 @@ impl RuntimeState {
         } else {
             history.full.metadata.launch_recency.clone()
         };
+        // Every retained publication holds this map, so it is edited from the
+        // previous one: unchanged entries keep sharing their tree nodes.
+        let attention = super::attention::project(&full);
+        let mut published = history.full.metadata.session_attention.clone();
+        published.retain(|id, _| attention.contains_key(id));
+        for (id, attention) in attention {
+            if let Some(view) = full.sessions.get_mut(&id) {
+                view.attention = attention;
+            }
+            if published.get(&id) != Some(&attention) {
+                published.insert(id, attention);
+            }
+        }
+        full.metadata.session_attention = published;
         history.publish(full.clone())?;
         history.native_owners = native_owners;
         history.full = full;
@@ -539,7 +553,10 @@ mod tests {
 
     #[tokio::test]
     async fn attaching_and_then_changing_owner_state_yields_an_incremental_frame() {
-        let state = super::super::tests::test_runtime_state();
+        let state = super::super::tests::test_runtime_state_with(Controller {
+            config: super::super::tests::runtime_test_config(),
+            state: Default::default(),
+        });
         let initial = state.runtime_changes(None, false).await.unwrap();
         let mut replica = RuntimeReplica::default();
         replica.apply(initial).unwrap();
@@ -554,6 +571,10 @@ mod tests {
                 ),
             );
         });
+        state.owner().sessions.insert(
+            "new".into(),
+            RuntimeSessionView::from_managed("new".into(), Default::default()),
+        );
         state.publish_revision();
         let frame = state.runtime_changes(cursor, true).await.unwrap();
         let RuntimeFrame::Delta { changes, .. } = &frame else {
@@ -562,6 +583,26 @@ mod tests {
         assert_eq!(changes.records.len(), 1);
         replica.apply(frame).unwrap();
         assert!(replica.projection.records.contains_key("new"));
+        assert_eq!(
+            replica.projection.sessions["new"].attention,
+            mj_core::attention::SessionAttention::Unreachable
+        );
+        let cursor = replica.cursor.clone();
+        let mut config = (*replica.projection.metadata.config).clone();
+        config.profiles.remove("codex");
+        state.owner().install_config(config);
+        state.publish_revision();
+        replica
+            .apply(state.runtime_changes(cursor, false).await.unwrap())
+            .unwrap();
+        assert_eq!(
+            replica.projection.metadata.session_attention["new"],
+            mj_core::attention::SessionAttention::Failed
+        );
+        assert_eq!(
+            replica.projection.sessions["new"].attention,
+            mj_core::attention::SessionAttention::Failed
+        );
     }
 
     // Hard-won: 8c88175f7: captures copied and compared unchanged metadata on every update.
@@ -883,6 +924,7 @@ mod tests {
                     agent,
                     projection_ordinal: 0,
                     projection_digest: String::new(),
+                    pending_input: false,
                 },
             )
         };
@@ -1091,6 +1133,7 @@ mod tests {
             agent,
             projection_ordinal: 0,
             projection_digest: String::new(),
+            pending_input: false,
         };
         full.native_agents.insert(view_id.clone(), summary.clone());
         let mut native_owners = NativeOwners::new();

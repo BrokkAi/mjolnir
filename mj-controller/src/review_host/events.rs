@@ -335,7 +335,10 @@ pub(super) struct HostState {
 
 pub(super) enum PreparingOperation {
     Review {
-        cancelled: Arc<std::sync::atomic::AtomicBool>,
+        /// The one record of whether the review was cancelled before it
+        /// opened. Preparation races it, so cancelling stops whichever
+        /// step is running.
+        cancel: tokio_util::sync::CancellationToken,
     },
     Override {
         task: tokio::task::JoinHandle<()>,

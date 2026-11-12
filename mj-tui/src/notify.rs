@@ -118,12 +118,15 @@ impl DashboardState {
                         .session_details
                         .get(id)
                         .is_some_and(|detail| !detail.pending_elicitations.is_empty())
-                        && self.own_attention_level(id) == AttentionLevel::Waiting =>
+                        && self.attention_level(id) == AttentionLevel::Waiting =>
                 {
                     AttentionLevel::Waiting
                 }
                 Some(_) => AttentionLevel::Inactive,
-                None => self.unseen_failure_level(id, self.own_attention_level(id)),
+                // A descendant form owns its episode and names this row.
+                // The daemon also promotes the row, which must not ring twice.
+                None if self.waiting_child_of(id).is_some() => AttentionLevel::Inactive,
+                None => self.unseen_failure_level(id, self.attention_level(id)),
             };
             if !level.needs_person() {
                 episodes.remove(id);
@@ -235,6 +238,10 @@ impl DashboardState {
                         .map(str::to_owned)
                 })
                 .unwrap_or_else(|| "Waiting for your input".to_owned()),
+            AttentionLevel::Important => detail
+                .and_then(|detail| detail.last_agent_message.as_deref())
+                .map(str::to_owned)
+                .unwrap_or_else(|| "Important update".to_owned()),
             AttentionLevel::Failed => self
                 .state
                 .sessions
@@ -380,13 +387,15 @@ impl DashboardState {
         }
         // Questions, unreachable workers and failures each get their own
         // word, most urgent first: "waiting" means a question for a person.
-        let (mut failed, mut unreachable, mut waiting, mut unread) = (0, 0, 0, 0);
+        let (mut failed, mut unreachable, mut waiting, mut important, mut unread) = (0, 0, 0, 0, 0);
         for entry in self.attention_queue() {
             match entry.level {
                 AttentionLevel::Failed => failed += 1,
                 AttentionLevel::Unreachable => unreachable += 1,
                 AttentionLevel::Waiting => waiting += 1,
-                _ => unread += 1,
+                AttentionLevel::Important => important += 1,
+                AttentionLevel::Unread => unread += 1,
+                _ => {}
             }
         }
         let mut title = String::from("mj");
@@ -394,6 +403,7 @@ impl DashboardState {
             (failed, "failed"),
             (unreachable, "unreachable"),
             (waiting, "waiting"),
+            (important, "important"),
             (unread, "unread"),
         ] {
             if count > 0 {
@@ -456,6 +466,13 @@ mod tests {
         let done = dashboard.session_details.get_mut("done").unwrap();
         done.unread_agent_messages = 1;
         done.last_agent_message = Some("All tests pass now.\nSecond line".into());
+        dashboard.set_session_attention(mj_core::snapshot_map::SnapshotMap::from([
+            (
+                "asks".into(),
+                mj_core::attention::SessionAttention::NeedsInput,
+            ),
+            ("done".into(), mj_core::attention::SessionAttention::Idle),
+        ]));
         dashboard.set_current_session(None);
         dashboard
     }
@@ -537,6 +554,12 @@ mod tests {
         );
         dashboard.state.sessions.get_mut("done").unwrap().state =
             mj_core::state::SessionState::Disconnected;
+        crate::test_support::serve_attention(
+            &mut dashboard,
+            &["done"],
+            mj_core::attention::SessionAttention::Unreachable,
+        );
+
         assert_eq!(
             dashboard.terminal_title().as_deref(),
             Some("mj · 1 unreachable · 1 waiting")

@@ -233,6 +233,40 @@ pub(super) async fn serve_client(
             // stop should not be refused.
             Err("daemon is shutting down; retry to reach a fresh daemon".to_owned())
         } else {
+            if request.action.is_cancellable_machine_action() {
+                let cancelled = Arc::new(AtomicBool::new(false));
+                let guard =
+                    crate::server_runtime::preflight::ProcessCancellationGuard(cancelled.clone());
+                let mut work = Box::pin(super::machine::execute(request.action, &state, cancelled));
+                let mut byte = [0u8; 1];
+                use tokio::io::AsyncReadExt;
+                let result = tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => None,
+                    closed = stream.read(&mut byte) => {
+                        if let Err(error) = closed { tracing::debug!(%error, "machine request connection closed"); }
+                        None
+                    },
+                    result = &mut work => Some(result),
+                };
+                let Some(result) = result else {
+                    drop(guard);
+                    if let Err(error) = work.await {
+                        tracing::debug!(%error, "cancelled machine request finished");
+                    }
+                    return Ok(());
+                };
+                write_response(
+                    &mut stream,
+                    ResponseEnvelope {
+                        protocol_version: request.protocol_version,
+                        request_id,
+                        result: result.map_err(|error| format!("{error:#}")),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
             // Lifecycle actions contain large checkpoint/restore futures. Keep
             // them off the connection task's stack, including in debug builds.
             let action = Box::pin(handle_action(

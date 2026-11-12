@@ -179,14 +179,14 @@ impl Controller {
         }
         let canonical = match record.target.as_ref() {
             Some(locator) => locator.clone(),
-            None => backend::locator_after_provision_named(
+            None => Box::new(backend::locator_after_provision_named(
                 configured,
                 &target,
                 session_id,
                 None,
                 executor,
                 &targets::resource_name(session_id)?,
-            )?,
+            )?),
         };
         let locator = backend_locator(&canonical, &record, &self.config)?;
         {

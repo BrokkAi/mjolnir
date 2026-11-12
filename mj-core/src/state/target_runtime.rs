@@ -61,7 +61,7 @@ impl ContainerSettings {
     pub fn upgrade_supported(session: &SessionRecord) -> bool {
         Self::owns_container(session)
             && !matches!(
-                session.target,
+                session.target.as_deref(),
                 Some(
                     TargetLocator::AppleContainer { .. } | TargetLocator::SshAppleContainer { .. }
                 )
@@ -105,7 +105,7 @@ impl ContainerSettings {
 
     fn owns_container(session: &SessionRecord) -> bool {
         matches!(
-            session.target,
+            session.target.as_deref(),
             Some(
                 TargetLocator::LocalPodman {
                     borrowed_from: None,

@@ -1606,7 +1606,7 @@ impl Controller {
         }
         let checkpoint = move_operation
             .and_then(|op| op.handoff.as_ref())
-            .or(previous.checkpoint.as_ref())
+            .or(previous.checkpoint.as_deref())
             .context("session has no checkpoint")?;
         // A receipt for an isolated destination says nothing about a host
         // checkout. Explicit moves to raw execution must check that source.
@@ -1751,7 +1751,7 @@ impl Controller {
         let mut source_environment = crate::database::session_environment(session_id)?;
         if previous_managed_worktree.is_some() {
             let mut physical_source = previous.clone();
-            physical_source.managed_worktree = previous_managed_worktree.clone();
+            physical_source.managed_worktree = previous_managed_worktree.clone().map(Box::new);
             source_environment = Some(crate::database::reserve_owned_checkout(&physical_source)?);
         }
         let managed_checkout_present = previous_managed_worktree
@@ -2023,7 +2023,7 @@ impl Controller {
                 let written = conversion_checkpoint(&archive_path, snapshot, &output)?;
                 conversion_checkpoint_written = Some(written.clone());
                 let record = self.state.sessions.get_mut(session_id).unwrap();
-                record.checkpoint = Some(written);
+                record.checkpoint = Some(Box::new(written));
                 record.updated_at = now();
                 // Persist the converted archive before provisioning without
                 // restoring client-owned fields from this earlier snapshot.
@@ -2109,7 +2109,7 @@ impl Controller {
                 // one it replaced can go.
                 if let Some(written) = &conversion_checkpoint_written {
                     super::checkpoint::prune_replaced_checkpoint(
-                        previous.checkpoint.as_ref(),
+                        previous.checkpoint.as_deref(),
                         written,
                     );
                 }

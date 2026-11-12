@@ -100,7 +100,7 @@
         # The same application binaries mj's updater replaces; documents stay behind.
         $binaries = @(Get-ChildItem -LiteralPath $bundles[0].FullName -File | Where-Object {
             $stem = $_.Name -replace '\.exe$', ''
-            $stem -in @('mj', 'mj-desktop', 'mj-voice-worker', 'mj-worker') -or $stem -like 'mj-worker-*'
+            $stem -in @('mj', 'mj-voice-worker', 'mj-worker') -or $stem -like 'mj-worker-*'
         })
         $controller = $binaries | Where-Object { $_.Name -eq 'mj.exe' }
         if (-not $controller) {

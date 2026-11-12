@@ -51,10 +51,10 @@ pub struct EnvironmentPreparedDestination {
 impl EnvironmentPlacement {
     pub(crate) fn from_session(session: &SessionRecord) -> Self {
         Self {
-            target: session.target.clone(),
+            target: session.target.clone().map(|v| *v),
             target_template_id: session.target_template_id.clone(),
             runtime: session.target_runtime.as_deref().cloned(),
-            managed_worktree: session.managed_worktree.clone(),
+            managed_worktree: session.managed_worktree.clone().map(|v| *v),
             project_directory: session.project_directory.clone(),
             container_workspace: session.container_workspace.clone(),
             build_cache: session.build_cache.clone(),
@@ -963,9 +963,9 @@ mod tests {
         let mut parent = crate::controller::test_support::checkpoint_test_session(
             "22222222222222222222222222222222",
         );
-        parent.target = Some(TargetLocator::LocalBare {
+        parent.target = Some(Box::new(TargetLocator::LocalBare {
             worker_root: directory.path().join(&parent.id),
-        });
+        }));
         #[cfg(unix)]
         {
             use std::os::unix::ffi::OsStrExt;
@@ -973,15 +973,15 @@ mod tests {
                 .path()
                 .join(std::ffi::OsStr::from_bytes(b"physical-\xff"));
             parent.project_directory = Some(path.clone());
-            parent.target = Some(TargetLocator::LocalBare {
+            parent.target = Some(Box::new(TargetLocator::LocalBare {
                 worker_root: path.join(&parent.id),
-            });
+            }));
         }
         let mut child = parent.clone();
         child.id = "33333333333333333333333333333333".into();
-        child.target = Some(TargetLocator::LocalBare {
+        child.target = Some(Box::new(TargetLocator::LocalBare {
             worker_root: directory.path().join(&child.id),
-        });
+        }));
         let transaction = connection.transaction().unwrap();
         super::super::state_io::insert_session(&transaction, &parent).unwrap();
         super::super::state_io::insert_session_with_parent(&transaction, &child, Some(&parent.id))
@@ -991,9 +991,9 @@ mod tests {
         let mut source = child.clone();
         source.id = parent.id.clone();
         source.project_directory = None;
-        source.target = Some(TargetLocator::LocalBare {
+        source.target = Some(Box::new(TargetLocator::LocalBare {
             worker_root: directory.path().join("old-source"),
-        });
+        }));
         let mut source_json = serde_json::to_value(&source).unwrap();
         source_json["harness_kind"] = "removed-harness".into();
         let mut runtime = TargetRuntimeSettings::from(&mj_core::config::TargetTemplate::LocalBare);
@@ -1081,7 +1081,7 @@ mod tests {
                 .unwrap()
                 .placement
                 .target,
-            source.target
+            source.target.map(|v| *v)
         );
         let child_environment: String = connection
             .query_row(
@@ -1098,7 +1098,7 @@ mod tests {
             physical.placement.project_directory,
             parent.project_directory
         );
-        assert_eq!(physical.placement.target, parent.target);
+        assert_eq!(physical.placement.target, parent.target.map(|v| *v));
         assert_eq!(
             read_environment_workers(&connection, &environment_id)
                 .unwrap()

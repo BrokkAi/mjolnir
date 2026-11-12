@@ -91,7 +91,7 @@ impl RecoveryCoordinator {
                         let observation = pending.observation;
                         let session_id = observation.session.id.clone();
                         let policy = policies.entry(session_id.clone()).or_default();
-                        policy.observe_checkpoint(observation.session.checkpoint.as_ref());
+                        policy.observe_checkpoint(observation.session.checkpoint.as_deref());
                         policy.observe_completed_turn(observation.latest_completed_turn_ordinal);
                         policy.observe_wait(pending.observed_wait);
                         if checkpoint_due(policy, &observation, Utc::now())
@@ -146,7 +146,7 @@ impl RecoveryCoordinator {
                                 let deferred = outcome.as_ref().err().is_some_and(|(_, deferred)| *deferred);
                                 let result = RecoveryResult {
                                     session_id,
-                                    expected_target,
+                                    expected_target: *expected_target,
                                     outcome: outcome.map_err(|(detail, _)| detail),
                                     cancelled: cancelled.load(Ordering::Acquire),
                                     deferred,
@@ -160,7 +160,7 @@ impl RecoveryCoordinator {
                                     let detail = detail.clone();
                                     let settling = admission.clone();
                                     let persisted = tokio::task::spawn_blocking(move || {
-                                        let result = record_recovery_failure_if_current(&session_id, &target, expected_checkpoint.as_ref(), &detail);
+                                        let result = record_recovery_failure_if_current(&session_id, &target, expected_checkpoint.as_deref(), &detail);
                                         drop(settling);
                                         result
                                     }).await;

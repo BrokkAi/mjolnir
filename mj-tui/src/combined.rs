@@ -2589,6 +2589,10 @@ mod tests {
         failed_session.last_error = Some("Podman exited before the workspace was removed".into());
         let failed_session_id = failed_session.id.clone();
         let mut failed = dashboard_with_session(failed_session);
+        failed.set_session_attention(mj_core::snapshot_map::SnapshotMap::from([(
+            failed_session_id.clone(),
+            mj_core::attention::SessionAttention::Failed,
+        )]));
         // The shared fixture resets updated_at, so pin the clock after building the dashboard.
         failed
             .state

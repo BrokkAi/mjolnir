@@ -1561,6 +1561,7 @@ mod tests {
         fixture
             .replacement_view
             .send_replace(mj_client::session::ManagedSessionView {
+                attention: Default::default(),
                 connected: true,
                 error: None,
                 snapshot: Some(mj_core::state::ManagedSessionSnapshot {

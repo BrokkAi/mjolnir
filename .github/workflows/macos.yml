@@ -45,12 +45,6 @@ jobs:
     - name: Run tests
       run: cargo test
 
-    - name: Run desktop Clippy lints
-      run: cargo clippy --locked -p brokk-mj-desktop --all-targets -- -D warnings
-
-    - name: Run desktop tests
-      run: cargo test --locked -p brokk-mj-desktop
-
     # The voice worker is outside the default members and ships in the macOS
     # release, so this is its only macOS build before release.
     - name: Run voice worker Clippy lints

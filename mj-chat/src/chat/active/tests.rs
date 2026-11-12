@@ -172,6 +172,7 @@ fn a_disconnected_view_without_a_snapshot_stops_stale_animation() {
     apply_session_view(
         &mut chat,
         Ok(ManagedSessionView {
+            attention: Default::default(),
             snapshot: None,
             connected: false,
             error: None,
@@ -320,6 +321,7 @@ fn managed_view(session: MaterializedSession) -> ManagedSessionView {
     let latest_ordinal = session.applied_event_ordinal;
     let latest_digest = session.applied_event_digest.clone();
     ManagedSessionView {
+        attention: Default::default(),
         snapshot: Some(mj_core::state::ManagedSessionSnapshot {
             window: mj_core::state::ProjectionWindow::of(&session),
             materialized: session,
@@ -580,6 +582,7 @@ fn a_transient_error_before_the_first_snapshot_keeps_the_loading_row() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.set_transcript_loading(true);
     let view = ManagedSessionView {
+        attention: Default::default(),
         snapshot: None,
         connected: false,
         error: Some(ViewError::Unreachable("database is busy".into())),

@@ -741,14 +741,14 @@ fn failed_suspension_requires_a_separate_checkpoint_discard_confirmation() {
         DashboardAction::None
     );
     assert!(
-        matches!(&dashboard.mode, Mode::Confirm(dialog) if matches!(&dialog.confirmation, Confirmation::DiscardSinceCheckpoint { checkpoint: selected, .. } if selected == &checkpoint))
+        matches!(&dashboard.mode, Mode::Confirm(dialog) if matches!(&dialog.confirmation, Confirmation::DiscardSinceCheckpoint { checkpoint: selected, .. } if *selected == *checkpoint))
     );
     dashboard.handle_key(key(KeyCode::Right));
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::DiscardSinceCheckpoint {
             session_id: "session-1".into(),
-            checkpoint
+            checkpoint: *checkpoint
         }
     );
 }

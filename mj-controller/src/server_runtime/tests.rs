@@ -64,8 +64,21 @@ fn ordinary_web_publications_project_only_changed_rows_at_every_history_size() {
             controller.state.sessions.insert(id, record);
         }
         let sources = PhoneProjectSources::default();
+        let native = mj_core::native_agent::NativeAgent {
+            owner_session_id: "history-000000".into(),
+            session_id: "native".into(),
+            parent_session_id: None,
+            name: "Inspect".into(),
+            task: String::new(),
+            capabilities: Default::default(),
+            state: mj_core::native_agent::NativeAgentState::Running,
+            availability: Default::default(),
+            availability_reason: None,
+            stable_id: None,
+        };
+        let native_rows = BTreeMap::from([("history-000000".to_owned(), vec![native.clone()])]);
         let views = PhoneSessionViews {
-            native_agents: &Default::default(),
+            native_agents: &native_rows,
             conversations: &Default::default(),
             queued_prompts: &Default::default(),
             active_user_shells: &Default::default(),
@@ -81,7 +94,56 @@ fn ordinary_web_publications_project_only_changed_rows_at_every_history_size() {
             reviews: &Default::default(),
         };
         let mut publisher = publication::ViewerPublication::default();
+        let mut runtime = mj_client::runtime_feed::RuntimeProjection::default();
+        runtime.native_agents.insert(
+            native.view_id(),
+            mj_core::native_agent::NativeAgentSummary {
+                generation_ordinal: 1,
+                agent: native.clone(),
+                projection_ordinal: 0,
+                projection_digest: String::new(),
+                pending_input: false,
+            },
+        );
+        runtime.metadata.session_attention.insert(
+            native.view_id(),
+            mj_core::attention::SessionAttention::Working,
+        );
+        let attention = mj_core::attention::SessionAttention::Important;
+        runtime
+            .metadata
+            .session_attention
+            .insert("history-000000".into(), attention);
+        let runtime_view = mj_client::daemon::RuntimeSessionView::from_managed(
+            "history-000000".into(),
+            mj_client::session::ManagedSessionView {
+                attention,
+                ..Default::default()
+            },
+        );
+        publisher.observe_runtime(&runtime, &mut Default::default(), &mut Default::default());
         let held = publisher.snapshot(&controller, &[], &Default::default(), &views, 1);
+        let viewer = &held.sessions.0["history-000000"];
+        let api = crate::server::api::ApiSession::from(viewer);
+        assert_eq!(
+            serde_json::to_value(&runtime_view).unwrap()["attention"],
+            serde_json::to_value(&api).unwrap()["attention"]
+        );
+        assert_eq!(viewer.attention, runtime_view.attention);
+        assert_eq!(
+            viewer.native_subagent_attention["native"],
+            mj_core::attention::SessionAttention::Working
+        );
+        runtime.metadata.session_attention.insert(
+            native.view_id(),
+            mj_core::attention::SessionAttention::Unreachable,
+        );
+        publisher.observe_runtime(&runtime, &mut Default::default(), &mut Default::default());
+        let refreshed = publisher.snapshot(&controller, &[], &Default::default(), &views, 2);
+        assert_eq!(
+            refreshed.sessions.0["history-000000"].native_subagent_attention["native"],
+            mj_core::attention::SessionAttention::Unreachable
+        );
         crate::server::take_viewer_row_visits();
         publisher.snapshot(&controller, &[], &Default::default(), &views, 2);
         assert_eq!(crate::server::take_viewer_row_visits(), 0);
@@ -338,7 +400,7 @@ fn golden_phone_new_session_preflight() {
         effort: None,
     }];
     let mut plain = run_new_preflight(
-        config,
+        config.clone(),
         "hel".into(),
         "raw".into(),
         Some(folder.path().to_path_buf()),
@@ -351,6 +413,28 @@ fn golden_phone_new_session_preflight() {
     )
     .unwrap();
     writeln!(out, "{}", serde_json::to_string_pretty(&plain).unwrap()).unwrap();
+
+    let error = preflight_new_request(
+        config,
+        mj_client::daemon::NewSessionPreflightRequest {
+            workspace_id: String::new(),
+            profile_id: "codex".into(),
+            bundle_id: String::new(),
+            target_id: "raw".into(),
+            project_directory: Some(folder.path().to_path_buf()),
+            remote_repairs: Vec::new(),
+            additional_mounts: vec![crate::targets::AdditionalMount {
+                source: folder.path().to_path_buf(),
+                destination: "/attached".into(),
+                access: crate::targets::MountAccess::Ro,
+            }],
+        },
+        CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false))),
+    )
+    .expect_err("shared preflight refuses mounts on bare targets");
+    writeln!(out, "=== shared HTTP/control launch validation ===").unwrap();
+    writeln!(out, "result: rejected").unwrap();
+    writeln!(out, "reason: {error}").unwrap();
 
     let mut config = Config::default();
     config.targets.insert(
@@ -1695,7 +1779,7 @@ async fn phone_projects_resolve_a_sub_agent_from_its_suspended_parent() {
     parent.state = SessionState::Stopped;
     parent.target_template_id = "local".into();
     parent.project_directory = Some(clone.clone());
-    parent.managed_worktree = Some(mj_core::state::ManagedWorktree {
+    parent.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
         kind: mj_core::state::ManagedCheckoutKind::Clone,
         source_project_directory: project.clone(),
         source_repository: project.clone(),
@@ -1703,7 +1787,7 @@ async fn phone_projects_resolve_a_sub_agent_from_its_suspended_parent() {
         branch: "mj/parent".into(),
         target: mj_core::state::ManagedWorktreeTarget::Local,
         base_commit: None,
-    });
+    }));
     let mut child = phone_session("child", 0);
     child.state = SessionState::Stopped;
     child.target_template_id = "local".into();

@@ -101,15 +101,15 @@ fn restart_keeps_relay_ownership_through_checkpoint_and_can_recover_closing_stat
 #[test]
 fn restart_recovery_requires_the_checkpoint_bound_to_its_intent() {
     let mut record = runtime_test_session("session-1", "workspace", SessionState::Closing);
-    record.target = Some(mj_core::state::TargetLocator::LocalBare {
+    record.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: "/tmp/session-1".into(),
-    });
-    record.checkpoint = Some(mj_core::state::CheckpointMetadata {
+    }));
+    record.checkpoint = Some(Box::new(mj_core::state::CheckpointMetadata {
         archive_path: "/tmp/session-1.tar".into(),
         sha256: "fresh-checkpoint".into(),
         created_at: "2026-10-03T00:00:00Z".into(),
         event_frontier: 7,
-    });
+    }));
     let mut intent = crate::database::SessionRestartIntent {
         session_id: "session-1".into(),
         operation_id: "restart-1".into(),
@@ -127,7 +127,7 @@ fn restart_recovery_requires_the_checkpoint_bound_to_its_intent() {
     assert!(!restart::restart_checkpoint_matches(&record, &intent));
     intent.checkpoint_sha256 = Some("fresh-checkpoint".into());
     assert!(restart::restart_checkpoint_matches(&record, &intent));
-    intent.handoff = record.checkpoint.clone();
+    intent.handoff = record.checkpoint.clone().map(|v| *v);
     intent.handoff.as_mut().unwrap().sha256 = "handoff".into();
     assert!(!restart::restart_checkpoint_matches(&record, &intent));
     intent.checkpoint_sha256 = Some("handoff".into());
@@ -170,11 +170,11 @@ async fn restart_target_probe_only_allows_fallback_for_a_proven_missing_target()
     let state = test_runtime_state();
     let mut controller = state.controller_projection();
     let mut missing = runtime_test_session("session-1", "workspace", SessionState::Closing);
-    missing.target = Some(mj_core::state::TargetLocator::LocalPodman {
+    missing.target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
         borrowed_from: None,
         container_id: mj_core::targets::resource_name("session-1").unwrap(),
         workspace_storage: Default::default(),
-    });
+    }));
     controller
         .state
         .sessions
@@ -185,9 +185,9 @@ async fn restart_target_probe_only_allows_fallback_for_a_proven_missing_target()
     assert!(restart::fallback_is_safe(unavailable));
 
     let mut reachable = runtime_test_session("bare-session", "workspace", SessionState::Closing);
-    reachable.target = Some(mj_core::state::TargetLocator::LocalBare {
+    reachable.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: "/tmp/bare-session".into(),
-    });
+    }));
     controller
         .state
         .sessions
@@ -200,11 +200,11 @@ async fn restart_target_probe_only_allows_fallback_for_a_proven_missing_target()
 
     let mut apple = runtime_test_session("apple-session", "workspace", SessionState::Closing);
     apple.target_template_id = "mac-apple".into();
-    apple.target = Some(mj_core::state::TargetLocator::SshAppleContainer {
+    apple.target = Some(Box::new(mj_core::state::TargetLocator::SshAppleContainer {
         borrowed_from: None,
         host: "mac.test".into(),
         container_id: mj_core::targets::resource_name("apple-session").unwrap(),
-    });
+    }));
     controller.config.targets.insert(
         "mac-apple".into(),
         serde_json::from_value(serde_json::json!({
@@ -527,7 +527,7 @@ fn startup_reports_every_in_flight_state_that_no_operation_owns() {
         ("moving", SessionState::Provisioning, None),
     ] {
         let mut session = runtime_test_session(id, "workspace", session_state);
-        session.target = session_target;
+        session.target = session_target.map(Box::new);
         state.sessions.insert(id.into(), session);
     }
     let controller = Controller {
@@ -564,7 +564,7 @@ fn a_stop_on_a_record_left_mid_close_routes_to_recovery() {
     });
     for state in [SessionState::Closing, SessionState::Destroying] {
         let mut session = runtime_test_session("session", "workspace", state);
-        session.target = target.clone();
+        session.target = target.clone().map(Box::new);
         assert_eq!(
             close_route(Some(&session), false),
             CloseRoute::RecoverInterrupted
@@ -580,7 +580,7 @@ fn a_stop_on_a_record_left_mid_close_routes_to_recovery() {
     }
 
     let mut running = runtime_test_session("session", "workspace", SessionState::Running);
-    running.target = target.clone();
+    running.target = target.clone().map(Box::new);
     assert_eq!(close_route(Some(&running), false), CloseRoute::Graceful);
     assert_eq!(close_route(None, false), CloseRoute::Graceful);
 
@@ -591,7 +591,7 @@ fn a_stop_on_a_record_left_mid_close_routes_to_recovery() {
         close_route(Some(&provisioning), false),
         CloseRoute::SettleWithoutCheckpoint
     );
-    provisioning.target = target.clone();
+    provisioning.target = target.clone().map(Box::new);
     assert_eq!(
         close_route(Some(&provisioning), false),
         CloseRoute::SettleWithoutCheckpoint
@@ -606,7 +606,7 @@ fn a_stop_on_a_record_left_mid_close_routes_to_recovery() {
     // A failed session that still names its target keeps a workspace worth
     // checkpointing, so it takes the graceful close.
     let mut failed_with_target = failed.clone();
-    failed_with_target.target = target.clone();
+    failed_with_target.target = target.clone().map(Box::new);
     assert_eq!(
         close_route(Some(&failed_with_target), false),
         CloseRoute::Graceful
@@ -633,7 +633,7 @@ fn a_stop_on_a_record_left_mid_close_routes_to_recovery() {
 
     let mut stopped = runtime_test_session("session", "workspace", SessionState::Stopped);
     assert_eq!(close_route(Some(&stopped), false), CloseRoute::Done);
-    stopped.target = target;
+    stopped.target = target.map(Box::new);
     assert_eq!(
         close_route(Some(&stopped), false),
         CloseRoute::DeferredCleanup
@@ -1476,6 +1476,34 @@ async fn daemon_client_eof_does_not_cancel_a_submitted_mutation() {
     let _ = server.await.expect("daemon task panicked");
 }
 
+/// Matching configuration for records produced by runtime_test_session.
+pub(super) fn runtime_test_config() -> Config {
+    use mj_core::config::{
+        HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository, TargetTemplate,
+    };
+    let mut config = Config::default();
+    config.profiles.insert(
+        "codex".into(),
+        HarnessProfile::new(HarnessKind::Codex, PathBuf::from("/home/dev/.codex")),
+    );
+    config
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    config.bundles.insert(
+        "project".into(),
+        ProjectBundle {
+            primary_repo: "main".into(),
+            repositories: vec![ProjectRepository {
+                id: "main".into(),
+                local: Some(PathBuf::from("/workspace/project")),
+                destination: PathBuf::from("."),
+                ..Default::default()
+            }],
+        },
+    );
+    config
+}
+
 pub(super) fn runtime_test_session(
     id: &str,
     workspace_id: &str,
@@ -1591,6 +1619,7 @@ async fn daemon_records_definitive_missing_workspaces_without_an_attached_surfac
     });
     assert!(state.attachments.lock().unwrap().is_empty());
     let mut view = ManagedSessionView {
+        attention: Default::default(),
         snapshot: None,
         connected: false,
         error: Some(ViewError::Unreachable(
@@ -1639,12 +1668,12 @@ async fn missing_target_retry_completes_a_committed_transition() {
     let _writer = crate::database::install_isolated_test_writer();
     let workspace = crate::database::create_workspace("Missing target retry").unwrap();
     let mut session = runtime_test_session("missing", &workspace.id, SessionState::Running);
-    session.checkpoint = Some(mj_core::state::CheckpointMetadata {
+    session.checkpoint = Some(Box::new(mj_core::state::CheckpointMetadata {
         archive_path: "/isolated/recovery.zip".into(),
         sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
         created_at: "2026-09-03T00:00:00Z".into(),
         event_frontier: 1,
-    });
+    }));
     crate::database::save_session(&session).unwrap();
     static RELOADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     fn fail_first_reload() -> Result<Controller> {
@@ -3193,11 +3222,11 @@ async fn a_waiting_close_preserves_the_intent_of_reserved_restart_teardown() {
 async fn a_close_removing_the_target_stops_offering_cancellation() {
     let state = test_runtime_state();
     let mut session = runtime_test_session("destroying", "workspace", SessionState::Closing);
-    session.target = Some(mj_core::state::TargetLocator::LocalPodman {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
         borrowed_from: None,
         container_id: "a".repeat(64),
         workspace_storage: Default::default(),
-    });
+    }));
     state.owner().edit_sessions(|sessions| {
         sessions.insert(session.id.clone(), session.clone());
     });
@@ -3734,6 +3763,7 @@ pub(super) fn ready_startup_view() -> ManagedSessionView {
         activity: None,
     };
     ManagedSessionView {
+        attention: Default::default(),
         snapshot: Some(mj_core::state::ManagedSessionSnapshot {
             subagent_requests: Default::default(),
             subagent_completions: Default::default(),
@@ -4126,10 +4156,10 @@ async fn a_current_worker_in_an_older_container_keeps_its_environment() {
         SessionState::Running,
     );
     session.target_template_id = "docker".into();
-    session.target = Some(mj_core::state::TargetLocator::LocalDocker {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalDocker {
         borrowed_from: None,
         container_id: mj_core::targets::resource_name("session-1").unwrap(),
-    });
+    }));
     let template = mj_core::config::TargetTemplate::LocalDocker {
         container: serde_json::from_value(serde_json::json!({})).unwrap(),
     };
@@ -4346,11 +4376,11 @@ async fn recovered_container_replacement_keeps_commit_authority_after_failure() 
         SessionState::Running,
     );
     record.target_template_id = "podman".into();
-    record.target = Some(mj_core::state::TargetLocator::LocalPodman {
+    record.target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
         container_id: mj_core::targets::resource_name("session-1").unwrap(),
         workspace_storage: Default::default(),
         borrowed_from: None,
-    });
+    }));
     crate::database::save_session(&record).unwrap();
     crate::database::begin_container_upgrade(
         "session-1",
@@ -4416,6 +4446,7 @@ async fn recovered_container_replacement_keeps_commit_authority_after_failure() 
     );
 
     let missing = ManagedSessionView {
+        attention: Default::default(),
         snapshot: None,
         connected: false,
         error: Some(ViewError::TargetMissing(
@@ -4452,7 +4483,7 @@ async fn recovered_container_replacement_keeps_commit_authority_after_failure() 
         }
     }
     let recovery = crate::session_manager::WorkerRecoveryPlan {
-        source_target: saved.target.clone().unwrap(),
+        source_target: *saved.target.clone().unwrap(),
         target: None,
         workspace: None,
         liveness_probe: crate::targets::CommandSpec::new(
@@ -4514,9 +4545,9 @@ async fn container_replacement_serializes_with_child_wake_and_registration() {
         mj_core::workspace::DEFAULT_WORKSPACE_ID,
         SessionState::Parked,
     );
-    child.target = Some(mj_core::state::TargetLocator::LocalBare {
+    child.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: "/isolated/child-1".into(),
-    });
+    }));
     crate::database::save_subagent_session(&child, &runtime_test_subagent("child-1", "session-1"))
         .unwrap();
     let plan = crate::targets::container_upgrade_test_plan("session-1");
@@ -4529,7 +4560,7 @@ async fn container_replacement_serializes_with_child_wake_and_registration() {
     .unwrap();
     let wake = crate::database::WorkerRestartIntent {
         operation_id: "wake-1".into(),
-        target: child.target.clone().unwrap(),
+        target: *child.target.clone().unwrap(),
         desired_build: "fixture".into(),
     };
     let owner = crate::worker_lifecycle::WorkerPermit::try_acquire("child-1", "test child wake")
@@ -4615,11 +4646,11 @@ async fn restart_compares_persisted_applied_settings_and_serializes_mount_edits(
         mj_core::workspace::DEFAULT_WORKSPACE_ID,
         SessionState::Running,
     );
-    session.target = Some(mj_core::state::TargetLocator::LocalPodman {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
         borrowed_from: None,
         container_id: mj_core::targets::resource_name("session-1").unwrap(),
         workspace_storage: Default::default(),
-    });
+    }));
     session.additional_mounts = vec![mj_core::targets::AdditionalMount {
         source: "/srv/reference".into(),
         destination: "/reference".into(),
@@ -4741,12 +4772,12 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
             .remove("session-1")
             .unwrap();
         session.state = SessionState::Closing;
-        session.checkpoint = Some(mj_core::state::CheckpointMetadata {
+        session.checkpoint = Some(Box::new(mj_core::state::CheckpointMetadata {
             archive_path: "/isolated/checkpoint.hel.zip".into(),
             sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             created_at: "now".into(),
             event_frontier: 1,
-        });
+        }));
         crate::database::save_checkpointed_session(&session)?;
         crate::database::advance_session_restart(
             "session-1",
@@ -4853,11 +4884,11 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
         mj_core::workspace::DEFAULT_WORKSPACE_ID,
         SessionState::Closing,
     );
-    session.target = Some(mj_core::state::TargetLocator::LocalPodman {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
         borrowed_from: None,
         container_id: mj_core::targets::resource_name(&session.id).unwrap(),
         workspace_storage: Default::default(),
-    });
+    }));
     crate::database::save_session(&session).unwrap();
     let intent = crate::database::begin_session_restart(
         &session.id,
@@ -5783,12 +5814,12 @@ async fn a_destroyed_session_is_still_found_by_its_id() {
     // must still remove its record and publish a safe warning independently.
     session.id = "abcdef0123456789abcdef0123456789".into();
     session.target_template_id = "removed-machine".into();
-    session.target = Some(mj_core::state::TargetLocator::SshPodman {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::SshPodman {
         host: "removed.invalid".into(),
         container_id: "gone-container".into(),
         workspace_storage: Default::default(),
         borrowed_from: None,
-    });
+    }));
     crate::database::save_session(&session).unwrap();
     state.push_notice(&session.id, "private diagnostic /secret/path");
     // Hard-won: 27c51a34c: unavailable target configuration blocked Destroy too.
@@ -5830,9 +5861,9 @@ async fn a_destroyed_session_is_still_found_by_its_id() {
     std::fs::create_dir_all(&worker_root).unwrap();
     std::fs::write(worker_root.join("keep"), "parent worker evidence").unwrap();
     parent.state = SessionState::Running;
-    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+    parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: worker_root.clone(),
-    });
+    }));
     crate::database::save_session(&parent).unwrap();
     session.id = child_id.into();
     crate::database::save_subagent_session(&session, &runtime_test_subagent(child_id, parent_id))
@@ -5916,9 +5947,9 @@ async fn a_destroyed_session_is_still_found_by_its_id() {
         mj_core::workspace::DEFAULT_WORKSPACE_ID,
         SessionState::Running,
     );
-    root.target = Some(mj_core::state::TargetLocator::LocalBare {
+    root.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: repository.path().join(requested),
-    });
+    }));
     crate::database::save_session(&root).unwrap();
     session.id = descendant.into();
     crate::database::save_subagent_session(&session, &runtime_test_subagent(descendant, requested))
@@ -7044,9 +7075,9 @@ async fn suspension_intent_survives_restart_and_missing_worker_reports_failure()
     let workspace = crate::database::create_workspace("Suspend restart").unwrap();
     let root = tempfile::tempdir().unwrap();
     let mut session = runtime_test_session("restart-suspend", &workspace.id, SessionState::Running);
-    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: root.path().join(&session.id),
-    });
+    }));
     session.last_error = Some("old connection failure".into());
     crate::database::save_session(&session).unwrap();
     let state = test_runtime_state_loading_the_store();
@@ -7140,9 +7171,9 @@ async fn a_graceful_stop_waits_for_a_destroy_in_flight() {
         "destroy evidence",
     )
     .unwrap();
-    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+    parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: root.path().join(parent_id),
-    });
+    }));
     crate::database::save_session(&parent).unwrap();
     let child = runtime_test_session(child_id, &workspace.id, SessionState::Running);
     crate::database::save_subagent_session(&child, &runtime_test_subagent(child_id, parent_id))
@@ -7291,16 +7322,16 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
     // A parent with nothing to checkpoint yet, so its own suspend settles
     // without a worker to talk to.
     let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Provisioning);
-    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+    parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: root.path().join(parent_id),
-    });
+    }));
     crate::database::save_session(&parent).unwrap();
 
     // A child that finished its task and handed back its report.
     let mut finished = runtime_test_session(finished_id, &workspace.id, SessionState::Running);
-    finished.target = Some(mj_core::state::TargetLocator::LocalBare {
+    finished.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: root.path().join(finished_id),
-    });
+    }));
     finished.session_title_override = Some("Fix the parser".into());
     let mut relation = runtime_test_subagent(finished_id, parent_id);
     relation.initial_prompt = "Fix the off-by-one in the parser.".into();
@@ -7367,11 +7398,11 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
     let mut stuck = runtime_test_session(stuck_id, &workspace.id, SessionState::Running);
     stuck.title = "Review the docs".into();
     stuck.target_template_id = "removed-target".into();
-    stuck.target = Some(mj_core::state::TargetLocator::SshBare {
+    stuck.target = Some(Box::new(mj_core::state::TargetLocator::SshBare {
         host: "builder.invalid".into(),
         workspace: PathBuf::from(format!(".local/share/hel/workspaces/{stuck_id}")),
         worker_id: Some(stuck_id.into()),
-    });
+    }));
     crate::database::save_subagent_session(&stuck, &runtime_test_subagent(stuck_id, parent_id))
         .unwrap();
     // The primary's oracle, working like the child above. It is stopped with
@@ -7379,11 +7410,11 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
     let mut oracle = runtime_test_session(oracle_id, &workspace.id, SessionState::Running);
     oracle.title = "oracle".into();
     oracle.target_template_id = "removed-target".into();
-    oracle.target = Some(mj_core::state::TargetLocator::SshBare {
+    oracle.target = Some(Box::new(mj_core::state::TargetLocator::SshBare {
         host: "builder.invalid".into(),
         workspace: PathBuf::from(format!(".local/share/hel/workspaces/{oracle_id}")),
         worker_id: Some(oracle_id.into()),
-    });
+    }));
     let mut oracle_relation = runtime_test_subagent(oracle_id, parent_id);
     oracle_relation.kind = mj_core::subagent::SubagentKind::Oracle;
     crate::database::save_subagent_session(&oracle, &oracle_relation).unwrap();
@@ -7555,18 +7586,18 @@ async fn live_parent_with_a_working_sub_agent(recovery_copy: ParentRecoveryCopy)
     parent.workspace_id = workspace.id.clone();
     parent.target_template_id = "removed-local".into();
     parent.target_runtime = Some((&mj_core::config::TargetTemplate::LocalBare).into());
-    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+    parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: worker_root.clone(),
-    });
+    }));
     parent.project_directory = Some(checkout);
     if recovery_copy == ParentRecoveryCopy::Installed {
-        parent.checkpoint = Some(
+        parent.checkpoint = Some(Box::new(
             crate::controller::test_support::write_checkpoint_gate_archive(
                 &archives,
                 LATCH_RELAY_SESSION,
                 2,
             ),
-        );
+        ));
     }
     crate::database::save_session(&parent).unwrap();
     crate::database::save_materialized_session(&mj_core::state::MaterializedSession::empty(
@@ -7576,9 +7607,9 @@ async fn live_parent_with_a_working_sub_agent(recovery_copy: ParentRecoveryCopy)
 
     let mut child = runtime_test_session(WORKING_CHILD, &workspace.id, SessionState::Running);
     child.title = "Review the docs".into();
-    child.target = Some(mj_core::state::TargetLocator::LocalBare {
+    child.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: directory.path().join(WORKING_CHILD),
-    });
+    }));
     crate::database::save_subagent_session(
         &child,
         &runtime_test_subagent(WORKING_CHILD, LATCH_RELAY_SESSION),
@@ -7813,9 +7844,9 @@ async fn live_clone_with_an_unpushed_commit() -> LiveClone {
     session.state = SessionState::Running;
     session.target_template_id = "removed-local".into();
     session.target_runtime = Some((&mj_core::config::TargetTemplate::LocalBare).into());
-    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: worker_root.clone(),
-    });
+    }));
     crate::database::save_session(&session).unwrap();
     crate::database::save_materialized_session(&mj_core::state::MaterializedSession::empty(
         LATCH_RELAY_SESSION,
@@ -8123,7 +8154,7 @@ async fn discarding_changes_since_a_checkpoint_stops_the_sub_agents() {
         .state
         .start_session_lifecycle(SessionLifecycleRequest::Discard {
             session_id: LATCH_RELAY_SESSION.into(),
-            checkpoint: checkpoint.clone(),
+            checkpoint: *checkpoint.clone(),
         })
         .await
         .unwrap_err();
@@ -8153,7 +8184,7 @@ async fn discarding_changes_since_a_checkpoint_stops_the_sub_agents() {
             .state
             .start_session_lifecycle(SessionLifecycleRequest::Discard {
                 session_id: LATCH_RELAY_SESSION.into(),
-                checkpoint: checkpoint.clone(),
+                checkpoint: *checkpoint.clone(),
             }),
     )
     .await
@@ -8252,7 +8283,7 @@ async fn accepted_discard_failure_is_published_without_an_observer() {
         .state
         .admit_session_lifecycle(SessionLifecycleRequest::Discard {
             session_id: LATCH_RELAY_SESSION.into(),
-            checkpoint: checkpoint.clone(),
+            checkpoint: *checkpoint.clone(),
         })
         .await
         .unwrap();
@@ -8483,14 +8514,14 @@ async fn a_sub_agent_its_parents_suspend_stops_is_shown_stopping_not_destroying(
     // A parent with nothing to checkpoint yet, so its suspend settles
     // without a worker to talk to.
     let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Provisioning);
-    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+    parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: root.path().join(parent_id),
-    });
+    }));
     crate::database::save_session(&parent).unwrap();
     let mut child = runtime_test_session(WORKING_CHILD, &workspace.id, SessionState::Running);
-    child.target = Some(mj_core::state::TargetLocator::LocalBare {
+    child.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: root.path().join(WORKING_CHILD),
-    });
+    }));
     crate::database::save_subagent_session(
         &child,
         &runtime_test_subagent(WORKING_CHILD, parent_id),
@@ -8595,7 +8626,9 @@ fn parked_child(root: &Path, child_id: &str, parent_id: &str, workspace_id: &str
     .unwrap();
     std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o755)).unwrap();
     let mut child = runtime_test_session(child_id, workspace_id, SessionState::Parked);
-    child.target = Some(mj_core::state::TargetLocator::LocalBare { worker_root });
+    child.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+        worker_root,
+    }));
     child.session_title_override = Some("Map the parser".into());
     crate::database::save_subagent_session(&child, &runtime_test_subagent(child_id, parent_id))
         .unwrap();
@@ -8621,9 +8654,9 @@ async fn suspending_a_parent_removes_its_parked_sub_agents_without_starting_or_w
     // A parent with nothing to checkpoint yet, so its own suspend settles
     // without a worker to talk to.
     let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Provisioning);
-    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+    parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: root.path().join(parent_id),
-    });
+    }));
     crate::database::save_session(&parent).unwrap();
     // No handback tool and no finished turn on record: only being parked
     // says this child's parent already has what it will get from it.
@@ -8671,7 +8704,7 @@ async fn closing_a_parked_sub_agent_stops_it_without_starting_its_worker() {
     let parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
     crate::database::save_session(&parent).unwrap();
     let child = parked_child(root.path(), child_id, parent_id, &workspace.id);
-    let worker_root = match &child.target {
+    let worker_root = match child.target.as_deref() {
         Some(mj_core::state::TargetLocator::LocalBare { worker_root }) => worker_root.clone(),
         _ => unreachable!(),
     };
@@ -8802,9 +8835,9 @@ async fn child_close_yields_handoff_and_replays_its_durable_request_with_the_fin
         crate::database::save_session(&parent).unwrap();
         let mut child =
             runtime_test_session(LATCH_RELAY_SESSION, &workspace.id, SessionState::Running);
-        child.target = Some(mj_core::state::TargetLocator::LocalBare {
+        child.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: worker_root.clone(),
-        });
+        }));
         crate::database::save_subagent_session(
             &child,
             &runtime_test_subagent(LATCH_RELAY_SESSION, parent_id),
@@ -8885,9 +8918,9 @@ async fn child_close_yields_handoff_and_replays_its_durable_request_with_the_fin
         assert_eq!(child.state, SessionState::Closing);
         assert_eq!(
             child.target,
-            Some(mj_core::state::TargetLocator::LocalBare {
+            Some(Box::new(mj_core::state::TargetLocator::LocalBare {
                 worker_root: worker_root.clone(),
-            })
+            }))
         );
         assert!(
             child.public_error().is_none(),
@@ -9015,9 +9048,9 @@ async fn exercise_child_close_with_a_nested_workspace(
     let parent_root = root.path().join(parent_id);
     std::fs::create_dir_all(&parent_root).unwrap();
     std::fs::write(parent_root.join("private"), "parent worker").unwrap();
-    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+    parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: parent_root.clone(),
-    });
+    }));
     crate::database::save_session(&parent).unwrap();
     let worker_root = root.path().join(LATCH_RELAY_SESSION);
     std::fs::create_dir_all(&worker_root).unwrap();
@@ -9029,9 +9062,9 @@ async fn exercise_child_close_with_a_nested_workspace(
         relation.kind = mj_core::subagent::SubagentKind::Reviewer;
     }
     child.project_directory = parent.project_directory.clone();
-    child.target = Some(mj_core::state::TargetLocator::LocalBare {
+    child.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: worker_root.clone(),
-    });
+    }));
     crate::database::save_subagent_session(&child, &relation).unwrap();
     let reports = repository
         .path()
@@ -9259,9 +9292,9 @@ async fn unreachable_child_keeps_its_private_journal_until_worker_death_is_prove
     crate::database::save_session(&parent).unwrap();
     let mut child = runtime_test_session(LATCH_RELAY_SESSION, &workspace.id, SessionState::Closing);
     child.project_directory = Some(parent_dir.clone());
-    child.target = Some(mj_core::state::TargetLocator::LocalBare {
+    child.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: child_root.clone(),
-    });
+    }));
     let mut relation = runtime_test_subagent(LATCH_RELAY_SESSION, parent_id);
     relation.working_directory = "deleted-child-cwd".into();
     crate::database::save_subagent_session(&child, &relation).unwrap();
@@ -9347,15 +9380,15 @@ async fn dead_child_close_recovers_journal_without_recreating_its_cwd() {
     std::fs::write(parent_root.join("private"), "parent worker").unwrap();
     let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
     parent.project_directory = Some(parent_dir.clone());
-    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+    parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: parent_root.clone(),
-    });
+    }));
     crate::database::save_session(&parent).unwrap();
     let mut child = runtime_test_session(LATCH_RELAY_SESSION, &workspace.id, SessionState::Closing);
     child.project_directory = Some(parent_dir.clone());
-    child.target = Some(mj_core::state::TargetLocator::LocalBare {
+    child.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: child_root.clone(),
-    });
+    }));
     let mut relation = runtime_test_subagent(LATCH_RELAY_SESSION, parent_id);
     relation.working_directory = "deleted-child-cwd".into();
     crate::database::save_subagent_session(&child, &relation).unwrap();
@@ -10427,9 +10460,9 @@ async fn changing_a_sessions_workspace_reaches_the_published_projection() {
         mj_core::workspace::DEFAULT_WORKSPACE_ID,
         SessionState::Running,
     );
-    live.target = Some(mj_core::state::TargetLocator::LocalBare {
+    live.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: "/worker/session-1".into(),
-    });
+    }));
     crate::database::save_session(&live).unwrap();
     assert!(state.session_record("session-1").is_some());
     let initial = state.runtime_changes(None, false).await.unwrap();
@@ -10727,11 +10760,11 @@ async fn archiving_old_children_needs_no_index_copy_and_preserves_the_parent() {
                 ],
             },
         });
-    parent.checkpoint = Some(
+    parent.checkpoint = Some(Box::new(
         crate::controller::test_support::write_checkpoint_archive_input(
             &archives, parent_id, &input,
         ),
-    );
+    ));
     crate::database::save_session(&parent).unwrap();
     let mut child = parent.clone();
     child.state = SessionState::Stopped;
@@ -11969,9 +12002,9 @@ async fn a_failure_after_a_sub_agent_registers_moves_it_to_error() {
         straightforward: None,
         subtle: None,
     });
-    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+    parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: mj_core::config::data_dir().join("workers").join(parent_id),
-    });
+    }));
     crate::database::save_session(&parent).unwrap();
 
     let remote = spawn_remote_session_manager().unwrap();
@@ -12210,4 +12243,231 @@ async fn suspend_acceptance_survives_client_disconnect_during_checkpoint() {
         SessionState::Stopped
     );
     assert!(stored.sessions[LATCH_RELAY_SESSION].checkpoint.is_some());
+}
+
+/// Exercise the real authenticated control boundary: these directories exist
+/// only in the server fixture, never in client-side interpretation.
+#[tokio::test]
+async fn daemon_api_exchange() {
+    let root = tempfile::tempdir().unwrap();
+    let server_root = root.path().canonicalize().unwrap();
+    let project = server_root.join("server-only-project");
+    fs::create_dir(&project).unwrap();
+    let mut config = Config::default();
+    config
+        .targets
+        .insert("local".into(), mj_core::config::TargetTemplate::LocalBare);
+    config.profiles.insert(
+        "agent".into(),
+        mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Codex,
+            server_root.as_path().join("profile"),
+        ),
+    );
+    let state = test_runtime_state_with(Controller {
+        config,
+        state: Default::default(),
+    });
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let metadata = test_metadata(listener.local_addr().unwrap());
+    let actions = vec![
+        DaemonAction::CheckProjectDirectories {
+            paths: vec![project.clone(), server_root.as_path().join("absent")],
+        },
+        DaemonAction::CompletePath {
+            host: mj_core::path_completion::CompletionHost::Local,
+            prefix: format!("{}/server-", server_root.as_path().display()),
+            kind: mj_core::path_completion::CompletionKind::Directories,
+        },
+        DaemonAction::DiscoverProjects {
+            request: mj_core::project_picker::ProjectDiscoveryRequest::Directory {
+                path: server_root.as_path().to_string_lossy().into_owned(),
+                filter: String::new(),
+            },
+        },
+        DaemonAction::ResolveSetupPath {
+            machine: mj_core::config::Machine::Local { build_cache: None },
+            source: project.clone(),
+        },
+        DaemonAction::ValidateMountSource {
+            target_id: "missing".into(),
+            source: project.clone(),
+        },
+        DaemonAction::ValidateSessionMounts {
+            target_id: "missing".into(),
+            mounts: vec![mj_core::targets::AdditionalMount {
+                source: project.clone(),
+                destination: "/project".into(),
+                access: mj_core::targets::MountAccess::Ro,
+            }],
+        },
+        DaemonAction::ResolveContainerPath {
+            target_id: "local".into(),
+            source: project.clone(),
+        },
+        DaemonAction::ValidateProjectDirectory {
+            target_id: "local".into(),
+            directory: project.clone(),
+        },
+        DaemonAction::PreflightNewSession {
+            request: NewSessionPreflightRequest {
+                profile_id: "agent".into(),
+                workspace_id: String::new(),
+                bundle_id: String::new(),
+                target_id: "local".into(),
+                project_directory: Some(project.clone()),
+                additional_mounts: Vec::new(),
+                remote_repairs: Vec::new(),
+            },
+        },
+        DaemonAction::ResolveContainerPath {
+            target_id: "missing".into(),
+            source: project,
+        },
+    ];
+    let mut exchange = Vec::new();
+    for (index, action) in actions.into_iter().enumerate() {
+        let server_state = state.clone();
+        let server_metadata = metadata.clone();
+        let server_listener = &listener;
+        let connect = TcpStream::connect(metadata.address);
+        let (stream, accepted) = tokio::join!(connect, server_listener.accept());
+        let (server_stream, _) = accepted.unwrap();
+        let server = tokio::spawn(async move {
+            serve_client(
+                server_stream,
+                server_metadata,
+                server_state,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        });
+        let mut stream = stream.unwrap();
+        let rendered_action = serde_json::to_value(&action).unwrap();
+        write_frame(
+            &mut stream,
+            &RequestEnvelope {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: index as u64,
+                token: metadata.token.clone(),
+                action,
+            },
+        )
+        .await
+        .unwrap();
+        let response: ResponseEnvelope = read_frame(&mut stream).await.unwrap();
+        exchange.push(serde_json::json!({"request": rendered_action, "reply": response.result}));
+        drop(stream);
+        server.await.unwrap();
+    }
+    // Normalize JSON's escaped Windows separators before replacing roots.
+    let rendered = serde_json::to_string_pretty(&exchange)
+        .unwrap()
+        .replace("\\\\", "/")
+        .replace(
+            &server_root.to_string_lossy().replace('\\', "/"),
+            "<server>",
+        )
+        .replace(
+            &server_root
+                .parent()
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/"),
+            "<server-parent>",
+        );
+    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "daemon-api-exchange", &rendered);
+}
+
+/// Real OpenSSH is held in a proxy command. Closing a superseded completion
+/// must reap that command even after it emits more than a pipe buffer.
+#[cfg(unix)]
+#[tokio::test]
+async fn superseded_machine_completion_closes_connection_and_reaps_ssh() {
+    let root = tempfile::tempdir().unwrap();
+    let started = root.path().join("started");
+    let script = root.path().join("proxy.sh");
+    fs::write(
+        &script,
+        format!(
+            "head -c 131072 /dev/zero >&2\nprintf '%s' $$ > {}\nexec sleep 600\n",
+            mj_core::targets::posix_quote(&started.to_string_lossy())
+        ),
+    )
+    .unwrap();
+    let state = test_runtime_state();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let metadata = test_metadata(listener.local_addr().unwrap());
+    let server_metadata = metadata.clone();
+    let shutdown = CancellationToken::new();
+    let server_shutdown = shutdown.clone();
+    let mut server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        serve_client(stream, server_metadata, state, server_shutdown)
+            .await
+            .unwrap();
+    });
+    let mut stream = TcpStream::connect(metadata.address).await.unwrap();
+    let machine = mj_core::config::Machine::Ssh {
+        ssh: mj_core::config::SshConnection {
+            host: "machine-cancellation.invalid".into(),
+            user: None,
+            identity_file: None,
+            extra_args: vec![
+                "-o".into(),
+                format!(
+                    "ProxyCommand=sh {}",
+                    mj_core::targets::posix_quote(&script.to_string_lossy())
+                ),
+                "-o".into(),
+                "ControlMaster=no".into(),
+                "-o".into(),
+                "ControlPath=none".into(),
+            ],
+        },
+        workspace_prefix: "work".into(),
+        build_cache: None,
+    };
+    write_frame(
+        &mut stream,
+        &RequestEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: 1,
+            token: metadata.token,
+            action: DaemonAction::CompletePath {
+                host: mj_core::path_completion::CompletionHost::Machine(Box::new(machine)),
+                prefix: "~/projects".into(),
+                kind: mj_core::path_completion::CompletionKind::Directories,
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let started_result = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Ok(pid) = fs::read_to_string(&started)
+                && let Ok(pid) = pid.parse::<u32>()
+            {
+                break pid;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    // Always cancel/reap before a failed assertion can abandon the fixture.
+    drop(stream);
+    match tokio::time::timeout(Duration::from_secs(30), &mut server).await {
+        Ok(result) => result.unwrap(),
+        Err(_) => {
+            shutdown.cancel();
+            server.await.unwrap();
+            panic!("connection closure did not cancel completion");
+        }
+    }
+    let pid = started_result.expect("OpenSSH proxy never started");
+    assert!(
+        !daemon_process_is_alive(pid),
+        "superseded completion left its SSH proxy alive"
+    );
 }

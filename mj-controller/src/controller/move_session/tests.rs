@@ -338,10 +338,10 @@ fn terminal_move_recovery_finishes_interrupted_close_before_phase_retry() {
         let mut session = checkpoint_test_session(&session_id);
         session.state = SessionState::Destroying;
         session.target_template_id = "local-bare".into();
-        session.target = Some(TargetLocator::LocalBare {
+        session.target = Some(Box::new(TargetLocator::LocalBare {
             worker_root: worker_root.clone(),
-        });
-        session.checkpoint = Some(checkpoint.clone());
+        }));
+        session.checkpoint = Some(Box::new(checkpoint.clone()));
         let state = State {
             sessions: [(session_id.clone(), session.clone())]
                 .into_iter()
@@ -380,7 +380,7 @@ fn terminal_move_recovery_finishes_interrupted_close_before_phase_retry() {
             selection,
             source_profile_id: "codex".into(),
             source_target_template_id: "local-bare".into(),
-            source_target: session.target.clone(),
+            source_target: session.target.clone().map(|v| *v),
             source_native_session_id: session.native_session_id.clone(),
             source_additional_mounts: Vec::new(),
             source_resource_allocation: None,
@@ -881,7 +881,7 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
     // This relay belongs to a raw checkout, not an unconfigured bundle.
     session.project_directory = Some(directory.path().to_path_buf());
     session.target_template_id = "local-bare".into();
-    session.target = Some(target.clone());
+    session.target = Some(Box::new(target.clone()));
     session.native_session_id = None;
     session.state = SessionState::Running;
     let state = State {
@@ -1093,7 +1093,7 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
         .sessions
         .get_mut(MOVE_QUEUE_SESSION_ID)
         .expect("move queue session exists")
-        .target = Some(replacement_target.clone());
+        .target = Some(Box::new(replacement_target.clone()));
     operation.destination_target = Some(replacement_target);
     let error = runtime
         .block_on(controller.admit_move_queue(&mut operation, &RefusingExecutor("move preflight")))
@@ -1128,9 +1128,9 @@ fn move_preparation_captures_active_and_queue_changes_in_a_new_fingerprint() {
     let mut session = raw_session_on("local-bare", &repository.path().to_string_lossy());
     session.bundle_id = "project".into();
     session.state = SessionState::Running;
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: mj_core::config::data_dir().join("workers").join(session_id),
-    });
+    }));
     let state = State {
         sessions: [(session_id.into(), session.clone())].into_iter().collect(),
         ..State::default()
@@ -1241,9 +1241,9 @@ fn move_preparation_can_refresh_a_dead_source_without_starting_its_harness() {
 fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
     let mut source = raw_session_on("local-bare", "/home/dev/project");
     source.state = SessionState::Running;
-    source.target = Some(mj_core::state::TargetLocator::LocalBare {
+    source.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: PathBuf::from("/tmp/worker"),
-    });
+    }));
     source.additional_mounts = Vec::new();
     source.resource_allocation = None;
     let baseline = mj_core::state::MoveSelection {
@@ -1639,7 +1639,7 @@ pub(super) fn source_recovery_operation(session: &mj_core::state::SessionRecord)
         },
         source_profile_id: session.last_profile.clone(),
         source_target_template_id: session.target_template_id.clone(),
-        source_target: session.target.clone(),
+        source_target: session.target.clone().map(|v| *v),
         source_native_session_id: session.native_session_id.clone(),
         source_additional_mounts: Vec::new(),
         source_resource_allocation: None,
@@ -1803,9 +1803,9 @@ fn move_source_recovery_retains_data_on_cancellation_or_failed_stop_and_keeps_it
     fs::write(root.join("retained-data"), b"source work").unwrap();
     let mut session = raw_session_on("local-bare", directory.path().to_str().unwrap());
     session.state = SessionState::Running;
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: root.clone(),
-    });
+    }));
     crate::database::save_session(&session).unwrap();
     let mut config = resume_compatibility_config();
     add_codex_profile(&mut config, directory.path());
@@ -1985,9 +1985,9 @@ fn preparing_a_local_session_for_a_container_previews_the_conversion() {
     let mut session = raw_session_on("local-bare", &repository.path().to_string_lossy());
     session.bundle_id = "project".into();
     session.state = SessionState::Running;
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: mj_core::config::data_dir().join("workers").join(session_id),
-    });
+    }));
     let state = State {
         sessions: [(session_id.into(), session)].into_iter().collect(),
         ..State::default()
@@ -2135,9 +2135,9 @@ fn a_managed_clone_moved_into_a_container_is_restored_where_it_was_cloned() {
     source.bundle_id = bundle_id;
     source.project = Some(project.into());
     source.state = SessionState::Closing;
-    source.target = Some(TargetLocator::LocalBare {
+    source.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: mj_core::config::data_dir().join("workers").join(session_id),
-    });
+    }));
     crate::database::save_session(&source).unwrap();
     let mut controller = Controller {
         config: resume_compatibility_config(),
@@ -2235,11 +2235,11 @@ fn a_managed_clone_moved_into_a_container_is_restored_where_it_was_cloned() {
         .collect::<Vec<_>>();
 
     let destination = controller.state.sessions.get_mut(session_id).unwrap();
-    destination.target = Some(TargetLocator::LocalPodman {
+    destination.target = Some(Box::new(TargetLocator::LocalPodman {
         container_id: resource,
         workspace_storage: Default::default(),
         borrowed_from: None,
-    });
+    }));
     controller
         .restore_move_workspace(session_id, &executor)
         .unwrap();
@@ -2328,11 +2328,11 @@ fn a_container_session_moved_to_a_local_checkout_is_restored_into_it() {
     source.state = SessionState::Closing;
     source.container_workspace =
         Some(mj_core::targets::new_container_workspace(session_id).unwrap());
-    source.target = Some(TargetLocator::LocalPodman {
+    source.target = Some(Box::new(TargetLocator::LocalPodman {
         container_id: mj_core::targets::resource_name(session_id).unwrap(),
         workspace_storage: Default::default(),
         borrowed_from: None,
-    });
+    }));
     crate::database::save_session(&source).unwrap();
     let mut controller = Controller {
         config: resume_compatibility_config(),
@@ -2401,9 +2401,9 @@ fn a_container_session_moved_to_a_local_checkout_is_restored_into_it() {
     let record = controller.state.sessions.get_mut(session_id).unwrap();
     record.target_template_id = "local-bare".into();
     record.target_runtime = Some((&controller.config.targets["local-bare"]).into());
-    record.target = Some(TargetLocator::LocalBare {
+    record.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: mj_core::config::data_dir().join("workers").join(session_id),
-    });
+    }));
     apply_workspace_to_raw(record, &conversion);
 
     controller
@@ -2479,9 +2479,9 @@ fn a_move_is_blocked_before_copying_when_an_rsync_rejects_partial_dir() {
     let mut session = raw_session_on("local-bare", &repository.path().to_string_lossy());
     session.bundle_id = "project".into();
     session.state = SessionState::Running;
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: mj_core::config::data_dir().join("workers").join(session_id),
-    });
+    }));
     let state = State {
         sessions: [(session_id.into(), session)].into_iter().collect(),
         ..State::default()
@@ -2841,12 +2841,12 @@ fn in_place_fixture(destination_kind: HarnessKind, source_kind: HarnessKind) -> 
     session.harness_kind = source_kind;
     session.last_profile = IN_PLACE_SOURCE_PROFILE.into();
     session.target_template_id = "local-bare".into();
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: worker_root.clone(),
-    });
+    }));
     session.project_directory = Some(checkout.clone());
     session.state = SessionState::Running;
-    session.checkpoint = Some(checkpoint.clone());
+    session.checkpoint = Some(Box::new(checkpoint.clone()));
     crate::database::save_session(&session).unwrap();
     crate::database::save_materialized_session(&MaterializedSession::empty(LATCH_RELAY_SESSION))
         .unwrap();
@@ -2903,7 +2903,7 @@ fn in_place_operation(controller: &Controller, destination_profile: &str) -> Mov
         selection,
         source_profile_id: source.last_profile.clone(),
         source_target_template_id: source.target_template_id.clone(),
-        source_target: source.target.clone(),
+        source_target: source.target.clone().map(|v| *v),
         source_native_session_id: source.native_session_id.clone(),
         source_additional_mounts: Vec::new(),
         source_resource_allocation: None,
@@ -3438,9 +3438,9 @@ fn roleless_in_place_move_refuses_live_children_but_allows_parked_children() {
     child.id = "live-child".into();
     child.state = SessionState::Running;
     child.session_title_override = Some("finish the migration".into());
-    child.target = Some(TargetLocator::LocalBare {
+    child.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: fixture._directory.path().join("live-child"),
-    });
+    }));
     let relation = mj_core::subagent::SubagentRecord {
         kind: mj_core::subagent::SubagentKind::Worker,
         reviewer_launch: None,
@@ -3631,9 +3631,9 @@ fn recovery_from_in_place_closing_source_keeps_children_and_skips_stop_hook() {
         child.id = child_id.into();
         child.state = child_state;
         child.subagents = None;
-        child.target = Some(TargetLocator::LocalBare {
+        child.target = Some(Box::new(TargetLocator::LocalBare {
             worker_root: _directory.path().join(child_id),
-        });
+        }));
         let relation = mj_core::subagent::SubagentRecord {
             kind: mj_core::subagent::SubagentKind::Worker,
             reviewer_launch: None,
@@ -3743,12 +3743,12 @@ fn in_place_move_records_its_oracle_selection_on_the_session() {
 
     let moved = &controller.state.sessions[LATCH_RELAY_SESSION];
     assert!(!moved.oracle);
-    assert_eq!(moved.oracle_choice, Some(choice.clone()));
+    assert_eq!(moved.oracle_choice, Some(Box::new(choice.clone())));
     let stored = crate::database::load_session_record(LATCH_RELAY_SESSION)
         .unwrap()
         .unwrap();
     assert!(!stored.oracle);
-    assert_eq!(stored.oracle_choice, Some(choice));
+    assert_eq!(stored.oracle_choice, Some(Box::new(choice)));
 }
 
 /// A Move that stopped the oracle leaves the same entry a suspend does, and
@@ -4272,12 +4272,12 @@ fn profile_move_preserves_a_workspace_without_later_history() {
         .get_mut(LATCH_RELAY_SESSION)
         .unwrap();
     record.bundle_id = "project".into();
-    record.checkout = Some(mj_core::remote_git::ExactCheckout {
+    record.checkout = Some(Box::new(mj_core::remote_git::ExactCheckout {
         repository_id: "project".into(),
         commit: base.clone(),
         branch: Some("main".into()),
         no_later_history: true,
-    });
+    }));
     record.launch_base = Some(base);
     record.state = SessionState::Closing;
     crate::database::save_session(record).unwrap();
@@ -4539,7 +4539,10 @@ fn in_place_profile_move_retains_native_state_and_installed_worker() {
         .unwrap()
         .unwrap();
     assert!(persisted.in_place);
-    assert_eq!(persisted.destination_target, source_target);
+    assert_eq!(
+        persisted.destination_target,
+        source_target.as_deref().cloned()
+    );
     assert_eq!(persisted.checkpoint.as_ref(), Some(&checkpoint));
     let moved = &controller.state.sessions[LATCH_RELAY_SESSION];
     assert!(
@@ -4633,7 +4636,7 @@ fn restart_reuses_an_error_target_and_preserves_its_queued_command() {
     record.state = SessionState::Error;
     record.last_error = Some("suspend lost its worker".into());
     record.last_checkpoint_error = Some("worker process is gone".into());
-    record.checkpoint = Some(fixture.checkpoint.clone());
+    record.checkpoint = Some(Box::new(fixture.checkpoint.clone()));
     crate::database::save_session(record).unwrap();
 
     let mut controller = fixture.controller;
@@ -4659,9 +4662,9 @@ fn restart_reuses_an_error_target_and_preserves_its_queued_command() {
     );
     assert_eq!(
         controller.state.sessions[LATCH_RELAY_SESSION].target,
-        Some(TargetLocator::LocalBare {
+        Some(Box::new(TargetLocator::LocalBare {
             worker_root: fixture.worker_root.clone()
-        })
+        }))
     );
     assert_eq!(fs::read(&temp_marker).unwrap(), b"temporary target data");
     assert_eq!(
@@ -4733,7 +4736,7 @@ fn restart_classifies_a_missing_target_as_a_preflight_fallback() {
         .get_mut(LATCH_RELAY_SESSION)
         .unwrap();
     record.state = SessionState::Closing;
-    record.checkpoint = Some(fixture.checkpoint.clone());
+    record.checkpoint = Some(Box::new(fixture.checkpoint.clone()));
     crate::database::save_session(record).unwrap();
     fs::remove_dir_all(&fixture.worker_root).unwrap();
 
@@ -5051,7 +5054,7 @@ fn in_place_move_failure_retains_environment_for_retry() {
     let rolled_back = &controller.state.sessions[LATCH_RELAY_SESSION];
     assert_eq!(rolled_back.state, SessionState::Error);
     assert!(rolled_back.target.is_some());
-    assert_eq!(rolled_back.checkpoint.as_ref(), Some(&checkpoint));
+    assert_eq!(rolled_back.checkpoint.as_deref(), Some(&checkpoint));
     // The record the swap replaced is back, harness and profile included.
     assert_eq!(rolled_back.last_profile, IN_PLACE_SOURCE_PROFILE);
     assert_eq!(rolled_back.harness_kind, HarnessKind::Claude);
@@ -5849,7 +5852,7 @@ fn restart_with_oversized_workspace_retains_native_state_and_full_checkpoint() {
     assert_eq!(
         fixture.controller.state.sessions[LATCH_RELAY_SESSION]
             .checkpoint
-            .as_ref(),
+            .as_deref(),
         Some(&fixture.checkpoint)
     );
     // Model startup: reload durable ownership and sweep unreferenced archives.
@@ -5873,7 +5876,7 @@ fn restart_with_oversized_workspace_retains_native_state_and_full_checkpoint() {
     let record = &fixture.controller.state.sessions[LATCH_RELAY_SESSION];
     assert_eq!(record.state, SessionState::Running);
     assert_eq!(record.target, source_target);
-    assert_eq!(record.checkpoint.as_ref(), Some(&fixture.checkpoint));
+    assert_eq!(record.checkpoint.as_deref(), Some(&fixture.checkpoint));
     assert!(fixture.checkpoint.archive_path.exists());
     assert_eq!(
         fs::metadata(&fixture.checkout).unwrap().ino(),
@@ -5950,9 +5953,9 @@ fn retired_ec2_move_is_rejected_before_source_interruption() {
     let mut session = raw_session_on("local-bare", &repository.path().to_string_lossy());
     session.bundle_id = "project".into();
     session.state = SessionState::Running;
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: mj_core::config::data_dir().join("workers").join(id),
-    });
+    }));
     session.resource_allocation = Some(SessionResourceAllocation::Container {
         cpus: 2,
         memory_bytes: 4 * 1024 * 1024 * 1024,

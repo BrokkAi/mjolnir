@@ -61,29 +61,3 @@ jobs:
 
     - name: Test the Windows installer
       run: node --test scripts/install-ps1.test.mjs
-
-  desktop:
-    name: Desktop shell (x86_64-pc-windows-msvc)
-    runs-on: windows-latest
-    env:
-      CARGO_BUILD_TARGET: x86_64-pc-windows-msvc
-    steps:
-    - uses: actions/checkout@v6
-      with:
-        persist-credentials: false
-    - uses: dtolnay/rust-toolchain@1.99.1
-      with:
-        components: clippy
-        targets: x86_64-pc-windows-msvc
-    - uses: ./.github/actions/cache-rust
-      with:
-        lane: desktop-x86_64-pc-windows-msvc
-        build-paths: |
-          target/debug
-          target/x86_64-pc-windows-msvc
-    - name: Run desktop Clippy lints
-      run: cargo clippy --locked -p brokk-mj-desktop --all-targets -- -D warnings
-    - name: Build desktop application
-      run: cargo build --locked -p brokk-mj-desktop
-    - name: Compile desktop tests
-      run: cargo test --locked -p brokk-mj-desktop --no-run

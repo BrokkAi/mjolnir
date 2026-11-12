@@ -288,7 +288,7 @@ impl Controller {
                 session_id,
                 &crate::database::WorkerRestartIntent {
                     operation_id: owner.operation_id().to_owned(),
-                    target: target.clone(),
+                    target: *target.clone(),
                     desired_build: String::new(),
                 },
             )?;
@@ -417,9 +417,9 @@ mod tests {
     fn register_child(root: &std::path::Path) {
         crate::database::save_session(&checkpoint_test_session("parent-1")).unwrap();
         let mut child = checkpoint_test_session(LATCH_RELAY_SESSION);
-        child.target = Some(TargetLocator::LocalBare {
+        child.target = Some(Box::new(TargetLocator::LocalBare {
             worker_root: root.join(LATCH_RELAY_SESSION),
-        });
+        }));
         crate::database::save_subagent_session(
             &child,
             &mj_core::subagent::SubagentRecord {
@@ -543,9 +543,9 @@ mod tests {
             .unwrap();
         parent.project_directory = Some(root.to_path_buf());
         parent.target_template_id = "local-bare".into();
-        parent.target = Some(TargetLocator::LocalBare {
+        parent.target = Some(Box::new(TargetLocator::LocalBare {
             worker_root: root.join("parent-1"),
-        });
+        }));
         parent.no_project_memory = true;
         crate::database::save_session(&parent).unwrap();
         let mut child = crate::database::read_durable_session_record(LATCH_RELAY_SESSION)
@@ -616,7 +616,7 @@ mod tests {
                 .unwrap();
         owner.scope(async {
             let intent = crate::database::WorkerRestartIntent {
-                operation_id: owner.operation_id().to_owned(), target, desired_build: String::new(),
+                operation_id: owner.operation_id().to_owned(), target: *target, desired_build: String::new(),
             };
             crate::database::begin_subagent_unpark(LATCH_RELAY_SESSION, &intent).unwrap();
             let failure = "login_invalid: workspace routing discovery unauthorized (401); run `mj login --profile codex`";
@@ -751,7 +751,7 @@ mod tests {
         );
         let mut target = latch_relay_target(root.path(), None, ReleaseSupport::Supported, false);
         target.worker_recovery = Some(crate::session_manager::WorkerRecoveryPlan {
-            source_target,
+            source_target: *source_target,
             target: None,
             workspace: None,
             exit_record: None,
@@ -845,7 +845,7 @@ mod tests {
                     LATCH_RELAY_SESSION,
                     &crate::database::WorkerRestartIntent {
                         operation_id: owner.operation_id().into(),
-                        target: controller.state.sessions[LATCH_RELAY_SESSION]
+                        target: *controller.state.sessions[LATCH_RELAY_SESSION]
                             .target
                             .clone()
                             .unwrap(),
