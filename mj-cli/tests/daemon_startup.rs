@@ -1617,3 +1617,212 @@ fn review_start_fails_with_the_reason_the_daemon_refused_it() {
     );
     assert!(!log.contains("review started"), "{log}");
 }
+
+/// Real daemon/control/PTY/harness boundary, including a disconnected login.
+#[cfg(unix)]
+#[test]
+fn daemon_login_terminal_writes_daemon_profile_and_disconnect_kills_harness_group() {
+    use mj_client::daemon::login_terminal::{TerminalInput, TerminalOutput};
+    use mj_client::daemon::{DaemonClient, DaemonMetadata, read_frame, write_frame};
+    use mj_core::config::{Config, HarnessKind, HarnessProfile};
+    use std::time::{Duration, Instant};
+    let storage = upgrade_storage();
+    let user = storage.path().join("user");
+    let tools = storage.path().join("tools");
+    let home = user.join(".config/opencode");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&tools).unwrap();
+    mj_core::test_hooks::install_fake_command(
+        &tools,
+        "opencode",
+        r#"
+if [ "$1 $2" != 'auth login' ]; then exit 1; fi
+login_home="$XDG_CONFIG_HOME/opencode"
+if [ -e "$login_home/cancel" ]; then
+  sleep 600 & child=$!
+  printf '%s' "$child" > "$login_home/child"
+  printf 'waiting'
+  wait
+else
+  head -c 131072 /dev/zero | tr '\000' x
+  printf '\nCode: '
+  read -r code
+  stty size > "$login_home/size"
+  printf '%s' "$code" > "$login_home/credential"
+  printf 'saved\n'
+fi
+"#,
+    );
+    let path = format!("{}:/usr/bin:/bin", tools.display());
+    let mut config = Config::default();
+    config.phone.enabled = false;
+    let mut profile = HarnessProfile::new(HarnessKind::OpenCode, home.clone());
+    profile.environment.insert("PATH".into(), path.clone());
+    config.profiles.insert("fixture".into(), profile);
+    config
+        .save_to(&storage.path().join("config/config.toml"))
+        .unwrap();
+    let mut command = upgrade_command(&storage);
+    common::AgentIsolation::under(storage.path()).apply(&mut command);
+    command
+        .arg("daemon-run")
+        .env("HOME", &user)
+        .env("XDG_CONFIG_HOME", user.join(".config"))
+        .env("XDG_DATA_HOME", user.join(".local/share"))
+        .env("PATH", path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(fs::File::create(storage.path().join("login-daemon.log")).unwrap());
+    let mut daemon = command.spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let metadata = loop {
+        if let Ok(bytes) = fs::read(storage.path().join("data/daemon.json"))
+            && let Ok(metadata) = serde_json::from_slice::<DaemonMetadata>(&bytes)
+        {
+            break metadata;
+        }
+        assert!(
+            daemon.try_wait().unwrap().is_none(),
+            "login test daemon exited"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "login test daemon failed to publish metadata"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            for mode in 0..3 {
+                let disconnect = mode > 0;
+                if disconnect {
+                    fs::write(home.join("cancel"), "").unwrap();
+                }
+                let client = DaemonClient::connect(metadata.clone()).await.unwrap();
+                let mut terminal = client
+                    .login_terminal("fixture".into(), 80, 24)
+                    .await
+                    .unwrap();
+                let mut transcript = Vec::new();
+                loop {
+                    match read_frame::<TerminalOutput>(&mut terminal.stream)
+                        .await
+                        .unwrap()
+                    {
+                        TerminalOutput::Bytes(bytes) => transcript.extend(bytes),
+                        other => panic!(
+                            "login failed before prompt: {other:?}; {}",
+                            String::from_utf8_lossy(&transcript)
+                        ),
+                    }
+                    if transcript.ends_with(if disconnect { b"waiting" } else { b"Code: " }) {
+                        break;
+                    }
+                }
+                if disconnect {
+                    let child: i32 = fs::read_to_string(home.join("child"))
+                        .unwrap()
+                        .parse()
+                        .unwrap();
+                    if mode == 1 {
+                        // Fill the PTY input while the harness is not reading;
+                        // disconnect must still reach the process-group owner.
+                        write_frame(
+                            &mut terminal.stream,
+                            &TerminalInput::Bytes(vec![b'x'; 131072]),
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    if mode == 2 {
+                        let reply = DaemonClient::connect(metadata.clone())
+                            .await
+                            .unwrap()
+                            .request(mj_client::daemon::DaemonAction::PrepareUpgrade)
+                            .await
+                            .unwrap();
+                        assert!(matches!(reply, mj_client::daemon::DaemonReply::Done));
+                        loop {
+                            match read_frame::<TerminalOutput>(&mut terminal.stream).await {
+                                Ok(TerminalOutput::Failed(message)) => {
+                                    assert!(message.contains("retry Login"));
+                                    break;
+                                }
+                                Ok(TerminalOutput::Bytes(_)) => {}
+                                // The daemon aborts disposable connection tasks on
+                                // handoff. The pane renders EOF as a retry notice.
+                                Err(error) => {
+                                    let error = error
+                                        .root_cause()
+                                        .downcast_ref::<std::io::Error>()
+                                        .expect("handoff connection I/O error");
+                                    assert!(matches!(
+                                        error.kind(),
+                                        std::io::ErrorKind::UnexpectedEof
+                                            | std::io::ErrorKind::ConnectionReset
+                                    ));
+                                    break;
+                                }
+                                other => panic!("handoff did not end terminal: {other:?}"),
+                            }
+                        }
+                    }
+                    drop(terminal);
+                    loop {
+                        #[cfg(target_os = "linux")]
+                        let alive = fs::read_to_string(format!("/proc/{child}/stat"))
+                            .is_ok_and(|state| state.split_whitespace().nth(2) != Some("Z"));
+                        #[cfg(not(target_os = "linux"))]
+                        let alive = unsafe { libc::kill(child, 0) == 0 };
+                        if !alive {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                } else {
+                    assert!(transcript.len() > 131072);
+                    write_frame(
+                        &mut terminal.stream,
+                        &TerminalInput::Resize {
+                            cols: 100,
+                            rows: 40,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    write_frame(
+                        &mut terminal.stream,
+                        &TerminalInput::Bytes(b"daemon-code\n".to_vec()),
+                    )
+                    .await
+                    .unwrap();
+                    loop {
+                        match read_frame::<TerminalOutput>(&mut terminal.stream)
+                            .await
+                            .unwrap()
+                        {
+                            TerminalOutput::Bytes(bytes) => transcript.extend(bytes),
+                            TerminalOutput::Exited { code } => {
+                                assert_eq!(code, 0, "{}", String::from_utf8_lossy(&transcript));
+                                break;
+                            }
+                            TerminalOutput::Failed(error) => panic!("{error}"),
+                        }
+                    }
+                    assert_eq!(
+                        fs::read_to_string(home.join("credential")).unwrap(),
+                        "daemon-code"
+                    );
+                    assert_eq!(
+                        fs::read_to_string(home.join("size")).unwrap().trim(),
+                        "40 100"
+                    );
+                    assert!(String::from_utf8_lossy(&transcript).contains("saved"));
+                }
+            }
+        })
+        .await
+        .expect("daemon login integration timed out");
+    });
+    daemon.wait().unwrap();
+}
