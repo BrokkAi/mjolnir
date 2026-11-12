@@ -4,7 +4,7 @@ use super::{
     PreparationFailure, StudentFailureKind,
     assets::{self, Artifact, Staging},
 };
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -51,8 +51,17 @@ fn target() -> Result<&'static str> {
         ("macos", "x86_64") => Ok("x86_64-apple-darwin"),
         ("macos", "aarch64") => Ok("aarch64-apple-darwin"),
         ("windows", "x86_64") => Ok("x86_64-pc-windows-msvc"),
-        (os, arch) => bail!("local GitHub scoring is unavailable on {os}/{arch}"),
+        (os, arch) => Err(PreparationFailure {
+            kind: StudentFailureKind::Load,
+            cause: format!("local GitHub scoring is unavailable on {os}/{arch}"),
+            retry_after: None,
+            notice: Some(super::StudentNotice::PlatformUnsupported),
+        }
+        .into()),
     }
+}
+pub(super) fn validate_platform() -> Result<()> {
+    target().map(|_| ())
 }
 fn files(platform: &Platform) -> Vec<Artifact> {
     platform

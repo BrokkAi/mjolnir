@@ -644,6 +644,8 @@ async fn supervise(
             }
             Action::Prepare(use_gpu) => {
                 let preparation = async {
+                    // Decide unsupported hosts before starting any model bytes.
+                    runtime::validate_platform()?;
                     let client = reqwest::Client::builder().build().map_err(|e| {
                         PreparationFailure::error(StudentFailureKind::Download, e, None)
                     })?;
