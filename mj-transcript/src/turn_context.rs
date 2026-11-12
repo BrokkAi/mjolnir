@@ -393,7 +393,9 @@ fn complete_message(state: &mut TurnContextState) {
     state.message_id = None;
 }
 
-fn tail(text: &str, maximum_bytes: usize) -> String {
+/// The last `maximum_bytes` of `text`, cut at a character boundary: the tail
+/// every turn classifier receives.
+pub fn tail(text: &str, maximum_bytes: usize) -> String {
     let start = text.floor_char_boundary(text.len().saturating_sub(maximum_bytes));
     let mut value = text[start..].to_owned();
     mj_core::transcript::truncate_string_start(&mut value, maximum_bytes);

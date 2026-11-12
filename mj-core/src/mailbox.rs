@@ -50,6 +50,16 @@ pub(crate) struct LegacyMailboxEvent<'a> {
 }
 
 impl MailboxEvent {
+    /// Parent instructions are assignments only for the child's handback check.
+    pub fn handback_assignment(&self) -> Option<(String, &str)> {
+        match &self.body {
+            MailboxEventBody::ParentMessage { text } => {
+                Some((format!("subagent-input-mailbox-{}", self.key), text))
+            }
+            _ => None,
+        }
+    }
+
     /// Full message text, as distinct from an informational mailbox event.
     pub fn message_text(&self) -> Option<&str> {
         match &self.body {

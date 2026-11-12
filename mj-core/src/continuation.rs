@@ -282,8 +282,11 @@ generated_prompts! {
         /// Restored archive context. No current producer; older transcripts still
         /// carry it.
         Archive => "archive-",
-        /// Sub-agent traffic: another session's input (`subagent-input-`), a
-        /// child's spawn brief (`subagent-spawn-`) and older wait notices.
+        /// A child's original assignment from its parent.
+        SubagentSpawn => "subagent-spawn-",
+        /// A parent's follow-up assignment.
+        SubagentInput => "subagent-input-",
+        /// Other generated sub-agent traffic, including older wait notices.
         Subagent => "subagent-",
         /// A mailbox event that wakes an idle session.
         MailboxWake => "mailbox-wake-",
@@ -339,14 +342,22 @@ impl GeneratedPrompt {
             .find(|producer| producer.recognizes(command_id))
     }
 
+    /// Parent assignments are authorization only for the handback check.
+    pub fn is_subagent_assignment(command_id: &str) -> bool {
+        matches!(
+            Self::of(command_id),
+            Some(Self::SubagentSpawn | Self::SubagentInput)
+        )
+    }
+
     /// Id of another session's input to a sub-agent, delivered as a turn.
     pub fn subagent_input_id(request_id: &str) -> String {
-        Self::Subagent.command_id(format_args!("input-{request_id}"))
+        Self::SubagentInput.command_id(request_id)
     }
 
     /// Id (and startup group id) of a child's spawn brief.
     pub fn subagent_spawn_id(request_key: &str) -> String {
-        Self::Subagent.command_id(format_args!("spawn-{request_key}"))
+        Self::SubagentSpawn.command_id(request_key)
     }
 }
 
