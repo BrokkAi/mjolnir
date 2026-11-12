@@ -10,6 +10,7 @@
 //! the review host all need the plain text of a stored message, and none of
 //! them should have to reach up into the chat view to get it.
 
+use crate::packed_text::PackedText;
 use std::sync::Arc;
 
 use agent_client_protocol::v1::schema::{
@@ -164,7 +165,7 @@ pub enum ToolSummarySourceKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCallPresentation {
     pub summary: String,
-    pub source: String,
+    pub source: PackedText,
     pub source_kind: ToolSummarySourceKind,
     pub tool_kind: ToolKind,
     /// Version of the parser rules that produced `summary`. A missing value
@@ -178,7 +179,7 @@ pub struct ToolCallPresentation {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(from = "serde_json::Value")]
 pub struct OpaqueToolCall {
-    json: Box<serde_json::value::RawValue>,
+    json: PackedText,
     metadata: Box<ToolCallMetadata>,
 }
 
@@ -194,12 +195,14 @@ struct ToolCallMetadata {
 
 impl Serialize for OpaqueToolCall {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.json.serialize(serializer)
+        serde_json::value::RawValue::from_string(self.json.text().into_owned())
+            .expect("opaque JSON")
+            .serialize(serializer)
     }
 }
 impl PartialEq for OpaqueToolCall {
     fn eq(&self, other: &Self) -> bool {
-        self.json.get() == other.json.get() || self.value() == other.value()
+        self.json == other.json || self.value() == other.value()
     }
 }
 impl Eq for OpaqueToolCall {}
@@ -249,7 +252,9 @@ impl From<serde_json::Value> for OpaqueToolCall {
             raw_result,
         };
         Self {
-            json: serde_json::value::to_raw_value(&value).expect("JSON Value serializes"),
+            json: serde_json::to_string(&value)
+                .expect("JSON Value serializes")
+                .into(),
             metadata: Box::new(metadata),
         }
     }
@@ -263,10 +268,10 @@ impl OpaqueToolCall {
         result
     }
     pub fn value(&self) -> serde_json::Value {
-        serde_json::from_str(self.json.get()).expect("opaque call contains valid JSON")
+        serde_json::from_str(&self.json.text()).expect("opaque call contains valid JSON")
     }
     pub fn decode(&self) -> serde_json::Result<agent_client_protocol::v1::schema::ToolCall> {
-        serde_json::from_str(self.json.get())
+        serde_json::from_str(&self.json.text())
     }
     pub fn raw_status(&self) -> Option<&str> {
         self.metadata.raw_status.as_deref()
@@ -483,7 +488,7 @@ fn text_chunks_mergeable(last: &serde_json::Value, next: &serde_json::Value) -> 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalOutputRecord {
     pub terminal_id: String,
-    pub output: String,
+    pub output: PackedText,
     #[serde(default, skip_serializing_if = "is_false")]
     pub truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -496,7 +501,7 @@ impl TerminalOutputRecord {
     /// Compute once before comparing one terminal event with the tool window.
     pub fn raw_result_digest(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
-        Sha256::digest(self.output.as_bytes()).into()
+        Sha256::digest(self.output.text().as_bytes()).into()
     }
 
     /// Whether the command ended the way a caller asked for: exit status zero
@@ -536,10 +541,10 @@ impl TerminalOutputRecord {
                 bytes.len() == self.output.len()
                     && bytes
                         .iter()
-                        .zip(self.output.as_bytes())
+                        .zip(self.output.text().as_bytes())
                         .all(|(value, byte)| value.as_u64() == Some(u64::from(*byte)))
             }
-            Some(serde_json::Value::String(output)) => output == &self.output,
+            Some(serde_json::Value::String(output)) => output == self.output.text().as_ref(),
             _ => false,
         }
     }
@@ -867,7 +872,9 @@ impl ChatEntry {
         }
         if let Some(presentation) = &mut self.tool_presentation {
             truncate_string_start(&mut presentation.summary, DETAIL_BYTES);
-            truncate_string_start(&mut presentation.source, TEXT_BYTES);
+            let mut source = presentation.source.text().into_owned();
+            truncate_string_start(&mut source, TEXT_BYTES);
+            presentation.source = source.into();
         }
         self.plan.truncate(DETAIL_COUNT);
         for line in &mut self.plan {

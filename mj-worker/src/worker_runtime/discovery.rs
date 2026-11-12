@@ -81,6 +81,7 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
     let launch = LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
+        login_identity: Default::default(),
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
         subagent_mcp_socket: None,
@@ -333,6 +334,7 @@ for line in sys.stdin:
         let launch = LaunchSpec {
             operator_away: Default::default(),
             imported_logins: None,
+            login_identity: Default::default(),
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             managed_subagent: false,

@@ -276,6 +276,7 @@ fn mailbox_quota_recovery_survives_missing_user_request_and_prior_cancellation()
                         code: Some("provider.api_error".into()),
                         http_status: Some(429),
                         reset_at: None,
+                        login_fingerprint: None,
                     }),
                 },
             )
