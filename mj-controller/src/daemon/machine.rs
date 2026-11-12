@@ -12,6 +12,7 @@ pub(super) async fn execute(
         // Preserve the dashboard's existing command deadlines, including the
         // bound on preflight when it applies confirmed Git repairs.
         let executor = match &action {
+            DaemonAction::TestTarget { .. } => executor.with_deadline(Duration::from_secs(15)),
             DaemonAction::ProfileLoginStatuses => executor.with_deadline(Duration::from_secs(10)),
             DaemonAction::CompletePath { .. } => executor.with_deadline(Duration::from_secs(5)),
             DaemonAction::DiscoverProjects { .. } => {
@@ -28,6 +29,27 @@ pub(super) async fn execute(
         };
         let controller = crate::controller::config_only_controller(config);
         match action {
+            DaemonAction::TestTarget { target_id } => {
+                controller.test_target(&target_id, &executor)?;
+                Ok(DaemonReply::Done)
+            }
+            DaemonAction::CheckpointArchiveSizes { paths } => {
+                let sizes = paths
+                    .into_iter()
+                    .map(|(id, path)| {
+                        let size = match fs::metadata(&path) {
+                            Ok(metadata) => Some(metadata.len()),
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                            Err(error) => {
+                                return Err(anyhow::Error::new(error)
+                                    .context(format!("read {}", path.display())));
+                            }
+                        };
+                        Ok((id, size))
+                    })
+                    .collect::<Result<_>>()?;
+                Ok(DaemonReply::CheckpointArchiveSizes(sizes))
+            }
             DaemonAction::ProfileLoginStatuses => Ok(DaemonReply::ProfileLoginStatuses(
                 crate::profile_login::statuses(&controller.config, &executor),
             )),

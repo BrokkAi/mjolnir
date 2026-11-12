@@ -8,7 +8,9 @@ pub(super) async fn handle_action(
 ) -> Result<DaemonReply> {
     let _work = upgrade_request_activity(&action)?;
     match action {
-        action @ (DaemonAction::ProfileLoginStatuses
+        action @ (DaemonAction::CheckpointArchiveSizes { .. }
+        | DaemonAction::TestTarget { .. }
+        | DaemonAction::ProfileLoginStatuses
         | DaemonAction::PreflightNewSession { .. }
         | DaemonAction::ValidateProjectDirectory { .. }
         | DaemonAction::CompletePath { .. }
@@ -307,6 +309,28 @@ pub(super) async fn handle_action(
                     "abandoned prompt history could not be stored"
                 );
             }
+            Ok(DaemonReply::Done)
+        }
+        DaemonAction::SaveSpinnerStyle { style } => {
+            // Hold the configuration owner through persistence and publication:
+            // an acknowledged save must be visible to the next dashboard.
+            let mut inactivity = state.config_mutation.lock().await;
+            let config = blocking(move || {
+                Config::update(|config| {
+                    config.spinner = style;
+                    Ok(())
+                })
+                .map(|(config, ())| config)
+            })
+            .await?;
+            state.configure_inactivity(&mut inactivity, config.advanced.auto_afk_minutes);
+            state
+                .review_config
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone_from(&config.review);
+            state.owner().install_config(config);
+            state.publish_revision();
             Ok(DaemonReply::Done)
         }
         DaemonAction::SaveSidebarSize { size } => {
@@ -1085,6 +1109,9 @@ pub(super) fn upgrade_request_activity(
         && !request.remote_repairs.is_empty()
     {
         return crate::upgrade::activity("new-session preflight remote repairs").map(Some);
+    }
+    if matches!(action, DaemonAction::SaveSpinnerStyle { .. }) {
+        return crate::upgrade::activity("spinner style setting").map(Some);
     }
     if matches!(action, DaemonAction::SaveSidebarSize { .. }) {
         return crate::upgrade::activity("sidebar size setting").map(Some);

@@ -1,6 +1,37 @@
 [
   {
     "request": {
+      "action": "checkpoint_archive_sizes",
+      "arguments": {
+        "paths": {
+          "archived": "<server>/daemon-only.tar",
+          "missing": "<server>/missing.tar"
+        }
+      }
+    },
+    "reply": {
+      "Ok": {
+        "reply": "checkpoint_archive_sizes",
+        "value": {
+          "archived": 20,
+          "missing": null
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "action": "test_target",
+      "arguments": {
+        "target_id": "missing"
+      }
+    },
+    "reply": {
+      "Err": "unknown target template \"missing\""
+    }
+  },
+  {
+    "request": {
       "action": "profile_login_statuses"
     },
     "reply": {
@@ -225,6 +256,19 @@
     },
     "reply": {
       "Err": "Unknown path target"
+    }
+  },
+  {
+    "request": {
+      "action": "save_spinner_style",
+      "arguments": {
+        "style": "wave"
+      }
+    },
+    "reply": {
+      "Ok": {
+        "reply": "done"
+      }
     }
   }
 ]

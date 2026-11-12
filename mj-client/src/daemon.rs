@@ -692,6 +692,15 @@ pub enum DaemonAction {
         target_id: String,
         directory: PathBuf,
     },
+    CheckpointArchiveSizes {
+        paths: std::collections::BTreeMap<String, PathBuf>,
+    },
+    SaveSpinnerStyle {
+        style: mj_core::config::SpinnerStyle,
+    },
+    TestTarget {
+        target_id: String,
+    },
     ProfileLoginStatuses,
     CompletePath {
         host: mj_core::path_completion::CompletionHost,
@@ -1199,6 +1208,7 @@ pub struct ResponseEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "reply", content = "value")]
 pub enum DaemonReply {
+    CheckpointArchiveSizes(std::collections::BTreeMap<String, Option<u64>>),
     ProfileLoginStatuses(std::collections::BTreeMap<String, mj_core::credentials::LoginStatus>),
     NewSessionPreflight(PreflightNew),
     PathCompletion(mj_core::path_completion::PathCompletion),
@@ -3266,7 +3276,9 @@ impl DaemonAction {
         }
         matches!(
             self,
-            Self::ProfileLoginStatuses
+            Self::CheckpointArchiveSizes { .. }
+                | Self::TestTarget { .. }
+                | Self::ProfileLoginStatuses
                 | Self::PreflightNewSession { .. }
                 | Self::ValidateProjectDirectory { .. }
                 | Self::CompletePath { .. }

@@ -647,11 +647,23 @@ pub(crate) fn spawn_spinner_style_save(
         "saving spinner style",
         updates,
         move || {
-            Config::update(|config| {
-                config.spinner = style;
-                Ok(())
-            })
-            .map(|(config, ())| config)
+            mj_core::runtime::block_on(async move {
+                let mut client = daemon::connect_or_start().await?;
+                match client
+                    .request(mj_client::daemon::DaemonAction::SaveSpinnerStyle { style })
+                    .await?
+                {
+                    mj_client::daemon::DaemonReply::Done => {}
+                    reply => anyhow::bail!("unexpected spinner save reply: {reply:?}"),
+                }
+                match client
+                    .request(mj_client::daemon::DaemonAction::Configuration)
+                    .await?
+                {
+                    mj_client::daemon::DaemonReply::Configuration(config) => Ok(*config),
+                    reply => anyhow::bail!("unexpected configuration reply: {reply:?}"),
+                }
+            })?
         },
         |result| DashboardIoUpdate::SpinnerStyleSaved { result },
     )
@@ -685,9 +697,6 @@ pub(crate) fn spawn_project_source_resolution(
         },
     )
 }
-
-/// A controller that answers target questions from configuration alone.
-pub(crate) use mj_controller::controller::config_only_controller;
 
 /// What every session lifecycle operation needs to run off the loop.
 pub(crate) struct LifecycleOperationRequest {
@@ -1284,20 +1293,18 @@ pub(crate) fn spawn_checkpoint_archive_size_refresh(
     updates: UnboundedSender<DashboardIoUpdate>,
 ) {
     tokio::task::spawn_blocking(move || {
-        let sizes = targets
-            .iter()
-            .map(|(session_id, path)| {
-                let size = match std::fs::metadata(path) {
-                    Ok(metadata) => Some(metadata.len()),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                    Err(error) => {
-                        tracing::warn!(path = %path.display(), %error, "could not read checkpoint archive size");
-                        None
-                    }
-                };
-                (session_id.clone(), size)
-            })
-            .collect();
+        let sizes = match machine_request(
+            mj_client::daemon::DaemonAction::CheckpointArchiveSizes {
+                paths: targets.clone(),
+            },
+            Arc::new(AtomicBool::new(false)),
+        ) {
+            Ok(mj_client::daemon::DaemonReply::CheckpointArchiveSizes(sizes)) => sizes,
+            result => {
+                tracing::warn!(?result, "checkpoint archive size request failed");
+                return;
+            }
+        };
         report(
             "checkpoint archive sizes",
             &updates,

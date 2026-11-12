@@ -12216,10 +12216,24 @@ async fn suspend_acceptance_survives_client_disconnect_during_checkpoint() {
 /// only in the server fixture, never in client-side interpretation.
 #[tokio::test]
 async fn daemon_api_exchange() {
+    const CHILD: &str = "MJ_MACHINE_EXCHANGE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), "daemon_api_exchange"),
+        )
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "machine-exchange")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let server_root = root.path().canonicalize().unwrap();
     let project = server_root.join("server-only-project");
     fs::create_dir(&project).unwrap();
+    let archive = server_root.join("daemon-only.tar");
+    fs::write(&archive, b"daemon archive bytes").unwrap();
     let mut config = Config::default();
     config
         .targets
@@ -12238,6 +12252,16 @@ async fn daemon_api_exchange() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let metadata = test_metadata(listener.local_addr().unwrap());
     let actions = vec![
+        DaemonAction::CheckpointArchiveSizes {
+            paths: [
+                ("archived".into(), archive),
+                ("missing".into(), server_root.join("missing.tar")),
+            ]
+            .into(),
+        },
+        DaemonAction::TestTarget {
+            target_id: "missing".into(),
+        },
         DaemonAction::ProfileLoginStatuses,
         DaemonAction::CheckProjectDirectories {
             paths: vec![project.clone(), server_root.as_path().join("absent")],
@@ -12291,6 +12315,9 @@ async fn daemon_api_exchange() {
         DaemonAction::ResolveContainerPath {
             target_id: "missing".into(),
             source: project,
+        },
+        DaemonAction::SaveSpinnerStyle {
+            style: mj_core::config::SpinnerStyle::Wave,
         },
     ];
     let mut exchange = Vec::new();

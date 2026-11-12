@@ -19,13 +19,13 @@ use mj_tui::{DashboardAction, SessionOperationKind};
 use crate::daemon;
 use crate::dashboard::io::{
     ConfigRenameRequest, ContainerSettingsRequest, DashboardIoUpdate, LifecycleOperationRequest,
-    ResumeRepositoryPreflightApply, config_only_controller, report, spawn_async_job,
-    spawn_cancellable_io, spawn_cancellable_io_with_token, spawn_clipboard_read,
-    spawn_config_rename, spawn_create_bundle, spawn_dashboard_change_workspace,
-    spawn_dashboard_container_settings, spawn_dashboard_create_session, spawn_dashboard_rename,
-    spawn_lifecycle_operation, spawn_remove_bundle, spawn_workspace_close,
-    spawn_workspace_close_cancel, spawn_workspace_create, spawn_workspace_draft_recovery,
-    spawn_workspace_management_load, spawn_workspace_rename,
+    ResumeRepositoryPreflightApply, report, spawn_async_job, spawn_cancellable_io,
+    spawn_cancellable_io_with_token, spawn_clipboard_read, spawn_config_rename,
+    spawn_create_bundle, spawn_dashboard_change_workspace, spawn_dashboard_container_settings,
+    spawn_dashboard_create_session, spawn_dashboard_rename, spawn_lifecycle_operation,
+    spawn_remove_bundle, spawn_workspace_close, spawn_workspace_close_cancel,
+    spawn_workspace_create, spawn_workspace_draft_recovery, spawn_workspace_management_load,
+    spawn_workspace_rename,
 };
 use crate::dashboard::{DashboardContext, QUOTA_REFRESH_NOTICE, resume_progress_notice};
 use crate::import::{DashboardImportSafety, PendingDashboardImport};
@@ -789,19 +789,17 @@ pub(crate) async fn apply_dashboard_action(
             }
         }
         DashboardAction::TestTarget { target_id } => {
-            let config = context.controller.config.clone();
             let reported_id = target_id.clone();
             let (cancelled, _) = spawn_cancellable_io_with_token(
                 context.critical_operations.clone(),
                 format!("testing target {target_id}"),
                 context.dashboard_io_tx.clone(),
-                move |cancelled| {
-                    if cancelled.load(Ordering::Acquire) {
-                        anyhow::bail!("target test cancelled");
-                    }
-                    let executor = CancellableProcessExecutor::new(cancelled)
-                        .with_deadline(std::time::Duration::from_secs(15));
-                    config_only_controller(config).test_target(&target_id, &executor)
+                move |cancelled| match crate::dashboard::io::machine_request(
+                    MachineAction::TestTarget { target_id },
+                    cancelled,
+                )? {
+                    MachineReply::Done => Ok(()),
+                    reply => bail!("unexpected target test reply: {reply:?}"),
                 },
                 move |result| DashboardIoUpdate::TargetTest {
                     target_id: reported_id,
