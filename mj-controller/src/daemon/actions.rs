@@ -9,18 +9,8 @@ pub(super) async fn handle_action(
     let _work = upgrade_request_activity(&action)?;
     match action {
         DaemonAction::UploadChunk { .. } => bail!("upload fragment outside upload transport"),
-        DaemonAction::InstallAttachment {
-            session_id,
-            reference,
-            bytes,
-        } => {
-            let reference = blocking(move || {
-                mj_core::attachment::AttachmentStore::controller(&session_id)?
-                    .install(&reference, &bytes)?;
-                Ok(reference)
-            })
-            .await?;
-            Ok(DaemonReply::AttachmentInstalled(reference))
+        DaemonAction::InstallAttachment { .. } | DaemonAction::TranscribeAudio { .. } => {
+            bail!("blob action outside connection transport")
         }
         DaemonAction::TranscriptionAvailable { preferred_profile } => {
             let config = state.with_config(Clone::clone);
@@ -28,40 +18,6 @@ pub(super) async fn handle_action(
                 blocking(move || Ok(transcription_auth(&config, &preferred_profile).is_some()))
                     .await?;
             Ok(DaemonReply::TranscriptionAvailable(available))
-        }
-        DaemonAction::TranscribeAudio {
-            preferred_profile,
-            bytes,
-        } => {
-            let config = state.with_config(Clone::clone);
-            let auth = blocking(move || {
-                transcription_auth(&config, &preferred_profile).context(
-                    "voice transcription requires a signed-in ChatGPT Codex profile on the daemon",
-                )
-            })
-            .await?;
-            // The supervised task owns admission until inference finishes, including
-            // when its connection disappears. No accepted request is replayed.
-            let work = crate::upgrade::activity("voice transcription")?;
-            let task = tokio::spawn(async move {
-                let _work = work;
-                let client = anvil_client::codex_client::CodexClient::with_auth_path(auth);
-                let request = anvil_client::transcribe::TranscribeRequest::new(
-                    bytes.into(),
-                    "audio.wav",
-                    "audio/wav",
-                );
-                let response = client
-                    .transcribe(request)
-                    .await
-                    .context("daemon transcribe captured audio")?;
-                let text = response.text.trim().to_owned();
-                ensure!(!text.is_empty(), "daemon transcription returned no text");
-                Ok::<_, anyhow::Error>(text)
-            });
-            Ok(DaemonReply::Transcription(
-                task.await.context("daemon transcription task failed")??,
-            ))
         }
         DaemonAction::RecordOperatorActivity => {
             state.record_operator_activity().await;
@@ -1135,7 +1091,8 @@ pub(super) fn upgrade_request_activity(
     }
     if matches!(
         action,
-        DaemonAction::RecordOperatorActivity
+        DaemonAction::TranscribeAudio { .. }
+            | DaemonAction::RecordOperatorActivity
             | DaemonAction::Ping
             | DaemonAction::Identity
             | DaemonAction::Configuration
@@ -1230,6 +1187,9 @@ mod missing_target_compat_tests {
 }
 
 /// Credential selection lives on the machine owning the profiles.
-fn transcription_auth(config: &mj_core::config::Config, preferred: &str) -> Option<PathBuf> {
+pub(super) fn transcription_auth(
+    config: &mj_core::config::Config,
+    preferred: &str,
+) -> Option<PathBuf> {
     mj_client::auth::available_auth(mj_client::auth::auth_paths(config, preferred))
 }

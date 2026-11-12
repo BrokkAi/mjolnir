@@ -1049,11 +1049,12 @@ fn normalize_prompt_images(
                 )?;
                 let reference = tokio::runtime::Handle::current().block_on(async {
                     let mut client = mj_client::daemon::connect_existing().await?;
+                    let blob = client.upload(&mut optimized.bytes.as_slice()).await?;
                     match client
                         .request(mj_client::daemon::DaemonAction::InstallAttachment {
                             session_id: session_id.to_owned(),
                             reference: reference.clone(),
-                            bytes: optimized.bytes,
+                            blob,
                         })
                         .await?
                     {
@@ -1606,21 +1607,34 @@ mod tests {
                 loop {
                     let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
                     assert_eq!(request.token, metadata.token);
-                    let DaemonAction::UploadChunk { bytes, finished } = request.action else {
+                    let DaemonAction::UploadChunk { bytes, sha256 } = request.action else {
                         panic!("expected upload fragment");
                     };
                     body.extend_from_slice(&bytes);
-                    if !finished {
+                    if sha256.is_none() {
                         continue;
                     }
+                    write_frame(
+                        &mut stream,
+                        &ResponseEnvelope {
+                            protocol_version: PROTOCOL_VERSION,
+                            request_id: request.request_id,
+                            result: Ok(DaemonReply::BlobUploaded("fixture-blob".into())),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
                     let DaemonAction::InstallAttachment {
                         session_id,
                         reference,
-                        bytes,
-                    } = serde_json::from_slice(&body).unwrap()
+                        blob,
+                    } = request.action
                     else {
                         panic!("expected attachment installation");
                     };
+                    assert_eq!(blob, "fixture-blob");
+                    let bytes = body;
                     mj_core::attachment::AttachmentStore::controller(&session_id)
                         .unwrap()
                         .install(&reference, &bytes)
