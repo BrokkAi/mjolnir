@@ -696,6 +696,13 @@ pub enum DaemonAction {
         reference: mj_core::attachment::AttachmentRef,
         blob: String,
     },
+    TranscriptionAvailable {
+        preferred_profile: String,
+    },
+    TranscribeAudio {
+        preferred_profile: String,
+        blob: String,
+    },
     RecordOperatorActivity,
     SetOperatorAway {
         away: bool,
@@ -1176,6 +1183,8 @@ pub struct ResponseEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "reply", content = "value")]
 pub enum DaemonReply {
+    TranscriptionAvailable(bool),
+    Transcription(String),
     BlobUploaded(String),
     AttachmentInstalled(mj_core::attachment::AttachmentRef),
     LifecycleAccepted(LifecycleReceipt),
@@ -3246,7 +3255,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // The host node is gone: NodeConnect is no longer an action.
 // Lifecycle submission acknowledges ownership separately from completion.
 // Authenticated chunked client uploads and daemon-owned attachment installation.
-pub const PROTOCOL_VERSION: u32 = 88;
+// Daemon-owned voice credential discovery and uploaded-audio transcription.
+pub const PROTOCOL_VERSION: u32 = 89;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

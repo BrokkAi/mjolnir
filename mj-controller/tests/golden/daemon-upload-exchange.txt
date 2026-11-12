@@ -4,5 +4,8 @@ repeat content-addressed install: {"reply":"attachment_installed","value":{"sha2
 corrupt payload: attachment data does not match its digest or size
 import unknown blob: unknown upload blob
 import verified archive: {"reply":"done"}
+transcription availability: {"reply":"transcription_available","value":false}
+transcription without credential: voice transcription requires a signed-in ChatGPT Codex profile on the daemon
+transcription blob after refusal: unknown upload blob
 connection after refusal: {"reply":"pong"}
 import during handoff: {"reply":"upgrade_pending"}

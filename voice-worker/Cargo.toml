@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2024"
 rust-version.workspace = true
 license.workspace = true
-description = "Codex OAuth dictation sidecar for Mjolnir"
+description = "Microphone capture sidecar for Mjolnir"
 repository = "https://github.com/BrokkAi/mjolnir"
 publish = true
 
@@ -17,12 +17,9 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-anvil-client.workspace = true
-bytes.workspace = true
 cpal = "0.16"
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
 tokio-util.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]

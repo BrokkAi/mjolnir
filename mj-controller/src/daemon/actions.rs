@@ -9,7 +9,16 @@ pub(super) async fn handle_action(
     let _work = upgrade_request_activity(&action)?;
     match action {
         DaemonAction::UploadChunk { .. } => bail!("upload fragment outside upload transport"),
-        DaemonAction::InstallAttachment { .. } => bail!("blob action outside connection transport"),
+        DaemonAction::InstallAttachment { .. } | DaemonAction::TranscribeAudio { .. } => {
+            bail!("blob action outside connection transport")
+        }
+        DaemonAction::TranscriptionAvailable { preferred_profile } => {
+            let config = state.with_config(Clone::clone);
+            let available =
+                blocking(move || Ok(transcription_auth(&config, &preferred_profile).is_some()))
+                    .await?;
+            Ok(DaemonReply::TranscriptionAvailable(available))
+        }
         DaemonAction::RecordOperatorActivity => {
             state.record_operator_activity().await;
             Ok(DaemonReply::Done)
@@ -1061,7 +1070,8 @@ pub(super) fn upgrade_request_activity(
     }
     if matches!(
         action,
-        DaemonAction::RecordOperatorActivity
+        DaemonAction::TranscribeAudio { .. }
+            | DaemonAction::RecordOperatorActivity
             | DaemonAction::Ping
             | DaemonAction::Identity
             | DaemonAction::Configuration
@@ -1154,4 +1164,46 @@ mod missing_target_compat_tests {
         assert_eq!(stored.updated_at, session.updated_at);
         assert_eq!(stored.last_error, None);
     }
+}
+
+/// Credential selection lives on the machine owning the profiles.
+pub(super) fn transcription_auth(
+    config: &mj_core::config::Config,
+    preferred: &str,
+) -> Option<PathBuf> {
+    available_auth(auth_paths(config, preferred))
+}
+
+/// Find candidate Codex subscription auth files, preferring the session's
+/// current profile and then sorting all remaining profile IDs.
+fn auth_paths(config: &mj_core::config::Config, preferred: &str) -> Vec<PathBuf> {
+    let mut profiles = config
+        .profiles
+        .iter()
+        .filter(|(_, profile)| profile.kind == mj_core::config::HarnessKind::Codex)
+        .collect::<Vec<_>>();
+    profiles.sort_by_key(|(id, _)| (*id != preferred, *id));
+    profiles
+        .into_iter()
+        .map(|(_, profile)| profile.home.join(profile.kind.credential_file_name()))
+        .collect()
+}
+
+/// Return the first auth file containing complete ChatGPT-subscription OAuth
+/// tokens. API-key auth files are deliberately skipped.
+fn available_auth(paths: Vec<PathBuf>) -> Option<PathBuf> {
+    paths.into_iter().find(
+        |path| match anvil_client::codex_auth::read_auth_dot_json_at(path) {
+            Ok(Some(auth)) => auth.tokens.is_some_and(|tokens| {
+                !tokens.access_token.trim().is_empty()
+                    && !tokens.refresh_token.trim().is_empty()
+                    && !tokens.account_id.trim().is_empty()
+            }),
+            Ok(None) => false,
+            Err(error) => {
+                tracing::warn!(%error, "could not inspect Codex dictation credentials");
+                false
+            }
+        },
+    )
 }

@@ -665,10 +665,9 @@ async fn the_dictation_chord_says_why_dictation_is_unavailable() {
     assert_eq!(chat.draft(), "");
 
     // Once the probe has answered, the chord gives its reason.
-    chat.apply_voice_update(VoiceUpdate::Availability(
-        Vec::new(),
-        Ok(Err(io::DICTATION_NEEDS_A_CODEX_PROFILE.to_owned())),
-    ));
+    chat.apply_voice_update(VoiceUpdate::Availability(Ok(Err(
+        io::DICTATION_NEEDS_A_CODEX_PROFILE.to_owned(),
+    ))));
     chat.state.clear_notice();
     assert_eq!(
         chat.toggle_dictation().as_deref(),

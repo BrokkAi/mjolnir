@@ -456,6 +456,51 @@ pub(super) async fn serve_client(
                     }
                     None => Err("unknown upload blob".into()),
                 }
+            } else if let DaemonAction::TranscribeAudio {
+                preferred_profile,
+                blob,
+            } = request.action
+            {
+                match blobs.remove(&blob) {
+                    Some(path) => {
+                        let config = state.with_config(Clone::clone);
+                        // This disposable request owns no admission. Dropping its future
+                        // on disconnect or handoff cancels the network operation.
+                        let transcription = async move {
+                            let (auth, bytes) = blocking(move || {
+                                let bytes = std::fs::read(&path)?;
+                                let auth = super::actions::transcription_auth(&config, &preferred_profile).context("voice transcription requires a signed-in ChatGPT Codex profile on the daemon")?;
+                                Ok((auth, bytes))
+                            }).await?;
+                            let client =
+                                anvil_client::codex_client::CodexClient::with_auth_path(auth);
+                            let response = client
+                                .transcribe(anvil_client::transcribe::TranscribeRequest::new(
+                                    bytes.into(),
+                                    "audio.wav",
+                                    "audio/wav",
+                                ))
+                                .await
+                                .context("daemon transcribe captured audio")?;
+                            let text = response.text.trim().to_owned();
+                            ensure!(!text.is_empty(), "daemon transcription returned no text");
+                            Ok::<_, anyhow::Error>(DaemonReply::Transcription(text))
+                        };
+                        let mut byte = [0];
+                        tokio::select! {
+                            result = transcription => result.map_err(|error| format!("{error:#}")),
+                            _ = cancellation.cancelled() => Err("daemon transcription cancelled by handoff".into()),
+                            closed = stream.peek(&mut byte) => {
+                                match closed {
+                                    Ok(0) => return Ok(()),
+                                    Ok(_) => Err("unexpected input during transcription".into()),
+                                    Err(error) => return Err(error.into()),
+                                }
+                            }
+                        }
+                    }
+                    None => Err("unknown upload blob".into()),
+                }
             } else {
                 Box::pin(handle_action(
                     request.action,

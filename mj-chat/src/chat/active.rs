@@ -437,10 +437,8 @@ pub struct ActiveChat {
     voice_updates_tx: tokio::sync::mpsc::UnboundedSender<VoiceUpdate>,
     voice_updates_rx: tokio::sync::mpsc::UnboundedReceiver<VoiceUpdate>,
     voice_cancel: Option<std::sync::mpsc::Sender<crate::speech::VoiceCommand>>,
-    voice_auth: Option<std::path::PathBuf>,
     voice_probe_at: Option<std::time::Instant>,
     voice_probe_pending: bool,
-    voice_probe_paths: Vec<std::path::PathBuf>,
     /// Why the last availability probe found dictation unavailable, as the
     /// sentence the dictation key shows. `None` until a probe says.
     voice_unavailable: Option<String>,
@@ -712,10 +710,8 @@ impl ActiveChat {
             voice_updates_tx,
             voice_updates_rx,
             voice_cancel: None,
-            voice_auth: None,
             voice_probe_at: None,
             voice_probe_pending: false,
-            voice_probe_paths: Vec::new(),
             voice_unavailable: None,
             voice_finishing: false,
             remote_open: true,
@@ -956,44 +952,78 @@ impl Drop for ActiveChat {
 }
 
 enum VoiceUpdate {
-    /// The probed auth paths, and either the auth file dictation would use or
-    /// the sentence saying why it cannot start.
-    Availability(
-        Vec<std::path::PathBuf>,
-        anyhow::Result<Result<std::path::PathBuf, String>>,
-    ),
+    Availability(anyhow::Result<Result<(), String>>),
     Status(String),
     Finished(anyhow::Result<String>),
 }
 
 fn spawn_dictation(
-    auth_path: std::path::PathBuf,
+    preferred_profile: String,
     updates: tokio::sync::mpsc::UnboundedSender<VoiceUpdate>,
     cancel: std::sync::mpsc::Receiver<crate::speech::VoiceCommand>,
 ) {
     tokio::spawn(async move {
-        let worker_updates = updates.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            let updates = worker_updates;
-            let status_updates = updates.clone();
-            crate::speech::run_dictation(
-                &auth_path,
-                |_| {},
-                |_| {},
-                move |status| {
-                    if let Err(error) = status_updates.send(VoiceUpdate::Status(status)) {
-                        tracing::debug!(%error, "voice status dropped because the chat closed");
-                    }
-                },
-                cancel,
-            )
-        })
-        .await
-        .unwrap_or_else(|error| Err(anyhow::anyhow!("dictation task failed: {error}")));
+        let result = dictation_handoff(preferred_profile, updates.clone(), cancel).await;
         if let Err(error) = updates.send(VoiceUpdate::Finished(result)) {
             tracing::debug!(%error, "voice result dropped because the chat closed");
         }
     });
+}
+
+async fn dictation_handoff(
+    preferred_profile: String,
+    updates: tokio::sync::mpsc::UnboundedSender<VoiceUpdate>,
+    cancel: std::sync::mpsc::Receiver<crate::speech::VoiceCommand>,
+) -> anyhow::Result<String> {
+    let (recording, cancel) = tokio::task::spawn_blocking(move || {
+        let recording = tempfile::NamedTempFile::new()?;
+        let path = recording.path().to_owned();
+        crate::speech::run_dictation(
+            &path,
+            |_| {},
+            |_| {},
+            move |status| {
+                if let Err(error) = updates.send(VoiceUpdate::Status(status)) {
+                    tracing::debug!(%error, "voice status receiver closed");
+                }
+            },
+            &cancel,
+        )?;
+        Ok::<_, anyhow::Error>((recording, cancel))
+    })
+    .await??;
+    let cancelled = async move {
+        loop {
+            match cancel.try_recv() {
+                Ok(crate::speech::VoiceCommand::Finish) => {}
+                Ok(crate::speech::VoiceCommand::Cancel)
+                | Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await
+                }
+            }
+        }
+    };
+    let transcribe = async {
+        let mut client = mj_client::daemon::connect_existing().await?;
+        let mut file = tokio::fs::File::open(recording.path()).await?;
+        let blob = client.upload(&mut file).await?;
+        match client
+            .request(mj_client::daemon::DaemonAction::TranscribeAudio {
+                preferred_profile,
+                blob,
+            })
+            .await?
+        {
+            mj_client::daemon::DaemonReply::Transcription(text) => Ok(text),
+            reply => Err(anyhow::anyhow!("unexpected transcription reply: {reply:?}")),
+        }
+    };
+    tokio::select! {
+        biased;
+        _ = cancelled => Err(anyhow::anyhow!("voice dictation cancelled")),
+        result = transcribe => result,
+    }
 }
 
 fn append_dictation(prefix: &str, transcript: &str) -> String {
