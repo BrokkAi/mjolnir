@@ -6616,11 +6616,23 @@ fn long_conversation() -> MaterializedSession {
 }
 
 // Hard-won: 312cdbd23: stale pending content made the live window load nearly all history.
+// Hard-won: f7df24176: store queries split turns at elicitation replies and missed native prompts.
 #[test]
 fn actor_history_window_keeps_open_streams_and_rehydrates_old_tools() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("history.sqlite3");
-    let full = long_conversation();
+    let mut full = long_conversation();
+    // An elicitation reply inside the old turn is not a turn start, and the
+    // newest turn begins with a native prompt; store and trim must agree.
+    full.transcript[50] = Arc::new(TranscriptItem {
+        stable_id: format!("{}0051", mj_core::transcript::ELICITATION_REPLY_ITEM_PREFIX),
+        body: TranscriptBody::User {
+            content: vec![serde_json::json!({"type":"text", "text":"approve"})],
+        },
+        latest_content_event_ordinal: None,
+        ..(*full.transcript[50]).clone()
+    });
+    Arc::make_mut(&mut full.transcript[2400]).stable_id = "native-user:2401".into();
     save_session_to(&path, &session(&full.session_id, "project-1")).unwrap();
     for pending in ["none", "tool", "stream"] {
         let mut full = full.clone();
@@ -6654,6 +6666,7 @@ fn actor_history_window_keeps_open_streams_and_rehydrates_old_tools() {
             assert_eq!(loaded.transcript[100], full.transcript[1400]);
         }
         assert_eq!(window.provisional_title.as_deref(), Some("request 1"));
+        assert_eq!(window.latest_turn_start_position, Some(2401));
         assert_eq!(
             load_materialized_session_from(&path, &full.session_id)
                 .unwrap()

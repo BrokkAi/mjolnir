@@ -242,35 +242,35 @@ pub(super) fn materialized_user_message(
     Ok(None)
 }
 
+/// SQL form of `TranscriptItem::is_turn_start`: a user prompt (a user item
+/// that is not an elicitation reply) or a harness-started turn marker. Every
+/// store query that finds turn boundaries uses this, so loaded windows agree
+/// with `ProjectionWindow::trim`.
+fn turn_start_sql() -> String {
+    format!(
+        "(stable_id GLOB '{}*' OR (stable_id NOT GLOB '{}*' AND json_extract(body_json, '$.kind')='user'))",
+        mj_core::transcript::HARNESS_TURN_ITEM_PREFIX,
+        mj_core::transcript::ELICITATION_REPLY_ITEM_PREFIX,
+    )
+}
+
 /// Where the newest turn began: a user message, or the marker for a turn the
-/// harness started on its own. This is the recovery boundary, so it reads a
-/// position only and never has to decode a transcript body.
+/// harness started on its own. This is the recovery boundary; it reads a
+/// position only, scanning back from the newest item.
 pub(super) fn last_materialized_turn_start(
     connection: &Connection,
     session_id: &str,
 ) -> Result<Option<u64>> {
     Ok(connection
         .query_row(
-            "SELECT position
-             FROM materialized_transcript_items
-             WHERE session_id = ?1
-               AND (
-                   stable_id GLOB ?2
-                   OR json_extract(
-                       CASE
-                           WHEN stable_id GLOB 'user:*' OR stable_id GLOB 'user-*'
-                           THEN body_json
-                           ELSE '{}'
-                       END,
-                       '$.kind'
-                   ) = 'user'
-               )
-             ORDER BY position DESC, stable_id DESC
-             LIMIT 1",
-            params![
-                session_id,
-                format!("{}*", mj_core::transcript::HARNESS_TURN_ITEM_PREFIX)
-            ],
+            &format!(
+                "SELECT position FROM materialized_transcript_items
+                 WHERE session_id = ?1 AND {}
+                 ORDER BY position DESC, stable_id DESC
+                 LIMIT 1",
+                turn_start_sql()
+            ),
+            params![session_id],
             |row| row.get::<_, u64>(0),
         )
         .optional()?)
@@ -885,19 +885,21 @@ pub(super) fn load_materialized_actor_projection_from(
         )
         .optional()?;
     let boundary = desired.unwrap_or(0).min(latest_turn.unwrap_or(0));
+    let turn_start = turn_start_sql();
     let start: u64 = connection.query_row(
-        "SELECT COALESCE(MAX(position),0) FROM materialized_transcript_items
-         WHERE session_id=?1 AND position<=?2
-         AND (json_extract(body_json, '$.kind')='user' OR stable_id LIKE 'harness-turn:%')",
+        &format!(
+            "SELECT COALESCE(MAX(position),0) FROM materialized_transcript_items
+             WHERE session_id=?1 AND position<=?2 AND {turn_start}"
+        ),
         params![session_id, boundary],
         |row| row.get(0),
     )?;
     // Find old unsettled turns in one JSON pass, then read only their ranges.
     let ranges = {
-        let mut statement = connection.prepare(
-            "WITH starts AS (
+        let mut statement = connection.prepare(&format!(
+            "WITH starts AS MATERIALIZED (
                 SELECT position FROM materialized_transcript_items WHERE session_id=?1
-                AND (json_extract(body_json, '$.kind')='user' OR stable_id LIKE 'harness-turn:%')
+                AND {turn_start}
              ), unsettled AS (
                 SELECT position FROM materialized_transcript_items WHERE session_id=?1 AND position<?2
                 AND ((json_extract(body_json, '$.kind') IN ('agent','thought') AND json_extract(body_json, '$.streaming')=1)
@@ -905,7 +907,8 @@ pub(super) fn load_materialized_actor_projection_from(
              )
              SELECT DISTINCT COALESCE((SELECT MAX(position) FROM starts WHERE position<=u.position),0),
                  COALESCE((SELECT MIN(position) FROM starts WHERE position>u.position),?2)
-             FROM unsettled u ORDER BY 1")?;
+             FROM unsettled u ORDER BY 1"
+        ))?;
         statement
             .query_map(params![session_id, start], |row| {
                 Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?))
