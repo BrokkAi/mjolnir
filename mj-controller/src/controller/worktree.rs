@@ -950,13 +950,13 @@ pub(super) fn apply_raw_to_workspace(
 ) -> Result<()> {
     let project = record
         .project
-        .get_or_insert_with(|| conversion.project.clone());
+        .get_or_insert_with(|| conversion.project.clone().into());
     ensure!(
         project.bundle == conversion.project.bundle
             && project.identities == conversion.project.identities,
         "the accepted project changed while preparing the checkout transition"
     );
-    project
+    std::sync::Arc::make_mut(project)
         .network_sources
         .insert(conversion.repository_id.clone(), conversion.source.clone());
     record.project_directory = None;
@@ -1051,7 +1051,7 @@ fn accepted_project_snapshot(
     executor: &impl CommandExecutor,
 ) -> Result<ProjectBundleSnapshot> {
     if let Some(project) = &session.project {
-        return Ok(project.clone());
+        return Ok((**project).clone());
     }
     let bundle = session
         .project_bundle(config)
@@ -1068,7 +1068,7 @@ pub(super) fn plan_raw_to_workspace(
 ) -> Result<RawToWorkspaceConversion> {
     let checkout = session.checkout();
     let project = if let Some(project) = &session.project {
-        project.clone()
+        (**project).clone()
     } else {
         let project_directory = checkout
             .project_directory()

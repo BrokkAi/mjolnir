@@ -266,6 +266,7 @@ pub(super) fn finish_operation(
     }
     let transaction =
         connection.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+    let mut interns = None;
     let mut state = previous.state.clone();
     let mut moves = previous.moves.clone();
     let mut native_agents = previous.native_agents.clone();
@@ -339,7 +340,14 @@ pub(super) fn finish_operation(
                 }
             }
             "session" => {
-                let record = state_io::load_session_with(&transaction, key)?;
+                if interns.is_none() {
+                    interns = Some(state_io::SessionInterns::from_state(&state)?);
+                }
+                let record = state_io::load_session_interned_with(
+                    &transaction,
+                    key,
+                    interns.as_mut().unwrap(),
+                )?;
                 let membership_changed = state.sessions.contains_key(key) != record.is_some();
                 if state.sessions.get(key) != record.as_ref() {
                     match record {

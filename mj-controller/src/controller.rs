@@ -1098,7 +1098,7 @@ impl Controller {
         let record = SessionRecord {
             oracle_choice,
             oracle: oracle_enabled,
-            project,
+            project: project.map(std::sync::Arc::new),
             target_runtime: Some(template.into()),
             build_cache: None,
             create_managed_worktree,

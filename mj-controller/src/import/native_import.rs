@@ -134,13 +134,16 @@ pub fn import_native_session(
         SessionRecord {
             oracle_choice: None,
             oracle: true,
-            project: Some(crate::project_catalog::snapshot(
-                bundle,
-                &mj_core::targets::CancellableProcessExecutor::with_timeout(Duration::from_secs(
-                    15,
-                )),
-                raw_project.is_none(),
-            )?),
+            project: Some(
+                crate::project_catalog::snapshot(
+                    bundle,
+                    &mj_core::targets::CancellableProcessExecutor::with_timeout(
+                        Duration::from_secs(15),
+                    ),
+                    raw_project.is_none(),
+                )?
+                .into(),
+            ),
             target_runtime: None,
             launch_base: None,
             launch_branch: None,

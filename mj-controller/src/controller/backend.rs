@@ -40,7 +40,7 @@ impl Controller {
         if session
             .project
             .as_ref()
-            .is_some_and(mj_core::repository::ProjectBundleSnapshot::primary_is_plain_directory)
+            .is_some_and(|project| project.primary_is_plain_directory())
         {
             return Ok((launch.cwd, "not a git checkout".to_owned()));
         }
@@ -1262,7 +1262,7 @@ pub(crate) fn backend_locator(
         locator,
         &session.id,
         &session.target_template_id,
-        session.target_runtime.as_ref(),
+        session.target_runtime.as_deref(),
         config,
     )
 }

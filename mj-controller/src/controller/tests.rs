@@ -2541,6 +2541,7 @@ fn legacy_access_backfills_before_reload_and_refuses_an_unrecoverable_host() {
     assert_eq!(
         saved,
         mj_core::state::TargetRuntimeSettings::from(&durable_remote_template("original.test"))
+            .into()
     );
     let replacement =
         mj_core::state::TargetRuntimeSettings::from(&durable_remote_template("different.test"));

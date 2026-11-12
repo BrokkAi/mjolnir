@@ -1,5 +1,59 @@
 use super::*;
 
+/// Scoped to a load/publication: no cache retains deleted sessions.
+#[derive(Default)]
+pub(super) struct SessionInterns {
+    projects: std::collections::HashMap<
+        String,
+        std::sync::Arc<mj_core::repository::ProjectBundleSnapshot>,
+    >,
+    runtimes:
+        std::collections::HashMap<String, std::sync::Arc<mj_core::state::TargetRuntimeSettings>>,
+}
+
+impl SessionInterns {
+    pub(super) fn from_state(state: &State) -> Result<Self> {
+        let mut pool = Self::default();
+        let mut projects = std::collections::HashSet::new();
+        let mut runtimes = std::collections::HashSet::new();
+        for record in state.sessions.values() {
+            if let Some(value) = &record.project
+                && projects.insert(std::sync::Arc::as_ptr(value))
+            {
+                pool.projects
+                    .entry(serde_json::to_string(value)?)
+                    .or_insert_with(|| value.clone());
+            }
+            if let Some(value) = &record.target_runtime
+                && runtimes.insert(std::sync::Arc::as_ptr(value))
+            {
+                pool.runtimes
+                    .entry(serde_json::to_string(value)?)
+                    .or_insert_with(|| value.clone());
+            }
+        }
+        Ok(pool)
+    }
+}
+
+fn decode_shared<T: serde::de::DeserializeOwned>(
+    row: &rusqlite::Row<'_>,
+    column: usize,
+    pool: &mut std::collections::HashMap<String, std::sync::Arc<T>>,
+) -> rusqlite::Result<Option<std::sync::Arc<T>>> {
+    let Some(json) = row.get::<_, Option<String>>(column)? else {
+        return Ok(None);
+    };
+    if let Some(value) = pool.get(&json) {
+        return Ok(Some(value.clone()));
+    }
+    let value = std::sync::Arc::new(serde_json::from_str::<T>(&json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(column, Type::Text, Box::new(error))
+    })?);
+    pool.insert(json, value.clone());
+    Ok(Some(value))
+}
+
 pub fn load_state() -> Result<State> {
     if let Some(committed) = committed_state()? {
         return Ok(committed.state.clone());
@@ -53,7 +107,8 @@ pub(super) fn load_state_with(connection: &Connection) -> Result<State> {
         state.last_oracle_choices.insert(profile_id, enabled);
     }
     let mut statement = connection.prepare(&format!("{SESSION_QUERY} ORDER BY s.session_id"))?;
-    let rows = statement.query_map([], decode_session)?;
+    let mut interns = SessionInterns::default();
+    let rows = statement.query_map([], |row| decode_session(row, &mut interns))?;
     for row in rows {
         if let Some(session) = row? {
             state.sessions.insert(session.id.clone(), session);
@@ -1290,7 +1345,7 @@ pub fn backfill_target_runtime(
     session_id: &str,
     target_template_id: &str,
     runtime: &mj_core::state::TargetRuntimeSettings,
-) -> Result<Option<mj_core::state::TargetRuntimeSettings>> {
+) -> Result<Option<std::sync::Arc<mj_core::state::TargetRuntimeSettings>>> {
     let session_id = session_id.to_owned();
     let target_template_id = target_template_id.to_owned();
     let runtime = serde_json::to_string(runtime)?;
@@ -1322,7 +1377,10 @@ const SESSION_QUERY: &str =
                 s.no_github_credentials
          FROM sessions s JOIN session_contexts c USING(session_id)";
 
-fn decode_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<SessionRecord>> {
+fn decode_session(
+    row: &rusqlite::Row<'_>,
+    interns: &mut SessionInterns,
+) -> rusqlite::Result<Option<SessionRecord>> {
     // A harness Mjolnir no longer supports can still own rows an earlier
     // release wrote. Skip such a session with a warning rather than
     // failing the whole listing and hiding every other session with it.
@@ -1346,22 +1404,8 @@ fn decode_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<SessionRec
             })
             .transpose()?,
         oracle: row.get(36)?,
-        project: row
-            .get::<_, Option<String>>(32)?
-            .map(|json| {
-                serde_json::from_str(&json).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(32, Type::Text, Box::new(error))
-                })
-            })
-            .transpose()?,
-        target_runtime: row
-            .get::<_, Option<String>>(28)?
-            .map(|json| {
-                serde_json::from_str(&json).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(28, Type::Text, Box::new(error))
-                })
-            })
-            .transpose()?,
+        project: decode_shared(row, 32, &mut interns.projects)?,
+        target_runtime: decode_shared(row, 28, &mut interns.runtimes)?,
         harness_kind,
         create_managed_worktree: row.get(23)?,
         launch_base: row.get(27)?,
@@ -1488,11 +1532,19 @@ pub(super) fn load_session_with(
     connection: &Connection,
     id: &str,
 ) -> Result<Option<SessionRecord>> {
+    load_session_interned_with(connection, id, &mut SessionInterns::default())
+}
+
+pub(super) fn load_session_interned_with(
+    connection: &Connection,
+    id: &str,
+    interns: &mut SessionInterns,
+) -> Result<Option<SessionRecord>> {
     let record = connection
         .query_row(
             &format!("{SESSION_QUERY} WHERE s.session_id=?1"),
             [id],
-            decode_session,
+            |row| decode_session(row, interns),
         )
         .optional()?
         .flatten();

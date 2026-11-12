@@ -238,11 +238,15 @@ impl Controller {
                     workspace_id,
                     candidate.locator,
                 );
-                record.target_runtime =
-                    Some(record.target_runtime_settings(&self.config)?.into_owned());
+                record.target_runtime = Some(
+                    record
+                        .target_runtime_settings(&self.config)?
+                        .into_owned()
+                        .into(),
+                );
                 record.no_github_credentials = no_github_credentials;
                 record.container_workspace = container_workspace;
-                record.project = Some(project);
+                record.project = Some(project.into());
                 (record, true)
             }
         };

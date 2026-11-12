@@ -126,7 +126,7 @@ async fn repairing_an_accepted_source_preserves_repository_ids_and_layout_across
         }],
     };
     let project = crate::project_catalog::snapshot(&bundle, &SourceExists, true).unwrap();
-    session.project = Some(project.clone());
+    session.project = Some(project.clone().into());
     crate::database::store_catalog_project("project", &project, true).unwrap();
     crate::database::save_session(&session).unwrap();
     let config = Config {
@@ -1212,7 +1212,7 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
     let destination: TargetTemplate =
         serde_json::from_str(r#"{"kind":"local-podman","image":"test"}"#).unwrap();
     let destination_runtime = mj_core::state::TargetRuntimeSettings::from(&destination);
-    cleaned.target_runtime = Some(destination_runtime.clone());
+    cleaned.target_runtime = Some(destination_runtime.clone().into());
 
     let failure =
         apply_failed_resume_rollback(&mut cleaned, &previous, "worker upload failed", None);
@@ -1231,7 +1231,7 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
     cleanup_failed.state = SessionState::Error;
     cleanup_failed.last_profile = "codex-new".into();
     cleanup_failed.target = Some(partial_target.clone());
-    cleanup_failed.target_runtime = Some(destination_runtime.clone());
+    cleanup_failed.target_runtime = Some(destination_runtime.clone().into());
     let partial_checkout = crate::controller::test_support::managed_raw_session(
         mj_core::state::ManagedWorktreeTarget::Local,
     );
@@ -1248,7 +1248,10 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
     assert_eq!(cleanup_failed.state, SessionState::Error);
     assert_eq!(cleanup_failed.last_profile, "codex-new");
     assert_eq!(cleanup_failed.target, Some(partial_target));
-    assert_eq!(cleanup_failed.target_runtime, Some(destination_runtime));
+    assert_eq!(
+        cleanup_failed.target_runtime,
+        Some(destination_runtime.into())
+    );
     assert_eq!(
         cleanup_failed.project_directory,
         partial_checkout.project_directory
@@ -1752,8 +1755,11 @@ fn a_failed_raw_conversion_preserves_bundle_context_and_checkpoint() {
         }],
     };
     session.bundle_id = "bifrost".into();
-    session.project =
-        Some(crate::project_catalog::snapshot(&bundle, &ProcessExecutor, false).unwrap());
+    session.project = Some(
+        crate::project_catalog::snapshot(&bundle, &ProcessExecutor, false)
+            .unwrap()
+            .into(),
+    );
     session.checkpoint = Some(checkpoint.clone());
     let worktree = session.managed_worktree.clone().unwrap();
     let previous = session.clone();

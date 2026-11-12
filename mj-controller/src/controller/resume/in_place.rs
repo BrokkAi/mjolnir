@@ -320,9 +320,13 @@ impl Controller {
                 let mut runtime = if mode == InPlaceRestoreMode::Move {
                     mj_core::state::TargetRuntimeSettings::from(&target_template)
                 } else {
-                    record.target_runtime.clone().unwrap_or_else(|| {
-                        mj_core::state::TargetRuntimeSettings::from(&target_template)
-                    })
+                    record
+                        .target_runtime
+                        .as_deref()
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            mj_core::state::TargetRuntimeSettings::from(&target_template)
+                        })
                 };
                 runtime.tool_cache = record
                     .target_runtime
@@ -332,7 +336,7 @@ impl Controller {
                     .target_runtime
                     .as_ref()
                     .and_then(|runtime| runtime.container_settings.clone());
-                record.target_runtime = Some(runtime);
+                record.target_runtime = Some(runtime.into());
                 record.native_session_id =
                     native_continuity.then(|| archive_manifest.session.native_session_id.clone());
                 record.state = SessionState::Provisioning;

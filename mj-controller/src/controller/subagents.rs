@@ -354,7 +354,13 @@ impl Controller {
             oracle_choice: None,
             oracle: false,
             project: parent.project.clone(),
-            target_runtime: Some(parent.target_runtime_settings(&self.config)?.into_owned()),
+            target_runtime: Some(match &parent.target_runtime {
+                Some(runtime) => runtime.clone(),
+                None => parent
+                    .target_runtime_settings(&self.config)?
+                    .into_owned()
+                    .into(),
+            }),
             launch_base: None,
             launch_branch: None,
             checkout: None,

@@ -4137,7 +4137,7 @@ async fn a_current_worker_in_an_older_container_keeps_its_environment() {
     let mut applied = mj_core::state::ContainerSettings::requested(&session);
     applied.default_image = Some(Some("ghcr.io/brokkai/mjolnir/agent-dev:2.51.0".into()));
     runtime.container_settings = Some(applied);
-    session.target_runtime = Some(runtime);
+    session.target_runtime = Some(runtime.into());
     crate::database::save_session(&session).unwrap();
     let state = test_runtime_state();
     let controller = Controller {
@@ -4634,7 +4634,7 @@ async fn restart_compares_persisted_applied_settings_and_serializes_mount_edits(
         mj_core::config::DEFAULT_CONTAINER_IMAGE,
     );
     runtime.container_settings = Some(applied.clone());
-    session.target_runtime = Some(runtime);
+    session.target_runtime = Some(runtime.into());
     crate::database::save_session(&session).unwrap();
     let intent = crate::database::begin_session_restart(
         "session-1",

@@ -403,6 +403,7 @@ impl Controller {
         let previous = session.clone();
         let mut project = session.project.clone();
         if let Some(project) = &mut project {
+            let project = std::sync::Arc::make_mut(project);
             let repository = project
                 .bundle
                 .repositories

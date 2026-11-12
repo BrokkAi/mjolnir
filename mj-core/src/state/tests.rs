@@ -722,18 +722,21 @@ fn checkout_derivation_covers_attached_managed_bundle_and_borrowed_records() {
         .insert(bundle_workspace.id.clone(), bundle_workspace.clone());
     let mut saved_project_workspace = checkout_session("saved-project-workspace");
     let bundle = sample_config().bundles["hel"].clone();
-    saved_project_workspace.project = Some(crate::repository::ProjectBundleSnapshot {
-        identities: BTreeMap::from([(
-            "hel".into(),
-            crate::repository::RepositoryIdentity::from_remote(
-                "https://github.com/BrokkAi/hel.git",
-            )
-            .expect("valid repository identity"),
-        )]),
-        bundle,
-        network_sources: Default::default(),
-        plain_directories: Default::default(),
-    });
+    saved_project_workspace.project = Some(
+        crate::repository::ProjectBundleSnapshot {
+            identities: BTreeMap::from([(
+                "hel".into(),
+                crate::repository::RepositoryIdentity::from_remote(
+                    "https://github.com/BrokkAi/hel.git",
+                )
+                .expect("valid repository identity"),
+            )]),
+            bundle,
+            network_sources: Default::default(),
+            plain_directories: Default::default(),
+        }
+        .into(),
+    );
     state.sessions.insert(
         saved_project_workspace.id.clone(),
         saved_project_workspace.clone(),

@@ -1757,19 +1757,22 @@ mod tests {
             container_id: "hel-session".into(),
             borrowed_from: None,
         });
-        session.project = Some(mj_core::repository::ProjectBundleSnapshot {
-            bundle: config.bundles["project"].clone(),
-            identities: Default::default(),
-            network_sources: [(
-                "project".to_owned(),
-                mj_core::remote_git::NetworkGitSource {
-                    fetch_url: "https://github.com/example/project.git".into(),
-                    push_urls: vec!["https://github.com/example/project.git".into()],
-                },
-            )]
+        session.project = Some(
+            mj_core::repository::ProjectBundleSnapshot {
+                bundle: config.bundles["project"].clone(),
+                identities: Default::default(),
+                network_sources: [(
+                    "project".to_owned(),
+                    mj_core::remote_git::NetworkGitSource {
+                        fetch_url: "https://github.com/example/project.git".into(),
+                        push_urls: vec!["https://github.com/example/project.git".into()],
+                    },
+                )]
+                .into(),
+                plain_directories: Default::default(),
+            }
             .into(),
-            plain_directories: Default::default(),
-        });
+        );
         let mut selection = mj_core::remote_git::ExactCheckout {
             repository_id: "project".into(),
             commit: "a".repeat(40),

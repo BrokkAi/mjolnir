@@ -244,3 +244,9 @@ impl From<&TargetTemplate> for TargetRuntimeSettings {
         }
     }
 }
+
+impl From<&TargetTemplate> for std::sync::Arc<TargetRuntimeSettings> {
+    fn from(template: &TargetTemplate) -> Self {
+        Self::new(TargetRuntimeSettings::from(template))
+    }
+}
