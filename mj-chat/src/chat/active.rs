@@ -1007,11 +1007,12 @@ async fn dictation_handoff(
     let transcribe = async {
         let mut client = mj_client::daemon::connect_existing().await?;
         let mut file = tokio::fs::File::open(recording.path()).await?;
-        let blob = client.upload(&mut file).await?;
         match client
-            .request(mj_client::daemon::DaemonAction::TranscribeAudio {
-                preferred_profile,
-                blob,
+            .upload_and_consume(&mut file, |blob| {
+                mj_client::daemon::DaemonAction::TranscribeAudio {
+                    preferred_profile: preferred_profile.clone(),
+                    blob,
+                }
             })
             .await?
         {

@@ -531,33 +531,47 @@ fn persist_imported_session_cancellable(
             .context("import has no archive")?
             .archive_path;
         let mut file = tokio::fs::File::open(path).await?;
-        let blob = {
-            let upload = client.upload(&mut file);
-            tokio::pin!(upload);
-            loop {
-                if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
-                    return Ok(None);
-                }
-                tokio::select! {
-                    result = &mut upload => break result?,
-                    _ = tokio::time::sleep(Duration::from_millis(25)), if cancelled.is_some() => {},
-                }
+        let upload_cancelled = std::cell::Cell::new(false);
+        let result = client
+            .upload_and_consume_observed(
+                &mut file,
+                |blob| crate::daemon::DaemonAction::ImportSession {
+                    session: Box::new(session.clone()),
+                    bundle: bundle.clone(),
+                    blob,
+                },
+                |uploading| async move {
+                    if let Some((task_id, updates)) = registering {
+                        updates
+                            .send(if uploading {
+                                DashboardImportUpdate::Uploading { task_id }
+                            } else {
+                                DashboardImportUpdate::Registering { task_id }
+                            })
+                            .await
+                            .context("import progress consumer closed")?;
+                    }
+                    Ok(())
+                },
+                async {
+                    loop {
+                        if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+                            upload_cancelled.set(true);
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                    }
+                },
+            )
+            .await;
+        match result {
+            Ok(crate::daemon::DaemonReply::Done) => {}
+            Ok(reply) => anyhow::bail!("unexpected import reply: {reply:?}"),
+            Err(_) if upload_cancelled.get() => {
+                return Ok(None);
             }
-        };
-        if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
-            return Ok(None);
+            Err(error) => return Err(error),
         }
-        if let Some((task_id, updates)) = registering {
-            updates
-                .send(DashboardImportUpdate::Registering { task_id })
-                .await
-                .context("import progress consumer closed before registration")?;
-        }
-        if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
-            return Ok(None);
-        }
-        // ImportSession has one commit point and no user cancellation protocol.
-        client.import_session(session, bundle, blob).await?;
         client
             .session_record(session_id)
             .await?
@@ -608,6 +622,9 @@ pub(crate) enum DashboardImportTaskResult {
 }
 
 pub(crate) enum DashboardImportUpdate {
+    Uploading {
+        task_id: u64,
+    },
     Registering {
         task_id: u64,
     },

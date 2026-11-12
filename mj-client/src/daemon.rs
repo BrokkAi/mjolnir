@@ -1827,15 +1827,8 @@ impl DaemonClient {
         R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin,
         A: Fn(String) -> DaemonAction,
     {
-        self.upload_and_consume_with_reconnect(reader, action, || async {
-            loop {
-                if let Ok(client) = connect_existing().await {
-                    return Ok(client);
-                }
-                tokio::time::sleep(Duration::from_millis(250)).await;
-            }
-        })
-        .await
+        self.upload_and_consume_with_reconnect(reader, action, reconnect_after_upload_refusal)
+            .await
     }
 
     async fn upload_and_consume_with_reconnect<R, A, F, Fut>(
@@ -1850,14 +1843,74 @@ impl DaemonClient {
         F: FnMut() -> Fut,
         Fut: Future<Output = Result<Self>>,
     {
+        self.upload_and_consume_observed_with_reconnect(
+            reader,
+            action,
+            &mut reconnect,
+            |_| std::future::ready(Ok(())),
+            std::future::pending(),
+        )
+        .await
+    }
+
+    /// Report each phase; cancellation is observed only during byte upload.
+    pub async fn upload_and_consume_observed<R, A, P, PF, C>(
+        &mut self,
+        reader: &mut R,
+        action: A,
+        phase: P,
+        cancel: C,
+    ) -> Result<DaemonReply>
+    where
+        R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin,
+        A: Fn(String) -> DaemonAction,
+        P: FnMut(bool) -> PF,
+        PF: Future<Output = Result<()>>,
+        C: Future<Output = ()>,
+    {
+        self.upload_and_consume_observed_with_reconnect(
+            reader,
+            action,
+            reconnect_after_upload_refusal,
+            phase,
+            cancel,
+        )
+        .await
+    }
+
+    async fn upload_and_consume_observed_with_reconnect<R, A, F, Fut, P, PF, C>(
+        &mut self,
+        reader: &mut R,
+        action: A,
+        mut reconnect: F,
+        mut phase: P,
+        cancel: C,
+    ) -> Result<DaemonReply>
+    where
+        R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin,
+        A: Fn(String) -> DaemonAction,
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<Self>>,
+        P: FnMut(bool) -> PF,
+        PF: Future<Output = Result<()>>,
+        C: Future<Output = ()>,
+    {
+        tokio::pin!(cancel);
         use tokio::io::AsyncSeekExt;
         let start = reader.stream_position().await?;
+        phase(true).await?;
         loop {
-            let blob = self.upload(reader).await?;
+            let blob = tokio::select! {
+                biased;
+                _ = &mut cancel => bail!("upload cancelled"),
+                result = self.upload(reader) => result?,
+            };
+            phase(false).await?;
             let reply = self.request_once(action(blob)).await?;
             if !matches!(reply, DaemonReply::UpgradePending) {
                 return Ok(reply);
             }
+            phase(true).await?;
             tokio::time::sleep(Duration::from_millis(100)).await;
             *self = reconnect().await?;
             reader.seek(std::io::SeekFrom::Start(start)).await?;
@@ -3334,6 +3387,15 @@ impl DaemonClient {
             DaemonReply::MoveOutcome(outcome) => Ok(outcome),
             _ => bail!("daemon returned an unexpected move reply"),
         }
+    }
+}
+
+async fn reconnect_after_upload_refusal() -> Result<DaemonClient> {
+    loop {
+        if let Ok(client) = connect_existing().await {
+            return Ok(client);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 

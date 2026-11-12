@@ -1748,6 +1748,16 @@ fn golden_tui_import_confirmation() {
         30,
         &drawn(&mut dashboard, 120, 30),
     );
+    dashboard.show_import_upload();
+    assert!(matches!(&dashboard.mode, Mode::Importing(progress) if progress.cancellable));
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(matches!(dashboard.mode, Mode::Confirm(_)));
+    dashboard.show_import_registration();
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Esc)),
+        DashboardAction::None
+    );
+    assert!(matches!(&dashboard.mode, Mode::Importing(progress) if !progress.cancellable));
     mj_core::golden::assert_golden(
         env!("CARGO_MANIFEST_DIR"),
         "tui-import-confirmation",

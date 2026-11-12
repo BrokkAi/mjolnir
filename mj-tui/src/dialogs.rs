@@ -1162,6 +1162,15 @@ impl DashboardState {
         });
     }
 
+    pub fn show_import_upload(&mut self) {
+        if let Some(progress) = import_progress_mut(&mut self.mode) {
+            progress.cancellable = true;
+            progress.message = "Uploading archive…".into();
+            progress.last_updated = Instant::now();
+            self.mode = Mode::Importing(progress.clone());
+        }
+    }
+
     pub fn show_import_registration(&mut self) {
         if let Some(progress) = import_progress_mut(&mut self.mode) {
             progress.cancellable = false;

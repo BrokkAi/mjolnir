@@ -700,6 +700,15 @@ impl DashboardContext {
     pub(crate) fn drain_import_tasks(&mut self) {
         while let Some(update) = self.import_tasks.next_ready() {
             match update {
+                DashboardImportUpdate::Uploading { task_id } => {
+                    if self
+                        .active_import
+                        .as_ref()
+                        .is_some_and(|active| active.task_id == task_id)
+                    {
+                        self.dashboard.show_import_upload();
+                    }
+                }
                 DashboardImportUpdate::Registering { task_id } => {
                     if self
                         .active_import
