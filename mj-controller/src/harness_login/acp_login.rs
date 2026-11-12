@@ -532,6 +532,7 @@ fn render_command(command: &TerminalCommand) -> String {
 }
 
 struct AcpSession {
+    owns_group: bool,
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
@@ -560,8 +561,10 @@ impl AcpSession {
             .kill_on_drop(true);
         // A shell bootstrap or npx can leave a native server in the bridge's
         // process group. Own that group so shutdown reaches it.
-        #[cfg(unix)]
-        command.process_group(0);
+        let owns_group = std::env::var_os("MJ_LOGIN_TERMINAL").is_none();
+        if owns_group {
+            command.process_group(0);
+        }
         let mut child = command.spawn().with_context(|| {
             format!(
                 "start the {} ACP bridge {}",
@@ -572,6 +575,7 @@ impl AcpSession {
         let stdin = child.stdin.take().context("ACP bridge has no stdin")?;
         let stdout = BufReader::new(child.stdout.take().context("ACP bridge has no stdout")?);
         let mut session = Self {
+            owns_group,
             child,
             stdin,
             stdout,
@@ -707,13 +711,24 @@ impl AcpSession {
         let _ = self.stdin.shutdown().await;
         #[cfg(unix)]
         if let Some(pid) = self.child.id() {
-            mj_core::subprocess::terminate_process_group(pid as i32, libc::SIGTERM);
+            if self.owns_group {
+                mj_core::subprocess::terminate_process_group(pid as i32, libc::SIGTERM);
+            } else {
+                // The daemon owns this entire terminal group; leave its
+                // descendants in that group for connection teardown.
+                // SAFETY: pid is a live unreaped child owned by this session.
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGTERM);
+                }
+            }
         }
         match tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await {
             Ok(_) => {}
             Err(_) => {
                 #[cfg(unix)]
-                if let Some(pid) = self.child.id() {
+                if self.owns_group
+                    && let Some(pid) = self.child.id()
+                {
                     mj_core::subprocess::terminate_process_group(pid as i32, libc::SIGKILL);
                 }
                 let _ = self.child.start_kill();
@@ -729,7 +744,8 @@ impl Drop for AcpSession {
         // with it. `try_wait` distinguishes a live child from one already
         // reaped, so a recycled pid is never signaled.
         #[cfg(unix)]
-        if self.child.try_wait().ok().flatten().is_none()
+        if self.owns_group
+            && self.child.try_wait().ok().flatten().is_none()
             && let Some(pid) = self.child.id()
         {
             mj_core::subprocess::terminate_process_group(pid as i32, libc::SIGKILL);

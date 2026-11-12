@@ -29,9 +29,14 @@ This is private-network operation with working SSH authentication and host trust
 - [ ] Implement and validate milestone 6: matching-build PowerShell go script.
 - [ ] Implement milestone 7: user documentation, final validation, platform dispatch and real Windows acceptance.
 
-- [ ] (2026-11-12, daemon login worker) Extract shared ACP/native/setup-token login driver into mj-controller; 11 focused tests, full controller/CLI suites and workspace clippy pass. Daemon PTY/control transport and dashboard pane remain.
+- [ ] (2026-11-12, daemon login worker) Extract shared ACP/native/setup-token login driver into mj-controller; 11 focused tests, full controller/CLI suites and workspace clippy pass. Daemon PTY/control transport implemented; real daemon e2e passes success, >128KiB output, input/credential write, disconnect teardown and handoff termination. Client full suite passes; controller full suite has one unrelated rsync ETXTBSY failure that passes alone; CLI full suite and final blocked-input/handoff regression pass; workspace clippy passes. Dashboard pane remains.
 
 ## Surprises & Discoveries
+
+- (2026-11-12, daemon login worker) This worktree still has no saved-profile login-status DaemonAction: `dashboard/io/spawn.rs::spawn_profile_login_statuses` calls `mj_controller::profile_login::statuses` locally. Dashboard login integration must consume the milestone-4 status action when that parallel work is merged. `run_setup_login` here also directly spawns the current executable; it has not yet been replaced by the streaming pane.
+
+- (2026-11-12, daemon login worker; parent-approved follow-up) During managed harness preparation, `harness_install::install_npm` runs `npm ci --omit=dev --no-audit --no-fund` through `subprocess::run_bounded`, which creates its own process group. Killing the daemon-owned login PTY group therefore does not kill this npm group. It writes package contents under the managed harness cache's `.install-*` staging directory; runtime-version probes and login-shell environment capture can similarly survive in helper groups. These finite probe/install commands normally exit when their work finishes. Their parent-held deadlines (15 minutes for npm installation, 10 minutes for harness commands) cannot be guaranteed after the login child itself is killed. Do not claim all preparation has stopped on disconnect. Intended structural fix: the login child owns its preparation helpers and stops their groups when terminated, preserving daemon → login child → helper ownership. The parent explicitly deferred shared subprocess ownership changes from this slice. The dashboard must render connection loss during login/preparation plainly and offer retry.
+- (2026-11-12, daemon login worker) Daemon handoff aborts disposable connection tasks in `daemon/process.rs`; a login connection can end with EOF before a final failure frame. The PTY guard still kills its group. The dashboard must render EOF as “The daemon connection ended during login or harness preparation; retry Login.” The real daemon regression accepts the final failure frame or handoff EOF and verifies descendants exit.
 
 - (2026-11-12, daemon login worker) `mj-worker/src/user_shell.rs:168` disables stdin and streams stdout/stderr pipes. No PTY owner, bidirectional terminal framing, or emulator dependency was found in this checkout; implementing an interactive login pane needs those facilities.
 
@@ -94,6 +99,8 @@ Decision (2026-11-12, daemon login worker): Put the complete harness login drive
 Decision (parent approval, 2026-11-12): There is no existing PTY transport or emulator to reuse: RunUserShell is output-only pipes. Use portable-pty for the daemon-owned PTY (including Windows ConPTY), define terminal byte/input/resize framing once in mj-client, and use vt100 plus tui-term on the dashboard side. Check license policy and crate boundaries for these dependencies.
 
 Decision (parent approval, 2026-11-12): The daemon PTY launches its own current executable through an internal login entrypoint that bypasses placement forwarding. The shared driver inherits terminal stdio and restores process-wide SIGINT, so it must run in this child, never in the daemon process. The daemon owns the PTY and process group; the dashboard never launches mj.
+
+Decision (2026-11-12, daemon login worker): A dedicated LoginTerminal control connection switches from the authenticated request/reply handshake to shared terminal byte, resize, exit and failure frames. The PTY owner takes no handoff admission and terminates on disconnect or daemon cancellation. Daemon-local ACP bridges inherit this owned process group; ordinary CLI login retains its ACP group ownership. Observe root exit without reaping before group teardown so process ids cannot be recycled while cleanup owns the group. portable-pty 0.9 is MIT, accepted by the existing license policy, and already present in Cargo.lock through the CLI test infrastructure.
 
 ## Outcomes & Retrospective
 

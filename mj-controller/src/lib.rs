@@ -9,6 +9,7 @@ mod codex_usage;
 mod grok_usage;
 mod kimi_auth;
 mod launch_timing;
+mod login_terminal;
 mod muse_usage;
 mod quota_runtime;
 mod zai_usage;

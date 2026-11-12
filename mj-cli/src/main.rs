@@ -426,6 +426,8 @@ impl From<MoveQueue> for ResumeQueueDisposition {
 
 #[derive(Debug, Args)]
 struct LoginArgs {
+    #[arg(long, hide = true)]
+    daemon_local: bool,
     /// Profile to authenticate. Optional when exactly one profile exists.
     #[arg(long)]
     profile: Option<String>,
@@ -1146,7 +1148,7 @@ async fn run_command(
             if args.cli {
                 forwarded.push("--cli".to_owned());
             }
-            if daemon::run_where_daemon_lives(&forwarded, true).await? {
+            if !args.daemon_local && daemon::run_where_daemon_lives(&forwarded, true).await? {
                 return Ok(DashboardExit::Normal);
             }
             login(args).await.map(|()| DashboardExit::Normal)

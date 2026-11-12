@@ -708,6 +708,7 @@ dependencies = [
  "hmac",
  "http-body-util",
  "libc",
+ "portable-pty",
  "rayon",
  "reedline",
  "reqwest",
