@@ -545,8 +545,9 @@ fn set_executable(_path: &Path) -> Result<()> {
 }
 
 fn run_setup(host: &CacheHost, program: &Path, executor: &impl CommandExecutor) -> Result<()> {
-    // Accepted mbx 1.30.0 window: setup.rs:275–278 calls util.rs:125–141 to
-    // rename the cargo launcher before setting its executable bit. Interruption
+    // Pre-existing mbx 1.30.0 defect: setup.rs:275–278 calls util.rs:125–141 to
+    // rename the cargo launcher before setting its executable bit. Daemon handoff
+    // and disconnect add ways to interrupt this existing window. Interruption
     // can leave it non-executable until Install runs again. The structural fix
     // belongs in mbx: set the temporary file's mode before persist, then bump our pin.
     let command = host.command(

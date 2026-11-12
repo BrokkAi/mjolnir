@@ -1153,15 +1153,11 @@ pub(crate) async fn run_dashboard_for_workspace(
             if let Some(check) = context.dashboard.take_availability_check() {
                 actions::apply_dashboard_action(&mut context, check).await?;
             }
-            // Settings shows whether each saved profile has a login. Reading
-            // those files belongs off the loop; this is the one place that
+            // Settings shows whether each saved profile has a daemon login.
+            // Request status off the loop; this is the one place that
             // starts it so every surface that opens Settings is covered.
             if let Some(generation) = context.dashboard.take_profile_login_refresh() {
-                io::spawn_profile_login_statuses(
-                    generation,
-                    context.config.clone(),
-                    context.dashboard_io_tx.clone(),
-                );
+                io::spawn_profile_login_statuses(generation, context.dashboard_io_tx.clone());
             }
             if let Some((generation, profile_id)) = context.dashboard.take_setup_login() {
                 actions::apply_dashboard_action(
