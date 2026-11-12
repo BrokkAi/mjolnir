@@ -300,6 +300,9 @@ pub struct DurableRelay {
     /// Whether the daemon will act on a `Continue` verdict. Off when the
     /// launch environment says automatic continuation is disabled.
     continuation_enabled: bool,
+    /// The classifier the sub-agent handback check asks. Only the Unix worker
+    /// sets and reads it; the field stays on Windows so the relay type matches.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) handback_verdict_client: Option<crate::acp::verdict_client::VerdictClient>,
     /// When a Claude background task last completed or failed, until the
     /// harness turn that answers it opens. Claude Code always follows such a
