@@ -211,7 +211,7 @@ impl DurableRelay {
     /// Legacy Jev judgments remain process-local and are reasked after restart.
     #[cfg_attr(not(unix), allow(dead_code))]
     fn reask_background_after_restart(&mut self) -> Result<()> {
-        if self.verdict_harness.is_none() || self.background_commands().is_empty() {
+        if self.verdict_harness.is_none() {
             return Ok(());
         }
         let Some(mut a) = self.snapshot.assessment.as_deref().cloned().filter(|a| {
@@ -246,22 +246,37 @@ impl DurableRelay {
                 if blocked(&self.activity_facts()).is_some() {
                     return Ok(());
                 }
-                // Keep the completed action authoritative; only refresh runtime judgment.
-                a.revision = self.snapshot.latest_ordinal + 1;
-                a.status = mj_core::assessment::Status::Pending;
-                a.evidence = None;
+                if matches!(
+                    a.action,
+                    Some(
+                        mj_core::assessment::Action::Wait | mj_core::assessment::Action::Uncertain
+                    )
+                ) {
+                    a.classify_again(self.snapshot.latest_ordinal + 1);
+                } else {
+                    // Other completed actions retain authority during background refresh.
+                    a.revision = self.snapshot.latest_ordinal + 1;
+                    a.status = mj_core::assessment::Status::Pending;
+                    a.evidence = None;
+                }
                 return self.store_assessment(a);
             }
             let answers = serde_json::to_value(glide)?;
             self.replied_verdict.judge_background(
                 self.turn_context.generation(),
-                mj_core::activity::eot_glide::background_needed(&answers, true),
+                mj_core::activity::eot_glide::background_needed(
+                    &answers,
+                    !self.background_commands().is_empty(),
+                ),
             );
             self.replied_verdict.asked_turn = Some((a.turn_id.clone(), a.completed_ordinal));
             return Ok(());
         }
         let facts = self.activity_facts();
-        if blocked(&facts).is_some() || facts.background_needed.is_some() {
+        if self.background_commands().is_empty()
+            || blocked(&facts).is_some()
+            || facts.background_needed.is_some()
+        {
             return Ok(());
         }
         tracing::info!(target: "mj_jev", session = %self.snapshot.session_id,
@@ -800,6 +815,85 @@ mod tests {
             assert_eq!(relay.activity_facts().background_needed, Some(false));
             assert!(relay.operational_state().is_quiet());
             assert_eq!(relay.snapshot.assessment.as_ref().unwrap().action, action);
+            relay.prepare_pending_assessment().unwrap();
+            assert!(relay.pending_replied_verdict().is_none());
+        }
+    }
+
+    // Hard-won: 8ad2f6a1d: Wait survived changed and empty background inventories forever.
+    #[test]
+    fn glide_wait_inventory_changes_reclassify_once() {
+        use crate::relay::test_support::{finish_prompt, prompt, submit_relay};
+        let samples: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../mj-core/src/activity/eot_glide_fresh_sample.json"
+        ))
+        .unwrap();
+        let finished = samples
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["expected"] == "finished")
+            .unwrap();
+        let waiting = samples
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["expected"] == "wait")
+            .unwrap();
+        for remaining in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut relay = DurableRelay::open(temp.path(), "wait-background", "test").unwrap();
+            relay.set_acp_ready(true);
+            relay.set_turn_verdict_harness(HarnessKind::Claude);
+            submit_relay(&mut relay, "user-turn", prompt("Finish the task"));
+            relay.claim_pending_commands(true).unwrap();
+            relay
+                .agent_terminal_started(ActiveAgentTerminal {
+                    terminal_id: "first".into(),
+                    command: "checks".into(),
+                    started_at_ms: 100,
+                })
+                .unwrap();
+            finish_prompt(&mut relay, "user-turn");
+            relay.prepare_pending_assessment().unwrap();
+            let (revision, _, _) = relay.pending_replied_verdict().unwrap();
+            relay
+                .apply_glide_assessment(
+                    revision,
+                    crate::acp::verdict_client::glide_turn::Probabilities::parse(waiting).unwrap(),
+                )
+                .unwrap();
+            assert_eq!(
+                relay.snapshot.assessment.as_ref().unwrap().action,
+                Some(mj_core::assessment::Action::Wait)
+            );
+            assert!(relay.activity_facts().expected_continuation.is_some());
+            if remaining {
+                relay
+                    .agent_terminal_started(ActiveAgentTerminal {
+                        terminal_id: "second".into(),
+                        command: "more checks".into(),
+                        started_at_ms: 200,
+                    })
+                    .unwrap();
+            }
+            relay.agent_terminal_closed("first").unwrap();
+            relay.prepare_pending_assessment().unwrap();
+            let (revision, evidence, _) = relay.pending_replied_verdict().unwrap();
+            assert_eq!(evidence.background.len(), usize::from(remaining));
+            relay.prepare_pending_assessment().unwrap();
+            assert!(relay.pending_replied_verdict().is_none());
+            relay
+                .apply_glide_assessment(
+                    revision,
+                    crate::acp::verdict_client::glide_turn::Probabilities::parse(finished).unwrap(),
+                )
+                .unwrap();
+            assert_eq!(
+                relay.snapshot.assessment.as_ref().unwrap().action,
+                Some(mj_core::assessment::Action::Finished)
+            );
+            assert!(relay.activity_facts().expected_continuation.is_none());
             relay.prepare_pending_assessment().unwrap();
             assert!(relay.pending_replied_verdict().is_none());
         }

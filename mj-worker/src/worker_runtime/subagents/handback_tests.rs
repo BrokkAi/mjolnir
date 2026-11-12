@@ -216,3 +216,97 @@ async fn pending_handback_check_withholds_publication_and_repeat_is_forwarded_wi
         "Report delivered"
     );
 }
+
+// Hard-won: 8ad2f6a1d: a slow optional handback check delayed delivery to the parent.
+#[tokio::test]
+async fn slow_handback_glide_delivers_unchecked_and_consumes_check() {
+    let root = tempfile::tempdir().unwrap();
+    let logs = tempfile::tempdir().unwrap();
+    let mut owner = DurableRelay::open(root.path(), SESSION, "test").unwrap();
+    owner.set_turn_verdict_harness(HarnessKind::Codex);
+    owner
+        .record_observation(mj_core::relay::RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+    submit_relay(
+        &mut owner,
+        "subagent-spawn-first",
+        prompt("Implement and validate."),
+    );
+    owner.claim_pending_commands(true).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    owner.handback_verdict_client = Some(
+        VerdictClient::new(VerdictSource::Direct {
+            key: "test".into(),
+            endpoint: format!("http://{}/", listener.local_addr().unwrap()),
+        })
+        .unwrap()
+        .with_log(Some(
+            mj_core::jev::DecisionLog::open(logs.path().into()).unwrap(),
+        )),
+    );
+    let mut endpoint = SubagentEndpoint::open(root.path()).unwrap();
+    endpoint.relay = Some(Arc::new(RelayCell::new(owner)));
+    endpoint.subagent_kind = Some(SubagentKind::Worker);
+    let http = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut socket = BufReader::new(socket);
+        let mut length = 0;
+        loop {
+            let mut line = String::new();
+            socket.read_line(&mut line).await.unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                length = value.trim().parse::<usize>().unwrap();
+            }
+        }
+        let mut body = vec![0; length];
+        socket.read_exact(&mut body).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(7)).await;
+        // The caller has already delivered unchecked; no response is needed.
+    });
+    let started = Instant::now();
+    let first = tokio::spawn(call(endpoint.clone(), report("slow")));
+    let mut changes = endpoint.generations();
+    loop {
+        if endpoint.state.lock().unwrap().requests.contains_key("slow") {
+            break;
+        }
+        tokio::time::timeout(Duration::from_secs(7), changes.changed())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    assert!(started.elapsed() >= Duration::from_secs(5));
+    assert!(started.elapsed() < Duration::from_secs(7));
+    endpoint
+        .complete(SubagentToolResult {
+            request_id: "slow".into(),
+            completed_at_ms: 1,
+            is_error: false,
+            message: "Report delivered".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        first.await.unwrap()["result"]["message"],
+        "Report delivered"
+    );
+    let repeat_started = Instant::now();
+    assert!(
+        endpoint
+            .check_handback(&mut report("repeat"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(repeat_started.elapsed() < Duration::from_secs(1));
+    let page = mj_core::jev::read(logs.path(), SESSION, None).unwrap();
+    let page = mj_core::jev::read(logs.path(), SESSION, Some(&page.decisions[0].id)).unwrap();
+    let technical = page.decisions[0].technical.as_ref().unwrap();
+    assert_eq!(technical["outcome"], "delivered");
+    assert_eq!(technical["reason"], "timeout");
+    http.await.unwrap();
+}

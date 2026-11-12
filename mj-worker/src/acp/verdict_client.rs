@@ -521,7 +521,10 @@ impl VerdictClient {
             finished: false,
             dispatch: tracing::dispatcher::get_default(Clone::clone),
         };
-        let result = async {
+        // User requires fail-open after a few seconds to save the parent's time.
+        // Fresh 268-case GLiDE latency: p50 1.1s / p95 2.8s; 5s admits nearly all normal calls.
+        let timeout = Duration::from_secs(5);
+        let result = tokio::time::timeout(timeout, async {
             // Explicit endpoints support isolated proxy fixtures; no provider key leaves the worker.
             let endpoint = match &self.source {
                 VerdictSource::Direct { endpoint, .. } if cfg!(test) => endpoint.clone(),
@@ -541,6 +544,7 @@ impl VerdictClient {
                         .authorization
                         .clone()
                         .context("missing handback authorization")?,
+                    timeout,
                     |history| {
                         let mut evidence = evidence.clone();
                         evidence.authorization = Some(history.clone());
@@ -550,8 +554,10 @@ impl VerdictClient {
                 .await?;
             let response = response.json::<serde_json::Value>().await?;
             mj_core::assessment::HandbackProbabilities::parse(&response["probabilities"])
-        }
-        .await;
+        })
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(std::convert::identity);
         if let Some(log) = &attempt.diagnostic {
             match &result {
                 Ok(probabilities) => {
@@ -695,6 +701,7 @@ impl VerdictClient {
         &self,
         endpoint: reqwest::Url,
         mut history: mj_core::assessment::ContextHistory,
+        timeout: Duration,
         project: impl Fn(&mj_core::assessment::ContextHistory) -> Result<serde_json::Value>,
     ) -> Result<reqwest::Response> {
         let mut body = serde_json::to_vec(&project(&history)?)?;
@@ -702,6 +709,7 @@ impl VerdictClient {
             let response = self
                 .client
                 .post(endpoint.clone())
+                .timeout(timeout)
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
                 .body(body.clone())
                 .send()
@@ -750,10 +758,15 @@ impl VerdictClient {
                 "https://mj-jev-proxy.eng-admin-a63.workers.dev/v1/glide-turn-verdict",
             )?,
         };
+        // Fastino: "set your client read timeout above 170 seconds"
+        // https://docs.fastino.ai/troubleshooting/retries (supersedes older 300s notes).
         let mut response = self
-            .post_glide(endpoint, authorization, |history| {
-                glide_turn::project(evidence, history.clone(), facts, native_agent_count)
-            })
+            .post_glide(
+                endpoint,
+                authorization,
+                Duration::from_secs(180),
+                |history| glide_turn::project(evidence, history.clone(), facts, native_agent_count),
+            )
             .await?;
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await.context("read GLiDE verdict")? {
@@ -958,6 +971,10 @@ mod tests {
                             .unwrap();
                             ("200 OK", samples[0].clone())
                         };
+                        // Hard-won: 8ad2f6a1d: GLiDE inherited Jev's ten-second timeout.
+                        if !handback && !refusal {
+                            tokio::time::sleep(Duration::from_secs(15)).await;
+                        }
                         let answer = answer.to_string();
                         socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}", answer.len()).as_bytes()).await.unwrap();
                         if !reject {
