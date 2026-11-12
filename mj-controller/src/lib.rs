@@ -15,7 +15,6 @@ mod zai_usage;
 
 pub mod compaction;
 pub mod controller;
-pub mod desktop;
 pub mod doctor;
 pub(crate) mod handoff;
 pub mod image;

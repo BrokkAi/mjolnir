@@ -335,7 +335,7 @@ only when it is one of the following, in priority order:
 3. Integration: two sides that change independently must agree. In this
    project those are the store schema and migrations against data-access code
    and other daemon revisions; the daemon API against mj-client, `mj api`,
-   the TUI, the web viewer and the desktop shell; the relay protocol and
+   the TUI, the web viewer; the relay protocol and
    journal across worker and daemon versions; checkpoint, handoff and other
    persisted formats against their readers; ACP and the pinned harness
    bridges; harness transcripts that we import; the MCP servers we expose;
