@@ -1377,6 +1377,21 @@ pub struct BrowserTranscriptProjector {
     published: BTreeMap<String, Arc<BrowserTranscriptEntry>>,
 }
 
+/// A browser tool row renders its summary and diffstats only. The Raw-view
+/// detail below is read by the terminal renderer, which converts its own
+/// entries, so the browser projector does not keep it.
+fn release_raw_view_detail(entries: &mut [ChatEntry]) {
+    for entry in entries
+        .iter_mut()
+        .filter(|entry| entry.role == ChatRole::Tool)
+    {
+        entry.tool_content = Vec::new();
+        entry.tool_input = None;
+        entry.tool_error = None;
+        entry.tool_locations = Vec::new();
+    }
+}
+
 impl BrowserTranscriptProjector {
     /// Projects `session` for the browser, with an exact update cursor on
     /// every entry.
@@ -1404,6 +1419,7 @@ impl BrowserTranscriptProjector {
             true,
             std::mem::take(&mut self.entries),
         );
+        release_raw_view_detail(&mut self.entries);
         let mut converted = self.entries.iter().peekable();
         let mut previous = std::mem::take(&mut self.facts).into_iter().peekable();
         self.facts = session
@@ -1466,6 +1482,7 @@ impl BrowserTranscriptProjector {
                 true,
                 std::mem::take(&mut self.entries),
             );
+            release_raw_view_detail(&mut self.entries);
             let indices = self
                 .facts
                 .iter()
@@ -1764,6 +1781,12 @@ mod tests {
                 serde_json::to_vec(&reference.project(&session)).unwrap()
             );
             assert!(projector.entries.len() < 200);
+            assert!(
+                projector
+                    .entries
+                    .iter()
+                    .all(|entry| entry.tool_content.is_empty() && entry.tool_input.is_none())
+            );
             // Equal content with a new Arc exercises field-equality reuse.
             session.transcript[0] = Arc::new((*session.transcript[0]).clone());
             session.applied_event_ordinal += 1;
@@ -1819,6 +1842,12 @@ mod tests {
                 serde_json::to_vec(&reference.project(&session)).unwrap()
             );
             assert!(projector.entries.len() < 200);
+            assert!(
+                projector
+                    .entries
+                    .iter()
+                    .all(|entry| entry.tool_content.is_empty() && entry.tool_input.is_none())
+            );
             session.transcript = session
                 .transcript
                 .iter()
