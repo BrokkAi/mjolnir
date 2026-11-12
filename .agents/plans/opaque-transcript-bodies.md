@@ -27,6 +27,12 @@ The daemon's largest heap owner is the decoded live transcript windows: about 44
   Rationale: one representation change with no format or protocol change; also removes parse cost on window loads.
 - Decision: hot paths read small typed metadata computed once, in one constructor, from the parsed value whenever a call is created or updated: at least the decoded status (with today's typed-decode rule: malformed fields read as Pending), the tool-call id, the terminal ids named in content, and a digest of the raw result used by raw-output terminal matching. Cold paths parse on demand through one accessor. Mutations (projector merges of tool updates) parse, modify, re-serialize and recompute metadata through one function.
   Rationale: without metadata, raw-output matching would parse every tool in the window on each terminal event; one constructor keeps metadata and text from disagreeing.
+- Decision (amends the type decision): the opaque type deserializes through a transient `serde_json::Value` and then stores the JSON text; no custom deserializers in M1. A raw fast path at the store boundary is optional (M1b) and only if measured load CPU matters.
+  Rationale: `TranscriptBody` is `#[serde(tag = "kind")]`; serde buffers internally tagged enums through `Content`, which cannot hand `RawValue` the original text (`invalid type: newtype struct, expected any valid JSON value`), and transcript bodies also cross other tagged envelopes. The transient decode keeps the whole retained-memory benefit.
+  Date/Author: 2026-11-12, parent agent after the implementer's M0 reproducer.
+- Decision: cached metadata also carries the fallback-terminal classification, and keeps the two existing status rules as separate named fields: the raw stored status string (window trim) and whether the typed ACP decode succeeded (renderers read Pending when it did not).
+  Rationale: terminal events typed-decode every tool through `fallback_tool_item` today; the two status rules are existing behavior and are kept explicit rather than silently merged.
+  Date/Author: 2026-11-12, parent agent.
 - Decision: compression is a separate milestone and a separate decision after M1 is measured live.
   Rationale: compression adds per-access decompression and a dictionary lifecycle (training, versioning, embedding); measure the raw-text win first.
 
