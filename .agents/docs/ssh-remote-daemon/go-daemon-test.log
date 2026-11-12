@@ -1,0 +1,589 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling libc v0.2.186
+   Compiling unicode-ident v1.0.24
+   Compiling cfg-if v1.0.4
+   Compiling serde_core v1.0.229
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.9
+   Compiling memchr v2.8.1
+   Compiling smallvec v1.15.1
+   Compiling equivalent v1.0.2
+   Compiling itoa v1.0.18
+   Compiling log v0.4.30
+   Compiling foldhash v0.2.0
+   Compiling pkg-config v0.3.33
+   Compiling pin-project-lite v0.2.17
+   Compiling futures-core v0.3.32
+   Compiling serde v1.0.229
+   Compiling autocfg v1.5.1
+   Compiling parking_lot_core v0.9.12
+   Compiling scopeguard v1.2.0
+   Compiling rustix v1.1.4
+   Compiling linux-raw-sys v0.12.1
+   Compiling once_cell v1.21.4
+   Compiling futures-io v0.3.32
+   Compiling bytes v1.11.1
+   Compiling stable_deref_trait v1.2.1
+   Compiling zmij v1.0.21
+   Compiling slab v0.4.12
+   Compiling version_check v0.9.5
+   Compiling futures-sink v0.3.32
+   Compiling strsim v0.11.1
+   Compiling percent-encoding v2.3.2
+   Compiling heck v0.5.0
+   Compiling futures-task v0.3.32
+   Compiling base64 v0.22.1
+   Compiling writeable v0.6.3
+   Compiling litemap v0.8.2
+   Compiling dunce v1.0.5
+   Compiling unicode-segmentation v1.13.3
+   Compiling fs_extra v1.3.0
+   Compiling utf8_iter v1.0.4
+   Compiling simd-adler32 v0.3.9
+   Compiling zeroize v1.8.2
+   Compiling crc32fast v1.5.0
+   Compiling typenum v1.20.1
+   Compiling icu_properties_data v2.2.0
+   Compiling ident_case v1.0.1
+   Compiling icu_normalizer_data v2.2.0
+   Compiling ryu v1.0.23
+   Compiling serde_json v1.0.150
+   Compiling crossbeam-utils v0.8.21
+   Compiling atomic-waker v1.1.2
+   Compiling powerfmt v0.2.0
+   Compiling time-core v0.1.8
+   Compiling num-conv v0.2.2
+   Compiling aws-lc-rs v1.18.1
+   Compiling adler2 v2.0.1
+   Compiling parking v2.2.1
+   Compiling litrs v1.0.0
+   Compiling num_threads v0.1.7
+   Compiling untrusted v0.9.0
+   Compiling thiserror v2.0.20
+   Compiling tower-service v0.3.3
+   Compiling httparse v1.10.1
+   Compiling unicode-xid v0.2.6
+   Compiling httpdate v1.0.3
+   Compiling fastrand v2.4.1
+   Compiling fnv v1.0.7
+   Compiling rustls v0.23.40
+   Compiling try-lock v0.2.5
+   Compiling allocator-api2 v0.2.21
+   Compiling alloc-no-stdlib v3.0.0
+   Compiling regex-syntax v0.8.10
+   Compiling unicase v2.9.0
+   Compiling subtle v2.6.1
+   Compiling either v1.16.0
+   Compiling rustversion v1.0.22
+   Compiling getrandom v0.4.2
+   Compiling rand_core v0.10.1
+   Compiling hashbrown v0.17.1
+   Compiling tower-layer v0.3.3
+   Compiling ipnet v2.12.0
+   Compiling cpufeatures v0.3.0
+   Compiling fixedbitset v0.5.7
+   Compiling getrandom v0.3.4
+   Compiling compression-core v0.4.33
+   Compiling zerocopy v0.8.50
+   Compiling iana-time-zone v0.1.65
+   Compiling cmov v0.5.4
+   Compiling anyhow v1.0.102
+   Compiling mime v0.3.17
+   Compiling psl-types v2.0.11
+   Compiling bytemuck v1.25.0
+   Compiling openssl-probe v0.2.1
+   Compiling const-oid v0.10.2
+   Compiling option-ext v0.2.0
+   Compiling unicode-width v0.2.2
+   Compiling zstd-safe v7.2.4
+   Compiling signal-hook v0.3.18
+   Compiling tree-sitter-language v0.1.8
+   Compiling async-task v4.7.1
+   Compiling instability v0.3.12
+   Compiling twox-hash v2.1.5
+   Compiling rand_core v0.9.5
+   Compiling indoc v2.0.7
+   Compiling winnow v0.5.40
+   Compiling ref-cast v1.0.25
+   Compiling static_assertions v1.1.0
+   Compiling archery v1.2.3
+   Compiling imbl-sized-chunks v0.2.0
+   Compiling shell-words v1.1.1
+   Compiling lazy_static v1.5.0
+   Compiling rustc-hash v2.1.2
+   Compiling arraydeque v0.5.1
+   Compiling downcast-rs v1.2.1
+   Compiling similar v2.7.0
+   Compiling borrow-or-share v0.2.4
+   Compiling lock_api v0.4.14
+   Compiling num-traits v0.2.19
+   Compiling futures-channel v0.3.32
+   Compiling tracing-core v0.1.36
+   Compiling http v1.4.1
+   Compiling rustls-pki-types v1.14.1
+   Compiling deranged v0.5.8
+   Compiling miniz_oxide v0.8.9
+   Compiling time-macros v0.2.27
+   Compiling form_urlencoded v1.2.2
+   Compiling document-features v0.2.12
+   Compiling convert_case v0.10.0
+   Compiling want v0.3.1
+   Compiling alloc-stdlib v0.3.0
+   Compiling hashbrown v0.16.1
+   Compiling aho-corasick v1.1.4
+   Compiling hybrid-array v0.4.14
+   Compiling sync_wrapper v1.0.2
+   Compiling indexmap v2.14.0
+   Compiling cookie v0.18.2
+   Compiling futures-lite v2.6.1
+   Compiling event-listener v5.4.2
+   Compiling mime_guess v2.0.5
+   Compiling ctutils v0.4.2
+   Compiling async-io v2.6.0
+   Compiling generic-array v0.14.7
+   Compiling encoding_rs v0.8.35
+   Compiling wayland-sys v0.31.11
+   Compiling itertools v0.14.0
+   Compiling piper v0.2.5
+   Compiling safe_arch v0.7.4
+   Compiling ruzstd v0.9.1
+   Compiling rand_xoshiro v0.7.0
+   Compiling ahash v0.8.12
+   Compiling quick-xml v0.41.0
+   Compiling bit-vec v0.8.0
+   Compiling unicode-general-category v1.1.0
+   Compiling wayland-client v0.31.15
+   Compiling thiserror v1.0.69
+   Compiling bytesize v2.7.0
+   Compiling fdeflate v0.3.7
+   Compiling ascii v1.1.0
+   Compiling outref v0.5.2
+   Compiling cpufeatures v0.2.17
+   Compiling quick-error v2.0.1
+   Compiling micromap v0.3.0
+   Compiling vcpkg v0.2.15
+   Compiling vsimd v0.8.0
+   Compiling pxfm v0.1.30
+   Compiling chunked_transfer v1.5.0
+   Compiling crossbeam-epoch v0.9.20
+   Compiling byteorder-lite v0.1.0
+   Compiling foldhash v0.1.5
+   Compiling zune-core v0.5.3
+   Compiling chacha20 v0.10.2
+   Compiling jsonschema-regex v0.46.10
+   Compiling num-cmp v0.1.0
+   Compiling utf8parse v0.2.2
+   Compiling streaming-iterator v0.1.9
+   Compiling data-encoding v2.11.1
+   Compiling crossbeam-deque v0.8.7
+   Compiling bytecount v0.6.9
+   Compiling nom v8.0.0
+   Compiling colorchoice v1.0.5
+   Compiling rayon-core v1.13.0
+   Compiling anstyle v1.0.14
+   Compiling anstyle-query v1.1.5
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling fs-err v3.3.0
+   Compiling semver v1.0.28
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling clap_lex v1.1.0
+   Compiling tinyvec_macros v0.1.1
+   Compiling pulldown-cmark v0.10.3
+   Compiling fallible-iterator v0.3.0
+   Compiling byteorder v1.5.0
+   Compiling bumpalo v3.20.3
+   Compiling x11rb-protocol v0.13.2
+   Compiling http-body v1.0.1
+   Compiling brotli-decompressor v6.0.1
+   Compiling regex-automata v0.4.14
+   Compiling block-buffer v0.12.1
+   Compiling crypto-common v0.2.2
+   Compiling event-listener-strategy v0.5.4
+   Compiling rustls-native-certs v0.8.4
+   Compiling hashlink v0.12.2
+   Compiling lru v0.16.4
+   Compiling wide v0.7.33
+   Compiling unicode-truncate v2.0.1
+   Compiling bit-set v0.8.0
+   Compiling tiny_http v0.12.0
+   Compiling uuid-simd v0.8.0
+   Compiling image-webp v0.2.4
+   Compiling zune-jpeg v0.5.15
+   Compiling hashbrown v0.15.5
+   Compiling anstyle-parse v1.0.0
+   Compiling zip v2.4.2
+   Compiling siphasher v1.0.3
+   Compiling tinyvec v1.11.0
+   Compiling vte v0.14.1
+   Compiling arrayref v0.3.9
+   Compiling constant_time_eq v0.4.2
+   Compiling nu-ansi-term v0.50.3
+   Compiling arrayvec v0.7.8
+   Compiling same-file v1.0.6
+   Compiling chrono-tz v0.10.4
+   Compiling rustls-pemfile v2.2.0
+   Compiling linkify v0.11.0
+   Compiling itertools v0.15.0
+   Compiling matchit v0.8.4
+   Compiling tracing-log v0.2.0
+   Compiling sharded-slab v0.1.7
+   Compiling thread_local v1.1.10
+   Compiling brokk-mjolnir v2.71.0 (/home/jonathan/Projects/mjolnir-wt/1514-go-docs/mj-cli)
+   Compiling qrcode v0.14.1
+   Compiling pem v3.0.6
+   Compiling jobserver v0.1.35
+   Compiling bitflags v2.11.1
+   Compiling errno v0.3.14
+   Compiling mio v1.2.1
+   Compiling socket2 v0.6.4
+   Compiling getrandom v0.2.17
+   Compiling flate2 v1.1.9
+   Compiling time v0.3.47
+   Compiling concurrent-queue v2.5.0
+   Compiling brotli v9.0.0
+   Compiling http-body-util v0.1.3
+   Compiling digest v0.11.3
+   Compiling dirs-sys v0.5.0
+   Compiling regex v1.12.3
+   Compiling async-lock v3.4.2
+   Compiling filetime v0.2.29
+   Compiling yaml-rust2 v0.13.0
+   Compiling imbl v7.0.2
+   Compiling serde_path_to_error v0.1.20
+   Compiling fancy-regex v0.18.0
+   Compiling fs2 v0.4.3
+   Compiling petgraph v0.8.3
+   Compiling os_pipe v1.2.3
+   Compiling anstream v1.0.0
+   Compiling sysinfo v0.32.1
+   Compiling fxhash v0.2.1
+   Compiling zopfli v0.8.3
+   Compiling phf_shared v0.12.1
+   Compiling unicode-normalization v0.1.25
+   Compiling strip-ansi-escapes v0.2.1
+   Compiling matchers v0.2.0
+   Compiling syn v2.0.117
+   Compiling cc v1.2.63
+   Compiling syn v3.0.4
+   Compiling signal-hook-registry v1.4.8
+   Compiling parking_lot v0.12.5
+   Compiling compression-codecs v0.4.45
+   Compiling async-channel v2.5.0
+   Compiling num-integer v0.1.47
+   Compiling castaway v0.2.4
+   Compiling uuid v1.23.2
+   Compiling sha2 v0.11.0
+   Compiling dirs v6.0.0
+   Compiling brokk-mj-core v2.71.0 (/home/jonathan/Projects/mjolnir-wt/1514-go-docs/mj-core)
+   Compiling ppv-lite86 v0.2.21
+   Compiling crypto-common v0.1.7
+   Compiling num-complex v0.4.6
+   Compiling rand_core v0.6.4
+   Compiling block-buffer v0.10.4
+   Compiling wayland-scanner v0.31.11
+   Compiling png v0.18.1
+   Compiling moxcms v0.8.1
+   Compiling line-clipping v0.3.7
+   Compiling rand v0.10.2
+   Compiling tree_magic_mini v3.2.2
+   Compiling hmac v0.13.0
+   Compiling arc-swap v1.9.1
+   Compiling dirs v7.0.0
+   Compiling walkdir v2.5.0
+   Compiling yasna v0.5.2
+   Compiling clap_builder v4.6.0
+   Compiling phf v0.12.1
+   Compiling synstructure v0.13.2
+   Compiling cmake v0.1.58
+   Compiling darling_core v0.23.0
+   Compiling polling v3.11.0
+   Compiling xattr v1.6.1
+   Compiling blocking v1.7.0
+   Compiling compact_str v0.9.1
+   Compiling num-bigint v0.4.8
+   Compiling tempfile v3.27.0
+   Compiling num-iter v0.1.46
+   Compiling rand_chacha v0.3.1
+   Compiling digest v0.10.7
+   Compiling image v0.25.10
+   Compiling gethostname v1.1.0
+   Compiling fd-lock v4.0.4
+   Compiling serde_derive v1.0.229
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling zerovec-derive v0.11.3
+   Compiling displaydoc v0.2.6
+   Compiling tokio-macros v2.7.0
+   Compiling futures-macro v0.3.32
+   Compiling tracing-attributes v0.1.31
+   Compiling aws-lc-sys v0.45.0
+   Compiling ring v0.17.14
+   Compiling derive_more-impl v2.1.1
+   Compiling thiserror-impl v2.0.20
+   Compiling zstd-sys v2.0.16+zstd.1.5.7
+   Compiling strum_macros v0.28.0
+   Compiling pin-project-internal v1.1.13
+   Compiling strum_macros v0.27.2
+   Compiling ref-cast-impl v1.0.25
+   Compiling wayland-backend v0.3.16
+   Compiling signal-hook-mio v0.2.5
+   Compiling agent-client-protocol-derive v5.0.0
+   Compiling num-rational v0.4.2
+   Compiling tar v0.4.46
+   Compiling thiserror-impl v1.0.69
+   Compiling tree-sitter v0.25.10
+   Compiling tree-sitter-bash v0.25.1
+   Compiling libsqlite3-sys v0.39.1
+   Compiling blake3 v1.8.6
+   Compiling tikv-jemalloc-sys v0.7.1+5.3.1-0-g81034ce1f1373e37dc865038e1bc8eeecf559ce8
+   Compiling clap_derive v4.6.1
+   Compiling darling_macro v0.23.0
+   Compiling sha2 v0.10.9
+   Compiling rand v0.8.6
+   Compiling x11rb v0.13.2
+   Compiling num v0.4.3
+   Compiling async-signal v0.2.14
+   Compiling rayon v1.12.0
+   Compiling fraction v0.15.4
+   Compiling async-process v2.5.0
+   Compiling chrono v0.4.44
+   Compiling serde_urlencoded v0.7.1
+   Compiling toml_datetime v0.6.3
+   Compiling serde_spanned v0.6.9
+   Compiling jsonc-parser v0.34.0
+   Compiling email_address v0.2.9
+   Compiling toml_edit v0.20.2
+   Compiling toml v0.8.2
+   Compiling strum v0.27.2
+   Compiling zerofrom v0.1.8
+   Compiling tokio v1.52.3
+   Compiling tracing v0.1.44
+   Compiling kasuari v0.4.12
+   Compiling derive_more v2.1.1
+   Compiling yoke v0.8.2
+   Compiling pin-project v1.1.13
+   Compiling ratatui-core v0.1.0
+   Compiling async-compression v0.4.50
+   Compiling crossterm v0.29.0
+   Compiling axum-core v0.5.6
+   Compiling tokio-stream v0.1.19
+   Compiling tracing-subscriber v0.3.23
+   Compiling zerotrie v0.2.4
+   Compiling futures-concurrency v7.7.1
+   Compiling wayland-protocols v0.32.13
+   Compiling darling v0.23.0
+   Compiling wayland-protocols-wlr v0.3.12
+   Compiling fluent-uri v0.4.1
+   Compiling serde_with_macros v3.20.0
+   Compiling wl-clipboard-rs v0.9.3
+   Compiling referencing v0.46.10
+   Compiling futures-util v0.3.32
+   Compiling arboard v3.6.1
+   Compiling ratatui-crossterm v0.1.0
+   Compiling ratatui-widgets v0.3.0
+   Compiling rat-event v2.1.0
+   Compiling tokio-util v0.7.18
+   Compiling tower v0.5.3
+   Compiling futures-executor v0.3.32
+   Compiling ratatui-macros v0.7.0
+   Compiling rat-focus v2.1.1
+   Compiling h2 v0.4.14
+   Compiling futures v0.3.32
+   Compiling ratatui v0.30.0
+   Compiling hyper v1.10.1
+   Compiling rusqlite v0.41.1
+   Compiling hyper-util v0.1.20
+   Compiling rcgen v0.13.2
+   Compiling axum v0.8.9
+   Compiling zerovec v0.11.6
+mbx[warning]: build-script result was not stored: local action key already has a different result
+   Compiling tinystr v0.8.3
+   Compiling potential_utf v0.1.5
+   Compiling icu_locale_core v2.2.0
+   Compiling icu_collections v2.2.0
+   Compiling icu_provider v2.2.0
+   Compiling zstd v0.13.3
+   Compiling icu_normalizer v2.2.0
+   Compiling icu_properties v2.2.0
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling url v2.5.8
+   Compiling publicsuffix v2.3.0
+   Compiling cookie_store v0.22.1
+   Compiling tower-http v0.6.11
+   Compiling oauth2 v5.0.0
+   Compiling webbrowser v1.2.4
+   Compiling strum v0.28.0
+   Compiling clap v4.6.1
+   Compiling reedline v0.51.0
+   Compiling brokk-sessionwiki v0.34.22
+   Compiling serde_with v3.20.0
+   Compiling agent-client-protocol-schema v1.15.1
+   Compiling agent-client-protocol v5.0.0
+   Compiling rustls-webpki v0.103.13
+   Compiling tokio-rustls v0.26.4
+   Compiling rustls-platform-verifier v0.7.0
+   Compiling hyper-rustls v0.27.9
+   Compiling axum-server v0.7.3
+   Compiling reqwest v0.13.4
+   Compiling jsonschema v0.46.10
+   Compiling brokk-anvil-client v0.28.6
+   Compiling brokk-mj-transcript v2.71.0 (/home/jonathan/Projects/mjolnir-wt/1514-go-docs/mj-transcript)
+   Compiling brokk-mj-review v2.71.0 (/home/jonathan/Projects/mjolnir-wt/1514-go-docs/mj-review)
+   Compiling brokk-mj-checkpoint v2.71.0 (/home/jonathan/Projects/mjolnir-wt/1514-go-docs/mj-checkpoint)
+   Compiling brokk-mj-client v2.71.0 (/home/jonathan/Projects/mjolnir-wt/1514-go-docs/mj-client)
+   Compiling brokk-mj-chat v2.71.0 (/home/jonathan/Projects/mjolnir-wt/1514-go-docs/mj-chat)
+   Compiling brokk-mj-controller v2.71.0 (/home/jonathan/Projects/mjolnir-wt/1514-go-docs/mj-controller)
+   Compiling brokk-mj-tui v2.71.0 (/home/jonathan/Projects/mjolnir-wt/1514-go-docs/mj-tui)
+   Compiling tikv-jemallocator v0.7.0
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 08s
+     Running unittests src/main.rs (target/debug/deps/mj-48ddfff8de1fc906)
+
+running 35 tests
+test daemon::container::tests::a_container_daemon_publishes_no_host_pid ... ok
+test daemon::tests::a_restart_that_cannot_identify_the_daemon_succeeds_without_the_guarantee ... ok
+test daemon::tests::a_restart_onto_this_build_succeeds_and_says_so ... ok
+test daemon::container::tests::a_daemon_container_shares_nothing_but_its_volume ... ok
+test daemon::tests::a_restart_onto_another_build_fails_and_names_both_builds ... ok
+test daemon::tests::development_refresh_detects_workers_installed_or_rebuilt_after_startup ... ok
+test dashboard::tests::the_daemon_running_again_notice_expires_by_itself ... ok
+test dashboard::tests::a_reconnect_replaces_the_daemon_not_running_error_notice ... ok
+test dashboard::tests::a_quick_reconnect_replaces_the_daemon_unavailable_notice ... ok
+test dashboard::tests::an_attached_keep_alive_clears_a_daemon_failure_without_a_transition ... ok
+test dashboard::tests::missing_target_poll_preserves_the_daemon_notice ... ok
+test daemon::tests::slow_startup_is_awaited_rather_than_reported_as_a_failure ... ok
+test daemon::tests::an_alive_daemon_that_never_answers_stops_at_the_bound ... ok
+test daemon::tests::a_configuration_the_new_daemon_cannot_read_refuses_the_replacement ... ok
+test daemon::tests::a_daemon_that_exits_is_reported_at_once ... ok
+test daemon::tests::a_failure_before_logging_starts_reports_detached_stderr ... ok
+test dashboard::actions::tests::restart_dispatch_sends_one_daemon_restart_action ... ok
+test logging::tests::prune_logs_never_removes_the_current_daemons_log ... ok
+test daemon::tests::failed_launch_reports_its_diagnostic_log_and_only_its_stderr ... ok
+test daemon::tests::a_profile_that_cannot_start_does_not_refuse_the_replacement ... ok
+test logging::tests::dev_full_keeps_the_daemon_log_thread_connected ... ok
+test daemon::tests::the_attachment_keep_alive_reports_a_missing_daemon_without_starting_one ... ok
+test daemon::tests::detached_daemon_can_launch_after_its_client_binary_is_removed ... ok
+test acp::tests::a_suspension_the_daemon_refuses_is_reported ... ok
+test acp::tests::without_a_workspace_the_daemon_chooses_as_it_does_for_mj_new ... ok
+test api_commands::tests::a_wait_follows_the_daemon_across_an_upgrade_handoff ... ok
+test dashboard::io::tests::lifecycle_quit_protects_submission_but_not_daemon_completion ... ok
+test daemon::tests::cancelled_startup_wait_does_not_retain_the_lock ... ok
+test api_client::tests::a_busy_daemon_is_retried_until_it_admits_the_request ... ok
+test daemon::tests::the_startup_lock_is_not_reentrant_within_one_process ... ok
+test daemon::tests::stopping_an_absent_daemon_waits_for_a_launch_in_progress ... ok
+test daemon::tests::api_waits_for_the_viewer_without_a_retry_command ... ok
+test daemon::tests::viewer_startup_reports_failure_and_bounds_a_stalled_start ... ok
+test daemon::tests::shared_holds_overlap_and_exclude_a_replacing_client ... ok
+test daemon::tests::splash_refreshes_blockers_each_second_for_replacing_and_queued_clients ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 219 filtered out; finished in 18.29s
+
+     Running tests/acp.rs (target/debug/deps/acp-5fb106800d6ec7ad)
+
+running 2 tests
+test the_acp_command_answers_initialize_without_starting_a_daemon ... ok
+test an_unknown_workspace_is_refused_at_start_from_the_store_without_a_daemon ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.43s
+
+     Running tests/daemon_startup.rs (target/debug/deps/daemon_startup-365fdb0a61fab624)
+
+running 17 tests
+test old_daemon_fixture ... ok
+test new_with_an_unknown_workspace_refuses_without_starting_a_daemon ... ok
+test new_without_a_workspace_refuses_without_starting_a_daemon ... ok
+test client_reports_the_daemon_startup_failure_instead_of_a_missing_endpoint ... ok
+test the_daemon_is_listed_as_mj_daemon_run ... ok
+test daemon_working_directory_survives_removal_of_the_launching_checkout ... ok
+test a_daemon_reports_a_fresh_identity_for_each_start ... ok
+test acp_with_an_unknown_workspace_refuses_at_start_when_a_daemon_is_running ... ok
+
+running 1 test
+
+running 1 test
+test old_daemon_fixture ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.16s
+
+test review_start_fails_with_the_reason_the_daemon_refused_it ... ok
+test daemon_cleans_legacy_activity_history_without_removing_session_transcripts ... ok
+test ordinary_startup_migrates_an_old_store_without_a_daemon ... ok
+test a_newer_compatible_daemon_and_store_are_reused_without_downgrading ... ok
+test a_daemon_that_dies_during_the_handoff_wait_is_replaced ... ok
+
+running 1 test
+test old_daemon_fixture ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.05s
+
+test older_same_release_clients_keep_a_newer_or_unordered_daemon ... ok
+test a_record_whose_daemon_died_does_not_block_the_upgrade ... ok
+
+running 1 test
+test old_daemon_fixture ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.16s
+
+
+running 1 test
+test old_daemon_fixture ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.15s
+
+test a_container_daemon_that_does_not_answer_is_not_replaced ... ok
+
+running 1 test
+test old_daemon_fixture ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.17s
+
+
+running 1 test
+test old_daemon_fixture ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.08s
+
+test concurrent_clients_replace_obsolete_daemons_once_and_reuse_the_winner ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 13.09s
+
+     Running tests/import_e2e.rs (target/debug/deps/import_e2e-f560c20203b370f3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/instance.rs (target/debug/deps/instance-27aa2d94ef50a4d7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/logging.rs (target/debug/deps/logging-4e730823c494e5ea)
+
+running 1 test
+test a_panicking_checkpoint_fixture_stops_its_daemon_before_removing_storage ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.85s
+
+     Running tests/store_divergence.rs (target/debug/deps/store_divergence-998e1c5f23aa981a)
+
+running 2 tests
+test daemon_survives_compatible_migration_then_exits_on_an_incompatible_one ... ok
+test daemon_exits_when_its_owner_process_exits ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.86s
+
+     Running tests/terminal_windows.rs (target/debug/deps/terminal_windows-7d3213f64ee51b8c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/termination_pty.rs (target/debug/deps/termination_pty-01ef678a3b951e03)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+

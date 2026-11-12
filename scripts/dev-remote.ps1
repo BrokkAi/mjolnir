@@ -34,6 +34,16 @@ function Assert-Clean([string] $Tree, [string] $Sha) {
     }
 }
 
+function Assert-StatusPlacement([string[]] $StatusLines) {
+    $statusText = $StatusLines -join "`n"
+    $daemonHost = if ($statusText -match '(?m)^Daemon host: (.+)\r?$') { $Matches[1].Trim() } else { '<missing>' }
+    $daemonInstance = if ($statusText -match '(?m)^Daemon instance: (.+)\r?$') { $Matches[1].Trim() } else { '<missing>' }
+    $configFile = if ($statusText -match '(?m)^Client config: (.+)\r?$') { $Matches[1].Trim() } else { 'the selected client instance config.toml' }
+    if ($daemonHost -cne $SshHost -or $daemonInstance -cne $Instance) {
+        throw "Daemon host is '$daemonHost'; -SshHost is '$SshHost'. Daemon instance is '$daemonInstance'; -Instance is '$Instance'. Change [daemon] host/instance in $configFile to match, then rerun at the same SHA."
+    }
+}
+
 # Expand only a leading ~/ remotely; quote all caller-controlled text.
 $remotePath = if ($RemoteCheckout.StartsWith('~/')) {
     '"$HOME"/' + (Quote-Sh $RemoteCheckout.Substring(2))
@@ -112,6 +122,9 @@ echo "Linux installed executable: $installed"
         Update-MjInstallPath $installDir
         Assert-Clean $buildTree $sha
         $installed = Join-Path $installDir 'mj.exe'
+        # Check placement before startup so an unrelated daemon is not upgraded.
+        $placementStatus = & $installed --instance $Instance daemon status
+        Assert-StatusPlacement -StatusLines $placementStatus
         # This read-only control query uses normal placement startup/handoff,
         # including a remote instance override in the client configuration.
         & $installed --instance $Instance daemon afk status
@@ -119,6 +132,7 @@ echo "Linux installed executable: $installed"
         $status = & $installed --instance $Instance daemon status
         if ($LASTEXITCODE -ne 0) { throw 'Installed client could not verify the remote daemon. Check the selected instance SSH placement, then rerun at the same SHA.' }
         $status | Write-Host
+        Assert-StatusPlacement -StatusLines $status
         if (($status -join "`n") -notmatch '(?m)^\s*same_source:\s*true\s*$') {
             throw 'Both installs ran, but daemon status did not confirm same_source: true. Check SSH placement host, remote_command and instance; rerun at the same SHA.'
         }

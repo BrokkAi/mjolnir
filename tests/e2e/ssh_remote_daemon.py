@@ -205,6 +205,9 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
                         )
                     if action == "status":
                         assert "Client build:" in result.stdout, result.stdout
+                        assert "Daemon host: 127.0.0.1\n" in result.stdout, result.stdout
+                        assert f"Daemon instance: {options.instance}\n" in result.stdout, result.stdout
+                        assert f"Client config: {p}/client-config/config.toml\n" in result.stdout, result.stdout
                 result = subprocess.run(
                     base + ["go"], env=client_env, text=True, capture_output=True
                 )

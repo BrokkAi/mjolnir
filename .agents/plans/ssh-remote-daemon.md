@@ -269,3 +269,17 @@ Validation: client and CLI crate suites, workspace clippy with warnings denied, 
 Milestone 6 discovery (2026-11-12): root install.ps1 now exposes -FunctionsOnly for shared destination, staged replacement and PATH functions while retaining standalone download installation. The development command uses -SshHost because PowerShell reserves $Host. flock and an exclusive Windows file handle serialize reused build worktrees; normal Cargo storage is preserved. No PowerShell parser is installed on this Linux host.
 
 Milestone 7 discovery (2026-11-12): docs/node_modules and pwsh are absent; no tools installed. Human guide distinguishes settled login/import/voice design from completed implementation. Validate Windows with the PowerShell parser and two runs at one SHA in the isolated remote-dev instance; site validation requires npm ci then npm run build in docs/.
+
+Go-command review follow-up (2026-11-12): parent settled the host-mismatch finding
+by extending the existing SSH status output with Daemon host and Daemon instance.
+Client config names the authoritative path for the repair message; PowerShell
+reads those lines rather than interpreting TOML. The script checks placement
+before startup/handoff and before success. Real SSH dispatch assertions cover
+these status fields, including stopped-daemon status.
+
+Go-command follow-up validation (2026-11-12): requested daemon tests, matching
+client/CLI dev build, isolated ssh-go-dispatch scenario, workspace Clippy with
+warnings denied, rustfmt check and diff checks all pass. Logs and exact commands
+are under .agents/docs/ssh-remote-daemon/windows-validation.md and go-*.log.
+The previous host-mismatch review decision is implemented; native Windows parser
+and twice-run acceptance remain outstanding because pwsh is absent here.

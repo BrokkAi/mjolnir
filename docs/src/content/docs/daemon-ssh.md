@@ -36,7 +36,8 @@ mj --instance remote-dev daemon status
 mj --instance remote-dev
 ```
 
-Status names the client and daemon builds and reports `same_source: true`
+Status names the configured daemon host and remote instance, the client configuration
+file, and both builds. It reports `same_source: true`
 when they match. A mismatch requires installing the same release or development
 commit on both computers.
 
@@ -138,8 +139,11 @@ portable workers and the voice helper. Windows builds and installs native
 `%LOCALAPPDATA%\Programs\Mjolnir\bin`, as with the release installer. Set
 `MJOLNIR_NO_MODIFY_PATH` to leave the user PATH alone.
 
-The command finishes only after the installed Windows client reports
-`same_source: true` from daemon status. If either installation or that check
+The command checks that daemon status names the same host as `-SshHost` and
+the same remote instance as `-Instance` before starting or upgrading the daemon.
+If they differ, it names both values and the client configuration file to change.
+It finishes only after the installed Windows client reports `same_source: true`
+from daemon status. If either installation or that check
 fails, rerun with the printed `-Commit` SHA to finish the same build. A failed
 run may already have installed one computer. If an unpublished commit cannot
 be fetched from the Linux checkout over SSH, the error gives the exact Git
