@@ -1675,8 +1675,11 @@ fn move_raw_checkout_uses_the_same_accepted_bundle_transition_plan() {
     };
     let mut source = raw_session_on("local-bare", &checkout.path().to_string_lossy());
     source.bundle_id = "bifrost".into();
-    source.project =
-        Some(crate::project_catalog::snapshot(&bundle, &ProcessExecutor, false).unwrap());
+    source.project = Some(
+        crate::project_catalog::snapshot(&bundle, &ProcessExecutor, false)
+            .unwrap()
+            .into(),
+    );
     let controller = Controller {
         config: resume_compatibility_config(),
         state: State {
@@ -2130,7 +2133,7 @@ fn a_managed_clone_moved_into_a_container_is_restored_where_it_was_cloned() {
     .unwrap();
     let mut source = managed_clone_session(repository.path(), session_id);
     source.bundle_id = bundle_id;
-    source.project = Some(project);
+    source.project = Some(project.into());
     source.state = SessionState::Closing;
     source.target = Some(TargetLocator::LocalBare {
         worker_root: mj_core::config::data_dir().join("workers").join(session_id),
@@ -2321,7 +2324,7 @@ fn a_container_session_moved_to_a_local_checkout_is_restored_into_it() {
     .unwrap();
     let mut source = checkpoint_test_session(session_id);
     source.bundle_id = bundle_id;
-    source.project = Some(project);
+    source.project = Some(project.into());
     source.state = SessionState::Closing;
     source.container_workspace =
         Some(mj_core::targets::new_container_workspace(session_id).unwrap());

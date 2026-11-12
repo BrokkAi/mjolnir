@@ -53,7 +53,7 @@ impl EnvironmentPlacement {
         Self {
             target: session.target.clone(),
             target_template_id: session.target_template_id.clone(),
-            runtime: session.target_runtime.clone(),
+            runtime: session.target_runtime.as_deref().cloned(),
             managed_worktree: session.managed_worktree.clone(),
             project_directory: session.project_directory.clone(),
             container_workspace: session.container_workspace.clone(),
@@ -336,7 +336,7 @@ pub(super) fn capture_session_environment(
             &id,
             &session.id,
             &session.target_template_id,
-            session.target_runtime.as_ref(),
+            session.target_runtime.as_deref(),
             target,
         )?;
     }

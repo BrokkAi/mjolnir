@@ -324,7 +324,7 @@ impl Controller {
         if let Some(settings) = record
             .target_runtime
             .as_mut()
-            .and_then(|r| r.container_settings.as_mut())
+            .and_then(|r| std::sync::Arc::make_mut(r).container_settings.as_mut())
         {
             settings.default_image =
                 Some((image == mj_core::config::DEFAULT_CONTAINER_IMAGE).then(|| image.to_owned()));

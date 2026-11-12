@@ -6,7 +6,7 @@ fn is_plain_project_directory(session: &mj_core::state::SessionRecord) -> bool {
     session
         .project
         .as_ref()
-        .is_some_and(mj_core::repository::ProjectBundleSnapshot::primary_is_plain_directory)
+        .is_some_and(|project| project.primary_is_plain_directory())
 }
 
 impl Controller {

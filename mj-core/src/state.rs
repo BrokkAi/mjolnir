@@ -1564,7 +1564,7 @@ pub struct SessionRecord {
     pub bundle_id: String,
     /// Accepted bundle for every target, including a raw directory's bundle of one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project: Option<crate::repository::ProjectBundleSnapshot>,
+    pub project: Option<Arc<crate::repository::ProjectBundleSnapshot>>,
     /// Existing project directory used directly by a local or SSH bare target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_directory: Option<PathBuf>,
@@ -1663,7 +1663,7 @@ pub struct SessionRecord {
     pub target: Option<TargetLocator>,
     /// Connection and worker settings captured when this target was selected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_runtime: Option<TargetRuntimeSettings>,
+    pub target_runtime: Option<Arc<TargetRuntimeSettings>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2050,7 +2050,7 @@ impl SessionRecord {
     pub fn review_unavailable(&self) -> Option<&'static str> {
         self.project
             .as_ref()
-            .is_some_and(crate::repository::ProjectBundleSnapshot::primary_is_plain_directory)
+            .is_some_and(|project| project.primary_is_plain_directory())
             .then_some(crate::review::settings::PLAIN_DIRECTORY_REVIEW_OFF)
     }
 
@@ -2149,7 +2149,7 @@ impl SessionRecord {
             &self.id,
             &self.target_template_id,
             self.target.as_ref(),
-            self.target_runtime.as_ref(),
+            self.target_runtime.as_deref(),
             config,
         )
     }

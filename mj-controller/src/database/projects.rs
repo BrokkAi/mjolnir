@@ -536,7 +536,7 @@ mod tests {
         .unwrap();
         super::super::sessions::save_session_to(&path, &session).unwrap();
         let loaded = super::super::load_state_from(&path).unwrap();
-        assert_eq!(loaded.sessions["old-session"].project, Some(old));
+        assert_eq!(loaded.sessions["old-session"].project, Some(old.into()));
         assert_ne!(loaded.sessions["old-session"].bundle_id, "project");
         assert_eq!(loaded.sessions["new-session"].bundle_id, "project");
         let old_history = super::super::prompts::search_prompts_from(
@@ -721,7 +721,7 @@ mod tests {
         assert_eq!(history.len(), 2);
         assert_eq!(
             super::super::load_state_from(&path).unwrap().sessions["legacy-session"].project,
-            Some(legacy)
+            Some(legacy.into())
         );
     }
 }

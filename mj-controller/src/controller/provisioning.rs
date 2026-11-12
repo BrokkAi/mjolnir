@@ -619,7 +619,7 @@ impl Controller {
                 runtime.tool_cache = recorded.tool_cache.clone();
                 runtime.container_settings = recorded.container_settings.clone();
                 ensure!(
-                    recorded == &runtime,
+                    **recorded == runtime,
                     "target access settings changed before provisioning; retry with the selected target"
                 );
             } else {
@@ -627,7 +627,7 @@ impl Controller {
                     .sessions
                     .get_mut(session_id)
                     .unwrap()
-                    .target_runtime = Some(runtime);
+                    .target_runtime = Some(runtime.into());
                 self.persist_session_state(session_id)?;
             }
             let template = self
@@ -760,7 +760,7 @@ impl Controller {
             let runtime = self.state.sessions.get_mut(session_id)
                 .expect("session retained during provisioning")
                 .target_runtime.as_mut().context("selected runtime disappeared")?;
-            runtime.tool_cache = tool_cache;
+            std::sync::Arc::make_mut(runtime).tool_cache = tool_cache;
 
             self.persist_session_state(session_id)?;
             let prepared_cache = bundle
@@ -917,10 +917,10 @@ impl Controller {
                         None => mj_core::state::ContainerSettings::requested(&session),
                     });
                 apply_new_session_provisioning_result(&mut self.state, session_id, Ok(locator))?;
-                self.state.sessions.get_mut(session_id)
+                let runtime = self.state.sessions.get_mut(session_id)
                     .expect("session retained after target creation")
-                    .target_runtime.as_mut().context("selected runtime disappeared")?
-                    .container_settings = container_settings;
+                    .target_runtime.as_mut().context("selected runtime disappeared")?;
+                std::sync::Arc::make_mut(runtime).container_settings = container_settings;
                 self.state
                     .sessions
                     .get_mut(session_id)

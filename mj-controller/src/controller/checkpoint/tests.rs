@@ -133,7 +133,7 @@ fn a_plain_project_directory_is_captured_without_git() {
     recorded
         .plain_directories
         .insert(recorded.bundle.primary_repo.clone());
-    plain.project = Some(recorded);
+    plain.project = Some(recorded.into());
     let mut state = State::default();
     state.sessions.insert(session_id.clone(), plain);
     let controller = Controller {

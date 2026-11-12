@@ -393,7 +393,7 @@ fn refresh(executor: &impl CommandExecutor, retry: bool) -> Result<Vec<String>> 
                 let (id, project) = if let Some(session) = &known
                     && let Some(project) = &session.project
                 {
-                    (session.bundle_id.clone(), project.clone())
+                    (session.bundle_id.clone(), (**project).clone())
                 } else {
                     accept_directory(target, &path, executor)?
                 };

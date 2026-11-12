@@ -7167,18 +7167,77 @@ fn target_access_survives_lifecycle_updates_and_changes_with_the_target() {
         r#"{"kind":"ssh-podman","host":"original.test","user":"builder","identity_file":"/keys/id","extra_args":["-p","2222"],"image":"test"}"#
     ).unwrap();
     record.target_runtime = Some((&template).into());
-    record.target_runtime.as_mut().unwrap().tool_cache = Some(mj_core::state::ToolCachePlacement {
-        host: "ssh:builder@original.test".into(),
-        directory: "/fast/shared native caches".into(),
-        nx_home: "/home/hel/.nx".into(),
-    });
+    std::sync::Arc::make_mut(record.target_runtime.as_mut().unwrap()).tool_cache =
+        Some(mj_core::state::ToolCachePlacement {
+            host: "ssh:builder@original.test".into(),
+            directory: "/fast/shared native caches".into(),
+            nx_home: "/home/hel/.nx".into(),
+        });
     record.target = Some(TargetLocator::SshPodman {
         host: "original.test".into(),
         container_id: "original-container".into(),
         workspace_storage: Default::default(),
         borrowed_from: None,
     });
+    record.project = Some(std::sync::Arc::new(
+        mj_core::repository::ProjectBundleSnapshot {
+            bundle: mj_core::config::ProjectBundle {
+                primary_repo: "source".into(),
+                repositories: vec![mj_core::config::ProjectRepository {
+                    id: "source".into(),
+                    github: Some("acme/source".into()),
+                    local: None,
+                    destination: "source".into(),
+                    git_ref: None,
+                }],
+            },
+            identities: BTreeMap::from([(
+                "source".into(),
+                mj_core::repository::RepositoryIdentity::Github("acme".into(), "source".into()),
+            )]),
+            network_sources: Default::default(),
+            plain_directories: Default::default(),
+        },
+    ));
+    let project_json = serde_json::to_string(record.project.as_deref().unwrap()).unwrap();
+    let runtime_json = serde_json::to_string(record.target_runtime.as_deref().unwrap()).unwrap();
     save_session_to(&database, &record).unwrap();
+    let stored: (String, String) = open_reader(&database)
+        .unwrap()
+        .query_row(
+            "SELECT project_json, target_runtime_json FROM sessions WHERE session_id=?1",
+            [&record.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(stored, (project_json.clone(), runtime_json.clone()));
+    let loaded = load_state_from(&database).unwrap();
+    let loaded_record = &loaded.sessions[&record.id];
+    assert_eq!(
+        serde_json::to_string(&loaded_record.project).unwrap(),
+        project_json
+    );
+    assert_eq!(
+        serde_json::to_string(&loaded_record.target_runtime).unwrap(),
+        runtime_json
+    );
+    let mut interns = state_io::SessionInterns::from_state(&loaded).unwrap();
+    let refreshed = state_io::load_session_interned_with(
+        &open_reader(&database).unwrap(),
+        &record.id,
+        &mut interns,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(std::sync::Arc::ptr_eq(
+        loaded_record.project.as_ref().unwrap(),
+        refreshed.project.as_ref().unwrap(),
+    ));
+    assert!(std::sync::Arc::ptr_eq(
+        loaded_record.target_runtime.as_ref().unwrap(),
+        refreshed.target_runtime.as_ref().unwrap(),
+    ));
+
     record.state = SessionState::Error;
     save_lifecycle_session_to(&database, &record).unwrap();
     assert_eq!(
