@@ -34,3 +34,8 @@ Check dirty-worktree refusal and preservation of source checkout branches.
 Use the actual native Windows executable, not WSL. No acceptance claim yet.
 
 With docs dependencies available: cd docs; npm ci; npm run build.
+
+Review fixes: startup now uses installed Windows `daemon afk status`, a read-only
+control request through normal placement startup/handoff. This respects remote
+instance overrides without parsing TOML in PowerShell. Recovery commands expand
+remote ~/ via quoted $HOME rather than quoting a literal tilde.

@@ -54,7 +54,7 @@ try {
         $repository = "${SshHost}:$RemoteCheckout"
         & git -C $WindowsCheckout fetch $repository $sha
         if ($LASTEXITCODE -ne 0) {
-            throw "Cannot fetch $sha. On the box run: git -C '$RemoteCheckout' push origin ${sha}:refs/heads/mj-dev-build . Then rerun this command with -Commit $sha. Alternatively allow Git-over-SSH access to '$repository'."
+            throw "Cannot fetch $sha. On the box run: git -C $remotePath push origin ${sha}:refs/heads/mj-dev-build . Then rerun this command with -Commit $sha. Alternatively allow Git-over-SSH access to '$repository'."
         }
     }
     if (Test-Path -LiteralPath $buildTree) {
@@ -92,10 +92,8 @@ test "$(git rev-parse HEAD)" = BUILD_SHA || { echo "HEAD changed in $build_tree;
 installed="${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}/bin/mj"
 echo "Linux installed executable: $installed"
 "$installed" --version
-# endpoint owns ordinary startup/handoff; discard its bearer token output.
-"$installed" --instance BUILD_INSTANCE daemon endpoint --json >/dev/null
 '@
-    Invoke-Remote ($remoteBuild.Replace('REMOTE_PATH', $remotePath).Replace('BUILD_SHA', $sha).Replace('BUILD_INSTANCE', (Quote-Sh $Instance)))
+    Invoke-Remote ($remoteBuild.Replace('REMOTE_PATH', $remotePath).Replace('BUILD_SHA', $sha))
     Write-Host "Linux installation completed for $sha; building Windows."
     Push-Location $buildTree
     try {
@@ -114,6 +112,10 @@ echo "Linux installed executable: $installed"
         Update-MjInstallPath $installDir
         Assert-Clean $buildTree $sha
         $installed = Join-Path $installDir 'mj.exe'
+        # This read-only control query uses normal placement startup/handoff,
+        # including a remote instance override in the client configuration.
+        & $installed --instance $Instance daemon afk status
+        if ($LASTEXITCODE -ne 0) { throw 'Remote startup/handoff failed; check the selected instance SSH placement and rerun at the same SHA.' }
         $status = & $installed --instance $Instance daemon status
         if ($LASTEXITCODE -ne 0) { throw 'Installed client could not verify the remote daemon. Check the selected instance SSH placement, then rerun at the same SHA.' }
         $status | Write-Host
