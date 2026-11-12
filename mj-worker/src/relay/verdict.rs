@@ -1576,8 +1576,6 @@ impl DurableRelay {
         let Some(mut context) = self.snapshot.handback_checks.context.clone() else {
             return Ok(None);
         };
-        // Journal before HTTP: a crash or cancelled socket consumes the attempt.
-        self.record_observation(RelayObservation::HandbackCheckStarted { assignment_id })?;
         context.open_assistant_id = None;
         context.assistant(
             Some("handback-report"),
@@ -1602,6 +1600,19 @@ impl DurableRelay {
             "end_turn", None,
         ));
         crate::acp::verdict_client::bound_authorization(&mut evidence, Some(context));
+        // GLiDE judges the report against the parent's instructions. When they
+        // did not survive whole (a non-text block, or a request too large to
+        // carry them), there is nothing to judge against: deliver unchecked and
+        // leave the check unspent.
+        if !evidence
+            .authorization
+            .as_ref()
+            .is_some_and(|context| context.authorization_complete)
+        {
+            return Ok(None);
+        }
+        // Journal before HTTP: a crash or cancelled socket consumes the attempt.
+        self.record_observation(RelayObservation::HandbackCheckStarted { assignment_id })?;
         Ok(Some((
             self.snapshot.session_id.clone(),
             self.snapshot.latest_ordinal,

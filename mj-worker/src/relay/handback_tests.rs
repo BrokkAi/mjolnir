@@ -288,3 +288,36 @@ fn handback_attempt_survives_restart_and_reminders_but_new_assignment_gets_a_che
         );
     }
 }
+
+// Hard-won: b1e4ba6d8: an assignment GLiDE could not see whole was still classified and could bounce a valid report
+#[test]
+fn incomplete_assignment_evidence_delivers_unchecked_without_spending_the_check() {
+    use agent_client_protocol::v1::schema::{ContentBlock, ImageContent};
+    let root = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(root.path(), SESSION, "test").unwrap();
+    relay.set_turn_verdict_harness(HarnessKind::Codex);
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+    let assignment = "subagent-spawn-with-image";
+    submit_relay(
+        &mut relay,
+        assignment,
+        RelayCommand::Prompt {
+            prompt: vec![
+                ContentBlock::from("Match the layout in the attached screenshot."),
+                ContentBlock::Image(ImageContent::new("aGVsbG8=", "image/png")),
+            ],
+        },
+    );
+    relay.claim_pending_commands(true).unwrap();
+    assert!(
+        relay
+            .prepare_handback_check("Layout matches.")
+            .unwrap()
+            .is_none()
+    );
+    assert!(!relay.snapshot.handback_checks.checked.contains(assignment));
+}
