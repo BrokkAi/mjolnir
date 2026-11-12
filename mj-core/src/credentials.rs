@@ -365,7 +365,7 @@ impl HarnessKind {
             // dsh-acp has no login; its profiles authenticate with an API
             // key, so `login_command` refuses before this is reached.
             Self::Dsh => Vec::new(),
-            Self::Antigravity => Vec::new(),
+            Self::Antigravity => vec!["acp".into(), "--login".into(), "--disable-telemetry".into()],
         };
         (self.cli_binary_name().to_owned(), arguments)
     }
@@ -725,7 +725,15 @@ pub fn login_command(profile: &HarnessProfile) -> Result<(String, Vec<String>)> 
 /// exists, where "this profile needs no login" is not a useful answer: it only
 /// wants the program name to run `--version` against.
 pub fn native_login_command(profile: &HarnessProfile) -> (String, Vec<String>) {
-    profile.kind.native_login_command()
+    let (command, mut args) = profile.kind.native_login_command();
+    if profile.kind == HarnessKind::Antigravity {
+        // agy selects its login with an argument, not our staging variable.
+        args.extend([
+            "--gemini-dir".into(),
+            crate::target_path::text(&profile.home),
+        ]);
+    }
+    (command, args)
 }
 
 /// One live session the coordinator may reconcile with its profile.

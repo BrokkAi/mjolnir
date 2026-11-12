@@ -11,7 +11,8 @@ Enable explicit Antigravity profiles using a host-installed agy and isolated cop
 - [x] 2026-11-12: Read integration map and empirical agy 1.5.6 findings.
 - [x] 2026-11-12: Implement identity, ambient executable lookup, token staging/freshness, selectors, permissions, instructions, stdio MCP and exhaustive handling. Store changes are separately owned.
 - [x] 2026-11-12: Validate installed discovery, copied-home restart/resume and isolated mj file edit, command, memory MCP and model/effort switches. Original login hash unchanged; test session destroyed and daemon stopped.
-- [ ] Finish final suites/clippy after fixture repairs, then commit without pushing.
+- [x] 2026-11-12: Commit harness separately from the store change without pushing. Fix the combined-review login finding; account-boundary regression passes.
+- [ ] Parent acceptance of combined changes after final validation; detailed results are in the report directory.
 
 ## Surprises & Discoveries
 
@@ -23,7 +24,7 @@ Use antigravity identity, ~/.gemini source home, and token copies. No installati
 
 ## Outcomes & Retrospective
 
-The isolated session completed edits, commands and mj-memory search, and applied base-model and thought-level changes through mj. Direct ACP restart/resume preserves conversation history. Remaining validation is running.
+The isolated session completed edits, commands and mj-memory search, and applied base-model and thought-level changes through mj. Direct ACP restart/resume preserves conversation history. The parent owns combined acceptance. Final validation results and any unrelated baseline failures are recorded in the report directory.
 
 ## Context and Orientation
 
@@ -56,3 +57,5 @@ Reuse generic ACP configOptions and stdio MCP delivery, existing subprocess help
 2026-11-12: Parent revised decision 9: database changes removed from this assignment. Initial isolated startup exposed cross-table trigger rename validation in the old admission helper; removed implementation patch retained only as evidence in report directory. Direct agy resume, instructions, token-only credentials, selectors and stdio MCP validated.
 
 2026-11-12: Completed isolated acceptance with original Google token unchanged and verified stdio mj-memory.search_sessions. Added fixture support and early target executable lookup after existing integration tests found missing coverage. Additional-directory cwd defect reproduced directly; see directory-probe.log and directory-primary-probe.log in report directory.
+
+2026-11-12: Combined review found custom-home CLI login omitted --gemini-dir. Native login now uses agy acp --login with the configured home; regression with a home containing spaces proves the default account remains untouched. Corrected TUI harness-name expectation to include Antigravity.

@@ -1093,3 +1093,46 @@ async fn claude_installs_never_drop_the_hosts_refresh_token_and_converge_copies(
         assert_eq!(std::fs::read(&session).unwrap(), newer_own);
     }
 }
+
+// Hard-won: d633dfdbd: signing in a custom Antigravity home used the default account.
+#[cfg(unix)]
+#[test]
+fn antigravity_login_keeps_the_default_account_untouched() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let default = root.path().join(".gemini");
+    let selected = root.path().join("other Google account");
+    let marker = HarnessKind::Antigravity.credential_file_name();
+    std::fs::create_dir_all(default.join("antigravity-cli")).unwrap();
+    std::fs::write(default.join(marker), b"default-account").unwrap();
+    let shim = root.path().join("agy");
+    // A CLI-side fake uses agy's documented argument, and otherwise its
+    // default home; the Mjolnir-only environment variable cannot select it.
+    std::fs::write(
+        &shim,
+        r#"#!/bin/sh
+selected="$HOME/.gemini"
+while [ "$#" -gt 0 ]; do
+    case "$1" in --gemini-dir) shift; selected="$1" ;; esac
+    shift
+done
+mkdir -p "$selected/antigravity-cli"
+printf signed-in > "$selected/antigravity-cli/antigravity-oauth-token"
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let profile = HarnessProfile::new(HarnessKind::Antigravity, selected.clone());
+    let (program, args) = login_command(&profile).unwrap();
+    let status = std::process::Command::new(root.path().join(program))
+        .args(args)
+        .env("HOME", root.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        std::fs::read(default.join(marker)).unwrap(),
+        b"default-account"
+    );
+    assert_eq!(std::fs::read(selected.join(marker)).unwrap(), b"signed-in");
+}
