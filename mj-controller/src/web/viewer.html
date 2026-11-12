@@ -81,6 +81,12 @@
       <div id="launch-failures" aria-live="polite"></div>
 
       <section id="dashboard" class="page">
+        <aside id="notification-offer" hidden>
+          <span id="notification-offer-text"></span>
+          <button type="button" id="notification-offer-enable">Enable</button>
+          <button type="button" id="notification-offer-dismiss" class="secondary">Not now</button>
+          <span id="notification-offer-error" role="alert"></span>
+        </aside>
         <div class="row page-actions">
           <button data-route="new">New session</button>
           <button data-route="resume" class="secondary">Resume a session</button>
@@ -313,6 +319,7 @@
       </section>
     </main>
 
+    <script src="/push-sync.js"></script>
     <script type="module" src="/viewer.js"></script>
   </body>
 </html>

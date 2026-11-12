@@ -4,7 +4,7 @@
 
 A user installs the web viewer on Android Chrome or an iOS 16.4+ Home Screen, enables notifications in Settings, and receives encrypted system notifications when a session needs them while they are away. Each card opens its conversation without reloading an existing viewer or losing drafts. Refocusing the viewer removes cards for resolved attention, retaining cards whose worker is temporarily unavailable.
 
-Work belongs exclusively in `/home/jonathan/Projects/mjolnir-wt/web-push`, initially detached at `0543d2536`. Commit on detached HEAD, never push or change branches, and leave the main clone's source untouched. The assigned report directory is the exception for text evidence. This living plan follows `.agents/PLANS.md`.
+The original implementation used `/home/jonathan/Projects/mjolnir-wt/web-push`, detached at `0543d2536`, and was merged by the parent. The current authorized follow-up works in the main clone at `/home/jonathan/Projects/mjolnir/.mj/clones/4f86b847ae014721aac99daaffd3ae50`; do not commit, push, install or request self-review. The assigned report directory is the exception for text evidence. This living plan follows `.agents/PLANS.md`.
 
 ## Progress
 
@@ -40,7 +40,7 @@ Provisional migration 127 is compatible: new standalone push tables are neither 
 
 Transport uncertainty uses exponential backoff with no retry cap. Responses 429 and 5xx honor Retry-After and persist an endpoint deadline that new episodes cannot bypass. Responses 404/410 delete only the matching enrollment. Permanent payload rejection retires only that intent and remains visible in Settings. TTL is one day for an intermittently offline phone; VAPID uses the RFC maximum validity of 24 hours. Payloads contain only session display title, trimmed first-line question/form/reply body, session ID, URL and tag. No silent withdrawal pushes are sent.
 
-The parent instructed this worker to stop requesting reviews and hand back the cut for integrated review. The current review finding about expiry with no native replacement remains deferred: `pushsubscriptionchange` renews a current subscription but does not recreate an absent one while permission remains granted. Distinguishing expiry from concurrent explicit Disable needs a parent design decision. The finding was recorded as declined for this worker's scope, not claimed fixed.
+The parent deferred empty native expiry during the summary cut, then supplied the integrated design: IndexedDB stores enabled intent and pending endpoints, shared reconciliation restores expired subscriptions only while enabled and permitted, and retries failed server registration at the next load/focus/visibility/sign-in/rotation trigger. Disable and revoked permission remove server enrollment; failed removals retain endpoints for retry. The same-endpoint daemon registration preserves delivery retries and errors, making routine reconciliation idempotent.
 
 ## Context and Orientation
 
@@ -56,11 +56,11 @@ The daemon is the background controller process. Its existing `daemon/attention.
 
 The persistence milestone creates compatible standalone tables and demonstrates reservations, receipts, presence, expiry, enrollment replacement and process-equivalent restart against real SQLite files. The sender milestone consumes daemon attention and presence, claims sends in the database and performs network work outside the writer and control loop. The browser milestone requests permission directly from a tap, enrolls through authenticated actions, reports device errors, shows a test notification and routes clicks without losing drafts.
 
-These milestones are implemented. The final milestone removes the summary mechanism at the parent's direction, validates only affected paths, commits on detached HEAD and hands back without another worker review request. The parent owns integrated review and final acceptance. Do not introduce a browser lifecycle actor or another durable mechanism merely to complete more review rounds in this worker.
+These milestones are implemented. The current milestone implements shared subscription reconciliation and the dashboard offer, validates affected paths and hands back uncommitted work without another review request. The parent owns integrated review and final acceptance.
 
 ## Concrete Steps
 
-Run from `/home/jonathan/Projects/mjolnir-wt/web-push` using ordinary mbx/Cargo storage. Every Cargo test must be elevated and use a named instance:
+For the integrated follow-up, run from `/home/jonathan/Projects/mjolnir/.mj/clones/4f86b847ae014721aac99daaffd3ae50` using ordinary mbx/Cargo storage. Every Cargo test must be elevated and use a named instance:
 
     MJ_INSTANCE=web-push-test cargo test -p brokk-mj-controller web_push --lib
     cargo clippy -p brokk-mj-controller --all-targets -- -D warnings
@@ -68,7 +68,7 @@ Run from `/home/jonathan/Projects/mjolnir-wt/web-push` using ordinary mbx/Cargo 
     MJ_INSTANCE=web-push-browser tests/e2e/web/node_modules/.bin/playwright test -c tests/e2e/web/playwright.config.js --project=deterministic settings.spec.js
     node tests/e2e/web/viewer.unit.test.mjs
 
-Expect 2 focused Rust tests, 3 Playwright cases and 38 browser boundary tests passing, and no lint or format errors. Browser dependencies use the existing pinned `npm ci --prefix tests/e2e/web` installation. Never redirect Rust build output, install a test binary, or run against the default instance. Stage explicit changed paths and commit on detached HEAD; do not push or request another review.
+Expect 2 focused Rust tests, 3 Playwright cases and 38 browser boundary tests passing, and no lint or format errors. Browser dependencies use the existing pinned `npm ci --prefix tests/e2e/web` installation. Never redirect Rust build output, install a test binary, or run against the default instance. Leave follow-up changes uncommitted; do not push, install or request another review.
 
 ## Validation and Acceptance
 
@@ -76,7 +76,7 @@ The encryption/JWT test checks RFC 8291 Appendix A derivation/ciphertext, JWT au
 
 The existing Settings Playwright spec uses mocked routes and native browser APIs to verify permission from a tap, enrollment/test/unsubscribe, current device state, retention of temporarily unavailable question cards and withdrawal of resolved individual cards. The service-worker case verifies displayed notifications, renewal actions and click routing without full document navigation. The Settings golden fits a 390x844 viewport without sideways overflow.
 
-Real phone delivery remains untested. Open a trusted HTTPS viewer; for iOS 16.4+, add it to the Home Screen and open the installed app. Sign in, enable notifications and send a test. While operator presence is away, trigger a question and an important reply; verify title/body, an audible alert for later episodes under the same tag, and conversation routing that preserves drafts. Turn away with multiple existing questions and verify individual session cards. Answer elsewhere, refocus the viewer and check withdrawal. Disconnect/reconnect a worker and verify its still-open card survives. Restart the daemon after acknowledged delivery and check no replay. Keep Tailscale connected for tailnet-only URLs. If native subscription expiration leaves no replacement, reopening Settings and enabling again is currently required; integrated review must resolve that limitation before claiming automatic expiry renewal.
+Real phone delivery remains untested. Open a trusted HTTPS viewer; for iOS 16.4+, add it to the Home Screen and open the installed app. Sign in, enable notifications and send a test. While operator presence is away, trigger a question and an important reply; verify title/body, an audible alert for later episodes under the same tag, and conversation routing that preserves drafts. Turn away with multiple existing questions and verify individual session cards. Answer elsewhere, refocus the viewer and check withdrawal. Disconnect/reconnect a worker and verify its still-open card survives. Restart the daemon after acknowledged delivery and check no replay. Keep Tailscale connected for tailnet-only URLs. Expire a native subscription without replacement and check that reconciliation recreates it while enabled; simulate failed registration, then restore sign-in/network and focus or reload to check retry. Disable in another tab and ensure subsequent reconciliation stays disabled.
 
 ## Idempotence and Recovery
 
@@ -84,7 +84,7 @@ Unique device/episode reservations and acceptance receipts make ordinary replay 
 
 ## Outcomes & Retrospective
 
-The pre-cut primary implementation (`web_push.rs`, `database/web_push.rs`, `database/web_push.sql`) was 1739 lines. After the cut it is 1108 lines, a reduction of 631 (36%). All affected checks pass; no tests failed. Rust build/test finished in 8m02s plus 0.24s execution; clippy finished in 4m50s, Playwright in 2.7s, and the 38 browser tests in 75ms. The cut removes summary coverage, lookup and coordination rather than continuing to patch a mechanism the parent rejected. The remaining background-expiry review finding is explicitly deferred to integrated review.
+The pre-cut primary implementation (`web_push.rs`, `database/web_push.rs`, `database/web_push.sql`) was 1739 lines. After the cut it is 1108 lines, a reduction of 631 (36%). All affected checks pass; no tests failed. Rust build/test finished in 8m02s plus 0.24s execution; clippy finished in 4m50s, Playwright in 2.7s, and the 38 browser tests in 75ms. The cut removes summary coverage, lookup and coordination rather than continuing to patch a mechanism the parent rejected. That historical background-expiry deferral is resolved by the integrated follow-up below.
 
 ## Artifacts and Notes
 
@@ -95,3 +95,9 @@ Text evidence belongs in `/home/jonathan/Projects/mjolnir/.mj/clones/4f86b847ae0
 Viewer actions are `PushSubscribe`, `PushRenew`, `PushUnsubscribe` and `PushTest`; GET routes are `/api/push/key` and `/api/push/status?endpoint=...`. Dispatcher database calls are `push_observe`, `push_claim`, `push_result` and startup-only `push_recover`. No summary route or wire contract remains. Existing ring/reqwest provide cryptography/HTTPS with no new dependency.
 
 Revision note (2026-11-12): Rewrote the plan around the parent's explicit summary cut and integrated-review handoff. Previous summary fixes remain in commit history but are superseded by the final individual-episode design. Retained standalone enrollment, receipt, click-routing and renewal work; three small current-review fixes were completed without adding a new lifecycle mechanism.
+
+## Integrated follow-up (2026-11-12)
+
+The parent merged the implementation and authorized uncommitted fixes in the main clone. IndexedDB now owns device intent (enabled and dismissed) and endpoints awaiting daemon acknowledgement. A shared `/push-sync.js` asset performs reconcile from the viewer and service worker. Web Locks serialize tab/worker mutations; disable clears intent before network work, and old endpoints survive authentication/offline errors until atomic server renewal succeeds. Viewer load, focus, visibility regain, successful sign-in and subscription-change events trigger reconciliation. No background permission request occurs. The dashboard offers a dismissible Enable prompt, or a Home Screen installation hint in an iOS tab. Settings pending/errors remain visible. Cache v33 includes the shared script. No commit, push, installation or self-review is authorized in this pass. Browser regressions exercise real IndexedDB and cross-context intent, expiry/retry/revocation, prompt dismissal and iOS hint behavior; the existing asset integration test includes the new script.
+
+Follow-up validation: 3 focused Rust tests pass (published crypto fixture, delivery persistence/idempotent registration, asset ETags); 5 affected Playwright cases pass; 40 Node tests pass; touched-controller all-targets clippy with `-D warnings`, rustfmt, JS syntax and diff checks pass. The Settings golden was regenerated and has no diff; the dashboard-only prompt does not change Settings text. No processes remain running from this work. No commit, push or installation was performed. Routine same-key registration now preserves delivery retries/errors, while a changed encryption owner releases its old reservations.

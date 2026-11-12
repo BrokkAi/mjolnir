@@ -14,7 +14,7 @@ const EXCHANGE = JSON.parse(fs.readFileSync(
   'utf8',
 ));
 const WORKSPACE_ID = 'workspace-settings';
-const ASSETS = new Set(['viewer.html', 'viewer.js', 'viewer.css', 'markdown.js', 'tool-output.js', 'manifest.webmanifest']);
+const ASSETS = new Set(['viewer.html', 'push-sync.js', 'viewer.js', 'viewer.css', 'markdown.js', 'tool-output.js', 'manifest.webmanifest']);
 
 test.use({ serviceWorkers: 'block' });
 
@@ -260,7 +260,7 @@ test('device notification enrollment starts from a tap and supports test and uns
   await expect(page.locator('#device-notification-state')).toHaveText('Test notification requested');
   // Hard-won: 82e2bb311: failed server removal lost the native endpoint needed to retry.
   await page.locator('#device-notification-disable').click();
-  await expect(page.locator('#device-notification-state')).toContainText('Device removal failed');
+  await expect(page.locator('#device-notification-state')).toContainText('Notification sync failed');
   await page.locator('#device-notification-disable').click();
   await expect(page.locator('#device-notification-state')).toContainText('Not enabled');
   expect(actions.map(action => action.action)).toEqual(['push-subscribe', 'push-test', 'push-unsubscribe', 'push-unsubscribe']);
@@ -286,7 +286,7 @@ test('device notification enrollment starts from a tap and supports test and uns
 // Hard-won: 7a50f9da7: notification clicks reloaded existing viewer drafts.
 test('service worker push displays and clicks route an existing window to the conversation', async ({ page }) => {
   await page.goto('about:blank');
-  const source = fs.readFileSync(path.join(WEB_ROOT, 'service-worker.js'), 'utf8');
+  const source = fs.readFileSync(path.join(WEB_ROOT, 'service-worker.js'), 'utf8').replace("importScripts('/push-sync.js');", '');
   const result = await page.evaluate(async source => {
     const listeners = {};
     const calls = [];
@@ -304,28 +304,108 @@ test('service worker push displays and clicks route an existing window to the co
     };
     let currentSubscription = { toJSON: () => ({ endpoint: 'https://push.example/new', keys: { p256dh: 'key', auth: 'auth' } }) };
     const fetch = async (url, options) => { calls.push(['subscription', url, options.credentials, JSON.parse(options.body)]); return { ok: true }; };
-    new Function('self', 'fetch', source)(self, fetch);
+    new Function('self', 'fetch', 'MjPush', source)(self, fetch, { reconcile: async () => {} });
     let pending;
     listeners.push({ data: { json: () => ({ title: 'Build', body: 'Which option?', tag: 'session', session_id: 'session', url: '/#conversation/session' }) }, waitUntil: promise => { pending = promise; } });
     await pending;
     listeners.notificationclick({ notification: { data: { url: '/#conversation/session' }, close: () => calls.push(['close']) }, waitUntil: promise => { pending = promise; } });
-    await pending;
-    // Hard-won: 5a12b9f64: a browser refresh with the viewer closed was never registered.
-    listeners.pushsubscriptionchange({ oldSubscription: { endpoint: 'https://push.example/old' }, newSubscription: currentSubscription, waitUntil: promise => { pending = promise; } });
-    await pending;
-    // A stale refresh after native Disable must not recreate a subscription.
-    currentSubscription = null;
-    listeners.pushsubscriptionchange({ oldSubscription: { endpoint: 'https://push.example/old' }, newSubscription: {}, waitUntil: promise => { pending = promise; } });
-    await pending;
-    // Permission loss has no replacement and removes the previous endpoint.
-    listeners.pushsubscriptionchange({ oldSubscription: { endpoint: 'https://push.example/old' }, newSubscription: null, waitUntil: promise => { pending = promise; } });
     await pending;
     return calls;
   }, source);
   expect(result).toEqual([
     ['show', 'Build', { body: 'Which option?', renotify: true, tag: 'session', data: { url: '/#conversation/session', session_id: 'session' } }],
     ['close'], ['route', { type: 'mj-notification-open', url: 'https://viewer.test/#conversation/session' }], ['focus'],
-    ['subscription', '/api/actions', 'include', { action: 'push-renew', old_endpoint: 'https://push.example/old', subscription: { endpoint: 'https://push.example/new', keys: { p256dh: 'key', auth: 'auth' } } }],
-    ['subscription', '/api/actions', 'include', { action: 'push-unsubscribe', endpoint: 'https://push.example/old' }],
   ]);
+});
+
+// Hard-won: 437e04dc6: expiry and failed rotation lost enrollment until manual Enable.
+test('device reconcile retries expiry and rotation and shares disable intent across contexts', async ({ page }) => {
+  await mount(page);
+  await page.addInitScript(() => {
+    window.Notification = class {
+      static permission = 'default';
+      static requestPermission() { this.permission = 'granted'; localStorage.setItem('permission', 'granted'); return Promise.resolve('granted'); }
+    };
+    Notification.permission = localStorage.getItem('permission') || 'default';
+    window.PushManager = class {};
+    const manager = {
+      getSubscription: async () => {
+        const endpoint = localStorage.getItem('native');
+        return endpoint ? { endpoint, toJSON: () => ({ endpoint, keys: { p256dh: 'key', auth: 'auth' } }), unsubscribe: async () => { localStorage.removeItem('native'); return true; } } : null;
+      },
+      subscribe: async () => { localStorage.setItem('native', 'https://push.example/recreated'); return manager.getSubscription(); },
+    };
+    window.registration = { active: {}, pushManager: manager, getNotifications: async () => [] };
+    Object.defineProperty(navigator, 'serviceWorker', { value: Object.assign(new EventTarget(), { register: async () => registration, getRegistration: async () => registration }) });
+  });
+  const actions = [];
+  let failRenew = false;
+  await page.route('**/api/push/key', route => route.fulfill({ json: { public_key: 'BA' } }));
+  await page.route('**/api/push/status?*', route => route.fulfill({ json: { subscribed: true } }));
+  await page.route('**/api/actions', route => {
+    const action = route.request().postDataJSON(); actions.push(action);
+    return route.fulfill({ status: failRenew ? 401 : 200, json: { accepted: !failRenew } });
+  });
+  await page.goto('https://viewer.test/');
+  await expect(page.locator('#notification-offer')).toBeVisible();
+  await page.locator('#notification-offer-enable').click();
+  await expect(page.locator('#notification-offer')).toBeHidden();
+  const workerSource = fs.readFileSync(path.join(WEB_ROOT, 'service-worker.js'), 'utf8').replace("importScripts('/push-sync.js');", '');
+  await page.evaluate(async source => {
+    localStorage.removeItem('native');
+    const listeners = {};
+    const self = { addEventListener: (name, listener) => listeners[name] = listener, registration };
+    new Function('self', source)(self);
+    let pending;
+    listeners.pushsubscriptionchange({ oldSubscription: { endpoint: 'https://push.example/expired' }, waitUntil: promise => pending = promise });
+    await pending;
+  }, workerSource);
+  expect(actions.some(a => a.action === 'push-renew' && a.old_endpoint.endsWith('/expired'))).toBe(true);
+  failRenew = true;
+  await page.evaluate(async () => {
+    localStorage.setItem('native', 'https://push.example/rotated');
+    await MjPush.reconcile(registration).catch(() => {});
+  });
+  failRenew = false;
+  await page.reload();
+  await expect.poll(() => actions.filter(a => a.action === 'push-renew' && a.subscription.endpoint.endsWith('/rotated')).length).toBe(2);
+  // Another JS context reads the same IndexedDB flag; it cannot recreate after Disable.
+  await page.evaluate(async () => {
+    await MjPush.setEnabled(false, registration);
+  });
+  const frame = await page.evaluateHandle(() => { const node = document.createElement('iframe'); document.body.append(node); return node; });
+  const other = await (await frame.asElement().contentFrame());
+  await other.evaluate(fs.readFileSync(path.join(WEB_ROOT, 'push-sync.js'), 'utf8'));
+  await other.evaluate(async () => { window.Notification = class { static permission = 'granted'; }; await MjPush.reconcile(parent.registration); });
+  expect(await page.evaluate(() => localStorage.getItem('native'))).toBeNull();
+  await page.evaluate(async () => {
+    await MjPush.setEnabled(true, registration);
+    Notification.permission = 'denied';
+    await MjPush.reconcile(registration);
+  });
+  expect(actions.at(-1).action).toBe('push-unsubscribe');
+  expect(await page.evaluate(() => localStorage.getItem('native'))).toBeNull();
+});
+
+test('notification offer dismissal persists and iOS tabs show the install hint', async ({ page }) => {
+  await mount(page);
+  await page.addInitScript(() => {
+    window.Notification = class { static permission = 'default'; };
+    window.PushManager = class {};
+  });
+  await page.goto('https://viewer.test/');
+  await expect(page.locator('#notification-offer')).toBeVisible();
+  await page.locator('#notification-offer-dismiss').click();
+  await page.reload();
+  await expect(page.locator('#notification-offer')).toBeHidden();
+  await page.evaluate(() => new Promise(resolve => { const request = indexedDB.deleteDatabase('mj-notifications'); request.onsuccess = resolve; }));
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'userAgent', { value: 'iPhone Safari' });
+    window.matchMedia = () => ({ matches: false, addEventListener() {} });
+  });
+  await page.reload();
+  await expect(page.locator('#notification-offer')).toContainText('Add Mjolnir to your Home Screen');
+  await expect(page.locator('#notification-offer-enable')).toBeHidden();
+  await page.evaluate(() => { Notification.permission = 'denied'; window.dispatchEvent(new Event('focus')); });
+  await expect(page.locator('#notification-offer')).toBeHidden();
 });

@@ -649,6 +649,7 @@ test('offline shell uses a Mjolnir cache without caching live requests', async (
   const context = vm.createContext({
     URL,
     caches,
+    importScripts() {},
     self,
     fetch(request) {
       operations.push(['fetch', request.url]);
@@ -671,6 +672,7 @@ test('offline shell uses a Mjolnir cache without caching live requests', async (
         '/',
         '/viewer.css',
         '/viewer.js',
+        '/push-sync.js',
         '/manifest.webmanifest',
         '/icon.svg',
       ],
@@ -1584,4 +1586,17 @@ test('notification snapshot retains handled entries below the notification band 
   assert.deepEqual(retained[2].row.capabilities, {});
   vm.runInContext('notificationSnapshot.reset()', context);
   assert.deepEqual(update([a, c]).map(entry => entry.row.id), ['c', 'a']);
+});
+
+// Hard-won: 437e04dc6: an empty expiry event skipped durable reconciliation.
+test('service worker delegates empty expiry to shared reconcile and reports failures', async () => {
+  const listeners = new Map();
+  const registration = {};
+  const seen = [];
+  const context = vm.createContext({ importScripts() {}, self: { registration, addEventListener: (name, callback) => listeners.set(name, callback) }, MjPush: { reconcile: async (...args) => { seen.push(args); throw new Error('offline'); } }, console: { warn() {} } });
+  vm.runInContext(serviceWorkerSource, context);
+  let pending;
+  listeners.get('pushsubscriptionchange')({ oldSubscription: { endpoint: 'old' }, newSubscription: null, waitUntil: promise => { pending = promise; } });
+  await assert.rejects(pending, /offline/);
+  assert.deepEqual(seen, [[registration, 'old']]);
 });

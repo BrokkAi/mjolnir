@@ -9024,6 +9024,7 @@ document.querySelector('#login-form').onsubmit = async e => {
       body: JSON.stringify({ code: document.querySelector('#code').value }),
     });
     document.querySelector('#login-error').textContent = '';
+    reconcileDeviceNotifications();
     await restoreRoute();
   } catch (err) {
     document.querySelector('#login-error').textContent = err.message;
@@ -10001,7 +10002,24 @@ async function pushRegistration() {
   if (!registration?.active) throw new Error('The app is preparing notifications. Reload and try again.');
   return registration;
 }
+let notificationSyncPending = 0;
+let notificationSyncError = '';
+async function syncDeviceNotifications(work) {
+  notificationSyncPending += 1;
+  notificationState.textContent = 'Syncing notifications…';
+  notificationEnable.disabled = notificationDisable.disabled = notificationTest.disabled = true;
+  try { await work(); notificationSyncError = ''; }
+  catch (error) { notificationSyncError = error.message; throw error; }
+  finally { notificationSyncPending -= 1; }
+}
 async function refreshDeviceNotifications() {
+  if (notificationSyncPending) return;
+  if (notificationSyncError) {
+    notificationState.textContent = notificationSyncError;
+    notificationEnable.disabled = notificationDisable.disabled = false;
+    notificationTest.disabled = true;
+    return;
+  }
   if (!pushSupported()) {
     notificationState.textContent = 'Notifications need a supported browser and HTTPS. On iOS, open the Home Screen app.';
     notificationEnable.disabled = notificationDisable.disabled = notificationTest.disabled = true;
@@ -10016,35 +10034,20 @@ async function refreshDeviceNotifications() {
   } catch (error) { notificationState.textContent = error.message; }
 }
 notificationEnable.onclick = async () => {
+  notificationState.textContent = 'Syncing notifications…';
   try {
     const permission = await Notification.requestPermission();
     if (permission !== 'granted') throw new Error('Notification permission was not granted. Allow it in this browser’s site settings to enable notifications.');
-    const registration = await pushRegistration();
-    const { public_key: publicKey } = await request('/api/push/key');
-    const decoded = atob(publicKey.replace(/-/g, '+').replace(/_/g, '/'));
-    const key = Uint8Array.from(decoded, character => character.charCodeAt(0));
-    const subscription = await registration.pushManager.getSubscription() || await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
-    await request('/api/actions', { method: 'POST', body: JSON.stringify({ action: 'push-subscribe', subscription: subscription.toJSON() }) });
+    await syncDeviceNotifications(async () => MjPush.setEnabled(true, await pushRegistration()));
+    await refreshNotificationOffer();
     await refreshDeviceNotifications();
-  } catch (error) { notificationState.textContent = error.message; }
+  } catch (error) { notificationSyncError = error.message; await refreshDeviceNotifications(); }
 };
 notificationDisable.onclick = async () => {
   try {
-    const manager = (await pushRegistration()).pushManager;
-    let subscription;
-    // The browser may rotate its subscription during a network request. Keep
-    // disabling the actual current native resource before reporting success.
-    while ((subscription = await manager.getSubscription())) {
-      // Keep the native endpoint available for retry until server removal succeeds.
-      await request('/api/actions', { method: 'POST', body: JSON.stringify({ action: 'push-unsubscribe', endpoint: subscription.endpoint }) });
-      const removed = await subscription.unsubscribe();
-      if (!removed) {
-        const current = await manager.getSubscription();
-        if (current && JSON.stringify(current.toJSON()) === JSON.stringify(subscription.toJSON())) throw new Error('Could not disable notifications. Try Disable notifications again.');
-      }
-    }
+    await syncDeviceNotifications(async () => MjPush.setEnabled(false, await pushRegistration()));
     await refreshDeviceNotifications();
-  } catch (error) { notificationState.textContent = error.message; }
+  } catch (error) { await refreshDeviceNotifications(); }
 };
 notificationTest.onclick = async () => {
   try {
@@ -10075,6 +10078,39 @@ function refreshNotificationAttention() {
     notificationAttentionRefresh = refresh().finally(() => { notificationAttentionRefresh = undefined; });
   }
 }
-window.addEventListener('focus', () => { refreshDeviceNotifications(); refreshNotificationAttention(); });
-document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshNotificationAttention(); });
+window.addEventListener('focus', () => { reconcileDeviceNotifications(); refreshNotificationAttention(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { reconcileDeviceNotifications(); refreshNotificationAttention(); } });
 refreshDeviceNotifications();
+
+async function reconcileDeviceNotifications() {
+  if (!pushSupported()) return;
+  notificationState.textContent = 'Syncing notifications…';
+  try {
+    await syncDeviceNotifications(async () => MjPush.reconcile(await pushRegistration()));
+    await refreshDeviceNotifications();
+  } catch (error) { await refreshDeviceNotifications(); }
+}
+reconcileDeviceNotifications();
+
+async function refreshNotificationOffer() {
+  const offer = document.querySelector('#notification-offer');
+  try {
+    const iosTab = /iPad|iPhone|iPod/.test(navigator.userAgent) && !matchMedia('(display-mode: standalone)').matches && !navigator.standalone;
+    const state = await MjPush.state();
+    const permitted = !('Notification' in window) || Notification.permission === 'default';
+    offer.hidden = !window.isSecureContext || state.enabled || state.dismissed || !permitted || (!iosTab && !pushSupported());
+    document.querySelector('#notification-offer-text').textContent = iosTab ? 'Add Mjolnir to your Home Screen to get notifications' : 'Get notified on this device when a session needs you';
+    document.querySelector('#notification-offer-enable').hidden = iosTab;
+  } catch (error) { console.warn('Could not read notification preference', error); }
+}
+document.querySelector('#notification-offer-enable').onclick = async () => {
+  // Calling this directly keeps the permission request inside the tap gesture.
+  await notificationEnable.onclick();
+  document.querySelector('#notification-offer-error').textContent = notificationState.textContent.startsWith('Enabled') ? '' : notificationState.textContent;
+};
+document.querySelector('#notification-offer-dismiss').onclick = async () => {
+  try { await MjPush.dismiss(); await refreshNotificationOffer(); }
+  catch (error) { document.querySelector('#notification-offer-error').textContent = error.message; }
+};
+refreshNotificationOffer();
+window.addEventListener('focus', refreshNotificationOffer);

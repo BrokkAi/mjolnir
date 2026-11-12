@@ -197,6 +197,7 @@ pub(super) fn router(options: ServerOptions) -> Router {
         .route("/login", get(viewer))
         .route("/viewer.css", get(viewer_css))
         .route("/viewer.js", get(viewer_js))
+        .route("/push-sync.js", get(push_sync_js))
         .route("/markdown.js", get(markdown_js))
         .route("/tool-output.js", get(tool_output_js))
         .route("/manifest.webmanifest", get(manifest))

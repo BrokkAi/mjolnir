@@ -10,11 +10,13 @@
 // CACHE_VERSION must change whenever any shell asset changes. Activation
 // deletes every cache that is not the current one, so an upgrade cannot leave
 // a previous version's assets behind.
-const CACHE_VERSION = 'mjolnir-shell-v32';
+importScripts('/push-sync.js');
+const CACHE_VERSION = 'mjolnir-shell-v33';
 const SHELL = [
   '/',
   '/viewer.css',
   '/viewer.js',
+  '/push-sync.js',
   '/manifest.webmanifest',
   '/icon.svg',
 ];
@@ -94,30 +96,11 @@ self.addEventListener('notificationclick', event => {
   })());
 });
 
-// Browser-driven refresh runs even with no viewer window. Use the current
-// native subscription, so an older event cannot restore a device since disabled.
-let subscriptionUpdates = Promise.resolve();
+// Reconcile durable device intent even when no viewer window is open.
 self.addEventListener('pushsubscriptionchange', event => {
-  const update = subscriptionUpdates.then(async () => {
-    const current = await self.registration.pushManager.getSubscription();
-    const oldEndpoint = event.oldSubscription?.endpoint;
-    let action;
-    if (!current) {
-      if (event.newSubscription || !oldEndpoint) return;
-      action = { action: 'push-unsubscribe', endpoint: oldEndpoint };
-    } else {
-      action = oldEndpoint
-        ? { action: 'push-renew', old_endpoint: oldEndpoint, subscription: current.toJSON() }
-        : { action: 'push-subscribe', subscription: current.toJSON() };
-    }
-    const response = await fetch('/api/actions', {
-      method: 'POST', credentials: 'include',
-      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(action),
-    });
-    if (!response.ok) throw new Error(`Could not update notification subscription (HTTP ${response.status}). Open the viewer to check its sign-in and device notification state.`);
-  });
-  // Rotation events for one native registration have one ordered owner. The
-  // event still observes rejection; the queue reports it and admits later work.
-  subscriptionUpdates = update.catch(error => console.warn('Notification subscription update failed', error));
-  event.waitUntil(update);
+  const update = MjPush.reconcile(self.registration, event.oldSubscription?.endpoint);
+  event.waitUntil(update.catch(error => {
+    console.warn('Notification subscription update failed', error);
+    throw error;
+  }));
 });

@@ -35,14 +35,14 @@ fn push_subscribe_in(db: &Connection, subscription: Subscription) -> Result<()> 
             // Replacement releases the old owner's reservations in the same
             // transaction. An opaque ID also prevents ABA after delete/recreate.
             db.execute(
-                "UPDATE push_deliveries SET accepted=0 WHERE endpoint=?1 AND accepted=3",
+                "UPDATE push_deliveries SET accepted=0,retry_at=0,failures=0,error=NULL WHERE endpoint=?1 AND accepted IN (0,3)",
                 [&subscription.endpoint],
             )?;
             mj_core::state::new_session_id().context("generate Web Push enrollment identifier")?
         }
     };
     db.execute("INSERT INTO push_devices(endpoint,subscription,enrollment) VALUES(?1,?2,?3) ON CONFLICT(endpoint) DO UPDATE SET subscription=excluded.subscription,enrollment=excluded.enrollment",params![subscription.endpoint,encoded,enrollment])?;
-    db.execute("UPDATE push_deliveries SET retry_at=0,failures=0,error=NULL WHERE endpoint=?1 AND accepted=0",[subscription.endpoint])?;
+    // Routine device reconciliation must preserve retry deadlines and errors.
     Ok(())
 }
 pub(crate) fn push_renew(old_endpoint: String, subscription: Subscription) -> Result<()> {
@@ -500,6 +500,16 @@ mod tests {
         result(&db, &reentry, Some(429), 100);
         observe(&mut db, true, &["a", "c"]);
         push_subscribe_with(&db, subscription.clone()).unwrap();
+        // Hard-won: routine browser reconciliation reset pending delivery state.
+        assert_eq!(
+            db.query_row(
+                "SELECT retry_at FROM push_deliveries WHERE endpoint=?1 AND episode=?2",
+                params![subscription.endpoint, reentry.episode],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            100
+        );
         assert!(push_claim_with(&db, 99).unwrap().is_empty());
         let after_backpressure = push_claim_with(&db, 100).unwrap();
         assert_eq!(after_backpressure.len(), 2);
