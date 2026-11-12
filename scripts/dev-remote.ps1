@@ -27,9 +27,9 @@ function Invoke-Remote([string] $Body) {
     $result
 }
 function Assert-Clean([string] $Tree, [string] $Sha) {
-    $dirty = Invoke-Git @('-C', $Tree, 'status', '--porcelain', '--untracked-files=all')
+    $dirty = Invoke-Git -GitArgs @('-C', $Tree, 'status', '--porcelain', '--untracked-files=all')
     if ($dirty) { throw "Build worktree $Tree is dirty. Preserve its edits elsewhere, then commit or remove them there and rerun. No reset or clean was performed." }
-    if ($Sha -and (Invoke-Git @('-C', $Tree, 'rev-parse', 'HEAD')) -ne $Sha) {
+    if ($Sha -and (Invoke-Git -GitArgs @('-C', $Tree, 'rev-parse', 'HEAD')) -ne $Sha) {
         throw "HEAD changed in $Tree during the build. Stop other writers and rerun at $Sha."
     }
 }
@@ -59,9 +59,9 @@ try {
     }
     if (Test-Path -LiteralPath $buildTree) {
         Assert-Clean $buildTree ''
-        Invoke-Git @('-C', $buildTree, 'checkout', '--detach', $sha)
+        Invoke-Git -GitArgs @('-C', $buildTree, 'checkout', '--detach', $sha)
     } else {
-        Invoke-Git @('-C', $WindowsCheckout, 'worktree', 'add', '--detach', $buildTree, $sha)
+        Invoke-Git -GitArgs @('-C', $WindowsCheckout, 'worktree', 'add', '--detach', $buildTree, $sha)
     }
     Assert-Clean $buildTree $sha
 
