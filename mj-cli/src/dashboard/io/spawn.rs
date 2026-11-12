@@ -1204,6 +1204,8 @@ pub(crate) fn spawn_imported_session_apply(
         "saving imported session",
         updates,
         move || {
+            // Move the staging guard too: disjoint captures otherwise drop it before upload.
+            let _archive_directory = imported._archive_directory;
             let mut session = imported
                 .controller
                 .state
