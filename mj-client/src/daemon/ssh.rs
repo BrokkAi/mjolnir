@@ -149,14 +149,12 @@ async fn open_with_port(
         let local_addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port()?));
         let mut command = tokio::process::Command::new("ssh");
         // The tunnel needs its own connection. Through a shared ControlMaster
-        // connection the master would own the listener: its "listening" line
-        // would not reach this child's stderr, and stopping this child would
+        // connection the master would own the listener, and stopping this child would
         // not remove the forward. OpenSSH keeps the first value of an option,
         // so these override the user's `ssh_args` and ssh_config.
         command
             .args([
                 "-N",
-                "-v",
                 "-o",
                 "ControlMaster=no",
                 "-o",
@@ -180,29 +178,30 @@ async fn open_with_port(
             endpoint: endpoint.clone(),
             child,
         };
-        let metadata = lease.metadata();
-        // Do not send credentials until OpenSSH confirms ownership of the port.
-        let listening = format!(
-            "debug1: Local forwarding listening on 127.0.0.1 port {}.",
-            local_addr.port()
-        );
-        let diagnostics = lease.child.stderr_capture();
         let ready = async {
             loop {
-                if String::from_utf8_lossy(&diagnostics.lock().expect("stderr mutex poisoned"))
-                    .lines()
-                    .any(|line| line.trim_end() == listening)
+                // Bound a silent competing listener, not SSH startup.
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    prove_listener(local_addr, &endpoint.token),
+                )
+                .await
                 {
-                    break;
+                    Ok(Ok(true)) => return true,
+                    Ok(Err(ref error))
+                        if error
+                            .downcast_ref::<std::io::Error>()
+                            .is_some_and(|e| e.kind() == std::io::ErrorKind::ConnectionRefused) =>
+                    {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                    _ => {
+                        // Give SSH's bind failure the connection deadline to
+                        // finish; send no more bytes to the unproven peer.
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        return false;
+                    }
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-            match super::DaemonClient::connect(metadata).await {
-                Ok(mut client) => matches!(
-                    client.request_once(super::DaemonAction::Ping).await,
-                    Ok(super::DaemonReply::Pong)
-                ),
-                Err(_) => false,
             }
         };
         tokio::select! {
@@ -230,7 +229,7 @@ async fn open_with_port(
             }
             status = lease.child.wait() => {
                 let status = status?;
-                let stderr = String::from_utf8_lossy(&diagnostics.lock().expect("stderr mutex poisoned")).into_owned();
+                let stderr = String::from_utf8_lossy(&lease.child.stderr()).into_owned();
                 let collision = stderr.lines().any(|line|
                     (line.contains("bind") && line.contains("Address already in use"))
                     || line.contains("cannot listen to port"));
@@ -241,8 +240,61 @@ async fn open_with_port(
     }
 }
 
+async fn prove_listener(address: std::net::SocketAddr, token: &str) -> Result<bool> {
+    use hmac::Mac;
+    let mut random = [0u8; 32];
+    getrandom::fill(&mut random).map_err(|error| anyhow::anyhow!("{error}"))?;
+    let nonce = mj_core::hex::lower_hex(random);
+    let mut stream = tokio::net::TcpStream::connect(address).await?;
+    super::write_frame(
+        &mut stream,
+        &super::RequestEnvelope {
+            protocol_version: super::PROTOCOL_VERSION,
+            request_id: 0,
+            token: String::new(),
+            action: super::DaemonAction::ProveIdentity {
+                nonce: nonce.clone(),
+            },
+        },
+    )
+    .await?;
+    let response = super::read_response(&mut stream).await?;
+    Ok(
+        matches!(response.result, Ok(super::DaemonReply::IdentityProof { mac })
+        if super::identity_proof(token, &nonce).verify_slice(&mac).is_ok()),
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    // Hard-won: 5159ed294: a forwarding diagnostic printed before bind() released the token to another listener
+    #[tokio::test]
+    async fn competing_listener_never_receives_control_token() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let token = "private-control-token-that-must-never-cross-the-wire";
+        let peer = async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let length = stream.read_u32().await.unwrap();
+            let mut bytes = vec![0; length as usize];
+            stream.read_exact(&mut bytes).await.unwrap();
+            assert!(!String::from_utf8_lossy(&bytes).contains(token));
+            let request: super::super::RequestEnvelope = serde_json::from_slice(&bytes).unwrap();
+            assert!(request.token.is_empty());
+            assert!(matches!(
+                request.action,
+                super::super::DaemonAction::ProveIdentity { .. }
+            ));
+            stream.write_all(&[0, 0, 0, 1, b'!']).await.unwrap();
+            let mut remainder = Vec::new();
+            stream.read_to_end(&mut remainder).await.unwrap();
+            assert!(remainder.is_empty());
+        };
+        let (result, ()) = tokio::join!(super::prove_listener(address, token), peer);
+        assert!(result.is_err());
+    }
+
     /// Run against a disposable sshd with a real, matching mj, never a live
     /// instance. The driver supplies isolated remote config/data directories.
     #[tokio::test]
@@ -347,11 +399,6 @@ mod tests {
         )
         .await
         .unwrap();
-        // Hard-won: #1514: the token was sent to a competing local listener.
-        assert_eq!(
-            occupied.accept().unwrap_err().kind(),
-            std::io::ErrorKind::WouldBlock
-        );
         assert!(!first);
         assert_ne!(second.local_addr.port(), occupied_port);
         assert_eq!(second.endpoint.instance_id, endpoint.instance_id);

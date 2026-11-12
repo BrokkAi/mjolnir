@@ -702,6 +702,9 @@ pub struct DraftPreview {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "action", content = "arguments")]
 pub enum DaemonAction {
+    ProveIdentity {
+        nonce: String,
+    },
     PreflightNewSession {
         request: NewSessionPreflightRequest,
     },
@@ -1216,6 +1219,9 @@ pub struct ResponseEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "reply", content = "value")]
 pub enum DaemonReply {
+    IdentityProof {
+        mac: Vec<u8>,
+    },
     NewSessionPreflight(PreflightNew),
     PathCompletion(mj_core::path_completion::PathCompletion),
     ProjectDirectories(Vec<(std::path::PathBuf, bool)>),
@@ -3230,7 +3236,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Clients obtain the HTTP API credential over control with ApiCredential.
 // The dashboard's path, project and preflight work are daemon actions, and
 // closing a cancellable action's connection cancels it.
-pub const PROTOCOL_VERSION: u32 = 90;
+// Version 91: unauthenticated nonce proof before SSH tunnel credentials.
+pub const PROTOCOL_VERSION: u32 = 91;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
@@ -3385,6 +3392,16 @@ pub struct NewSessionPreflightRequest {
     pub target_id: String,
     #[serde(default)]
     pub project_directory: Option<PathBuf>,
+}
+
+/// Domain-separated proof shared by the daemon and SSH transport.
+pub fn identity_proof(token: &str, nonce: &str) -> hmac::Hmac<sha2::Sha256> {
+    use hmac::Mac;
+    let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::KeyInit>::new_from_slice(token.as_bytes())
+        .expect("HMAC accepts arbitrary key lengths");
+    mac.update(b"mj-daemon-identity-v1");
+    mac.update(nonce.as_bytes());
+    mac
 }
 
 #[cfg(test)]
