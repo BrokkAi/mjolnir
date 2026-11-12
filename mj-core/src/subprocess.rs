@@ -1489,8 +1489,10 @@ mod tests {
                     &mut master,
                     &mut slave,
                     std::ptr::null_mut(),
-                    std::ptr::null(),
-                    std::ptr::null(),
+                    // macOS declares these `*mut`, Linux `*const`; a null
+                    // `*mut` coerces to either.
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
                 )
             },
             0
