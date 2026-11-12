@@ -1490,7 +1490,9 @@ test('review settings action renders a button that sends its action id', () => {
   assert.equal(controls[0].textContent, 'Dismiss notification');
   context.session.notification_dismissal = { read_through: 11 };
   controls[0].onclick({ stopPropagation() {} });
-  assert.deepEqual(JSON.parse(JSON.stringify(calls[1])), { dataset: { action: 'dismiss-notification', id: 's' }, extra: { target: { read_through: 10 } } });
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[1])), {
+    dataset: { dismissNotification: 'true', action: 'dismiss-notification', id: 's', notificationDismissal: '{"read_through":10}' },
+  });
   context.pendingActions.add('dismiss-notification:s');
   vm.runInContext('renderNotificationDismissal(container, session, null)', context);
   assert.equal(controls[0].disabled, true);

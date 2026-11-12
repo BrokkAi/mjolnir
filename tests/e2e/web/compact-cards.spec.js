@@ -948,6 +948,18 @@ test('menus follow capabilities, long press cancellation, right click, keyboard,
   await expect(page.locator('#action-error')).toHaveText('stop failed in fixture');
   expect(confirmed).toBe(true);
 
+  // Dismissal sits in the menu where the TUI puts it, not on the card, and
+  // names the notification the menu showed.
+  const menuSession = state.snapshot.sessions.find(item => item.id === 'openable');
+  menuSession.capabilities.dismiss_notification = true;
+  menuSession.notification_dismissal = { read_through: 10 };
+  await refresh(page, state);
+  await expect(openCard.getByRole('button', { name: 'Dismiss notification' })).toHaveCount(0);
+  await openTrigger.click();
+  await expect(openMenu.getByRole('menuitem')).toHaveText(['Changed files…', 'Dismiss notification', 'Copy session ID', 'Cancel operation', 'Suspend session…']);
+  await openMenu.getByRole('menuitem', { name: 'Dismiss notification' }).click();
+  await expect.poll(() => state.actions.at(-1)).toEqual({ action: 'dismiss-notification', session_id: 'openable', target: { read_through: 10 } });
+
   async function beginPointer(cardLocator) {
     const box = await cardLocator.boundingBox();
     await page.mouse.move(box.x + 16, box.y + box.height / 2);

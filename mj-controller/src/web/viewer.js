@@ -1706,6 +1706,7 @@ function sessionMenuActions(session) {
   const actions = [];
   if (session.configuration_issue) actions.push(['Repair configuration…', 'secondary', 'repair-config']);
   if (session.lifecycle === 'live' && !isTransitioningSession(session)) actions.push(['Changed files…', 'secondary', 'changed-files']);
+  if (can.dismiss_notification) actions.push(['Dismiss notification', 'secondary', 'dismiss-notification']);
   if (can.rename) actions.push(['Rename', 'secondary', 'rename']);
   if (can.change_workspace) actions.push(['Change workspace…', 'secondary', 'change-workspace']);
   if (can.container_settings) actions.push(['Container settings…', 'secondary', 'container-settings']);
@@ -1767,7 +1768,6 @@ function updateSessionCard(card, session) {
   card._metaSeparators[0].hidden = !(shown[0] && shown[1]);
   card._metaSeparators[1].hidden = !((shown[0] || shown[1]) && shown[2]);
   updateSessionActivity(card, session);
-  renderNotificationDismissal(card, session, actionError);
   updateSessionMenu(card, session);
 }
 
@@ -1783,12 +1783,20 @@ function renderNotificationDismissal(container, session, errorNode) {
     container.append(control);
   }
   control.disabled = pendingActions.has(`dismiss-notification:${session.id}`);
-  const target = session.notification_dismissal;
+  control.dataset.action = 'dismiss-notification';
+  control.dataset.id = session.id;
+  markNotificationDismissal(control, session);
   control.onclick = event => {
     event.stopPropagation();
-    return runSessionAction({ action: 'dismiss-notification', id: session.id }, errorNode,
-      { target });
+    return runSessionAction(control.dataset, errorNode);
   };
+}
+
+/// A dismissal names the notification its control showed, so a tap clears
+/// what the person saw and not one that arrived after the last render.
+function markNotificationDismissal(control, session) {
+  if (control.dataset.action !== 'dismiss-notification') return;
+  control.dataset.notificationDismissal = JSON.stringify(session.notification_dismissal ?? null);
 }
 
 function updateSessionMenu(card, session) {
@@ -1806,6 +1814,7 @@ function updateSessionMenu(card, session) {
           target: session.target_id,
         });
         control.setAttribute('role', 'menuitem');
+        markNotificationDismissal(control, session);
         return control;
       }),
     );
@@ -1819,6 +1828,7 @@ function updateSessionMenu(card, session) {
     for (const control of card._menu.querySelectorAll?.('button[data-action]') || []) {
       control.dataset.profile = session.profile_id || '';
       control.dataset.target = session.target_id || '';
+      markNotificationDismissal(control, session);
       control.disabled = pendingActions.has(`${control.dataset.action}:${session.id}`);
     }
   }
@@ -9387,6 +9397,9 @@ async function runSessionAction(dataset, errorNode, extra) {
     const choice = await confirmSessionDestruction(session);
     if (choice === null) return false;
     extra = { ...extra, delete_branch: choice };
+  }
+  if (dataset.action === 'dismiss-notification') {
+    extra = { ...extra, target: JSON.parse(dataset.notificationDismissal) };
   }
   const body = { action: dataset.action, session_id: dataset.id, ...extra };
   if (dataset.action === 'rename') {
