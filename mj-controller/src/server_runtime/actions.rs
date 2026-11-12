@@ -134,6 +134,22 @@ pub(super) async fn apply_phone_action(
     control: &PhoneActionControl,
 ) -> Result<()> {
     match action {
+        ControllerAction::PushSubscribe { subscription } => {
+            crate::web_push::blocking(move || crate::database::push_subscribe(subscription))
+                .await?;
+            crate::web_push::wake();
+            Ok(())
+        }
+        ControllerAction::PushUnsubscribe { endpoint } => {
+            crate::web_push::blocking(move || crate::database::push_unsubscribe(&endpoint)).await?;
+            crate::web_push::wake();
+            Ok(())
+        }
+        ControllerAction::PushTest { endpoint } => {
+            crate::web_push::blocking(move || crate::database::push_test(endpoint)).await?;
+            crate::web_push::wake();
+            Ok(())
+        }
         ControllerAction::RecordOperatorActivity => {
             services.daemon_runtime.record_operator_activity().await;
             Ok(())

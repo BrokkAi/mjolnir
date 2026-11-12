@@ -126,6 +126,8 @@ pub(super) fn router(options: ServerOptions) -> Router {
     };
     let upgrade_gate = state.upgrade_gate.clone();
     let protected = Router::new()
+        .route("/api/push/key", get(push_key))
+        .route("/api/push/status", get(push_device_status))
         .route("/api/snapshot", get(snapshot))
         .route("/api/sessions/{session_id}/row", get(session_row))
         .route("/api/conversations/{session_id}", get(conversation))

@@ -31,7 +31,10 @@ use mj_core::workspace::{
     new_workspace_id, normalize_workspace_name,
 };
 
-const SCHEMA_VERSION: i64 = 126;
+const SCHEMA_VERSION: i64 = 127;
+
+mod web_push;
+pub(crate) use web_push::*;
 
 mod environments;
 pub(crate) use environments::*;
