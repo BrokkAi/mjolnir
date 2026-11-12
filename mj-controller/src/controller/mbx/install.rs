@@ -76,7 +76,48 @@ if [ -n "$lock" ]; then
 fi
 if [ "$shell_kind" = fish ]; then block=$fish_block; else block=$posix_block; fi
 existing=
-if [ -e "$profile" ]; then existing=$(cat -- "$profile"); fi
+if [ -e "$profile" ]; then
+    # A sentinel preserves trailing newlines for exact owned-prefix comparisons.
+    existing=$(cat -- "$profile" && printf '.')
+    existing=${existing%.}
+fi
+start='# >>> mbx (added by Mjolnir) >>>'
+end='# <<< mbx <<<'
+# Inspect only the suffix after the last completed block.
+trailing=${existing##*"$end"}
+case "$trailing" in
+    *"$start"*)
+        fragment="$start${trailing#*"$start"}"
+        prefix=${existing%"$fragment"}
+        offset=$(printf '%s' "$prefix" | wc -c)
+        line=$(printf '%s' "$prefix" | wc -l)
+        line=$((line + 1))
+        # Byte comparisons also handle a write interrupted halfway through a line.
+        length=$(printf '%s' "$fragment" | wc -c)
+        matched=$(printf '%s' "$fragment" | MBX_PROFILE_BLOCK="$block" MBX_PROFILE_LENGTH="$length" LC_ALL=C awk '
+            { actual=actual $0 "\n" }
+            END {
+                actual=substr(actual, 1, ENVIRON["MBX_PROFILE_LENGTH"]+0)
+                expected=ENVIRON["MBX_PROFILE_BLOCK"]
+                n=length(actual); if (length(expected)<n) n=length(expected)
+                for (i=1; i<=n && substr(actual,i,1)==substr(expected,i,1); i++) {}
+                print i-1
+            }')
+        if [ "$matched" -ne "$length" ]; then
+            first=$((offset + 1))
+            last=$((offset + matched))
+            printf '%s\n' "$profile: incomplete Mj block at line $line is followed by other content. Delete only bytes $first through $last (the incomplete Mj block prefix beginning with '$start'); preserve subsequent content, then run Install again." >&2
+            exit 1
+        fi
+        # dd preserves the prefix and truncates in place at the seek offset,
+        # following symlinks. No copy or rename can replace unrelated contents.
+        if ! error=$(dd if=/dev/null of="$profile" bs=1 seek="$offset" 2>&1); then
+            printf '%s\n' "repair $profile at line $line failed: $error" >&2
+            exit 1
+        fi
+        existing=$prefix
+        ;;
+esac
 case "$existing" in
     *"$block"*) status=unchanged ;;
     *)
@@ -86,7 +127,10 @@ case "$existing" in
         block="
 $block
 "
-        printf '%s' "$block" >> "$profile"
+        if ! printf '%s' "$block" >> "$profile"; then
+            printf '%s\n' "append $profile failed with an I/O error; run Install again to repair the incomplete Mj block" >&2
+            exit 1
+        fi
         status=changed
         ;;
 esac
@@ -604,7 +648,8 @@ fn update_profile(
         ],
         "add the mbx PATH block to the container host login profile",
     );
-    let output = checked(executor.execute(&command)?, &command)?;
+    let output = checked(executor.execute(&command)?, &command)
+        .with_context(|| format!("update shell profile {}", selection.file))?;
     let text = String::from_utf8(output.stdout).context("profile update result is not UTF-8")?;
     let mut lines = text.lines().map(str::to_owned);
     let status = lines.next().context("profile update returned no result")?;
@@ -1264,6 +1309,120 @@ mod tests {
         let cached = download("x86_64", next_stage.path(), &targets::ProcessExecutor).unwrap();
         assert_eq!(cached, destination);
         assert_eq!(std::fs::read(cached).unwrap(), bytes);
+    }
+
+    // Hard-won: #1514: a short profile append left an open function that another append could not repair.
+    #[cfg(unix)]
+    #[test]
+    fn short_profile_append_repairs_only_its_own_tail_on_retry() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let tools = root.path().join("tools");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&tools).unwrap();
+        for (name, path) in [
+            ("sh", "/bin/sh"),
+            ("cat", "/bin/cat"),
+            ("wc", "/usr/bin/wc"),
+            ("awk", "/usr/bin/awk"),
+            ("dd", "/bin/dd"),
+            ("mkdir", "/bin/mkdir"),
+        ] {
+            symlink(path, tools.join(name)).unwrap();
+        }
+        let target = root.path().join("profile-target");
+        let profile = home.join(".profile");
+        let original = b"# keep user bytes unchanged\n";
+        std::fs::write(&target, original).unwrap();
+        symlink(&target, &profile).unwrap();
+        let binary_dir = home.join(".local/bin");
+        let shim_dir = home.join("data/mbx/bin");
+        let block = posix_profile_block(&binary_dir, &shim_dir);
+        let fish = fish_profile_block(&binary_dir, &shim_dir);
+        let executor = targets::ProcessExecutor;
+        let _lock = lock_local_mbx(&home, &executor).unwrap();
+        let mut append = CommandSpec::new(
+            "/bin/sh",
+            [
+                "-c",
+                PROFILE_SCRIPT,
+                "mj-profile",
+                "update",
+                binary_dir.to_str().unwrap(),
+                &block,
+                &fish,
+                "",
+            ],
+        );
+        append
+            .env
+            .insert("HOME".into(), home.to_string_lossy().into_owned());
+        append.env.insert("SHELL".into(), "/bin/sh".into());
+        append
+            .env
+            .insert("PATH".into(), tools.to_string_lossy().into_owned());
+        append.env.insert(
+            "XDG_DATA_HOME".into(),
+            home.join("data").to_string_lossy().into_owned(),
+        );
+        let mut limited = append.clone();
+        let mut args = vec!["-c".to_owned(), "import os,resource,signal,sys; resource.setrlimit(resource.RLIMIT_FSIZE,(int(sys.argv[1]),int(sys.argv[1]))); signal.signal(signal.SIGXFSZ,signal.SIG_IGN); os.execv(sys.argv[2],sys.argv[2:])".into(), (original.len()+70).to_string(), limited.program.clone()];
+        args.extend(limited.args);
+        limited.program = "/usr/bin/python3".into();
+        limited.args = args;
+        let failed = executor.execute(&limited).unwrap();
+        assert_ne!(failed.status, 0);
+        let error = String::from_utf8(failed.stderr).unwrap();
+        assert!(error.contains(profile.to_str().unwrap()), "{error}");
+        assert!(error.contains("I/O error"), "{error}");
+        let partial = std::fs::read(&target).unwrap();
+        assert_eq!(partial.len(), original.len() + 70);
+        let repaired = executor.execute(&append).unwrap();
+        assert_eq!(
+            repaired.status,
+            0,
+            "{}",
+            String::from_utf8_lossy(&repaired.stderr)
+        );
+        assert!(
+            std::fs::symlink_metadata(&profile)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let body = std::fs::read_to_string(&target).unwrap();
+        assert!(body.as_bytes().starts_with(original));
+        assert_eq!(body.matches("# >>> mbx (added by Mjolnir) >>>").count(), 1);
+        assert_eq!(body.matches("# <<< mbx <<<").count(), 1);
+        assert!(body.contains(&block));
+        let syntax = executor
+            .execute(&CommandSpec::new(
+                "/bin/sh",
+                ["-n", profile.to_str().unwrap()],
+            ))
+            .unwrap();
+        assert_eq!(
+            syntax.status,
+            0,
+            "{}",
+            String::from_utf8_lossy(&syntax.stderr)
+        );
+        assert_eq!(executor.execute(&append).unwrap().status, 0);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), body);
+        let mut external = partial;
+        external.extend_from_slice(b"\nexport OTHER_CONTENT=preserve\n");
+        std::fs::write(&target, &external).unwrap();
+        let refused = executor.execute(&append).unwrap();
+        assert_ne!(refused.status, 0);
+        let error = String::from_utf8(refused.stderr).unwrap();
+        assert!(
+            error.contains(profile.to_str().unwrap())
+                && error.contains("line 3")
+                && error.contains("Delete only bytes"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), external);
     }
 
     // Hard-won: #1514: interruption after publishing mbx must be repaired by rerunning Install.
