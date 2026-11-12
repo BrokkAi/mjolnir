@@ -35,6 +35,9 @@ pub(super) async fn handle_action(
             state.set_operator_away(away).await?;
             Ok(DaemonReply::Done)
         }
+        DaemonAction::ProveIdentity { .. } => {
+            unreachable!("identity proof is served before authentication")
+        }
         DaemonAction::Ping => Ok(DaemonReply::Pong),
         // Each blocker carries its count and age, so the waiting client can say
         // what the upgrade waits for and for how long.
@@ -1107,6 +1110,7 @@ pub(super) fn upgrade_request_activity(
     if matches!(
         action,
         DaemonAction::RecordOperatorActivity
+            | DaemonAction::ProveIdentity { .. }
             | DaemonAction::Ping
             | DaemonAction::Identity
             | DaemonAction::Configuration

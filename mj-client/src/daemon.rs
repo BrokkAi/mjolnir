@@ -1,5 +1,7 @@
 //! Authenticated local daemon protocol and client transport.
 mod chunk_bytes;
+pub mod connector;
+pub mod ssh;
 use crate::executable::describe_running_daemon_and_client_builds;
 use crate::session::{ManagedSessionView, ViewError};
 use agent_client_protocol::v1::schema::ContentBlock;
@@ -58,6 +60,19 @@ pub struct DaemonMetadata {
     /// owner, and a container daemon can report it on every platform.
     #[serde(skip)]
     pub placement: DaemonPlacement,
+}
+
+/// Process-private credentials returned by `mj daemon endpoint --json`.
+/// This is not local PID metadata and must never be written to daemon.json.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct DaemonEndpoint {
+    #[serde(default)]
+    pub config_path: Option<std::path::PathBuf>,
+    pub protocol_version: u32,
+    pub build_version: String,
+    pub control_address: SocketAddr,
+    pub token: String,
+    pub instance_id: String,
 }
 
 /// Where the daemon runs, as the daemon itself reports it.
@@ -687,6 +702,9 @@ pub struct DraftPreview {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "action", content = "arguments")]
 pub enum DaemonAction {
+    ProveIdentity {
+        nonce: String,
+    },
     PreflightNewSession {
         request: NewSessionPreflightRequest,
     },
@@ -1201,6 +1219,9 @@ pub struct ResponseEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "reply", content = "value")]
 pub enum DaemonReply {
+    IdentityProof {
+        mac: Vec<u8>,
+    },
     NewSessionPreflight(PreflightNew),
     PathCompletion(mj_core::path_completion::PathCompletion),
     ProjectDirectories(Vec<(std::path::PathBuf, bool)>),
@@ -1731,6 +1752,8 @@ pub async fn read_response(stream: &mut TcpStream) -> Result<ResponseEnvelope> {
 }
 
 pub struct DaemonClient {
+    ssh_lease: Option<std::sync::Arc<ssh::SshLease>>,
+    connector: Option<std::sync::Arc<connector::DaemonConnector>>,
     metadata: DaemonMetadata,
     stream: TcpStream,
     next_request_id: u64,
@@ -1746,6 +1769,41 @@ impl DaemonClient {
             metadata,
             stream,
             next_request_id: 1,
+            connector: None,
+            ssh_lease: None,
+        })
+    }
+
+    /// Connect through an SSH tunnel's local port and require the daemon to
+    /// prove it holds the token on this very connection before any request
+    /// carries the token. The tunnel may have exited since an earlier proof,
+    /// and another process may now hold its port.
+    pub(crate) async fn connect_proven(metadata: DaemonMetadata) -> Result<Self> {
+        let mut client = Self::connect(metadata).await?;
+        ensure!(
+            ssh::prove_stream(&mut client.stream, &client.metadata.token).await?,
+            "the SSH tunnel's local port {} did not prove it reaches the daemon",
+            client.metadata.address
+        );
+        Ok(client)
+    }
+
+    /// Connector-owned SSH origin; never inferred from daemon-host placement.
+    pub fn connector(&self) -> Option<&std::sync::Arc<connector::DaemonConnector>> {
+        self.connector.as_ref()
+    }
+
+    /// Describe the authenticated endpoint, retaining the address actually
+    /// dialed (including a container's published loopback port).
+    pub async fn endpoint(&mut self) -> Result<DaemonEndpoint> {
+        let identity = self.identity().await?;
+        Ok(DaemonEndpoint {
+            config_path: None,
+            protocol_version: self.metadata.protocol_version,
+            build_version: identity.build_version,
+            control_address: self.metadata.address,
+            token: self.metadata.token.clone(),
+            instance_id: identity.instance_id,
         })
     }
 
@@ -1753,7 +1811,12 @@ impl DaemonClient {
     /// requests must reach daemons of any protocol version, and the frozen
     /// subset encodes identically across all of them.
     pub async fn request(&mut self, action: DaemonAction) -> Result<DaemonReply> {
+        let connector = self.connector.clone();
+        let previous = self.metadata.clone();
         self.request_with_reconnect(action, || async {
+            if let Some(connector) = &connector {
+                return connector.refresh(&previous).await;
+            }
             loop {
                 if let Ok(client) = connect_existing().await {
                     return Ok(client);
@@ -3074,10 +3137,10 @@ impl DaemonClient {
 }
 
 pub async fn connect_existing() -> Result<DaemonClient> {
-    let metadata = tokio::task::spawn_blocking(read_metadata)
+    connector::DaemonConnector::shared()
+        .await?
+        .connect_existing()
         .await
-        .context("read daemon metadata task failed")??;
-    DaemonClient::connect(metadata).await
 }
 
 /// A handle to whatever daemon the metadata file advertises, regardless of its
@@ -3187,7 +3250,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Clients obtain the HTTP API credential over control with ApiCredential.
 // The dashboard's path, project and preflight work are daemon actions, and
 // closing a cancellable action's connection cancels it.
-pub const PROTOCOL_VERSION: u32 = 90;
+// Version 91: unauthenticated nonce proof before SSH tunnel credentials.
+pub const PROTOCOL_VERSION: u32 = 91;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
@@ -3342,6 +3406,16 @@ pub struct NewSessionPreflightRequest {
     pub target_id: String,
     #[serde(default)]
     pub project_directory: Option<PathBuf>,
+}
+
+/// Domain-separated proof shared by the daemon and SSH transport.
+pub fn identity_proof(token: &str, nonce: &str) -> hmac::Hmac<sha2::Sha256> {
+    use hmac::Mac;
+    let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::KeyInit>::new_from_slice(token.as_bytes())
+        .expect("HMAC accepts arbitrary key lengths");
+    mac.update(b"mj-daemon-identity-v1");
+    mac.update(nonce.as_bytes());
+    mac
 }
 
 #[cfg(test)]

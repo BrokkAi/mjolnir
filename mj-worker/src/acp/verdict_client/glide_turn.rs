@@ -103,14 +103,28 @@ pub(crate) fn shrink(history: &mut ContextHistory) -> bool {
 pub(crate) use mj_core::activity::eot_glide::types::Probabilities;
 
 #[cfg(test)]
+pub(crate) fn test_samples() -> Value {
+    let mut samples: Value = serde_json::from_str(include_str!(
+        "../../../../mj-core/src/activity/eot_glide_fresh_sample.json"
+    ))
+    .unwrap();
+    // These recorded vectors predate attention. Exercise the new axis without
+    // altering the frozen action probabilities or their recorded provenance.
+    for sample in samples.as_array_mut().unwrap() {
+        sample["answers"]["attention"] = serde_json::json!({"probabilities": {
+            "needs_input": 0.0, "important": 1.0, "redundant_request": 0.0,
+            "none": 0.0, "unclear": 0.0
+        }});
+    }
+    samples
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn glide_distributions_validate_real_provider_vectors_and_reject_partial_scores() {
-        let samples: Value = serde_json::from_str(include_str!(
-            "../../../../mj-core/src/activity/eot_glide_fresh_sample.json"
-        ))
-        .unwrap();
+        let samples: Value = crate::acp::verdict_client::glide_turn::test_samples();
         for sample in samples.as_array().unwrap() {
             Probabilities::parse(sample).unwrap();
             let mut partial = sample.clone();
@@ -122,6 +136,20 @@ mod tests {
             let mut invalid = sample.clone();
             invalid["answers"]["turn_state"]["probabilities"]["finished"] = 2.0.into();
             assert!(Probabilities::parse(&invalid).is_err());
+            let mut older_proxy = sample.clone();
+            older_proxy["answers"]
+                .as_object_mut()
+                .unwrap()
+                .remove("attention");
+            // Hard-won: 4dbf5e62d: a proxy without the attention question failed every verdict.
+            let parsed = Probabilities::parse(&older_proxy).unwrap();
+            assert!(parsed.attention.is_none());
+            let mut partial_attention = sample.clone();
+            partial_attention["answers"]["attention"]["probabilities"]
+                .as_object_mut()
+                .unwrap()
+                .remove("important");
+            assert!(Probabilities::parse(&partial_attention).is_err());
         }
     }
 }

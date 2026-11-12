@@ -117,7 +117,7 @@ async fn completed_turn_response(
             let winner = match axis.as_str() {
                 "work" => work,
                 "input" => input,
-                "failure" => "none",
+                "failure" | "attention" => "none",
                 "background" => "unclear",
                 "permission_veto" => "unknown",
                 "turn_state" => {
