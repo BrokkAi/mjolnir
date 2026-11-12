@@ -69,6 +69,7 @@ mod tests {
         let mut connection = open(&path).unwrap();
         let mut report = ProfileQuota {
             paid_credits: None,
+            monthly_price_usd: Some(100),
             banked_resets: None,
             profile_id: "test".into(),
             harness: mj_core::config::HarnessKind::Claude,
@@ -115,6 +116,7 @@ mod tests {
         save_report(&mut connection, "account-a", &report).unwrap();
         observed.push(report.clone());
         report.refreshed_at_epoch_seconds += 600;
+        report.monthly_price_usd = Some(200);
         report.windows[0].resets_at_epoch_seconds = None;
         report.windows.push(crate::quota::QuotaWindow {
             label: "Weekly (model)".into(),
@@ -129,6 +131,7 @@ mod tests {
         save_report(&mut connection, "account-a", &report).unwrap();
         observed.push(report.clone());
         let last_good = load(&connection, "account-a").unwrap().unwrap();
+        assert_eq!(last_good.monthly_price_usd, Some(200));
         assert_eq!(last_good.windows[0].resets_at_epoch_seconds, Some(12345));
         report.error = Some("rate limited".into());
         report.rate_limited_until_epoch_seconds = Some(1500);

@@ -1422,7 +1422,14 @@ fn golden_phone_session_snapshot() {
         }),
     );
 
-    let mut quota_controller = controller_with_profiles(&["claude", "claude-unknown", "codex"]);
+    let mut quota_controller =
+        controller_with_profiles(&["agy", "claude", "claude-unknown", "codex"]);
+    quota_controller
+        .config
+        .profiles
+        .get_mut("agy")
+        .unwrap()
+        .kind = HarnessKind::Antigravity;
     quota_controller
         .config
         .profiles
@@ -1450,6 +1457,7 @@ fn golden_phone_session_snapshot() {
     };
     let quota_report = |profile_id: &str, harness: HarnessKind, windows| ProfileQuota {
         paid_credits: None,
+        monthly_price_usd: None,
         banked_resets: None,
         profile_id: profile_id.into(),
         harness,
@@ -1460,6 +1468,39 @@ fn golden_phone_session_snapshot() {
         rate_limited_until_epoch_seconds: None,
     };
     let quota_reports = BTreeMap::from([
+        (
+            "agy".into(),
+            quota_report(
+                "agy",
+                HarnessKind::Antigravity,
+                vec![
+                    quota_window(
+                        "Week",
+                        Some(73),
+                        Some(mj_client::quota::AntigravityQuotaPool::Gemini.model_scope()),
+                        7 * 24 * 60 * 60,
+                    ),
+                    quota_window(
+                        "5H",
+                        Some(48),
+                        Some(mj_client::quota::AntigravityQuotaPool::Gemini.model_scope()),
+                        5 * 60 * 60,
+                    ),
+                    quota_window(
+                        "Week",
+                        Some(0),
+                        Some(mj_client::quota::AntigravityQuotaPool::Claude.model_scope()),
+                        7 * 24 * 60 * 60,
+                    ),
+                    quota_window(
+                        "5H",
+                        Some(81),
+                        Some(mj_client::quota::AntigravityQuotaPool::Claude.model_scope()),
+                        5 * 60 * 60,
+                    ),
+                ],
+            ),
+        ),
         (
             "claude".into(),
             quota_report(
@@ -1521,10 +1562,11 @@ fn golden_phone_session_snapshot() {
     section(
         &mut out,
         "viewer quota windows",
-        "Claude, unknown Claude, and Codex profiles",
+        "Antigravity, Claude, unknown Claude, and Codex profiles",
         &serde_json::json!({
             "profiles": quota_snapshot.profiles.iter().map(|profile| serde_json::json!({
                 "id": profile.id,
+                "quota_pools": profile.quota_pools,
                 "quota": profile.quota,
             })).collect::<Vec<_>>(),
         }),
@@ -2199,6 +2241,7 @@ fn quota_projection_preserves_reset_metadata_and_marks_only_overdue_readings_sta
             "codex".to_owned(),
             ProfileQuota {
                 paid_credits: None,
+                monthly_price_usd: None,
                 banked_resets: Some(1),
                 profile_id: "codex".into(),
                 harness: HarnessKind::Codex,

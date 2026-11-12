@@ -1553,7 +1553,7 @@ fn missing_harness_homes_name_every_supported_agent() {
 
     assert_eq!(
         check.detail,
-        "No Codex, Claude Code, Kimi Code, Grok Build, Muse Code, OpenCode, or DSH home was found in the default or environment-overridden locations."
+        "No Codex, Claude Code, Kimi Code, Grok Build, Muse Code, OpenCode, DSH, or Antigravity home was found in the default or environment-overridden locations."
     );
 }
 

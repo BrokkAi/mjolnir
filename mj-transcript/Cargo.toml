@@ -14,17 +14,25 @@ name = "mj_transcript"
 [lints]
 workspace = true
 
+[features]
+github-history = ["dep:tokenizers", "mj-core/github-history"]
+
 [dependencies]
 mj-core.workspace = true
 agent-client-protocol.workspace = true
 anyhow.workspace = true
+chrono.workspace = true
+regex = "1"
+indexmap = { version = "2", features = ["serde"] }
+tokenizers = { version = "0.22", optional = true, default-features = false, features = ["fancy-regex"] }
 serde = { workspace = true, features = ["rc"] }
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 sha2.workspace = true
 tracing.workspace = true
 tree-sitter = "0.25"
 tree-sitter-bash = "0.25.1"
 
 [dev-dependencies]
-mj-core = { workspace = true, features = ["golden"] }
+tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
+mj-core = { workspace = true, features = ["golden", "github-history"] }
 tempfile.workspace = true

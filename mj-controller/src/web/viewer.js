@@ -2540,7 +2540,7 @@ function selectNewProfile(draft, profileId) {
 // Mirrors HarnessKind::supports_delegation_tools.
 function subagentChoiceApplies(draft = newDraft) {
   const kind = snapshot?.profiles.find(profile => profile.id === draft?.profileId)?.harness_kind;
-  return kind === 'claude' || kind === 'codex' || kind === 'dsh' || kind === 'opencode';
+  return kind === 'claude' || kind === 'codex' || kind === 'dsh' || kind === 'opencode' || kind === 'antigravity';
 }
 
 // Every top-level session's message-only server carries ask_oracle, whatever its harness.
@@ -2552,7 +2552,7 @@ function oracleChoiceApplies(draft = newDraft) {
 // do nothing there and is not offered.
 function subagentNativeOffered(draft = newDraft) {
   const kind = snapshot?.profiles.find(profile => profile.id === draft?.profileId)?.harness_kind;
-  return kind !== 'dsh';
+  return kind !== 'dsh' && kind !== 'antigravity';
 }
 
 // A policy as the delegation choice shows and submits it for the draft's
@@ -5212,6 +5212,10 @@ function renderQuota() {
     [...quotaPanel.querySelectorAll('details[open]')].map(row => row.dataset.profileId),
   );
   const profiles = snapshot.profiles || [];
+  const rows = profiles.flatMap(profile => {
+    const pools = profile.quota_pools || [];
+    return pools.length ? pools.map(pool => ({ profile, pool })) : [{ profile, pool: null }];
+  });
   if (!profiles.length) {
     quotaPanel.replaceChildren(el('p', 'dim', 'No profiles configured.'));
     return;
@@ -5233,19 +5237,24 @@ function renderQuota() {
   quotaPanel.replaceChildren(
     hint,
     heading,
-    ...profiles.map(profile => {
+    ...rows.map(({ profile, pool }) => {
       const disclosure = el('details', 'quota-profile');
-      disclosure.dataset.profileId = profile.id;
-      disclosure.open = expanded.has(profile.id);
+      const rowId = pool ? `${profile.id}:${pool}` : profile.id;
+      const displayName = pool ? `${profile.id} (${pool})` : profile.id;
+      disclosure.dataset.profileId = rowId;
+      disclosure.open = expanded.has(rowId);
       const summary = el('summary', 'quota-overview-row');
-      const quota = profile.quota;
-      const name = el('span', 'quota-profile-name', profile.id);
+      const quota = pool && profile.quota ? {
+        ...profile.quota,
+        windows: (profile.quota.windows || []).filter(window => window.pool === pool),
+      } : profile.quota;
+      const name = el('span', 'quota-profile-name', displayName);
       const hold = quotaHoldText(Math.floor(serverClockMs() / 1000), quota);
       if (hold) name.append(el('small', 'reading-mid', hold));
       else if (quota?.has_error) name.append(el('small', 'reading-low', 'probe failed'));
       else if (quota?.stale) name.append(el('small', 'reading-mid', 'stale'));
       summary.append(name);
-      const spoken = [profile.id, hold || (quota?.has_error ? 'probe failed; last reading' : quota?.stale ? 'stale reading' : '')];
+      const spoken = [displayName, hold || (quota?.has_error ? 'probe failed; last reading' : quota?.stale ? 'stale reading' : '')];
       if (quota?.windows?.length) {
         for (const label of labels) {
           const window = quota.windows.find(window => window.label === label);

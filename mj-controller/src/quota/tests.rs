@@ -178,6 +178,7 @@ fn golden_quota_compact_row() {
     ) -> ProfileQuota {
         ProfileQuota {
             paid_credits: None,
+            monthly_price_usd: None,
             banked_resets: None,
             profile_id: profile_id.into(),
             harness,
@@ -1214,6 +1215,7 @@ fn retry_after_is_seconds_or_an_http_date_and_the_hold_is_bounded() {
 fn quota_report(refreshed_at: u64, remaining: Option<u8>) -> ProfileQuota {
     ProfileQuota {
         paid_credits: None,
+        monthly_price_usd: None,
         banked_resets: None,
         profile_id: "claude".into(),
         harness: HarnessKind::Claude,

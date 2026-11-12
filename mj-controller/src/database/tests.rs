@@ -3599,6 +3599,7 @@ fn deleting_an_operational_session_removes_its_prompts_and_keeps_its_context() {
         )
         .unwrap();
 
+    super::sessions::delete_session_from(&database, "session-1").unwrap();
     state.sessions.clear();
     save_state_to(&database, &state).unwrap();
 
@@ -6207,6 +6208,9 @@ fn state_reads_keep_sessions_and_subagents_in_one_snapshot_during_concurrent_cha
         } else {
             (with_child, without_child)
         };
+        if creating_child {
+            super::sessions::delete_session_from(&path, &child.id).unwrap();
+        }
         save_state_to(&path, &before).unwrap();
         let writer_path = path.clone();
         let committed = after.clone();
@@ -6216,6 +6220,9 @@ fn state_reads_keep_sessions_and_subagents_in_one_snapshot_during_concurrent_cha
                 // WAL permits this while a read transaction remains open.
                 if creating_child {
                     register_test_subagent(&writer_path, &child, &launch).unwrap();
+                }
+                if !creating_child {
+                    super::sessions::delete_session_from(&writer_path, &child.id).unwrap();
                 }
                 save_state_to(&writer_path, &committed).unwrap();
                 let writer = open(&writer_path).unwrap();
@@ -7424,6 +7431,7 @@ fn a_subagent_report_is_kept_once_per_turn_and_leaves_with_its_child() {
     let mut state = load_state_from(&path).unwrap();
     state.subagents.remove(&child.id);
     state.sessions.remove(&child.id);
+    super::sessions::delete_session_from(&path, &child.id).unwrap();
     save_state_to(&path, &state).unwrap();
     assert_eq!(
         load_subagent_report_from(&path, &child.id).unwrap(),
@@ -7471,6 +7479,7 @@ fn a_parents_stopped_sub_agents_are_listed_once_and_leave_with_the_parent() {
     let mut state = load_state_from(&path).unwrap();
     state.subagents.remove(&child.id);
     state.sessions.remove(&child.id);
+    super::sessions::delete_session_from(&path, &child.id).unwrap();
     save_state_to(&path, &state).unwrap();
     assert_eq!(
         load_stopped_subagents_from(&path, &parent.id)

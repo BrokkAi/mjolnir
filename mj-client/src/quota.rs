@@ -13,6 +13,44 @@ pub const API_LABEL: &str = "API";
 /// is no reading to take and none is missing.
 pub const NOT_REPORTED_LABEL: &str = "n/a";
 
+/// The independent subscription pools returned by Antigravity's `/usage`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AntigravityQuotaPool {
+    Gemini,
+    Claude,
+}
+
+impl AntigravityQuotaPool {
+    pub const ALL: [Self; 2] = [Self::Gemini, Self::Claude];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Gemini => "Ge",
+            Self::Claude => "Cl",
+        }
+    }
+
+    pub const fn bucket_prefix(self) -> &'static str {
+        match self {
+            Self::Gemini => "gemini-",
+            Self::Claude => "3p-",
+        }
+    }
+
+    pub const fn model_scope(self) -> &'static str {
+        match self {
+            Self::Gemini => "gemini",
+            Self::Claude => "claude,gpt",
+        }
+    }
+
+    pub fn of_window(window: &QuotaWindow) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|pool| window.model_scope.as_deref() == Some(pool.model_scope()))
+    }
+}
+
 /// A quota window reported by a harness.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QuotaWindow {
@@ -21,6 +59,7 @@ pub struct QuotaWindow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_seconds: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Model-name fragments sharing this allowance, separated by commas.
     pub model_scope: Option<String>,
     pub used: Option<i64>,
     pub limit: Option<i64>,
@@ -30,6 +69,16 @@ pub struct QuotaWindow {
 }
 
 impl QuotaWindow {
+    pub fn applies_to_model(&self, model: &str) -> bool {
+        self.model_scope.as_deref().is_none_or(|scope| {
+            let model = model.to_ascii_lowercase();
+            scope.split(',').any(|fragment| {
+                let fragment = fragment.trim();
+                !fragment.is_empty() && model.contains(&fragment.to_ascii_lowercase())
+            })
+        })
+    }
+
     /// Whether this allowance spans a week or longer, including model-scoped labels.
     pub fn is_weekly_or_longer(&self) -> bool {
         let label = if self.model_scope.is_some() {
@@ -63,6 +112,9 @@ pub struct QuotaSnapshot {
 /// The quota report shown for one harness profile.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProfileQuota {
+    /// Monthly USD list price used as a subscription capacity proxy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monthly_price_usd: Option<u32>,
     /// Paid extra usage, independent of included quota and banked resets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paid_credits: Option<PaidCredits>,
@@ -104,6 +156,19 @@ impl PaidCredits {
 }
 
 impl ProfileQuota {
+    /// A display projection of one pool; the original report retains all scopes
+    /// for model selection and quota recovery.
+    pub fn for_antigravity_pool(&self, pool: AntigravityQuotaPool) -> Self {
+        let mut report = self.clone();
+        report
+            .windows
+            .retain(|window| window.model_scope.as_deref() == Some(pool.model_scope()));
+        for window in &mut report.windows {
+            window.model_scope = None;
+        }
+        report
+    }
+
     /// Billing mode inferred from the daemon's cached report.
     pub fn billing_class(&self) -> QuotaBilling {
         if self.error.is_some() {
@@ -233,13 +298,20 @@ impl ProfileQuota {
                     (_, Some(used), Some(limit)) => format!("{used}/{limit}"),
                     _ => "available".to_string(),
                 };
+                let label = if self.harness == HarnessKind::Antigravity {
+                    AntigravityQuotaPool::of_window(window)
+                        .map(|pool| format!("{} ({})", window.label, pool.label()))
+                        .unwrap_or_else(|| window.label.clone())
+                } else {
+                    window.label.clone()
+                };
                 match window
                     .resets
                     .as_ref()
                     .filter(|reset| seen_resets.insert((*reset).clone()))
                 {
-                    Some(reset) => format!("{} {usage}, resets {reset}", window.label),
-                    None => format!("{} {usage}", window.label),
+                    Some(reset) => format!("{label} {usage}, resets {reset}"),
+                    None => format!("{label} {usage}"),
                 }
             })
             .collect::<Vec<_>>();

@@ -122,7 +122,7 @@ pub(super) async fn start_session(
     let (profile_hint, target_id) = resolve_launch(&state, &request)?;
     // An unnamed profile plus a named model is the CLI's model-first path.
     // Consider every configured, usable profile; a saved default profile is
-    // only the quota ranking anchor for ties.
+    // only the ordering anchor for candidates without a usable draw weight.
     let model_selection = if request.profile_id.is_none() {
         match request.model.as_deref() {
             Some(model) => Some(
