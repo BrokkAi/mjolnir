@@ -25,9 +25,10 @@ export interface Env {
 
 const UPSTREAM = "https://api.typesafe.ai/v1/systemone";
 const MAX_BODY_BYTES = 64 * 1024;
-// Frozen EOT evaluation (2026-11-12) measured ~79 KB evidence bodies.
-// Allow 80 KiB for that measured projection; other routes retain 64 KiB.
-const EOT_BODY_BYTES = 80 * 1024;
+// GLiDE documents 65,536 tokens per question (docs.fastino.ai, GLiDE API
+// notes). Four UTF-8 bytes per token gives a conservative 256 KiB request
+// body bound; tokenization is provider-owned, so this is a transport bound.
+const GLIDE_BODY_BYTES = 65_536 * 4;
 const UPSTREAM_TIMEOUT_MS = 8_000;
 const encoder = new TextEncoder();
 
@@ -57,9 +58,14 @@ type TurnEvidenceV6 = TurnEvidenceV4 & {
 // v6 adds background process evidence, so Jev can judge whether anyone still
 // depends on those commands (the `background` question).
 function evidenceV6(value: unknown): value is TurnEvidenceV6 {
+  return evidenceV6Shape(value, true);
+}
+
+function evidenceV6Shape(value: unknown, bounded: boolean): value is TurnEvidenceV6 {
+  const text = bounded ? boundedText : stringShape;
   if (!object(value)) return false;
   const { background, final_tool_calls, ...ordinary } = value;
-  if (!evidenceV5(ordinary)) return false;
+  if (!evidenceV5Shape(ordinary, bounded)) return false;
   if (final_tool_calls !== undefined && !(Array.isArray(final_tool_calls) && final_tool_calls.length <= 16
     && final_tool_calls.every(item => object(item) && Object.keys(item).length === 2
       && text(item.name, 128) && text(item.status, 32)))) return false;
@@ -105,9 +111,14 @@ function answersWithQuestions(
 }
 
 function evidenceV5(value: unknown): value is TurnEvidenceV4 {
+  return evidenceV5Shape(value, true);
+}
+
+function evidenceV5Shape(value: unknown, bounded: boolean): value is TurnEvidenceV4 {
+  const text = bounded ? boundedText : stringShape;
   if (!object(value)) return false;
   const { authorization, ...ordinary } = value;
-  if (!evidenceV4(ordinary) || (ordinary.phase === "replied" && !ordinary.completion)) return false;
+  if (!evidenceV4Shape(ordinary, bounded) || (ordinary.phase === "replied" && !ordinary.completion)) return false;
   if (authorization === undefined) return true;
   if (!object(authorization) || typeof authorization.authorization_complete !== "boolean"
     || typeof authorization.assistant_history_omitted !== "boolean"
@@ -123,7 +134,7 @@ function evidenceV5(value: unknown): value is TurnEvidenceV4 {
     else if (m.role === "assistant") assistants += encoder.encode(m.text).length;
     else return false;
   }
-  return users <= 32 * 1024 && assistants <= 16 * 1024;
+  return !bounded || (users <= 32 * 1024 && assistants <= 16 * 1024);
 }
 
 function answersV5(value: unknown): Record<string, unknown> | null {
@@ -150,7 +161,19 @@ function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function text(value: unknown, limit: number): value is string {
+const text = boundedText;
+
+// GLiDE uses the overall transport bound and the provider's token refusal.
+// Reuse the evidence shape checks while omitting legacy per-field byte limits.
+function stringShape(value: unknown, _limit: number): value is string {
+  return typeof value === "string";
+}
+
+function glideEvidence(value: unknown): value is TurnEvidenceV6 {
+  return evidenceV6Shape(value, false);
+}
+
+function boundedText(value: unknown, limit: number): value is string {
   return typeof value === "string" && encoder.encode(value).length <= limit;
 }
 
@@ -163,6 +186,11 @@ function probability(value: unknown): value is number {
 }
 
 function evidence(value: unknown): value is TurnEvidence {
+  return evidenceShape(value, true);
+}
+
+function evidenceShape(value: unknown, bounded: boolean): value is TurnEvidence {
+  const text = bounded ? boundedText : stringShape;
   if (!object(value)) return false;
   const fields = [
     "harness", "phase", "silent_for_s", "tools_in_flight", "recent_tools",
@@ -181,16 +209,26 @@ function evidence(value: unknown): value is TurnEvidence {
 }
 
 function evidenceV2(value: unknown): value is TurnEvidenceV2 {
+  return evidenceV2Shape(value, true);
+}
+
+function evidenceV2Shape(value: unknown, bounded: boolean): value is TurnEvidenceV2 {
+  const text = bounded ? boundedText : stringShape;
   if (!object(value) || !("transcript_summary" in value) || "recent_tools" in value
     || !text(value.transcript_summary, 48 * 1024)) return false;
   const { transcript_summary: _summary, ...rest } = value;
-  return evidence({ ...rest, recent_tools: [] });
+  return evidenceShape({ ...rest, recent_tools: [] }, bounded);
 }
 
 function evidenceV4(value: unknown): value is TurnEvidenceV4 {
+  return evidenceV4Shape(value, true);
+}
+
+function evidenceV4Shape(value: unknown, bounded: boolean): value is TurnEvidenceV4 {
+  const text = bounded ? boundedText : stringShape;
   if (!object(value)) return false;
   const { completion, ...ordinary } = value;
-  if (!evidenceV2(ordinary)) return false;
+  if (!evidenceV2Shape(ordinary, bounded)) return false;
   if (completion === undefined) return true;
   if (value.phase !== "replied" || !object(completion)
     || Object.keys(completion).length !== 2
@@ -370,7 +408,7 @@ async function handbackVerdict(state: unknown, key: string): Promise<Response> {
 function eotEvidence(value: unknown): boolean {
   if (!object(value)) return false;
   const { latest_user_message, current_assistant_replies, runtime_observations, ...base } = value;
-  return evidenceV6(base) && base.phase === "replied"
+  return glideEvidence(base) && base.phase === "replied"
     && typeof latest_user_message === "string"
     && Array.isArray(current_assistant_replies) && current_assistant_replies.every(v => typeof v === "string")
     && Array.isArray(runtime_observations) && runtime_observations.every(v => typeof v === "string");
@@ -425,12 +463,12 @@ export default {
     }
     let state: unknown;
     try {
-      state = await readBounded(request, eot ? EOT_BODY_BYTES : MAX_BODY_BYTES);
+      state = await readBounded(request, (eot || handback) ? GLIDE_BODY_BYTES : MAX_BODY_BYTES);
     } catch (cause) {
       return cause instanceof BodyTooLarge ? error("body_too_large", 413) : error("invalid_json", 400);
     }
     if (eot) return eotEvidence(state) ? eotVerdict(state, key) : error("invalid_evidence", 400);
-    if (handback) return evidenceV6(state) ? handbackVerdict(state, key) : error("invalid_evidence", 400);
+    if (handback) return glideEvidence(state) ? handbackVerdict(state, key) : error("invalid_evidence", 400);
     if (githubItem) return githubItemRequest(state) ? classify(state, key) : error("invalid_github_item_request", 400);
     if (githubItemV2) return githubItemRequestV2(state) ? classify(state, key, 1, false, true) : error("invalid_github_item_request", 400);
     if (questionLocator) return questionLocatorRequest(state) ? classify(state, key) : error("invalid_evidence", 400);

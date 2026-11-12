@@ -35,11 +35,30 @@ test("EOT provider backpressure preserves status and Retry-After", async t => {
   assert.equal(await response.text(), "busy");
   assert.equal(mock.mock.callCount(), 1);
 });
-test("EOT applies admission and its measured body bound before provider work", async t => {
+test("EOT applies admission and the GLiDE-derived body bound before provider work", async t => {
   const mock = t.mock.method(globalThis, "fetch", async () => Response.json({ answers }));
   assert.equal((await proxy.fetch(request(), { ...env, TURN_RATE_LIMITER: { async limit() { return { success: false }; } } })).status, 429);
-  assert.equal((await proxy.fetch(request({ ...state, latest_user_message: "x".repeat(81 * 1024) }), env)).status, 413);
+  assert.equal((await proxy.fetch(request({ ...state, latest_user_message: "x".repeat(257 * 1024) }), env)).status, 413);
   assert.equal(mock.mock.callCount(), 0);
-  assert.equal((await proxy.fetch(request({ ...state, latest_user_message: "x".repeat(70 * 1024) }), env)).status, 200);
+  assert.equal((await proxy.fetch(request({ ...state, latest_user_message: "x".repeat(81 * 1024) }), env)).status, 200);
   assert.equal((await proxy.fetch(request({ model: "override", state, questions }), env)).status, 400);
+});
+
+// Hard-won: dc4c34617: a client-side byte cap made long turns permanently unclassifiable
+test("GLiDE forwards a 200 KiB authorization reply without legacy field caps", async t => {
+  const large = { ...state, harness: "a".repeat(100), user_prompt_tail: "x".repeat(2048),
+    assistant_text_tail: "x".repeat(4096), authorization: { ...state.authorization,
+    messages: [{ id: "u", role: "user", text: "Complete task" },
+      { id: "a".repeat(512), role: "assistant", text: "synthetic reply ".repeat(14000) }] } };
+  const mock = t.mock.method(globalThis, "fetch", async (url, options) => {
+    assert.equal(url, "https://api.fastino.ai/v1/systemone");
+    assert.deepEqual(JSON.parse(options!.body as string).state, large);
+    return Response.json({ answers });
+  });
+  assert.equal((await proxy.fetch(request(large), env)).status, 200);
+  assert.equal(mock.mock.callCount(), 1);
+  assert.equal((await proxy.fetch(request({ ...large, authorization: {
+    ...large.authorization, messages: [{ id: "bad", role: "assistant", text: 123 }]
+  } }), env)).status, 400);
+  assert.equal(mock.mock.callCount(), 1);
 });

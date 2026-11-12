@@ -8,6 +8,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
+fn is_glide_size_refusal(status: reqwest::StatusCode, body: &[u8]) -> bool {
+    let Ok(body) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    (status == reqwest::StatusCode::PAYLOAD_TOO_LARGE && body["error"] == "body_too_large")
+        // Verified against Fastino with synthetic oversized input, 2026-11-12.
+        || (status == reqwest::StatusCode::BAD_REQUEST
+            && body["error"]["code"] == "input_too_long")
+}
+
 /// The Unix worker is the only production caller of the classifier client;
 /// these items stay compiled on Windows alongside the shared source type.
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -524,13 +534,20 @@ impl VerdictClient {
                     url.to_string()
                 }
             };
-            let response = self.client.post(endpoint).json(&body).send().await?;
-            ensure!(
-                response.status().is_success(),
-                "GLiDE proxy HTTP {} (Retry-After: {:?})",
-                response.status(),
-                response.headers().get(reqwest::header::RETRY_AFTER)
-            );
+            let response = self
+                .post_glide(
+                    reqwest::Url::parse(&endpoint)?,
+                    evidence
+                        .authorization
+                        .clone()
+                        .context("missing handback authorization")?,
+                    |history| {
+                        let mut evidence = evidence.clone();
+                        evidence.authorization = Some(history.clone());
+                        Ok(mj_core::jev::request_body(&evidence, None))
+                    },
+                )
+                .await?;
             let response = response.json::<serde_json::Value>().await?;
             mj_core::assessment::HandbackProbabilities::parse(&response["probabilities"])
         }
@@ -673,6 +690,49 @@ impl VerdictClient {
         (attempt, result)
     }
 
+    /// Retry only an explicit size refusal, and only with a strictly smaller body.
+    async fn post_glide(
+        &self,
+        endpoint: reqwest::Url,
+        mut history: mj_core::assessment::ContextHistory,
+        project: impl Fn(&mj_core::assessment::ContextHistory) -> Result<serde_json::Value>,
+    ) -> Result<reqwest::Response> {
+        let mut body = serde_json::to_vec(&project(&history)?)?;
+        loop {
+            let response = self
+                .client
+                .post(endpoint.clone())
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body.clone())
+                .send()
+                .await
+                .context("request GLiDE verdict")?;
+            if response.status().is_success() {
+                return Ok(response);
+            }
+            let status = response.status();
+            let bytes = response.bytes().await.context("read GLiDE refusal")?;
+            if is_glide_size_refusal(status, &bytes) {
+                let mut smaller = None;
+                while glide_turn::shrink(&mut history) {
+                    let candidate = serde_json::to_vec(&project(&history)?)?;
+                    if candidate.len() < body.len() {
+                        smaller = Some(candidate);
+                        break;
+                    }
+                }
+                if let Some(candidate) = smaller {
+                    body = candidate;
+                    continue;
+                }
+            }
+            anyhow::bail!(
+                "GLiDE verdict HTTP {status}: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+        }
+    }
+
     /// Completed-turn transport only; callers retain ownership of action and logging.
     pub(crate) async fn ask_glide_turn(
         &self,
@@ -681,7 +741,6 @@ impl VerdictClient {
         facts: &mj_core::activity::ActivityFacts,
         native_agent_count: usize,
     ) -> Result<glide_turn::Probabilities> {
-        let body = glide_turn::project(evidence, authorization, facts, native_agent_count)?;
         // GLiDE is hosted even when the unrelated locator uses a Direct source.
         let endpoint = match &self.source {
             VerdictSource::Hosted { endpoint } => {
@@ -692,14 +751,10 @@ impl VerdictClient {
             )?,
         };
         let mut response = self
-            .client
-            .post(endpoint)
-            .json(&body)
-            .send()
-            .await
-            .context("request GLiDE turn verdict")?
-            .error_for_status()
-            .context("GLiDE turn verdict HTTP status")?;
+            .post_glide(endpoint, authorization, |history| {
+                glide_turn::project(evidence, history.clone(), facts, native_agent_count)
+            })
+            .await?;
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await.context("read GLiDE verdict")? {
             ensure!(
@@ -848,6 +903,109 @@ mod tests {
             .unwrap(),
             task,
         )
+    }
+
+    // Hard-won: dc4c34617: a client-side byte cap made long turns permanently unclassifiable
+    #[tokio::test]
+    async fn glide_handback_large_requests_shrink_only_after_size_refusal() {
+        for handback in [false, true] {
+            for refusal in [false, true] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+                let server = tokio::spawn(async move {
+                    let mut sizes = Vec::new();
+                    loop {
+                        let (socket, _) = listener.accept().await.unwrap();
+                        let mut socket = BufReader::new(socket);
+                        let mut length = 0usize;
+                        loop {
+                            let mut line = String::new();
+                            socket.read_line(&mut line).await.unwrap();
+                            if line == "\r\n" {
+                                break;
+                            }
+                            if let Some(value) =
+                                line.to_ascii_lowercase().strip_prefix("content-length:")
+                            {
+                                length = value.trim().parse().unwrap();
+                            }
+                        }
+                        let mut body = vec![0; length];
+                        socket.read_exact(&mut body).await.unwrap();
+                        sizes.push(length);
+                        let reject = refusal && sizes.len() <= 3;
+                        let (status, answer) = if reject {
+                            if sizes.len() == 1 {
+                                (
+                                    "413 Payload Too Large",
+                                    serde_json::json!({"error":"body_too_large"}),
+                                )
+                            } else {
+                                (
+                                    "400 Bad Request",
+                                    serde_json::json!({"error":{"code":"input_too_long","message":"prompt exceeds the maximum context length"}}),
+                                )
+                            }
+                        } else if handback {
+                            (
+                                "200 OK",
+                                serde_json::json!({"probabilities":{"unfinished":0.0,"needs_parent_input":0.0,"blocked":0.0,"permitted_stop":0.0,"finished":1.0,"unclear":0.0}}),
+                            )
+                        } else {
+                            let samples: serde_json::Value = serde_json::from_str(include_str!(
+                                "../../../mj-core/src/activity/eot_glide_fresh_sample.json"
+                            ))
+                            .unwrap();
+                            ("200 OK", samples[0].clone())
+                        };
+                        let answer = answer.to_string();
+                        socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}", answer.len()).as_bytes()).await.unwrap();
+                        if !reject {
+                            return sizes;
+                        }
+                    }
+                });
+                let client = VerdictClient::new(VerdictSource::Hosted { endpoint }).unwrap();
+                let mut completed = evidence();
+                completed.phase = TurnPhase::Replied;
+                completed.authorization = Some(ContextHistory {
+                    messages: vec![
+                        EvidenceMessage {
+                            id: "u".into(),
+                            role: "user".into(),
+                            text: "Complete task".into(),
+                        },
+                        EvidenceMessage {
+                            id: "a".into(),
+                            role: "assistant".into(),
+                            text: "synthetic reply ".repeat(14000),
+                        },
+                    ],
+                    ..Default::default()
+                });
+                if handback {
+                    client
+                        .ask_handback_logged("isolated", 1, &completed)
+                        .await
+                        .1
+                        .unwrap();
+                } else {
+                    client
+                        .ask_glide_turn(
+                            &completed,
+                            completed.authorization.clone().unwrap(),
+                            &Default::default(),
+                            0,
+                        )
+                        .await
+                        .unwrap();
+                }
+                let sizes = server.await.unwrap();
+                assert!(sizes[0] > 200 * 1024);
+                assert_eq!(sizes.len(), if refusal { 4 } else { 1 });
+                assert!(sizes.windows(2).all(|pair| pair[1] < pair[0]));
+            }
+        }
     }
 
     fn evidence() -> TurnEvidence {
