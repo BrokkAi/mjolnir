@@ -2360,7 +2360,7 @@ function renderNewTargetSizingControls(draft, host) {
     } else if (target.container_host_limits) {
       host.append(el('p', 'dim', `Host: ${target.container_host_limits.cpus} CPUs and ${capacityGiBText(target.container_host_limits.memory_bytes)} GiB RAM. RAM left is unavailable until the capacity probe answers.`));
     }
-    const saveDefault = el('label', 'field');
+    const saveDefault = el('label', 'field-inline');
     const saveDefaultInput = el('input');
     saveDefaultInput.type = 'checkbox';
     saveDefaultInput.id = 'new-save-default-size';
@@ -2368,7 +2368,7 @@ function renderNewTargetSizingControls(draft, host) {
     saveDefaultInput.onchange = () => {
       draft.rememberContainerSize = saveDefaultInput.checked;
     };
-    saveDefault.append(saveDefaultInput, document.createTextNode(' Save as default sizing'));
+    saveDefault.append(saveDefaultInput, document.createTextNode('Save as default sizing'));
     host.append(saveDefault);
     const error = el('p', 'error', newResourceAllocationError(draft));
     error.id = 'new-resource-error';
