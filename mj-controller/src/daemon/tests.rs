@@ -8181,6 +8181,112 @@ async fn discarding_changes_since_a_checkpoint_stops_the_sub_agents() {
     parent.channels.shutdown.shutdown().await.unwrap();
 }
 
+// Hard-won: #1507: an accepted Discard failure disappeared when its observer left.
+#[cfg(unix)]
+#[tokio::test]
+async fn accepted_discard_failure_is_published_without_an_observer() {
+    use crate::controller::checkpoint::tests::LATCH_RELAY_SESSION;
+    const NAME: &str = "accepted_discard_failure_is_published_without_an_observer";
+    if !in_isolated_live_parent_test(NAME) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let parent = live_parent_with_a_working_sub_agent(ParentRecoveryCopy::Installed).await;
+    let checkpoint = crate::database::load_state().unwrap().sessions[LATCH_RELAY_SESSION]
+        .checkpoint
+        .clone()
+        .unwrap();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (acceptance, watch) = tokio::sync::watch::channel(Some(Ok(())));
+    let child = parent
+        .state
+        .admit_prepared_lifecycle(
+            WORKING_CHILD.into(),
+            LifecycleKind::StopSubagent,
+            super::lifecycle::LifecycleStart::request(
+                serde_json::to_string(&(LifecycleKind::StopSubagent.label(), false)).unwrap(),
+                None,
+                None,
+            ),
+            Some(watch),
+            {
+                let release = release.clone();
+                move |_, _, _| async move {
+                    release.notified().await;
+                    bail!("held child teardown diagnostic")
+                }
+            },
+        )
+        .unwrap();
+    let child_result = child.result.clone();
+    drop(child);
+    let baseline = acceptance.receiver_count();
+    let mut started = parent
+        .state
+        .admit_session_lifecycle(SessionLifecycleRequest::Discard {
+            session_id: LATCH_RELAY_SESSION.into(),
+            checkpoint: checkpoint.clone(),
+        })
+        .await
+        .unwrap();
+    let receipt = tokio::time::timeout(Duration::from_secs(30), started.confirm_acceptance())
+        .await
+        .unwrap()
+        .unwrap();
+    let accepted = crate::database::load_state().unwrap().sessions[LATCH_RELAY_SESSION].clone();
+    assert_eq!(accepted.state, SessionState::Destroying);
+    assert_eq!(accepted.checkpoint.as_ref(), Some(&checkpoint));
+    drop(started);
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while acceptance.receiver_count() <= baseline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("Discard never joined the held child stop");
+    // No initiating result or acceptance observer remains when teardown fails.
+    release.notify_one();
+    assert!(
+        RuntimeState::wait_lifecycle_result(child_result)
+            .await
+            .is_err()
+    );
+    let retained = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let stored = crate::database::load_state().unwrap();
+            let record = &stored.sessions[LATCH_RELAY_SESSION];
+            if record.public_error().is_some() {
+                break record.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("Discard failure was not persisted without an observer");
+    let public = retained.public_error().unwrap();
+    assert!(public.starts_with(mj_core::state::CLOSE_FAILURE_PREFIX));
+    assert!(public.contains(&receipt.operation_id));
+    assert!(!public.contains("held child teardown diagnostic"));
+    assert_eq!(retained.state, SessionState::Destroying);
+    assert_eq!(retained.checkpoint.as_ref(), Some(&checkpoint));
+    assert_eq!(retained.target, accepted.target);
+    // Stored timestamps have second precision; publication may share the ACK second.
+    assert!(retained.updated_at >= accepted.updated_at);
+    assert_eq!(
+        Controller::load().unwrap().state.sessions[LATCH_RELAY_SESSION].last_error,
+        retained.last_error
+    );
+    let outcome = parent.state.wait_session_lifecycle(receipt).await.unwrap();
+    assert!(
+        matches!(outcome, DaemonReply::LifecycleFailed(detail) if detail.contains("held child teardown diagnostic"))
+    );
+    assert_eq!(
+        parent.state.owner().controller().state.sessions[LATCH_RELAY_SESSION].last_error,
+        retained.last_error
+    );
+    parent.channels.shutdown.shutdown().await.unwrap();
+}
+
 // Hard-won: #1507: an accepted Discard had no durable teardown intent before target removal.
 #[cfg(unix)]
 #[tokio::test]

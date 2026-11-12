@@ -503,11 +503,12 @@ impl RuntimeState {
                         && matches!(
                             kind,
                             LifecycleKind::Suspend
+                                | LifecycleKind::ForceStop
                                 | LifecycleKind::Restart
                                 | LifecycleKind::UpgradeContainer
                         )
                     {
-                        if kind == LifecycleKind::Suspend {
+                        if matches!(kind, LifecycleKind::Suspend | LifecycleKind::ForceStop) {
                             state
                                 .record_failed_close(
                                     &operation_session_id,

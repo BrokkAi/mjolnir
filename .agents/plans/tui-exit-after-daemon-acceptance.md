@@ -1,12 +1,12 @@
 # Detach accepted lifecycle operations and stop retiring workers once
 
-This ExecPlan is maintained according to `.agents/PLANS.md`. It records the final design, validation and the scope cut after review.
+This ExecPlan is maintained according to `.agents/PLANS.md`. It records the lifecycle and retirement latency changes, their validation, and the continuing raw-process ownership work after review.
 
 ## Purpose / Big Picture
 
 Suspending a session can require checkpointing and target cleanup that outlive the dashboard. Once the daemon has accepted responsibility, closing the TUI must not wait for execution to finish or cancel an accepted Move. Unsent requests, drafts and other client-owned writes must remain protected until their own handoff or save.
 
-The reported suspend of session 5bc0d90883ed581d402cf1eee88b4a2f spent minutes stopping 93 historical worker roots serially and then stopping them again during removal. Stop independent roots concurrently once, and retain the managed lifecycle exclusion through removal. Keep the established bounded raw-worker shutdown and existing immediate container stop. Do not expand this latency fix into an unproven arbitrary-process containment mechanism.
+The reported suspend of session 5bc0d90883ed581d402cf1eee88b4a2f spent minutes stopping 93 historical worker roots serially and then stopping them again during removal. Stop independent roots concurrently once, and retain the managed lifecycle exclusion through removal. The first implementation's process-snapshot fence was unsafe and has been removed. Issue #1510 remains part of this user request: establish raw-process teardown through actual process owners rather than reintroducing a snapshot-based containment claim. Preserve the existing immediate container stop.
 
 ## Progress
 
@@ -19,7 +19,12 @@ The reported suspend of session 5bc0d90883ed581d402cf1eee88b4a2f spent minutes s
 - [x] Committed the initial implementation as b78af534d and requested review.
 - [x] Accepted two real review findings in the newly added process-tree fence; selected complete removal of that mechanism after independent ownership investigation.
 - [x] Completed the scoped backend cut, ten affected tests, final workspace Clippy with zero warnings and format/diff checks. Both worker-stop source files exactly match the pre-task baseline.
-- [ ] Commit the correction, complete required review and push. Installation is explicitly excluded.
+- [x] Committed removal of the unsafe fence as 4b6666729 and completed a second review.
+- [x] Persist accepted Discard failures under daemon ownership after the initiating observer exits. The new regression, two existing Discard cases, independent bounded review and final workspace Clippy/format/diff checks passed.
+- [ ] Commit the Discard correction and complete follow-up review.
+- [x] Claimed #1510 after the user challenged its unilateral deferral. It is included in the current work.
+- [ ] Settle and record an authoritative raw-process ownership design, implement it, and validate process identity and teardown ordering without relying on PID snapshots as ownership.
+- [ ] Push coherent reviewed changes and complete the remaining ownership work. Installation is explicitly excluded.
 
 ## Surprises & Discoveries
 
@@ -53,13 +58,17 @@ Decision: Hold TUI quit guards through acceptance, then make completion observat
 
 Decision: Keep owner-first/sorted worker permits and transactional Retiring admission. After existing container quiescence, perform independent remaining ordinary worker stops concurrently under their exact permits, join every result/panic and aggregate failures. Issue removal-only authority only after managed stops complete successfully, and retain its Reclamation borrow through command execution. Keep child removal serial and owner/enclosing removal last.
 
-Decision: Remove the entire added raw-process fence and its identity refactor after review. Reuse the established bounded ordinary stop once per root in parallel. Rationale: the observed minutes came from serialized and repeated stops; immediate all-descendant containment needs ownership that the daemon currently lacks. Do not add a protocol, service, cgroup, generation marker, extra polling or another snapshot predicate to justify the discarded mechanism. Describe the retained authority as managed-stop completion plus lifecycle exclusion, never proof that all arbitrary forked writers are gone.
+Decision: Remove the entire added raw-process fence and its identity refactor after review. Reuse the established bounded ordinary stop once per root in the latency checkpoint. Rationale: the observed minutes came from serialized and repeated stops; process snapshots cannot establish the ownership needed for stronger teardown. Describe the retained authority as managed-stop completion plus lifecycle exclusion, never proof that all arbitrary forked writers are gone. Any subsequent interface must be justified by the actual process-owner design, not added to rescue the discarded census mechanism.
+
+Decision: Include #1510 in the current task. Rationale: the user correctly identified process ownership as directly related to the requested raw teardown; splitting it out was the agent's sequencing choice, not a user-approved scope reduction. Finish the independently reviewable latency changes while investigating a minimal ownership design using the bridge supervisor, terminal registry and user-shell owners. Do not signal reused numeric process-group IDs or infer ownership from ancestry observed before a later identity read. Record the chosen interface, compatibility behavior and testable limits before implementation.
+
+Decision: Use one per-worker process owner for #1510, with actual child ownership outside the worker and file-descriptor handoff of existing streams. Rationale: an in-worker stop request cannot clean terminal and shell groups after that worker hangs or dies; an external owner can serialize launch versus stop and retain the actual child identity. The owner must keep the group leader unreaped until the final group signal, permanently disarm signalling before reaping, and confirm completion separately. Preserve established bounded bridge cleanup for native harness tools. New owner failure retains the affected root with a visible error; legacy workers retain explicitly legacy stop semantics. This is a process belonging to the session, not a host service or a claim to contain arbitrary daemonized host processes. The ownership ExecPlan will specify the startup and root-lock contract before source changes begin.
 
 Decision: Validate, commit and push this task only. The user clarified that the earlier installation instruction did not cover this separate suspend/TUI work. Do not replace installed binaries or activate a new live daemon.
 
 ## Outcomes & Retrospective
 
-The final implementation preserves the two latency fixes: concurrent one-pass retirement and TUI exit after daemon acceptance. The attempted immediate tree-kill mechanism was removed completely. This is a deliberate scope reduction, not a substitute claim that the old snapshot is containment-safe. The existing raw ownership limitation is recorded separately in https://github.com/BrokkAi/mjolnir/issues/1510.
+The current latency checkpoint preserves concurrent one-pass retirement and TUI exit after daemon acceptance. The attempted immediate tree-kill mechanism was removed completely; the old snapshot is not containment-safe. The remaining ownership defect is tracked in https://github.com/BrokkAi/mjolnir/issues/1510 and remains unfinished work within this request. The second review's Discard failure-publication defect is fixed: the lifecycle supervisor now routes ForceStop failures through the existing safe durable close-failure publication before completing the result. A real held child-stop failure persists its public reference after the initiating observer leaves, retaining Destroying, checkpoint and target; the exact-ID observer can still obtain the detailed failure. The new test passed in0.40s, both existing Discard cases passed, and final workspace Clippy/format/diff checks passed. No new result ledger or state was added.
 
 The integrated five-package development suites passed 4,390 tests with 37 ignored, plus one ignored documentation test. One workspace-close fixture failed and was corrected; its affected rerun passed in0.39s. Client phase and TUI guard filters passed after boxing Move/Resume payloads without changing JSON. Workspace Clippy and format/diff checks passed after isolated enum/layout repairs. Passing full suites were not repeated for individual repairs.
 
@@ -71,7 +80,7 @@ Native Mac and Linux tests of the discarded fence remain historical experiment e
 
 The TUI in mj-cli owns terminal input and unsaved client data. mj-controller's daemon owns lifecycle operations and persisted session/operation state. Workers own their harnesses and journals independently of attached clients. mj-client defines the daemon wire protocol.
 
-Relevant source is mj-cli/src/dashboard/{actions,drains,io,io/spawn}.rs and pollers.rs; mj-client/src/daemon.rs; mj-controller/src/daemon/{session_lifecycle,lifecycle,owner,close,restart,resume,session_move}.rs; controller/{environment,lifecycle,move_session,resume}.rs; and targets/cleanup.rs. Existing targets/worker_daemon.rs and worker_binary/process.rs must retain their pre-task ordinary stop implementation after the cut.
+Relevant source is mj-cli/src/dashboard/{actions,drains,io,io/spawn}.rs and pollers.rs; mj-client/src/daemon.rs; mj-controller/src/daemon/{session_lifecycle,lifecycle,owner,close,restart,resume,session_move}.rs; controller/{environment,lifecycle,move_session,resume}.rs; and targets/cleanup.rs. Existing targets/worker_daemon.rs and worker_binary/process.rs retain their pre-task ordinary stop implementation in the latency checkpoint. The raw ownership investigation starts at mj-worker/src/worker_runtime/unix/supervisor.rs, mj-worker/src/acp.rs and the terminal/user-shell registries; these own real children and process groups rather than daemon-side inferred descendants.
 
 Reclamation holds the retiring environment's inventory and worker permits. Its scoped stopped-worker value identifies a placement whose existing managed stop completed. An opaque cleanup plan retains that borrow until execution returns, preventing a caller from extracting an unguarded removal command.
 
@@ -79,9 +88,11 @@ Reclamation holds the retiring environment's inventory and worker permits. Its s
 
 Milestone one diagnoses the actual delay and the client/daemon boundary. It is complete with timestamped evidence, an operation matrix and the 93-root double-stop finding.
 
-Milestone two implements acceptance and concurrent retirement through existing owners. It is complete except for removing the rejected process-tree fence. Restore that file and its helper to their pre-task implementation, call ordinary stop once per root, preserve the concurrency/failure/no-repeat tests and qualify the authority's managed-lifecycle contract.
+Milestone two implements acceptance and concurrent retirement through existing owners. The rejected process-tree fence is removed. Ordinary stop runs once per root, preserving concurrency/failure/no-repeat tests and qualifying the authority's managed-lifecycle contract. Complete the Discard review fix by publishing ForceStop failures through the existing close-failure owner, with a regression that drops the initiating observer before a held teardown failure.
 
-Milestone three verifies the final scoped result and delivers reviewed commits to origin/master. Reuse accepted broad validation, run affected stop/retirement and retained-Move tests after the cut, run final workspace Clippy/format/diff checks, commit the correction and request review again. Merge upstream as already authorized. Do not install.
+Milestone three delivers the independently reviewable latency result to origin/master. Reuse accepted broad validation and the completed affected tests after the cut. Validate the Discard correction, run final workspace Clippy/format/diff checks, commit and request review again. Merge upstream as already authorized. Do not install.
+
+Milestone four addresses #1510 in this same task. First compare concrete ownership mechanisms for responsive and unresponsive raw workers, including separately grouped bridge, terminal and user-shell processes. Establish how the actual child identity remains reserved until group teardown and how completion is confirmed before file deletion. State the coverage of harness-internal detached processes honestly. Record the chosen design and exact source changes in a self-contained ownership ExecPlan before implementing this significant change. Verify process reuse, group leader exit, independent groups, partial failures and legacy behavior through real isolated processes. A separate plan organizes implementation; it does not defer the user's request.
 
 ## Concrete Steps
 
@@ -117,11 +128,13 @@ Retiring environment state supports retry after a failed managed stop. Keep all 
 
 ## Artifacts and Notes
 
-Issues: https://github.com/BrokkAi/mjolnir/issues/1506 and https://github.com/BrokkAi/mjolnir/issues/1507.
+Issues: https://github.com/BrokkAi/mjolnir/issues/1506, https://github.com/BrokkAi/mjolnir/issues/1507 and https://github.com/BrokkAi/mjolnir/issues/1510.
 
 Live timings and backend work are in .mj/agents/1cbd92b1e462d4831611d7744363a0df/. Its 1506-authoritative-ownership-map.md describes actual group owners. The independent design review is .mj/agents/f2c6d8abae249bbaa96ea6880588d309/teardown-design-review.md; its final scope-cut addendum supersedes earlier immediate-kill proposals.
 
 API evidence is .mj/agents/3015c9deeefcbc11932935c38d210b42/implementation.md, review-fixes-focused.log and authorized-fixture-boxing-tests.log. The initial incomplete TUI child was closed before parent takeover; the parent owns its final CLI changes.
+
+Discard failure-publication evidence is .mj/agents/3015c9deeefcbc11932935c38d210b42/discard-failure-publication-final.log and the two existing cases in discard-failure-publication-tests.log. Final lint evidence is .mj/agents/b0df254c0e1ea40035ec39f1841037fe/clippy-discard-publication.log with format/diff siblings. Independent inspection found no remaining issue in this correction.
 
 Integrated evidence is .mj/agents/b0df254c0e1ea40035ec39f1841037fe/final-validation.md, test-summary.json and smoke-process-exit-proof.json. Final scope-cut lint is clippy-scope-cut.log with format/diff siblings. Backend final tests and report are .mj/agents/1cbd92b1e462d4831611d7744363a0df/1506-scope-cut-tests.log and1506-backend-cut-report.md. The accepted one-off tmux adapter is accepted_suspend_tmux.py in the validator report directory; full evidence is under /mnt/optane/tmp/1507-tmux-completion-evidence/tui-accepted-suspend-seed-1507-92281.
 
@@ -133,4 +146,4 @@ No new crate, runtime dependency, concurrency cap, timeout, service, generation 
 
 Revision note: Initial diagnostics and implementation were followed by independent review. Two real races invalidated the added PS-based fencing proof. This revision records the final scope cut, the preserved latency/acceptance fixes, reusable validation and the user's explicit no-install instruction.
 
-Revision note: The final scoped cut passed affected tests and workspace lint/format checks. Baseline raw process ownership is tracked separately as #1510; the current fixes are prepared for follow-up review and push.
+Revision note: The scoped cut passed affected tests and workspace lint/format checks. The user challenged deferring #1510, so raw ownership remains in the current work. The latency checkpoint is undergoing a Discard failure-publication review fix while the authoritative ownership design is investigated. No installation is authorized.
