@@ -786,6 +786,15 @@ fn expected_digest(triple: &str) -> Result<&'static str> {
 /// Async HTTP is cancelled by dropping its future; subprocesses retain their executor owner.
 fn download(triple: &str, directory: &Path, executor: &impl CommandExecutor) -> Result<PathBuf> {
     let expected = expected_digest(triple)?;
+    // Keep the original verified cache layout for offline retries and other hosts.
+    let destination = mj_core::config::data_dir()
+        .join("mbx")
+        .join(MBX_VERSION)
+        .join(triple)
+        .join("mbx");
+    if destination.is_file() {
+        return Ok(destination);
+    }
     let archive_path = directory.join("release.tar.gz");
     let url = release_url(triple);
     let archive = mj_core::runtime::block_on(async {
@@ -809,10 +818,27 @@ fn download(triple: &str, directory: &Path, executor: &impl CommandExecutor) -> 
     );
     let binary = extract_binary(&archive)?;
     check_cancelled(executor)?;
-    let destination = directory.join("mbx");
-    std::fs::write(&destination, binary).context("write verified staged mbx binary")?;
-    set_executable(&destination)?;
-    Ok(destination)
+    retain_verified_download(&destination, &binary)
+}
+
+fn retain_verified_download(destination: &Path, binary: &[u8]) -> Result<PathBuf> {
+    let parent = destination
+        .parent()
+        .context("verified mbx cache path has no parent")?;
+    std::fs::create_dir_all(parent).context("create verified mbx cache directory")?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    std::io::Write::write_all(&mut temporary, binary)?;
+    temporary.as_file_mut().sync_all()?;
+    set_executable(temporary.path())?;
+    match temporary.persist_noclobber(destination) {
+        Ok(_) => Ok(destination.to_path_buf()),
+        Err(error) if destination.is_file() => {
+            // A concurrent verified download published the same pinned release first.
+            drop(error);
+            Ok(destination.to_path_buf())
+        }
+        Err(error) => Err(error.error).context("publish verified mbx download cache"),
+    }
 }
 
 async fn fetch_archive(url: &str) -> Result<Vec<u8>> {
@@ -1201,6 +1227,43 @@ mod tests {
             !command.purpose.starts_with("run mbx setup")
                 && !command.purpose.starts_with("add the mbx PATH")
         }));
+    }
+
+    // Hard-won: #1514: disposable staging discarded verified binaries needed for offline repair.
+    #[test]
+    fn verified_download_cache_survives_staging_cleanup_and_supports_offline_retry() {
+        const CHILD: &str = "MJ_MBX_OFFLINE_CACHE_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            crate::controller::test_support::IsolatedTest::new(
+                crate::controller::test_support::test_name(
+                    module_path!(),
+                    "verified_download_cache_survives_staging_cleanup_and_supports_offline_retry",
+                ),
+            )
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "mbx-offline-cache")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        let destination = mj_core::config::data_dir()
+            .join("mbx")
+            .join(MBX_VERSION)
+            .join("x86_64")
+            .join("mbx");
+        let stage = tempfile::tempdir().unwrap();
+        let bytes = b"recorded verified mbx executable";
+        retain_verified_download(&destination, bytes).unwrap();
+        drop(stage);
+        // The real download entry point must reuse its durable cache with no runtime or network.
+        MBX_TEST_RELEASE_URL
+            .set("http://127.0.0.1:0/offline".into())
+            .unwrap();
+        let next_stage = tempfile::tempdir().unwrap();
+        let cached = download("x86_64", next_stage.path(), &targets::ProcessExecutor).unwrap();
+        assert_eq!(cached, destination);
+        assert_eq!(std::fs::read(cached).unwrap(), bytes);
     }
 
     // Hard-won: #1514: interruption after publishing mbx must be repaired by rerunning Install.

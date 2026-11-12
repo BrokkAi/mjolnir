@@ -25,6 +25,8 @@ This is private-network operation with working SSH authentication and host trust
 
 ## Surprises & Discoveries
 
+- (2026-11-12) Disposable staging must not discard verified release downloads. Restored the original `mbx/<version>/<architecture>/mbx` cache: checksum verification precedes atomic cache publication, concurrent downloads retain the first complete verified binary, and later hosts/offline repair reuse it while incomplete HTTP/download staging remains disposable. The offline-retry regression, targeted installer/control tests and workspace Clippy pass.
+
 - (2026-11-12) User resolved profile concurrency by using a single append of the complete block under the host mbx lock. Profile edits no longer copy or rename existing contents, so concurrent external appends cannot be overwritten. The mid-publication regression now reruns two installers concurrently and checks for exactly one complete block. Targeted installer/control tests and workspace Clippy pass; the old start-marker assertion was updated for complete-block detection.
 
 - (2026-11-12) Final disposable installer: async reqwest retains its 120-second download deadline and drops the response on cancellation; the entire install holds no admission. Mj profile updates use temporary siblings and atomic rename. Matching Mj-managed binaries retain the install/upgrade action for repair after interrupted setup; newer versions are not offered a downgrade. HTTP handoff/disconnect and mid-publication rerun regressions pass, as do all touched-crate suites and workspace Clippy. The recorded executable fixture uses its interpreter directly to avoid test forks inheriting writers and triggering ETXTBSY.
