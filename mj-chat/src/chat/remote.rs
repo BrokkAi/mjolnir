@@ -1049,12 +1049,14 @@ fn normalize_prompt_images(
                 )?;
                 let reference = tokio::runtime::Handle::current().block_on(async {
                     let mut client = mj_client::daemon::connect_existing().await?;
-                    let blob = client.upload(&mut optimized.bytes.as_slice()).await?;
+                    let mut reader = std::io::Cursor::new(&optimized.bytes);
                     match client
-                        .request(mj_client::daemon::DaemonAction::InstallAttachment {
-                            session_id: session_id.to_owned(),
-                            reference: reference.clone(),
-                            blob,
+                        .upload_and_consume(&mut reader, |blob| {
+                            mj_client::daemon::DaemonAction::InstallAttachment {
+                                session_id: session_id.to_owned(),
+                                reference: reference.clone(),
+                                blob,
+                            }
                         })
                         .await?
                     {

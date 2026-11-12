@@ -1807,6 +1807,54 @@ impl DaemonClient {
         }
     }
 
+    /// Upload and consume on one connection. Only explicit non-admission permits
+    /// replay; a transport error may hide acceptance and is returned to the caller.
+    pub async fn upload_and_consume<R, A>(
+        &mut self,
+        reader: &mut R,
+        action: A,
+    ) -> Result<DaemonReply>
+    where
+        R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin,
+        A: Fn(String) -> DaemonAction,
+    {
+        self.upload_and_consume_with_reconnect(reader, action, || async {
+            loop {
+                if let Ok(client) = connect_existing().await {
+                    return Ok(client);
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        })
+        .await
+    }
+
+    async fn upload_and_consume_with_reconnect<R, A, F, Fut>(
+        &mut self,
+        reader: &mut R,
+        action: A,
+        mut reconnect: F,
+    ) -> Result<DaemonReply>
+    where
+        R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin,
+        A: Fn(String) -> DaemonAction,
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<Self>>,
+    {
+        use tokio::io::AsyncSeekExt;
+        let start = reader.stream_position().await?;
+        loop {
+            let blob = self.upload(reader).await?;
+            let reply = self.request_once(action(blob)).await?;
+            if !matches!(reply, DaemonReply::UpgradePending) {
+                return Ok(reply);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            *self = reconnect().await?;
+            reader.seek(std::io::SeekFrom::Start(start)).await?;
+        }
+    }
+
     async fn request_once(&mut self, action: DaemonAction) -> Result<DaemonReply> {
         let protocol_version = self.metadata.protocol_version;
         let request_id = self.next_request_id;
@@ -2204,13 +2252,13 @@ impl DaemonClient {
         &mut self,
         session: SessionRecord,
         bundle: Option<ImportedBundle>,
-        blob: String,
+        reader: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin),
     ) -> Result<()> {
         match self
-            .request(DaemonAction::ImportSession {
+            .upload_and_consume(reader, |blob| DaemonAction::ImportSession {
                 blob,
-                session: Box::new(session),
-                bundle,
+                session: Box::new(session.clone()),
+                bundle: bundle.clone(),
             })
             .await?
         {
@@ -3573,6 +3621,110 @@ mod tests {
             client
                 .request_with_reconnect(action, || async {
                     panic!("an ambiguous acknowledgement must not replay a mutation");
+                })
+                .await
+                .is_err()
+        );
+        server.await.unwrap();
+    }
+
+    // Hard-won: #1514: a refused consumer reused a blob from the old connection.
+    #[tokio::test]
+    async fn refused_blob_consumer_reuploads_before_single_acceptance() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address: listener.local_addr().unwrap(),
+            token: "test".into(),
+            started_at: "test".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
+        };
+        let bytes = vec![42; 192 * 1024];
+        let expected = bytes.clone();
+        let server = tokio::spawn(async move {
+            let mut accepted = 0;
+            for attempt in 0..3 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut received: Vec<u8> = Vec::new();
+                let upload = loop {
+                    let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                    let DaemonAction::UploadChunk { bytes, sha256 } = &request.action else {
+                        panic!("expected upload before consuming action");
+                    };
+                    received.extend(bytes);
+                    if sha256.is_some() {
+                        break request;
+                    }
+                };
+                assert_eq!(received, expected);
+                let blob = format!("connection-{attempt}");
+                write_frame(
+                    &mut stream,
+                    &ResponseEnvelope {
+                        protocol_version: upload.protocol_version,
+                        request_id: upload.request_id,
+                        result: Ok(DaemonReply::BlobUploaded(blob.clone())),
+                    },
+                )
+                .await
+                .unwrap();
+                let consume: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                let DaemonAction::InstallAttachment { blob: actual, .. } = consume.action else {
+                    panic!("expected consumer");
+                };
+                assert_eq!(actual, blob);
+                if attempt == 2 {
+                    break;
+                } // Lost ACK must not reconnect or replay.
+                let reply = if attempt == 0 {
+                    DaemonReply::UpgradePending
+                } else {
+                    accepted += 1;
+                    DaemonReply::Done
+                };
+                write_frame(
+                    &mut stream,
+                    &ResponseEnvelope {
+                        protocol_version: consume.protocol_version,
+                        request_id: consume.request_id,
+                        result: Ok(reply),
+                    },
+                )
+                .await
+                .unwrap();
+            }
+            assert_eq!(accepted, 1);
+        });
+        let reference = mj_core::attachment::AttachmentRef {
+            sha256: "a".repeat(64),
+            mime_type: "image/png".into(),
+            size: bytes.len(),
+            width: 1,
+            height: 1,
+        };
+        let action = |blob| DaemonAction::InstallAttachment {
+            session_id: "session".into(),
+            reference: reference.clone(),
+            blob,
+        };
+        let mut reader = std::io::Cursor::new(bytes);
+        let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
+        let reply = client
+            .upload_and_consume_with_reconnect(&mut reader, action, || {
+                DaemonClient::connect(metadata.clone())
+            })
+            .await
+            .unwrap();
+        assert!(matches!(reply, DaemonReply::Done));
+        reader.set_position(0);
+        let mut client = DaemonClient::connect(metadata).await.unwrap();
+        assert!(
+            client
+                .upload_and_consume_with_reconnect(&mut reader, action, || async {
+                    panic!("lost acknowledgement cannot authorize replay");
                 })
                 .await
                 .is_err()

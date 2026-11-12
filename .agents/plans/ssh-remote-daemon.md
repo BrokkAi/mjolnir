@@ -24,6 +24,8 @@ This is private-network operation with working SSH authentication and host trust
 - [ ] Implement and validate milestone 6: matching-build PowerShell go script.
 - [ ] Implement milestone 7: user documentation, final validation, platform dispatch and real Windows acceptance.
 
+- [ ] (2026-11-12, retry follow-up) Pair-level upload replay implemented for attachment/import; real-connection refusal/lost-ACK regression passes, client/chat suites and CLI integration tests pass, workspace Clippy passes. CLI ACP-login ETXTBSY failure passed targeted rerun. Composer preparation/concurrency remain outstanding.
+
 - [ ] (2026-11-12, import child) Client native-home selection, atomic record/projection registration and lazy admission-independent upload storage committed (1907bf93a, 8bb394c72). Targeted source test and upload exchange pass; touched suites found fixture/environment failures, all failing cases pass targeted reruns after setting client CODEX_HOME in the isolated import fixture. Workspace Clippy passes. Composer references, upload retry unit, dialog path/cancellation and separate-directory CLI acceptance remain outstanding.
 
 ## Surprises & Discoveries
@@ -243,3 +245,5 @@ Discovery (2026-11-12, blob checkpoint): the full controller suite leaks `sleep 
 Discovery (2026-11-12, import child): the dashboard applies the prepared SessionRecord after persistence; after moving installation to the daemon, fetch that record back before applying it or the UI retains a deleted client staging path.
 
 Discovery (2026-11-12, import child): save_materialized_session requires a registered session, so ordering those two public writes cannot provide atomic registration. Import now inserts both inside the database writer transaction after archive installation; failed registration removes the archive with its output handle closed.
+
+Discovery (2026-11-12, retry follow-up): `DaemonClient::upload_and_consume` requires a rewindable reader, preserves its initial offset, and rebuilds connection-scoped blob IDs only after an explicit UpgradePending consumer refusal. Voice lives in another worktree: at merge replace its upload + TranscribeAudio request with this helper (Cursor for in-memory WAV). Never replay on transport errors. Composer already has supervised preparation jobs and pending markers in composer.rs; move remote installation into that owner, then remove submit-time normalization.

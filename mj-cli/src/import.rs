@@ -462,8 +462,7 @@ pub(crate) fn persist_imported_session(
             .context("import has no archive")?
             .archive_path;
         let mut file = tokio::fs::File::open(path).await?;
-        let blob = client.upload(&mut file).await?;
-        client.import_session(session, bundle, blob).await?;
+        client.import_session(session, bundle, &mut file).await?;
         client
             .session_record(session_id)
             .await?
