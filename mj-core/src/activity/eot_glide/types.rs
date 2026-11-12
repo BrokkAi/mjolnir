@@ -5,6 +5,8 @@ pub struct Distribution<T> {
 }
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Probabilities {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention: Option<Distribution<Attention>>,
     pub input: Distribution<Input>,
     pub failure: Distribution<Failure>,
     pub work: Distribution<Work>,
@@ -66,11 +68,19 @@ pub struct PermissionVeto {
 }
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
+/// Questions added after the frozen set. The hosted proxy and the workers
+/// upgrade independently, so a proxy that predates one of these omits its
+/// answer. That question then has no effect, instead of every verdict failing.
+/// An answer that is present must still be complete and valid.
+const OPTIONAL_AXES: &[&str] = &["attention"];
 impl Probabilities {
     pub fn parse(response: &Value) -> Result<Self> {
         let answers = response.get("answers").context("missing GLiDE answers")?;
         let questions: Value = serde_json::from_str(super::QUESTIONS)?;
         for (axis, question) in questions.as_object().unwrap() {
+            if OPTIONAL_AXES.contains(&axis.as_str()) && answers.get(axis).is_none() {
+                continue;
+            }
             let scores = answers[axis]["probabilities"]
                 .as_object()
                 .context("missing GLiDE distribution")?;
@@ -90,4 +100,14 @@ impl Probabilities {
         }
         Ok(serde_json::from_value(answers.clone())?)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Attention {
+    pub needs_input: f64,
+    pub important: f64,
+    pub redundant_request: f64,
+    pub none: f64,
+    pub unclear: f64,
 }
