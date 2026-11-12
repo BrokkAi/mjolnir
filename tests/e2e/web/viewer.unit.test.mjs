@@ -1536,6 +1536,12 @@ test('notification snapshot retains cleared positions until refresh or a new vis
   const a = { id: 'a', time: 1 }, b = { id: 'b', time: 2 }, c = { id: 'c', time: 3 };
   assert.deepEqual(update([a, b]).map(entry => entry.row.id), ['b', 'a']);
   assert.equal(update([a])[0].cleared, true);
+  context.running = { ...b, attention: 'working', capabilities: { open: false } };
+  const retained = JSON.parse(vm.runInContext('JSON.stringify(notificationSnapshot.update([], [running]))', context));
+  assert.equal(retained[0].row.attention, 'working');
+  assert.equal(retained[0].row.capabilities.open, false);
+  assert.equal(retained[1].row.lifecycle, 'destroyed');
+  assert.deepEqual(retained[1].row.capabilities, {});
   assert.deepEqual(update([a, c]).map(entry => [entry.row.id, entry.cleared]), [['c', false], ['b', true], ['a', false]]);
   assert.deepEqual(update([a, b, c]).map(entry => [entry.row.id, entry.cleared]), [['c', false], ['b', false], ['a', false]]);
   update([a, c]);

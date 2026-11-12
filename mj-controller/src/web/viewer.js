@@ -1155,12 +1155,20 @@ function liveSessions() {
 class NotificationSnapshot {
   constructor() { this.entries = []; }
   reset() { this.entries = []; }
-  update(rows) {
-    const current = new Map(rows.map(row => [row.id, row]));
+  update(rows, allRows = rows) {
+    const current = new Map(allRows.map(row => [row.id, row]));
+    const attentionIds = new Set(rows.map(row => row.id));
     const retained = new Set(this.entries.map(entry => entry.row.id));
     this.entries = [
       ...orderedSessions(rows.filter(row => !retained.has(row.id))).map(row => ({ row, cleared: false })),
-      ...this.entries.map(entry => ({ row: current.get(entry.row.id) || entry.row, cleared: !current.has(entry.row.id) })),
+      ...this.entries.map(entry => ({
+        row: current.get(entry.row.id) || {
+          ...entry.row, capabilities: {}, operation: null, transitioning: false,
+          lifecycle: 'destroyed', attention: 'inactive', configuration_issue: null, move_recovery: null,
+        },
+        excerpt: entry.excerpt,
+        cleared: !attentionIds.has(entry.row.id),
+      })),
     ];
     return this.entries;
   }
@@ -1179,7 +1187,8 @@ function renderNotifications() {
   const refresh = button('Refresh');
   refresh.onclick = () => { notificationSnapshot.reset(); renderSessions(); };
   header.append(refresh);
-  const items = notificationSnapshot.update(notificationRows()).map(({ row, cleared }) => {
+  const items = notificationSnapshot.update(notificationRows(), [...viewerState.rows.values()]).map(entry => {
+    const { row, cleared } = entry;
     let item = notificationItems.get(row.id);
     if (!item) {
       item = el('div', 'notification-entry');
@@ -1195,7 +1204,8 @@ function renderNotifications() {
     if (!card) { card = sessionCard(row); sessionCards.set(row.id, card); }
     else updateSessionCard(card, row);
     reconcileChildren(item, [card, item._excerpt, item._meta, item._actions]);
-    const excerpt = row.pending_elicitations?.find(request => request.message)?.message || row.preview?.join('\n');
+    const excerpt = row.pending_elicitations?.find(request => request.message)?.message || row.preview?.join('\n') || entry.excerpt;
+    entry.excerpt = excerpt;
     item._excerpt.textContent = excerpt || '';
     item._excerpt.hidden = !excerpt;
     const workspace = snapshot.workspaces?.find(workspace => workspace.id === row.workspace_id);
@@ -2013,7 +2023,7 @@ function beginSessionPress(event) {
         activeSessionPress.id !== card.dataset.sessionId ||
         current !== card ||
         card.isConnected === false ||
-        !sessionInWorkspace(card.dataset.sessionId, selectedWorkspaceId()) ||
+        (selectedWorkspaceId() !== 'notifications' && !sessionInWorkspace(card.dataset.sessionId, selectedWorkspaceId())) ||
         !sessionMenuActions(card._session).length
       ) {
         cancelSessionPress();
