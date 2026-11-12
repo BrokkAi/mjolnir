@@ -255,14 +255,9 @@ pub(super) async fn serve_client(
                     Some(result) => result,
                     None => {
                         drop(guard);
-                        // Preparation tears down its process group before its staging files.
-                        // An already admitted publication ignores cancellation and still acknowledges.
+                        // Stop subprocess groups before their staging files are removed.
                         work.await
                     }
-                };
-                let (result, _publication) = match result {
-                    Ok((reply, publication)) => (reply, publication),
-                    Err(error) => (Err(error), None),
                 };
                 if disconnected {
                     if let Err(error) = result {

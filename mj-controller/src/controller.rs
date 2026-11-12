@@ -92,7 +92,7 @@ pub(crate) use github_app::{
     renew_session_github_app_token,
 };
 pub use mbx::install::{
-    MbxInstallKind, MbxInstallResult, install_kind as mbx_install_kind, install_mbx, prepare_mbx,
+    MbxInstallKind, MbxInstallResult, install_kind as mbx_install_kind, install_mbx,
 };
 pub use mbx::preview_build_cache;
 pub(crate) use mbx::release::{FAILURE_REPORT_SECS, ReleaseFailure, recent_release_failures};
@@ -1768,3 +1768,6 @@ pub fn config_only_controller(config: Config) -> Controller {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) use mbx::install::MBX_TEST_RELEASE_URL;

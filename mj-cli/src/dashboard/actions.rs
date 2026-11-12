@@ -530,7 +530,7 @@ pub(crate) async fn apply_dashboard_action(
             let tracker = context.critical_operations.clone();
             spawn_cancellable_io_with_token(
                 tracker,
-                "preparing mbx installation (publication finishes once admitted)",
+                "installing mbx",
                 context.dashboard_io_tx.clone(),
                 move |cancelled| {
                     let install_result = super::io::machine_request(
@@ -544,9 +544,7 @@ pub(crate) async fn apply_dashboard_action(
                         reply => anyhow::bail!("unexpected mbx install reply: {reply:?}"),
                     })
                     .map_err(|error| {
-                        format!(
-                            "mbx installation interrupted or failed; retry to finish: {error:#}"
-                        )
+                        format!("mbx installation interrupted — run Install again: {error:#}")
                     });
                     let (preview_result, install_mbx_available) = match super::io::machine_request(
                         MachineAction::PreviewBuildCache { machine: *machine },

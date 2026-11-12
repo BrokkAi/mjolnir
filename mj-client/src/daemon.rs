@@ -3286,9 +3286,8 @@ impl DaemonClient {
 }
 
 impl DaemonAction {
-    /// Machine reads and install preparation use dedicated connections.
-    /// Closing one cancels subprocesses; admitted install publication finishes
-    /// independently and keeps its handoff admission through acknowledgement.
+    /// Disposable machine work uses dedicated connections. Closing one or
+    /// handing off the daemon cancels it; interrupted installs can be rerun.
     pub fn is_cancellable_machine_action(&self) -> bool {
         if let Self::PreflightNewSession { request } = self
             && !request.remote_repairs.is_empty()

@@ -3,14 +3,13 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(test)]
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
 
 use super::super::cache_host::{CacheHost, HostPlatform};
-use super::{MBX_VERSION, NativeMbx, probe_native_version, version_at_least};
+use super::{MBX_VERSION, NativeMbx, probe_native_version};
 use crate::targets::{self, CommandExecutor, CommandOutput, CommandSpec};
 use mj_core::config::Machine;
 use mj_core::state::{BuildCacheOff, BuildCachePreview};
@@ -75,15 +74,19 @@ if grep -Fq "$start" "$profile" 2>/dev/null; then
 else
     profile_dir=${profile%/*}
     mkdir -p -- "$profile_dir"
-    : >> "$profile"
-    if [ -s "$profile" ]; then
-        printf '\n' >> "$profile"
-    fi
+    # Preserve symlinked dotfiles by replacing their target, not the link.
+    if [ -L "$profile" ]; then profile=$(readlink -f -- "$profile"); fi
+    temporary=$(mktemp "${profile}.mjolnir.XXXXXX")
+    trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
+    if [ -e "$profile" ]; then cp -p -- "$profile" "$temporary"; fi
+    if [ -s "$temporary" ]; then printf '\n' >> "$temporary"; fi
     if [ "$shell_kind" = fish ]; then
-        printf '%s\n' "$fish_block" >> "$profile"
+        printf '%s\n' "$fish_block" >> "$temporary"
     else
-        printf '%s\n' "$posix_block" >> "$profile"
+        printf '%s\n' "$posix_block" >> "$temporary"
     fi
+    mv -f -- "$temporary" "$profile"
+    trap - EXIT HUP INT TERM
     status=changed
 fi
 printf '%s\n%s\n%s\n%s' "$status" "$shown" "$shell_kind" "$shim_dir"
@@ -154,13 +157,22 @@ pub(super) fn install_candidate_kind(preview: &BuildCachePreview) -> Option<MbxI
     }
     match preview.native_mbx.as_deref() {
         None => Some(MbxInstallKind::Install),
-        Some(version) if !version_at_least(version, MBX_VERSION) => Some(MbxInstallKind::Upgrade),
-        Some(_) => None,
+        Some(version)
+            if matches!(
+                (semver::Version::parse(version), semver::Version::parse(MBX_VERSION)),
+                (Ok(found), Ok(pinned)) if found > pinned
+            ) =>
+        {
+            None
+        }
+        // A matching binary can still have interrupted setup/profile updates.
+        // Keep the existing action available so rerunning always repairs them.
+        Some(_) => Some(MbxInstallKind::Upgrade),
     }
 }
 
 /// A fully staged install. Dropping it removes unpublished files after executor teardown.
-pub struct PreparedMbx {
+struct PreparedMbx {
     host: CacheHost,
     program: PathBuf,
     kind: MbxInstallKind,
@@ -183,8 +195,10 @@ impl Drop for PreparedMbx {
 }
 
 /// Probe, fetch, verify and upload without publishing or holding handoff admission.
-pub fn prepare_mbx(machine: &Machine, executor: &impl CommandExecutor) -> Result<PreparedMbx> {
-    let directory = tempfile::tempdir().context("create mbx download staging directory")?;
+fn prepare_mbx(machine: &Machine, executor: &impl CommandExecutor) -> Result<PreparedMbx> {
+    let root = mj_core::config::data_dir().join("mbx-download");
+    std::fs::create_dir_all(&root).context("create mbx download staging root")?;
+    let directory = tempfile::tempdir_in(root).context("create mbx download staging directory")?;
     let mut prepared = prepare_mbx_with(machine, executor, None, |triple| {
         download(triple, directory.path(), executor)
     })?;
@@ -195,9 +209,7 @@ pub fn prepare_mbx(machine: &Machine, executor: &impl CommandExecutor) -> Result
 /// Install from a standalone CLI operation without a daemon handoff owner.
 pub fn install_mbx(machine: &Machine, executor: &impl CommandExecutor) -> Result<MbxInstallResult> {
     let prepared = prepare_mbx(machine, executor)?;
-    let publishing =
-        targets::CancellableProcessExecutor::with_timeout(std::time::Duration::from_secs(240));
-    prepared.publish(&publishing)
+    prepared.publish(executor)
 }
 
 #[cfg(test)]
@@ -260,8 +272,8 @@ fn prepare_mbx_with(
 }
 
 impl PreparedMbx {
-    /// Publish only after admission. The caller supplies an executor independent of request cancellation.
-    pub fn publish(mut self, executor: &impl CommandExecutor) -> Result<MbxInstallResult> {
+    /// Every Mj-owned mutation publishes a complete file; interruption is repaired by rerunning.
+    fn publish(mut self, executor: &impl CommandExecutor) -> Result<MbxInstallResult> {
         let host = self.host.clone();
         let program = self.program.clone();
         let kind = self.kind;
@@ -486,6 +498,10 @@ fn set_executable(_path: &Path) -> Result<()> {
 }
 
 fn run_setup(host: &CacheHost, program: &Path, executor: &impl CommandExecutor) -> Result<()> {
+    // Accepted mbx 1.30.0 window: setup.rs:275–278 calls util.rs:125–141 to
+    // rename the cargo launcher before setting its executable bit. Interruption
+    // can leave it non-executable until Install runs again. The structural fix
+    // belongs in mbx: set the temporary file's mode before persist, then bump our pin.
     let command = host.command(
         vec![
             program.to_string_lossy().into_owned(),
@@ -713,6 +729,10 @@ fn checked(output: CommandOutput, command: &CommandSpec) -> Result<CommandOutput
 }
 
 fn release_url(triple: &str) -> String {
+    #[cfg(test)]
+    if let Some(url) = MBX_TEST_RELEASE_URL.get() {
+        return url.clone();
+    }
     format!(
         "https://github.com/jdx/mr-boxington/releases/download/v{MBX_VERSION}/mbx-{triple}-unknown-linux-musl.tar.gz"
     )
@@ -726,13 +746,25 @@ fn expected_digest(triple: &str) -> Result<&'static str> {
     }
 }
 
-/// Fetch with the same cancellable subprocess owner as host probes and uploads.
+/// Async HTTP is cancelled by dropping its future; subprocesses retain their executor owner.
 fn download(triple: &str, directory: &Path, executor: &impl CommandExecutor) -> Result<PathBuf> {
     let expected = expected_digest(triple)?;
     let archive_path = directory.join("release.tar.gz");
-    fetch_archive(&release_url(triple), &archive_path, executor)?;
+    let url = release_url(triple);
+    let archive = mj_core::runtime::block_on(async {
+        let fetch = fetch_archive(&url);
+        tokio::pin!(fetch);
+        loop {
+            check_cancelled(executor)?;
+            tokio::select! {
+                result = &mut fetch => return result,
+                // Match the cancellable subprocess executor's flag polling interval.
+                _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+            }
+        }
+    })??;
     check_cancelled(executor)?;
-    let archive = std::fs::read(&archive_path).context("read staged mbx archive")?;
+    std::fs::write(&archive_path, &archive).context("write staged mbx archive")?;
     let actual = mj_core::hex::lower_hex(Sha256::digest(&archive));
     ensure!(
         actual.eq_ignore_ascii_case(expected),
@@ -746,23 +778,26 @@ fn download(triple: &str, directory: &Path, executor: &impl CommandExecutor) -> 
     Ok(destination)
 }
 
-fn fetch_archive(url: &str, archive: &Path, executor: &impl CommandExecutor) -> Result<()> {
-    let command = CommandSpec::new(
-        "curl",
-        [
-            "--fail",
-            "--location",
-            "--silent",
-            "--show-error",
-            "--output",
-            &archive.to_string_lossy(),
-            url,
-        ],
-    )
-    .purpose("download the pinned mbx release");
-    checked(executor.execute(&command)?, &command)?;
-    Ok(())
+async fn fetch_archive(url: &str) -> Result<Vec<u8>> {
+    // Preserve the original per-download deadline, including standalone EC2 installs.
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()?
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("download {url}"))?
+        .error_for_status()
+        .with_context(|| format!("download {url}"))?;
+    Ok(response
+        .bytes()
+        .await
+        .context("read mbx release response")?
+        .to_vec())
 }
+
+#[cfg(test)]
+pub(crate) static MBX_TEST_RELEASE_URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// Extract the archive's single binary; its licence texts are not installed.
 fn extract_binary(archive: &[u8]) -> Result<Vec<u8>> {
@@ -914,7 +949,10 @@ mod tests {
             install_kind(&cache_preview(Some("1.22.0"), None)),
             Some(MbxInstallKind::Upgrade)
         );
-        assert_eq!(install_kind(&cache_preview(Some(MBX_VERSION), None)), None);
+        assert_eq!(
+            install_kind(&cache_preview(Some(MBX_VERSION), None)),
+            Some(MbxInstallKind::Upgrade)
+        );
         let mut external = cache_preview(Some("1.22.0"), None);
         external.mbx_profile_file = None;
         assert_eq!(install_kind(&external), None);
@@ -1126,6 +1164,147 @@ mod tests {
             !command.purpose.starts_with("run mbx setup")
                 && !command.purpose.starts_with("add the mbx PATH")
         }));
+    }
+
+    // Hard-won: #1514: interruption after publishing mbx must be repaired by rerunning Install.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn interrupted_publication_rerun_converges_without_admission() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Arc, atomic::AtomicBool};
+        use tokio::io::AsyncReadExt;
+        struct FixtureExecutor {
+            executor: targets::CancellableProcessExecutor,
+            home: PathBuf,
+        }
+        impl CommandExecutor for FixtureExecutor {
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                let mut command = command.clone();
+                command
+                    .env
+                    .insert("HOME".into(), self.home.to_string_lossy().into_owned());
+                command.env.insert(
+                    "PATH".into(),
+                    format!("{}:/usr/bin:/bin", self.home.join(".local/bin").display()),
+                );
+                command.env.insert(
+                    "XDG_DATA_HOME".into(),
+                    self.home.join("data").to_string_lossy().into_owned(),
+                );
+                command.env.insert(
+                    "XDG_CONFIG_HOME".into(),
+                    self.home.join("config").to_string_lossy().into_owned(),
+                );
+                // Read the recorded fixture through Python: concurrent test forks
+                // can inherit a staging writer and make script exec return ETXTBSY.
+                if command.purpose == "run mbx setup on the container host" {
+                    command.args.insert(0, command.program.clone());
+                    command.program = "/usr/bin/python3".into();
+                } else if command.purpose == "read the container host mbx version" {
+                    for argument in &mut command.args {
+                        *argument = argument.replace(
+                            "\"$resolved\" --version",
+                            "/usr/bin/python3 \"$resolved\" --version",
+                        );
+                    }
+                }
+                self.executor.execute(&command)
+            }
+            fn cancellation_requested(&self) -> bool {
+                self.executor.is_cancelled()
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let marker = home.join("setup-started");
+        let ready = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let binary = root.path().join("recorded-mbx");
+        std::fs::write(
+            &binary,
+            format!(
+                r#"#!/usr/bin/python3
+import os, socket, sys
+if '--version' in sys.argv:
+    print('mbx {}')
+else:
+    marker = os.path.join(os.environ['HOME'], 'setup-started')
+    if not os.path.exists(marker):
+        open(marker, 'w').close()
+        sys.stdout.buffer.write(b'x' * 131072)
+        sys.stdout.buffer.flush()
+        with socket.create_connection(('127.0.0.1', {})) as ready:
+            ready.sendall(b'R')
+            ready.recv(1)
+"#,
+                MBX_VERSION,
+                ready.local_addr().unwrap().port()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let executor = FixtureExecutor {
+            executor: targets::CancellableProcessExecutor::new(cancelled.clone()),
+            home: home.clone(),
+        };
+        let worker_home = home.clone();
+        let worker_binary = binary.clone();
+        let install = tokio::task::spawn_blocking(move || {
+            install_mbx_with(&local_machine(), &executor, Some(&worker_home), |_| {
+                Ok(worker_binary)
+            })
+        });
+        let (mut signal, _) = tokio::time::timeout(Duration::from_secs(30), ready.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(signal.read_u8().await.unwrap(), b'R');
+        let program = home.join(".local/bin/mbx");
+        assert_eq!(
+            std::fs::read(&program).unwrap(),
+            std::fs::read(&binary).unwrap()
+        );
+        assert!(marker.is_file());
+        assert!(
+            !crate::upgrade::active_labels()
+                .iter()
+                .any(|label| label.contains("mbx installation"))
+        );
+        cancelled.store(true, Ordering::Release);
+        assert!(install.await.unwrap().is_err());
+        assert_eq!(
+            signal.read_u8().await.unwrap_err().kind(),
+            std::io::ErrorKind::UnexpectedEof
+        );
+        let rerun_home = home.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let executor = FixtureExecutor {
+                executor: targets::CancellableProcessExecutor::new(Arc::new(AtomicBool::new(
+                    false,
+                ))),
+                home: rerun_home.clone(),
+            };
+            install_mbx_with(&local_machine(), &executor, Some(&rerun_home), |_| {
+                Ok(binary)
+            })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.version, MBX_VERSION);
+        let profile = home.join(result.profile_file.trim_start_matches("~/"));
+        let body = std::fs::read_to_string(profile).unwrap();
+        assert_eq!(body.matches("# >>> mbx (added by Mjolnir) >>>").count(), 1);
+        assert!(
+            !std::fs::read_dir(program.parent().unwrap())
+                .unwrap()
+                .any(|entry| entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".tmp"))
+        );
     }
 
     #[cfg(unix)]

@@ -24,9 +24,7 @@ pub(super) async fn handle_action(
         | DaemonAction::ResolveSetupPath { .. }
         | DaemonAction::ValidateMountSource { .. }
         | DaemonAction::ValidateSessionMounts { .. }) => {
-            super::machine::execute(action, state, Arc::new(AtomicBool::new(false)))
-                .await?
-                .0
+            super::machine::execute(action, state, Arc::new(AtomicBool::new(false))).await
         }
         DaemonAction::RecordOperatorActivity => {
             state.record_operator_activity().await;

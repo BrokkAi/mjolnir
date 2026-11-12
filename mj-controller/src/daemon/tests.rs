@@ -12594,33 +12594,16 @@ async fn mbx_preparation_cancels_on_handoff_and_disconnect_before_removing_stagi
         .run();
         return;
     }
-    use std::os::unix::fs::PermissionsExt;
-    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let root = PathBuf::from(std::env::var_os(CHILD).unwrap());
-    for handoff in [true, false] {
-        let ready = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-        let curl = root.join("bin/curl");
-        // A recorded download blocks after more than a pipe buffer, signalling readiness
-        // over a socket. No sleeps or Internet service determine cancellation ordering.
-        fs::write(
-            &curl,
-            format!(
-                r#"#!/usr/bin/python3
-import json, os, socket, sys
-archive = sys.argv[-2]
-with open(archive, 'wb') as output:
-    output.write(b'x' * 131072)
-sys.stdout.buffer.write(b'x' * 131072)
-sys.stdout.buffer.flush()
-with socket.create_connection(('127.0.0.1', {})) as ready:
-    ready.sendall((json.dumps([os.getpid(), archive]) + '\n').encode())
-    ready.recv(1)
-"#,
-                ready.local_addr().unwrap().port()
-            ),
-        )
+    let download_server = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    crate::controller::MBX_TEST_RELEASE_URL
+        .set(format!(
+            "http://{}/archive",
+            download_server.local_addr().unwrap()
+        ))
         .unwrap();
-        fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
+    for handoff in [true, false] {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let metadata = test_metadata(listener.local_addr().unwrap());
         let server_metadata = metadata.clone();
@@ -12650,18 +12633,24 @@ with socket.create_connection(('127.0.0.1', {})) as ready:
         )
         .await
         .unwrap();
-        let signal = tokio::time::timeout(Duration::from_secs(30), ready.accept()).await;
-        if signal.is_err() {
+        let download =
+            tokio::time::timeout(Duration::from_secs(30), download_server.accept()).await;
+        if download.is_err() {
             shutdown.cancel();
             server.await.unwrap().unwrap();
-            panic!("recorded mbx download did not reach readiness");
+            panic!("mbx download never reached HTTP fixture");
         }
-        let (signal, _) = signal.unwrap().unwrap();
-        let mut signal = BufReader::new(signal);
-        let mut line = String::new();
-        signal.read_line(&mut line).await.unwrap();
-        let (pid, archive): (u32, PathBuf) = serde_json::from_str(&line).unwrap();
-        assert!(archive.is_file());
+        let (mut download, _) = download.unwrap().unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            request.push(download.read_u8().await.unwrap());
+        }
+        // The body remains incomplete. The real reqwest future must be dropped on cancellation.
+        download
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\n\r\n")
+            .await
+            .unwrap();
+        download.write_all(&vec![b'x'; 131072]).await.unwrap();
         assert!(
             !crate::upgrade::active_labels()
                 .iter()
@@ -12675,13 +12664,20 @@ with socket.create_connection(('127.0.0.1', {})) as ready:
             drop(client);
         }
         server.await.unwrap().unwrap();
-        assert!(
-            !daemon_process_is_alive(pid),
-            "download process survived cancellation"
-        );
-        assert!(
-            !archive.parent().unwrap().exists(),
-            "download staging survived teardown"
+        let mut remaining = Vec::new();
+        // A dropped response closes the incomplete HTTP body, instead of waiting for its deadline.
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            download.read_to_end(&mut remaining),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            fs::read_dir(mj_core::config::data_dir().join("mbx-download"))
+                .unwrap()
+                .count(),
+            0
         );
         assert!(!root.join("home/.local/bin/mbx").exists());
     }
