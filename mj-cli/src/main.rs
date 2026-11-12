@@ -5,6 +5,11 @@
 //! [`server`] implements the daemon-owned phone control, [`pollers`] the background
 //! feeds both of them read, and [`import`] session adoption.
 
+// glibc retained tens of GiB of freed heap across the daemon's session tasks.
+#[cfg(target_os = "linux")]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 mod acp;
 #[cfg(unix)]
 mod acp_login;
