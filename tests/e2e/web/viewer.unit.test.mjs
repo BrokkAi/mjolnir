@@ -317,7 +317,7 @@ test('session titles stay blue while truly idle and clear blue when activity res
     textContent: '',
     classList: { toggle: (name, enabled) => enabled ? classes.add(name) : classes.delete(name) },
   };
-  const context = vm.createContext({ node, session: { title: 'Test session', is_idle: true } });
+  const context = vm.createContext({ node, session: { title: 'Test session', attention: 'idle' } });
   vm.runInContext(sourceBetween('function renderSessionTitle(', '\nfunction renderConversationHeader('), context);
   vm.runInContext('renderSessionTitle(node, session)', context);
   assert.equal(node.textContent, 'Test session');
@@ -326,10 +326,10 @@ test('session titles stay blue while truly idle and clear blue when activity res
   context.session.latest_event_ordinal = 20;
   vm.runInContext('renderSessionTitle(node, session)', context);
   assert.ok(classes.has('idle-title'));
-  context.session.is_idle = false;
+  context.session.attention = 'working';
   vm.runInContext('renderSessionTitle(node, session)', context);
   assert.ok(!classes.has('idle-title'));
-  delete context.session.is_idle;
+  delete context.session.attention;
   vm.runInContext('renderSessionTitle(node, session)', context);
   assert.ok(!classes.has('idle-title'), 'unknown activity is not confirmed idle');
 });

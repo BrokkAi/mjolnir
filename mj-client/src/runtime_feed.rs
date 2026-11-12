@@ -300,6 +300,7 @@ pub struct RuntimeContainerCapacity {
 /// Configuration and bounded active-operation views are separate from history.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeMetadata {
+    pub session_attention: std::collections::BTreeMap<String, mj_core::attention::SessionAttention>,
     #[serde(default)]
     pub operator_presence: mj_core::state::OperatorPresence,
     #[serde(default)]
@@ -880,6 +881,7 @@ mod tests {
 
     fn session(id: &str) -> RuntimeSessionView {
         RuntimeSessionView {
+            attention: Default::default(),
             policy_config_keys: Vec::new(),
             session_id: id.into(),
             projection_ordinal: 0,

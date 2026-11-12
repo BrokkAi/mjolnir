@@ -305,6 +305,12 @@ impl RuntimeState {
         } else {
             history.full.metadata.launch_recency.clone()
         };
+        full.metadata.session_attention = super::attention::project(&full);
+        for (id, attention) in &full.metadata.session_attention {
+            if let Some(view) = full.sessions.get_mut(id) {
+                view.attention = *attention;
+            }
+        }
         history.publish(full.clone())?;
         history.native_owners = native_owners;
         history.full = full;
@@ -883,6 +889,7 @@ mod tests {
                     agent,
                     projection_ordinal: 0,
                     projection_digest: String::new(),
+                    pending_input: false,
                 },
             )
         };
@@ -1091,6 +1098,7 @@ mod tests {
             agent,
             projection_ordinal: 0,
             projection_digest: String::new(),
+            pending_input: false,
         };
         full.native_agents.insert(view_id.clone(), summary.clone());
         let mut native_owners = NativeOwners::new();

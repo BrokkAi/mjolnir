@@ -34,7 +34,7 @@ const INTERNED_FIELDS = [
 ];
 
 const SUMMARY_FIELDS = new Set([
-  'id', 'workspace_id', 'bundle_id', 'title', 'subagent_parent_id',
+  'id', 'workspace_id', 'bundle_id', 'title', 'subagent_parent_id', 'attention',
   'subagent_session_ids', 'reviewer_session_ids', 'publication_state', 'profile_id',
   'target_id', 'state', 'container_upgrade_supported', 'created_at', 'updated_at', 'has_error',
   'configuration_issue', 'launch_error', 'storage_problem', 'project_label',

@@ -1713,6 +1713,12 @@ mod tests {
         );
         assessment.status = mj_core::assessment::Status::Assessed;
         assessment.action = Some(mj_core::assessment::Action::AwaitInput);
+        crate::test_support::serve_attention(
+            &mut dashboard,
+            &[&session.id],
+            mj_core::attention::SessionAttention::NeedsInput,
+        );
+
         let project = |dashboard: &mut DashboardState,
                        materialized: &mj_core::state::MaterializedSession,
                        assessment: &mj_core::assessment::TurnAssessment| {
@@ -1772,6 +1778,11 @@ mod tests {
         assessment.status = mj_core::assessment::Status::Superseded;
         assessment.reason = "question_dismissed".into();
         materialized.applied_event_ordinal = 6;
+        crate::test_support::serve_attention(
+            &mut dashboard,
+            &[&session_id],
+            mj_core::attention::SessionAttention::Idle,
+        );
         project(&mut dashboard, &materialized, &assessment);
         assert_ne!(
             dashboard.attention_level(&session_id),
@@ -1791,6 +1802,11 @@ mod tests {
         assessment.completed_ordinal = 8;
         assessment.status = mj_core::assessment::Status::Assessed;
         assessment.reason = "user_input_required".into();
+        crate::test_support::serve_attention(
+            &mut dashboard,
+            &[&session_id],
+            mj_core::attention::SessionAttention::NeedsInput,
+        );
         project(&mut dashboard, &materialized, &assessment);
         assert_eq!(
             (spec(CommandId::DismissQuestion).available)(&dashboard),
@@ -1809,6 +1825,11 @@ mod tests {
         assessment.status = mj_core::assessment::Status::Superseded;
         assessment.reason = "question_dismissed".into();
         materialized.applied_event_ordinal = 11;
+        crate::test_support::serve_attention(
+            &mut dashboard,
+            &[&session_id],
+            mj_core::attention::SessionAttention::Idle,
+        );
         project(&mut dashboard, &materialized, &assessment);
         dashboard.question_dismissal_finished(&session_id, next, Ok(10));
         assert!(!dashboard.question_dismissal_pending(&session_id));

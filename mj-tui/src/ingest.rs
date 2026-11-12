@@ -543,6 +543,24 @@ pub(crate) struct CapacityDetail {
 }
 
 impl DashboardState {
+    pub fn set_session_attention_for(
+        &mut self,
+        session_id: &str,
+        attention: mj_core::attention::SessionAttention,
+    ) {
+        if self.served_attention.get(session_id) != Some(&attention) {
+            self.served_attention
+                .insert(session_id.to_owned(), attention);
+        }
+    }
+    pub fn set_session_attention(
+        &mut self,
+        attention: BTreeMap<String, mj_core::attention::SessionAttention>,
+    ) {
+        if self.served_attention != attention {
+            *self.served_attention = attention;
+        }
+    }
     pub fn set_workspace_names(&mut self, names: BTreeMap<String, String>) {
         self.workspace_names = names;
         let workspace_name = self

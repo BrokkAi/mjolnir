@@ -45,6 +45,7 @@ pub struct RuntimeStateUpdate {
     /// Session creation history for project-list ordering and the legacy fallback; see
     /// [`mj_client::runtime_feed::LaunchRecency`].
     pub launch_recency: Vec<mj_client::runtime_feed::LaunchRecency>,
+    pub session_attention: BTreeMap<String, mj_core::attention::SessionAttention>,
     pub recent_launch: Option<mj_core::go::RecentLaunch>,
     pub container_upgrade_sessions: std::collections::BTreeSet<String>,
     /// The daemon storage owner's verdict per target host.
@@ -63,6 +64,7 @@ pub struct RuntimeStateUpdate {
 /// configuration surface.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct PublishedView {
+    pub(super) attention: mj_core::attention::SessionAttention,
     pub(super) projection_ordinal: u64,
     pub(super) projection_digest: String,
     pub(super) operational:
@@ -74,6 +76,7 @@ pub(super) struct PublishedView {
 impl PublishedView {
     pub(super) fn of(runtime: &crate::daemon::RuntimeSessionView) -> Self {
         Self {
+            attention: runtime.attention,
             projection_ordinal: runtime.projection_ordinal,
             projection_digest: runtime.projection_digest.clone(),
             operational: runtime.operational.clone(),
@@ -349,6 +352,7 @@ pub(super) fn runtime_projection_view(
 ) -> Option<ManagedSessionView> {
     let Some(operational) = runtime.operational else {
         return Some(ManagedSessionView {
+            attention: runtime.attention,
             snapshot: None,
             connected: runtime.connected,
             error: runtime.error,
@@ -362,6 +366,7 @@ pub(super) fn runtime_projection_view(
         {
             convergence.converged(&runtime.session_id);
             return Some(ManagedSessionView {
+                attention: runtime.attention,
                 snapshot: Some(ManagedSessionSnapshot {
                     materialized,
                     window,
@@ -403,6 +408,7 @@ pub(super) fn runtime_projection_view(
         Err(error) => format!("load daemon-owned projection: {error:#}"),
     };
     Some(ManagedSessionView {
+        attention: runtime.attention,
         snapshot: None,
         connected: false,
         error: Some(ViewError::ProjectionIntegrity(detail)),
