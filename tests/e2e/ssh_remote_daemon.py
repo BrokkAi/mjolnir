@@ -28,8 +28,12 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
     )
     (p / "config").mkdir()
     (p / "data").mkdir()
-    # Wildcard advertisement deliberately differs from local_address (127.0.0.1).
-    # strace verifies the destination even though this fixture shares loopback.
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
+        route.connect(("192.0.2.1", 9))
+        advertised = route.getsockname()[0]
+    assert advertised != "0.0.0.0" and not advertised.startswith("127."), (
+        "SSH HTTP scenario requires a specific non-loopback host address"
+    )
     subprocess.run(
         [
             "openssl",
@@ -47,13 +51,13 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
             "-subj",
             "/CN=ssh-http-test",
             "-addext",
-            "subjectAltName=IP:0.0.0.0",
+            f"subjectAltName=IP:{advertised}",
         ],
         check=True,
         capture_output=True,
     )
     (p / "config" / "config.toml").write_text(
-        'version = 22\n[phone]\nbind="0.0.0.0:0"\ntailscale_detect=false\n'
+        f'version = 22\n[phone]\nbind="{advertised}:0"\ntailscale_detect=false\n'
         + "tls_cert="
         + json.dumps(str(p / "cert.pem"))
         + "\n"
@@ -110,6 +114,14 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
                 MJ_CONFIG_DIR=str(p / "client-config"),
                 MJ_DATA_DIR=str(p / "client-data"),
             )
+            if options.scenario == "control":
+                subprocess.run(
+                    ["cargo", "test", "-p", "brokk-mj-client",
+                     "real_ssh_endpoint_discovery", "--", "--ignored", "--nocapture"],
+                    env=dict(client_env, MJ_SSH_DISCOVERY_PLACEMENT=str(
+                        p / "client-config" / "config.toml")),
+                    check=True,
+                )
             if options.scenario == "dispatch":
                 base = [binary, "--instance", options.instance]
                 subprocess.run(
@@ -220,7 +232,7 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
                     assert not list((p / "client-data").rglob("api-token*"))
                     if options.scenario == "http":
                         trace = (p / "connect.log").read_text()
-                        assert 'sin_addr=inet_addr("0.0.0.0")' in trace, trace
+                        assert f'sin_addr=inet_addr("{advertised}")' in trace, trace
                     if phase == 0:
                         subprocess.run(
                             [
@@ -235,7 +247,8 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
                         )
                 if options.scenario == "http":
                     (p / "config" / "config.toml").write_text(
-                        'version = 22\n[phone]\nbind="127.0.0.1:0"\ntailscale_detect=false\n'
+                        (p / "config" / "config.toml").read_text().replace(
+                            f'bind="{advertised}:0"', 'bind="0.0.0.0:0"')
                     )
                     subprocess.run(
                         [str(wrapper), "--instance", options.instance, "daemon", "restart"],
@@ -252,6 +265,7 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
                     assert result.returncode != 0
                     for expected in [
                         "the viewer is unreachable from this computer",
+                        "advertised address is a wildcard",
                         "tailscale_detect",
                         "tls_cert",
                         "tls_key",
@@ -270,6 +284,9 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
                     "PASS: SSH sessions before/after remote restart; no client metadata/store"
                 )
         finally:
+            if options.scenario == "control":
+                subprocess.run([str(wrapper), "--instance", "ssh-discovery-e2e",
+                                "daemon", "stop"])
             subprocess.run(
                 [str(wrapper), "--instance", options.instance, "daemon", "stop"]
             )

@@ -1746,6 +1746,7 @@ pub async fn read_response(stream: &mut TcpStream) -> Result<ResponseEnvelope> {
 }
 
 pub struct DaemonClient {
+    ssh_lease: Option<std::sync::Arc<ssh::SshLease>>,
     connector: Option<std::sync::Arc<connector::DaemonConnector>>,
     metadata: DaemonMetadata,
     stream: TcpStream,
@@ -1763,6 +1764,7 @@ impl DaemonClient {
             stream,
             next_request_id: 1,
             connector: None,
+            ssh_lease: None,
         })
     }
 

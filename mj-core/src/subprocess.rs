@@ -185,6 +185,11 @@ impl SupervisedChild {
         })
     }
 
+    /// Observe captured diagnostics while independently waiting for process exit.
+    pub fn stderr_capture(&self) -> std::sync::Arc<std::sync::Mutex<Vec<u8>>> {
+        self.stderr.clone()
+    }
+
     /// Captured diagnostics so far, including output received before exit.
     pub fn stderr(&self) -> Vec<u8> {
         self.stderr.lock().expect("stderr mutex poisoned").clone()

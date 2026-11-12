@@ -136,6 +136,7 @@ async fn open_with_port(
         command
             .args([
                 "-N",
+                "-v",
                 "-o",
                 "ExitOnForwardFailure=yes",
                 "-o",
@@ -156,22 +157,28 @@ async fn open_with_port(
             child,
         };
         let metadata = lease.metadata();
-        // A refused local connection means ssh is not listening yet, so keep
-        // waiting while the child runs. Once the tunnel accepts, one Ping
-        // decides: if it fails, the daemon behind the discovered endpoint is
-        // gone, because `ssh -N` keeps running when a forwarded connection is
-        // refused.
+        // Do not send credentials until OpenSSH confirms ownership of the port.
+        let listening = format!(
+            "debug1: Local forwarding listening on 127.0.0.1 port {}.",
+            local_addr.port()
+        );
+        let diagnostics = lease.child.stderr_capture();
         let ready = async {
             loop {
-                match super::DaemonClient::connect(metadata.clone()).await {
-                    Ok(mut client) => {
-                        return matches!(
-                            client.request_once(super::DaemonAction::Ping).await,
-                            Ok(super::DaemonReply::Pong)
-                        );
-                    }
-                    Err(_) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+                if String::from_utf8_lossy(&diagnostics.lock().expect("stderr mutex poisoned"))
+                    .lines()
+                    .any(|line| line.trim_end() == listening)
+                {
+                    break;
                 }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            match super::DaemonClient::connect(metadata).await {
+                Ok(mut client) => matches!(
+                    client.request_once(super::DaemonAction::Ping).await,
+                    Ok(super::DaemonReply::Pong)
+                ),
+                Err(_) => false,
             }
         };
         tokio::select! {
@@ -199,12 +206,12 @@ async fn open_with_port(
             }
             status = lease.child.wait() => {
                 let status = status?;
-                let stderr = String::from_utf8_lossy(&lease.child.stderr()).into_owned();
+                let stderr = String::from_utf8_lossy(&diagnostics.lock().expect("stderr mutex poisoned")).into_owned();
                 let collision = stderr.lines().any(|line|
                     (line.contains("bind") && line.contains("Address already in use"))
                     || line.contains("cannot listen to port"));
                 if collision { continue; }
-                bail!("SSH daemon tunnel exited ({status}): {}", stderr.trim());
+                bail!("SSH daemon tunnel exited ({status}): {}", stderr.lines().filter(|line| !line.starts_with("debug") && !line.starts_with("OpenSSH")).collect::<Vec<_>>().join("\n"));
             }
         }
     }
@@ -229,6 +236,8 @@ mod tests {
             .await
             .unwrap();
         let first_identity = connected.identity().await.unwrap();
+        let old_lease = std::sync::Arc::downgrade(connected.ssh_lease.as_ref().unwrap());
+        let old_address = connected.metadata.address;
         let mut second_client = connector.connect_existing().await.unwrap();
         assert_eq!(
             second_client.identity().await.unwrap().instance_id,
@@ -261,8 +270,12 @@ mod tests {
             right.unwrap().identity().await.unwrap().instance_id,
             new_identity.instance_id
         );
+        // Hard-won: #1514: refreshing one client killed another client's tunnel.
+        assert!(old_lease.upgrade().is_some());
+        tokio::net::TcpStream::connect(old_address).await.unwrap();
         drop(connected);
         drop(second_client);
+        assert!(old_lease.upgrade().is_none());
         drop(connector);
         let endpoint = super::discover(
             &placement,
@@ -293,6 +306,7 @@ mod tests {
         lease.terminate().await.unwrap();
         let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let occupied_port = occupied.local_addr().unwrap().port();
+        occupied.set_nonblocking(true).unwrap();
         let mut first = true;
         let mut second = super::open_with_port(
             &placement,
@@ -309,6 +323,11 @@ mod tests {
         )
         .await
         .unwrap();
+        // Hard-won: #1514: the token was sent to a competing local listener.
+        assert_eq!(
+            occupied.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
         assert!(!first);
         assert_ne!(second.local_addr.port(), occupied_port);
         assert_eq!(second.endpoint.instance_id, endpoint.instance_id);

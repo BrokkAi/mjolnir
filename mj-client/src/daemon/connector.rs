@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 
 pub struct DaemonConnector {
     placement: DaemonConfig,
-    lease: Mutex<Option<SshLease>>,
+    lease: Mutex<Option<Arc<SshLease>>>,
 }
 
 static CONNECTOR: Mutex<Weak<DaemonConnector>> = Mutex::const_new(Weak::new());
@@ -53,8 +53,8 @@ impl DaemonConnector {
         }
         let url = url::Url::parse(viewer_url)?;
         let loopback = match url.host() {
-            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback() || ip.is_unspecified(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback() || ip.is_unspecified(),
             Some(url::Host::Domain(host)) => {
                 host.eq_ignore_ascii_case("localhost")
                     || host.to_ascii_lowercase().ends_with(".localhost")
@@ -62,6 +62,13 @@ impl DaemonConnector {
             None => false,
         };
         if loopback {
+            let wildcard = matches!(url.host(), Some(url::Host::Ipv4(ip)) if ip.is_unspecified())
+                || matches!(url.host(), Some(url::Host::Ipv6(ip)) if ip.is_unspecified());
+            let detail = if wildcard {
+                " the advertised address is a wildcard; [phone] bind must name a reachable address or use Tailscale;"
+            } else {
+                ""
+            };
             let lease = self.lease.lock().await;
             let path = lease
                 .as_ref()
@@ -69,7 +76,7 @@ impl DaemonConnector {
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|| "the remote config.toml".into());
             anyhow::bail!(
-                "the viewer is unreachable from this computer; on {} enable [phone] tailscale_detect with working Tailscale, or set [phone] bind to a reachable address with tls_cert and tls_key; remote config: {path}",
+                "the viewer is unreachable from this computer;{detail} on {} enable [phone] tailscale_detect with working Tailscale, or set [phone] bind to a reachable address with tls_cert and tls_key; remote config: {path}",
                 self.placement.host.as_deref().unwrap_or("the SSH host")
             );
         }
@@ -104,7 +111,7 @@ impl DaemonConnector {
         previous: &DaemonMetadata,
     ) -> Result<DaemonClient> {
         if self.is_ssh() {
-            self.remote(DiscoveryIntent::Existing, Some(previous.address))
+            self.remote(DiscoveryIntent::Start, Some(previous.address))
                 .await
         } else {
             self.connect_existing().await
@@ -129,11 +136,9 @@ impl DaemonConnector {
                 )
             {
                 client.connector = Some(self.clone());
+                client.ssh_lease = Some(current.clone());
                 return Ok(client);
             }
-        }
-        if let Some(mut old) = lease.take() {
-            old.terminate().await?;
         }
         let instance = self
             .placement
@@ -144,9 +149,11 @@ impl DaemonConnector {
         let replacement =
             ssh::open(&self.placement, &instance, intent, std::future::pending()).await?;
         let metadata = replacement.metadata();
-        *lease = Some(replacement);
+        let replacement = Arc::new(replacement);
+        *lease = Some(replacement.clone());
         let mut client = DaemonClient::connect(metadata).await?;
         client.connector = Some(self.clone());
+        client.ssh_lease = Some(replacement);
         Ok(client)
     }
 }
