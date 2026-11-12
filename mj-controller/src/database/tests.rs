@@ -7993,6 +7993,7 @@ fn obsolete_turn_review_rows_are_retired_before_recovery() {
     );
 }
 
+// Hard-won: e13ed5c7c: page joins duplicated parked output across page boundaries
 #[test]
 fn history_pages_join_parked_terminal_output_without_changing_page_boundaries() {
     use mj_core::state::TerminalOutputRecord;
@@ -8066,25 +8067,42 @@ fn history_pages_join_parked_terminal_output_without_changing_page_boundaries() 
             .unwrap();
         assert_eq!(page.items[0].stable_id, owner.stable_id);
         assert!(
-            mj_client::transcript::history_entries(&page)[0]
+            !mj_client::transcript::history_entries(&page)[0]
                 .text
                 .contains("authoritative terminal output")
         );
-        // A remote client may later hold both the hydrated tool and its source record.
-        let mut held = full.clone();
-        held.transcript = full
-            .transcript
+        // Convert single-item pages independently, as dispatch_earlier_history does.
+        let newest = load_transcript_history_from(&path, &full.session_id, None, 1)
+            .unwrap()
+            .unwrap();
+        let older =
+            load_transcript_history_from(&path, &full.session_id, newest.before.as_ref(), 1)
+                .unwrap()
+                .unwrap();
+        let rendered = [newest, older]
             .iter()
-            .map(|item| {
-                if item.stable_id == owner.stable_id {
-                    filtered.items[0].clone()
-                } else {
-                    item.clone()
-                }
-            })
-            .collect();
-        let entries = mj_client::transcript::materialized_chat_entries(&held);
-        assert_eq!(entries.len(), 1);
+            .flat_map(mj_client::transcript::history_entries)
+            .map(|e| e.text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(rendered.matches("authoritative terminal output").count(), 1);
+        let unfiltered = load_materialized_transcript_filtered_from(
+            &path,
+            &full.session_id,
+            0,
+            10,
+            vec![],
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        let rendered = unfiltered
+            .items
+            .iter()
+            .map(|i| mj_transcript::transcript::transcript_item_text(i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(rendered.matches("authoritative terminal output").count(), 1);
         let stored = load_materialized_session_from(&path, &full.session_id)
             .unwrap()
             .unwrap();
@@ -8095,6 +8113,7 @@ fn history_pages_join_parked_terminal_output_without_changing_page_boundaries() 
     }
 }
 
+// Hard-won: e13ed5c7c: history hydration duplicated output for evicted owners
 #[test]
 fn terminal_output_for_evicted_owner_parks_and_joins_history_pages() {
     use mj_core::relay::{RELAY_EVENT_FORMAT_V1, RelayEvent, RelayObservation};
@@ -8172,17 +8191,23 @@ fn terminal_output_for_evicted_owner_parks_and_joins_history_pages() {
             .any(|item| item.stable_id == "terminal:evicted-terminal")
     );
     for roles in [vec![], vec![mj_core::transcript::TranscriptRole::Tool]] {
-        let page =
-            load_materialized_transcript_filtered_from(&path, &full.session_id, 2, 1, roles, false)
-                .unwrap()
-                .unwrap();
+        let page = load_materialized_transcript_filtered_from(
+            &path,
+            &full.session_id,
+            2,
+            1,
+            roles.clone(),
+            false,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].stable_id, owner.stable_id);
         let outputs =
             mj_core::transcript::TerminalOutputs::of(page.items.iter().map(AsRef::as_ref));
         let text =
             mj_transcript::transcript::transcript_item_text_with_outputs(&page.items[0], &outputs);
-        assert_eq!(text.matches(output).count(), 1);
+        assert_eq!(text.matches(output).count(), usize::from(!roles.is_empty()));
     }
     let before = mj_core::storage::TranscriptCursor::of(&full.transcript[3]);
     let page = load_transcript_history_from(&path, &full.session_id, Some(&before), 1)
@@ -8193,7 +8218,7 @@ fn terminal_output_for_evicted_owner_parks_and_joins_history_pages() {
             .text
             .matches(output)
             .count(),
-        1
+        0
     );
     let all = mj_core::storage::TranscriptHistoryPage {
         items: stored.transcript.clone(),
@@ -8207,12 +8232,15 @@ fn terminal_output_for_evicted_owner_parks_and_joins_history_pages() {
             .sum::<usize>(),
         1
     );
+    let summary =
+        mj_transcript::summary::TranscriptSummary::from_materialized_keeping(&stored, usize::MAX)
+            .render(usize::MAX);
+    assert_eq!(summary.matches(output).count(), 1);
     let entries = mj_client::transcript::materialized_chat_entries(&stored);
     assert_eq!(
         entries
             .iter()
-            .flat_map(|entry| &entry.tool_content)
-            .map(|text| text.matches(output).count())
+            .map(|entry| entry.text.matches(output).count())
             .sum::<usize>(),
         1
     );

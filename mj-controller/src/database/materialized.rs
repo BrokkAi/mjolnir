@@ -793,7 +793,9 @@ pub(super) fn load_materialized_transcript_filtered_from(
     } else {
         latest_seq.max(after_seq)
     };
-    hydrate_terminal_outputs(&connection, session_id, &mut items)?;
+    if !roles.is_empty() && !roles.contains(&mj_core::transcript::TranscriptRole::Terminal) {
+        hydrate_terminal_outputs(&connection, session_id, &mut items)?;
+    }
     Ok(Some(TranscriptPage {
         next_after_seq,
         items,
@@ -1047,7 +1049,6 @@ pub(super) fn load_transcript_history_from(
         items.remove(0);
     }
     let before = has_more.then(|| mj_core::storage::TranscriptCursor::of(&items[0]));
-    hydrate_terminal_outputs(&connection, session_id, &mut items)?;
     Ok(Some(mj_core::storage::TranscriptHistoryPage {
         items,
         before,

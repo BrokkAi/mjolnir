@@ -46,7 +46,6 @@ pub(super) async fn native_agent_history(
     let page = backend(&state)?
         .native_agent_history(owner, child, before)
         .await?;
-    let outputs = mj_core::transcript::TerminalOutputs::of(page.items.iter().map(AsRef::as_ref));
     let items = page
         .items
         .iter()
@@ -55,7 +54,7 @@ pub(super) async fn native_agent_history(
                 "stable_id": item.stable_id,
                 "position": item.position,
                 "role": mj_core::transcript::transcript_item_role(&item.body),
-                "text": mj_transcript::transcript::transcript_item_text_with_outputs(item, &outputs),
+                "text": mj_transcript::transcript::transcript_item_text(item),
             })
         })
         .collect::<Vec<_>>();
@@ -421,7 +420,6 @@ pub(super) async fn transcript(
         )
         .await?
         .ok_or_else(|| ApiFailure::not_found("no transcript is recorded for that session"))?;
-    let outputs = mj_core::transcript::TerminalOutputs::of(page.items.iter().map(AsRef::as_ref));
     Ok(Json(TranscriptResponse {
         next_after_seq: page.next_after_seq,
         session_id,
@@ -435,7 +433,7 @@ pub(super) async fn transcript(
                 position: item.position,
                 seq: item.seq(),
                 role: mj_core::transcript::transcript_item_role(&item.body).to_owned(),
-                text: mj_transcript::transcript::transcript_item_text_with_outputs(item, &outputs),
+                text: mj_transcript::transcript::transcript_item_text(item),
                 created_at_ms: item.created_at_ms,
                 last_changed_at_ms: item.last_changed_at_ms,
                 body: item.body.clone(),

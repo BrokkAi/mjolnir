@@ -81,17 +81,15 @@ pub struct HistoryEntry {
 }
 
 pub fn history_entries(page: &mj_core::storage::TranscriptHistoryPage) -> Vec<HistoryEntry> {
-    let outputs = TerminalOutputs::of(page.items.iter().map(AsRef::as_ref));
     page.items
         .iter()
-        .filter(|item| !matches!(&item.body, TranscriptBody::TerminalOutput { record } if outputs.shown_under_tool(&record.terminal_id)))
         .map(|item| HistoryEntry {
             role: mj_core::transcript::transcript_item_role(&item.body),
             text: match &item.body {
                 TranscriptBody::Message { event } => mj_core::transcript::sanitize_terminal_text(
                     event.message_text().expect("message entry metadata"),
                 ),
-                _ => mj_transcript::transcript::transcript_item_text_with_outputs(item, &outputs),
+                _ => mj_transcript::transcript::transcript_item_text(item),
             },
             label: match &item.body {
                 TranscriptBody::Message { event } => Some(event.message_label()),
@@ -193,20 +191,17 @@ pub fn materialized_chat_entries_with_diffstats(
     session: &MaterializedSession,
     diffstats: &BTreeMap<String, Vec<String>>,
 ) -> Vec<ChatEntry> {
-    let outputs = TerminalOutputs::of(session.transcript.iter().map(AsRef::as_ref));
     let mut entries = session
         .transcript
         .iter()
         .map(|item| {
-            materialized_chat_entry_with_outputs(
+            materialized_chat_entry_with_diffstats(
                 item,
-                &outputs,
                 session.applied_event_ordinal,
                 diffstats.get(&item.stable_id),
             )
         })
         .collect::<Vec<_>>();
-    entries.retain(|entry| !entry.source.0.as_ref().is_some_and(|item| matches!(&item.body, TranscriptBody::TerminalOutput { record } if outputs.shown_under_tool(&record.terminal_id))));
     apply_entry_list_rules(&mut entries);
     entries
 }
@@ -221,12 +216,10 @@ pub const TAIL_SEED_ITEMS: usize = 256;
 /// session's transcript. Runs off the event loop, so it takes the items by
 /// slice rather than the session.
 pub fn materialized_prefix_entries(items: &[Arc<TranscriptItem>], frontier: u64) -> Vec<ChatEntry> {
-    let outputs = TerminalOutputs::of(items.iter().map(AsRef::as_ref));
     let mut entries = items
         .iter()
-        .map(|item| materialized_chat_entry_with_outputs(item, &outputs, frontier, None))
+        .map(|item| materialized_chat_entry_with_diffstats(item, frontier, None))
         .collect::<Vec<_>>();
-    entries.retain(|entry| !entry.source.0.as_ref().is_some_and(|item| matches!(&item.body, TranscriptBody::TerminalOutput { record } if outputs.shown_under_tool(&record.terminal_id))));
     apply_entry_list_rules(&mut entries);
     entries
 }
@@ -246,7 +239,6 @@ pub fn materialized_chat_entries_reusing(
     previous: Vec<ChatEntry>,
 ) -> Vec<ChatEntry> {
     let mut previous = previous.into_iter().peekable();
-    let outputs = TerminalOutputs::of(session.transcript.iter().map(AsRef::as_ref));
     let mut entries = session
         .transcript
         .iter()
@@ -265,29 +257,19 @@ pub fn materialized_chat_entries_reusing(
                 .peek()
                 .is_none_or(|entry| entry.start_seq != item.position)
             {
-                return materialized_chat_entry_with_outputs(
+                return materialized_chat_entry_with_diffstats(
                     item,
-                    &outputs,
                     session.applied_event_ordinal,
                     None,
                 );
             }
             let Some(mut entry) = previous.next() else {
-                return materialized_chat_entry_with_outputs(
+                return materialized_chat_entry_with_diffstats(
                     item,
-                    &outputs,
                     session.applied_event_ordinal,
                     None,
                 );
             };
-            if outputs.has_standalone() {
-                return materialized_chat_entry_with_outputs(
-                    item,
-                    &outputs,
-                    session.applied_event_ordinal,
-                    None,
-                );
-            }
             if entry.source.is(item) {
                 entry.seq = item_update_ordinal(item, session.applied_event_ordinal);
                 return entry;
@@ -297,15 +279,9 @@ pub fn materialized_chat_entries_reusing(
                 entry.source = TranscriptSource(Some(item.clone()));
                 return entry;
             }
-            materialized_chat_entry_with_outputs(
-                item,
-                &outputs,
-                session.applied_event_ordinal,
-                None,
-            )
+            materialized_chat_entry_with_diffstats(item, session.applied_event_ordinal, None)
         })
         .collect::<Vec<_>>();
-    entries.retain(|entry| !entry.source.0.as_ref().is_some_and(|item| matches!(&item.body, TranscriptBody::TerminalOutput { record } if outputs.shown_under_tool(&record.terminal_id))));
     apply_entry_list_rules(&mut entries);
     entries
 }
@@ -1546,6 +1522,59 @@ mod tests {
             .map(|entry| entry.id)
             .collect::<Vec<_>>();
         assert_eq!(sent, [2], "the changed tool call is sent again");
+    }
+
+    // Hard-won: e13ed5c7c: parked records rebuilt unchanged entries and disappeared across prefix and tail
+    #[test]
+    fn parked_output_preserves_entry_reuse_across_prefix_and_tail() {
+        let mut session = MaterializedSession::empty("parked-tail");
+        session.transcript.push(item(1, TranscriptBody::Tool {
+            call: json!({"toolCallId":"owner", "title":"Execute", "status":"completed", "kind":"execute"}),
+            terminal_outputs: Vec::new(), terminal_refs: vec!["parked".into()], presentation: None,
+        }));
+        for position in 2..=300 {
+            session.transcript.push(item(
+                position,
+                TranscriptBody::User {
+                    content: vec![json!({"type":"text", "text":format!("message {position}")})],
+                },
+            ));
+        }
+        session.transcript.push(item(
+            301,
+            TranscriptBody::TerminalOutput {
+                record: TerminalOutputRecord {
+                    terminal_id: "parked".into(),
+                    output: "unique parked output".into(),
+                    truncated: false,
+                    exit_code: Some(0),
+                    signal: None,
+                },
+            },
+        ));
+        session.applied_event_ordinal = 301;
+        let previous = materialized_chat_entries(&session);
+        let pointer = previous[1].text.as_ptr();
+        let reused = materialized_chat_entries_reusing(&session, 0, previous);
+        assert_eq!(reused[1].text.as_ptr(), pointer);
+        let split = session.transcript.len() - TAIL_SEED_ITEMS;
+        let mut entries = materialized_prefix_entries(&session.transcript[..split], 301);
+        entries.extend(materialized_chat_entries_reusing(
+            &session,
+            split,
+            Vec::new(),
+        ));
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| e.text.matches("unique parked output").count()
+                    + e.tool_content
+                        .iter()
+                        .map(|t| t.matches("unique parked output").count())
+                        .sum::<usize>())
+                .sum::<usize>(),
+            1
+        );
     }
 
     #[test]
