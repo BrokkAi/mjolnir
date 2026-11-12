@@ -87,7 +87,13 @@ pub(super) fn check(
             check_id,
             title,
             detail,
-            "On the host, run: sudo -n mkdir -p /etc/ssh/sshd_config.d && printf '%s\\n' '# Measured relay-session refusals at ~40 containers on morannon (Series 20/21).' 'MaxSessions 200' 'MaxStartups 100:30:300' | sudo -n tee /etc/ssh/sshd_config.d/60-mj-mux.conf && sudo -n sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' /etc/ssh/sshd_config && sudo -n sshd -t && sudo -n systemctl reload \"$(systemctl show -p Id --value sshd.service)\". Then run `sudo -n sshd -T` to verify the effective values; earlier drop-ins may take precedence. Reconnect existing SSH masters to apply the new limits.",
+            format!(
+                r#"On the host, run: `sudo -n mkdir -p /etc/ssh/sshd_config.d && printf '%s\n' '# Measured relay-session refusals at ~40 containers on morannon (Series 20/21).' 'MaxSessions {sessions}' 'MaxStartups {start}:{rate}:{full}' | sudo -n tee /etc/ssh/sshd_config.d/60-mj-mux.conf && sudo -n cp /etc/ssh/sshd_config /etc/ssh/sshd_config.mj-backup && {{ printf '%s\n' 'Include /etc/ssh/sshd_config.d/*.conf'; sudo -n cat /etc/ssh/sshd_config.mj-backup; }} | sudo -n tee /etc/ssh/sshd_config && sudo -n sshd -t`. On Linux with systemd, reload with `sudo -n systemctl reload "$(systemctl show -p Id --value sshd.service)"`. On macOS, launchd starts sshd for each new connection, so reconnect to apply the settings. Then run `sudo -n sshd -T` to verify the effective values; earlier drop-ins may take precedence. Reconnect existing SSH masters to apply the new limits."#,
+                sessions = sessions.max(200),
+                start = start.max(100),
+                rate = rate.min(30),
+                full = full.max(300),
+            ),
         )
     }
 }

@@ -404,6 +404,8 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         Ok(failed("sudo: a password is required")),
         Ok(output("maxsessions 10\nmaxstartups 10:30:100\n")),
         Ok(output("maxsessions 200\nmaxstartups 100:30:300\n")),
+        Ok(output("maxsessions 1000\nmaxstartups 10:30:100\n")),
+        Ok(output("maxsessions 10\nmaxstartups 500:10:1000\n")),
     ] {
         checks.push(sshd::check("remote", &ssh, &FakeExecutor::new([response])));
     }
