@@ -549,8 +549,6 @@ codex
 
 Important
 
-Browser tests · 0m ago
-
 Input needed
 ?
 ⋯
@@ -561,8 +559,6 @@ Attention
 codex
 
 Input needed
-
-Browser tests · 0m ago
 
 Unreachable worker
 ×
@@ -575,8 +571,6 @@ codex
 
 Unreachable
 
-Browser tests · 0m ago
-
 A long session title that occupies one ellipsized line on a narrow phone screen
 ×
 2
@@ -588,8 +582,6 @@ Beta
 codex
 
 Failed
-
-Browser tests · 0m ago
 layout: {"documentWidth":390,"viewportWidth":390,"cards":[{"title":"Important result","attention":[{"text":"!","label":"Important"}],"meta":["Attention","/work/project","codex"],"activity":"Important","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"Input needed","attention":[{"text":"?","label":"Input needed"}],"meta":["Attention","/work/project","codex"],"activity":"Input needed","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"Unreachable worker","attention":[{"text":"×","label":"Unreachable"}],"meta":["Attention","/work/project","codex"],"activity":"Unreachable","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"A long session title that occupies one ellipsized line on a narrow phone screen","attention":[{"text":"×","label":"Failed"},{"text":"2","label":"2 queued prompts"}],"meta":["Beta","/work/attention","codex"],"activity":"Failed","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}}]}
 === notifications selected by default (390x844) ===
 Notifications (4)
