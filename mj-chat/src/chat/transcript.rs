@@ -385,6 +385,7 @@ impl TranscriptSnapshot {
             .entries
             .into_iter()
             .flat_map(|entry| {
+                let entry = std::sync::Arc::unwrap_or_clone(entry);
                 entry
                     .lines
                     .into_iter()

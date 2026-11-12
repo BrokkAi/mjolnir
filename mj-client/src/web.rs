@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -20,7 +21,8 @@ pub struct BrowserTranscript {
     /// entry.
     pub window_start_seq: u64,
     pub reset: bool,
-    pub entries: Vec<BrowserTranscriptEntry>,
+    /// Shared with the projector so publication retains one copy of each row.
+    pub entries: Vec<Arc<BrowserTranscriptEntry>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

@@ -1202,7 +1202,7 @@ fn golden_phone_session_snapshot() {
             diffstats: Vec::new(),
         }
     };
-    let conversations = |entries| {
+    let conversations = |entries: Vec<crate::server::BrowserTranscriptEntry>| {
         mj_core::snapshot_map::SnapshotMap::from([(
             "session-1".to_owned(),
             BrowserTranscript {
@@ -1210,7 +1210,7 @@ fn golden_phone_session_snapshot() {
                 presentation_key: "key".into(),
                 window_start_seq: 1,
                 reset: false,
-                entries,
+                entries: entries.into_iter().map(Arc::new).collect(),
             },
         )])
     };

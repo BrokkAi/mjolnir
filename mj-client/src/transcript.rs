@@ -179,7 +179,7 @@ pub fn browser_transcript(
         presentation_key: rich_presentation_key(source_entries, &collapse, last_compaction_seq),
         window_start_seq,
         reset,
-        entries,
+        entries: entries.into_iter().map(Arc::new).collect(),
     }
 }
 
@@ -1194,7 +1194,7 @@ pub fn materialized_browser_transcript(session: &MaterializedSession) -> Browser
 pub struct BrowserTranscriptProjector {
     entries: Vec<ChatEntry>,
     /// The entries this projector last published, by id.
-    published: BTreeMap<String, BrowserTranscriptEntry>,
+    published: BTreeMap<String, Arc<BrowserTranscriptEntry>>,
 }
 
 impl BrowserTranscriptProjector {
@@ -1214,6 +1214,8 @@ impl BrowserTranscriptProjector {
             browser_transcript(&self.entries, session.applied_event_ordinal, 0, None);
         let first = self.published.is_empty();
         for entry in &mut transcript.entries {
+            // Freshly rendered rows have one owner until publication below.
+            let entry = Arc::get_mut(entry).expect("unpublished browser row");
             match self.published.get(&entry.identity()) {
                 Some(previous) if same_rendering(previous, entry) => {
                     entry.updated_seq = previous.updated_seq;
@@ -1461,6 +1463,63 @@ mod tests {
             without_cursors(&materialized_browser_transcript(session))
         );
         cached
+    }
+
+    #[test]
+    fn browser_publication_shares_large_rows_without_changing_cursors() {
+        let mut session = MaterializedSession::empty("shared-publication");
+        for position in 1..=8_000 {
+            session.transcript.push(item(
+                position,
+                TranscriptBody::User {
+                    content: vec![json!({"type": "text", "text": format!(
+                        "Message {position}: {}", "realistic transcript text and Unicode 支持. ".repeat(40)
+                    )})],
+                },
+            ));
+        }
+        session.applied_event_ordinal = 8_000;
+        let mut projector = BrowserTranscriptProjector::default();
+        let first = projector.project(&session);
+        assert_eq!(
+            serde_json::to_vec(&first).unwrap(),
+            serde_json::to_vec(&materialized_browser_transcript(&session)).unwrap(),
+        );
+        // The conversations map clones the returned transcript. Its rows and
+        // the projector's cursor baseline must still have the same allocation.
+        let conversation = first.clone();
+        for entry in &conversation.entries {
+            assert!(Arc::ptr_eq(entry, &projector.published[&entry.identity()]));
+        }
+        let line_bytes: usize = first
+            .entries
+            .iter()
+            .flat_map(|entry| &entry.lines)
+            .map(String::len)
+            .sum();
+        eprintln!(
+            "shared publication measurement: {} source items, {} published rows, {line_bytes} line bytes; old two copies = {} line bytes, shared = {line_bytes}",
+            session.transcript.len(),
+            first.entries.len(),
+            line_bytes * 2
+        );
+
+        session.applied_event_ordinal += 1;
+        Arc::make_mut(session.transcript.last_mut().unwrap()).body = TranscriptBody::User {
+            content: vec![json!({"type": "text", "text": "changed newest item"})],
+        };
+        let second = projector.project(&session);
+        for entry in &second.entries {
+            assert!(Arc::ptr_eq(entry, &projector.published[&entry.identity()]));
+            if entry.id == 8_000 {
+                assert_eq!(entry.updated_seq, 8_001);
+            } else {
+                let previous = first.entries.iter().find(|old| old.id == entry.id).unwrap();
+                assert_eq!(entry.updated_seq, previous.updated_seq);
+            }
+        }
+        // Later publication cannot mutate the previous conversation snapshot.
+        assert_eq!(conversation, first);
     }
 
     /// A browser polling with `after_seq` is sent an entry again only when

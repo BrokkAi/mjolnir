@@ -2470,7 +2470,7 @@ fn browser_lines(session: &MaterializedSession) -> Vec<String> {
         .browser_transcript(None)
         .entries
         .into_iter()
-        .flat_map(|entry| entry.lines)
+        .flat_map(|entry| std::sync::Arc::unwrap_or_clone(entry).lines)
         .collect()
 }
 

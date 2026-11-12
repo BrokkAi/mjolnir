@@ -3567,7 +3567,10 @@ async fn conversation_endpoint_returns_authenticated_bounded_deltas() {
                 tool_status: None,
                 diffstats: Vec::new(),
             },
-        ],
+        ]
+        .into_iter()
+        .map(Arc::new)
+        .collect(),
     };
     let (app, _, _, _, _) =
         app_with_conversations(BTreeMap::from([("session-1".into(), transcript)]));
@@ -3649,7 +3652,10 @@ async fn conversation_endpoint_rejects_cached_transcript_during_transition() {
             tone: "agent",
             tool_status: None,
             diffstats: Vec::new(),
-        }],
+        }]
+        .into_iter()
+        .map(Arc::new)
+        .collect(),
     };
     let (app, _, _, _, _) = app_with(
         BTreeMap::from([("session-1".into(), transcript)]),
