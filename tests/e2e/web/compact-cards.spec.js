@@ -1500,7 +1500,8 @@ test('notifications retain handled entries below the band until leaving or reloa
   await noticeCard.locator('button[aria-label^="Actions for"]').click();
   await expect(noticeCard.getByRole('menuitem', { name: 'Resume', exact: true })).toBeVisible();
   await expect(noticeCard.getByRole('menuitem', { name: 'Changed files…' })).toHaveCount(0);
-  await page.keyboard.press('Escape');
+  await noticeCard.getByRole('menuitem', { name: 'Resume', exact: true }).click();
+  await expect.poll(() => state.actions.find(action => action.action === 'resume')).toMatchObject({ session_id: 'notice-b', workspace_id: OTHER_WORKSPACE_ID });
   const c = session('notice-c', 'c', 'C', { attention: 'failed', activity: SERVER_TIME_MS });
   state.snapshot.sessions.push(c);
   await refresh(page, state);

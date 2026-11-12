@@ -9366,7 +9366,7 @@ async function runSessionAction(dataset, errorNode, extra) {
     // back to what the session last used.
     body.profile_id = extra?.profile_id || dataset.profile;
     body.target_id = extra?.target_id || dataset.target;
-    body.workspace_id = extra?.workspace_id || dataset.workspace_id || selectedWorkspaceId();
+    body.workspace_id = extra?.workspace_id || dataset.workspace_id || sessionById(dataset.id)?.workspace_id;
     body.queue = extra?.queue || 'start';
     if (extra && Object.prototype.hasOwnProperty.call(extra, 'additional_mounts')) {
       body.additional_mounts = extra.additional_mounts;
