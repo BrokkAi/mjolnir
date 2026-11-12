@@ -1554,15 +1554,7 @@ impl ApiBackend {
             let summaries = ids
                 .into_iter()
                 .map(|id| {
-                    if let Some(status) = startup_context(
-                        committed
-                            .startup_groups
-                            .get(&id)
-                            .map(Vec::as_slice)
-                            .unwrap_or_default(),
-                    )?
-                    .1
-                    {
+                    if let Some(status) = startup_context(committed.startup_groups.get(&id))?.1 {
                         starts.insert(id.clone(), status);
                     }
                     let summary = committed.turns.get(&id).map(|turn| {
@@ -2774,64 +2766,48 @@ async fn load_startup_context(session_id: String) -> Result<(Option<String>, Opt
     // other durable records, so a status read costs no store connection. A
     // `mj wait` reads this on every revision it wakes for. Only a process
     // without the writer reads the store.
-    let steps = match crate::database::committed_state()? {
-        Some(committed) => committed
-            .startup_groups
-            .get_shared(&session_id)
-            .unwrap_or_default(),
-        None => Arc::new(
+    let status = match crate::database::committed_state()? {
+        Some(committed) => committed.startup_groups.get_shared(&session_id),
+        None => {
             blocking("read durable startup status", move || {
-                crate::database::load_latest_startup_group(&session_id).map(|steps| {
-                    steps
-                        .into_iter()
-                        .map(crate::database::StartupStepStatus::from)
-                        .collect()
-                })
+                crate::database::load_latest_startup_group(&session_id)
+                    .map(|steps| crate::database::StartupGroupStatus::of(&steps).map(Arc::new))
             })
-            .await?,
-        ),
+            .await?
+        }
     };
-    startup_context(&steps)
+    startup_context(status.as_deref())
 }
 
 fn startup_context(
-    steps: &[crate::database::StartupStepStatus],
+    status: Option<&crate::database::StartupGroupStatus>,
 ) -> Result<(Option<String>, Option<StartStatus>)> {
-    let group_id = steps.last().and_then(|step| step.group_id.clone());
-    if let Some(step) = steps
-        .iter()
-        .find(|step| matches!(step.phase.as_str(), "failed" | "rejecting"))
-    {
+    let Some(status) = status else {
+        return Ok((None, None));
+    };
+    let group_id = status.group_id.clone();
+    if let Some(error) = &status.failure {
         return Ok((
             group_id,
             Some(StartStatus::Failed {
-                message: step
-                    .error
+                message: error
                     .clone()
                     .unwrap_or_else(|| "session startup was rejected".to_owned()),
             }),
         ));
     }
-    if steps
-        .iter()
-        .any(|step| matches!(step.phase.as_str(), "pending" | "delivering" | "accepted"))
-    {
+    if status.pending {
         return Ok((group_id, Some(StartStatus::Pending)));
     }
-    let Some(last) = steps.last() else {
-        return Ok((group_id, None));
-    };
-    if last.phase == "done"
-        && *last
-            .api_prompt
+    if let Some((api_prompt, accepted_ordinal)) = &status.last_done
+        && *api_prompt
             .as_ref()
             .map_err(|error| anyhow::anyhow!("{error}"))?
     {
         return Ok((
             group_id,
             Some(StartStatus::Submitted {
-                turn_id: last
-                    .accepted_ordinal
+                turn_id: accepted_ordinal
                     .context("completed startup prompt has no acceptance ordinal")?,
             }),
         ));
