@@ -471,12 +471,13 @@ mod tests {
                 "asks".into(),
                 mj_core::attention::SessionAttention::NeedsInput,
             ),
-            ("done".into(), mj_core::attention::SessionAttention::Idle),
+            ("done".into(), mj_core::attention::SessionAttention::Unread),
         ]));
         dashboard.set_current_session(None);
         dashboard
     }
 
+    // Hard-won: 92684ad3b: interruption after read output stopped producing an unread notification.
     #[test]
     fn a_new_question_notifies_once_after_the_delay() {
         let mut dashboard = dashboard();
@@ -511,6 +512,41 @@ mod tests {
         let again = dashboard.notification_events(63_000);
         assert_eq!(again.len(), 1);
         assert_eq!(again[0].session_id, "asks");
+        dashboard.set_session_attention_for("done", mj_core::attention::SessionAttention::Idle);
+        assert!(dashboard.notification_events(64_000).is_empty());
+        dashboard
+            .state
+            .sessions
+            .get_mut("done")
+            .unwrap()
+            .viewed_through_event_ordinal = 2;
+        let mut interrupted = crate::test_support::materialized_session_for(
+            "done",
+            vec![crate::test_support::agent_message(2, "Read output")],
+        );
+        interrupted.applied_event_ordinal = 3;
+        interrupted.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
+            command_id: "interrupted".into(),
+            accepted_ordinal: Some(1),
+            turn_start_position: Some(1),
+            completed_ordinal: 3,
+            completed_at_ms: 3,
+            outcome: mj_core::state::TurnOutcomeKind::Interrupted {
+                message: "Stopped".into(),
+                reason: None,
+            },
+            answered_through: None,
+            diagnostic: None,
+            usage: None,
+            work_facts: None,
+        });
+        dashboard.apply_materialized_session(&interrupted);
+        dashboard.set_session_attention_for("done", mj_core::attention::SessionAttention::Unread);
+        assert!(dashboard.notification_events(65_000).is_empty());
+        let interrupted = dashboard.notification_events(67_000);
+        assert_eq!(interrupted.len(), 1);
+        assert_eq!(interrupted[0].level, AttentionLevel::Unread);
+        assert_eq!(interrupted[0].body, "Work was interrupted");
     }
 
     #[test]

@@ -361,12 +361,16 @@ test('golden_viewer_new_session', async ({ context }) => {
     await expect(dialog.locator('.mount-row')).toHaveCount(3);
     output.push('=== existing Container settings uses the shared editor ===');
     output.push((await dialog.innerText()).trim());
+    const sourcesBeforeSave = await page.evaluate(() => window.fixtureEventSources.length);
     await dialog.getByRole('button', { name: 'Save', exact: true }).click();
     await expect.poll(() => state.actions.length).toBe(1);
     expect(state.actions[0]).toEqual({
       action: 'set-container-settings', session_id: 'mounted', cpus: '6', memory: '12g', mounts,
     });
     await expect(dialog).toHaveCount(0);
+    // Save closes the dialog before its snapshot refresh lands; a later fixture
+    // change sent before that snapshot would be overwritten by it.
+    await expect.poll(() => page.evaluate(() => window.fixtureEventSources.length)).toBe(sourcesBeforeSave + 1);
     state.snapshot.sessions[0].container_upgrade_supported = true;
     state.upgradePreview = { session_id: 'mounted', source_container_id: 'old-container', current_image: 'agent-dev:2.51.0', current_image_id: 'sha256:previous', target_image: 'agent-dev:2.52.0', target_image_id: 'sha256:selected', available: true, retained_mounts: ['/workspace', '/cache', '/tmp'], warning: 'Writable-layer state, including manually installed packages, may be lost. A checkpoint does not preserve the whole environment.' };
     await refresh(page, state);

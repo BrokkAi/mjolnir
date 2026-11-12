@@ -53,6 +53,7 @@ fn web_suspend_restart_and_move_use_the_lifecycle_cancellation_control() {
     }
 }
 
+// Hard-won: 92684ad3b: unread-frontier changes must reach the viewer even when attention stays unchanged.
 #[test]
 fn ordinary_web_publications_project_only_changed_rows_at_every_history_size() {
     for count in [100, 10_000, 100_000] {
@@ -114,6 +115,10 @@ fn ordinary_web_publications_project_only_changed_rows_at_every_history_size() {
             .metadata
             .session_attention
             .insert("history-000000".into(), attention);
+        runtime
+            .metadata
+            .unread_frontiers
+            .insert("history-000000".into(), 80);
         let runtime_view = mj_client::daemon::RuntimeSessionView::from_managed(
             "history-000000".into(),
             mj_client::session::ManagedSessionView {
@@ -130,6 +135,7 @@ fn ordinary_web_publications_project_only_changed_rows_at_every_history_size() {
             serde_json::to_value(&api).unwrap()["attention"]
         );
         assert_eq!(viewer.attention, runtime_view.attention);
+        assert_eq!(viewer.unread_frontier, Some(80));
         assert_eq!(
             viewer.native_subagent_attention["native"],
             mj_core::attention::SessionAttention::Working
@@ -147,8 +153,17 @@ fn ordinary_web_publications_project_only_changed_rows_at_every_history_size() {
         crate::server::take_viewer_row_visits();
         publisher.snapshot(&controller, &[], &Default::default(), &views, 2);
         assert_eq!(crate::server::take_viewer_row_visits(), 0);
-        publisher.dirty.insert("history-000000".into());
-        publisher.snapshot(&controller, &[], &Default::default(), &views, 3);
+        runtime
+            .metadata
+            .unread_frontiers
+            .insert("history-000000".into(), 99);
+        publisher.observe_runtime(&runtime, &mut Default::default(), &mut Default::default());
+        let frontier_only = publisher.snapshot(&controller, &[], &Default::default(), &views, 3);
+        assert_eq!(
+            frontier_only.sessions.0["history-000000"].unread_frontier,
+            Some(99)
+        );
+        assert_eq!(held.sessions.0["history-000000"].unread_frontier, Some(80));
         assert_eq!(crate::server::take_viewer_row_visits(), 1);
         controller
             .state
