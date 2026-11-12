@@ -675,9 +675,9 @@ mod tests {
         let mut record = crate::database::test_session("healthy", "old-project");
         record.project_directory = Some(checkout.clone());
         record.target_template_id = "localhost".into();
-        record.target = Some(mj_core::state::TargetLocator::LocalBare {
+        record.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: root.path().join("workers").join(&record.id),
-        });
+        }));
         let raw_key =
             ProjectMemoryIdentity::for_legacy_session(&record, Some(&legacy_bundle), None)
                 .unwrap()

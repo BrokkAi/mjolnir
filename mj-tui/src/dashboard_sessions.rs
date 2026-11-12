@@ -11,8 +11,8 @@ use crate::render::{headroom_color, quota_remaining_percent, weekly_quota_exhaus
 ///
 /// The order is the order a person wants to be interrupted in: a failure
 /// first, then a session nothing can be learned about because its worker is
-/// unreachable, then a question the agent cannot proceed without, then a
-/// finished answer nobody has read, then work in progress, then idle, then
+/// unreachable, then a question the agent cannot proceed without, then an
+/// important update, then an unread answer, then work in progress, idle, and
 /// anything stopped or still starting. Rows and priority sorting retain the
 /// session's status; the attention queue and badges omit failures already read
 /// in this terminal.
@@ -22,6 +22,7 @@ pub enum AttentionLevel {
     Idle,
     Working,
     Unread,
+    Important,
     Waiting,
     Unreachable,
     Failed,
@@ -66,122 +67,37 @@ pub(crate) struct AttentionNavigation {
     workspace_id: Option<String>,
 }
 
-/// The attention level from the same facts the row symbol reads.
-///
-/// `in_operation` is a launch, resume, move, or stop the daemon is running
-/// for the session; the session is busy on the person's behalf, not waiting.
-/// `transition_failed` is a launch, resume, move, or stop that stopped with
-/// an error, which the row already draws as a failure.
-pub(crate) fn attention_level(
-    detail: Option<&SessionDetail>,
-    review: Option<&RuntimeReviewView>,
-    state: SessionState,
-    unreachable: bool,
-    in_operation: bool,
-    transition_failed: bool,
-) -> AttentionLevel {
-    use mj_core::review::driver::TurnReviewPhase;
-    use mj_core::review::verdict::ReviewVerdict;
-
-    if transition_failed {
-        return AttentionLevel::Failed;
-    }
-    if in_operation {
-        return AttentionLevel::Working;
-    }
-    match state {
-        SessionState::Lost | SessionState::Error | SessionState::DestroyedWithDataLoss => {
-            return AttentionLevel::Failed;
-        }
-        SessionState::Disconnected => return AttentionLevel::Unreachable,
-        SessionState::StartupCleanup => return AttentionLevel::Failed,
-        // A parked sub-agent is idle by definition: its turn ended, its parent
-        // was told, and it has no worker to report anything else.
-        SessionState::Parked => return AttentionLevel::Idle,
-        SessionState::Stopped => return AttentionLevel::Inactive,
-        SessionState::Provisioning
-        | SessionState::Checkpointing
-        | SessionState::Closing
-        | SessionState::Destroying => return AttentionLevel::Working,
-        SessionState::Running => {}
-    }
-    if unreachable {
-        return AttentionLevel::Unreachable;
-    }
-    // A review that failed outranks a pending question, so the row, the queue,
-    // and the badge all report the failure first.
-    let review_level = review
-        .filter(|review| review.activity_label().is_some())
-        .map(|review| match &review.phase {
-            TurnReviewPhase::Verdict(ReviewVerdict::Failed { .. }) => AttentionLevel::Failed,
-            _ if review.is_working() => AttentionLevel::Working,
-            TurnReviewPhase::Verdict(ReviewVerdict::Clean) => AttentionLevel::Unread,
-            _ => AttentionLevel::Waiting,
-        });
-    if review_level == Some(AttentionLevel::Failed) {
-        return AttentionLevel::Failed;
-    }
-    if detail.is_some_and(|detail| !detail.pending_elicitations.is_empty()) {
-        return AttentionLevel::Waiting;
-    }
-    if let Some(level) = review_level {
-        return level;
-    }
-    let Some(detail) = detail else {
-        return AttentionLevel::Idle;
-    };
-    if matches!(
-        detail.activity.state().last_known(),
-        mj_core::activity::ActivityState::CheckingContinuation
-    ) {
-        return AttentionLevel::Working;
-    }
-    if detail.awaiting_input && detail.current_turn_started_at.is_none() {
-        AttentionLevel::Waiting
-    } else if matches!(
-        detail.activity.state().last_known(),
-        mj_core::activity::ActivityState::Expecting { .. }
-    ) || !detail.activity.is_idle(detail.current_turn_started_at)
-    {
-        AttentionLevel::Working
-    } else if detail.has_unread() {
-        AttentionLevel::Unread
-    } else {
-        AttentionLevel::Idle
-    }
-}
-
-/// The attention level of `session` from its own facts alone. Only
+/// The daemon's severity with local unread receipts applied. Only
 /// [`crate::session_view::SessionFacts`] calls this; everything else reads
 /// the level it keeps.
-pub(crate) fn own_attention_level(
+pub(crate) fn presentation_attention(
     dashboard: &DashboardState,
     session_id: &str,
-    session: &SessionRecord,
 ) -> AttentionLevel {
-    let level = attention_level(
-        dashboard.session_details.get(session_id),
-        dashboard.session_review(session_id),
-        session.state,
-        dashboard.unreachable_sessions.contains(session_id),
-        dashboard.session_operations.contains_key(session_id)
-            || dashboard.transition_kind(session_id).is_some(),
-        dashboard.transition_failure_kind(session_id).is_some(),
-    );
-    let Some(native) = dashboard.native_agents.get(session_id) else {
-        return level;
+    use mj_core::attention::SessionAttention;
+    let level = match dashboard
+        .served_attention
+        .get(session_id)
+        .copied()
+        .unwrap_or_default()
+    {
+        SessionAttention::NeedsInput => AttentionLevel::Waiting,
+        SessionAttention::Important => AttentionLevel::Important,
+        SessionAttention::Failed => AttentionLevel::Failed,
+        SessionAttention::Unreachable => AttentionLevel::Unreachable,
+        SessionAttention::Working => AttentionLevel::Working,
+        SessionAttention::Idle => AttentionLevel::Idle,
+        SessionAttention::Inactive | SessionAttention::Unknown => AttentionLevel::Inactive,
     };
-    use mj_core::native_agent::NativeAgentState;
-    match native.agent.state {
-        NativeAgentState::Running => match level {
-            AttentionLevel::Idle | AttentionLevel::Inactive | AttentionLevel::Unread => {
-                AttentionLevel::Working
-            }
-            _ => level,
-        },
-        NativeAgentState::Failed => AttentionLevel::Failed,
-        NativeAgentState::Disconnected => AttentionLevel::Unreachable,
-        NativeAgentState::Completed | NativeAgentState::Cancelled => AttentionLevel::Idle,
+    if level == AttentionLevel::Idle
+        && dashboard
+            .session_details
+            .get(session_id)
+            .is_some_and(SessionDetail::has_unread)
+    {
+        AttentionLevel::Unread
+    } else {
+        level
     }
 }
 
@@ -825,10 +741,10 @@ impl DashboardState {
     /// Whether the session's own turn is still going: working, or holding a
     /// question the agent asked in that turn.
     fn has_unfinished_turn(&self, session_id: &str) -> bool {
-        matches!(
-            self.own_attention_level(session_id),
-            AttentionLevel::Working | AttentionLevel::Waiting
-        )
+        self.own_turn_is_running(session_id)
+            || self.session_details.get(session_id).is_some_and(|detail| {
+                !detail.pending_elicitations.is_empty() || detail.awaiting_input
+            })
     }
 
     /// What Interrupt all stops for `root`: every session in its Mjolnir
@@ -898,15 +814,14 @@ impl DashboardState {
         ));
     }
 
-    /// The attention level from the session's own facts alone.
-    pub(crate) fn own_attention_level(&self, session_id: &str) -> AttentionLevel {
-        self.session_facts().own_attention_level(session_id)
-    }
-
     /// The child whose open form makes `parent_id` read as waiting when the
     /// parent itself is not, so a person is taken to that form.
     pub(crate) fn waiting_child_of(&self, parent_id: &str) -> Option<String> {
-        if self.own_attention_level(parent_id) >= AttentionLevel::Waiting {
+        if self.attention_level(parent_id) != AttentionLevel::Waiting
+            || self.session_details.get(parent_id).is_some_and(|detail| {
+                !detail.pending_elicitations.is_empty() || detail.awaiting_input
+            })
+        {
             return None;
         }
         self.session_facts()
@@ -930,7 +845,10 @@ impl DashboardState {
     /// not [`Self::attention_level`], which reads as waiting while a child
     /// waits on a person even though the parent's turn still runs.
     pub(crate) fn own_turn_is_running(&self, session_id: &str) -> bool {
-        self.own_attention_level(session_id) == AttentionLevel::Working
+        self.session_details.get(session_id).is_some_and(|detail| {
+            detail.pending_elicitations.is_empty()
+                && !detail.activity.is_idle(detail.current_turn_started_at)
+        })
     }
 
     /// Whether a live, reachable session is computing right now: the fact the
@@ -1531,24 +1449,34 @@ impl DashboardState {
 mod verdict_tests {
     use super::*;
 
-    fn level(detail: &SessionDetail) -> AttentionLevel {
-        attention_level(
-            Some(detail),
-            None,
-            SessionState::Running,
-            false,
-            false,
-            false,
-        )
-    }
-
+    // Hard-won: e569a20c5: unread output hid working sessions.
     #[test]
-    fn expected_continuation_outranks_unread_output() {
-        let mut detail = SessionDetail {
-            unread_agent_messages: 1,
-            ..Default::default()
-        };
-        detail.activity.state = Some(mj_core::activity::ActivityState::Expecting { since_ms: 1 });
-        assert_eq!(level(&detail), AttentionLevel::Working);
+    fn unread_never_masks_served_person_facing_attention() {
+        use mj_core::attention::SessionAttention;
+        let mut dashboard = DashboardState::new(
+            Config::default(),
+            State {
+                version: mj_core::state::STATE_VERSION,
+                ..Default::default()
+            },
+            BTreeMap::new(),
+        );
+        dashboard.session_details.insert(
+            "session".to_owned(),
+            SessionDetail {
+                unread_agent_messages: 1,
+                ..Default::default()
+            },
+        );
+        for (served, expected) in [
+            (SessionAttention::NeedsInput, AttentionLevel::Waiting),
+            (SessionAttention::Important, AttentionLevel::Important),
+            (SessionAttention::Working, AttentionLevel::Working),
+            (SessionAttention::Inactive, AttentionLevel::Inactive),
+            (SessionAttention::Idle, AttentionLevel::Unread),
+        ] {
+            dashboard.set_session_attention(BTreeMap::from([("session".to_owned(), served)]));
+            assert_eq!(presentation_attention(&dashboard, "session"), expected);
+        }
     }
 }

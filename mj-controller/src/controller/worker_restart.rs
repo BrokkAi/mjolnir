@@ -240,7 +240,7 @@ impl Controller {
                 let operation_id = owner.operation_id().to_owned();
                 let intent = crate::database::WorkerRestartIntent {
                     operation_id: operation_id.clone(),
-                    target: self.state.sessions[session_id]
+                    target: *self.state.sessions[session_id]
                         .target
                         .clone()
                         .context("worker restart has no durable target")?,

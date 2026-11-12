@@ -772,11 +772,11 @@ fn github_credentials_creation_default_is_resolved_once_and_children_can_opt_out
         straightforward: None,
         subtle: None,
     });
-    parent.target = Some(TargetLocator::LocalPodman {
+    parent.target = Some(Box::new(TargetLocator::LocalPodman {
         container_id: "credential-test-container".into(),
         workspace_storage: Default::default(),
         borrowed_from: None,
-    });
+    }));
     crate::database::save_session(parent).unwrap();
     let child_id = controller
         .register_subagent(super::subagents::RegisterSubagentRequest {
@@ -1066,7 +1066,10 @@ fn registration_records_a_plain_local_directory_as_its_project() {
     let id = registration.id;
 
     let stored = &controller.state.sessions[&id];
-    assert_eq!(stored.review, Some(mj_core::config::SessionReview::Off));
+    assert_eq!(
+        stored.review,
+        Some(Box::new(mj_core::config::SessionReview::Off))
+    );
     assert_eq!(stored.project_directory.as_deref(), Some(workspace.path()));
     assert!(stored.managed_worktree.is_none());
     let project = stored.project.as_ref().expect("plain project was recorded");
@@ -1089,7 +1092,7 @@ fn registration_records_a_plain_local_directory_as_its_project() {
     );
     assert_eq!(
         controller.state.sessions[&no_reviewers.id].review,
-        Some(mj_core::config::SessionReview::Off)
+        Some(Box::new(mj_core::config::SessionReview::Off))
     );
 
     // The API shape `{"mode":"turn","reviewers":[]}` is an explicitly empty
@@ -1111,7 +1114,7 @@ fn registration_records_a_plain_local_directory_as_its_project() {
     );
     assert_eq!(
         controller.state.sessions[&empty_list.id].review,
-        Some(mj_core::config::SessionReview::Off)
+        Some(Box::new(mj_core::config::SessionReview::Off))
     );
 }
 
@@ -1159,12 +1162,12 @@ fn registration_with_a_start_commit_stores_an_exact_checkout_of_the_primary_repo
     let stored = crate::database::load_state().unwrap().sessions[&id].clone();
     assert_eq!(
         stored.checkout,
-        Some(mj_core::remote_git::ExactCheckout {
+        Some(Box::new(mj_core::remote_git::ExactCheckout {
             repository_id: "project".into(),
             commit: at.into(),
             branch: Some("town/run-1".into()),
             no_later_history: false,
-        })
+        }))
     );
     // The checkout owns the branch, and the base is left to default to `at`.
     assert_eq!((stored.launch_base, stored.launch_branch), (None, None));
@@ -1272,12 +1275,12 @@ fn registration_without_later_history_records_a_cutoff_and_refuses_what_it_canno
     let stored = crate::database::load_state().unwrap().sessions[&id].clone();
     assert_eq!(
         stored.checkout,
-        Some(mj_core::remote_git::ExactCheckout {
+        Some(Box::new(mj_core::remote_git::ExactCheckout {
             repository_id: "project".into(),
             commit: at.into(),
             branch: Some("review/run-1".into()),
             no_later_history: true,
-        })
+        }))
     );
     assert_eq!(stored.launch_base.as_deref(), Some(base));
     assert!(stored.start_selection().no_later_history);
@@ -1981,7 +1984,7 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
     let mut parent = super::test_support::checkpoint_test_session(parent_id);
     parent.target_template_id = "localhost".into();
     parent.project_directory = Some(clone.clone());
-    parent.managed_worktree = Some(mj_core::state::ManagedWorktree {
+    parent.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
         kind: mj_core::state::ManagedCheckoutKind::Clone,
         source_project_directory: project.path().to_path_buf(),
         source_repository: project.path().to_path_buf(),
@@ -1989,15 +1992,15 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
         branch: "master".into(),
         target: mj_core::state::ManagedWorktreeTarget::Local,
         base_commit: None,
-    });
+    }));
     parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
         straightforward: None,
         subtle: None,
     });
     let parent_root = mj_core::config::data_dir().join("workers").join(parent_id);
-    parent.target = Some(TargetLocator::LocalBare {
+    parent.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: parent_root.clone(),
-    });
+    }));
     controller
         .state
         .sessions
@@ -2137,9 +2140,9 @@ fn a_subagent_of_an_opted_out_session_gets_no_project_memory_and_no_github_event
             straightforward: None,
             subtle: None,
         });
-        session.target = Some(TargetLocator::LocalBare {
+        session.target = Some(Box::new(TargetLocator::LocalBare {
             worker_root: mj_core::config::data_dir().join("workers").join(id),
-        });
+        }));
         session.no_project_memory = opted_out;
         session.no_github_events = opted_out;
         session.no_github_credentials = opted_out;
@@ -2269,11 +2272,11 @@ fn a_recovered_ssh_relay_uses_the_machines_current_ssh_options() {
         super::test_support::checkpoint_test_session("0123456789abcdef0123456789abcdef");
     session.target_template_id = "ec2".into();
     session.target_runtime = Some((&ssh_bare("ec2.test", &["-o", "ServerAliveCountMax=3"])).into());
-    session.target = Some(TargetLocator::SshBare {
+    session.target = Some(Box::new(TargetLocator::SshBare {
         host: "ec2.test".into(),
         workspace: ".local/share/hel/workspaces/0123456789abcdef0123456789abcdef".into(),
         worker_id: None,
-    });
+    }));
     let mut controller = Controller {
         config: registration_config(),
         state: State::default(),
@@ -2380,12 +2383,12 @@ fn saved_target_survives_config_removal_restart_and_failed_cleanup() {
     );
     let record = controller.state.sessions.get_mut(&id).unwrap();
     record.state = SessionState::Running;
-    record.target = Some(TargetLocator::SshPodman {
+    record.target = Some(Box::new(TargetLocator::SshPodman {
         host: "original.test".into(),
         container_id: targets::resource_name(&id).unwrap(),
         workspace_storage: Default::default(),
         borrowed_from: None,
-    });
+    }));
     controller.persist_session_state(&id).unwrap();
     controller.config.targets.clear();
     controller.config.save().unwrap();
@@ -2519,12 +2522,12 @@ fn legacy_access_backfills_before_reload_and_refuses_an_unrecoverable_host() {
         .insert("podman".into(), durable_remote_template("original.test"));
     let mut session =
         super::test_support::checkpoint_test_session("0123456789abcdef0123456789abcdef");
-    session.target = Some(TargetLocator::SshPodman {
+    session.target = Some(Box::new(TargetLocator::SshPodman {
         host: "original.test".into(),
         container_id: "original-container".into(),
         workspace_storage: Default::default(),
         borrowed_from: None,
-    });
+    }));
     controller
         .state
         .sessions
@@ -2591,10 +2594,10 @@ fn legacy_access_backfills_before_reload_and_refuses_an_unrecoverable_host() {
     );
     // A legacy local locator is self-contained even with no template.
     let local = controller.state.sessions.get_mut(&session.id).unwrap();
-    local.target = Some(TargetLocator::LocalDocker {
+    local.target = Some(Box::new(TargetLocator::LocalDocker {
         container_id: "local-container".into(),
         borrowed_from: None,
-    });
+    }));
     controller.config.targets.clear();
     controller
         .session_export_layout(&session.id, &UnusedExecutor)
@@ -2836,9 +2839,9 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     parent.target_template_id = "localhost".into();
     parent.project_directory = Some(project.path().to_path_buf());
     parent.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
-    parent.target = Some(TargetLocator::LocalBare {
+    parent.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: mj_core::config::data_dir().join("workers").join(parent_id),
-    });
+    }));
     let mut controller = Controller {
         config,
         state: Default::default(),
@@ -2984,11 +2987,11 @@ fn reviewer_children_use_the_resolved_profile_without_delegation_policy_or_capac
     let mut muse_parent = controller.state.sessions[parent_id].clone();
     muse_parent.id = muse_parent_id.into();
     muse_parent.harness_kind = HarnessKind::Kimi;
-    muse_parent.target = Some(TargetLocator::LocalBare {
+    muse_parent.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: mj_core::config::data_dir()
             .join("workers")
             .join(muse_parent_id),
-    });
+    }));
     controller
         .state
         .sessions
@@ -3187,15 +3190,15 @@ fn ordinary_children_inherit_the_parent_effective_review_setting() {
         straightforward: None,
         subtle: None,
     });
-    parent.target = Some(TargetLocator::LocalBare {
+    parent.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: mj_core::config::data_dir().join("workers").join(parent_id),
-    });
-    parent.review = Some(mj_core::config::SessionReview::Push {
+    }));
+    parent.review = Some(Box::new(mj_core::config::SessionReview::Push {
         reviewers: Some(vec![mj_core::config::SubagentChoice {
             model: "review-model".into(),
             effort: None,
         }]),
-    });
+    }));
     controller.state.sessions.insert(parent_id.into(), parent);
     crate::database::save_state(&controller.state).unwrap();
 
@@ -3251,7 +3254,7 @@ fn ordinary_children_inherit_the_parent_effective_review_setting() {
     );
 
     controller.state.sessions.get_mut(parent_id).unwrap().review =
-        Some(mj_core::config::SessionReview::Off);
+        Some(Box::new(mj_core::config::SessionReview::Off));
     crate::database::save_state(&controller.state).unwrap();
     let disabled = register_worker(&mut controller, "review-disabled");
     let disabled_launch = controller

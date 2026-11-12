@@ -131,7 +131,7 @@ impl Controller {
                 &directory,
                 launch_base,
                 session.launch_branch.as_deref(),
-                checkout,
+                checkout.map(|v| &**v),
             )?;
         }
         Ok(())
@@ -611,13 +611,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let session_id = "11111111-1111-4111-8111-111111111111";
         let mut session = super::super::test_support::checkpoint_test_session(session_id);
-        session.checkpoint = Some(
+        session.checkpoint = Some(Box::new(
             super::super::test_support::write_network_checkpoint_archive(
                 root.path(),
                 session_id,
                 0,
             ),
-        );
+        ));
         let bundle = checkpoint_bundle(&session).unwrap();
         assert_eq!(bundle.primary, "project");
         assert_eq!(
@@ -908,7 +908,7 @@ mod tests {
         let mut config = resume_compatibility_config();
         config.bundles.insert("project".into(), bundle);
         let mut session = super::super::test_support::checkpoint_test_session(EXACT_SESSION);
-        session.checkout = Some(fixture.selection.clone());
+        session.checkout = Some(Box::new(fixture.selection.clone()));
         // A base the other repository does not hold: applying it there would fail.
         session.launch_base = Some(fixture.later.clone());
         let mut state = mj_core::state::State::default();
@@ -1423,7 +1423,7 @@ mod tests {
         config.bundles.insert("project".into(), bundle.clone());
         let mut session = super::super::test_support::checkpoint_test_session(EXACT_SESSION);
         session.bundle_id = "project".into();
-        session.checkout = Some(fixture.selection(Some("town/run-123")));
+        session.checkout = Some(Box::new(fixture.selection(Some("town/run-123"))));
         session.launch_base = Some(fixture.base.clone());
         session.container_workspace = None;
         let mut controller = Controller {
@@ -1753,10 +1753,10 @@ mod tests {
             .bundles
             .insert("project".into(), local_bundle(Path::new("/unused")));
         let mut session = super::super::test_support::checkpoint_test_session(EXACT_SESSION);
-        session.target = Some(mj_core::state::TargetLocator::LocalDocker {
+        session.target = Some(Box::new(mj_core::state::TargetLocator::LocalDocker {
             container_id: "hel-session".into(),
             borrowed_from: None,
-        });
+        }));
         session.project = Some(
             mj_core::repository::ProjectBundleSnapshot {
                 bundle: config.bundles["project"].clone(),
@@ -1783,7 +1783,7 @@ mod tests {
         // of its own, so it asks the parent how that workspace began.
         let origin = |selection: &mj_core::remote_git::ExactCheckout, session_id: &str| {
             let mut session = session.clone();
-            session.checkout = Some(selection.clone());
+            session.checkout = Some(Box::new(selection.clone()));
             let mut child = session.clone();
             child.id = "child-session".into();
             child.checkout = None;

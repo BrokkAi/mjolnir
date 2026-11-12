@@ -168,7 +168,9 @@ impl ActorCommand {
 
 pub(super) struct ReturnedConnection {
     pub(super) lease_id: u64,
-    pub(super) connection: Option<StandaloneSession>,
+    /// Boxed: the unbounded channel allocates whole 32-slot blocks of this
+    /// message per actor, and a session connection is a large struct.
+    pub(super) connection: Option<Box<StandaloneSession>>,
 }
 
 /// A submission that arrived while a lifecycle operation held the connection.

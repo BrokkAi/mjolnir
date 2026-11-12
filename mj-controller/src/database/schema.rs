@@ -4337,10 +4337,10 @@ mod reader_tests {
         drop(connection);
         assert!(load_state_from(&path).unwrap().sessions["existing"].oracle);
         session.oracle = false;
-        session.oracle_choice = Some(mj_core::config::SubagentChoice {
+        session.oracle_choice = Some(Box::new(mj_core::config::SubagentChoice {
             model: "advisor".into(),
             effort: Some("high".into()),
-        });
+        }));
         save_session_to(&path, &session).unwrap();
         let loaded = load_state_from(&path).unwrap();
         assert!(!loaded.sessions["existing"].oracle);

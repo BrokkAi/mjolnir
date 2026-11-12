@@ -156,7 +156,7 @@ fn failed_move_recovery(operation: &MoveOperation, state: &mj_core::state::State
     if operation.prepared_destination.is_some()
         && record.is_some_and(|r| {
             matches!(r.state, SessionState::Running | SessionState::Disconnected)
-                && r.target == operation.source_target
+                && r.target.as_deref() == operation.source_target.as_ref()
         })
     {
         return "Source retained and still running. EC2 destination cleaned up; prepare Move again when ready.".into();
@@ -1083,7 +1083,7 @@ impl Controller {
                 selection.oracle = None;
             }
             if retained.selection.oracle_choice.is_none()
-                && selection.oracle_choice.as_ref() == source.oracle_choice.as_ref()
+                && selection.oracle_choice.as_ref() == source.oracle_choice.as_deref()
             {
                 selection.oracle_choice = None;
             }
@@ -1169,7 +1169,7 @@ impl Controller {
             ensure!(
                 !retained.in_place
                     || (retained.source_target.is_some()
-                        && source.target == retained.source_target),
+                        && source.target.as_deref() == retained.source_target.as_ref()),
                 "retained Move target is missing or changed; refusing to recreate it"
             );
         }
@@ -1191,7 +1191,7 @@ impl Controller {
             && selection
                 .oracle_choice
                 .as_ref()
-                .or(source.oracle_choice.as_ref())
+                .or(source.oracle_choice.as_deref())
                 .or(self.config.subagents.oracle.as_ref())
                 .is_none_or(|choice| choice.model.trim().is_empty())
         {
@@ -1524,7 +1524,7 @@ impl Controller {
                 selection: checked.selection.clone(),
                 source_profile_id: source.last_profile.clone(),
                 source_target_template_id: source.target_template_id.clone(),
-                source_target: source.target.clone(),
+                source_target: source.target.clone().map(|v| *v),
                 source_native_session_id: source.native_session_id.clone(),
                 source_additional_mounts: source.additional_mounts.clone(),
                 source_resource_allocation: source.resource_allocation.clone(),
@@ -1824,7 +1824,7 @@ impl Controller {
             }
             if operation.workspace_transfer.is_some() && operation.recovery_session.is_some() && !operation.cancellation_requested
                 && !(operation.phase == MovePhase::ResumingDestination && session.state == SessionState::Running) {
-                if session.state == SessionState::Provisioning || session.target != operation.source_target {
+                if session.state == SessionState::Provisioning || session.target.as_deref() != operation.source_target.as_ref() {
                     self.rollback_move_destination(&operation, anyhow::anyhow!("resume interrupted Move transfer"), executor)?;
                 }
                 return Box::pin(self.execute_move(&mut operation, None, executor, manager, MoveSourceRelay::default())).await;
@@ -1844,7 +1844,7 @@ impl Controller {
                 // handoff its seal recorded. Taking the source's older full
                 // checkpoint here would make a lost handoff look retained.
                 if !operation.retains_source_environment() {
-                    operation.checkpoint = self.state.sessions[&id].checkpoint.clone();
+                    operation.checkpoint = self.state.sessions[&id].checkpoint.clone().map(|v| *v);
                 }
                 if operation.retains_source_environment() && self.state.sessions[&id].state == SessionState::Closing {
                     let previous = self.state.sessions[&id].clone();
@@ -1923,7 +1923,7 @@ impl Controller {
                     ensure!(Some(&session.last_profile) == operation.selection.profile_id.as_ref()
                         && Some(&session.target_template_id) == operation.selection.target_template_id.as_ref(),
                         "ready destination does not match the move intent");
-                    operation.destination_target = session.target.clone();
+                    operation.destination_target = session.target.clone().map(|v| *v);
                     operation.destination_native_session_id = session.native_session_id.clone();
                     operation.queue_admission_started = true;
                     operation.phase = MovePhase::StartingQueue;
@@ -1955,7 +1955,7 @@ impl Controller {
                     if matches!(session.state, SessionState::Closing | SessionState::Destroying) {
                         Box::pin(self.recover_move_source_stop(&mut operation, executor, manager)).await?;
                     }
-                    operation.checkpoint = self.state.sessions[&id].checkpoint.clone();
+                    operation.checkpoint = self.state.sessions[&id].checkpoint.clone().map(|v| *v);
                     if !operation.retains_source_environment() && self.state.sessions[&id].state == SessionState::Stopped && self.state.sessions[&id].target.is_some() {
                         self.cleanup_stopped_target(&id, executor)?;
                     }
@@ -2130,7 +2130,7 @@ impl Controller {
             if operation.in_place {
                 ensure!(
                     operation.source_target.is_some()
-                        && self.state.sessions[&id].target == operation.source_target,
+                        && self.state.sessions[&id].target.as_deref() == operation.source_target.as_ref(),
                     "retained Move target is missing or changed; refusing to recreate the environment"
                 );
             }
@@ -2166,7 +2166,7 @@ impl Controller {
                 && !(operation.retains_source_environment() && operation.recovery_session.is_some())
             {
                 Box::pin(self.recover_move_source_stop(operation, executor, manager)).await?;
-                operation.checkpoint = self.state.sessions[&id].checkpoint.clone();
+                operation.checkpoint = self.state.sessions[&id].checkpoint.clone().map(|v| *v);
             }
             if matches!(
                 self.state.sessions[&id].state,
@@ -2328,7 +2328,7 @@ impl Controller {
             operation.checkpoint = operation
                 .checkpoint
                 .clone()
-                .or_else(|| self.state.sessions[&id].checkpoint.clone());
+                .or_else(|| self.state.sessions[&id].checkpoint.clone().map(|v| *v));
             ensure!(
                 operation.restore_artifact().is_some(),
                 "move has no verified checkpoint"
@@ -2358,7 +2358,7 @@ impl Controller {
                     session.oracle = oracle;
                 }
                 if let Some(choice) = &operation.selection.oracle_choice {
-                    session.oracle_choice = Some(choice.clone());
+                    session.oracle_choice = Some(Box::new(choice.clone()));
                 }
                 crate::database::save_resumed_session(session, None)?;
             }
@@ -2404,7 +2404,7 @@ impl Controller {
                 }
             }
             let destination = &self.state.sessions[&id];
-            operation.destination_target = destination.target.clone();
+            operation.destination_target = destination.target.clone().map(|v| *v);
             operation.destination_native_session_id = destination.native_session_id.clone();
             // Persist readiness before submitting even the first queued command.
             operation.phase = MovePhase::StartingQueue;
@@ -2433,7 +2433,7 @@ impl Controller {
             let destination = &self.state.sessions[id];
             ensure!(
                 destination.state == SessionState::Running
-                    && destination.target == operation.destination_target
+                    && destination.target.as_deref() == operation.destination_target.as_ref()
                     && destination.native_session_id == operation.destination_native_session_id,
                 "cannot prove the same ready destination; refusing to replay potentially executed work"
             );
@@ -2597,7 +2597,7 @@ impl Controller {
         if let Some(prepared) = preparation {
             let checkpoint = operation
                 .restore_artifact()
-                .or(self.state.sessions[id].checkpoint.as_ref())
+                .or(self.state.sessions[id].checkpoint.as_deref())
                 .context("no move checkpoint")?;
             let verified = verify_archive_streaming(&checkpoint.archive_path)?;
             let actual: Vec<_> = verified
@@ -2669,7 +2669,7 @@ fn move_changes_nothing(source: &mj_core::state::SessionRecord, selection: &Move
         && selection
             .oracle_choice
             .as_ref()
-            .is_none_or(|choice| Some(choice) == source.oracle_choice.as_ref())
+            .is_none_or(|choice| Some(choice) == source.oracle_choice.as_deref())
 }
 
 pub(crate) fn parent_tools_enabled(

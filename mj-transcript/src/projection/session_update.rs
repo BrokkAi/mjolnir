@@ -47,7 +47,7 @@ pub(super) fn project_session_update(
                         call.tool_call_id
                     );
                 };
-                *existing = serde_json::to_value(call)?;
+                *existing = serde_json::to_value(call)?.into();
                 *presentation = Some(Box::new(tool_call_presentation(call)));
                 item.last_changed_at_ms = item.last_changed_at_ms.max(event.recorded_at_ms);
                 apply_terminal_metadata(&mut item, call.meta.as_ref());
@@ -63,7 +63,7 @@ pub(super) fn project_session_update(
                     created_at_ms: event.recorded_at_ms,
                     last_changed_at_ms: event.recorded_at_ms,
                     body: TranscriptBody::Tool {
-                        call: serde_json::to_value(call)?,
+                        call: serde_json::to_value(call)?.into(),
                         terminal_outputs: Vec::new(),
                         terminal_refs: Vec::new(),
                         presentation: Some(Box::new(tool_call_presentation(call))),
@@ -106,10 +106,9 @@ pub(super) fn project_session_update(
                     update.tool_call_id
                 );
             };
-            let mut materialized_call: ToolCall = serde_json::from_value(call.clone())
-                .with_context(|| {
-                    format!("parse materialized ACP tool call {}", update.tool_call_id)
-                })?;
+            let mut materialized_call: ToolCall = call.decode().with_context(|| {
+                format!("parse materialized ACP tool call {}", update.tool_call_id)
+            })?;
             let presentation_changed = crate::transcript::tool_call_update_changes_presentation(
                 &materialized_call,
                 &update.fields,
@@ -122,7 +121,7 @@ pub(super) fn project_session_update(
             {
                 *presentation = Some(Box::new(tool_call_presentation(&materialized_call)));
             }
-            *call = serde_json::to_value(materialized_call)?;
+            *call = serde_json::to_value(materialized_call)?.into();
             item.last_changed_at_ms = item.last_changed_at_ms.max(event.recorded_at_ms);
             apply_terminal_metadata(&mut item, update.meta.as_ref());
             attach_terminal_outputs(current, index, mutation, &mut item);

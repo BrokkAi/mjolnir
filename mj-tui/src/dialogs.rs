@@ -1809,7 +1809,7 @@ impl DashboardState {
                     self.mode =
                         Mode::Confirm(self.confirm_dialog(Confirmation::DiscardSinceCheckpoint {
                             session_id,
-                            checkpoint,
+                            checkpoint: *checkpoint,
                         }));
                 } else {
                     self.set_notice("No recovery copy is available. Retry suspension.");
@@ -1827,7 +1827,7 @@ impl DashboardState {
                     .state
                     .sessions
                     .get(&session_id)
-                    .and_then(|s| s.checkpoint.as_ref())
+                    .and_then(|s| s.checkpoint.as_deref())
                     != Some(&checkpoint)
                 {
                     self.cancel_modal();

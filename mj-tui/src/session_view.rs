@@ -15,7 +15,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
-use crate::dashboard_sessions::own_attention_level;
+use crate::dashboard_sessions::presentation_attention;
 
 /// Revisions come from one counter, so a replaced value never repeats a
 /// revision an earlier value had.
@@ -106,7 +106,7 @@ pub(crate) struct SessionFacts {
     /// Revisions of the inputs these facts were derived from; `None` before
     /// the first derivation.
     inputs: Option<[u64; 5]>,
-    /// The attention level of every session record from its own facts.
+    /// Served attention with this terminal's unread receipt applied.
     own: HashMap<String, AttentionLevel>,
     /// For each parent, its first active Mjolnir sub-agent that is waiting
     /// on a question.
@@ -125,8 +125,8 @@ impl SessionFacts {
         let own = dashboard
             .state
             .sessions
-            .iter()
-            .map(|(id, session)| (id.clone(), own_attention_level(dashboard, id, session)))
+            .keys()
+            .map(|id| (id.clone(), presentation_attention(dashboard, id)))
             .collect::<HashMap<_, _>>();
         let holds_form = |child: &str| {
             own.get(child) == Some(&AttentionLevel::Waiting)
@@ -176,24 +176,11 @@ impl SessionFacts {
         }
     }
 
-    pub(crate) fn own_attention_level(&self, session_id: &str) -> AttentionLevel {
+    pub(crate) fn attention_level(&self, session_id: &str) -> AttentionLevel {
         self.own
             .get(session_id)
             .copied()
             .unwrap_or(AttentionLevel::Inactive)
-    }
-
-    /// A parent whose Mjolnir sub-agent is waiting on a question reads as
-    /// waiting too. The child has no row outside the Sub-agents view, so
-    /// without this nothing a person normally looks at would show that the
-    /// child needs them (R11-1).
-    pub(crate) fn attention_level(&self, session_id: &str) -> AttentionLevel {
-        let own = self.own_attention_level(session_id);
-        if own < AttentionLevel::Waiting && self.waiting_child.contains_key(session_id) {
-            AttentionLevel::Waiting
-        } else {
-            own
-        }
     }
 
     pub(crate) fn waiting_child(&self, parent_id: &str) -> Option<&str> {
@@ -495,7 +482,7 @@ impl DashboardState {
             self.state.revision(),
             self.session_details.revision(),
             self.session_reviews.revision(),
-            self.unreachable_sessions.revision(),
+            self.served_attention.revision(),
             self.session_operations.revision(),
         ]
     }

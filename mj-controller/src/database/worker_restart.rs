@@ -30,7 +30,7 @@ fn begin_worker_restart_for(
         let tx = connection.transaction()?;
         let record = state_io::load_session_with(&tx, &session_id)?;
         ensure!(
-            record.is_some_and(|s| s.target.as_ref() == Some(&intent.target)),
+            record.is_some_and(|s| s.target.as_deref() == Some(&intent.target)),
             "worker restart target changed before admission"
         );
         let claimed = tx.execute(

@@ -144,7 +144,9 @@ pub const RELAY_IDLE_GOAL_INTENT_PROTOCOL: u32 = 60;
 pub const RELAY_HANDBACK_CHECK_PROTOCOL: u32 = 61;
 /// Additive typed GLiDE completed-turn assessment; old readers retain stored action.
 pub const RELAY_GLIDE_TURN_PROTOCOL: u32 = 62;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_GLIDE_TURN_PROTOCOL;
+/// Optional assessment attention hint, independent of scheduling action.
+pub const RELAY_ATTENTION_PROTOCOL: u32 = 63;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_ATTENTION_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

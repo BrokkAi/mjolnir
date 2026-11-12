@@ -147,7 +147,7 @@ pub(crate) fn credential_sync_targets_from_sources(
                     ),
                 github: controller.config.github.clone(),
                 sync_github_token: !session.no_github_credentials
-                    && target_syncs_github_token(session.target.as_ref()),
+                    && target_syncs_github_token(session.target.as_deref()),
                 skills_scope: session.target.as_ref()?.skills_scope(),
                 spec,
             })

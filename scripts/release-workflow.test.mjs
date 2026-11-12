@@ -32,7 +32,7 @@ for (const target of ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', '
     const dir = fixture(t);
     const mac = target.endsWith('-apple-darwin');
     const windows = target === 'x86_64-pc-windows-msvc';
-    const binaries = windows ? ['mj.exe', 'mj-desktop.exe'] : ['mj', 'mj-desktop', 'mj-voice-worker'];
+    const binaries = windows ? ['mj.exe'] : ['mj', 'mj-voice-worker'];
     if (mac) binaries.push('mj-worker');
     const native = join(dir, 'native');
     mkdirSync(native, { recursive: true });

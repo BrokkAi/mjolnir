@@ -370,8 +370,8 @@ impl Controller {
         record.state = SessionState::Closing;
         record.native_session_id = Some(artifact.native_session_id.clone());
         if !session_handoff {
-            record.checkpoint = Some(artifact.metadata.clone());
-            record.publication = publication;
+            record.checkpoint = Some(Box::new(artifact.metadata.clone()));
+            record.publication = publication.map(Box::new);
         }
         record.updated_at = now();
         record.last_error = None;
@@ -379,7 +379,7 @@ impl Controller {
         if session_handoff {
             if let Some((operation, _)) = move_intent.as_mut() {
                 operation.handoff = Some(artifact.metadata.clone());
-                operation.checkpoint = previous.checkpoint.clone();
+                operation.checkpoint = previous.checkpoint.clone().map(|v| *v);
                 operation.updated_at = now();
                 crate::database::save_move_operation(operation)?;
             } else {
@@ -464,7 +464,7 @@ impl Controller {
             return Err(error);
         }
         if !session_handoff {
-            prune_replaced_checkpoint(previous.checkpoint.as_ref(), &artifact.metadata);
+            prune_replaced_checkpoint(previous.checkpoint.as_deref(), &artifact.metadata);
             // A stopping session will not checkpoint again, so this is its last
             // chance to release what its checkpoint now covers.
             release_projection_behind_checkpoint(session_id, &artifact.metadata);
@@ -975,7 +975,7 @@ impl Controller {
                     "refusing to destroy session {session_id}: it is not closing or destroying"
                 );
                 ensure!(
-                    session.checkpoint.as_ref() == Some(verified),
+                    session.checkpoint.as_deref() == Some(verified),
                     "refusing to destroy session {session_id}: verified checkpoint gate is stale"
                 );
                 if session.state == SessionState::Closing {
@@ -1137,7 +1137,7 @@ impl Controller {
                 "session {session_id} is already inactive"
             );
             ensure!(
-                previous.checkpoint.as_ref() == Some(confirmed),
+                previous.checkpoint.as_deref() == Some(confirmed),
                 "the recovery copy changed; review it before discarding changes"
             );
             {
@@ -1347,7 +1347,7 @@ impl Controller {
         super::checkpoint::remove_session_checkpoint_archives(
             &mj_core::config::sessions_dir(),
             session_id,
-            session.checkpoint.as_ref(),
+            session.checkpoint.as_deref(),
         )?;
         mj_core::attachment::AttachmentStore::controller(session_id)?
             .remove_session_data()
@@ -1512,7 +1512,7 @@ impl Controller {
                 super::checkpoint::remove_session_checkpoint_archives(
                     &mj_core::config::sessions_dir(),
                     session_id,
-                    session.checkpoint.as_ref(),
+                    session.checkpoint.as_deref(),
                 )?;
                 mj_core::attachment::AttachmentStore::controller(session_id)?
                     .remove_session_data()

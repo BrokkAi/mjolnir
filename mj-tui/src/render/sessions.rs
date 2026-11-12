@@ -275,7 +275,7 @@ fn drawn_session_rows_in_range(
                         }
                         SessionTransitionKind::Destroying => glyphs.destroying,
                     },
-                    _ => facts.status_symbol(operation),
+                    _ => facts.status_symbol(),
                 };
                 let prefix = format!("{}{symbol} ", if selected { glyphs.selected } else { "  " });
                 let (heading_key, heading_line) =
@@ -744,7 +744,7 @@ pub(crate) fn session_activity_line(
         )
     }) {
         "Checking continuation".to_owned()
-    } else if facts.needs_input() {
+    } else if facts.needs_input() && waiting_child.is_none() {
         "Question".to_owned()
     } else if let Some(label) = review_status_label(review) {
         label.to_owned()
@@ -944,20 +944,15 @@ pub(crate) struct SessionRowFacts<'a> {
 impl SessionRowFacts<'_> {
     /// One status symbol is used in expanded, compact, and minimized rows so
     /// lifecycle and attention state remains visible at every width.
-    pub(crate) fn status_symbol(
-        &self,
-        operation: Option<&SessionOperationDisplay>,
-    ) -> &'static str {
+    pub(crate) fn status_symbol(&self) -> &'static str {
         let glyphs = theme::glyphs();
-        if operation.is_some() {
-            return glyphs.working;
-        }
         // The same scale the attention queue and the badges read, so a row
         // can never show a symbol the queue disagrees with.
         match self.attention {
             AttentionLevel::Failed => return glyphs.failed,
             AttentionLevel::Unreachable => return glyphs.unreachable,
             AttentionLevel::Waiting => return glyphs.waiting,
+            AttentionLevel::Important => return glyphs.important,
             AttentionLevel::Unread => return glyphs.unread,
             AttentionLevel::Working => return glyphs.working,
             AttentionLevel::Idle | AttentionLevel::Inactive => {}
@@ -1005,8 +1000,7 @@ impl SessionRowFacts<'_> {
     }
 
     pub(crate) fn needs_input(&self) -> bool {
-        self.detail
-            .is_some_and(|detail| !detail.pending_elicitations.is_empty() || detail.awaiting_input)
+        self.attention == AttentionLevel::Waiting
     }
 }
 
@@ -1041,8 +1035,7 @@ pub(crate) fn session_display_clock(
 
     if session.last_error.is_some()
         || unreachable
-        || detail
-            .is_some_and(|detail| !detail.pending_elicitations.is_empty() || detail.awaiting_input)
+        || dashboard.attention_level(&session.id).needs_person()
         || review.is_some_and(|review| review.activity_label().is_some())
         || !session.state.is_active()
     {
@@ -1514,6 +1507,7 @@ pub(crate) fn attention_glyph(level: AttentionLevel) -> &'static str {
         AttentionLevel::Failed => glyphs.failed,
         AttentionLevel::Unreachable => glyphs.unreachable,
         AttentionLevel::Waiting => glyphs.waiting,
+        AttentionLevel::Important => glyphs.important,
         AttentionLevel::Unread => glyphs.unread,
         AttentionLevel::Working => glyphs.working,
         AttentionLevel::Idle | AttentionLevel::Inactive => glyphs.idle,
@@ -1525,7 +1519,9 @@ pub(crate) fn attention_glyph(level: AttentionLevel) -> &'static str {
 pub(crate) fn attention_color(level: AttentionLevel) -> Color {
     match level {
         AttentionLevel::Failed | AttentionLevel::Unreachable => theme::palette().session_error,
-        AttentionLevel::Waiting | AttentionLevel::Unread => theme::palette().session_attention,
+        AttentionLevel::Waiting | AttentionLevel::Important | AttentionLevel::Unread => {
+            theme::palette().session_attention
+        }
         AttentionLevel::Working | AttentionLevel::Inactive => theme::palette().session_activity,
         AttentionLevel::Idle => theme::palette().session_idle,
     }

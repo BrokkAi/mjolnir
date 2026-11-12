@@ -442,7 +442,7 @@ impl Controller {
         ensure_managed_worktree_available(executor, &managed)?;
         let record = self.state.sessions.get_mut(session_id).unwrap();
         record.project_directory = Some(target_path::join(&worktree_root, &relative_directory));
-        record.managed_worktree = Some(managed.clone());
+        record.managed_worktree = Some(Box::new(managed.clone()));
         record.updated_at = now();
         self.persist_session_state(session_id)?;
         Ok(Some(PreparedManagedCheckout {
@@ -1007,7 +1007,7 @@ pub(super) fn apply_workspace_to_raw(
     conversion: &WorkspaceToRawConversion,
 ) {
     record.project_directory = Some(conversion.worktree.worktree_root.clone());
-    record.managed_worktree = Some(conversion.worktree.clone());
+    record.managed_worktree = Some(Box::new(conversion.worktree.clone()));
 }
 
 /// Everything a raw-to-workspace transition needs before the session record

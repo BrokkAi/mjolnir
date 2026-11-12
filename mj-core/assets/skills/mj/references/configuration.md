@@ -79,7 +79,7 @@ also accepted when reading and is saved under `[github.watch] enabled`.
 | `show_stopped_sessions` | boolean | no | ignored | Retired. It is accepted when reading configuration files but has no effect and is omitted on the next save. Suspended sessions are listed only in the resume dialog. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
 | `theme` | string enum | no | `"midnight"` | Terminal color palette: `auto`, `midnight`, `light`, `darcula`, `high-contrast`, `high-contrast-light`, `colorblind-dark`, `colorblind-light`, `catppuccin-mocha`, `catppuccin-latte`, `campbell`, `one-half-dark`, `one-half-light`, `solarized-dark`, `solarized-light`, `terminal-dark`, `terminal-light`, or `mono` (no colors). `auto` asks the terminal for its background color at startup and uses `midnight` on a dark background and `light` on a light one, or `midnight` when the terminal does not answer. The colorblind palettes keep failures distinct from success and warnings with red-green or blue-yellow color blindness. The Campbell, One Half, and Solarized palettes match the Windows Terminal schemes of the same name; `terminal-dark` and `terminal-light` use the terminal's own background and 16 ANSI colors, with a neutral gray for secondary text. A non-empty `NO_COLOR` environment variable selects `mono` regardless of this setting. |
-| `phone` | table | no | default `[phone]` values | Browser and desktop viewer settings. |
+| `phone` | table | no | default `[phone]` values | Browser viewer settings. |
 | `advanced` | table | no | default `[advanced]` values | Optional terminal display settings. |
 | `notify` | table | no | default `[notify]` values | How the terminal dashboard reports sessions that need you. |
 | `review` | table | no | default `[review]` values | Reviewer settings for push review. |
@@ -298,8 +298,8 @@ The terminal Settings screen edits these settings under **Notifications**.
 
 ## Web viewer `[phone]`
 
-The historical section name remains `phone`, although it controls both the web
-viewer and the native desktop shell.
+The historical section name remains `phone`, although it controls the web
+viewer.
 
 ```toml
 [phone]
@@ -331,7 +331,7 @@ the conflict is resolved.
 A non-loopback `bind` is rejected unless both explicit TLS paths are present.
 When Tailscale detection succeeds, Mjolnir may advertise a secure non-loopback
 listener without changing the configured loopback fallback. Explicit TLS takes
-precedence. See [Web viewer and desktop app](/web-viewer/) for access and login.
+precedence. See [Web viewer](/web-viewer/) for access and login.
 
 ## Automatic review `[review]`
 
@@ -1266,8 +1266,6 @@ them in the environment that starts the daemon, then run `mj daemon restart`.
 | `MJ_WORKER_DIR` | Directory containing architecture-named portable Linux workers. |
 | `MJ_WORKER_URL` | Fallback worker URL template; `{target}` expands to the target triple. Requires `MJ_WORKER_SHA256`. |
 | `MJ_WORKER_SHA256` | Required 64-character hexadecimal digest for `MJ_WORKER_URL`. |
-| `MJ_DESKTOP_BINARY` | Path to `mj-desktop` used by `mj app`. |
-| `MJ_CONTROLLER_BINARY` | Path to `mj` when `mj-desktop` cannot find its sibling controller. |
 | `MJ_VOICE_WORKER` | Path to the local dictation helper. |
 | `MJ_INSTANCE` | Instance name; same effect as `--instance`. |
 | `MJ_SSH_CONTROL_MASTER` | Set to `0` to disable SSH connection sharing (ControlMaster) for diagnosis. Mjolnir learns how many sessions each shared connection carries from the server's refusal and has no setting for it; see the [SSH guide](/ssh/#sharing-connections-per-host). |

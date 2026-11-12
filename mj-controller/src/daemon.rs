@@ -220,6 +220,7 @@ pub struct RuntimeState {
     attachments: Mutex<BTreeMap<String, Attachment>>,
     phone_status: Mutex<WebViewerStatus>,
     pub web_viewer: crate::web_viewer::ViewerControl,
+    pub(crate) api_credential: std::sync::OnceLock<String>,
     ever_attached: AtomicBool,
     revisions: RuntimeRevisions,
     workspaces_tx: tokio::sync::watch::Sender<Vec<WorkspaceRecord>>,
@@ -848,3 +849,5 @@ mod dashboard_reads;
 mod tests;
 
 pub(crate) mod continuation;
+
+mod attention;
