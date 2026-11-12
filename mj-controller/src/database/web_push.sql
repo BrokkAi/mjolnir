@@ -6,3 +6,5 @@ CREATE TABLE IF NOT EXISTS push_deliveries(endpoint TEXT NOT NULL REFERENCES pus
  episode TEXT NOT NULL, payload TEXT NOT NULL, accepted INTEGER NOT NULL DEFAULT 0,
  retry_at INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0, error TEXT, summary_episode TEXT,
  PRIMARY KEY(endpoint,episode));
+-- Notification cleanup must survive subscription expiry and outbox retirement.
+CREATE TABLE IF NOT EXISTS push_summary_coverage(url TEXT PRIMARY KEY, sessions TEXT NOT NULL);

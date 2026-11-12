@@ -65,12 +65,18 @@ pub(crate) struct Notice {
     pub title: String,
     pub body: String,
     pub session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub session_ids: Vec<String>,
     pub url: String,
     pub tag: String,
 }
 
+/// A fixed-size URL reference keeps summary push payloads independent of count.
+pub(crate) fn summary_url(endpoint: &str, episode: &str) -> String {
+    let digest = ring::digest::digest(
+        &ring::digest::SHA256,
+        format!("{endpoint}\0{episode}").as_bytes(),
+    );
+    format!("/?push-summary={}", B64.encode(digest.as_ref()))
+}
 pub(crate) struct Vapid(signature::EcdsaKeyPair);
 impl Vapid {
     pub(crate) fn load() -> Result<Self> {
@@ -323,7 +329,6 @@ fn episodes(runtime: &mj_client::runtime_feed::RuntimeProjection) -> Vec<(String
                     title: record.listed_title().to_owned(),
                     body,
                     session_id: Some(id.clone()),
-                    session_ids: Vec::new(),
                     url: format!("/#conversation/{id}"),
                     tag: id.clone(),
                 },
@@ -339,7 +344,7 @@ pub(crate) async fn run(state: Arc<RuntimeState>) -> Result<()> {
         .build()?;
     let mut revisions = state.revisions();
     let mut sends = tokio::task::JoinSet::new();
-    let mut active = BTreeSet::new();
+    blocking(db::push_recover).await?;
     loop {
         let runtime = state.runtime_publication()?;
         let presence = runtime.metadata.operator_presence;
@@ -359,24 +364,13 @@ pub(crate) async fn run(state: Arc<RuntimeState>) -> Result<()> {
             .map(|(id, _)| id.clone())
             .collect();
         blocking(move || db::push_observe(presence, episodes(&runtime), unavailable)).await?;
-        let due = blocking(|| db::push_due(chrono::Utc::now().timestamp())).await?;
+        let due = blocking(|| db::push_claim(chrono::Utc::now().timestamp())).await?;
         for delivery in due {
-            let key = (
-                delivery.subscription.endpoint.clone(),
-                serde_json::from_str::<Notice>(&delivery.payload)?.tag,
-            );
-            if !active.insert(key.clone()) {
-                continue;
-            }
             let client = client.clone();
             let vapid = vapid.clone();
-            sends.spawn(async move {
-                let result = deliver(&client, &vapid, delivery).await;
-                (key, result)
-            });
+            sends.spawn(async move { deliver(&client, &vapid, delivery).await });
         }
-        let exclusions = active.iter().cloned().collect();
-        let next = blocking(move || db::push_next_due(exclusions)).await?;
+        let next = blocking(db::push_next_due).await?;
         // Serialize each device/tag so an older request cannot replace a newer
         // card. Other sessions and devices continue independently.
         let deadline = next.and_then(|at| {
@@ -390,7 +384,7 @@ pub(crate) async fn run(state: Arc<RuntimeState>) -> Result<()> {
         tokio::select! {
             changed=revisions.changed()=>{changed.context("push runtime feed closed")?;},
             _=WAKE.get_or_init(Default::default).notified()=>{},
-            completed=sends.join_next(),if !sends.is_empty()=>{let (key,result)=completed.context("push task disappeared")??;active.remove(&key);result?;},
+            completed=sends.join_next(),if !sends.is_empty()=>{let result=completed.context("push task disappeared")??;result?;},
             _=async {match deadline {Some(deadline)=>tokio::time::sleep_until(deadline).await,None=>std::future::pending().await}}=>{},
         }
     }

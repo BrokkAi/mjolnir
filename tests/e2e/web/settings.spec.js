@@ -242,12 +242,16 @@ test('device notification enrollment starts from a tap and supports test and uns
     next.sessions = Object.entries(states).map(([id, attention]) => ({ id, title: id, workspace_id: WORKSPACE_ID, attention, active: true, is_idle: true, capabilities: {}, detail: false }));
     return route.fulfill({ json: viewerWireSnapshot(next) });
   });
+  await page.route('**/api/push/summary?*', route => {
+    const id = new URL(route.request().url()).searchParams.get('id');
+    return route.fulfill({ json: { session_ids: id === 'mixed' ? ['idle', 'unknown'] : ['idle', 'working'] } });
+  });
   // Hard-won: c146a8a89: focus removed unavailable questions but kept resolved summaries.
   await page.evaluate(() => {
     window.pushShownNotifications = [
       { label: 'unknown', session_id: 'unknown' }, { label: 'unreachable', session_id: 'unreachable' },
       { label: 'failed', session_id: 'failed' }, { label: 'idle', session_id: 'idle' },
-      { label: 'mixed', session_ids: ['idle', 'unknown'] }, { label: 'resolved-summary', session_ids: ['idle', 'working'] },
+      { label: 'mixed', url: '/?push-summary=mixed' }, { label: 'resolved-summary', url: '/?push-summary=resolved' },
     ];
     window.dispatchEvent(new Event('focus'));
   });
@@ -279,7 +283,7 @@ test('service worker push displays and clicks route an existing window to the co
     return calls;
   }, source);
   expect(result).toEqual([
-    ['show', 'Build', { body: 'Which option?', tag: 'session', data: { url: '/#conversation/session', session_id: 'session', session_ids: [] } }],
+    ['show', 'Build', { body: 'Which option?', tag: 'session', data: { url: '/#conversation/session', session_id: 'session' } }],
     ['close'], ['navigate', 'https://viewer.test/#conversation/session'], ['focus'],
   ]);
 });

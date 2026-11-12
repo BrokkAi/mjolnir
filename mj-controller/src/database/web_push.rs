@@ -9,7 +9,7 @@ pub(crate) fn push_subscribe(subscription: Subscription) -> Result<()> {
 }
 fn push_subscribe_with(db: &Connection, subscription: Subscription) -> Result<()> {
     let tx = db.unchecked_transaction()?;
-    tx.execute("INSERT INTO push_devices(endpoint,subscription) VALUES (?1,?2) ON CONFLICT(endpoint) DO UPDATE SET subscription=excluded.subscription,retry_at=0",
+    tx.execute("INSERT INTO push_devices(endpoint,subscription) VALUES (?1,?2) ON CONFLICT(endpoint) DO UPDATE SET subscription=excluded.subscription",
         params![subscription.endpoint, serde_json::to_string(&subscription)?])?;
     tx.execute("UPDATE push_deliveries SET retry_at=0,failures=0,error=NULL WHERE endpoint=?1 AND accepted=0",[subscription.endpoint])?;
     tx.commit()?;
@@ -106,7 +106,7 @@ fn push_observe_at_with(
             let mut unsent = Vec::new();
             for (_, identity, notice) in &episodes {
                 let reserved: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM push_deliveries q WHERE endpoint=?1 AND episode=?2 AND (?3 OR accepted=1 OR (accepted=2 AND EXISTS(SELECT 1 FROM push_deliveries summary WHERE summary.endpoint=q.endpoint AND summary.episode=q.summary_episode AND summary.accepted=1))))",
+                    "SELECT EXISTS(SELECT 1 FROM push_deliveries q WHERE endpoint=?1 AND episode=?2 AND (?3 OR accepted IN (1,3) OR (accepted=2 AND EXISTS(SELECT 1 FROM push_deliveries summary WHERE summary.endpoint=q.endpoint AND summary.episode=q.summary_episode AND summary.accepted IN (1,3)))))",
                     params![endpoint, identity, same_away_period],
                     |r| r.get(0),
                 )?;
@@ -120,19 +120,25 @@ fn push_observe_at_with(
                     .map(|(id, _)| id.as_str())
                     .collect::<Vec<_>>()
                     .join("|");
+                let summary_id = format!("summary:{ids}");
                 let summary = Notice {
                     title: format!("{} sessions need you", unsent.len()),
                     body: "Open Mjolnir to see them".into(),
                     session_id: None,
-                    session_ids: unsent
-                        .iter()
-                        .filter_map(|(_, notice)| notice.session_id.clone())
-                        .collect(),
-                    url: "/".into(),
+                    url: crate::web_push::summary_url(&endpoint, &summary_id),
                     tag: "summary".into(),
                 };
-                let summary_id = format!("summary:{ids}");
                 tx.execute("DELETE FROM push_deliveries WHERE endpoint=?1 AND accepted=0 AND episode LIKE 'summary:%'",[&endpoint])?;
+                let coverage = unsent
+                    .iter()
+                    .filter_map(|(_, notice)| notice.session_id.clone())
+                    .collect::<Vec<_>>();
+                // Immutable cleanup coverage outlives subscription expiry and
+                // outbox retirement, including unknown remote acceptance.
+                tx.execute(
+                    "INSERT OR IGNORE INTO push_summary_coverage VALUES(?1,?2)",
+                    params![summary.url, serde_json::to_string(&coverage)?],
+                )?;
                 reserve(&tx, &endpoint, &summary_id, &summary, 0)?;
                 for (id, notice) in unsent {
                     reserve(&tx, &endpoint, id, notice, 2)?;
@@ -163,7 +169,6 @@ fn push_observe_at_with(
         } else {
             let mut notice: Notice = serde_json::from_str(&payload)?;
             notice.title = format!("{} sessions need you", covered.len());
-            notice.session_ids = covered;
             tx.execute(
                 "UPDATE push_deliveries SET payload=?3 WHERE endpoint=?1 AND episode=?2",
                 params![endpoint, episode, serde_json::to_string(&notice)?],
@@ -189,7 +194,7 @@ fn reserve(
     notice: &Notice,
     accepted: i64,
 ) -> Result<()> {
-    // 0 queued, 1 service acceptance receipt, 2 covered by a durable summary.
+    // One durable state: 0 queued, 1 accepted, 2 summary-covered, 3 in flight.
     tx.execute("INSERT OR IGNORE INTO push_deliveries(endpoint,episode,payload,accepted) VALUES(?1,?2,?3,?4)",params![endpoint,episode,serde_json::to_string(notice)?,accepted])?;
     Ok(())
 }
@@ -219,7 +224,6 @@ fn push_test_with(db: &mut Connection, endpoint: String) -> Result<()> {
             title: "Mjolnir".into(),
             body: "Notifications are enabled on this device".into(),
             session_id: None,
-            session_ids: Vec::new(),
             url: "/".into(),
             tag: "test".into(),
         },
@@ -235,12 +239,60 @@ pub(crate) struct PushDelivery {
     pub payload: String,
     pub failures: u32,
 }
-pub(crate) fn push_due(now: i64) -> Result<Vec<PushDelivery>> {
-    let db = open_reader(&database_path())?;
-    push_due_with(&db, now)
-}
+// Admission and scheduling consume the same durable readiness rule. The
+// database writer alone owns per-device/tag flight admission and summary cover.
+const READY_PUSH: &str = "FROM push_deliveries q JOIN push_devices d USING(endpoint)
+ WHERE q.accepted=0 AND (q.episode LIKE 'test:%' OR ((SELECT away FROM push_observation WHERE singleton=1)=1
+ AND ((q.episode LIKE 'summary:%' AND EXISTS(SELECT 1 FROM push_episodes WHERE eligible=1))
+ OR q.episode IN (SELECT identity FROM push_episodes WHERE eligible=1))))
+ AND NOT EXISTS(SELECT 1 FROM push_deliveries flight WHERE flight.endpoint=q.endpoint AND flight.accepted=3 AND json_extract(flight.payload,'$.tag')=json_extract(q.payload,'$.tag'))";
 fn push_due_with(db: &Connection, now: i64) -> Result<Vec<PushDelivery>> {
-    db.prepare("SELECT d.subscription,q.episode,q.payload,q.failures FROM push_deliveries q JOIN push_devices d USING(endpoint) WHERE q.accepted=0 AND q.retry_at<=?1 AND d.retry_at<=?1 AND (q.episode LIKE 'test:%' OR ((SELECT away FROM push_observation WHERE singleton=1)=1 AND ((q.episode LIKE 'summary:%' AND EXISTS(SELECT 1 FROM push_episodes WHERE eligible=1)) OR q.episode IN (SELECT identity FROM push_episodes WHERE eligible=1))))")?.query_map([now], |r| Ok((r.get::<_,String>(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?.into_iter().map(|(subscription,episode,payload,failures)| Ok(PushDelivery {subscription:serde_json::from_str(&subscription)?,episode,payload,failures})).collect::<Result<_>>()
+    let sql = format!(
+        "SELECT d.subscription,q.episode,q.payload,q.failures {READY_PUSH} AND q.retry_at<=?1 AND d.retry_at<=?1"
+    );
+    db.prepare(&sql)?
+        .query_map([now], |r| {
+            Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .map(|(subscription, episode, payload, failures)| {
+            Ok(PushDelivery {
+                subscription: serde_json::from_str(&subscription)?,
+                episode,
+                payload,
+                failures,
+            })
+        })
+        .collect()
+}
+pub(crate) fn push_claim(now: i64) -> Result<Vec<PushDelivery>> {
+    submit_database_write("admit Web Push sends", move |db| push_claim_with(db, now))
+}
+fn push_claim_with(db: &Connection, now: i64) -> Result<Vec<PushDelivery>> {
+    let tx = db.unchecked_transaction()?;
+    let due = push_due_with(&tx, now)?;
+    let mut admitted = Vec::new();
+    for delivery in due {
+        let changed=tx.execute("UPDATE push_deliveries AS q SET accepted=3 WHERE endpoint=?1 AND episode=?2 AND accepted=0
+            AND NOT EXISTS(SELECT 1 FROM push_deliveries flight WHERE flight.endpoint=q.endpoint AND flight.accepted=3 AND json_extract(flight.payload,'$.tag')=json_extract(q.payload,'$.tag'))",params![delivery.subscription.endpoint,delivery.episode])?;
+        if changed == 1 {
+            admitted.push(delivery);
+        }
+    }
+    tx.commit()?;
+    Ok(admitted)
+}
+pub(crate) fn push_recover() -> Result<()> {
+    submit_database_write("recover uncertain Web Push sends", |db| {
+        push_recover_with(db)
+    })
+}
+fn push_recover_with(db: &Connection) -> Result<()> {
+    // Only service startup, under the daemon's store ownership, recovers flight
+    // reservations. Remote acceptance may be unknown; receipts never reset.
+    db.execute("UPDATE push_deliveries SET accepted=0 WHERE accepted=3", [])?;
+    Ok(())
 }
 pub(crate) fn push_result(
     subscription: Subscription,
@@ -281,7 +333,13 @@ fn apply_push_result_with(
         tx.commit()?;
         return Ok(());
     }
-    if !status.is_some_and(|status| (200..300).contains(&status)) {
+    let owns_flight:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM push_deliveries WHERE endpoint=?1 AND episode=?2 AND accepted=3)",params![subscription.endpoint,episode],|r|r.get(0))?;
+    if !owns_flight {
+        return Ok(());
+    }
+    // A permanent payload rejection retires only that intent. Endpoint-wide
+    // backpressure is reserved for transient service/transport failures.
+    if status.is_none() || status.is_some_and(|status| status == 429 || status >= 500) {
         // Retry-After constrains follow-up requests to this endpoint, including
         // newly queued episodes and summaries, not just the rejected intent.
         tx.execute(
@@ -308,20 +366,33 @@ fn push_result_with(
     retry_at: i64,
     error: Option<String>,
 ) -> Result<()> {
-    db.execute("UPDATE push_deliveries SET accepted=?3,retry_at=?4,failures=failures+1,error=?5 WHERE endpoint=?1 AND episode=?2",params![endpoint,episode,accepted,retry_at,error])?;
+    db.execute("UPDATE push_deliveries SET accepted=?3,retry_at=?4,failures=failures+1,error=?5 WHERE endpoint=?1 AND episode=?2 AND accepted IN (0,3)",params![endpoint,episode,accepted,retry_at,error])?;
     Ok(())
 }
-pub(crate) fn push_next_due(active: Vec<(String, String)>) -> Result<Option<i64>> {
+pub(crate) fn push_next_due() -> Result<Option<i64>> {
     let db = open_reader(&database_path())?;
-    let rows=db.prepare("SELECT q.endpoint,q.payload,max(q.retry_at,d.retry_at) FROM push_deliveries q JOIN push_devices d USING(endpoint) WHERE q.accepted=0 AND (episode LIKE 'test:%' OR ((SELECT away FROM push_observation WHERE singleton=1)=1 AND ((episode LIKE 'summary:%' AND EXISTS(SELECT 1 FROM push_episodes WHERE eligible=1)) OR episode IN (SELECT identity FROM push_episodes WHERE eligible=1))))")?.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut next = None;
-    for (endpoint, payload, at) in rows {
-        let notice: Notice = serde_json::from_str(&payload)?;
-        if !active.contains(&(endpoint, notice.tag)) {
-            next = Some(next.map_or(at, |previous: i64| previous.min(at)));
-        }
-    }
-    Ok(next)
+    Ok(db.query_row(
+        &format!("SELECT min(max(q.retry_at,d.retry_at)) {READY_PUSH}"),
+        [],
+        |r| r.get(0),
+    )?)
+}
+pub(crate) fn push_summary_coverage(id: String) -> Result<Option<Vec<String>>> {
+    let db = open_reader(&database_path())?;
+    push_summary_coverage_with(&db, &id)
+}
+fn push_summary_coverage_with(db: &Connection, id: &str) -> Result<Option<Vec<String>>> {
+    let url = format!("/?push-summary={id}");
+    let sessions: Option<String> = db
+        .query_row(
+            "SELECT sessions FROM push_summary_coverage WHERE url=?1",
+            [url],
+            |r| r.get(0),
+        )
+        .optional()?;
+    sessions
+        .map(|sessions| Ok(serde_json::from_str(&sessions)?))
+        .transpose()
 }
 pub(crate) fn push_device_status(endpoint: String) -> Result<serde_json::Value> {
     let db = open_reader(&database_path())?;
@@ -330,7 +401,7 @@ pub(crate) fn push_device_status(endpoint: String) -> Result<serde_json::Value> 
         [&endpoint],
         |r| r.get::<_, bool>(0),
     )?;
-    let error:Option<String>=db.query_row("SELECT error FROM push_deliveries WHERE endpoint=?1 AND error IS NOT NULL ORDER BY retry_at DESC LIMIT 1",[endpoint],|r|r.get(0)).optional()?.flatten();
+    let error:Option<String>=db.query_row("SELECT error FROM push_deliveries WHERE endpoint=?1 AND accepted IN (0,3) AND error IS NOT NULL ORDER BY retry_at DESC LIMIT 1",[endpoint],|r|r.get(0)).optional()?.flatten();
     Ok(serde_json::json!({"subscribed":subscribed,"error":error}))
 }
 
@@ -360,7 +431,6 @@ mod tests {
                 title: id.into(),
                 body: "Which option?".into(),
                 session_id: Some(id.into()),
-                session_ids: Vec::new(),
                 url: format!("/#conversation/{id}"),
                 tag: id.into(),
             },
@@ -486,7 +556,7 @@ mod tests {
         assert_eq!(push_due_with(&db, 0).unwrap().len(), 1);
         // A real service refusal blocks follow-up requests to the device,
         // including a new episode, until the persisted service deadline.
-        let pending = push_due_with(&db, 0).unwrap();
+        let pending = push_claim_with(&db, 0).unwrap();
         apply_push_result_with(
             &db,
             subscription.clone(),
@@ -497,6 +567,8 @@ mod tests {
         )
         .unwrap();
         push_observe_with(&mut db, true, vec![episode("new-after-refusal")]).unwrap();
+        // Re-enrollment cannot erase a real endpoint Retry-After deadline.
+        push_subscribe_with(&db, subscription.clone()).unwrap();
         assert!(push_due_with(&db, 99).unwrap().is_empty());
         drop(db);
         let mut db = open(&path).unwrap();
@@ -515,7 +587,13 @@ mod tests {
         let summary = push_due_with(&db, 100).unwrap();
         assert_eq!(summary.len(), 1);
         let notice: Notice = serde_json::from_str(&summary[0].payload).unwrap();
-        assert_eq!(notice.session_ids, vec!["summary-a", "summary-b"]);
+        let reference = notice.url.split("push-summary=").nth(1).unwrap().to_owned();
+        assert_eq!(
+            push_summary_coverage_with(&db, &reference)
+                .unwrap()
+                .unwrap(),
+            vec!["summary-a", "summary-b"]
+        );
         push_observe_at_with(
             &mut db,
             OperatorPresence {
@@ -533,7 +611,6 @@ mod tests {
             .unwrap();
         let notice: Notice = serde_json::from_str(&summary.payload).unwrap();
         assert_eq!(notice.title, "1 sessions need you");
-        assert_eq!(notice.session_ids, vec!["summary-b"]);
         push_observe_at_with(
             &mut db,
             OperatorPresence {
@@ -547,6 +624,217 @@ mod tests {
         let pending = push_due_with(&db, 100).unwrap();
         assert_eq!(pending.len(), 1);
         assert!(!pending[0].episode.starts_with("summary:"));
+        // A phone can already show a summary whose remote acceptance was
+        // unknown. Retirement must retain its lookup data for later cleanup.
+        assert_eq!(
+            push_summary_coverage_with(&db, &reference)
+                .unwrap()
+                .unwrap(),
+            vec!["summary-a", "summary-b"]
+        );
+        // Hard-won: 4c4eefc4c: a permanently rejected summary disabled its device.
+        push_observe_at_with(
+            &mut db,
+            OperatorPresence {
+                away: true,
+                revision: 7,
+            },
+            vec![episode("reject-a"), episode("reject-b")],
+            vec![],
+        )
+        .unwrap();
+        let rejected = push_claim_with(&db, 100).unwrap();
+        assert_eq!(rejected.len(), 1);
+        apply_push_result_with(
+            &db,
+            subscription.clone(),
+            rejected[0].episode.clone(),
+            Some(413),
+            i64::MAX,
+            Some("payload rejected".into()),
+        )
+        .unwrap();
+        push_test_with(&mut db, endpoint.clone()).unwrap();
+        let test = push_claim_with(&db, 100).unwrap();
+        assert_eq!(test.len(), 1);
+        assert!(test[0].episode.starts_with("test:"));
+        apply_push_result_with(
+            &db,
+            subscription.clone(),
+            test[0].episode.clone(),
+            Some(201),
+            0,
+            None,
+        )
+        .unwrap();
+        push_observe_at_with(
+            &mut db,
+            OperatorPresence {
+                away: true,
+                revision: 7,
+            },
+            vec![
+                episode("reject-a"),
+                episode("reject-b"),
+                episode("after-rejection"),
+            ],
+            vec![],
+        )
+        .unwrap();
+        let later = push_claim_with(&db, 100).unwrap();
+        assert_eq!(later.len(), 1);
+        assert!(later[0].episode.starts_with("after-rejection:"));
+        apply_push_result_with(
+            &db,
+            subscription.clone(),
+            later[0].episode.clone(),
+            Some(201),
+            0,
+            None,
+        )
+        .unwrap();
+        // Hard-won: 4c4eefc4c: an in-flight individual could also be summarized.
+        push_observe_at_with(
+            &mut db,
+            OperatorPresence {
+                away: true,
+                revision: 7,
+            },
+            vec![episode("flight")],
+            vec![],
+        )
+        .unwrap();
+        let flight = push_claim_with(&db, 100).unwrap();
+        assert_eq!(flight.len(), 1);
+        push_observe_at_with(
+            &mut db,
+            OperatorPresence {
+                away: false,
+                revision: 8,
+            },
+            vec![episode("flight")],
+            vec![],
+        )
+        .unwrap();
+        push_observe_at_with(
+            &mut db,
+            OperatorPresence {
+                away: true,
+                revision: 9,
+            },
+            vec![episode("flight")],
+            vec![],
+        )
+        .unwrap();
+        assert!(push_claim_with(&db, 100).unwrap().is_empty());
+        apply_push_result_with(
+            &db,
+            subscription.clone(),
+            flight[0].episode.clone(),
+            Some(503),
+            101,
+            Some("retry".into()),
+        )
+        .unwrap();
+        let retry = push_claim_with(&db, 101).unwrap();
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].episode, flight[0].episode);
+        // Recovery clears flight ownership, never an acceptance receipt.
+        drop(db);
+        let mut db = open(&path).unwrap();
+        push_recover_with(&db).unwrap();
+        let retry = push_claim_with(&db, 101).unwrap();
+        assert_eq!(retry.len(), 1);
+        apply_push_result_with(
+            &db,
+            subscription.clone(),
+            retry[0].episode.clone(),
+            Some(201),
+            0,
+            None,
+        )
+        .unwrap();
+        push_recover_with(&db).unwrap();
+        assert!(push_claim_with(&db, 101).unwrap().is_empty());
+        // An in-flight summary likewise keeps ownership of its covered episodes.
+        push_observe_at_with(
+            &mut db,
+            OperatorPresence {
+                away: true,
+                revision: 11,
+            },
+            vec![episode("summary-flight")],
+            vec![],
+        )
+        .unwrap();
+        let flight = push_claim_with(&db, 101).unwrap();
+        assert_eq!(flight.len(), 1);
+        assert!(flight[0].episode.starts_with("summary:"));
+        push_observe_at_with(
+            &mut db,
+            OperatorPresence {
+                away: false,
+                revision: 12,
+            },
+            vec![episode("summary-flight")],
+            vec![],
+        )
+        .unwrap();
+        push_observe_at_with(
+            &mut db,
+            OperatorPresence {
+                away: true,
+                revision: 13,
+            },
+            vec![episode("summary-flight")],
+            vec![],
+        )
+        .unwrap();
+        assert!(push_claim_with(&db, 101).unwrap().is_empty());
+        apply_push_result_with(
+            &db,
+            subscription.clone(),
+            flight[0].episode.clone(),
+            Some(201),
+            0,
+            None,
+        )
+        .unwrap();
+        // A stale completion cannot turn summary-covered work back into a retry.
+        apply_push_result_with(
+            &db,
+            subscription.clone(),
+            "summary-flight:1".into(),
+            Some(503),
+            102,
+            Some("stale".into()),
+        )
+        .unwrap();
+        assert!(push_claim_with(&db, 102).unwrap().is_empty());
+        // Hard-won: 4c4eefc4c: summary coverage exceeded the push payload limit.
+        let many = (0..1000)
+            .map(|n| episode(&format!("large-{n:032x}")))
+            .collect();
+        push_observe_at_with(
+            &mut db,
+            OperatorPresence {
+                away: true,
+                revision: 15,
+            },
+            many,
+            vec![],
+        )
+        .unwrap();
+        let large = push_claim_with(&db, 103).unwrap();
+        assert_eq!(large.len(), 1);
+        // RFC 8291 section 4 documents 3993 available plaintext bytes.
+        assert!(large[0].payload.len() <= 3993);
+        let notice: Notice = serde_json::from_str(&large[0].payload).unwrap();
+        assert_eq!(notice.title, "1000 sessions need you");
+        let reference = notice.url.split("push-summary=").nth(1).unwrap();
+        let coverage = push_summary_coverage_with(&db, reference).unwrap().unwrap();
+        assert_eq!(coverage.len(), 1000);
+        assert!(serde_json::to_string(&coverage).unwrap().len() > 4096);
         // HTTP 410 cascades queued intents and receipts.
 
         apply_push_result_with(&db, subscription.clone(), String::new(), Some(410), 0, None)
@@ -556,6 +844,15 @@ mod tests {
                 .get::<_, i64>(0))
                 .unwrap(),
             0
+        );
+        // Coverage is owned independently of a subscription's lifetime, so a
+        // shown summary can still be withdrawn after the endpoint expires.
+        assert_eq!(
+            push_summary_coverage_with(&db, reference)
+                .unwrap()
+                .unwrap()
+                .len(),
+            1000
         );
     }
 }

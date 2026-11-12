@@ -1,96 +1,102 @@
 # Deliver phone notifications from the web viewer
 
-This living ExecPlan follows `.agents/PLANS.md`. Work belongs exclusively in `/home/jonathan/Projects/mjolnir-wt/web-push`, initially detached at `0543d2536`. Commit coherent checkpoints on that detached HEAD; never push or edit the main clone.
+This living ExecPlan follows `.agents/PLANS.md`. Work belongs exclusively in `/home/jonathan/Projects/mjolnir-wt/web-push`, initially detached at `0543d2536`. Commit on detached HEAD, never push, and leave the main clone's source untouched. Evidence goes in the assigned agent report directory.
 
 ## Purpose / Big Picture
 
-A user installs the viewer on Android Chrome or an iOS 16.4+ Home Screen and enables device notifications in Settings. When the operator is away, a session asking for input or offering an important reply produces an encrypted system notification. Tapping opens that session. Opening or focusing the viewer removes notifications for resolved attention.
+A user installs the viewer on Android Chrome or an iOS 16.4+ Home Screen and enables notifications in Settings. Away sessions asking for input or offering an important reply produce encrypted system notifications without a native app. Individual cards open their conversation. Returning to the viewer withdraws resolved cards and summaries while retaining cards whose attention is temporarily unavailable.
 
 ## Progress
 
-- [x] (2026-11-12) Read the planning standard and inspected attention publication, presence, browser routing and the existing service worker.
-- [x] (2026-11-12) Identified a required parent decision about crash-time delivery guarantees.
-- [x] (2026-11-12) Parent approved at-least-once delivery, durable acceptance receipts and stable tags.
-- [x] (2026-11-12) Implemented durable subscriptions, episode sequences, summary coverage, acceptance receipts and private VAPID keys.
-- [x] (2026-11-12) Implemented supervised concurrent sending, presence summaries, authenticated subscription actions and device failure status.
-- [x] (2026-11-12) Implemented Settings and service-worker handlers; 3 affected Playwright cases and 38 existing browser boundary tests pass.
-- [x] (2026-11-12) Focused Rust tests pass (2); affected Playwright tests pass (3); existing browser boundary tests pass (38).
-- [x] (2026-11-12) Touched-crate clippy with warnings denied and workspace rustfmt check pass.
-- [x] (2026-11-12) Browser checkpoint committed as 980376940.
-- [x] (2026-11-12) Daemon checkpoint committed as c146a8a89; first independent review completed.
-- [x] (2026-11-12) Fixed all review findings and reran affected checks: 2 Rust, 3 Playwright, 38 Node; clippy and formatting pass.
-- [x] (2026-11-12) Send validated implementation through the required review workflow; final verdict is recorded in the session handback.
+- [x] (2026-11-12) Inspected attention publication, presence, persistence, routing and the service worker; wrote this plan before implementation.
+- [x] (2026-11-12) Obtained the parent's explicit at-least-once delivery decision.
+- [x] (2026-11-12) Implemented durable subscriptions, episodes, summary coverage, admission, receipts and private VAPID keys.
+- [x] (2026-11-12) Implemented authenticated actions, device status and coverage APIs, Settings controls and service-worker handlers.
+- [x] (2026-11-12) Committed browser checkpoint 980376940 and daemon checkpoint c146a8a89.
+- [x] (2026-11-12) Addressed first-review coverage and withdrawal defects in 4c4eefc4c.
+- [x] (2026-11-12) Addressed second-review device rejection and in-flight ownership defects, including the underlying summary payload growth.
+- [x] (2026-11-12) Final affected checks pass: 2 Rust, 3 Playwright, 38 browser boundary tests, touched-crate clippy and rustfmt.
+- [x] (2026-11-12) Send validated implementation through required review; the final verdict is recorded in the session handback.
 
 ## Surprises & Discoveries
 
-The requirement of exactly one remote push with neither repeats nor drops across arbitrary crashes cannot be implemented by a local database receipt alone. A push service may accept the HTTP request immediately before the daemon dies, before the receipt commits. After restart the database cannot distinguish acceptance from a request that never reached the service. Notification tags replace currently shown notifications, but do not prevent a second alert after the first was dismissed. The parent explicitly approved this at-least-once residual duplicate window before implementation.
+Remote push acceptance cannot commit atomically with a local SQLite receipt. If the daemon dies after acceptance but before the receipt, restart cannot distinguish that from a request that never reached the service. Tags replace visible cards, but cannot prevent another alert after dismissal. The parent explicitly accepted this residual duplicate window before implementation; the sender comments state it.
+
+The runtime watch can coalesce present-to-away transitions, so the sender must use the owner's presence revision, not only its boolean. Worker recovery can temporarily expose unavailable attention; that must pause an existing episode rather than manufacture a new question.
+
+Review found that summary membership must be reconciled independently of unrelated attention, and that per-tag task bookkeeping alone cannot coordinate summaries with individual requests already in flight. Durable admission now belongs to the same database writer as summary coverage. Review also exposed count-dependent payload growth from putting coverage lists on the wire. Coverage now stays in an independent database table, with a fixed-size opaque URL reference on the wire.
 
 ## Decision Log
 
-Approved by parent (2026-11-12): use durable delivery intent and retry after uncertain transport outcomes, accepting possible repeated remote sends. Persist acceptance receipts so acknowledged sends never repeat after restart. Stable session notification tags replace visible cards. The residual duplicate window is remote acceptance before the local acceptance receipt commits. Retrying after that crash can alert again even if the original card was dismissed; this is explicitly accepted. The sender code states this window.
+The parent approved durable intent before send, retries for unknown outcomes, durable acceptance receipts and stable tags. This is at-least-once remote delivery. The residual duplicate window described above is intentional; acknowledged sends never reset on restart.
 
-Implemented: the database writer allocates a monotonically increasing sequence per session. The episode identifier is session id plus this sequence. Current attention category and source identities are stored with each active episode. Sources include completed outcome ordinals, pending form ids/messages from the session and managed descendants, and native question owner/generation identities. Repeated observations and removal of answered forms retain the episode; category changes, newly added sources and re-entry after observed attention clearance allocate a sequence. This covers forms and promoted questions without depending solely on an assessment ordinal. Attention eligibility still comes exclusively from the daemon projection.
+The database writer allocates a monotonic per-session sequence. Episode identity is session ID plus sequence. Stored source signatures include attention category, completed outcome ordinals, pending form IDs/messages from the session and managed descendants, and native question owner/generation identities. Repeated observations and removal of answered forms retain the episode. New sources, category changes and re-entry after confirmed clearance allocate another sequence. Unknown, Unreachable and Failed observations retain identity and pause sends. Eligibility is one policy expression containing NeedsInput and Important; attention classification itself remains daemon-owned.
 
-Implemented: reuse existing ring for P-256 agreement, HKDF-SHA256, AES-GCM and ES256 VAPID signatures, and existing reqwest for HTTPS. No new production or test dependency was needed. Published RFC 8291 Appendix A ciphertext and intermediate values validate encryption; ring's separate signature verifier validates JWTs. Key publication uses a private temporary file, no-clobber atomic publication and directory fsync.
+One outbox state owns each delivery: queued, accepted, summary-covered or in flight. The database writer atomically claims eligible sends and enforces one in-flight request per device/tag. Summary regrouping excludes in-flight individuals and episodes covered by an in-flight summary. Completion updates only the admitted row, so a late failure cannot uncover a summary-covered episode. Startup resets uncertain in-flight rows to queued and preserves acceptance receipts. The sender has no separate busy flag or active set.
 
-Implemented: provisional migration 127 is compatible because it adds standalone tables older snapshot writers do not touch. No compatibility floor change. Assign its final revision at merge. Push intents, summary coverage and acceptance receipts commit on the existing single database writer. Covered rows are distinct from service-accepted receipts; an unaccepted summary can be regrouped when presence turns away again.
+Reuse existing ring for P-256 agreement, HKDF-SHA256, AES-GCM and ES256 VAPID signing, and existing reqwest for HTTPS. No production or test dependency was added. Published RFC 8291 Appendix A values validate encryption, and ring's separate signature verifier validates the JWT. VAPID keys are private PKCS8 files, published with restrictive temporary-file permissions, atomic no-clobber publication and directory fsync. Never regenerate a valid key on restart.
 
-Implemented: each device/tag has one in-flight send; other sessions and devices overlap. Unknown transport outcomes use unbounded exponential backoff, responses 429/5xx use Retry-After when provided, 404/410 removes matching enrollment and cascades its outbox. Permanent service rejection stays visible in Settings until explicit re-enrollment. TTL is one day so an intermittently offline phone can receive queued cards. VAPID validity is the RFC maximum of 24 hours; its contact URL is the project repository.
+Provisional migration 127 is compatible: standalone push tables are neither read nor rewritten by older snapshot writers, and no existing JSON or constraints change. The compatibility floor remains unchanged. Assign its final revision at merge. Tables own device subscriptions/backpressure, presence observation, current episodes, sequence counters, outbox deliveries and immutable summary cleanup coverage.
+
+Unknown transport outcomes use exponential backoff without a retry cap. Responses 429 and 5xx honor Retry-After and persist an endpoint-wide deadline that new episodes and re-enrollment cannot bypass. Responses 404/410 delete only the matching enrollment. Permanent payload rejection stops only that intent and stays visible in Settings; it cannot disable the device. TTL is one day for an intermittently offline phone. VAPID validity uses the RFC maximum of 24 hours, with the project repository as contact URL.
+
+Push payloads contain only title, first-line body, session ID, URL and notification tag. Summary payload size is independent of coverage count: its URL contains an opaque hash reference. Authenticated coverage lookup returns only the original covered session IDs. Coverage survives outbox retirement and subscription expiry, so even a phone that displayed an unacknowledged send can later withdraw it. The browser fetches fresh attention before evaluating withdrawal, retaining Unknown/Unreachable/Failed cards. No silent withdrawal pushes are sent.
 
 ## Outcomes & Retrospective
 
-Implementation and validation are complete. The final focused Rust suite passed (2 tests), including durable acceptance/unknown outcomes, away-only delivery, summary coverage, expiry, recovery identity, coalesced presence changes, form changes and device retry deadlines. Browser checks passed (3 Playwright, 38 existing Node boundary tests). Touched-crate clippy and rustfmt pass. Mechanical fixes included the shared database writer API, nested-condition lint and one unused mutable test binding. No live phone delivery has been attempted. The browser checkpoint is 980376940 and the daemon checkpoint is c146a8a89. Both independent first reviewers identified summary coverage/withdrawal defects; all findings were accepted and fixed. Review regressions pass, and the follow-up commit is sent through the required review workflow. The final review verdict is recorded in the session handback.
+Implementation and affected validation are complete; no real phone delivery has been attempted. Both independent review rounds' findings were accepted and fixed. The latest change makes races unrepresentable by giving the database writer sole ownership of send admission and coverage, rather than narrowing a task-bookkeeping window. It also removes session-list-sized push bodies instead of adding a guessed limit or a fallback.
 
 ## Context and Orientation
 
-`mj-controller/src/daemon/attention.rs::update` publishes the sole classification through runtime metadata. `mj-controller/src/daemon/feed.rs` calls it and publishes `operator_presence`; `mj-core/src/state.rs::OperatorPresence` has `away` and `revision`. Consume this owner-produced state in one serialized dispatcher, with network requests in supervised background tasks. The controller owns lifecycle and database work, while workers own agent turns. Delivery intent must survive daemon replacement.
+`mj-controller/src/daemon/attention.rs::update` supplies the sole person-facing classification. `daemon/feed.rs` publishes it with `OperatorPresence` in runtime metadata. `mj-controller/src/web_push.rs` consumes that projection, builds episode source signatures and notification content, encrypts/signs payloads and supervises independent HTTPS tasks. It runs alongside the phone server in `daemon/serve.rs`; the HTTP server retains its own accepted-work shutdown drain.
 
-`mj-controller/src/web/service-worker.js` currently caches the shell and excludes API requests. Its cache version is v26 and must advance with asset changes. `viewer.js` routes conversation URLs as `/#conversation/<session-id>`. `viewer.html` and `viewer.css` contain the Settings surface. Authenticated mutations use `POST /api/actions`, validated in `mj-controller/src/server/validation.rs` and dispatched in `server_runtime/actions.rs`.
+`mj-controller/src/database/web_push.rs` uses the existing database writer for every mutation. Its SQL schema lives in `database/web_push.sql`; migration registration is in `database/schema.rs` and `database.rs`. Devices are identified by their browser-provided subscription endpoint. Outbox state and receipts are durable, so replacing the daemon does not depend on a worker turn or an in-memory task.
+
+`server/actions.rs`, `server/validation.rs` and `server_runtime/actions.rs` expose Subscribe, Unsubscribe and Test through the normal cookie-authenticated viewer action path. `server/settings.rs` and `server/routes.rs` serve the public VAPID key, device failure status and summary coverage; private key material never reaches the browser.
+
+`web/viewer.html` and `web/viewer.js` implement device controls and focus cleanup. `web/service-worker.js` displays every push and focuses or opens a same-origin target on click. Its cache version is v29 and must be reassigned upward if another lane also changes it. Conversation URLs are `/#conversation/<session-id>`; summary URLs open the viewer and carry the cleanup reference.
 
 ## Plan of Work
 
-The crash guarantee is resolved as above. Store migration helpers have been inspected; the implementation adds a new migration whose final revision is assigned at merge, after the other lane's 126. Classify compatibility explicitly: new standalone subscription, episode and delivery tables are intended to be compatible because old code neither reads nor overwrites them; verify migration revision gating before claiming compatibility. Use a unique per-device/per-episode delivery key and atomic summary reservation so turning away summarizes already-open unsent sessions instead of sending a burst.
+The persistence milestone creates compatible standalone tables and demonstrates reservations, receipts, presence changes, expiry and recovery against real SQLite files. The sender milestone consumes the existing runtime publication, atomically admits sends, and keeps network requests outside the database writer and control loop. The browser milestone requests permission directly from the tap, enrolls through authenticated actions, displays current state and sends a test. The acceptance milestone extends existing browser cases and verifies crypto against an independent published fixture, then commits and requests review.
 
-Generate a VAPID signing key once in the daemon data directory using exclusive creation and restrictive permissions. VAPID is the public-key signature proving the sender's identity to a push service. RFC 8291 encryption protects the notification body using subscription keys; aes128gcm is the required encrypted content encoding. Inspect workspace dependencies before selecting a maintained encryption crate, and validate it independently. Reuse reqwest for outbound HTTP; it is already in the controller. No dependency decision has yet been made.
-
-Send only display title, first-line body, session identifier and conversation URL. Input uses the question/form line or 'Needs your input'; important replies use the reply line or 'Has a reply for you'. Keep eligibility in one policy expression containing NeedsInput and Important. Remove expired subscriptions on 404/410, persist service-directed Retry-After for 429/5xx, and report background errors. No arbitrary retry count or concurrency cap.
-
-Expose the public key and device state through the viewer API and add subscribe, unsubscribe and test actions. Settings requests permission directly from a tap and shows current state and the iOS Home Screen/HTTPS hint. The worker displays every push and focuses or opens a same-origin conversation on click. On viewer focus and refreshed attention state, close shown notifications whose session is no longer eligible using registration.getNotifications; never send silent withdrawal pushes.
+These milestones are implemented. Future review fixes must extend existing cases for an actual tricky condition, rerun only affected tests, and finish with touched-crate clippy plus rustfmt. Do not introduce new default-instance tests, speculative caps, branches, pushes or installation steps.
 
 ## Concrete Steps
 
-All commands run from the detached worktree. Read existing migration and action patterns before edits. Use an isolated `MJ_INSTANCE=web-push-test` for every new binary/browser invocation and retain automated suites' isolated data/config paths. Run cargo tests with elevated permissions, without redirecting target output or changing mbx configuration.
+Run from `/home/jonathan/Projects/mjolnir-wt/web-push`, using ordinary mbx/Cargo storage. Every cargo test runs with elevated permissions and `MJ_INSTANCE=web-push-test`:
 
-Run focused tests with `cargo test -p mj-controller <affected-filter>` and store tests with their actual package/filter after locating the store owner. Run `cargo clippy -p mj-controller --all-targets -- -D warnings`, adding every other touched crate, and `cargo fmt --all -- --check`. Locate and extend the current Playwright Settings/service-worker spec, run its existing runner with mocked routes and isolated configuration. Expected result is all selected tests passing; capture actual names/results in this plan. Commit only explicitly named changed files; request agent review before handback.
+    MJ_INSTANCE=web-push-test cargo test -p brokk-mj-controller web_push --lib
+    cargo clippy -p brokk-mj-controller --all-targets -- -D warnings
+    cargo fmt --all -- --check
+
+Expected results are 2 passing focused Rust tests and no lint/format errors. Run affected browser checks with the pinned existing dependencies:
+
+    MJ_INSTANCE=web-push-browser tests/e2e/web/node_modules/.bin/playwright test -c tests/e2e/web/playwright.config.js --project=deterministic settings.spec.js
+    node --test tests/e2e/web/viewer.unit.test.mjs
+
+Expected results are 3 Playwright cases and 38 existing browser boundary tests passing. Do not update goldens unless user-visible text actually changed. Stage only changed files, commit on detached HEAD, and request review with the assigned worktree path.
 
 ## Validation and Acceptance
 
-Encryption must decrypt using an independent implementation or the published RFC vector, and the VAPID JWT signature must verify independently. Durable integration tests simulate restart, present suppression, away summaries, resolved episodes and 410 subscription removal. Include the approved ambiguous-send behavior in crash tests. Browser tests exercise permission from the Settings tap and click routing. No live phone result can be claimed here.
+The encryption/JWT test checks RFC 8291 Appendix A ciphertext and derivation values, JWT audience/expiry and signature verification. The database regression covers acknowledged and unknown outcomes across reconnect, present suppression, away summaries, form removal/re-entry, worker recovery, coalesced presence revisions, device deadlines, expiry, summary shrinking/retirement, permanent rejection followed by test/new sends, in-flight individual/summary ownership, stale completions and restart admission. A real 1,000-session summary proves the stored coverage exceeds 4096 bytes while its actual push plaintext stays within the documented RFC 8291 section 4 allowance of 3993 bytes; lookup survives endpoint expiry.
 
-On a phone, visit the trusted HTTPS viewer; on iOS add it to the Home Screen first. Enable notifications, send a test, and verify a system notification opens the viewer. Mark the operator away and trigger a question and an important reply; verify titles, bodies and session routing. Answer elsewhere, refocus the viewer and verify the old card disappears. Turn away with multiple existing questions and verify one summary. Restart the daemon after acknowledged delivery and verify no duplicate.
+The browser regression drives the real Settings UI with mocked routes and browser push APIs. It checks permission only from a tap, test/unsubscribe actions, temporary-unavailability retention, resolved individual/summary cleanup through the coverage API, and service-worker click routing. The existing Settings golden still fits a 390x844 viewport without sideways overflow.
+
+On a phone, open a trusted HTTPS viewer. On iOS 16.4+, add it to the Home Screen and open that app first. Enable notifications and send a test. With the operator away, trigger a question and an important reply; check session titles, first-line bodies and conversation routing. Turn away with multiple existing questions and verify one summary. Answer elsewhere and refocus the viewer; both individual and resolved summary cards must disappear. Temporarily disconnect/reconnect a worker and verify its open question card survives. Restart the daemon after acknowledged delivery and verify no duplicate. Keep Tailscale connected when opening a tailnet-only viewer URL.
 
 ## Idempotence and Recovery
 
-Database uniqueness makes replaying acknowledged episode work safe. Subscription expiry removes the device, permitting a new explicit enrollment. Never test against the default instance or live store. Stop test processes before deleting their directories. Do not delete or regenerate a valid VAPID key on restart because subscriptions depend on it. Failed sends remain observable and follow the approved durable retry policy.
+Unique device/episode reservations and acceptance receipts make ordinary replay safe. Only startup recovers in-flight rows. An unknown remote acceptance may repeat as explicitly approved; tags replace the same card. Resolved queued intents retire before sending. Summary cleanup coverage has an independent durable lifetime because displayed OS notifications can outlive subscriptions and outbox work.
+
+Never test against the default instance or live store, never redirect build output, and stop owning processes before deleting test directories. No daemon/browser test build was installed or used against live session data. Subscription expiry allows explicit re-enrollment, while the retained coverage still supports cleanup of already shown cards.
 
 ## Artifacts and Notes
 
-Initial evidence: `feed.rs:310` invokes attention update; `feed.rs:231` copies operator presence; `viewer.js:273` parses conversation hashes. Evidence is stored under /home/jonathan/Projects/mjolnir/.mj/clones/4f86b847ae014721aac99daaffd3ae50/.mj/agents/0160580e08e248d034b0153fe3f1d13c/: tests.log (2 passed), browser.log (3 passed), node.log (38 passed), clippy.log and format.log (both clean). This is the assigned report directory; repository source changes remain exclusively in the detached worktree.
+Evidence is in `/home/jonathan/Projects/mjolnir/.mj/clones/4f86b847ae014721aac99daaffd3ae50/.mj/agents/0160580e08e248d034b0153fe3f1d13c/`: `tests.log`, `clippy.log`, `format.log`, `browser.log` and `node.log`. The session handback records all commits and the final review verdict. This is the assigned report directory; source changes remain exclusively in the detached worktree.
 
 ## Interfaces and Dependencies
 
-The dispatcher must accept owner-produced session attention and presence together, persist device delivery decisions, then dispatch HTTP outside the event loop. Database actions must provide atomic enqueue/receipt/expiry operations. Viewer actions must share the controller's normal authentication and validation. The implementation is in `mj-controller/src/web_push.rs` and `mj-controller/src/database/web_push.rs`; schema SQL is `database/web_push.sql`. Public device actions are PushSubscribe, PushUnsubscribe and PushTest. Authenticated viewer routes are GET /api/push/key and GET /api/push/status?endpoint=... .
+The public viewer action variants are `PushSubscribe`, `PushUnsubscribe` and `PushTest`. Viewer-only GET routes are `/api/push/key`, `/api/push/status?endpoint=...` and `/api/push/summary?id=...`. The dispatcher calls `push_observe`, `push_claim`, `push_result` and startup-only `push_recover`; these all use the single database writer. `READY_PUSH` is shared by admission and scheduling. All background failures propagate or are reported with context, and subscription capability URLs are removed from transport diagnostics.
 
-Revision note (2026-11-12): Created the implementation plan and recorded the external-send/database crash ambiguity before making a persisted contract choice.
-
-Revision note (2026-11-12): Recorded the approved delivery semantics and implemented persistence, episode sequencing, crypto, API and browser milestones; final tests and review remain.
-
-Revision note (2026-11-12): The sender consumes OperatorPresence.revision as well as away, so a coalesced watch feed cannot miss a present-to-away transition. Unreachable/Unknown/Failed observations pause sends and retain episode identity instead of treating recovery as a new question. The extended persistence test covers both races. On phone focus, withdrawal waits for a fresh daemon snapshot instead of trusting a suspended tab's cached attention.
-
-Revision note (2026-11-12): Service-directed retry deadlines are owned by the device row as well as the rejected intent, so new episodes and regrouped summaries cannot bypass Retry-After. The persistence regression also checks that this deadline survives reconnect and gates a newly queued episode. Browser checkpoint committed as 980376940.
-
-Revision note (2026-11-12): Final affected checks pass; recorded evidence locations and the browser checkpoint. Daemon commit and automated review remain.
-
-Revision note (2026-11-12, review fixes): Retain shown cards for Unknown/Unreachable/Failed attention. Encrypted summaries now carry covered session IDs (no extra conversation data), allowing focus cleanup when every covered session is resolved. The database reconciles each queued summary against its own current eligible coverage, updates its count, and retires empty summaries even when unrelated attention remains. Unavailable coverage becomes a paused individual intent. Extended existing persistence and Playwright cases with the review regressions; rerun affected checks before the follow-up commit.
-
-Revision note (2026-11-12): All review fixes pass the focused Rust suite, affected Playwright suite, existing browser boundary tests, touched-crate clippy and rustfmt. The follow-up commit is ready for the required second review. No findings were overridden.
+Revision note (2026-11-12): Consolidated the final design and evidence after two review rounds, replacing interim mechanisms with durable admission and independent immutable summary coverage. The follow-up commit is ready for required review.

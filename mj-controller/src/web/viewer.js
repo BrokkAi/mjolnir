@@ -9903,7 +9903,12 @@ async function withdrawResolvedNotifications() {
     const notifications = await registration.getNotifications();
     for (const notification of notifications) {
       const data = notification.data || {};
-      const ids = data.session_ids?.length ? data.session_ids : data.session_id ? [data.session_id] : [];
+      let ids = data.session_id ? [data.session_id] : [];
+      const reference = new URL(data.url || '/', location.origin).searchParams.get('push-summary');
+      if (reference) {
+        const coverage = await request(`/api/push/summary?id=${encodeURIComponent(reference)}`);
+        ids = coverage.session_ids;
+      }
       const resolved = id => {
         const session = sessionById(id);
         // Unavailable attention does not establish that a request was answered.
