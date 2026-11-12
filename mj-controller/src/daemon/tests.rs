@@ -12253,12 +12253,23 @@ async fn daemon_api_exchange() {
     const CHILD: &str = "MJ_TEST_DAEMON_API_EXCHANGE";
     if std::env::var_os(CHILD).is_none() {
         let directory = tempfile::tempdir().unwrap();
+        // Keep probes isolated, but give macOS version detection a stable answer.
+        // Apple container discovery is intentionally specific to the host OS.
+        let bin = directory.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let probe = bin.join("sw_vers");
+            fs::write(&probe, "#!/bin/sh\nprintf '25.0\\n'\n").unwrap();
+            fs::set_permissions(probe, fs::Permissions::from_mode(0o755)).unwrap();
+        }
         let mut child = crate::controller::test_support::IsolatedTest::new(
             crate::controller::test_support::test_name(module_path!(), "daemon_api_exchange"),
         )
         .env(CHILD, "1")
         .env("MJ_INSTANCE", "machine-exchange")
-        .env("PATH", "")
+        .env("PATH", &bin)
         .env("HOME", directory.path().join("home"))
         .env("USERPROFILE", directory.path().join("home"))
         .isolated_store(directory.path());
@@ -12505,7 +12516,11 @@ async fn daemon_api_exchange() {
                 .replace('\\', "/"),
             "<server-parent>",
         );
-    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "daemon-api-exchange", &rendered);
+    mj_core::golden::assert_platform_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "daemon-api-exchange",
+        &rendered,
+    );
 }
 
 /// Real OpenSSH is held in a proxy command. Closing a superseded completion
@@ -12949,7 +12964,8 @@ async fn daemon_upload_exchange() {
 }
 
 // Hard-won: #1514: admitted mbx downloads kept daemon handoff waiting for minutes.
-#[cfg(unix)]
+// The pinned mbx executable installs only on Linux container hosts.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn mbx_preparation_cancels_on_handoff_and_disconnect_before_removing_staging() {
     const CHILD: &str = "MJ_MBX_CANCELLATION_ROOT";

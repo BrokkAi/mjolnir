@@ -1769,5 +1769,5 @@ pub fn config_only_controller(config: Config) -> Controller {
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) use mbx::install::MBX_TEST_RELEASE_URL;
