@@ -13,7 +13,7 @@ Separately, the daemon gains SQLite planner statistics: the store has never been
 - [x] (2026-11-12) M1: `PRAGMA optimize=0x10012` on the writer connection after migrations (`02c10fb8d`). Workspace Clippy and 248 database tests passed. First run on a 5.4 GB copy of the five largest tables took 26.8 s; a repeat took 0.00 s.
 - [x] (2026-11-12) M2: one terminal-output accessor (`TerminalOutputs` in `mj-core/src/transcript.rs`), all readers converted, presentation-only hydration of tools in page reads (`e13ed5c7c`). Existing goldens unchanged.
 - [x] (2026-11-12) M3 (revised): store reverse scan and `HistoricalReferences.terminals` deleted; live-owner attachment, Kimi matching, fallback finalization and ACP metadata unchanged (`ea047e98d`). Final run: 98 transcript, 54 client unit + integration, 774 selected controller and 21 selected core tests; workspace Clippy, fmt and diff checks passed.
-- [ ] Decide whether the first-run `optimize` cost needs a change before install.
+- [x] (2026-11-12) First-run `optimize` cost accepted as a one-time startup delay (see Surprises).
 - [ ] Review, push, install, profile.
 
 ## Surprises & Discoveries
@@ -24,6 +24,9 @@ Separately, the daemon gains SQLite planner statistics: the store has never been
   Evidence: `mj-transcript/src/projection/terminals.rs:6–108` (`apply_terminal_metadata`), called from `session_update.rs:53,72,127`; protected by `terminal_metadata_retains_bounded_unicode_output_across_restore_and_late_exit`.
 - Observation: more readers than first listed: `mj-chat/src/chat/transcript.rs:315`, `mj-controller/src/server/api/turns.rs:57,436`, `mj-controller/src/database/events.rs:671`, and canonical tool-body consumers (`summary.rs`, archive validation, `handoff/claude.rs`).
 - Observation: in the three largest live sessions every terminal has exactly one referring item (39,443 terminals, 0 with more than one referrer), although `ProjectionIndex::terminal_referrers` allows a set.
+
+- Observation: the first `optimize` is dominated by an exact row count of each index, which `analysis_limit` does not bound; it is I/O, not CPU.
+  Evidence: on a 5.1 GB copy of `materialized_transcript_items`, `optimize=0x10012` took 28.5 s wall, 0.28 s user, 10.4 s system, and wrote exact `sqlite_stat1` counts (4,762,090); `analysis_limit=100` plus `ANALYZE` took 19.5 s; a warm `count(*)` took 4.6 s; a repeat `optimize` took 0.00 s. `ANALYZE` holds the write lock, so moving it after startup would stall writes instead.
 
 ## Decision Log
 
@@ -50,6 +53,10 @@ Separately, the daemon gains SQLite planner statistics: the store has never been
 - Decision: page and history reads hydrate the tools they return with joined terminal records (primary-key reads of `terminal:<id>`), presentation only, never written back; `TranscriptHistoryPage` is a public wire type, so hydration keeps remote clients correct without a wire field. Clients suppress a standalone item whose terminal a held tool shows. Archive validation reads the accessor's raw embedded view so shadowed embedded records are still validated.
   Rationale: role-filtered and cursor-paged readers cannot see parked items; hydration preserves page shape, cursors, filters and the response format.
   Date/Author: 2026-11-12, implementer proposal approved by the parent agent.
+
+- Decision (amends page hydration): partial views render items as stored and never join across chunks: the live client tail, the asynchronously converted prefix, history pages and unfiltered API pages. Output appears exactly once, under its tool when the owner was live and as a standalone block otherwise. Only readers that hold a complete transcript (archive export and validation, handoff, summaries and SessionWiki) or that filter out standalone terminal items (`role=tool` API pages, the GitHub tool-only reader) join and hydrate through the accessor.
+  Rationale: review found that joining in partial views either loses output (tool in the async prefix, parked record in the tail) or duplicates it (owner and parked record on different history pages), and that per-session join state disabled TUI entry reuse whenever any parked record existed. Owners of parked output are evicted from the live window, so the live tail gains nothing from a join.
+  Date/Author: 2026-11-12, parent agent after review of e13ed5c7c.
 
 ## Outcomes & Retrospective
 
