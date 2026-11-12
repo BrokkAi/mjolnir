@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
 
 use super::super::cache_host::{CacheHost, HostPlatform};
-use super::{MBX_VERSION, NativeMbx, probe_native_version, version_at_least};
+use super::{MBX_VERSION, NativeMbx, probe_native_version};
 use crate::targets::{self, CommandExecutor, CommandOutput, CommandSpec};
 use mj_core::config::Machine;
 use mj_core::state::{BuildCacheOff, BuildCachePreview};
@@ -68,23 +68,72 @@ fi
 [ "$action" = update ] || { echo 'unknown profile action' >&2; exit 2; }
 posix_block=$3
 fish_block=$4
-start='# >>> mbx (added by Mjolnir) >>>'
-if grep -Fq "$start" "$profile" 2>/dev/null; then
-    status=unchanged
-else
-    profile_dir=${profile%/*}
-    mkdir -p -- "$profile_dir"
-    : >> "$profile"
-    if [ -s "$profile" ]; then
-        printf '\n' >> "$profile"
-    fi
-    if [ "$shell_kind" = fish ]; then
-        printf '%s\n' "$fish_block" >> "$profile"
-    else
-        printf '%s\n' "$posix_block" >> "$profile"
-    fi
-    status=changed
+# Local callers hold this same host lock through Rust; SSH callers acquire it here.
+lock=${5-"$HOME/.mbx.lock"}
+if [ -n "$lock" ]; then
+    exec 9>"$lock"
+    flock -x 9
 fi
+if [ "$shell_kind" = fish ]; then block=$fish_block; else block=$posix_block; fi
+existing=
+if [ -e "$profile" ]; then
+    # A sentinel preserves trailing newlines for exact owned-prefix comparisons.
+    existing=$(cat -- "$profile" && printf '.')
+    existing=${existing%.}
+fi
+start='# >>> mbx (added by Mjolnir) >>>'
+end='# <<< mbx <<<'
+# Inspect only the suffix after the last completed block.
+trailing=${existing##*"$end"}
+case "$trailing" in
+    *"$start"*)
+        fragment="$start${trailing#*"$start"}"
+        prefix=${existing%"$fragment"}
+        offset=$(printf '%s' "$prefix" | wc -c)
+        line=$(printf '%s' "$prefix" | wc -l)
+        line=$((line + 1))
+        # Byte comparisons also handle a write interrupted halfway through a line.
+        length=$(printf '%s' "$fragment" | wc -c)
+        matched=$(printf '%s' "$fragment" | MBX_PROFILE_BLOCK="$block" MBX_PROFILE_LENGTH="$length" LC_ALL=C awk '
+            { actual=actual $0 "\n" }
+            END {
+                actual=substr(actual, 1, ENVIRON["MBX_PROFILE_LENGTH"]+0)
+                expected=ENVIRON["MBX_PROFILE_BLOCK"]
+                n=length(actual); if (length(expected)<n) n=length(expected)
+                for (i=1; i<=n && substr(actual,i,1)==substr(expected,i,1); i++) {}
+                print i-1
+            }')
+        if [ "$matched" -ne "$length" ]; then
+            first=$((offset + 1))
+            last=$((offset + matched))
+            printf '%s\n' "$profile: incomplete Mj block at line $line is followed by other content. Delete only bytes $first through $last (the incomplete Mj block prefix beginning with '$start'); preserve subsequent content, then run Install again." >&2
+            exit 1
+        fi
+        # dd preserves the prefix and truncates in place at the seek offset,
+        # following symlinks. No copy or rename can replace unrelated contents.
+        if ! error=$(dd if=/dev/null of="$profile" bs=1 seek="$offset" 2>&1); then
+            printf '%s\n' "repair $profile at line $line failed: $error" >&2
+            exit 1
+        fi
+        existing=$prefix
+        ;;
+esac
+case "$existing" in
+    *"$block"*) status=unchanged ;;
+    *)
+        profile_dir=${profile%/*}
+        mkdir -p -- "$profile_dir"
+        # One append preserves user bytes and follows profile symlinks.
+        block="
+$block
+"
+        if ! printf '%s' "$block" >> "$profile"; then
+            printf '%s\n' "append $profile failed with an I/O error; run Install again to repair the incomplete Mj block" >&2
+            exit 1
+        fi
+        status=changed
+        ;;
+esac
 printf '%s\n%s\n%s\n%s' "$status" "$shown" "$shell_kind" "$shim_dir"
 "#;
 
@@ -153,22 +202,78 @@ pub(super) fn install_candidate_kind(preview: &BuildCachePreview) -> Option<MbxI
     }
     match preview.native_mbx.as_deref() {
         None => Some(MbxInstallKind::Install),
-        Some(version) if !version_at_least(version, MBX_VERSION) => Some(MbxInstallKind::Upgrade),
-        Some(_) => None,
+        Some(version)
+            if matches!(
+                (semver::Version::parse(version), semver::Version::parse(MBX_VERSION)),
+                (Ok(found), Ok(pinned)) if found > pinned
+            ) =>
+        {
+            None
+        }
+        // A matching binary can still have interrupted setup/profile updates.
+        // Keep the existing action available so rerunning always repairs them.
+        Some(_) => Some(MbxInstallKind::Upgrade),
     }
 }
 
-/// Install or upgrade the pinned Linux mbx on a machine with a persistent host.
-pub fn install_mbx(machine: &Machine, executor: &impl CommandExecutor) -> Result<MbxInstallResult> {
-    install_mbx_with(machine, executor, None, download)
+/// A fully staged install. Dropping it removes unpublished files after executor teardown.
+struct PreparedMbx {
+    host: CacheHost,
+    home: PathBuf,
+    program: PathBuf,
+    kind: MbxInstallKind,
+    staged: Option<PathBuf>,
+    _download: Option<tempfile::TempDir>,
 }
 
+impl Drop for PreparedMbx {
+    fn drop(&mut self) {
+        if let Some(path) = &self.staged {
+            if self.host.ssh().is_none() {
+                if let Err(error) = std::fs::remove_file(path) {
+                    tracing::warn!(%error, path = %path.display(), "remove staged mbx binary");
+                }
+            } else {
+                cleanup_remote_staging(&self.host, path);
+            }
+        }
+    }
+}
+
+/// Probe, fetch, verify and upload without publishing or holding handoff admission.
+fn prepare_mbx(machine: &Machine, executor: &impl CommandExecutor) -> Result<PreparedMbx> {
+    let root = mj_core::config::data_dir().join("mbx-download");
+    std::fs::create_dir_all(&root).context("create mbx download staging root")?;
+    let directory = tempfile::tempdir_in(root).context("create mbx download staging directory")?;
+    let mut prepared = prepare_mbx_with(machine, executor, None, |triple| {
+        download(triple, directory.path(), executor)
+    })?;
+    prepared._download = Some(directory);
+    Ok(prepared)
+}
+
+/// Install from a standalone CLI operation without a daemon handoff owner.
+pub fn install_mbx(machine: &Machine, executor: &impl CommandExecutor) -> Result<MbxInstallResult> {
+    let prepared = prepare_mbx(machine, executor)?;
+    prepared.publish(executor)
+}
+
+#[cfg(test)]
 fn install_mbx_with(
     machine: &Machine,
     executor: &impl CommandExecutor,
     home_override: Option<&Path>,
     get_binary: impl FnOnce(&str) -> Result<PathBuf>,
 ) -> Result<MbxInstallResult> {
+    prepare_mbx_with(machine, executor, home_override, get_binary)?.publish(executor)
+}
+
+fn prepare_mbx_with(
+    machine: &Machine,
+    executor: &impl CommandExecutor,
+    home_override: Option<&Path>,
+    get_binary: impl FnOnce(&str) -> Result<PathBuf>,
+) -> Result<PreparedMbx> {
     let host = CacheHost::for_machine(machine)
         .context("this machine has no persistent container host where mbx can be installed")?;
     ensure!(
@@ -202,48 +307,71 @@ fn install_mbx_with(
         "the verified mbx download is not a regular file"
     );
     check_cancelled(executor)?;
-    transfer_binary(&host, &home, &binary, &program, executor)?;
-
-    check_cancelled(executor)?;
-    run_setup(&host, &program, executor)?;
-    let (profile_changed, profile) = update_profile(&host, &program, executor)?;
-
-    check_cancelled(executor)?;
-    let verified =
-        probe_native_version(&host, executor)?.context("mbx was not found after installation")?;
-    ensure!(
-        verified.program == program,
-        "mbx verification found {} instead of the installed path {}",
-        verified.program.display(),
-        program.display()
-    );
-    ensure!(
-        verified.version == MBX_VERSION,
-        "installed mbx reported version {}, expected {MBX_VERSION}",
-        verified.version
-    );
-    if machine.build_cache().and_then(|settings| settings.enabled) != Some(false) {
-        let synchronized =
-            super::native_cache_directory(&host, &verified, executor).and_then(|directory| {
-                super::sync_mbx_binary_from_native(&host, &verified, &directory, executor)
-                    .map(|_| ())
-            });
-        if let Err(error) = synchronized {
-            tracing::warn!(
-                host = host.key(),
-                "mbx installed successfully, but its shared cache copy will be refreshed by reconciliation: {error:#}"
-            );
-        }
-    }
-    Ok(MbxInstallResult {
+    let staged = stage_binary(&host, &home, &binary, &program, executor)?;
+    Ok(PreparedMbx {
+        host,
+        home,
         program,
-        version: verified.version,
-        profile_changed,
-        profile_file: profile.file,
-        profile_warning: profile.warning,
-        manual_path_line: profile.manual_path_line,
         kind,
+        staged: Some(staged),
+        _download: None,
     })
+}
+
+impl PreparedMbx {
+    /// Every Mj-owned mutation publishes a complete file; interruption is repaired by rerunning.
+    fn publish(mut self, executor: &impl CommandExecutor) -> Result<MbxInstallResult> {
+        let host = self.host.clone();
+        let program = self.program.clone();
+        let kind = self.kind;
+        let staged = self
+            .staged
+            .as_ref()
+            .context("mbx install has no staged binary")?;
+        let command = host.shell_command(
+            r#"chmod 755 -- "$1" && mv -f -- "$1" "$2""#,
+            "hel-mbx-install-publish",
+            [
+                staged.to_string_lossy().into_owned(),
+                program.to_string_lossy().into_owned(),
+            ],
+            "publish the mbx binary atomically on the SSH host",
+        );
+        if host.ssh().is_none() {
+            set_executable(staged)?;
+            std::fs::rename(staged, &program).context("publish staged mbx binary")?;
+        } else {
+            checked(executor.execute(&command)?, &command)?;
+        }
+        self.staged = None;
+        check_cancelled(executor)?;
+        run_setup(&host, &program, executor)?;
+        let (profile_changed, profile) = update_profile(&host, &self.home, &program, executor)?;
+
+        check_cancelled(executor)?;
+        let verified = probe_native_version(&host, executor)?
+            .context("mbx was not found after installation")?;
+        ensure!(
+            verified.program == program,
+            "mbx verification found {} instead of the installed path {}",
+            verified.program.display(),
+            program.display()
+        );
+        ensure!(
+            verified.version == MBX_VERSION,
+            "installed mbx reported version {}, expected {MBX_VERSION}",
+            verified.version
+        );
+        Ok(MbxInstallResult {
+            program: program.clone(),
+            version: verified.version,
+            profile_changed,
+            profile_file: profile.file,
+            profile_warning: profile.warning,
+            manual_path_line: profile.manual_path_line,
+            kind,
+        })
+    }
 }
 
 fn canonical_home(host: &CacheHost, executor: &impl CommandExecutor) -> Result<PathBuf> {
@@ -306,13 +434,13 @@ fn destination(home: &Path, existing: Option<&NativeMbx>) -> Result<InstallDesti
     })
 }
 
-fn transfer_binary(
+fn stage_binary(
     host: &CacheHost,
     home: &Path,
     binary: &Path,
     program: &Path,
     executor: &impl CommandExecutor,
-) -> Result<()> {
+) -> Result<PathBuf> {
     let parent = program
         .parent()
         .context("the selected mbx path has no parent directory")?;
@@ -328,11 +456,11 @@ fn transfer_binary(
         check_cancelled(executor)?;
         temporary.as_file_mut().sync_all()?;
         set_executable(temporary.path())?;
-        temporary
-            .persist(program)
+        return temporary
+            .keep()
+            .map(|(_, path)| path)
             .map_err(|error| error.error)
-            .with_context(|| format!("publish mbx binary {}", program.display()))?;
-        return Ok(());
+            .context("retain staged mbx binary");
     }
 
     let command = host.command(
@@ -363,30 +491,22 @@ fn transfer_binary(
         .execute(&upload)
         .and_then(|output| checked(output, &upload))
     {
-        remove_remote_temporary(host, &temporary, executor);
+        cleanup_remote_staging(host, &temporary);
         return Err(error);
     }
     if let Err(error) = check_cancelled(executor) {
-        remove_remote_temporary(host, &temporary, executor);
+        cleanup_remote_staging(host, &temporary);
         return Err(error);
     }
-    let command = host.shell_command(
-        r#"chmod 755 -- "$1" && mv -f -- "$1" "$2""#,
-        "hel-mbx-install-publish",
-        [
-            temporary.to_string_lossy().into_owned(),
-            program.to_string_lossy().into_owned(),
-        ],
-        "publish the mbx binary atomically on the SSH host",
-    );
-    if let Err(error) = executor
-        .execute(&command)
-        .and_then(|output| checked(output, &command))
-    {
-        remove_remote_temporary(host, &temporary, executor);
-        return Err(error);
-    }
-    Ok(())
+    Ok(temporary)
+}
+
+fn cleanup_remote_staging(host: &CacheHost, path: &Path) {
+    // Use the executor's existing 15-second cleanup bound, independent of the cancelled request.
+    let cleanup = targets::CancellableProcessExecutor::new(std::sync::Arc::new(
+        std::sync::atomic::AtomicBool::new(false),
+    ));
+    remove_remote_temporary(host, path, &cleanup);
 }
 
 fn remove_remote_temporary(host: &CacheHost, path: &Path, executor: &impl CommandExecutor) {
@@ -425,6 +545,10 @@ fn set_executable(_path: &Path) -> Result<()> {
 }
 
 fn run_setup(host: &CacheHost, program: &Path, executor: &impl CommandExecutor) -> Result<()> {
+    // Accepted mbx 1.30.0 window: setup.rs:275–278 calls util.rs:125–141 to
+    // rename the cargo launcher before setting its executable bit. Interruption
+    // can leave it non-executable until Install runs again. The structural fix
+    // belongs in mbx: set the temporary file's mode before persist, then bump our pin.
     let command = host.command(
         vec![
             program.to_string_lossy().into_owned(),
@@ -468,14 +592,43 @@ fn inspect_profile_selection(
     parse_profile_selection(&output.stdout)
 }
 
+fn lock_local_mbx(
+    home: &Path,
+    executor: &impl CommandExecutor,
+) -> Result<mj_core::file_lock::FileLock> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(home.join(".mbx.lock"))
+        .context("open mbx install lock")?;
+    loop {
+        check_cancelled(executor)?;
+        match file.try_lock() {
+            Ok(()) => return Ok(mj_core::file_lock::FileLock::new(file)),
+            Err(std::fs::TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(25)),
+            Err(std::fs::TryLockError::Error(error)) => {
+                return Err(error).context("lock mbx profile installation");
+            }
+        }
+    }
+}
+
 fn update_profile(
     host: &CacheHost,
+    home: &Path,
     program: &Path,
     executor: &impl CommandExecutor,
 ) -> Result<(bool, MbxProfileDetails)> {
     let binary_dir = program
         .parent()
         .context("the selected mbx path has no parent directory")?;
+    let _lock = if host.ssh().is_none() {
+        Some(lock_local_mbx(home, executor)?)
+    } else {
+        None
+    };
     let selection = inspect_profile_selection(host, binary_dir, executor)?;
     let posix_block = posix_profile_block(binary_dir, &selection.shim_dir);
     let fish_block = fish_profile_block(binary_dir, &selection.shim_dir);
@@ -487,10 +640,16 @@ fn update_profile(
             binary_dir.to_string_lossy().into_owned(),
             posix_block,
             fish_block,
+            if _lock.is_some() {
+                String::new()
+            } else {
+                home.join(".mbx.lock").to_string_lossy().into_owned()
+            },
         ],
         "add the mbx PATH block to the container host login profile",
     );
-    let output = checked(executor.execute(&command)?, &command)?;
+    let output = checked(executor.execute(&command)?, &command)
+        .with_context(|| format!("update shell profile {}", selection.file))?;
     let text = String::from_utf8(output.stdout).context("profile update result is not UTF-8")?;
     let mut lines = text.lines().map(str::to_owned);
     let status = lines.next().context("profile update returned no result")?;
@@ -652,6 +811,10 @@ fn checked(output: CommandOutput, command: &CommandSpec) -> Result<CommandOutput
 }
 
 fn release_url(triple: &str) -> String {
+    #[cfg(test)]
+    if let Some(url) = MBX_TEST_RELEASE_URL.get() {
+        return url.clone();
+    }
     format!(
         "https://github.com/jdx/mr-boxington/releases/download/v{MBX_VERSION}/mbx-{triple}-unknown-linux-musl.tar.gz"
     )
@@ -665,54 +828,84 @@ fn expected_digest(triple: &str) -> Result<&'static str> {
     }
 }
 
-/// Download the pinned release once into the controller data directory and
-/// verify its archive before extracting anything.
-pub(super) fn download(triple: &str) -> Result<PathBuf> {
+/// Async HTTP is cancelled by dropping its future; subprocesses retain their executor owner.
+fn download(triple: &str, directory: &Path, executor: &impl CommandExecutor) -> Result<PathBuf> {
     let expected = expected_digest(triple)?;
-    let directory = mj_core::config::data_dir()
+    // Keep the original verified cache layout for offline retries and other hosts.
+    let destination = mj_core::config::data_dir()
         .join("mbx")
         .join(MBX_VERSION)
-        .join(triple);
-    let destination = directory.join("mbx");
+        .join(triple)
+        .join("mbx");
     if destination.is_file() {
         return Ok(destination);
     }
-    std::fs::create_dir_all(&directory)
-        .with_context(|| format!("create the mbx cache {}", directory.display()))?;
+    let archive_path = directory.join("release.tar.gz");
     let url = release_url(triple);
-    let archive = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(120))
-        .build()?
-        .get(&url)
-        .send()
-        .with_context(|| format!("download {url}"))?
-        .error_for_status()
-        .with_context(|| format!("download {url}"))?
-        .bytes()?;
+    let archive = mj_core::runtime::block_on(async {
+        let fetch = fetch_archive(&url);
+        tokio::pin!(fetch);
+        loop {
+            check_cancelled(executor)?;
+            tokio::select! {
+                result = &mut fetch => return result,
+                // Match the cancellable subprocess executor's flag polling interval.
+                _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+            }
+        }
+    })??;
+    check_cancelled(executor)?;
+    std::fs::write(&archive_path, &archive).context("write staged mbx archive")?;
     let actual = mj_core::hex::lower_hex(Sha256::digest(&archive));
     ensure!(
         actual.eq_ignore_ascii_case(expected),
         "downloaded mbx checksum mismatch: expected {expected}, got {actual}"
     );
     let binary = extract_binary(&archive)?;
-    let mut temporary = tempfile::NamedTempFile::new_in(&directory)?;
-    std::io::Write::write_all(&mut temporary, &binary)?;
+    check_cancelled(executor)?;
+    retain_verified_download(&destination, &binary)
+}
+
+fn retain_verified_download(destination: &Path, binary: &[u8]) -> Result<PathBuf> {
+    let parent = destination
+        .parent()
+        .context("verified mbx cache path has no parent")?;
+    std::fs::create_dir_all(parent).context("create verified mbx cache directory")?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    std::io::Write::write_all(&mut temporary, binary)?;
     temporary.as_file_mut().sync_all()?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))?;
-    }
-    match temporary.persist_noclobber(&destination) {
-        Ok(_) => Ok(destination),
+    set_executable(temporary.path())?;
+    match temporary.persist_noclobber(destination) {
+        Ok(_) => Ok(destination.to_path_buf()),
         Err(error) if destination.is_file() => {
+            // A concurrent verified download published the same pinned release first.
             drop(error);
-            Ok(destination)
+            Ok(destination.to_path_buf())
         }
-        Err(error) => Err(error.error)
-            .with_context(|| format!("publish the mbx binary {}", destination.display())),
+        Err(error) => Err(error.error).context("publish verified mbx download cache"),
     }
 }
+
+async fn fetch_archive(url: &str) -> Result<Vec<u8>> {
+    // Preserve the original per-download deadline, including standalone EC2 installs.
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()?
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("download {url}"))?
+        .error_for_status()
+        .with_context(|| format!("download {url}"))?;
+    Ok(response
+        .bytes()
+        .await
+        .context("read mbx release response")?
+        .to_vec())
+}
+
+#[cfg(test)]
+pub(crate) static MBX_TEST_RELEASE_URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// Extract the archive's single binary; its licence texts are not installed.
 fn extract_binary(archive: &[u8]) -> Result<Vec<u8>> {
@@ -864,7 +1057,10 @@ mod tests {
             install_kind(&cache_preview(Some("1.22.0"), None)),
             Some(MbxInstallKind::Upgrade)
         );
-        assert_eq!(install_kind(&cache_preview(Some(MBX_VERSION), None)), None);
+        assert_eq!(
+            install_kind(&cache_preview(Some(MBX_VERSION), None)),
+            Some(MbxInstallKind::Upgrade)
+        );
         let mut external = cache_preview(Some("1.22.0"), None);
         external.mbx_profile_file = None;
         assert_eq!(install_kind(&external), None);
@@ -1078,6 +1274,319 @@ mod tests {
         }));
     }
 
+    // Hard-won: #1514: disposable staging discarded verified binaries needed for offline repair.
+    #[test]
+    fn verified_download_cache_survives_staging_cleanup_and_supports_offline_retry() {
+        const CHILD: &str = "MJ_MBX_OFFLINE_CACHE_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            crate::controller::test_support::IsolatedTest::new(
+                crate::controller::test_support::test_name(
+                    module_path!(),
+                    "verified_download_cache_survives_staging_cleanup_and_supports_offline_retry",
+                ),
+            )
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "mbx-offline-cache")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        let destination = mj_core::config::data_dir()
+            .join("mbx")
+            .join(MBX_VERSION)
+            .join("x86_64")
+            .join("mbx");
+        let stage = tempfile::tempdir().unwrap();
+        let bytes = b"recorded verified mbx executable";
+        retain_verified_download(&destination, bytes).unwrap();
+        drop(stage);
+        // The real download entry point must reuse its durable cache with no runtime or network.
+        MBX_TEST_RELEASE_URL
+            .set("http://127.0.0.1:0/offline".into())
+            .unwrap();
+        let next_stage = tempfile::tempdir().unwrap();
+        let cached = download("x86_64", next_stage.path(), &targets::ProcessExecutor).unwrap();
+        assert_eq!(cached, destination);
+        assert_eq!(std::fs::read(cached).unwrap(), bytes);
+    }
+
+    // Hard-won: #1514: a short profile append left an open function that another append could not repair.
+    #[cfg(unix)]
+    #[test]
+    fn short_profile_append_repairs_only_its_own_tail_on_retry() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let tools = root.path().join("tools");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&tools).unwrap();
+        for (name, path) in [
+            ("sh", "/bin/sh"),
+            ("cat", "/bin/cat"),
+            ("wc", "/usr/bin/wc"),
+            ("awk", "/usr/bin/awk"),
+            ("dd", "/bin/dd"),
+            ("mkdir", "/bin/mkdir"),
+        ] {
+            symlink(path, tools.join(name)).unwrap();
+        }
+        let target = root.path().join("profile-target");
+        let profile = home.join(".profile");
+        let original = b"# keep user bytes unchanged\n";
+        std::fs::write(&target, original).unwrap();
+        symlink(&target, &profile).unwrap();
+        let binary_dir = home.join(".local/bin");
+        let shim_dir = home.join("data/mbx/bin");
+        let block = posix_profile_block(&binary_dir, &shim_dir);
+        let fish = fish_profile_block(&binary_dir, &shim_dir);
+        let executor = targets::ProcessExecutor;
+        let _lock = lock_local_mbx(&home, &executor).unwrap();
+        let mut append = CommandSpec::new(
+            "/bin/sh",
+            [
+                "-c",
+                PROFILE_SCRIPT,
+                "mj-profile",
+                "update",
+                binary_dir.to_str().unwrap(),
+                &block,
+                &fish,
+                "",
+            ],
+        );
+        append
+            .env
+            .insert("HOME".into(), home.to_string_lossy().into_owned());
+        append.env.insert("SHELL".into(), "/bin/sh".into());
+        append
+            .env
+            .insert("PATH".into(), tools.to_string_lossy().into_owned());
+        append.env.insert(
+            "XDG_DATA_HOME".into(),
+            home.join("data").to_string_lossy().into_owned(),
+        );
+        let mut limited = append.clone();
+        let mut args = vec!["-c".to_owned(), "import os,resource,signal,sys; resource.setrlimit(resource.RLIMIT_FSIZE,(int(sys.argv[1]),int(sys.argv[1]))); signal.signal(signal.SIGXFSZ,signal.SIG_IGN); os.execv(sys.argv[2],sys.argv[2:])".into(), (original.len()+70).to_string(), limited.program.clone()];
+        args.extend(limited.args);
+        limited.program = "/usr/bin/python3".into();
+        limited.args = args;
+        let failed = executor.execute(&limited).unwrap();
+        assert_ne!(failed.status, 0);
+        let error = String::from_utf8(failed.stderr).unwrap();
+        assert!(error.contains(profile.to_str().unwrap()), "{error}");
+        assert!(error.contains("I/O error"), "{error}");
+        let partial = std::fs::read(&target).unwrap();
+        assert_eq!(partial.len(), original.len() + 70);
+        let repaired = executor.execute(&append).unwrap();
+        assert_eq!(
+            repaired.status,
+            0,
+            "{}",
+            String::from_utf8_lossy(&repaired.stderr)
+        );
+        assert!(
+            std::fs::symlink_metadata(&profile)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let body = std::fs::read_to_string(&target).unwrap();
+        assert!(body.as_bytes().starts_with(original));
+        assert_eq!(body.matches("# >>> mbx (added by Mjolnir) >>>").count(), 1);
+        assert_eq!(body.matches("# <<< mbx <<<").count(), 1);
+        assert!(body.contains(&block));
+        let syntax = executor
+            .execute(&CommandSpec::new(
+                "/bin/sh",
+                ["-n", profile.to_str().unwrap()],
+            ))
+            .unwrap();
+        assert_eq!(
+            syntax.status,
+            0,
+            "{}",
+            String::from_utf8_lossy(&syntax.stderr)
+        );
+        assert_eq!(executor.execute(&append).unwrap().status, 0);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), body);
+        let mut external = partial;
+        external.extend_from_slice(b"\nexport OTHER_CONTENT=preserve\n");
+        std::fs::write(&target, &external).unwrap();
+        let refused = executor.execute(&append).unwrap();
+        assert_ne!(refused.status, 0);
+        let error = String::from_utf8(refused.stderr).unwrap();
+        assert!(
+            error.contains(profile.to_str().unwrap())
+                && error.contains("line 3")
+                && error.contains("Delete only bytes"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), external);
+    }
+
+    // Hard-won: #1514: interruption after publishing mbx must be repaired by rerunning Install.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn interrupted_publication_rerun_converges_without_admission() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Arc, atomic::AtomicBool};
+        use tokio::io::AsyncReadExt;
+        struct FixtureExecutor {
+            executor: targets::CancellableProcessExecutor,
+            home: PathBuf,
+        }
+        impl CommandExecutor for FixtureExecutor {
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                let mut command = command.clone();
+                command
+                    .env
+                    .insert("HOME".into(), self.home.to_string_lossy().into_owned());
+                command.env.insert(
+                    "PATH".into(),
+                    format!("{}:/usr/bin:/bin", self.home.join(".local/bin").display()),
+                );
+                command.env.insert(
+                    "XDG_DATA_HOME".into(),
+                    self.home.join("data").to_string_lossy().into_owned(),
+                );
+                command.env.insert(
+                    "XDG_CONFIG_HOME".into(),
+                    self.home.join("config").to_string_lossy().into_owned(),
+                );
+                // Read the recorded fixture through Python: concurrent test forks
+                // can inherit a staging writer and make script exec return ETXTBSY.
+                if command.purpose == "run mbx setup on the container host" {
+                    command.args.insert(0, command.program.clone());
+                    command.program = "/usr/bin/python3".into();
+                } else if command.purpose == "read the container host mbx version" {
+                    for argument in &mut command.args {
+                        *argument = argument.replace(
+                            "\"$resolved\" --version",
+                            "/usr/bin/python3 \"$resolved\" --version",
+                        );
+                    }
+                }
+                self.executor.execute(&command)
+            }
+            fn cancellation_requested(&self) -> bool {
+                self.executor.is_cancelled()
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let marker = home.join("setup-started");
+        let ready = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let binary = root.path().join("recorded-mbx");
+        std::fs::write(
+            &binary,
+            format!(
+                r#"#!/usr/bin/python3
+import os, socket, sys
+if '--version' in sys.argv:
+    print('mbx {}')
+else:
+    marker = os.path.join(os.environ['HOME'], 'setup-started')
+    if not os.path.exists(marker):
+        open(marker, 'w').close()
+        sys.stdout.buffer.write(b'x' * 131072)
+        sys.stdout.buffer.flush()
+        with socket.create_connection(('127.0.0.1', {})) as ready:
+            ready.sendall(b'R')
+            ready.recv(1)
+"#,
+                MBX_VERSION,
+                ready.local_addr().unwrap().port()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let executor = FixtureExecutor {
+            executor: targets::CancellableProcessExecutor::new(cancelled.clone()),
+            home: home.clone(),
+        };
+        let worker_home = home.clone();
+        let worker_binary = binary.clone();
+        let install = tokio::task::spawn_blocking(move || {
+            install_mbx_with(&local_machine(), &executor, Some(&worker_home), |_| {
+                Ok(worker_binary)
+            })
+        });
+        let (mut signal, _) = tokio::time::timeout(Duration::from_secs(30), ready.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(signal.read_u8().await.unwrap(), b'R');
+        let program = home.join(".local/bin/mbx");
+        assert_eq!(
+            std::fs::read(&program).unwrap(),
+            std::fs::read(&binary).unwrap()
+        );
+        assert!(marker.is_file());
+        assert!(
+            !crate::upgrade::active_labels()
+                .iter()
+                .any(|label| label.contains("mbx installation"))
+        );
+        cancelled.store(true, Ordering::Release);
+        assert!(install.await.unwrap().is_err());
+        assert_eq!(
+            signal.read_u8().await.unwrap_err().kind(),
+            std::io::ErrorKind::UnexpectedEof
+        );
+        let rerun_home = home.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            std::thread::scope(|scope| {
+                let installs: Vec<_> = (0..2)
+                    .map(|_| {
+                        let home = rerun_home.clone();
+                        let binary = binary.clone();
+                        scope.spawn(move || {
+                            let executor = FixtureExecutor {
+                                executor: targets::CancellableProcessExecutor::new(Arc::new(
+                                    AtomicBool::new(false),
+                                )),
+                                home: home.clone(),
+                            };
+                            install_mbx_with(&local_machine(), &executor, Some(&home), |_| {
+                                Ok(binary)
+                            })
+                            .unwrap()
+                        })
+                    })
+                    .collect();
+                installs
+                    .into_iter()
+                    .map(|install| install.join().unwrap())
+                    .collect::<Vec<_>>()
+            })
+        })
+        .await
+        .unwrap();
+        assert!(result.iter().all(|install| install.version == MBX_VERSION));
+        let result = &result[0];
+        assert_eq!(result.version, MBX_VERSION);
+        let profile = home.join(result.profile_file.trim_start_matches("~/"));
+        let body = std::fs::read_to_string(profile).unwrap();
+        assert_eq!(body.matches("# >>> mbx (added by Mjolnir) >>>").count(), 1);
+        assert_eq!(body.matches("# <<< mbx <<<").count(), 1);
+        assert!(body.contains(&posix_profile_block(
+            program.parent().unwrap(),
+            &home.join("data/mbx/bin")
+        )));
+        assert!(
+            !std::fs::read_dir(program.parent().unwrap())
+                .unwrap()
+                .any(|entry| entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".tmp"))
+        );
+    }
+
     #[cfg(unix)]
     // Hard-won: 7f871fd03: inherited fixture writers made the shell probe silently select the wrong profile.
     #[test]
@@ -1223,10 +1732,12 @@ mod tests {
                     binary_dir.to_str().unwrap(),
                     &posix_block,
                     &fish_block,
+                    "", // The local test caller owns the host lock below.
                 ],
             );
             let mut update = update;
             update.env.clone_from(&command.env);
+            let _profile_lock = lock_local_mbx(&home, &executor).unwrap();
             let first_update = executor.execute(&update).unwrap();
             assert_eq!(
                 std::str::from_utf8(&first_update.stdout).unwrap(),
@@ -1354,7 +1865,7 @@ mod tests {
     fn profile_preview_and_install_use_one_shared_rule_script() {
         assert!(PROFILE_SCRIPT.contains("getent passwd"));
         assert!(PROFILE_SCRIPT.contains("${SHELL:-sh}"));
-        assert!(PROFILE_SCRIPT.contains("grep -Fq \"$start\" \"$profile\""));
+        assert!(PROFILE_SCRIPT.contains("case \"$existing\" in"));
         assert!(PROFILE_SCRIPT.contains("fish/conf.d/mbx.fish"));
         assert!(PROFILE_SCRIPT.contains("XDG_DATA_HOME"));
         let directory = Path::new("/home/example/.local/bin");

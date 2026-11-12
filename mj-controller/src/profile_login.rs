@@ -13,11 +13,27 @@ use mj_core::credentials::{self, LoginStatus};
 use crate::targets::CommandExecutor;
 
 /// The status of every profile in `config`, keyed by profile id.
-pub fn statuses(config: &Config, executor: &impl CommandExecutor) -> BTreeMap<String, LoginStatus> {
+pub fn statuses(
+    config: &Config,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> BTreeMap<String, LoginStatus> {
+    use rayon::prelude::*;
     config
         .profiles
-        .iter()
-        .map(|(id, profile)| (id.clone(), status(id, profile, executor)))
+        .par_iter()
+        .map(|(id, profile)| {
+            let executor = mj_core::targets::CancellableProcessExecutor::new(cancelled.clone())
+                .with_deadline(std::time::Duration::from_secs(10));
+            let result = status(id, profile, &executor);
+            let result = if executor.is_cancelled() {
+                LoginStatus::Unknown(format!(
+                    "profile {id} login probe cancelled or exceeded its 10 s deadline"
+                ))
+            } else {
+                result
+            };
+            (id.clone(), result)
+        })
         .collect()
 }
 

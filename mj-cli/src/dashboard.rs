@@ -1159,7 +1159,7 @@ pub(crate) async fn run_dashboard_for_workspace(
             if let Some(generation) = context.dashboard.take_profile_login_refresh() {
                 io::spawn_profile_login_statuses(
                     generation,
-                    context.dashboard.config().clone(),
+                    context.config.clone(),
                     context.dashboard_io_tx.clone(),
                 );
             }

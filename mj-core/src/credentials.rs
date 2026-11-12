@@ -431,7 +431,7 @@ pub fn validate_credential_payload(_kind: HarnessKind, bytes: &[u8]) -> Result<(
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LoginStatus {
     /// A credential the harness can start from is present.
     SignedIn,

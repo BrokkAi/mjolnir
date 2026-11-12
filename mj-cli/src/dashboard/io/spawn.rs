@@ -427,37 +427,6 @@ pub(crate) fn spawn_first_run_setup(
     )
 }
 
-/// What probing one machine found, as the dashboard reports it.
-fn machine_runtime_probe(probe: mj_controller::setup::MachineProbe) -> mj_tui::MachineRuntimeProbe {
-    use mj_controller::setup::MachineProbeOutcome;
-    let finding = match &probe.outcome {
-        MachineProbeOutcome::Answered(_) => mj_tui::MachineFinding::Answered {
-            runtimes: probe.runtimes(),
-            rejected: probe
-                .rejected()
-                .map(|runtime| RejectedRuntime {
-                    kind: runtime.kind.name().to_owned(),
-                    label: runtime.kind.label().to_owned(),
-                    detail: runtime.detail.clone(),
-                    remediation: runtime.remediation.clone(),
-                })
-                .collect(),
-        },
-        MachineProbeOutcome::Unreachable {
-            detail,
-            remediation,
-        } => mj_tui::MachineFinding::Unreachable {
-            detail: detail.clone(),
-            remediation: remediation.clone(),
-        },
-    };
-    mj_tui::MachineRuntimeProbe {
-        machine_id: probe.machine_id,
-        machine: probe.machine,
-        finding,
-    }
-}
-
 /// Check what is there and add what is new, off the event loop: this
 /// computer's agents and engines, and every machine at once, each with one
 /// SSH call. Quitting cancels the check.
@@ -470,48 +439,12 @@ pub(crate) fn spawn_availability_check(
         tracker,
         "checking what is available",
         updates,
-        move |cancelled| {
-            use mj_controller::setup::{self, DEFAULT_IMAGE};
-            // Only quitting stops the check. A host that runs out the
-            // deadline fails its own probe; every other answer still lands.
-            let quit = cancelled.clone();
-            let executor =
-                CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(60));
-            let report =
-                setup::check_availability(&mj_core::config::config_path(), &executor, &|| {
-                    quit.load(std::sync::atomic::Ordering::Acquire)
-                })?;
-            let path = std::env::var_os("PATH");
-            let local = report
-                .local
-                .into_iter()
-                .map(|runtime| {
-                    let (_, template) = setup::local_runtime_target(runtime.kind, DEFAULT_IMAGE);
-                    let installed = mj_controller::targets::local_engine_command(&template)
-                        .is_some_and(|engine| {
-                            mj_controller::targets::program_on_path(engine, path.as_deref())
-                        });
-                    let missing = (!runtime.usable()).then(|| match runtime.remediation {
-                        Some(fix) => format!("{} {fix}", runtime.detail.trim()),
-                        None => runtime.detail,
-                    });
-                    (
-                        runtime.kind.name().to_owned(),
-                        mj_tui::LocalEngine { missing, installed },
-                    )
-                })
-                .collect();
-            Ok(mj_tui::AvailabilityChecked {
-                profiles: report.profiles,
-                local,
-                machines: report
-                    .machines
-                    .into_iter()
-                    .map(machine_runtime_probe)
-                    .collect(),
-                added_profiles: report.added_profiles,
-                added_runtimes: report.added_runtimes,
-            })
+        move |cancelled| match machine_request(
+            mj_client::daemon::DaemonAction::CheckAvailability,
+            cancelled,
+        )? {
+            mj_client::daemon::DaemonReply::Availability(report) => Ok(report),
+            _ => anyhow::bail!("daemon returned an unexpected availability reply"),
         },
         move |result| DashboardIoUpdate::AvailabilityChecked { generation, result },
     )
@@ -550,56 +483,12 @@ pub(crate) fn spawn_setup_discovery(
             DetectScope::Runtimes => "detecting runtimes",
         },
         updates,
-        move |cancelled| {
-            use mj_controller::setup::{self, DEFAULT_IMAGE};
-            let executor =
-                CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(30));
-            let mut config = Config::default();
-            let mut rejected_runtimes = Vec::new();
-            let mut machine_probes = Vec::new();
-            match scope {
-                DetectScope::Profiles => {
-                    config = setup::profiles_config(&setup::discover_profiles(&executor));
-                    setup::reference_secret_api_keys(&mut config, &mj_core::config::config_path());
-                }
-                DetectScope::Runtimes => {
-                    // The machines are other hosts, probed while this one is.
-                    let (local, machines) = std::thread::scope(|scope| {
-                        let machines = scope.spawn(|| setup::probe_machines(&machines, &executor));
-                        let local = setup::discover_runtimes(&executor);
-                        let machines = machines
-                            .join()
-                            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-                        (local, machines)
-                    });
-                    machine_probes = machines.into_iter().map(machine_runtime_probe).collect();
-                    for runtime in local {
-                        if runtime.usable() {
-                            let (id, target) =
-                                setup::local_runtime_target(runtime.kind, DEFAULT_IMAGE);
-                            config.targets.insert(id.to_owned(), target);
-                        } else {
-                            rejected_runtimes.push(RejectedRuntime {
-                                kind: runtime.kind.name().to_owned(),
-                                label: runtime.kind.label().to_owned(),
-                                detail: runtime.detail,
-                                remediation: runtime.remediation,
-                            });
-                        }
-                    }
-                    #[cfg(unix)]
-                    config.targets.insert(
-                        "localhost".into(),
-                        mj_core::config::TargetTemplate::LocalBare,
-                    );
-                }
-            }
-            Ok(SetupDetection {
-                scope,
-                config,
-                rejected_runtimes,
-                machines: machine_probes,
-            })
+        move |cancelled| match machine_request(
+            mj_client::daemon::DaemonAction::DiscoverSetup { scope, machines },
+            cancelled,
+        )? {
+            mj_client::daemon::DaemonReply::SetupDiscovery(report) => Ok(*report),
+            _ => anyhow::bail!("daemon returned an unexpected discovery reply"),
         },
         move |result| DashboardIoUpdate::SetupDiscovered { generation, result },
     )
@@ -647,11 +536,23 @@ pub(crate) fn spawn_spinner_style_save(
         "saving spinner style",
         updates,
         move || {
-            Config::update(|config| {
-                config.spinner = style;
-                Ok(())
-            })
-            .map(|(config, ())| config)
+            mj_core::runtime::block_on(async move {
+                let mut client = daemon::connect_or_start().await?;
+                match client
+                    .request(mj_client::daemon::DaemonAction::SaveSpinnerStyle { style })
+                    .await?
+                {
+                    mj_client::daemon::DaemonReply::Done => {}
+                    reply => anyhow::bail!("unexpected spinner save reply: {reply:?}"),
+                }
+                match client
+                    .request(mj_client::daemon::DaemonAction::Configuration)
+                    .await?
+                {
+                    mj_client::daemon::DaemonReply::Configuration(config) => Ok(*config),
+                    reply => anyhow::bail!("unexpected configuration reply: {reply:?}"),
+                }
+            })?
         },
         |result| DashboardIoUpdate::SpinnerStyleSaved { result },
     )
@@ -685,9 +586,6 @@ pub(crate) fn spawn_project_source_resolution(
         },
     )
 }
-
-/// A controller that answers target questions from configuration alone.
-pub(crate) use mj_controller::controller::config_only_controller;
 
 /// What every session lifecycle operation needs to run off the loop.
 pub(crate) struct LifecycleOperationRequest {
@@ -1279,20 +1177,24 @@ pub(crate) fn spawn_checkpoint_archive_size_refresh(
     updates: UnboundedSender<DashboardIoUpdate>,
 ) {
     tokio::task::spawn_blocking(move || {
-        let sizes = targets
-            .iter()
-            .map(|(session_id, path)| {
-                let size = match std::fs::metadata(path) {
-                    Ok(metadata) => Some(metadata.len()),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                    Err(error) => {
-                        tracing::warn!(path = %path.display(), %error, "could not read checkpoint archive size");
-                        None
-                    }
+        let sizes = match machine_request(
+            mj_client::daemon::DaemonAction::CheckpointArchiveSizes {
+                paths: targets.clone(),
+            },
+            Arc::new(AtomicBool::new(false)),
+        ) {
+            Ok(mj_client::daemon::DaemonReply::CheckpointArchiveSizes(sizes)) => sizes,
+            result => {
+                let error = match result {
+                    Err(error) => format!("{error:#}"),
+                    Ok(reply) => format!("unexpected archive size reply: {reply:?}"),
                 };
-                (session_id.clone(), size)
-            })
-            .collect();
+                targets
+                    .keys()
+                    .map(|id| (id.clone(), Err(error.clone())))
+                    .collect()
+            }
+        };
         report(
             "checkpoint archive sizes",
             &updates,

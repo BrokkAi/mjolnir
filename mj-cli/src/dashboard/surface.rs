@@ -385,8 +385,6 @@ impl DashboardContext {
                 continue;
             }
             if let Some(target) = target {
-                self.checkpoint_archive_targets_seen
-                    .insert(id.clone(), target.clone());
                 changed_targets.insert(id.clone(), target.clone());
             } else {
                 self.checkpoint_archive_targets_seen.remove(id);

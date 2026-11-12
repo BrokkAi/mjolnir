@@ -711,12 +711,33 @@ pub enum DaemonAction {
         cols: u16,
         rows: u16,
     },
+    PreviewBuildCache {
+        machine: mj_core::config::Machine,
+    },
+    InstallMbx {
+        machine: mj_core::config::Machine,
+    },
     PreflightNewSession {
         request: NewSessionPreflightRequest,
     },
     ValidateProjectDirectory {
         target_id: String,
         directory: PathBuf,
+    },
+    CheckpointArchiveSizes {
+        paths: std::collections::BTreeMap<String, PathBuf>,
+    },
+    SaveSpinnerStyle {
+        style: mj_core::config::SpinnerStyle,
+    },
+    TestTarget {
+        target_id: String,
+    },
+    ProfileLoginStatuses,
+    CheckAvailability,
+    DiscoverSetup {
+        scope: crate::discovery::DetectScope,
+        machines: Vec<(String, mj_core::config::Machine)>,
     },
     CompletePath {
         host: mj_core::path_completion::CompletionHost,
@@ -1248,6 +1269,17 @@ pub enum DaemonReply {
         mac: Vec<u8>,
     },
     LoginTerminalReady,
+    BuildCachePreview(Option<mj_core::state::BuildCachePreview>, bool),
+    MbxInstalled(String),
+    CheckpointArchiveSizes(
+        std::collections::BTreeMap<String, std::result::Result<Option<u64>, String>>,
+    ),
+    SetupDiscovery(Box<crate::discovery::SetupDetection>),
+    Availability(
+        #[serde(deserialize_with = "deserialize_availability")]
+        crate::availability::AvailabilityChecked,
+    ),
+    ProfileLoginStatuses(std::collections::BTreeMap<String, mj_core::credentials::LoginStatus>),
     NewSessionPreflight(PreflightNew),
     PathCompletion(mj_core::path_completion::PathCompletion),
     ProjectDirectories(Vec<(std::path::PathBuf, bool)>),
@@ -3452,7 +3484,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Daemon-owned voice credential discovery and uploaded-audio transcription.
 // Version 92: streamed uploads, client imports and daemon voice actions.
 // Version 93: authenticated daemon-owned login terminal streams.
-pub const PROTOCOL_VERSION: u32 = 93;
+// 94: milestone-4 setup discovery, availability, login status and machine actions.
+pub const PROTOCOL_VERSION: u32 = 94;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
@@ -3534,8 +3567,8 @@ impl DaemonClient {
 }
 
 impl DaemonAction {
-    /// These disposable machine reads use a dedicated connection. Closing it
-    /// cancels subprocesses; daemon handoff may abandon the read as well.
+    /// Disposable machine work uses dedicated connections. Closing one or
+    /// handing off the daemon cancels it; interrupted installs can be rerun.
     pub fn is_cancellable_machine_action(&self) -> bool {
         if let Self::PreflightNewSession { request } = self
             && !request.remote_repairs.is_empty()
@@ -3544,7 +3577,14 @@ impl DaemonAction {
         }
         matches!(
             self,
-            Self::PreflightNewSession { .. }
+            Self::InstallMbx { .. }
+                | Self::PreviewBuildCache { .. }
+                | Self::CheckpointArchiveSizes { .. }
+                | Self::TestTarget { .. }
+                | Self::ProfileLoginStatuses
+                | Self::CheckAvailability
+                | Self::DiscoverSetup { .. }
+                | Self::PreflightNewSession { .. }
                 | Self::ValidateProjectDirectory { .. }
                 | Self::CompletePath { .. }
                 | Self::CheckProjectDirectories { .. }
@@ -3626,6 +3666,12 @@ async fn reconnect_after_upload_refusal() -> Result<DaemonClient> {
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
+}
+
+fn deserialize_availability<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<crate::availability::AvailabilityChecked, D::Error> {
+    mj_core::config::with_environment_sources_only(|| serde::Deserialize::deserialize(deserializer))
 }
 
 #[cfg(test)]

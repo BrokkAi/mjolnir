@@ -18,3 +18,7 @@ pub mod operations;
 
 pub mod daemon;
 pub mod executable;
+
+pub mod availability;
+
+pub mod discovery;
