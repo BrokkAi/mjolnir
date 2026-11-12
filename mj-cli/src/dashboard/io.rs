@@ -34,7 +34,7 @@ use tokio::task::{JoinError, JoinHandle};
 
 use crate::daemon;
 use crate::dashboard::{CriticalOperationTracker, DashboardContext};
-use crate::import::{DashboardImportSuccess, PendingDashboardImport, persist_imported_session};
+use crate::import::{DashboardImportSuccess, PendingDashboardImport};
 use crate::pollers::{DashboardLifecycleFailure, DashboardLifecycleUpdate, LifecycleSuccess};
 
 /// Everything the dashboard learns from a background job.

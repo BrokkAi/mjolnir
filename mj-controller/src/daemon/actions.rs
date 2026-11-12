@@ -1076,6 +1076,7 @@ pub(super) fn upgrade_request_activity(
             | DaemonAction::SubagentOptions { .. }
             | DaemonAction::WarmProfileCapabilities { .. }
             | DaemonAction::ProjectCatalog { .. }
+            | DaemonAction::ImportSession { .. }
     ) {
         Ok(None)
     } else {

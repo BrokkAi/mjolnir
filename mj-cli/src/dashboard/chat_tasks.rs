@@ -57,26 +57,9 @@ impl DashboardContext {
             let updates = self.import_updates_tx.clone();
             let cache = self.native_scan_cache.clone();
             tokio::task::spawn_blocking(move || {
-                let home = match crate::import::harness_config_home(profile.kind) {
-                    Ok(home) => home,
-                    Err(error) => {
-                        let _ = updates.blocking_send((
-                            discovery_id,
-                            ImportProfileOption {
-                                profile_id,
-                                harness_kind: profile.kind,
-                                sessions: Vec::new(),
-                                scan_progress: None,
-                                error: Some(format!("{error:#}")),
-                            },
-                        ));
-                        return;
-                    }
-                };
-                let completed = crate::import::discover_import_profile(
+                let completed = crate::import::discover_client_import_profile(
                     profile_id,
-                    profile.kind,
-                    home,
+                    profile,
                     &cache,
                     |profile| {
                         if let Ok(permit) = updates.try_reserve() {

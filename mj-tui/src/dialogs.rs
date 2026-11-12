@@ -470,6 +470,7 @@ pub(crate) struct ImportProgress {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ImportBundleConfirmation {
+    project_root: TextInput,
     managed_worktree: mj_core::state::ManagedWorktreeOptions,
     create_managed_worktree: bool,
     dirty_git_roots: Vec<String>,
@@ -1175,9 +1176,14 @@ impl DashboardState {
         omitted_non_git_dirs: Vec<String>,
         scratch_git_roots: Vec<String>,
         managed_worktree: mj_core::state::ManagedWorktreeOptions,
+        recorded_root: std::path::PathBuf,
     ) {
         let mut form = dialog_form(
-            &[DialogControl::ImportCancel, DialogControl::ImportContinue],
+            &[
+                DialogControl::Field,
+                DialogControl::ImportCancel,
+                DialogControl::ImportContinue,
+            ],
             DialogControl::ImportContinue,
         );
         if managed_worktree.available {
@@ -1188,6 +1194,7 @@ impl DashboardState {
             );
         }
         self.mode = Mode::ConfirmImportBundle(ImportBundleConfirmation {
+            project_root: TextInput::from_value(recorded_root.to_string_lossy().into_owned()),
             managed_worktree,
             create_managed_worktree: managed_worktree.default_create,
             dirty_git_roots,
@@ -1541,6 +1548,7 @@ impl DashboardState {
             Some(Interaction::Cancel)
             | Some(Interaction::Activate(DialogControl::ImportCancel)) => {
                 return DashboardAction::ConfirmImportBundle {
+                    project_root: confirmation.project_root.value().into(),
                     create_managed_worktree: None,
                     accepted: false,
                 };
@@ -1557,8 +1565,13 @@ impl DashboardState {
                         confirmation.managed_worktree.available
                             && confirmation.create_managed_worktree,
                     ),
+                    project_root: confirmation.project_root.value().into(),
                     accepted: true,
                 };
+            }
+            Some(Interaction::Edit(DialogControl::Field, edit)) => {
+                TextField::apply(&mut confirmation.project_root, edit);
+                self.mode = Mode::ConfirmImportBundle(confirmation);
             }
             _ => self.mode = Mode::ConfirmImportBundle(confirmation),
         }

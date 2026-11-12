@@ -4,25 +4,25 @@
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
-│hel ──────────────────────────────────││                               ✦  M J O L N I R                               │
+│hel ───────                                                                                                           │
 │› ■ ACP pre                                                                                                           │
-│  Stopped                                                                                                             │
-│  │ No mess  ╭ × Confirm import ───────────────────────────────────────────────────────────────────────╮              │
-│  │          │These checkouts have uncommitted changes:                                                │              │
-│             │/work/repo — 1 tracked change · 2 untracked paths                                        │              │
+│  Stopped    ╭ × Confirm import ───────────────────────────────────────────────────────────────────────╮              │
+│  │ No mess  │These checkouts have uncommitted changes:                                                │              │
+│  │          │/work/repo — 1 tracked change · 2 untracked paths                                        │              │
 │             │                                                                                         │              │
 │             │These scratch repositories are in temporary directories and stay outside the import:     │              │
 │             │/tmp/mj-golden-scratch                                                                   │              │
 │             │                                                                                         │              │
-│             │Checked creates a clean, separate checkout. Unchecked uses the original directory with   │  ────────────╯
-│             │its current files.                                                                       │  ────────────╮
+│             │Checked creates a clean, separate checkout. Unchecked uses the original directory with   │              │
+│             │its current files.                                                                       │  ────────────╯
+│             │Project root on daemon host:                                                             │  ────────────╮
+│             │/work/repo                                                                               │              │
 │             │☒ Create isolated checkout                                                               │              │
-│             │                                                                                         │              │
-│             │  Cancel     Continue                                                                    │  ────────────╯
-│             ╰─────────────────────────────────────────────────────────────────────────────────────────╯  ───── ▁   ▄ ╮
-│                                                                                                                      │
+│             │                                                                                         │  ────────────╯
+│             │  Cancel     Continue                                                                    │  ───── ▁   ▄ ╮
+│             ╰─────────────────────────────────────────────────────────────────────────────────────────╯              │
 │                                                                                                          ────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│                                                                                                          ───── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │

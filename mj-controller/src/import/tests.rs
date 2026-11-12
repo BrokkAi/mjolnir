@@ -889,6 +889,7 @@ fn nonempty_codex_import_materializes_and_validates_canonical_archive() {
         &config,
         &mut state,
         NativeImportRequest {
+            daemon_project_root: None,
             harness: HarnessKind::Codex,
             harness_home: &codex_home,
             native_session_id: &source.native_session_id,
@@ -1019,6 +1020,7 @@ fn stop_sequence_claude_import_produces_idle_raw_project_session() {
         &config,
         &mut state,
         NativeImportRequest {
+            daemon_project_root: None,
             harness: HarnessKind::Claude,
             harness_home: &claude_home,
             native_session_id: &source.native_session_id,

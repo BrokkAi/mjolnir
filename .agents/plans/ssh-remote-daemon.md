@@ -24,7 +24,7 @@ This is private-network operation with working SSH authentication and host trust
 - [ ] Implement and validate milestone 6: matching-build PowerShell go script.
 - [ ] Implement milestone 7: user documentation, final validation, platform dispatch and real Windows acceptance.
 
-- [ ] (2026-11-12, import child) Client native-home selection, atomic record/projection registration and lazy admission-independent upload storage committed (1907bf93a, 8bb394c72). Targeted source test and upload exchange pass; touched suites found fixture/environment failures, all failing cases pass targeted reruns after setting client CODEX_HOME in the isolated import fixture. Workspace Clippy passes. Composer references, upload retry unit, dialog path/cancellation and separate-directory CLI acceptance remain outstanding.
+- [x] (2026-11-12, import follow-up) Client-side history and host-profile-home discovery, private daemon-root remapping, dialog path selection, cancellable upload, cancellable preparation outside handoff admission, and atomic registration implemented. Separate-store CLI acceptance and successful/refused import golden pass. Full touched-crate suites completed; the cleanup fixture assertion was corrected and its test passes, and the unrelated ACP login failure passes its targeted rerun. Workspace Clippy passes. Parent integration retains the SSH placement exclusion and upload-and-consume retry helper.
 
 ## Surprises & Discoveries
 
@@ -67,6 +67,8 @@ Decision (user, 2026-11-12, supersedes the earlier deferrals): Remove the native
 Decision: SSH launches require explicit remote project paths wherever cwd was the default. Login uses an interactive SSH terminal; document callback limitations without inventing a harness compatibility matrix. Rationale: client cwd and daemon credential files cannot be used across machines. Date/Author: 2026-11-12, user.
 
 Decision: Default development commit is the remote source checkout's HEAD, resolved once to a full SHA; optional `-Commit` overrides it. Both machines build in one reused, dedicated, clean, detached build worktree each, moved to that SHA (parent review: per-SHA worktrees would make every build cold), without switching the user's current branch. Rationale: the box is the development source of truth, origin/master could omit local committed work, and edits or commits during install split binary stamps. The script's explicitly requested detached build checkouts are build inputs, not development branches. Date/Author: 2026-11-12, plan author within the user's script choice.
+
+Decision (user, 2026-11-12): --path and the dialog field denote the daemon-host project root. A shared remapper relocates operational paths beneath the recorded project root, including project snapshots, bundle sources and archive origins. A remapped import receives a session-specific bundle; existing configured bundles are never modified. Roots outside the recorded root require an actionable refusal naming the roots and explaining how to import separately or record from a common parent.
 
 ## Outcomes & Retrospective
 
@@ -243,3 +245,10 @@ Discovery (2026-11-12, blob checkpoint): the full controller suite leaks `sleep 
 Discovery (2026-11-12, import child): the dashboard applies the prepared SessionRecord after persistence; after moving installation to the daemon, fetch that record back before applying it or the UI retains a deleted client staging path.
 
 Discovery (2026-11-12, import child): save_materialized_session requires a registered session, so ordering those two public writes cannot provide atomic registration. Import now inserts both inside the database writer transaction after archive installation; failed registration removes the archive with its output handle closed.
+
+
+Discovery (2026-11-12): A crash between archive installation and the database commit can leave an unregistered archive file. Crash recovery is outside this change.
+
+Discovery (2026-11-12, import follow-up): This worktree has no daemon CompletePath wire action; the import dialog uses plain text so completion cannot accidentally scan the client filesystem. Native home selection always includes the client's default home and includes configured profile homes only when daemon_shares_this_machine reports host placement. Parent integration must additionally exclude SSH in that helper, since a remote daemon reports Host from its own perspective.
+
+Discovery (2026-11-12, import handoff correction): Archive verification, projection preparation and file copying now run without handoff admission. A preparation task owns its temporary files and receives cancellation when its connection task stops; physical archive reads and copy chunks check cancellation before proceeding. Only final installation/configuration/SQL registration and its acknowledgement hold labeled import registration admission. A gate refusal drops the prepared temporary archive and explicitly returns UpgradePending, requiring re-upload on retry.

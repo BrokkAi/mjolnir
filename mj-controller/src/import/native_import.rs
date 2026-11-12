@@ -9,6 +9,7 @@ pub struct NativeImportRequest<'a> {
     pub bundle_id: &'a str,
     pub profile_id: Option<&'a str>,
     pub title: Option<&'a str>,
+    pub daemon_project_root: Option<&'a Path>,
     pub archive_directory: &'a Path,
 }
 
@@ -31,6 +32,7 @@ pub fn import_native_session(
         profile_id,
         title,
         archive_directory,
+        daemon_project_root,
     } = request;
     let bundle = config
         .bundles
@@ -49,7 +51,12 @@ pub fn import_native_session(
     };
     let targets = session_edit_targets(transcript, harness_home)?;
     let raw_project = raw_project_import(config, &targets);
-    let repositories =
+    let recorded_root = import_project_root(transcript, &targets);
+    let remap = daemon_project_root
+        .filter(|path| *path != recorded_root.as_path())
+        .map(|destination| ImportProjectRemap::new(&recorded_root, destination, &targets.git_roots))
+        .transpose()?;
+    let mut repositories =
         collect_local_repositories(bundle, &targets.git_roots, raw_project.is_none(), control)?;
     let native_artifacts =
         collect_import_native_artifacts(harness, harness_home, native_session_id, source_path)?;
@@ -84,6 +91,21 @@ pub fn import_native_session(
     let timestamp = timestamp();
     let profile_id = import_profile_id(config, profile_id, harness, harness_home)?;
     let target_id = default_import_target_id(config);
+    let mut project = crate::project_catalog::snapshot(
+        bundle,
+        &mj_core::targets::CancellableProcessExecutor::with_timeout(Duration::from_secs(15)),
+        raw_project.is_none(),
+    )?;
+    let remapped_bundle = if let Some(remap) = remap {
+        remap.apply(&mut project, &mut repositories)?;
+        Some(project.bundle.clone())
+    } else {
+        None
+    };
+    let remapped_id = remapped_bundle
+        .as_ref()
+        .map(|_| format!("import-{session_id}"));
+    let bundle_id = remapped_id.as_deref().unwrap_or(bundle_id);
     let archive_path = archive_directory.join(format!("{session_id}.hel.zip"));
     if let Some(control) = control {
         control.report(ImportArchiveProgress::WritingArchive)?;
@@ -134,16 +156,7 @@ pub fn import_native_session(
         SessionRecord {
             oracle_choice: None,
             oracle: true,
-            project: Some(
-                crate::project_catalog::snapshot(
-                    bundle,
-                    &mj_core::targets::CancellableProcessExecutor::with_timeout(
-                        Duration::from_secs(15),
-                    ),
-                    raw_project.is_none(),
-                )?
-                .into(),
-            ),
+            project: Some(project.into()),
             target_runtime: None,
             launch_base: None,
             launch_branch: None,
@@ -165,7 +178,9 @@ pub fn import_native_session(
             harness_kind: harness,
             last_profile: profile_id,
             bundle_id: bundle_id.to_owned(),
-            project_directory: raw_project.as_ref().map(|(directory, _)| directory.clone()),
+            project_directory: daemon_project_root
+                .map(Path::to_path_buf)
+                .or_else(|| raw_project.as_ref().map(|(directory, _)| directory.clone())),
             managed_worktree: None,
             review: None,
             no_project_memory: false,
@@ -195,6 +210,7 @@ pub fn import_native_session(
         source_cwd: transcript.cwd.clone(),
         bundle_id: bundle_id.to_owned(),
         archive_path,
+        remapped_bundle,
     })
 }
 
@@ -529,4 +545,96 @@ pub fn persist_imported_session_locally(session: &SessionRecord) -> Result<()> {
         &canonical,
     )?;
     crate::database::save_imported_session(session, &materialized)
+}
+
+/// The recorded project root used by both the path prompt and archive relocation.
+pub fn import_project_root(transcript: &ClaudeTranscript, targets: &SessionEditTargets) -> PathBuf {
+    targets
+        .git_roots
+        .iter()
+        .find(|root| transcript.cwd.starts_with(root))
+        .cloned()
+        .unwrap_or_else(|| transcript.cwd.clone())
+}
+
+/// Relocate operational project metadata together; native history retains its provenance.
+struct ImportProjectRemap<'a> {
+    recorded: &'a Path,
+    destination: &'a Path,
+}
+
+impl<'a> ImportProjectRemap<'a> {
+    fn new(recorded: &'a Path, destination: &'a Path, roots: &[PathBuf]) -> Result<Self> {
+        ensure!(
+            mj_core::target_path::is_absolute_on_host_or_target(destination),
+            "Enter an absolute project root on the daemon host, or keep the recorded root."
+        );
+        let outside = roots
+            .iter()
+            .filter(|root| !root.starts_with(recorded))
+            .collect::<Vec<_>>();
+        ensure!(
+            outside.is_empty(),
+            "cannot relocate repositories outside recorded project root {}: {}. Import one repository at a time, or record the session from their common parent and import again with --path pointing to that parent's daemon-host counterpart.",
+            recorded.display(),
+            outside
+                .iter()
+                .map(|root| root.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        Ok(Self {
+            recorded,
+            destination,
+        })
+    }
+    fn apply(
+        &self,
+        project: &mut mj_core::repository::ProjectBundleSnapshot,
+        repositories: &mut [mj_checkpoint::archive::RepositorySnapshot],
+    ) -> Result<()> {
+        let Self {
+            recorded,
+            destination,
+        } = *self;
+        let remap = |path: &Path| {
+            path.strip_prefix(recorded).ok().map(|relative| {
+                if relative.as_os_str().is_empty() {
+                    destination.to_path_buf()
+                } else {
+                    destination.join(relative)
+                }
+            })
+        };
+        let remap_url = |url: &mut String| {
+            if let Some(path) = remap(Path::new(url)) {
+                *url = path.to_string_lossy().into_owned();
+            }
+        };
+        for repository in &mut project.bundle.repositories {
+            if let Some(path) = &mut repository.local {
+                *path = remap(path).with_context(|| format!("repository {} at {} is outside recorded project root {}; import one repository at a time", repository.id, path.display(), recorded.display()))?;
+            }
+        }
+        for identity in project.identities.values_mut() {
+            if let mj_core::repository::RepositoryIdentity::Local(path) = identity
+                && let Some(mapped) = remap(path)
+            {
+                *path = mapped;
+            }
+        }
+        for source in project.network_sources.values_mut() {
+            remap_url(&mut source.fetch_url);
+            for url in &mut source.push_urls {
+                remap_url(url);
+            }
+        }
+        for repository in repositories {
+            remap_url(&mut repository.metadata.origin);
+            for url in &mut repository.metadata.push_urls {
+                remap_url(url);
+            }
+        }
+        Ok(())
+    }
 }

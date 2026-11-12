@@ -548,6 +548,7 @@ fn import_safety_keeps_managed_checkout_choice_without_file_inclusion_toggle() {
             available: true,
             default_create: false,
         },
+        "/work/repo".into(),
     );
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
     terminal
@@ -568,6 +569,7 @@ fn import_safety_keeps_managed_checkout_choice_without_file_inclusion_toggle() {
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::ConfirmImportBundle {
+            project_root: "/work/repo".into(),
             create_managed_worktree: Some(false),
             accepted: true,
         }
@@ -581,6 +583,7 @@ fn import_safety_keeps_managed_checkout_choice_without_file_inclusion_toggle() {
             available: true,
             default_create: false,
         },
+        "/work/repo".into(),
     );
     terminal
         .draw(|frame| render(frame, &mut dashboard))
@@ -613,6 +616,7 @@ fn import_safety_keeps_managed_checkout_choice_without_file_inclusion_toggle() {
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::ConfirmImportBundle {
+            project_root: "/work/repo".into(),
             create_managed_worktree: Some(true),
             accepted: true,
         }
@@ -1717,6 +1721,7 @@ fn golden_tui_import_confirmation() {
             available: true,
             default_create: true,
         },
+        "/work/repo".into(),
     );
     let lines = drawn(&mut dashboard, 120, 30);
     let mut output = String::new();

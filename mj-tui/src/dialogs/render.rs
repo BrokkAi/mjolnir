@@ -323,9 +323,11 @@ pub(crate) fn render_import_bundle_confirmation(
             "Checked creates a clean, separate checkout. Unchecked uses the original directory with its current files.",
         ));
     } else {
-        lines.push(Line::raw("This import uses an isolated workspace."));
+        lines.push(Line::raw(
+            "The imported session will use this project on the daemon host.",
+        ));
     }
-    let control_lines = usize::from(confirmation.managed_worktree.available) + 2;
+    let control_lines = usize::from(confirmation.managed_worktree.available) + 4;
     let body_paragraph = Paragraph::new(lines.clone()).wrap(Wrap { trim: false });
     let height = popup_height(
         &body_paragraph,
@@ -357,6 +359,18 @@ pub(crate) fn render_import_bundle_confirmation(
         dismissible_modal_title(&mut form, popup, "Confirm import", theme::title(true), true);
     frame.render_widget(theme::modal().title(title), popup);
     let y = inner.y.saturating_add(body_height);
+    frame.render_widget(
+        Paragraph::new("Project root on daemon host:"),
+        Rect::new(inner.x, y, inner.width, 1),
+    );
+    TextField::render(
+        frame,
+        Rect::new(inner.x, y + 1, inner.width, 1),
+        &confirmation.project_root,
+        &mut form,
+        DialogControl::Field,
+    );
+    let y = y + 2;
     // The worktree choice only exists when the import can create one.
     if confirmation.managed_worktree.available {
         Checkbox::render(

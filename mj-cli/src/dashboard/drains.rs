@@ -735,6 +735,7 @@ impl DashboardContext {
                                 prompt.omitted_non_git_dirs,
                                 prompt.scratch_git_roots,
                                 prompt.managed_worktree,
+                                prompt.recorded_root,
                             );
                         }
                         Ok(DashboardImportTaskResult::Imported(imported)) => {
