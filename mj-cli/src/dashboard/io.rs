@@ -22,11 +22,10 @@ use mj_core::state::{
 
 use mj_controller::controller::Controller;
 use mj_controller::controller::ResumeRepositorySourcePreflight;
-use mj_controller::targets::CancellableProcessExecutor;
 use mj_tui::{
     DashboardAction, DetectScope, PreparedMaterializedSessionDetail,
-    PreparedMaterializedSessionSummary, RejectedRuntime, RemoteRepositoryPreview,
-    SessionOperationKind, SetupDetection, WebViewerAccess,
+    PreparedMaterializedSessionSummary, RemoteRepositoryPreview, SessionOperationKind,
+    WebViewerAccess,
 };
 use mj_tui::{WorkspaceDraftEntry, WorkspaceManagementEntry};
 use tokio::sync::mpsc::UnboundedSender;

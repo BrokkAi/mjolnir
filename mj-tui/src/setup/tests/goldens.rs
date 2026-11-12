@@ -783,6 +783,7 @@ fn golden_machines_without_runtimes() {
     dashboard.setup_discovered(
         generation,
         Ok(crate::setup::SetupDetection {
+            profile_readiness: Default::default(),
             scope: DetectScope::Runtimes,
             config: Config::default(),
             rejected_runtimes: Vec::new(),

@@ -693,6 +693,11 @@ pub enum DaemonAction {
         directory: PathBuf,
     },
     ProfileLoginStatuses,
+    CheckAvailability,
+    DiscoverSetup {
+        scope: crate::discovery::DetectScope,
+        machines: Vec<(String, mj_core::config::Machine)>,
+    },
     CompletePath {
         host: mj_core::path_completion::CompletionHost,
         prefix: String,
@@ -1199,6 +1204,11 @@ pub struct ResponseEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "reply", content = "value")]
 pub enum DaemonReply {
+    SetupDiscovery(Box<crate::discovery::SetupDetection>),
+    Availability(
+        #[serde(deserialize_with = "deserialize_availability")]
+        crate::availability::AvailabilityChecked,
+    ),
     ProfileLoginStatuses(std::collections::BTreeMap<String, mj_core::credentials::LoginStatus>),
     NewSessionPreflight(PreflightNew),
     PathCompletion(mj_core::path_completion::PathCompletion),
@@ -3267,6 +3277,8 @@ impl DaemonAction {
         matches!(
             self,
             Self::ProfileLoginStatuses
+                | Self::CheckAvailability
+                | Self::DiscoverSetup { .. }
                 | Self::PreflightNewSession { .. }
                 | Self::ValidateProjectDirectory { .. }
                 | Self::CompletePath { .. }
@@ -3330,6 +3342,12 @@ pub struct NewSessionPreflightRequest {
     pub target_id: String,
     #[serde(default)]
     pub project_directory: Option<PathBuf>,
+}
+
+fn deserialize_availability<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<crate::availability::AvailabilityChecked, D::Error> {
+    mj_core::config::with_environment_sources_only(|| serde::Deserialize::deserialize(deserializer))
 }
 
 #[cfg(test)]

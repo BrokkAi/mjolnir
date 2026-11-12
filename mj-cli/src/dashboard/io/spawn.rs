@@ -427,37 +427,6 @@ pub(crate) fn spawn_first_run_setup(
     )
 }
 
-/// What probing one machine found, as the dashboard reports it.
-fn machine_runtime_probe(probe: mj_controller::setup::MachineProbe) -> mj_tui::MachineRuntimeProbe {
-    use mj_controller::setup::MachineProbeOutcome;
-    let finding = match &probe.outcome {
-        MachineProbeOutcome::Answered(_) => mj_tui::MachineFinding::Answered {
-            runtimes: probe.runtimes(),
-            rejected: probe
-                .rejected()
-                .map(|runtime| RejectedRuntime {
-                    kind: runtime.kind.name().to_owned(),
-                    label: runtime.kind.label().to_owned(),
-                    detail: runtime.detail.clone(),
-                    remediation: runtime.remediation.clone(),
-                })
-                .collect(),
-        },
-        MachineProbeOutcome::Unreachable {
-            detail,
-            remediation,
-        } => mj_tui::MachineFinding::Unreachable {
-            detail: detail.clone(),
-            remediation: remediation.clone(),
-        },
-    };
-    mj_tui::MachineRuntimeProbe {
-        machine_id: probe.machine_id,
-        machine: probe.machine,
-        finding,
-    }
-}
-
 /// Check what is there and add what is new, off the event loop: this
 /// computer's agents and engines, and every machine at once, each with one
 /// SSH call. Quitting cancels the check.
@@ -470,48 +439,12 @@ pub(crate) fn spawn_availability_check(
         tracker,
         "checking what is available",
         updates,
-        move |cancelled| {
-            use mj_controller::setup::{self, DEFAULT_IMAGE};
-            // Only quitting stops the check. A host that runs out the
-            // deadline fails its own probe; every other answer still lands.
-            let quit = cancelled.clone();
-            let executor =
-                CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(60));
-            let report =
-                setup::check_availability(&mj_core::config::config_path(), &executor, &|| {
-                    quit.load(std::sync::atomic::Ordering::Acquire)
-                })?;
-            let path = std::env::var_os("PATH");
-            let local = report
-                .local
-                .into_iter()
-                .map(|runtime| {
-                    let (_, template) = setup::local_runtime_target(runtime.kind, DEFAULT_IMAGE);
-                    let installed = mj_controller::targets::local_engine_command(&template)
-                        .is_some_and(|engine| {
-                            mj_controller::targets::program_on_path(engine, path.as_deref())
-                        });
-                    let missing = (!runtime.usable()).then(|| match runtime.remediation {
-                        Some(fix) => format!("{} {fix}", runtime.detail.trim()),
-                        None => runtime.detail,
-                    });
-                    (
-                        runtime.kind.name().to_owned(),
-                        mj_tui::LocalEngine { missing, installed },
-                    )
-                })
-                .collect();
-            Ok(mj_tui::AvailabilityChecked {
-                profiles: report.profiles,
-                local,
-                machines: report
-                    .machines
-                    .into_iter()
-                    .map(machine_runtime_probe)
-                    .collect(),
-                added_profiles: report.added_profiles,
-                added_runtimes: report.added_runtimes,
-            })
+        move |cancelled| match machine_request(
+            mj_client::daemon::DaemonAction::CheckAvailability,
+            cancelled,
+        )? {
+            mj_client::daemon::DaemonReply::Availability(report) => Ok(report),
+            _ => anyhow::bail!("daemon returned an unexpected availability reply"),
         },
         move |result| DashboardIoUpdate::AvailabilityChecked { generation, result },
     )
@@ -550,56 +483,12 @@ pub(crate) fn spawn_setup_discovery(
             DetectScope::Runtimes => "detecting runtimes",
         },
         updates,
-        move |cancelled| {
-            use mj_controller::setup::{self, DEFAULT_IMAGE};
-            let executor =
-                CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(30));
-            let mut config = Config::default();
-            let mut rejected_runtimes = Vec::new();
-            let mut machine_probes = Vec::new();
-            match scope {
-                DetectScope::Profiles => {
-                    config = setup::profiles_config(&setup::discover_profiles(&executor));
-                    setup::reference_secret_api_keys(&mut config, &mj_core::config::config_path());
-                }
-                DetectScope::Runtimes => {
-                    // The machines are other hosts, probed while this one is.
-                    let (local, machines) = std::thread::scope(|scope| {
-                        let machines = scope.spawn(|| setup::probe_machines(&machines, &executor));
-                        let local = setup::discover_runtimes(&executor);
-                        let machines = machines
-                            .join()
-                            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-                        (local, machines)
-                    });
-                    machine_probes = machines.into_iter().map(machine_runtime_probe).collect();
-                    for runtime in local {
-                        if runtime.usable() {
-                            let (id, target) =
-                                setup::local_runtime_target(runtime.kind, DEFAULT_IMAGE);
-                            config.targets.insert(id.to_owned(), target);
-                        } else {
-                            rejected_runtimes.push(RejectedRuntime {
-                                kind: runtime.kind.name().to_owned(),
-                                label: runtime.kind.label().to_owned(),
-                                detail: runtime.detail,
-                                remediation: runtime.remediation,
-                            });
-                        }
-                    }
-                    #[cfg(unix)]
-                    config.targets.insert(
-                        "localhost".into(),
-                        mj_core::config::TargetTemplate::LocalBare,
-                    );
-                }
-            }
-            Ok(SetupDetection {
-                scope,
-                config,
-                rejected_runtimes,
-                machines: machine_probes,
-            })
+        move |cancelled| match machine_request(
+            mj_client::daemon::DaemonAction::DiscoverSetup { scope, machines },
+            cancelled,
+        )? {
+            mj_client::daemon::DaemonReply::SetupDiscovery(report) => Ok(*report),
+            _ => anyhow::bail!("daemon returned an unexpected discovery reply"),
         },
         move |result| DashboardIoUpdate::SetupDiscovered { generation, result },
     )
