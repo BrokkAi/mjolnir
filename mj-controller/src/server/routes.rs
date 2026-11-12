@@ -128,7 +128,6 @@ pub(super) fn router(options: ServerOptions) -> Router {
     let protected = Router::new()
         .route("/api/push/key", get(push_key))
         .route("/api/push/status", get(push_device_status))
-        .route("/api/push/summary", get(push_summary))
         .route("/api/snapshot", get(snapshot))
         .route("/api/sessions/{session_id}/row", get(session_row))
         .route("/api/conversations/{session_id}", get(conversation))

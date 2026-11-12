@@ -151,7 +151,7 @@ test('golden_viewer_settings', async ({ page }) => {
     window.notificationDraftMarker = 'same document';
     navigator.serviceWorker.dispatchEvent(new MessageEvent('message', {
       origin: location.origin,
-      data: { type: 'mj-notification-open', url: `${location.origin}/?push-summary=fixture` },
+      data: { type: 'mj-notification-open', url: `${location.origin}/` },
     }));
   });
   await expect(page).toHaveURL(new RegExp(`#workspace/${WORKSPACE_ID}$`));
@@ -240,7 +240,16 @@ test('device notification enrollment starts from a tap and supports test and uns
   const actions = [];
   await page.route('**/api/push/status?*', route => route.fulfill({ json: { subscribed: true, error: null } }));
   await page.route('**/api/push/key', route => route.fulfill({ json: { public_key: 'BA' } }));
-  await page.route('**/api/actions', route => { actions.push(route.request().postDataJSON()); return route.fulfill({ json: { accepted: true } }); });
+  let rejectUnsubscribe = true;
+  await page.route('**/api/actions', route => {
+    const action = route.request().postDataJSON();
+    actions.push(action);
+    if (action.action === 'push-unsubscribe' && rejectUnsubscribe) {
+      rejectUnsubscribe = false;
+      return route.fulfill({ status: 503, json: { error: 'Device removal failed; try again' } });
+    }
+    return route.fulfill({ json: { accepted: true } });
+  });
   await page.goto('https://viewer.test/#settings');
   await expect(page.locator('#device-notification-state')).toContainText('Not enabled');
   expect(await page.evaluate(() => window.pushPermissionTaps)).toBe(0);
@@ -249,29 +258,28 @@ test('device notification enrollment starts from a tap and supports test and uns
   expect(await page.evaluate(() => window.pushPermissionTaps)).toBe(1);
   await page.locator('#device-notification-test').click();
   await expect(page.locator('#device-notification-state')).toHaveText('Test notification requested');
+  // Hard-won: 82e2bb311: failed server removal lost the native endpoint needed to retry.
+  await page.locator('#device-notification-disable').click();
+  await expect(page.locator('#device-notification-state')).toContainText('Device removal failed');
   await page.locator('#device-notification-disable').click();
   await expect(page.locator('#device-notification-state')).toContainText('Not enabled');
-  expect(actions.map(action => action.action)).toEqual(['push-subscribe', 'push-test', 'push-unsubscribe']);
+  expect(actions.map(action => action.action)).toEqual(['push-subscribe', 'push-test', 'push-unsubscribe', 'push-unsubscribe']);
   const states = { unknown: 'unknown', unreachable: 'unreachable', failed: 'failed', idle: 'idle', working: 'working' };
   await page.route('**/api/snapshot', route => {
     const next = snapshot();
     next.sessions = Object.entries(states).map(([id, attention]) => ({ id, title: id, workspace_id: WORKSPACE_ID, attention, active: true, is_idle: true, capabilities: {}, detail: false }));
     return route.fulfill({ json: viewerWireSnapshot(next) });
   });
-  await page.route('**/api/push/summary?*', route => {
-    const id = new URL(route.request().url()).searchParams.get('id');
-    return route.fulfill({ json: { session_ids: id === 'mixed' ? ['idle', 'unknown'] : ['idle', 'working'] } });
-  });
-  // Hard-won: c146a8a89: focus removed unavailable questions but kept resolved summaries.
+  // Hard-won: c146a8a89: focus removed notifications for unavailable questions.
   await page.evaluate(() => {
     window.pushShownNotifications = [
       { label: 'unknown', session_id: 'unknown' }, { label: 'unreachable', session_id: 'unreachable' },
       { label: 'failed', session_id: 'failed' }, { label: 'idle', session_id: 'idle' },
-      { label: 'mixed', url: '/?push-summary=mixed' }, { label: 'resolved-summary', url: '/?push-summary=resolved' },
+      { label: 'working', session_id: 'working' },
     ];
     window.dispatchEvent(new Event('focus'));
   });
-  await expect.poll(() => page.evaluate(() => [...new Set(window.pushClosedNotifications)].sort())).toEqual(['idle', 'resolved-summary']);
+  await expect.poll(() => page.evaluate(() => [...new Set(window.pushClosedNotifications)].sort())).toEqual(['idle', 'working']);
 
 });
 
@@ -315,7 +323,7 @@ test('service worker push displays and clicks route an existing window to the co
     return calls;
   }, source);
   expect(result).toEqual([
-    ['show', 'Build', { body: 'Which option?', tag: 'session', data: { url: '/#conversation/session', session_id: 'session' } }],
+    ['show', 'Build', { body: 'Which option?', renotify: true, tag: 'session', data: { url: '/#conversation/session', session_id: 'session' } }],
     ['close'], ['route', { type: 'mj-notification-open', url: 'https://viewer.test/#conversation/session' }], ['focus'],
     ['subscription', '/api/actions', 'include', { action: 'push-renew', old_endpoint: 'https://push.example/old', subscription: { endpoint: 'https://push.example/new', keys: { p256dh: 'key', auth: 'auth' } } }],
     ['subscription', '/api/actions', 'include', { action: 'push-unsubscribe', endpoint: 'https://push.example/old' }],

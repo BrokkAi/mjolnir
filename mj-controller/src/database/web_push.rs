@@ -59,8 +59,8 @@ fn push_renew_with(db: &Connection, old_endpoint: &str, subscription: Subscripti
     // Preserve known receipts across native endpoint rotation. Old in-flight
     // attempts become uncertain queued work under the new encryption owner.
     tx.execute("UPDATE push_devices SET retry_at=max(retry_at,coalesce((SELECT retry_at FROM push_devices WHERE endpoint=?1),0)) WHERE endpoint=?2",params![old_endpoint,subscription.endpoint])?;
-    tx.execute("INSERT INTO push_deliveries(endpoint,episode,payload,accepted,retry_at,failures,error,summary_episode)
-        SELECT ?2,q.episode,q.payload,CASE WHEN q.accepted=3 THEN 0 WHEN q.accepted=2 AND EXISTS(SELECT 1 FROM push_deliveries summary WHERE summary.endpoint=q.endpoint AND summary.episode=q.summary_episode AND summary.accepted=1) THEN 1 ELSE q.accepted END,q.retry_at,q.failures,q.error,q.summary_episode
+    tx.execute("INSERT INTO push_deliveries(endpoint,episode,payload,accepted,retry_at,failures,error)
+        SELECT ?2,q.episode,q.payload,CASE WHEN q.accepted=3 THEN 0 ELSE q.accepted END,q.retry_at,q.failures,q.error
         FROM push_deliveries q WHERE q.endpoint=?1
         ON CONFLICT(endpoint,episode) DO UPDATE SET accepted=CASE WHEN push_deliveries.accepted=3 THEN 3 WHEN push_deliveries.accepted=1 OR excluded.accepted=1 THEN 1 ELSE push_deliveries.accepted END",params![old_endpoint,subscription.endpoint])?;
     tx.execute("DELETE FROM push_devices WHERE endpoint=?1", [old_endpoint])?;
@@ -95,15 +95,7 @@ fn push_observe_at_with(
 ) -> Result<()> {
     let away = presence.away;
     let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let previous: Option<(bool, u64)> = tx
-        .query_row(
-            "SELECT away,revision FROM push_observation WHERE singleton=1",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    let same_away_period = previous == Some((true, presence.revision));
-    tx.execute("INSERT INTO push_observation VALUES(1,?1,?2) ON CONFLICT(singleton) DO UPDATE SET away=excluded.away,revision=excluded.revision",params![away,presence.revision])?;
+    tx.execute("INSERT INTO push_observation VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET away=excluded.away",[away])?;
     let previous_episodes = tx
         .prepare("SELECT session,identity,signature,payload FROM push_episodes")?
         .query_map([], |r| {
@@ -157,78 +149,12 @@ fn push_observe_at_with(
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for endpoint in devices {
-            let mut unsent = Vec::new();
             for (_, identity, notice) in &episodes {
-                let reserved: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM push_deliveries q WHERE endpoint=?1 AND episode=?2 AND (?3 OR accepted IN (1,3) OR (accepted=2 AND EXISTS(SELECT 1 FROM push_deliveries summary WHERE summary.endpoint=q.endpoint AND summary.episode=q.summary_episode AND summary.accepted IN (1,3)))))",
-                    params![endpoint, identity, same_away_period],
-                    |r| r.get(0),
-                )?;
-                if !reserved {
-                    unsent.push((identity, notice));
-                }
-            }
-            if !same_away_period && !unsent.is_empty() {
-                let ids = unsent
-                    .iter()
-                    .map(|(id, _)| id.as_str())
-                    .collect::<Vec<_>>()
-                    .join("|");
-                let summary_id = format!("summary:{ids}");
-                let summary = Notice {
-                    title: format!("{} sessions need you", unsent.len()),
-                    body: "Open Mjolnir to see them".into(),
-                    session_id: None,
-                    url: crate::web_push::summary_url(&endpoint, &summary_id),
-                    tag: "summary".into(),
-                };
-                tx.execute("DELETE FROM push_deliveries WHERE endpoint=?1 AND accepted=0 AND episode LIKE 'summary:%'",[&endpoint])?;
-                let coverage = unsent
-                    .iter()
-                    .filter_map(|(_, notice)| notice.session_id.clone())
-                    .collect::<Vec<_>>();
-                // Immutable cleanup coverage outlives subscription expiry and
-                // outbox retirement, including unknown remote acceptance.
-                tx.execute(
-                    "INSERT OR IGNORE INTO push_summary_coverage VALUES(?1,?2)",
-                    params![summary.url, serde_json::to_string(&coverage)?],
-                )?;
-                reserve(&tx, &endpoint, &summary_id, &summary, 0)?;
-                for (id, notice) in unsent {
-                    reserve(&tx, &endpoint, id, notice, 2)?;
-                    tx.execute("UPDATE push_deliveries SET accepted=2,summary_episode=?3 WHERE endpoint=?1 AND episode=?2",params![endpoint,id,summary_id])?;
-                }
-            } else {
-                for (id, notice) in unsent {
-                    reserve(&tx, &endpoint, id, notice, 0)?;
-                }
+                reserve(&tx, &endpoint, identity, notice)?;
             }
         }
     }
-    // Coverage belongs to the outbox transaction. An unavailable episode keeps
-    // its identity and becomes a paused individual intent; resolved ones retire.
-    tx.execute("UPDATE push_deliveries AS covered SET accepted=0,summary_episode=NULL
-        WHERE accepted=2 AND (NOT EXISTS(SELECT 1 FROM push_deliveries summary WHERE summary.endpoint=covered.endpoint AND summary.episode=covered.summary_episode)
-        OR (EXISTS(SELECT 1 FROM push_deliveries summary WHERE summary.endpoint=covered.endpoint AND summary.episode=covered.summary_episode AND summary.accepted=0)
-        AND episode NOT IN (SELECT identity FROM push_episodes WHERE eligible=1)))",[])?;
-    tx.execute("DELETE FROM push_deliveries WHERE accepted=0 AND episode NOT LIKE 'summary:%' AND episode NOT LIKE 'test:%' AND episode NOT IN (SELECT identity FROM push_episodes)", [])?;
-    let summaries=tx.prepare("SELECT endpoint,episode,payload FROM push_deliveries WHERE accepted=0 AND episode LIKE 'summary:%'")?.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-    for (endpoint, episode, payload) in summaries {
-        let covered=tx.prepare("SELECT e.session FROM push_deliveries covered JOIN push_episodes e ON e.identity=covered.episode WHERE covered.endpoint=?1 AND covered.summary_episode=?2 AND covered.accepted=2 AND e.eligible=1 ORDER BY e.session")?.query_map(params![endpoint,episode],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
-        if covered.is_empty() {
-            tx.execute(
-                "DELETE FROM push_deliveries WHERE endpoint=?1 AND episode=?2",
-                params![endpoint, episode],
-            )?;
-        } else {
-            let mut notice: Notice = serde_json::from_str(&payload)?;
-            notice.title = format!("{} sessions need you", covered.len());
-            tx.execute(
-                "UPDATE push_deliveries SET payload=?3 WHERE endpoint=?1 AND episode=?2",
-                params![endpoint, episode, serde_json::to_string(&notice)?],
-            )?;
-        }
-    }
+    tx.execute("DELETE FROM push_deliveries WHERE accepted=0 AND episode NOT LIKE 'test:%' AND episode NOT IN (SELECT identity FROM push_episodes)", [])?;
     tx.commit()?;
     Ok(())
 }
@@ -239,15 +165,9 @@ fn same_episode(previous: &str, next: &str) -> Result<bool> {
         serde_json::from_str(next).context("read published push episode sources")?;
     Ok(old_kind == kind && new.iter().all(|source| old.contains(source)))
 }
-fn reserve(
-    tx: &Transaction<'_>,
-    endpoint: &str,
-    episode: &str,
-    notice: &Notice,
-    accepted: i64,
-) -> Result<()> {
-    // One durable state: 0 queued, 1 accepted, 2 summary-covered, 3 in flight.
-    tx.execute("INSERT OR IGNORE INTO push_deliveries(endpoint,episode,payload,accepted) VALUES(?1,?2,?3,?4)",params![endpoint,episode,serde_json::to_string(notice)?,accepted])?;
+fn reserve(tx: &Transaction<'_>, endpoint: &str, episode: &str, notice: &Notice) -> Result<()> {
+    // One durable state: 0 queued, 1 accepted, 3 in flight.
+    tx.execute("INSERT OR IGNORE INTO push_deliveries(endpoint,episode,payload,accepted) VALUES(?1,?2,?3,0)",params![endpoint,episode,serde_json::to_string(notice)?])?;
     Ok(())
 }
 pub(crate) fn push_test(endpoint: String) -> Result<()> {
@@ -279,7 +199,6 @@ fn push_test_with(db: &mut Connection, endpoint: String) -> Result<()> {
             url: "/".into(),
             tag: "test".into(),
         },
-        0,
     )?;
     tx.commit()?;
     Ok(())
@@ -293,11 +212,10 @@ pub(crate) struct PushDelivery {
     pub failures: u32,
 }
 // Admission and scheduling consume the same durable readiness rule. The
-// database writer alone owns per-device/tag flight admission and summary cover.
+// database writer alone owns per-device/tag flight admission.
 const READY_PUSH: &str = "FROM push_deliveries q JOIN push_devices d USING(endpoint)
  WHERE q.accepted=0 AND (q.episode LIKE 'test:%' OR ((SELECT away FROM push_observation WHERE singleton=1)=1
- AND ((q.episode LIKE 'summary:%' AND EXISTS(SELECT 1 FROM push_episodes WHERE eligible=1))
- OR q.episode IN (SELECT identity FROM push_episodes WHERE eligible=1))))
+ AND q.episode IN (SELECT identity FROM push_episodes WHERE eligible=1)))
  AND NOT EXISTS(SELECT 1 FROM push_deliveries flight WHERE flight.endpoint=q.endpoint AND flight.accepted=3 AND json_extract(flight.payload,'$.tag')=json_extract(q.payload,'$.tag'))";
 fn push_due_with(db: &Connection, now: i64) -> Result<Vec<PushDelivery>> {
     let sql = format!(
@@ -411,7 +329,7 @@ fn apply_push_result_with(
     // backpressure is reserved for transient service/transport failures.
     if status.is_none() || status.is_some_and(|status| status == 429 || status >= 500) {
         // Retry-After constrains follow-up requests to this endpoint, including
-        // newly queued episodes and summaries, not just the rejected intent.
+        // newly queued episodes, not just the rejected intent.
         tx.execute(
             "UPDATE push_devices SET retry_at=max(retry_at,?2) WHERE endpoint=?1",
             params![subscription.endpoint, retry_at],
@@ -447,23 +365,6 @@ pub(crate) fn push_next_due() -> Result<Option<i64>> {
         |r| r.get(0),
     )?)
 }
-pub(crate) fn push_summary_coverage(id: String) -> Result<Option<Vec<String>>> {
-    let db = open_reader(&database_path())?;
-    push_summary_coverage_with(&db, &id)
-}
-fn push_summary_coverage_with(db: &Connection, id: &str) -> Result<Option<Vec<String>>> {
-    let url = format!("/?push-summary={id}");
-    let sessions: Option<String> = db
-        .query_row(
-            "SELECT sessions FROM push_summary_coverage WHERE url=?1",
-            [url],
-            |r| r.get(0),
-        )
-        .optional()?;
-    sessions
-        .map(|sessions| Ok(serde_json::from_str(&sessions)?))
-        .transpose()
-}
 pub(crate) fn push_device_status(endpoint: String) -> Result<serde_json::Value> {
     let db = open_reader(&database_path())?;
     let subscribed = db.query_row(
@@ -478,44 +379,7 @@ pub(crate) fn push_device_status(endpoint: String) -> Result<serde_json::Value> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn service_result(
-        db: &Connection,
-        subscription: Subscription,
-        episode: String,
-        status: Option<u16>,
-        retry_at: i64,
-        error: Option<String>,
-    ) -> Result<()> {
-        let enrollment: String = db.query_row(
-            "SELECT enrollment FROM push_devices WHERE endpoint=?1",
-            [&subscription.endpoint],
-            |r| r.get(0),
-        )?;
-        super::apply_push_result_with(
-            db,
-            subscription,
-            &enrollment,
-            episode,
-            status,
-            retry_at,
-            error,
-        )
-    }
-    fn push_observe_with(
-        db: &mut Connection,
-        away: bool,
-        episodes: Vec<(String, String, Notice)>,
-    ) -> Result<()> {
-        super::push_observe_at_with(
-            db,
-            OperatorPresence {
-                away,
-                revision: u64::from(away),
-            },
-            episodes,
-            vec![],
-        )
-    }
+
     fn episode(id: &str) -> (String, String, Notice) {
         (
             id.into(),
@@ -529,8 +393,34 @@ mod tests {
             },
         )
     }
+    fn observe(db: &mut Connection, away: bool, ids: &[&str]) {
+        push_observe_at_with(
+            db,
+            OperatorPresence {
+                away,
+                revision: u64::from(away),
+            },
+            ids.iter().map(|id| episode(id)).collect(),
+            vec![],
+        )
+        .unwrap();
+    }
+    fn result(db: &Connection, delivery: &PushDelivery, status: Option<u16>, retry_at: i64) {
+        apply_push_result_with(
+            db,
+            delivery.subscription.clone(),
+            &delivery.enrollment,
+            delivery.episode.clone(),
+            status,
+            retry_at,
+            None,
+        )
+        .unwrap();
+    }
+
+    // Hard-won: c146a8a89: worker recovery must retain the pending question's identity.
     #[test]
-    fn push_restart_receipts_presence_summary_and_expiry_are_durable() {
+    fn push_restart_receipts_presence_and_expiry_are_durable() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("push-test.sqlite3");
         let mut db = open(&path).unwrap();
@@ -542,636 +432,125 @@ mod tests {
             },
             expiration_time: None,
         };
-        let endpoint = subscription.endpoint.clone();
         push_subscribe_with(&db, subscription.clone()).unwrap();
-        push_observe_with(&mut db, false, vec![episode("a"), episode("b")]).unwrap();
-        assert!(push_due_with(&db, 0).unwrap().is_empty());
-        push_observe_with(&mut db, true, vec![episode("a"), episode("b")]).unwrap();
-        let due = push_due_with(&db, 0).unwrap();
-        assert_eq!(due.len(), 1);
-        assert!(due[0].episode.starts_with("summary:"));
-        assert_eq!(
-            serde_json::from_str::<Notice>(&due[0].payload)
+        observe(&mut db, false, &["a", "b"]);
+        assert!(push_claim_with(&db, 0).unwrap().is_empty());
+        observe(&mut db, true, &["a", "b"]);
+        let due = push_claim_with(&db, 0).unwrap();
+        assert_eq!(due.len(), 2); // Turning away sends individual open episodes.
+        assert!(due.iter().all(|q| {
+            serde_json::from_str::<Notice>(&q.payload)
                 .unwrap()
-                .title,
-            "2 sessions need you"
-        );
-        // Unknown outcomes remain queued across a process-equivalent reconnect.
+                .session_id
+                .is_some()
+        }));
+        assert!(push_claim_with(&db, 0).unwrap().is_empty());
+        result(&db, &due[0], Some(201), 0);
+        // Crash after remote acceptance but before receipt: only the uncertain
+        // request replays; the acknowledged request never resets.
         drop(db);
         let mut db = open(&path).unwrap();
-        push_observe_with(&mut db, true, vec![episode("a"), episode("b")]).unwrap();
-        assert_eq!(push_due_with(&db, 0).unwrap().len(), 1);
-        push_result_with(&db, endpoint.clone(), due[0].episode.clone(), true, 0, None).unwrap();
-        drop(db);
-        let mut db = open(&path).unwrap();
-        push_observe_with(&mut db, true, vec![episode("a"), episode("b")]).unwrap();
-        assert!(push_due_with(&db, 0).unwrap().is_empty());
-        push_observe_with(
-            &mut db,
-            true,
-            vec![episode("a"), episode("b"), episode("c")],
-        )
-        .unwrap();
-        let due = push_due_with(&db, 0).unwrap();
-        assert_eq!(due.len(), 1);
-        assert_eq!(due[0].episode, "c:1");
-        push_result_with(&db, endpoint.clone(), due[0].episode.clone(), true, 0, None).unwrap();
-        drop(db);
-        let mut db = open(&path).unwrap();
-        push_observe_with(
-            &mut db,
-            true,
-            vec![episode("a"), episode("b"), episode("c")],
-        )
-        .unwrap();
-        assert!(push_due_with(&db, 0).unwrap().is_empty());
-        // Restart recovery can briefly expose Unreachable. That pauses sends
-        // without inventing a fresh episode when the same question reconnects.
-        push_observe_at_with(
-            &mut db,
-            OperatorPresence {
-                away: true,
-                revision: 1,
-            },
-            vec![],
-            vec!["a".into(), "b".into(), "c".into()],
-        )
-        .unwrap();
-        push_observe_with(
-            &mut db,
-            true,
-            vec![episode("a"), episode("b"), episode("c")],
-        )
-        .unwrap();
-        assert!(push_due_with(&db, 0).unwrap().is_empty());
-        // A watch feed can coalesce present -> away. The owner's revision
-        // still makes that a new away period and summarizes queued retries.
-        push_observe_with(&mut db, true, vec![episode("x"), episode("y")]).unwrap();
-        assert_eq!(push_due_with(&db, 0).unwrap().len(), 2);
+        push_recover_with(&db).unwrap();
+        observe(&mut db, true, &["a", "b"]);
+        let retry = push_claim_with(&db, 0).unwrap();
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].episode, due[1].episode);
+        result(&db, &retry[0], Some(201), 0);
+        observe(&mut db, false, &["a", "b"]);
+        observe(&mut db, true, &["a", "b"]);
+        assert!(push_claim_with(&db, 0).unwrap().is_empty());
+
+        // Temporary missing attention pauses, rather than clears, the episode.
         push_observe_at_with(
             &mut db,
             OperatorPresence {
                 away: true,
                 revision: 3,
             },
-            vec![episode("x"), episode("y")],
+            vec![],
+            vec!["a".into(), "b".into()],
+        )
+        .unwrap();
+        observe(&mut db, true, &["a", "b"]);
+        assert!(push_claim_with(&db, 0).unwrap().is_empty());
+        // A newly promoted child question starts a new episode; removing an
+        // answered source keeps that episode and its receipt.
+        let mut question = episode("a");
+        question.1 =
+            serde_json::to_string(&("needs_input", vec!["a:form:unique", "child:form:new"]))
+                .unwrap();
+        push_observe_at_with(
+            &mut db,
+            OperatorPresence {
+                away: true,
+                revision: 3,
+            },
+            vec![question],
             vec![],
         )
         .unwrap();
-        let summary = push_due_with(&db, 0).unwrap();
-        assert_eq!(summary.len(), 1);
-        assert!(summary[0].episode.starts_with("summary:"));
-        push_result_with(
-            &db,
-            endpoint.clone(),
-            summary[0].episode.clone(),
-            true,
-            0,
-            None,
-        )
-        .unwrap();
-        // Removing one answered form retains the episode. A newly added form,
-        // or re-entry after all attention clears, allocates a new sequence.
-        let mut forms = episode("forms");
-        forms.1 = serde_json::to_string(&("needs_input", vec!["form:a", "form:b"])).unwrap();
-        push_observe_with(&mut db, true, vec![forms.clone()]).unwrap();
-        let due = push_due_with(&db, 0).unwrap();
-        assert_eq!(due.len(), 1);
-        push_result_with(&db, endpoint.clone(), due[0].episode.clone(), true, 0, None).unwrap();
-        forms.1 = serde_json::to_string(&("needs_input", vec!["form:b"])).unwrap();
-        push_observe_with(&mut db, true, vec![forms.clone()]).unwrap();
-        assert!(push_due_with(&db, 0).unwrap().is_empty());
-        forms.1 = serde_json::to_string(&("needs_input", vec!["form:b", "form:c"])).unwrap();
-        push_observe_with(&mut db, true, vec![forms.clone()]).unwrap();
-        assert_eq!(push_due_with(&db, 0).unwrap().len(), 1);
-        push_observe_with(&mut db, true, vec![]).unwrap();
-        push_observe_with(&mut db, true, vec![forms]).unwrap();
-        assert_eq!(push_due_with(&db, 0).unwrap().len(), 1);
-        // A real service refusal blocks follow-up requests to the device,
-        // including a new episode, until the persisted service deadline.
-        let pending = push_claim_with(&db, 0).unwrap();
-        service_result(
-            &db,
-            subscription.clone(),
-            pending[0].episode.clone(),
-            Some(429),
-            100,
-            Some("push service returned 429".into()),
-        )
-        .unwrap();
-        push_observe_with(&mut db, true, vec![episode("new-after-refusal")]).unwrap();
-        // Re-enrollment cannot erase a real endpoint Retry-After deadline.
+        let child = push_claim_with(&db, 0).unwrap().remove(0);
+        result(&db, &child, Some(201), 0);
+        observe(&mut db, true, &["a"]);
+        assert!(push_claim_with(&db, 0).unwrap().is_empty());
+        observe(&mut db, true, &[]);
+        observe(&mut db, true, &["a"]);
+        let reentry = push_claim_with(&db, 0).unwrap().remove(0);
+        assert_ne!(reentry.episode, child.episode);
+        result(&db, &reentry, Some(429), 100);
+        observe(&mut db, true, &["a", "c"]);
         push_subscribe_with(&db, subscription.clone()).unwrap();
-        assert!(push_due_with(&db, 99).unwrap().is_empty());
-        drop(db);
-        let mut db = open(&path).unwrap();
-        assert_eq!(push_due_with(&db, 100).unwrap().len(), 1);
-        // Hard-won: c146a8a89: unrelated attention kept obsolete summaries queued.
-        push_observe_at_with(
-            &mut db,
-            OperatorPresence {
-                away: true,
-                revision: 5,
-            },
-            vec![episode("summary-a"), episode("summary-b")],
-            vec![],
-        )
-        .unwrap();
-        let summary = push_due_with(&db, 100).unwrap();
-        assert_eq!(summary.len(), 1);
-        let notice: Notice = serde_json::from_str(&summary[0].payload).unwrap();
-        let reference = notice.url.split("push-summary=").nth(1).unwrap().to_owned();
-        assert_eq!(
-            push_summary_coverage_with(&db, &reference)
-                .unwrap()
-                .unwrap(),
-            vec!["summary-a", "summary-b"]
-        );
-        push_observe_at_with(
-            &mut db,
-            OperatorPresence {
-                away: true,
-                revision: 5,
-            },
-            vec![episode("summary-b"), episode("unrelated")],
-            vec![],
-        )
-        .unwrap();
-        let pending = push_due_with(&db, 100).unwrap();
-        let summary = pending
-            .iter()
-            .find(|item| item.episode.starts_with("summary:"))
-            .unwrap();
-        let notice: Notice = serde_json::from_str(&summary.payload).unwrap();
-        assert_eq!(notice.title, "1 sessions need you");
-        push_observe_at_with(
-            &mut db,
-            OperatorPresence {
-                away: true,
-                revision: 5,
-            },
-            vec![episode("unrelated")],
-            vec![],
-        )
-        .unwrap();
-        let pending = push_due_with(&db, 100).unwrap();
-        assert_eq!(pending.len(), 1);
-        assert!(!pending[0].episode.starts_with("summary:"));
-        // A phone can already show a summary whose remote acceptance was
-        // unknown. Retirement must retain its lookup data for later cleanup.
-        assert_eq!(
-            push_summary_coverage_with(&db, &reference)
-                .unwrap()
-                .unwrap(),
-            vec!["summary-a", "summary-b"]
-        );
-        // Hard-won: 4c4eefc4c: a permanently rejected summary disabled its device.
-        push_observe_at_with(
-            &mut db,
-            OperatorPresence {
-                away: true,
-                revision: 7,
-            },
-            vec![episode("reject-a"), episode("reject-b")],
-            vec![],
-        )
-        .unwrap();
-        let rejected = push_claim_with(&db, 100).unwrap();
-        assert_eq!(rejected.len(), 1);
-        service_result(
-            &db,
-            subscription.clone(),
-            rejected[0].episode.clone(),
-            Some(413),
-            i64::MAX,
-            Some("payload rejected".into()),
-        )
-        .unwrap();
-        push_test_with(&mut db, endpoint.clone()).unwrap();
-        let test = push_claim_with(&db, 100).unwrap();
-        assert_eq!(test.len(), 1);
-        assert!(test[0].episode.starts_with("test:"));
-        service_result(
-            &db,
-            subscription.clone(),
-            test[0].episode.clone(),
-            Some(201),
-            0,
-            None,
-        )
-        .unwrap();
-        push_observe_at_with(
-            &mut db,
-            OperatorPresence {
-                away: true,
-                revision: 7,
-            },
-            vec![
-                episode("reject-a"),
-                episode("reject-b"),
-                episode("after-rejection"),
-            ],
-            vec![],
-        )
-        .unwrap();
-        let later = push_claim_with(&db, 100).unwrap();
-        assert_eq!(later.len(), 1);
-        assert!(later[0].episode.starts_with("after-rejection:"));
-        service_result(
-            &db,
-            subscription.clone(),
-            later[0].episode.clone(),
-            Some(201),
-            0,
-            None,
-        )
-        .unwrap();
-        // Hard-won: 4c4eefc4c: an in-flight individual could also be summarized.
-        push_observe_at_with(
-            &mut db,
-            OperatorPresence {
-                away: true,
-                revision: 7,
-            },
-            vec![episode("flight")],
-            vec![],
-        )
-        .unwrap();
-        let flight = push_claim_with(&db, 100).unwrap();
-        assert_eq!(flight.len(), 1);
-        push_observe_at_with(
-            &mut db,
-            OperatorPresence {
-                away: false,
-                revision: 8,
-            },
-            vec![episode("flight")],
-            vec![],
-        )
-        .unwrap();
-        push_observe_at_with(
-            &mut db,
-            OperatorPresence {
-                away: true,
-                revision: 9,
-            },
-            vec![episode("flight")],
-            vec![],
-        )
-        .unwrap();
-        assert!(push_claim_with(&db, 100).unwrap().is_empty());
-        service_result(
-            &db,
-            subscription.clone(),
-            flight[0].episode.clone(),
-            Some(503),
-            101,
-            Some("retry".into()),
-        )
-        .unwrap();
-        let retry = push_claim_with(&db, 101).unwrap();
-        assert_eq!(retry.len(), 1);
-        assert_eq!(retry[0].episode, flight[0].episode);
-        // Recovery clears flight ownership, never an acceptance receipt.
-        drop(db);
-        let mut db = open(&path).unwrap();
-        push_recover_with(&db).unwrap();
-        let retry = push_claim_with(&db, 101).unwrap();
-        assert_eq!(retry.len(), 1);
-        service_result(
-            &db,
-            subscription.clone(),
-            retry[0].episode.clone(),
-            Some(201),
-            0,
-            None,
-        )
-        .unwrap();
-        push_recover_with(&db).unwrap();
-        assert!(push_claim_with(&db, 101).unwrap().is_empty());
-        // An in-flight summary likewise keeps ownership of its covered episodes.
-        push_observe_at_with(
-            &mut db,
-            OperatorPresence {
-                away: true,
-                revision: 11,
-            },
-            vec![episode("summary-flight")],
-            vec![],
-        )
-        .unwrap();
-        let flight = push_claim_with(&db, 101).unwrap();
-        assert_eq!(flight.len(), 1);
-        assert!(flight[0].episode.starts_with("summary:"));
-        push_observe_at_with(
-            &mut db,
-            OperatorPresence {
-                away: false,
-                revision: 12,
-            },
-            vec![episode("summary-flight")],
-            vec![],
-        )
-        .unwrap();
-        push_observe_at_with(
-            &mut db,
-            OperatorPresence {
-                away: true,
-                revision: 13,
-            },
-            vec![episode("summary-flight")],
-            vec![],
-        )
-        .unwrap();
-        assert!(push_claim_with(&db, 101).unwrap().is_empty());
-        service_result(
-            &db,
-            subscription.clone(),
-            flight[0].episode.clone(),
-            Some(201),
-            0,
-            None,
-        )
-        .unwrap();
-        // A stale completion cannot turn summary-covered work back into a retry.
-        service_result(
-            &db,
-            subscription.clone(),
-            "summary-flight:1".into(),
-            Some(503),
-            102,
-            Some("stale".into()),
-        )
-        .unwrap();
-        assert!(push_claim_with(&db, 102).unwrap().is_empty());
-        // Hard-won: 4c4eefc4c: summary coverage exceeded the push payload limit.
-        let many = (0..1000)
-            .map(|n| episode(&format!("large-{n:032x}")))
-            .collect();
-        push_observe_at_with(
-            &mut db,
-            OperatorPresence {
-                away: true,
-                revision: 15,
-            },
-            many,
-            vec![],
-        )
-        .unwrap();
-        let large = push_claim_with(&db, 103).unwrap();
-        assert_eq!(large.len(), 1);
-        // RFC 8291 section 4 documents 3993 available plaintext bytes.
-        assert!(large[0].payload.len() <= 3993);
-        let notice: Notice = serde_json::from_str(&large[0].payload).unwrap();
-        assert_eq!(notice.title, "1000 sessions need you");
-        let reference = notice.url.split("push-summary=").nth(1).unwrap();
-        let coverage = push_summary_coverage_with(&db, reference).unwrap().unwrap();
-        assert_eq!(coverage.len(), 1000);
-        assert!(serde_json::to_string(&coverage).unwrap().len() > 4096);
-        service_result(
-            &db,
-            subscription.clone(),
-            large[0].episode.clone(),
-            Some(201),
-            0,
-            None,
-        )
-        .unwrap();
-        // Hard-won: 5c5ff2233: changed enrollment stranded its previous flight.
-        push_observe_at_with(
-            &mut db,
-            OperatorPresence {
-                away: true,
-                revision: 15,
-            },
-            vec![episode("enrollment-flight")],
-            vec![],
-        )
-        .unwrap();
-        let first = push_claim_with(&db, 103).unwrap();
-        assert_eq!(first.len(), 1);
+        assert!(push_claim_with(&db, 99).unwrap().is_empty());
+        let after_backpressure = push_claim_with(&db, 100).unwrap();
+        assert_eq!(after_backpressure.len(), 2);
+        for q in &after_backpressure {
+            result(&db, q, Some(413), i64::MAX);
+        }
+        // A rejected payload does not disable a device or future tests.
+        push_test_with(&mut db, subscription.endpoint.clone()).unwrap();
+        let test = push_claim_with(&db, 100).unwrap().remove(0);
+        result(&db, &test, Some(201), 0);
+
+        // Hard-won enrollment races: refresh preserves ownership, key replacement
+        // releases old reservations, and ABA never revives an old completion.
+        observe(&mut db, true, &["d"]);
+        let old = push_claim_with(&db, 100).unwrap().remove(0);
         let mut refreshed = subscription.clone();
-        refreshed.expiration_time = Some(123456.0);
+        refreshed.expiration_time = Some(123.0);
         push_subscribe_with(&db, refreshed).unwrap();
-        assert!(push_claim_with(&db, 103).unwrap().is_empty());
-        // A metadata-only refresh keeps its legitimate response admissible.
-        super::apply_push_result_with(
-            &db,
-            first[0].subscription.clone(),
-            &first[0].enrollment,
-            first[0].episode.clone(),
-            Some(201),
-            0,
-            None,
-        )
-        .unwrap();
-        assert!(push_claim_with(&db, 103).unwrap().is_empty());
-        push_observe_at_with(
-            &mut db,
-            OperatorPresence {
-                away: true,
-                revision: 15,
-            },
-            vec![episode("enrollment-keys")],
-            vec![],
-        )
-        .unwrap();
-        let first = push_claim_with(&db, 103).unwrap();
-        assert_eq!(first.len(), 1);
-        let mut changed = subscription.clone();
-        changed.keys.auth = "changed-authentication-secret".into();
-        push_subscribe_with(&db, changed.clone()).unwrap();
-        let second = push_claim_with(&db, 103).unwrap();
-        assert_eq!(second.len(), 1);
-        assert_ne!(first[0].enrollment, second[0].enrollment);
-        // Repeating identical data keeps the current owner's reservation.
-        push_subscribe_with(&db, changed.clone()).unwrap();
-        assert!(push_claim_with(&db, 103).unwrap().is_empty());
-        super::apply_push_result_with(
-            &db,
-            first[0].subscription.clone(),
-            &first[0].enrollment,
-            first[0].episode.clone(),
-            Some(503),
-            i64::MAX,
-            Some("stale".into()),
-        )
-        .unwrap();
+        assert!(push_claim_with(&db, 100).unwrap().is_empty());
+        let mut replaced = subscription.clone();
+        replaced.keys.auth = "replacement".into();
+        push_subscribe_with(&db, replaced).unwrap();
+        let replacement = push_claim_with(&db, 100).unwrap().remove(0);
+        result(&db, &old, Some(410), 0);
         push_subscribe_with(&db, subscription.clone()).unwrap();
-        let third = push_claim_with(&db, 103).unwrap();
-        assert_eq!(third.len(), 1);
-        assert_ne!(third[0].enrollment, first[0].enrollment);
-        // Returning to identical subscription bytes cannot revive an old owner.
-        super::apply_push_result_with(
-            &db,
-            second[0].subscription.clone(),
-            &second[0].enrollment,
-            second[0].episode.clone(),
-            Some(201),
-            0,
-            None,
-        )
-        .unwrap();
-        super::apply_push_result_with(
-            &db,
-            first[0].subscription.clone(),
-            &first[0].enrollment,
-            first[0].episode.clone(),
-            Some(410),
-            0,
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            db.query_row(
-                "SELECT accepted FROM push_deliveries WHERE endpoint=?1 AND episode=?2",
-                params![endpoint, third[0].episode],
-                |r| r.get::<_, i64>(0)
-            )
-            .unwrap(),
-            3
-        );
-        super::apply_push_result_with(
-            &db,
-            third[0].subscription.clone(),
-            &third[0].enrollment,
-            third[0].episode.clone(),
-            Some(201),
-            0,
-            None,
-        )
-        .unwrap();
-        assert!(push_claim_with(&db, 103).unwrap().is_empty());
-        // Deleting/recreating the same endpoint also assigns a distinct owner.
-        push_observe_at_with(
-            &mut db,
-            OperatorPresence {
-                away: true,
-                revision: 15,
-            },
-            vec![episode("recreated-flight")],
-            vec![],
-        )
-        .unwrap();
-        let old = push_claim_with(&db, 103).unwrap();
-        assert_eq!(old.len(), 1);
-        push_unsubscribe_with(&db, &endpoint).unwrap();
-        push_subscribe_with(&db, subscription.clone()).unwrap();
-        push_observe_at_with(
-            &mut db,
-            OperatorPresence {
-                away: true,
-                revision: 15,
-            },
-            vec![episode("recreated-flight")],
-            vec![],
-        )
-        .unwrap();
-        let recreated = push_claim_with(&db, 103).unwrap();
-        assert_eq!(recreated.len(), 1);
-        assert_ne!(old[0].enrollment, recreated[0].enrollment);
-        super::apply_push_result_with(
-            &db,
-            old[0].subscription.clone(),
-            &old[0].enrollment,
-            old[0].episode.clone(),
-            Some(410),
-            0,
-            None,
-        )
-        .unwrap();
+        let aba = push_claim_with(&db, 100).unwrap().remove(0);
+        assert_ne!(aba.enrollment, old.enrollment);
+        result(&db, &replacement, Some(410), 0);
+        result(&db, &old, Some(201), 0);
+        result(&db, &aba, Some(201), 0);
+        assert!(push_claim_with(&db, 100).unwrap().is_empty());
+
+        // Native endpoint rotation preserves acceptance and recovers uncertain
+        // work. A late result from the retired endpoint cannot delete its owner.
+        observe(&mut db, true, &["d", "e"]);
+        let uncertain = push_claim_with(&db, 100).unwrap().remove(0);
+        let mut rotated = subscription.clone();
+        rotated.endpoint = "https://push.example.com/rotated".into();
+        push_renew_with(&db, &subscription.endpoint, rotated.clone()).unwrap();
+        push_renew_with(&db, &subscription.endpoint, rotated.clone()).unwrap();
+        result(&db, &uncertain, Some(410), 0);
+        let rotated_due = push_claim_with(&db, 100).unwrap();
+        assert_eq!(rotated_due.len(), 1);
+        assert_eq!(rotated_due[0].episode, uncertain.episode);
+        result(&db, &rotated_due[0], Some(410), 0);
         assert_eq!(
             db.query_row("SELECT count(*) FROM push_devices", [], |r| r
-                .get::<_, i64>(0))
-                .unwrap(),
-            1
-        );
-        // HTTP 410 cascades queued intents and receipts.
-
-        service_result(&db, subscription.clone(), String::new(), Some(410), 0, None).unwrap();
-        assert_eq!(
-            db.query_row("SELECT count(*) FROM push_deliveries", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
             0
         );
-        // Hard-won: 5a12b9f64: native endpoint rotation lost the device's delivery stream.
-        push_subscribe_with(&db, subscription.clone()).unwrap();
-        push_observe_at_with(
-            &mut db,
-            OperatorPresence {
-                away: true,
-                revision: 15,
-            },
-            vec![episode("renew-ack"), episode("renew-flight")],
-            vec![],
-        )
-        .unwrap();
-        let admitted = push_claim_with(&db, 103).unwrap();
-        assert_eq!(admitted.len(), 2);
-        let acknowledged = admitted
-            .iter()
-            .find(|d| d.episode.starts_with("renew-ack:"))
-            .unwrap();
-        super::apply_push_result_with(
-            &db,
-            acknowledged.subscription.clone(),
-            &acknowledged.enrollment,
-            acknowledged.episode.clone(),
-            Some(201),
-            0,
-            None,
-        )
-        .unwrap();
-        let old_flight = admitted
-            .iter()
-            .find(|d| d.episode.starts_with("renew-flight:"))
-            .unwrap();
-        let mut renewed = subscription.clone();
-        renewed.endpoint = "https://push.example.com/renewed".into();
-        push_renew_with(&db, &endpoint, renewed.clone()).unwrap();
-        let moved = push_claim_with(&db, 103).unwrap();
-        assert_eq!(moved.len(), 1);
-        assert_eq!(moved[0].episode, old_flight.episode);
-        assert_eq!(moved[0].subscription.endpoint, renewed.endpoint);
-        super::apply_push_result_with(
-            &db,
-            old_flight.subscription.clone(),
-            &old_flight.enrollment,
-            old_flight.episode.clone(),
-            Some(410),
-            0,
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            db.query_row("SELECT count(*) FROM push_devices", [], |r| r
-                .get::<_, i64>(0))
-                .unwrap(),
-            1
-        );
-        super::apply_push_result_with(
-            &db,
-            moved[0].subscription.clone(),
-            &moved[0].enrollment,
-            moved[0].episode.clone(),
-            Some(201),
-            0,
-            None,
-        )
-        .unwrap();
-        // Replaying the browser's same rotation is idempotent, including after
-        // the old endpoint was already removed by the first accepted request.
-        push_renew_with(&db, &endpoint, renewed.clone()).unwrap();
-        assert!(push_claim_with(&db, 103).unwrap().is_empty());
-        // Coverage is owned independently of a subscription's lifetime, so a
-        // shown summary can still be withdrawn after the endpoint expires.
-        assert_eq!(
-            push_summary_coverage_with(&db, reference)
-                .unwrap()
-                .unwrap()
-                .len(),
-            1000
-        );
+        assert!(push_claim_with(&db, 100).unwrap().is_empty());
     }
 }

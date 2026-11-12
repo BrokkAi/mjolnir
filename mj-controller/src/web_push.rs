@@ -69,14 +69,6 @@ pub(crate) struct Notice {
     pub tag: String,
 }
 
-/// A fixed-size URL reference keeps summary push payloads independent of count.
-pub(crate) fn summary_url(endpoint: &str, episode: &str) -> String {
-    let digest = ring::digest::digest(
-        &ring::digest::SHA256,
-        format!("{endpoint}\0{episode}").as_bytes(),
-    );
-    format!("/?push-summary={}", B64.encode(digest.as_ref()))
-}
 pub(crate) struct Vapid(signature::EcdsaKeyPair);
 impl Vapid {
     pub(crate) fn load() -> Result<Self> {

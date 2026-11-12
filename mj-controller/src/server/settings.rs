@@ -555,22 +555,3 @@ pub(super) async fn push_device_status(
         .map(Json)
         .map_err(unreadable)
 }
-
-#[derive(Deserialize)]
-pub(super) struct PushSummaryQuery {
-    id: String,
-}
-pub(super) async fn push_summary(
-    Query(query): Query<PushSummaryQuery>,
-) -> Result<Json<Value>, ApiError> {
-    let ids = crate::web_push::blocking(move || crate::database::push_summary_coverage(query.id))
-        .await
-        .map_err(unreadable)?
-        .ok_or_else(|| {
-            ApiError::new(
-                StatusCode::NOT_FOUND,
-                "this notification's coverage is no longer available",
-            )
-        })?;
-    Ok(Json(serde_json::json!({"session_ids":ids})))
-}

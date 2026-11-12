@@ -10,7 +10,7 @@
 // CACHE_VERSION must change whenever any shell asset changes. Activation
 // deletes every cache that is not the current one, so an upgrade cannot leave
 // a previous version's assets behind.
-const CACHE_VERSION = 'mjolnir-shell-v31';
+const CACHE_VERSION = 'mjolnir-shell-v32';
 const SHELL = [
   '/',
   '/viewer.css',
@@ -69,7 +69,8 @@ self.addEventListener('push', event => {
     const notice = event.data ? event.data.json() : {};
     await self.registration.showNotification(notice.title || 'Mjolnir', {
       body: notice.body || 'Needs your input',
-      tag: notice.tag || notice.session_id || 'summary',
+      renotify: true,
+      tag: notice.tag || notice.session_id || 'mjolnir',
       data: { url: notice.url || '/', session_id: notice.session_id || null },
     });
   })());

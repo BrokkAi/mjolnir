@@ -9894,12 +9894,13 @@ notificationDisable.onclick = async () => {
     // The browser may rotate its subscription during a network request. Keep
     // disabling the actual current native resource before reporting success.
     while ((subscription = await manager.getSubscription())) {
+      // Keep the native endpoint available for retry until server removal succeeds.
+      await request('/api/actions', { method: 'POST', body: JSON.stringify({ action: 'push-unsubscribe', endpoint: subscription.endpoint }) });
       const removed = await subscription.unsubscribe();
       if (!removed) {
         const current = await manager.getSubscription();
         if (current && JSON.stringify(current.toJSON()) === JSON.stringify(subscription.toJSON())) throw new Error('Could not disable notifications. Try Disable notifications again.');
       }
-      await request('/api/actions', { method: 'POST', body: JSON.stringify({ action: 'push-unsubscribe', endpoint: subscription.endpoint }) });
     }
     await refreshDeviceNotifications();
   } catch (error) { notificationState.textContent = error.message; }
@@ -9918,19 +9919,10 @@ async function withdrawResolvedNotifications() {
     const registration = await pushRegistration();
     const notifications = await registration.getNotifications();
     for (const notification of notifications) {
-      const data = notification.data || {};
-      let ids = data.session_id ? [data.session_id] : [];
-      const reference = new URL(data.url || '/', location.origin).searchParams.get('push-summary');
-      if (reference) {
-        const coverage = await request(`/api/push/summary?id=${encodeURIComponent(reference)}`);
-        ids = coverage.session_ids;
-      }
-      const resolved = id => {
-        const session = sessionById(id);
-        // Unavailable attention does not establish that a request was answered.
-        return !session || ['idle', 'working', 'inactive', 'unread'].includes(session.attention);
-      };
-      if (ids.length && ids.every(resolved)) notification.close();
+      const id = notification.data?.session_id;
+      const session = id && sessionById(id);
+      // Unavailable attention does not establish that a request was answered.
+      if (id && (!session || ['idle', 'working', 'inactive', 'unread'].includes(session.attention))) notification.close();
     }
   } catch (error) { console.warn('Could not refresh shown notifications', error); }
 }
