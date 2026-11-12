@@ -8,15 +8,18 @@ The daemon's largest heap owner is the decoded live transcript windows: about 44
 
 ## Progress
 
-- [ ] M0: audit every reader of the opaque candidates and measure a prototype on real windows (memory and CPU of the hot paths).
-- [ ] M1: introduce the opaque type for `TranscriptBody::Tool.call`, convert readers through accessors and cached metadata, no behavior change.
-- [ ] M2: extend to other large `Value` payloads only if M0 measurement justifies it (Agent/Thought chunks, User content, Plan).
-- [ ] M3 (separate decision): zstd with a trained dictionary inside the same type.
-- [ ] Review, push, install, heap profile.
+- [x] M0: audit every reader of the opaque candidates and measure a prototype on real windows (memory and CPU of the hot paths).
+- [x] M1: introduce the opaque type for `TranscriptBody::Tool.call`, convert readers through accessors and cached metadata, no behavior change (b51237b39).
+- [x] M2: not needed. Agent and Thought chunks and User content total about 10 MiB in the measured windows (see Surprises).
+- [ ] M3: one compressed in-memory text type, applied to the tool-call JSON, terminal output text and the presentation source (approved by the user 2026-11-12, "yes to zstd"; scope and dictionary decisions below).
+- [x] Review, push, install, heap profile for M1 (decoded windows 439 → 206 MB with the halved tail; 184 MB at the next profile).
+- [ ] Review, push, install, heap profile for M3.
 
 ## Surprises & Discoveries
 
-(none yet)
+- After M1, the 184 MiB of decoded windows (heap profile of 891d942a9 at 15 minutes) split as 54.6 MiB tool-call JSON text, 5 MiB cached tool metadata, and about 121 MiB allocated while serde buffers the internally tagged body. Those buffered strings are moved into the final fields, so they are retained. Their nesting matches `terminal_outputs[].output` (55.8 MiB), one-level object strings such as `presentation` and `record.output` (17.5 MiB), and `System.text` (4.5 MiB). This attribution is inferred from nesting, not from type names.
+- Bytes in the store for the latest 2,000 items of 60 live sessions: `tool.call` 49.0 MiB, `tool.presentation` 19.9 MiB, `tool.terminal_outputs[].output` 13.9 MiB, Agent chunks 6.8 MiB, System 6.6 MiB, Message events 3.7 MiB, Thought chunks 2.8 MiB, User content 0.3 MiB. `presentation.source` holds whole command texts (median presentation 317 bytes, p90 1,384, max 12,027 in one session); it is the only copy once retention trims a finished call's raw input.
+- zstd level 3 on tool-call JSON (scripts and results in `/mnt/optane/tmp/zstd-m3/`): no dictionary 2.3x; a 7 KiB raw-content dictionary from the public ACP fixtures 2.5x; a 110 KiB dictionary trained on the user's own older items 3.8x (training takes 0.2 s on 6 MiB of samples). Terminal output compresses 2.5x with or without a dictionary. Per item: compression about 5–7 µs, decompression about 2 µs.
 
 ## Decision Log
 
@@ -35,6 +38,13 @@ The daemon's largest heap owner is the decoded live transcript windows: about 44
   Date/Author: 2026-11-12, parent agent.
 - Decision: compression is a separate milestone and a separate decision after M1 is measured live.
   Rationale: compression adds per-access decompression and a dictionary lifecycle (training, versioning, embedding); measure the raw-text win first.
+- Decision (M3 scope): one immutable text type in `mj-core` holds either the plain text or its zstd frame, whichever is smaller. It replaces the JSON text inside `OpaqueToolCall`, `TerminalOutputRecord::output` and `ToolCallPresentation::source`. Store rows, relay and wire messages, and goldens stay byte-identical: the strings serialize as strings and the call as raw JSON.
+  Rationale: these three fields are most of the decoded windows (Surprises); one type keeps one interpretation of compressed text.
+  Date/Author: 2026-11-12, parent agent after the user approved zstd.
+- Decision (M3 dictionary): no dictionary for now. A dictionary trained on transcripts must never be compiled into the published binary, because it would contain text from private sessions. A dictionary from public fixtures gains almost nothing (2.5x against 2.3x). Only a dictionary trained by each daemon on its own store reaches 3.8x, about 10 MiB more at the measured load, and it needs a startup training step that must finish before windows load. The representation keeps a variant tag, so a per-daemon dictionary can be added inside the type later without touching its readers.
+  Date/Author: 2026-11-12, parent agent.
+- Decision (M3 representation): zstd level 3 with the content size in the frame and no checksum. Compression and decompression reuse thread-local contexts, because creating a level-3 context per item allocates far more than the item. The original length is readable without decompressing (terminal matching compares lengths first). Equality compares text. Byte equality of two compressed values is exact, because compression is deterministic within one build. A value that compression does not shrink stays plain.
+  Date/Author: 2026-11-12, parent agent.
 
 ## Outcomes & Retrospective
 
