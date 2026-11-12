@@ -4,8 +4,108 @@ use mj_core::attention::{AssessmentAttention, SessionAttention};
 use mj_core::review::{driver::TurnReviewPhase, verdict::ReviewVerdict};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[cfg(test)]
 pub(super) fn project(runtime: &RuntimeProjection) -> BTreeMap<String, SessionAttention> {
+    project_ids(
+        runtime,
+        runtime
+            .records
+            .keys()
+            .chain(runtime.native_agents.keys())
+            .cloned()
+            .collect(),
+    )
+}
+
+/// Only publication calls this rule. Raw owner views are compared before attention
+/// is overlaid, so the overlay cannot make an unchanged input appear dirty.
+pub(super) fn update(previous: &RuntimeProjection, next: &mut RuntimeProjection) {
+    let global = previous.metadata.config != next.metadata.config
+        || previous.metadata.reviews != next.metadata.reviews
+        || previous.metadata.lifecycles != next.metadata.lifecycles
+        || previous.subagents != next.subagents;
+    let mut ids: BTreeSet<String> = if global {
+        previous
+            .records
+            .keys()
+            .chain(next.records.keys())
+            .chain(previous.native_agents.keys())
+            .chain(next.native_agents.keys())
+            .cloned()
+            .collect()
+    } else {
+        previous
+            .records
+            .changes(&next.records)
+            .map(|(id, _)| id.clone())
+            .chain(
+                previous
+                    .sessions
+                    .changes(&next.sessions)
+                    .map(|(id, _)| id.clone()),
+            )
+            .chain(
+                previous
+                    .transcripts
+                    .changes(&next.transcripts)
+                    .map(|(id, _)| id.clone()),
+            )
+            .chain(
+                previous
+                    .native_agents
+                    .changes(&next.native_agents)
+                    .map(|(id, _)| id.clone()),
+            )
+            .collect()
+    };
+    if ids.is_empty() {
+        next.metadata.session_attention = previous.metadata.session_attention.clone();
+        return;
+    }
+    for id in ids.clone() {
+        for runtime in [previous, &*next] {
+            let mut current = runtime
+                .native_agents
+                .get(&id)
+                .map_or(id.as_str(), |native| native.agent.owner_session_id.as_str());
+            let mut seen = BTreeSet::new();
+            while seen.insert(current) {
+                ids.insert(current.to_owned());
+                let Some(parent) = runtime.subagents.get(current) else {
+                    break;
+                };
+                current = &parent.parent_session_id;
+            }
+        }
+    }
+    let states = project_ids(next, ids.clone());
+    next.metadata.session_attention = previous.metadata.session_attention.clone();
+    for id in ids {
+        if let Some(state) = states.get(&id) {
+            if next.metadata.session_attention.get(&id) != Some(state) {
+                next.metadata.session_attention.insert(id, *state);
+            }
+        } else {
+            next.metadata.session_attention.remove(&id);
+        }
+    }
+}
+
+fn project_ids(
+    runtime: &RuntimeProjection,
+    ids: BTreeSet<String>,
+) -> BTreeMap<String, SessionAttention> {
     use SessionAttention::*;
+    let mut reviews = BTreeMap::new();
+    for review in &runtime.metadata.reviews {
+        reviews.entry(review.session_id.as_str()).or_insert(review);
+    }
+    let lifecycles: BTreeSet<_> = runtime
+        .metadata
+        .lifecycles
+        .iter()
+        .map(|operation| operation.session_id.as_str())
+        .collect();
     let mut questions = BTreeSet::new();
     // Native children never receive semantic assessments. Only an actual
     // harness form reaches their owner and its managed ancestors.
@@ -28,18 +128,22 @@ pub(super) fn project(runtime: &RuntimeProjection) -> BTreeMap<String, SessionAt
             current = &parent.parent_session_id;
         }
     }
-    for (id, record) in &runtime.records {
-        if record.state.is_active()
-            && (runtime
-                .transcripts
-                .get(id)
-                .is_some_and(|tail| !tail.header.pending_elicitations.is_empty())
-                || runtime
-                    .metadata
-                    .reviews
-                    .iter()
-                    .find(|review| review.session_id == *id)
-                    .is_some_and(|review| !review.questions.is_empty()))
+    for id in runtime
+        .transcripts
+        .iter()
+        .filter(|(_, tail)| !tail.header.pending_elicitations.is_empty())
+        .map(|(id, _)| id)
+        .chain(
+            reviews
+                .values()
+                .filter(|review| !review.questions.is_empty())
+                .map(|review| &review.session_id),
+        )
+    {
+        if runtime
+            .records
+            .get(id)
+            .is_some_and(|record| record.state.is_active())
         {
             let mut current = id.as_str();
             let mut visited = BTreeSet::new();
@@ -59,23 +163,15 @@ pub(super) fn project(runtime: &RuntimeProjection) -> BTreeMap<String, SessionAt
             }
         }
     }
-    let mut attention: BTreeMap<_, _> = runtime
-        .records
+    let mut attention: BTreeMap<_, _> = ids
         .iter()
+        .filter_map(|id| runtime.records.get(id).map(|record| (id, record)))
         .map(|(id, record)| {
             let view = runtime.sessions.get(id);
             let live = view.and_then(|view| view.operational.as_deref());
-            let review = runtime
-                .metadata
-                .reviews
-                .iter()
-                .find(|review| review.session_id == *id);
-            let transitioning = record.state.transition_kind().is_some()
-                || runtime
-                    .metadata
-                    .lifecycles
-                    .iter()
-                    .any(|operation| operation.session_id == *id);
+            let review = reviews.get(id.as_str()).copied();
+            let transitioning =
+                record.state.transition_kind().is_some() || lifecycles.contains(id.as_str());
             let state = if record
                 .configuration_issue(&runtime.metadata.config)
                 .is_some()
@@ -150,7 +246,9 @@ pub(super) fn project(runtime: &RuntimeProjection) -> BTreeMap<String, SessionAt
                             .is_some_and(|outcome| assessment.applies_to(outcome))
                     }) {
                         Some(assessment)
-                            if assessment.attention == Some(AssessmentAttention::Important) =>
+                            if assessment.attention == Some(AssessmentAttention::Important)
+                                && record.viewed_through_event_ordinal
+                                    < assessment.completed_ordinal =>
                         {
                             Important
                         }
@@ -165,7 +263,10 @@ pub(super) fn project(runtime: &RuntimeProjection) -> BTreeMap<String, SessionAt
             (id.clone(), state)
         })
         .collect();
-    for (id, native) in &runtime.native_agents {
+    for (id, native) in ids
+        .iter()
+        .filter_map(|id| runtime.native_agents.get(id).map(|native| (id, native)))
+    {
         use mj_core::native_agent::NativeAgentState;
         let state = match native.agent.state {
             NativeAgentState::Failed => Failed,
@@ -219,6 +320,122 @@ mod tests {
         native.pending_input = false;
         assert_eq!(project(&runtime)[&id], SessionAttention::Idle);
         assert_ne!(project(&runtime)["parent"], SessionAttention::NeedsInput);
+    }
+
+    #[test]
+    fn incremental_publications_match_full_projection_through_mixed_changes() {
+        let mut published = RuntimeProjection::default();
+        let mut next = runtime();
+        next.records
+            .insert("unrelated".into(), next.records["parent"].clone());
+        next.subagents.insert(
+            "child".into(),
+            mj_core::subagent::SubagentMetadata {
+                kind: Default::default(),
+                child_session_id: "child".into(),
+                parent_session_id: "parent".into(),
+                task_name: String::new(),
+                profile_id: String::new(),
+                model: None,
+                effort: None,
+                working_directory: Default::default(),
+                request_key: String::new(),
+                created_at: String::new(),
+                noticed_turn: None,
+                reported_finish: None,
+                handback_tool: false,
+            },
+        );
+        for step in 0..144 {
+            match step % 12 {
+                0 => next.records.get_mut("child").unwrap().state = SessionState::Error,
+                1 => next.records.get_mut("child").unwrap().state = SessionState::Running,
+                2 => {
+                    let mut materialized = MaterializedSession::empty("child");
+                    materialized.pending_elicitations.push(
+                        mj_core::elicitation::ElicitationRequest {
+                            id: "question".into(),
+                            message: "Which?".into(),
+                            title: None,
+                            description: None,
+                            fields: vec![],
+                            tool_permission: None,
+                        },
+                    );
+                    next.transcripts.insert(
+                        "child".into(),
+                        mj_client::runtime_feed::SessionTail::of(
+                            &materialized,
+                            &ProjectionWindow::of(&materialized),
+                            10,
+                        ),
+                    );
+                }
+                3 => {
+                    next.transcripts.remove("child");
+                }
+                4 => {
+                    let mut config = (*next.metadata.config).clone();
+                    config.profiles.remove("codex");
+                    next.metadata.config = config.into();
+                }
+                5 => next.metadata.config = super::super::tests::runtime_test_config().into(),
+                6 => {
+                    next.sessions.get_mut("child").unwrap().connected = false;
+                }
+                7 => {
+                    next.sessions.get_mut("child").unwrap().connected = true;
+                }
+                8 => {
+                    next.records.remove("unrelated");
+                }
+                9 => {
+                    next.records
+                        .insert("unrelated".into(), next.records["parent"].clone());
+                }
+                10 => next
+                    .metadata
+                    .reviews
+                    .push(mj_client::review::RuntimeReviewView {
+                        child_session_id: None,
+                        session_id: "parent".into(),
+                        phase: TurnReviewPhase::Verdict(ReviewVerdict::Clean),
+                        roles: vec![],
+                        status: String::new(),
+                        verdict: None,
+                        questions: vec![],
+                    }),
+                _ => next.metadata.reviews.clear(),
+            }
+            update(&published, &mut next);
+            let expected = project(&next);
+            assert_eq!(
+                next.metadata
+                    .session_attention
+                    .iter()
+                    .collect::<BTreeMap<_, _>>(),
+                expected.iter().collect::<BTreeMap<_, _>>(),
+                "step {step}"
+            );
+            if step % 12 == 2 || step % 12 == 3 {
+                let changed: BTreeSet<_> = published
+                    .metadata
+                    .session_attention
+                    .changes(&next.metadata.session_attention)
+                    .map(|(id, _)| id.as_str())
+                    .collect();
+                assert_eq!(changed, BTreeSet::from(["child", "parent"]));
+                assert!(std::ptr::eq(
+                    published
+                        .metadata
+                        .session_attention
+                        .get("unrelated")
+                        .unwrap(),
+                    next.metadata.session_attention.get("unrelated").unwrap()
+                ));
+            }
+            published = next.clone();
+        }
     }
 
     fn runtime() -> RuntimeProjection {
@@ -329,6 +546,23 @@ mod tests {
         relay.assessment = Some(std::sync::Arc::new(assessment));
         publish(&mut runtime, &materialized, &relay);
         assert_eq!(project(&runtime)["parent"], SessionAttention::Important);
+        runtime
+            .records
+            .get_mut("parent")
+            .unwrap()
+            .viewed_through_event_ordinal = 9;
+        assert_eq!(project(&runtime)["parent"], SessionAttention::Important);
+        runtime
+            .records
+            .get_mut("parent")
+            .unwrap()
+            .viewed_through_event_ordinal = 10;
+        assert_eq!(project(&runtime)["parent"], SessionAttention::Idle);
+        let mut assessment = (*relay.assessment.as_ref().unwrap().as_ref()).clone();
+        assessment.action = Some(Action::AwaitInput);
+        relay.assessment = Some(std::sync::Arc::new(assessment));
+        publish(&mut runtime, &materialized, &relay);
+        assert_eq!(project(&runtime)["parent"], SessionAttention::NeedsInput);
     }
 
     // Hard-won: 912798901: configuration repair errors lost their failure state.

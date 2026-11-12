@@ -20,6 +20,7 @@ pub(super) struct RuntimeHistory {
     bytes: usize,
     native_owners: NativeOwners,
     full: RuntimeProjection,
+    attention_source: RuntimeProjection,
     /// Family-scoped views recently served, oldest first. A terminal's next
     /// poll finds its base here and scopes only the changes since.
     scoped: VecDeque<(u64, Arc<ScopedProjection>)>,
@@ -305,21 +306,41 @@ impl RuntimeState {
         } else {
             history.full.metadata.launch_recency.clone()
         };
-        // Every retained publication holds this map, so it is edited from the
-        // previous one: unchanged entries keep sharing their tree nodes.
-        let attention = super::attention::project(&full);
-        let mut published = history.full.metadata.session_attention.clone();
-        published.retain(|id, _| attention.contains_key(id));
-        for (id, attention) in attention {
-            if let Some(view) = full.sessions.get_mut(&id) {
-                view.attention = attention;
-            }
-            if published.get(&id) != Some(&attention) {
-                published.insert(id, attention);
+        let mut source = full.clone();
+        super::attention::update(&history.attention_source, &mut full);
+        // Preserve decorated rows as well as the attention tree across polls.
+        let mut sessions = history.full.sessions.clone();
+        for (id, view) in history.attention_source.sessions.changes(&source.sessions) {
+            if let Some(view) = view {
+                let mut view = view.clone();
+                view.attention = full
+                    .metadata
+                    .session_attention
+                    .get(id)
+                    .copied()
+                    .unwrap_or_default();
+                sessions.insert(id.clone(), view);
+            } else {
+                sessions.remove(id);
             }
         }
-        full.metadata.session_attention = published;
+        for (id, state) in history
+            .full
+            .metadata
+            .session_attention
+            .changes(&full.metadata.session_attention)
+        {
+            if let Some(view) = sessions.get(id) {
+                let state = state.copied().unwrap_or_default();
+                if view.attention != state {
+                    sessions.get_mut(id).expect("existing view").attention = state;
+                }
+            }
+        }
+        full.sessions = sessions;
         history.publish(full.clone())?;
+        source.metadata.session_attention = full.metadata.session_attention.clone();
+        history.attention_source = source;
         history.native_owners = native_owners;
         history.full = full;
         Ok(history.cursor())

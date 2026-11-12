@@ -14,6 +14,81 @@
 # The script runs inside a script block so `iex` leaves no variables behind,
 # and it reports failures by throwing: `exit` would close the caller's shell.
 
+param([switch] $FunctionsOnly)
+
+function Get-MjInstallDirectory {
+    $default = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Programs\Mjolnir\bin'
+    if ($env:MJOLNIR_INSTALL_DIR) { [IO.Path]::GetFullPath($env:MJOLNIR_INSTALL_DIR) }
+    else { [IO.Path]::GetFullPath($default) }
+}
+
+function Install-MjBinaries($binaries, [string] $installDir) {
+    $ReplacedPrefix = '.mj-replaced-'
+    $controller = $binaries | Where-Object { $_.Name -eq 'mj.exe' }
+        New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+        # Earlier upgrades leave replaced binaries behind while something still
+        # runs them, and Windows refuses to delete those until they exit. An
+        # interrupted run can also leave a staged copy.
+        Get-ChildItem -LiteralPath $installDir -Force |
+            Where-Object { $_.Name.StartsWith($ReplacedPrefix) -or $_.Name.StartsWith('.mj-install-') } |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+
+        # Windows refuses to overwrite a running executable but lets it be
+        # renamed, so each installed file moves aside before its replacement
+        # moves in. Staging in the install directory keeps both renames on one
+        # volume. The controller goes last, once every companion is in place.
+        $ordered = @($binaries | Where-Object { $_.Name -ne 'mj.exe' }) + @($controller)
+        foreach ($binary in $ordered) {
+            $nonce = [Guid]::NewGuid().ToString('N')
+            $destination = Join-Path $installDir $binary.Name
+            $staged = Join-Path $installDir ".mj-install-$($binary.Name)-$nonce"
+            Copy-Item -LiteralPath $binary.FullName -Destination $staged
+            if (Test-Path -LiteralPath $destination) {
+                $aside = Join-Path $installDir "$ReplacedPrefix$($binary.Name)-$nonce"
+                Move-Item -LiteralPath $destination -Destination $aside
+                try {
+                    Move-Item -LiteralPath $staged -Destination $destination
+                } catch {
+                    Move-Item -LiteralPath $aside -Destination $destination
+                    Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
+                    throw
+                }
+                Remove-Item -LiteralPath $aside -Force -ErrorAction SilentlyContinue
+            } else {
+                Move-Item -LiteralPath $staged -Destination $destination
+            }
+        }
+
+}
+
+function Update-MjInstallPath([string] $installDir) {
+    if ($env:MJOLNIR_NO_MODIFY_PATH) {
+        return
+    }
+    $environment = Get-Item -Path 'HKCU:\Environment'
+    # Keep entries such as %USERPROFILE%\bin unexpanded when writing Path back.
+    $userPath = $environment.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+    $entries = @($userPath -split ';' | Where-Object { $_ })
+    $present = $entries | Where-Object {
+        [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\') -ieq $installDir.TrimEnd('\')
+    }
+    if (-not $present) {
+        $kind = if ($userPath -match '%') { 'ExpandString' } else { 'String' }
+        New-ItemProperty -Path 'HKCU:\Environment' -Name 'Path' -Value (($entries + $installDir) -join ';') `
+            -PropertyType $kind -Force | Out-Null
+        # Setting any user variable through .NET broadcasts the environment
+        # change, so terminals opened from now on see the new Path.
+        [Environment]::SetEnvironmentVariable('MJOLNIR_INSTALLER_REFRESH', '1', 'User')
+        [Environment]::SetEnvironmentVariable('MJOLNIR_INSTALLER_REFRESH', $null, 'User')
+        $env:Path = "$env:Path;$installDir"
+        Write-Host "added $installDir to your user Path; open a new terminal, then run mj"
+    } else {
+        Write-Host 'run mj to start'
+    }
+}
+
+if ($FunctionsOnly) { return }
+
 & {
     Set-StrictMode -Version 3.0
     $ErrorActionPreference = 'Stop'
@@ -41,8 +116,7 @@
     $owner = Get-Setting 'MJOLNIR_GITHUB_OWNER' 'BrokkAi'
     $api = (Get-Setting 'MJOLNIR_GITHUB_API' 'https://api.github.com').TrimEnd('/')
     $version = Get-Setting 'MJOLNIR_VERSION' ''
-    $defaultDir = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Programs\Mjolnir\bin'
-    $installDir = [IO.Path]::GetFullPath((Get-Setting 'MJOLNIR_INSTALL_DIR' $defaultDir))
+    $installDir = Get-MjInstallDirectory
 
     $headers = @{ 'User-Agent' = "mjolnir-install-ps1/$ScriptVersion"; 'Accept' = 'application/vnd.github+json' }
     $token = Get-Setting 'GITHUB_TOKEN' ''
@@ -111,65 +185,11 @@
             throw "the downloaded mj.exe failed to run (exit code $LASTEXITCODE)"
         }
 
-        New-Item -ItemType Directory -Path $installDir -Force | Out-Null
-        # Earlier upgrades leave replaced binaries behind while something still
-        # runs them, and Windows refuses to delete those until they exit. An
-        # interrupted run can also leave a staged copy.
-        Get-ChildItem -LiteralPath $installDir -Force |
-            Where-Object { $_.Name.StartsWith($ReplacedPrefix) -or $_.Name.StartsWith('.mj-install-') } |
-            Remove-Item -Force -ErrorAction SilentlyContinue
-
-        # Windows refuses to overwrite a running executable but lets it be
-        # renamed, so each installed file moves aside before its replacement
-        # moves in. Staging in the install directory keeps both renames on one
-        # volume. The controller goes last, once every companion is in place.
-        $ordered = @($binaries | Where-Object { $_.Name -ne 'mj.exe' }) + @($controller)
-        foreach ($binary in $ordered) {
-            $nonce = [Guid]::NewGuid().ToString('N')
-            $destination = Join-Path $installDir $binary.Name
-            $staged = Join-Path $installDir ".mj-install-$($binary.Name)-$nonce"
-            Copy-Item -LiteralPath $binary.FullName -Destination $staged
-            if (Test-Path -LiteralPath $destination) {
-                $aside = Join-Path $installDir "$ReplacedPrefix$($binary.Name)-$nonce"
-                Move-Item -LiteralPath $destination -Destination $aside
-                try {
-                    Move-Item -LiteralPath $staged -Destination $destination
-                } catch {
-                    Move-Item -LiteralPath $aside -Destination $destination
-                    Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
-                    throw
-                }
-                Remove-Item -LiteralPath $aside -Force -ErrorAction SilentlyContinue
-            } else {
-                Move-Item -LiteralPath $staged -Destination $destination
-            }
-        }
+        Install-MjBinaries $binaries $installDir
         Write-Step "installed $reported to $installDir"
     } finally {
         Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
     }
 
-    if (Get-Setting 'MJOLNIR_NO_MODIFY_PATH' '') {
-        return
-    }
-    $environment = Get-Item -Path 'HKCU:\Environment'
-    # Keep entries such as %USERPROFILE%\bin unexpanded when writing Path back.
-    $userPath = $environment.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
-    $entries = @($userPath -split ';' | Where-Object { $_ })
-    $present = $entries | Where-Object {
-        [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\') -ieq $installDir.TrimEnd('\')
-    }
-    if (-not $present) {
-        $kind = if ($userPath -match '%') { 'ExpandString' } else { 'String' }
-        New-ItemProperty -Path 'HKCU:\Environment' -Name 'Path' -Value (($entries + $installDir) -join ';') `
-            -PropertyType $kind -Force | Out-Null
-        # Setting any user variable through .NET broadcasts the environment
-        # change, so terminals opened from now on see the new Path.
-        [Environment]::SetEnvironmentVariable('MJOLNIR_INSTALLER_REFRESH', '1', 'User')
-        [Environment]::SetEnvironmentVariable('MJOLNIR_INSTALLER_REFRESH', $null, 'User')
-        $env:Path = "$env:Path;$installDir"
-        Write-Step "added $installDir to your user Path; open a new terminal, then run mj"
-    } else {
-        Write-Step 'run mj to start'
-    }
+    Update-MjInstallPath $installDir
 }

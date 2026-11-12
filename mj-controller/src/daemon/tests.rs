@@ -12471,3 +12471,351 @@ async fn superseded_machine_completion_closes_connection_and_reaps_ssh() {
         "superseded completion left its SSH proxy alive"
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn daemon_upload_exchange() {
+    const CHILD: &str = "MJ_TEST_UPLOAD_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), "daemon_upload_exchange"),
+        )
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "upload-exchange")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::start_database_writer().unwrap();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let metadata = DaemonMetadata {
+        protocol_version: PROTOCOL_VERSION,
+        pid: 1,
+        address: listener.local_addr().unwrap(),
+        token: "upload-secret".into(),
+        started_at: "now".into(),
+        build_version: "test".into(),
+        instance_id: "upload-exchange".into(),
+        placement: DaemonPlacement::Host,
+    };
+    let server_metadata = metadata.clone();
+    let server = tokio::spawn(async move {
+        for (index, authenticated) in [true, false, true, false, true].into_iter().enumerate() {
+            if index == 4 {
+                assert!(crate::upgrade::gate().try_close());
+            }
+            let (stream, _) = listener.accept().await.unwrap();
+            let result = serve_client(
+                stream,
+                server_metadata.clone(),
+                test_runtime_state_loading_the_store(),
+                CancellationToken::new(),
+            )
+            .await;
+            assert_eq!(result.is_ok(), authenticated);
+            assert_eq!(
+                std::fs::read_dir(mj_core::config::data_dir().join("uploads"))
+                    .unwrap()
+                    .count(),
+                0
+            );
+        }
+    });
+    let mut partial = TcpStream::connect(metadata.address).await.unwrap();
+    write_frame(
+        &mut partial,
+        &RequestEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: 1,
+            token: metadata.token.clone(),
+            action: DaemonAction::UploadChunk {
+                bytes: vec![0; 96 * 1024],
+                sha256: None,
+            },
+        },
+    )
+    .await
+    .unwrap();
+    drop(partial);
+    let mut unauthorized = TcpStream::connect(metadata.address).await.unwrap();
+    write_frame(
+        &mut unauthorized,
+        &RequestEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: 1,
+            token: "wrong-token".into(),
+            action: DaemonAction::UploadChunk {
+                bytes: vec![0; 96 * 1024],
+                sha256: None,
+            },
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        read_frame::<ResponseEnvelope>(&mut unauthorized)
+            .await
+            .is_err()
+    );
+    assert!(
+        !mj_core::attachment::AttachmentStore::controller("upload-session")
+            .unwrap()
+            .root()
+            .exists()
+    );
+    // Exercise several transport fragments and the pipe-buffer boundary.
+    let mut bytes = vec![37; 192 * 1024];
+    bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+    let reference =
+        mj_core::attachment::AttachmentRef::new(&bytes, "image/png".into(), 256, 256).unwrap();
+    let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
+    let mut output = String::from("interrupted upload: no blob remains\n");
+    for label in ["install 196608 bytes", "repeat content-addressed install"] {
+        let blob = client.upload(&mut bytes.as_slice()).await.unwrap();
+        let reply = client
+            .request(DaemonAction::InstallAttachment {
+                session_id: "upload-session".into(),
+                reference: reference.clone(),
+                blob,
+            })
+            .await
+            .unwrap();
+        output.push_str(&format!(
+            "{label}: {}\n",
+            serde_json::to_string(&reply).unwrap()
+        ));
+    }
+    assert_eq!(
+        mj_core::attachment::AttachmentStore::controller("upload-session")
+            .unwrap()
+            .read(&reference)
+            .unwrap(),
+        bytes
+    );
+    let mut corrupt = bytes;
+    corrupt[100] ^= 1;
+    let blob = client.upload(&mut corrupt.as_slice()).await.unwrap();
+    let error = client
+        .request(DaemonAction::InstallAttachment {
+            session_id: "upload-session".into(),
+            reference,
+            blob,
+        })
+        .await
+        .unwrap_err();
+    output.push_str(&format!("corrupt payload: {error}\n"));
+    let error = client
+        .request(DaemonAction::ImportSession {
+            blob: "another-connections-blob".into(),
+            session: Box::new(runtime_test_session(
+                "import-session",
+                "default",
+                SessionState::Stopped,
+            )),
+            bundle: None,
+        })
+        .await
+        .unwrap_err();
+    output.push_str(&format!("import unknown blob: {error}\n"));
+    let staging = tempfile::tempdir().unwrap();
+    let archive_path = staging.path().join("import.zip");
+    let mut session = runtime_test_session("import-session", "default", SessionState::Stopped);
+    let verified = mj_checkpoint::archive::write_archive_atomic(
+        &archive_path,
+        &mj_checkpoint::archive::ArchiveInput {
+            session: mj_core::archive::SessionManifest {
+                id: session.id.clone(),
+                title: session.title.clone(),
+                harness_kind: session.harness_kind,
+                profile_id: session.last_profile.clone(),
+                native_session_id: "native-import".into(),
+                created_at: session.created_at.clone(),
+                checkpointed_at: session.created_at.clone(),
+                hel_version: "test".into(),
+                relay_version: "test".into(),
+                adapter_version: "test".into(),
+            },
+            target: mj_core::archive::TargetManifest {
+                template_id: "local".into(),
+                target_kind: "import".into(),
+                details: Default::default(),
+            },
+            bundle: mj_core::archive::BundleManifest {
+                id: session.bundle_id.clone(),
+                primary_repository: "repo".into(),
+            },
+            canonical_session: empty_archive_snapshot(),
+            native_artifacts: Vec::new(),
+            repositories: Vec::new(),
+        },
+    )
+    .unwrap();
+    session.checkpoint = Some(Box::new(mj_core::state::CheckpointMetadata {
+        archive_path: archive_path.clone(),
+        sha256: verified.archive_sha256,
+        created_at: session.created_at.clone(),
+        event_frontier: 0,
+    }));
+    let blob = client
+        .upload(&mut tokio::fs::File::open(&archive_path).await.unwrap())
+        .await
+        .unwrap();
+    let reply = client
+        .request(DaemonAction::ImportSession {
+            session: Box::new(session),
+            bundle: None,
+            blob,
+        })
+        .await
+        .unwrap();
+    output.push_str(&format!(
+        "import verified archive: {}\n",
+        serde_json::to_string(&reply).unwrap()
+    ));
+    assert!(
+        mj_core::config::sessions_dir()
+            .join("import-session.hel.zip")
+            .is_file()
+    );
+    let registered = client
+        .session_record("import-session".into())
+        .await
+        .unwrap()
+        .unwrap();
+    let reply = client
+        .request(DaemonAction::TranscriptionAvailable {
+            preferred_profile: "missing".into(),
+        })
+        .await
+        .unwrap();
+    output.push_str(&format!(
+        "transcription availability: {}\n",
+        serde_json::to_string(&reply).unwrap()
+    ));
+    let audio_blob = client
+        .upload(&mut vec![0; 196608].as_slice())
+        .await
+        .unwrap();
+    let error = client
+        .request(DaemonAction::TranscribeAudio {
+            preferred_profile: "missing".into(),
+            blob: audio_blob.clone(),
+        })
+        .await
+        .unwrap_err();
+    output.push_str(&format!("transcription without credential: {error}\n"));
+    let error = client
+        .request(DaemonAction::TranscribeAudio {
+            preferred_profile: "missing".into(),
+            blob: audio_blob,
+        })
+        .await
+        .unwrap_err();
+    output.push_str(&format!("transcription blob after refusal: {error}\n"));
+    let reply = client.request(DaemonAction::Ping).await.unwrap();
+    output.push_str(&format!(
+        "connection after refusal: {}\n",
+        serde_json::to_string(&reply).unwrap()
+    ));
+    client
+        .upload(&mut b"unconsumed blob".as_slice())
+        .await
+        .unwrap();
+    drop(client);
+    let mut corrupt_digest = TcpStream::connect(metadata.address).await.unwrap();
+    write_frame(
+        &mut corrupt_digest,
+        &RequestEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: 1,
+            token: metadata.token.clone(),
+            action: DaemonAction::UploadChunk {
+                bytes: vec![1; 96 * 1024],
+                sha256: Some("wrong".into()),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        read_frame::<ResponseEnvelope>(&mut corrupt_digest)
+            .await
+            .is_err()
+    );
+    // Inspect raw replies: DaemonClient intentionally reconnects after UpgradePending.
+    async fn exchange(
+        stream: &mut TcpStream,
+        metadata: &DaemonMetadata,
+        action: DaemonAction,
+    ) -> DaemonReply {
+        write_frame(
+            stream,
+            &RequestEnvelope {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: 1,
+                token: metadata.token.clone(),
+                action,
+            },
+        )
+        .await
+        .unwrap();
+        read_frame::<ResponseEnvelope>(stream)
+            .await
+            .unwrap()
+            .result
+            .unwrap()
+    }
+    // Hard-won: blob storage admission prevented management connections during handoff.
+    let mut management = TcpStream::connect(metadata.address).await.unwrap();
+    assert!(matches!(
+        exchange(&mut management, &metadata, DaemonAction::Ping).await,
+        DaemonReply::Pong
+    ));
+    use sha2::Digest as _;
+    let bytes = std::fs::read(&archive_path).unwrap();
+    let digest = mj_core::hex::lower_hex(sha2::Sha256::digest(&bytes));
+    let DaemonReply::BlobUploaded(blob) = exchange(
+        &mut management,
+        &metadata,
+        DaemonAction::UploadChunk {
+            bytes,
+            sha256: Some(digest),
+        },
+    )
+    .await
+    else {
+        panic!("expected blob");
+    };
+    // Hard-won: #1514: archive preparation held daemon handoff admission.
+    let reply = exchange(
+        &mut management,
+        &metadata,
+        DaemonAction::ImportSession {
+            session: Box::new(registered),
+            bundle: None,
+            blob,
+        },
+    )
+    .await;
+    output.push_str(&format!(
+        "import during handoff: {}\n",
+        serde_json::to_string(&reply).unwrap()
+    ));
+    let remaining = std::fs::read_dir(mj_core::config::sessions_dir())
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .filter(|entry| entry.file_type().unwrap().is_file())
+        .map(|entry| entry.file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        remaining,
+        vec![std::ffi::OsString::from("import-session.hel.zip")]
+    );
+    assert_eq!(
+        output,
+        include_str!("../../tests/golden/daemon-upload-exchange.txt")
+    );
+    drop(management);
+    server.await.unwrap();
+}

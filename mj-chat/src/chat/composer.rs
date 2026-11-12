@@ -31,6 +31,10 @@ pub(super) enum ComposerIoUpdate {
         result: Result<mj_core::storage::PromptHistoryPage, String>,
     },
     AttachmentFinished(AttachmentResult),
+    ReceiptPrepared {
+        command_id: String,
+        result: Result<PromptPayload, String>,
+    },
     Remote(remote::ChatRemoteResult),
 }
 
@@ -83,9 +87,13 @@ pub(super) struct ComposerRuntime {
     pub(super) tx: UnboundedSender<ComposerIoUpdate>,
     pub(super) rx: UnboundedReceiver<ComposerIoUpdate>,
     pub(super) paste_in_flight: bool,
+    pub(super) receipt_preparations: BTreeMap<String, RemoteResultForwarder>,
+    pub(super) prepared_receipt_retries: VecDeque<String>,
+    pub(super) legacy_draft_images: BTreeMap<u64, ClipboardImage>,
     pub(super) attachment_queue: VecDeque<(u64, AttachmentSource, AttachmentFallback)>,
     pub(super) attachment_tasks_in_flight: usize,
     pub(super) next_attachment_sequence: u64,
+    attachment_cancellations: BTreeMap<u64, tokio::sync::oneshot::Sender<()>>,
     session_id: Option<String>,
     pub(super) accepting_staged: bool,
     pub(super) submit_when_ready: Option<DeferredSubmission>,
@@ -101,9 +109,13 @@ impl Default for ComposerRuntime {
             tx,
             rx,
             paste_in_flight: false,
+            receipt_preparations: BTreeMap::new(),
+            prepared_receipt_retries: VecDeque::new(),
+            legacy_draft_images: BTreeMap::new(),
             attachment_queue: VecDeque::new(),
             attachment_tasks_in_flight: 0,
             next_attachment_sequence: 0,
+            attachment_cancellations: BTreeMap::new(),
             session_id: None,
             accepting_staged: false,
             submit_when_ready: None,
@@ -554,6 +566,9 @@ impl ChatState {
                 self.composer_runtime.accepting_staged = false;
                 self.composer_runtime.submit_when_ready = submit_when_ready;
             }
+            ComposerIoUpdate::ReceiptPrepared { command_id, result } => {
+                self.finish_receipt_preparation(&command_id, result);
+            }
             ComposerIoUpdate::AttachmentFinished(result) => {
                 self.apply_attachment_result(result);
                 self.pump_attachment_queue();
@@ -583,6 +598,37 @@ impl ChatState {
     }
 
     pub(crate) fn pump_attachment_queue(&mut self) {
+        // Older drafts and conversation history may carry inline bytes. Adopt
+        // them into the same marker-owned jobs before they can be submitted.
+        for image in &mut self.input_images {
+            if image.image.reference.is_none() && !image.image.is_placeholder() {
+                let sequence = self.composer_runtime.next_attachment_sequence;
+                self.composer_runtime.next_attachment_sequence = sequence.wrapping_add(1);
+                let source = std::mem::replace(&mut image.image, ClipboardImage::pending());
+                self.pending_attachment_markers
+                    .insert(sequence, image.number);
+                self.composer_runtime.attachment_queue.push_back((
+                    sequence,
+                    AttachmentSource::Clipboard(source),
+                    AttachmentFallback::FailedMarker,
+                ));
+                self.input_generation = self.input_generation.wrapping_add(1);
+            }
+        }
+        self.composer_runtime
+            .attachment_cancellations
+            .retain(|sequence, _| {
+                self.pending_attachment_markers
+                    .get(sequence)
+                    .is_some_and(|number| {
+                        self.input_images
+                            .iter()
+                            .any(|image| image.number == *number && image.image.is_pending())
+                    })
+            });
+        self.composer_runtime
+            .attachment_queue
+            .retain(|(sequence, _, _)| self.pending_attachment_markers.contains_key(sequence));
         while self.composer_runtime.attachment_tasks_in_flight < MAX_ATTACHMENT_TASKS {
             let Some(session_id) = self.composer_runtime.session_id.clone() else {
                 break;
@@ -594,19 +640,16 @@ impl ChatState {
             };
             self.composer_runtime.attachment_tasks_in_flight += 1;
             let updates = self.composer_runtime.tx.clone();
+            let (cancel, cancelled) = tokio::sync::oneshot::channel();
+            self.composer_runtime
+                .attachment_cancellations
+                .insert(sequence, cancel);
             tokio::spawn(async move {
-                let result = match tokio::task::spawn_blocking(move || match source {
-                    AttachmentSource::Clipboard(image) => {
-                        attachments::install_clipboard_image(&session_id, image)
-                    }
-                    AttachmentSource::Path(path) => path
-                        .resolve()
-                        .and_then(|path| attachments::install_path(&session_id, &path)),
-                })
-                .await
-                {
-                    Ok(result) => result.map_err(|error| format!("{error:#}")),
-                    Err(error) => Err(format!("attachment task failed: {error}")),
+                let upload_session = session_id;
+                let preparation = async move { prepare_attachment(&upload_session, source).await };
+                let result = tokio::select! {
+                    result = preparation => result,
+                    _ = cancelled => Err("attachment cancelled".to_owned()),
                 };
                 if let Err(error) =
                     updates.send(ComposerIoUpdate::AttachmentFinished(AttachmentResult {
@@ -626,6 +669,33 @@ impl ChatState {
             .composer_runtime
             .attachment_tasks_in_flight
             .saturating_sub(1);
+        self.composer_runtime
+            .attachment_cancellations
+            .remove(&result.sequence);
         self.finish_attachment(result.sequence, result.result, result.fallback);
     }
+}
+
+/// Shared codec and daemon-install path for composer markers and old receipts.
+pub(super) async fn prepare_attachment(
+    session_id: &str,
+    source: AttachmentSource,
+) -> Result<ClipboardImage, String> {
+    let blocking_session = session_id.to_owned();
+    let image = match tokio::task::spawn_blocking(move || match source {
+        AttachmentSource::Clipboard(image) => {
+            attachments::install_clipboard_image(&blocking_session, image)
+        }
+        AttachmentSource::Path(path) => path
+            .resolve()
+            .and_then(|path| attachments::install_path(&blocking_session, &path)),
+    })
+    .await
+    {
+        Ok(result) => result.map_err(|error| format!("{error:#}")),
+        Err(error) => Err(format!("attachment task failed: {error}")),
+    }?;
+    attachments::upload_prepared_image(session_id, image)
+        .await
+        .map_err(|error| format!("{error:#}"))
 }

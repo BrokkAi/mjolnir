@@ -31,7 +31,7 @@ pub(super) struct ServerState {
     pub(super) engine_checks: Arc<api::LocalEngineChecks>,
     /// Why a target has no installable worker binary, if it has none.
     pub(super) worker_source_check: Option<WorkerSourceCheck>,
-    /// Prompts held until their starting session can take them.
+    /// Prompts held until startup or lifecycle work lets their session take them.
     pub(super) held_prompts: Arc<api::HeldPrompts>,
     pub(super) upgrade_gate: Arc<crate::upgrade::Gate>,
 }

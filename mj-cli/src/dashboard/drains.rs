@@ -702,6 +702,24 @@ impl DashboardContext {
     pub(crate) fn drain_import_tasks(&mut self) {
         while let Some(update) = self.import_tasks.next_ready() {
             match update {
+                DashboardImportUpdate::Uploading { task_id } => {
+                    if self
+                        .active_import
+                        .as_ref()
+                        .is_some_and(|active| active.task_id == task_id)
+                    {
+                        self.dashboard.show_import_upload();
+                    }
+                }
+                DashboardImportUpdate::Registering { task_id } => {
+                    if self
+                        .active_import
+                        .as_ref()
+                        .is_some_and(|active| active.task_id == task_id)
+                    {
+                        self.dashboard.show_import_registration();
+                    }
+                }
                 DashboardImportUpdate::Progress {
                     task_id,
                     step,
@@ -737,6 +755,7 @@ impl DashboardContext {
                                 prompt.omitted_non_git_dirs,
                                 prompt.scratch_git_roots,
                                 prompt.managed_worktree,
+                                prompt.recorded_root,
                             );
                         }
                         Ok(DashboardImportTaskResult::Imported(imported)) => {

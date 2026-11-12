@@ -2222,6 +2222,33 @@ fn materialized_session_round_trip_preserves_typed_projection() {
         }));
     }
 
+    let large = "terminal output supports Unicode λ\n".repeat(4096);
+    for item in &mut materialized.transcript {
+        if let TranscriptBody::Tool {
+            call,
+            terminal_outputs,
+            presentation,
+            ..
+        } = &mut Arc::make_mut(item).body
+        {
+            call.edit(|value| value["rawInput"] = serde_json::json!({"command": large}));
+            terminal_outputs.push(mj_core::transcript::TerminalOutputRecord {
+                terminal_id: "large-terminal".into(),
+                output: large.clone().into(),
+                truncated: false,
+                exit_code: Some(0),
+                signal: None,
+            });
+            *presentation = Some(Box::new(mj_core::transcript::ToolCallPresentation {
+                summary: "large command".into(),
+                source: large.clone().into(),
+                source_kind: mj_core::transcript::ToolSummarySourceKind::RawInput,
+                tool_kind: agent_client_protocol::v1::schema::ToolKind::Execute,
+                summary_version: 0,
+            }));
+        }
+    }
+
     save_materialized_session_to(&database, &materialized).unwrap();
 
     let loaded = load_materialized_session_from(&database, "session-1")
@@ -2238,6 +2265,10 @@ fn materialized_session_round_trip_preserves_typed_projection() {
                 panic!("tool body changed during store round trip");
             };
             assert_eq!(serde_json::to_string(loaded_call).unwrap(), expected);
+            assert_eq!(
+                serde_json::to_string(&before.body).unwrap(),
+                serde_json::to_string(&after.body).unwrap()
+            );
             let wire = mj_client::runtime_feed::TranscriptChange::Items(
                 mj_client::runtime_feed::TranscriptItems {
                     header: None,
@@ -7079,7 +7110,7 @@ fn history_window_keeps_pending_turn_for_late_completion() {
             full.transcript[2] = tool.clone();
             let record = mj_core::state::TerminalOutputRecord {
                 terminal_id: "late-terminal".into(),
-                output: output.clone(),
+                output: output.clone().into(),
                 truncated: false,
                 exit_code: Some(0),
                 signal: None,
@@ -7180,7 +7211,7 @@ fn history_window_keeps_pending_turn_for_late_completion() {
                     panic!("owner remains tool")
                 };
                 assert_eq!(terminal_refs, &["late-terminal"]);
-                assert_eq!(terminal_outputs[0].output, output);
+                assert_eq!(terminal_outputs[0].output.text(), output);
                 assert!(
                     !projection
                         .transcript

@@ -1,5 +1,29 @@
 use super::*;
 
+/// Record possible native history only when the prompt is ready to be sent.
+async fn record_prompt_use(
+    opened: &Arc<Mutex<Option<OpenedSession>>>,
+    events: &mpsc::Sender<RuntimeEvent>,
+) -> Result<()> {
+    // Mark before sending: even a failed reply cannot prove the
+    // agent did not receive and persist this prompt.
+    let mut first_use = false;
+    if let Some(opened) = opened
+        .lock()
+        .expect("opened session lock poisoned")
+        .as_mut()
+    {
+        opened.resume_required.store(true, Ordering::Release);
+        first_use = !opened.native_session_used.swap(true, Ordering::AcqRel);
+    }
+    // Persist the same fact durably, once, so a restart after this
+    // prompt never treats the thread as an empty one to replace.
+    if first_use {
+        emit_runtime_event(events, RuntimeEvent::NativeSessionUsed).await?;
+    }
+    Ok(())
+}
+
 /// Marks the boundary between a provider's replay of old history and the live
 /// history of this connection. Loading suppresses conversation replay, while
 /// current session metadata always passes. Every open path marks this boundary
@@ -930,22 +954,6 @@ pub(super) async fn serve_session(
                 // as unanswered would report the compaction that was asked for
                 // as a failure (#970).
                 let mut asked_to_compact = mj_core::acp::prompt_requests_compaction(&prompt);
-                // Mark before sending: even a failed reply cannot prove the
-                // agent did not receive and persist this prompt.
-                let mut first_use = false;
-                if let Some(opened) = opened
-                    .lock()
-                    .expect("opened session lock poisoned")
-                    .as_mut()
-                {
-                    opened.resume_required.store(true, Ordering::Release);
-                    first_use = !opened.native_session_used.swap(true, Ordering::AcqRel);
-                }
-                // Persist the same fact durably, once, so a restart after this
-                // prompt never treats the thread as an empty one to replace.
-                if first_use {
-                    emit_runtime_event(events, RuntimeEvent::NativeSessionUsed).await?;
-                }
                 let prompt_text = prompt
                     .iter()
                     .filter_map(|block| match block {
@@ -967,6 +975,8 @@ pub(super) async fn serve_session(
                 // `session/prompt` reply, so there is no harness that is safe
                 // to exempt and nothing left to special-case.
                 let stall_policy = spec.stall_policy.unwrap_or_else(turn_stall_policy);
+                let login_fingerprint = spec.login_identity.snapshot().1;
+                record_prompt_use(&opened, events).await?;
                 let mut prompt: ActivePrompt = Box::pin(
                     connection
                         .send_request(PromptRequest::new(session_id.clone(), prompt))
@@ -1097,6 +1107,7 @@ pub(super) async fn serve_session(
                                             code: Some(PROMPT_UNANSWERED_STOP_REASON.to_owned()),
                                             http_status: None,
                                             reset_at: None,
+                                            login_fingerprint: None,
                                         });
                                         PROMPT_UNANSWERED_STOP_REASON.to_owned()
                                     } else {
@@ -1126,6 +1137,11 @@ pub(super) async fn serve_session(
                                     stop_reason
                                 }
                             };
+                            if let Some(diagnostic) = diagnostic.as_mut()
+                                && mj_core::credentials::turn_diagnostic_reports_auth_failure(diagnostic)
+                            {
+                                diagnostic.login_fingerprint = login_fingerprint.clone();
+                            }
                             emit_runtime_event(
                                 events,
                                 RuntimeEvent::PromptFinished {
@@ -1212,6 +1228,7 @@ pub(super) async fn serve_session(
                                         code: Some(TURN_STALLED_STOP_REASON.to_owned()),
                                         http_status: None,
                                         reset_at: None,
+                                        login_fingerprint: None,
                                     }),
                                 },
                             )

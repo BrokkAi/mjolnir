@@ -38,6 +38,8 @@ use commands::validate_identifier;
 pub use replay::{DeferredRelayAttach, RelayReplayPlan};
 pub use serving::serve_relay_json_lines;
 #[cfg(test)]
+mod authentication_tests;
+#[cfg(test)]
 mod capacity_tests;
 #[cfg(test)]
 mod snapshot_tests;
@@ -280,6 +282,10 @@ pub struct DurableRelay {
     turn_context: mj_transcript::turn_context::TurnContext,
     managed_subagent: bool,
     verdict_harness: Option<mj_core::config::HarnessKind>,
+    #[cfg_attr(not(unix), allow(dead_code))] // The worker control runtime is Unix-only.
+    pub(crate) authentication_login_path: Option<PathBuf>,
+    #[cfg_attr(not(unix), allow(dead_code))] // Read only by the Unix worker control runtime.
+    pub(crate) login_identity: crate::acp::ClaudeLoginIdentity,
     replied_verdict: verdict::RepliedVerdictState,
     /// Adapter-owned tasks, keyed by their owning session and task identity.
     air_tasks: BTreeMap<String, AirTaskEntry>,
@@ -608,6 +614,8 @@ impl DurableRelay {
             turn_context: Default::default(),
             managed_subagent: false,
             verdict_harness: None,
+            authentication_login_path: None,
+            login_identity: Default::default(),
             replied_verdict: Default::default(),
             air_tasks: BTreeMap::new(),
             claude_pending_stops: BTreeMap::new(),

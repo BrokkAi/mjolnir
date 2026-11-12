@@ -19,6 +19,17 @@ pub(super) async fn handle_action(
         | DaemonAction::ValidateSessionMounts { .. }) => {
             super::machine::execute(action, state, Arc::new(AtomicBool::new(false))).await
         }
+        DaemonAction::UploadChunk { .. } => bail!("upload fragment outside upload transport"),
+        DaemonAction::InstallAttachment { .. } | DaemonAction::TranscribeAudio { .. } => {
+            bail!("blob action outside connection transport")
+        }
+        DaemonAction::TranscriptionAvailable { preferred_profile } => {
+            let config = state.with_config(Clone::clone);
+            let available =
+                blocking(move || Ok(transcription_auth(&config, &preferred_profile).is_some()))
+                    .await?;
+            Ok(DaemonReply::TranscriptionAvailable(available))
+        }
         DaemonAction::RecordOperatorActivity => {
             state.record_operator_activity().await;
             Ok(DaemonReply::Done)
@@ -34,6 +45,9 @@ pub(super) async fn handle_action(
         DaemonAction::SetOperatorAway { away } => {
             state.set_operator_away(away).await?;
             Ok(DaemonReply::Done)
+        }
+        DaemonAction::ProveIdentity { .. } => {
+            unreachable!("identity proof is served before authentication")
         }
         DaemonAction::Ping => Ok(DaemonReply::Pong),
         // Each blocker carries its count and age, so the waiting client can say
@@ -75,9 +89,9 @@ pub(super) async fn handle_action(
             Ok(DaemonReply::FirstRunSetup(report))
         }
         DaemonAction::RunDoctor => {
-            let errors = blocking(|| {
-                // Daemon-owned work is bounded: one deadline per probe, as
-                // `mj doctor` and `mj setup` have.
+            // Not `blocking`: the doctor only reads, so it takes no upgrade
+            // admission, and a handoff abandons it instead of waiting for it.
+            let errors = tokio::task::spawn_blocking(|| {
                 let executor = crate::doctor::probe_executor();
                 let checks = crate::doctor::run_with_config_path(
                     &mj_core::config::config_path(),
@@ -85,9 +99,10 @@ pub(super) async fn handle_action(
                     crate::doctor::current_apple_platform(&executor),
                     crate::doctor::DoctorOptions { smoke: false },
                 );
-                Ok(crate::setup::actionable_errors(&checks))
+                crate::setup::actionable_errors(&checks)
             })
-            .await?;
+            .await
+            .context("daemon doctor task panicked")?;
             Ok(DaemonReply::DoctorErrors(errors))
         }
         DaemonAction::NewSessionRemoteRepairs {
@@ -352,28 +367,7 @@ pub(super) async fn handle_action(
             blocking(move || crate::database::save_workspace_layout(&workspace_id, layout)).await?;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::PersistImportedSession { session, bundle } => {
-            blocking(move || {
-                if let Some(imported) = bundle {
-                    let ImportedBundle { bundle_id, bundle } = imported;
-                    Config::update(|config| {
-                        if let Some(existing) = config.bundles.get(&bundle_id) {
-                            anyhow::ensure!(
-                                existing == &bundle,
-                                "bundle {bundle_id:?} changed during import; retry the import"
-                            );
-                        } else {
-                            config.bundles.insert(bundle_id.clone(), bundle);
-                        }
-                        Ok(())
-                    })?;
-                }
-                crate::import::persist_imported_session_locally(&session)
-            })
-            .await?;
-            refresh_runtime_controller(state).await;
-            Ok(DaemonReply::Done)
-        }
+        DaemonAction::ImportSession { .. } => bail!("blob action outside connection transport"),
         DaemonAction::SessionProjectSource { session_id } => {
             let controller = state.with_controller(|controller| crate::controller::Controller {
                 config: controller.config.clone(),
@@ -1106,7 +1100,9 @@ pub(super) fn upgrade_request_activity(
     }
     if matches!(
         action,
-        DaemonAction::RecordOperatorActivity
+        DaemonAction::TranscribeAudio { .. }
+            | DaemonAction::RecordOperatorActivity
+            | DaemonAction::ProveIdentity { .. }
             | DaemonAction::Ping
             | DaemonAction::Identity
             | DaemonAction::Configuration
@@ -1121,6 +1117,9 @@ pub(super) fn upgrade_request_activity(
             | DaemonAction::SubagentOptions { .. }
             | DaemonAction::WarmProfileCapabilities { .. }
             | DaemonAction::ProjectCatalog { .. }
+            | DaemonAction::ImportSession { .. }
+            // Read-only and repeatable; the client reports an interrupted run.
+            | DaemonAction::RunDoctor
     ) {
         Ok(None)
     } else {
@@ -1198,4 +1197,46 @@ mod missing_target_compat_tests {
         assert_eq!(stored.updated_at, session.updated_at);
         assert_eq!(stored.last_error, None);
     }
+}
+
+/// Credential selection lives on the machine owning the profiles.
+pub(super) fn transcription_auth(
+    config: &mj_core::config::Config,
+    preferred: &str,
+) -> Option<PathBuf> {
+    available_auth(auth_paths(config, preferred))
+}
+
+/// Find candidate Codex subscription auth files, preferring the session's
+/// current profile and then sorting all remaining profile IDs.
+fn auth_paths(config: &mj_core::config::Config, preferred: &str) -> Vec<PathBuf> {
+    let mut profiles = config
+        .profiles
+        .iter()
+        .filter(|(_, profile)| profile.kind == mj_core::config::HarnessKind::Codex)
+        .collect::<Vec<_>>();
+    profiles.sort_by_key(|(id, _)| (*id != preferred, *id));
+    profiles
+        .into_iter()
+        .map(|(_, profile)| profile.home.join(profile.kind.credential_file_name()))
+        .collect()
+}
+
+/// Return the first auth file containing complete ChatGPT-subscription OAuth
+/// tokens. API-key auth files are deliberately skipped.
+fn available_auth(paths: Vec<PathBuf>) -> Option<PathBuf> {
+    paths.into_iter().find(
+        |path| match anvil_client::codex_auth::read_auth_dot_json_at(path) {
+            Ok(Some(auth)) => auth.tokens.is_some_and(|tokens| {
+                !tokens.access_token.trim().is_empty()
+                    && !tokens.refresh_token.trim().is_empty()
+                    && !tokens.account_id.trim().is_empty()
+            }),
+            Ok(None) => false,
+            Err(error) => {
+                tracing::warn!(%error, "could not inspect Codex dictation credentials");
+                false
+            }
+        },
+    )
 }

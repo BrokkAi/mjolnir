@@ -770,6 +770,7 @@ mod tests {
                     code: Some("provider.auth_error".into()),
                     http_status: Some(403),
                     reset_at: None,
+                    login_fingerprint: None,
                 }),
                 command_id: format!("p{i}"),
                 accepted_ordinal: None,

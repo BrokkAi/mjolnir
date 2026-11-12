@@ -796,6 +796,7 @@ fn the_detach_chord_quits_without_mutating_any_dashboard_modal() {
         Vec::new(),
         Vec::new(),
         Default::default(),
+        "/work/repo".into(),
     );
 
     let mut confirm = dashboard_with_session(stopped_session());
@@ -2215,6 +2216,7 @@ fn a_failed_stop_is_a_failure_for_the_queue_as_well_as_the_row() {
     );
 }
 
+// Hard-won: #1517: missing daemon attention hid the unread sessions after a failure was viewed.
 #[test]
 fn viewing_one_failure_reveals_the_five_unread_sessions_without_relabeling_them() {
     let mut failed = running_session();
@@ -2230,17 +2232,25 @@ fn viewing_one_failure_reveals_the_five_unread_sessions_without_relabeling_them(
     }
     dashboard.set_state(state);
     for index in 0..5 {
-        let detail = dashboard
-            .session_details
-            .get_mut(&format!("done-{index}"))
-            .unwrap();
+        let id = format!("done-{index}");
+        let detail = dashboard.session_details.get_mut(&id).unwrap();
         detail.agent_message_latest_content_ordinals = vec![1];
         detail.unread_agent_messages = 1;
+        crate::test_support::serve_attention(
+            &mut dashboard,
+            &[&id],
+            mj_core::attention::SessionAttention::Idle,
+        );
     }
     crate::test_support::serve_attention(
         &mut dashboard,
         &["failed"],
         mj_core::attention::SessionAttention::Failed,
+    );
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &["done-0", "done-1", "done-2", "done-3", "done-4"],
+        mj_core::attention::SessionAttention::Idle,
     );
     dashboard.select_active_session("failed");
     assert_eq!(
@@ -3168,6 +3178,12 @@ fn dashboard_with_an_unread_reply_off_screen() -> DashboardState {
     );
     reply.execution = MaterializedExecutionState::Idle;
     dashboard.apply_materialized_session(&reply);
+    // Attention is a separate host publication; the transcript supplies unread state.
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &["beta"],
+        mj_core::attention::SessionAttention::Idle,
+    );
     dashboard
 }
 

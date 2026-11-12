@@ -24,7 +24,9 @@ test("EOT GLiDE sends bundled frozen questions and validates complete distributi
   assert.deepEqual(await response.json(), { answers });
 });
 test("EOT rejects incomplete provider distributions", async t => {
-  t.mock.method(globalThis, "fetch", async () => Response.json({ answers: { work: answers.work } }));
+  const { attention, ...legacy } = answers;
+  assert.ok(attention);
+  t.mock.method(globalThis, "fetch", async () => Response.json({ answers: legacy }));
   assert.equal((await proxy.fetch(request(), env)).status, 502);
 });
 test("EOT provider backpressure preserves status and Retry-After", async t => {

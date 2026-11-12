@@ -90,6 +90,20 @@ impl RepliedVerdictState {
     }
 }
 
+fn glide_attention(
+    glide: &Option<mj_core::activity::eot_glide::types::Probabilities>,
+    action: mj_core::assessment::Action,
+) -> Option<mj_core::attention::AssessmentAttention> {
+    (action != mj_core::assessment::Action::AwaitInput
+        && glide
+            .as_ref()
+            .and_then(|g| g.attention.as_ref())
+            .is_some_and(|a| {
+                a.probabilities.important >= mj_core::activity::eot_glide::IMPORTANT_ATTENTION
+            }))
+    .then_some(mj_core::attention::AssessmentAttention::Important)
+}
+
 impl DurableRelay {
     pub(crate) fn classifies_turns(&self) -> bool {
         !self.managed_subagent
@@ -375,10 +389,12 @@ impl DurableRelay {
         self.apply_assessment_result(ordinal, Some(verdict), None)
     }
 
+    #[cfg(any(unix, test))]
     pub(crate) fn glide_runtime(&self) -> (ActivityFacts, usize) {
         (self.activity_facts(), self.native_agent_count())
     }
 
+    #[cfg(any(unix, test))]
     pub(crate) fn apply_glide_assessment(
         &mut self,
         ordinal: u64,
@@ -387,6 +403,7 @@ impl DurableRelay {
         self.apply_assessment_result(ordinal, None, Some(glide))
     }
 
+    #[cfg(any(unix, test))]
     fn apply_assessment_result(
         &mut self,
         ordinal: u64,
@@ -456,6 +473,7 @@ impl DurableRelay {
         }
         a.verdict = verdict;
         a.glide = glide;
+        a.attention = glide_attention(&a.glide, action);
         a.action = Some(action);
         a.status = Status::Assessed;
         a.retry_at_ms = None;
@@ -660,10 +678,7 @@ mod tests {
         use crate::acp::verdict_client::{VerdictClient, VerdictSource};
         use crate::relay::test_support::{finish_prompt, prompt, submit_relay};
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-        let samples: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../mj-core/src/activity/eot_glide_fresh_sample.json"
-        ))
-        .unwrap();
+        let samples: serde_json::Value = crate::acp::verdict_client::glide_turn::test_samples();
         for sample in samples.as_array().unwrap() {
             let temp = tempfile::tempdir().unwrap();
             let mut relay = DurableRelay::open(temp.path(), "glide-replay", "test").unwrap();
@@ -731,11 +746,25 @@ mod tests {
                 Some(mj_core::assessment::Action::Continue)
             );
             assert!(assessment.glide.is_some());
+            assert_eq!(
+                assessment.attention,
+                (assessment.action != Some(mj_core::assessment::Action::AwaitInput))
+                    .then_some(mj_core::attention::AssessmentAttention::Important)
+            );
+            let mut legacy = serde_json::to_value(assessment.glide.as_ref().unwrap()).unwrap();
+            legacy.as_object_mut().unwrap().remove("attention");
+            let legacy: mj_core::activity::eot_glide::types::Probabilities =
+                serde_json::from_value(legacy).unwrap();
+            assert!(legacy.attention.is_none());
             drop(relay);
             let replay = DurableRelay::open(temp.path(), "glide-replay", "test").unwrap();
             assert_eq!(
                 replay.snapshot.assessment.as_ref().unwrap().action,
                 assessment.action
+            );
+            assert_eq!(
+                replay.snapshot.assessment.as_ref().unwrap().attention,
+                assessment.attention
             );
             assert_eq!(
                 replay.snapshot.assessment.as_ref().unwrap().glide,
@@ -753,10 +782,7 @@ mod tests {
     #[test]
     fn glide_late_background_inventory_refreshes_once_after_restart() {
         use crate::relay::test_support::{finish_prompt, prompt, submit_relay};
-        let samples: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../mj-core/src/activity/eot_glide_fresh_sample.json"
-        ))
-        .unwrap();
+        let samples: serde_json::Value = crate::acp::verdict_client::glide_turn::test_samples();
         let mut answer = samples
             .as_array()
             .unwrap()
@@ -824,10 +850,7 @@ mod tests {
     #[test]
     fn glide_wait_inventory_changes_reclassify_once() {
         use crate::relay::test_support::{finish_prompt, prompt, submit_relay};
-        let samples: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../mj-core/src/activity/eot_glide_fresh_sample.json"
-        ))
-        .unwrap();
+        let samples: serde_json::Value = crate::acp::verdict_client::glide_turn::test_samples();
         let finished = samples
             .as_array()
             .unwrap()
