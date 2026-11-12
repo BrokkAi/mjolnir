@@ -2,7 +2,9 @@
 use anyhow::{Context, Result, ensure};
 use mj_core::activity::question_locator;
 use mj_core::activity::verdict::{TurnEvidence, TurnVerdict, api_key, questions, request_fits};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 /// The Unix worker is the only production caller of the classifier client;
 /// these items stay compiled on Windows alongside the shared source type.
@@ -462,7 +464,7 @@ impl VerdictClient {
         generation: u64,
         evidence: &TurnEvidence,
     ) -> (VerdictAttempt, Result<TurnVerdict>) {
-        self.ask_logged_for(session, generation, evidence, false, questions())
+        self.ask_logged_for(session, generation, evidence, questions())
             .await
     }
 
@@ -471,9 +473,75 @@ impl VerdictClient {
         session: &str,
         generation: u64,
         evidence: &TurnEvidence,
-    ) -> (VerdictAttempt, Result<TurnVerdict>) {
-        self.ask_logged_for(session, generation, evidence, true, questions())
-            .await
+    ) -> (
+        VerdictAttempt,
+        Result<mj_core::assessment::HandbackProbabilities>,
+    ) {
+        let diagnostic = self.log.as_ref().map(|log| {
+            log.start(
+                session,
+                "activity",
+                "Does this handback leave assigned work unfinished?",
+                "Parent assignment and final report.",
+            )
+        });
+        let body = mj_core::jev::request_body(evidence, None);
+        if let Some(log) = &diagnostic {
+            log.update(
+                None,
+                serde_json::json!({"request":body,"contract":"handback-glide-v1",
+                "model":"fastino/GLiDE","handback":true,
+                "unfinished_threshold":mj_core::assessment::HANDBACK_UNFINISHED_PROBABILITY}),
+            );
+        }
+        let attempt = VerdictAttempt {
+            diagnostic,
+            decision: None,
+            uncertain: false,
+            id: NEXT_REQUEST.fetch_add(1, Ordering::Relaxed),
+            session: session.into(),
+            generation,
+            phase: evidence.phase,
+            started: std::time::Instant::now(),
+            finished: false,
+            dispatch: tracing::dispatcher::get_default(Clone::clone),
+        };
+        let result = async {
+            // Explicit endpoints support isolated proxy fixtures; no provider key leaves the worker.
+            let endpoint = match &self.source {
+                VerdictSource::Direct { endpoint, .. } if cfg!(test) => endpoint.clone(),
+                VerdictSource::Direct { .. } => {
+                    HOSTED_VERDICT_ENDPOINT.replace("/v7/turn-verdict", "/v1/handback-verdict")
+                }
+                VerdictSource::Hosted { endpoint } => {
+                    let mut url = reqwest::Url::parse(endpoint)?;
+                    url.set_path("/v1/handback-verdict");
+                    url.to_string()
+                }
+            };
+            let response = self.client.post(endpoint).json(&body).send().await?;
+            ensure!(
+                response.status().is_success(),
+                "GLiDE proxy HTTP {} (Retry-After: {:?})",
+                response.status(),
+                response.headers().get(reqwest::header::RETRY_AFTER)
+            );
+            let response = response.json::<serde_json::Value>().await?;
+            mj_core::assessment::HandbackProbabilities::parse(&response["probabilities"])
+        }
+        .await;
+        if let Some(log) = &attempt.diagnostic {
+            match &result {
+                Ok(probabilities) => {
+                    log.update(None, serde_json::json!({"probabilities":probabilities}))
+                }
+                Err(error) => log.update(
+                    Some("No usable GLiDE answer; deliver unchecked."),
+                    serde_json::json!({"error":format!("{error:#}")}),
+                ),
+            }
+        }
+        (attempt, result)
     }
 
     async fn ask_logged_for(
@@ -481,33 +549,24 @@ impl VerdictClient {
         session: &str,
         generation: u64,
         evidence: &TurnEvidence,
-        handback: bool,
         question_set: serde_json::Value,
     ) -> (VerdictAttempt, Result<TurnVerdict>) {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
         // Completed-turn diagnostics belong to the durable relay owner. A
         // request can finish after its turn was superseded or its action admitted.
         let diagnostic = self
             .log
             .as_ref()
-            .filter(|_| {
-                handback || evidence.phase == mj_core::activity::verdict::TurnPhase::Running
-            })
+            .filter(|_| evidence.phase == mj_core::activity::verdict::TurnPhase::Running)
             .map(|log| {
                 log.start(
                     session,
                     "activity",
-                    if handback {
-                        "Does this handback leave authorized work unfinished?"
-                    } else {
-                        "Does the running turn require user input?"
-                    },
+                    "Does the running turn require user input?",
                     "Current conversation and live runtime facts.",
                 )
             });
         if let Some(diagnostic) = &diagnostic {
-            diagnostic.update(None, serde_json::json!({"request":self.request_body(evidence, &question_set), "contract":"turn-verdict-v7", "questions":question_set, "handback":handback, "handback_failure_threshold":mj_core::assessment::HANDBACK_FAILURE_CONFIDENCE, "handback_work_probability_threshold":mj_core::assessment::HANDBACK_WORK_PROBABILITY, "model":"jev-latest", "confidence_threshold":mj_core::activity::verdict::ACT_CONFIDENCE, "no_input_threshold":mj_core::activity::verdict::NO_INPUT_CONFIDENCE, "required_input_probability":mj_core::assessment::REQUIRED_INPUT_PROBABILITY, "required_input_ratio":mj_core::assessment::REQUIRED_INPUT_RATIO, "finished_work_probability":mj_core::assessment::FINISHED_WORK_PROBABILITY, "stale_failure_probability":mj_core::activity::verdict::STALE_FAILURE_PROBABILITY, "stale_reply_probability":mj_core::activity::verdict::STALE_REPLY_PROBABILITY, "stale_finished_silence_s":mj_core::activity::verdict::STALE_FINISHED_SILENCE.as_secs(), "server_retry_threshold":mj_core::activity::verdict::SERVER_RETRY_CONFIDENCE, "generation":generation, "source":if matches!(self.source, VerdictSource::Direct { .. }) { "direct" } else { "hosted" }}));
+            diagnostic.update(None, serde_json::json!({"request":self.request_body(evidence, &question_set), "contract":"turn-verdict-v7", "questions":question_set, "model":"jev-latest", "confidence_threshold":mj_core::activity::verdict::ACT_CONFIDENCE, "no_input_threshold":mj_core::activity::verdict::NO_INPUT_CONFIDENCE, "required_input_probability":mj_core::assessment::REQUIRED_INPUT_PROBABILITY, "required_input_ratio":mj_core::assessment::REQUIRED_INPUT_RATIO, "finished_work_probability":mj_core::assessment::FINISHED_WORK_PROBABILITY, "stale_failure_probability":mj_core::activity::verdict::STALE_FAILURE_PROBABILITY, "stale_reply_probability":mj_core::activity::verdict::STALE_REPLY_PROBABILITY, "stale_finished_silence_s":mj_core::activity::verdict::STALE_FINISHED_SILENCE.as_secs(), "server_retry_threshold":mj_core::activity::verdict::SERVER_RETRY_CONFIDENCE, "generation":generation, "source":if matches!(self.source, VerdictSource::Direct { .. }) { "direct" } else { "hosted" }}));
         }
         let mut attempt = VerdictAttempt {
             diagnostic,

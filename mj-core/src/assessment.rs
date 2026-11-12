@@ -10,10 +10,7 @@ use crate::continuation::{ASSISTANT_BYTES, EvidenceMessage, USER_BYTES};
 
 pub const PROTOCOL: u32 = 25;
 pub const AUTOMATION_CONFIDENCE: f32 = 0.90;
-// Handback bounces cost one additional tool round, unlike autonomous continuation.
-// Keep their thresholds independent so corpus tuning cannot change automation.
-pub const HANDBACK_FAILURE_CONFIDENCE: f32 = 0.90;
-pub const HANDBACK_WORK_PROBABILITY: f64 = 0.90;
+pub const HANDBACK_UNFINISHED_PROBABILITY: f64 = 0.50;
 pub const REQUIRED_INPUT_PROBABILITY: f64 = 0.50;
 pub const REQUIRED_INPUT_RATIO: f64 = 2.5;
 pub const FINISHED_WORK_PROBABILITY: f64 = 0.80;
@@ -88,19 +85,66 @@ pub struct Verdict {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply: Option<Judgment<Reply>>,
 }
-/// Whether the report leaves authorized work unfinished, regardless of input needs.
-/// The caller separately requires complete assignment authorization evidence.
-pub fn handback_needs_more_work(verdict: &Verdict) -> bool {
-    verdict.failure.choice == Failure::None
-        && verdict.failure.confidence >= HANDBACK_FAILURE_CONFIDENCE
-        && verdict.work.choice == Work::AuthorizedUnfinished
-        && verdict
-            .work
-            .probabilities
-            .get("authorized_unfinished")
-            .is_some_and(|probability| {
-                *probability + PROBABILITY_EPSILON >= HANDBACK_WORK_PROBABILITY
-            })
+/// GLiDE handback distribution; all six categories are required at the boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HandbackProbabilities {
+    pub unfinished: f64,
+    pub needs_parent_input: f64,
+    pub blocked: f64,
+    pub permitted_stop: f64,
+    pub finished: f64,
+    pub unclear: f64,
+}
+impl HandbackProbabilities {
+    pub fn parse(value: &Value) -> Result<Self> {
+        let probabilities: Self = serde_json::from_value(value.clone())?;
+        let values = [
+            probabilities.unfinished,
+            probabilities.needs_parent_input,
+            probabilities.blocked,
+            probabilities.permitted_stop,
+            probabilities.finished,
+            probabilities.unclear,
+        ];
+        ensure!(
+            values
+                .iter()
+                .all(|p| p.is_finite() && (0.0..=1.0).contains(p)),
+            "invalid handback probability"
+        );
+        // GLiDE rounds individual scores; the working client allows 0.03 total drift.
+        ensure!(
+            (values.iter().sum::<f64>() - 1.0).abs() <= 0.03,
+            "invalid handback distribution"
+        );
+        Ok(probabilities)
+    }
+}
+pub fn handback_needs_more_work(probabilities: &HandbackProbabilities) -> bool {
+    probabilities.unfinished >= HANDBACK_UNFINISHED_PROBABILITY
+}
+
+#[cfg(test)]
+mod handback_tests {
+    use super::*;
+
+    #[test]
+    fn handback_glide_distribution_boundary_and_malformed_answers() {
+        let mut value = serde_json::json!({"unfinished":0.5,"needs_parent_input":0.1,
+            "blocked":0.1,"permitted_stop":0.1,"finished":0.1,"unclear":0.1});
+        assert!(handback_needs_more_work(
+            &HandbackProbabilities::parse(&value).unwrap()
+        ));
+        value["unfinished"] = serde_json::json!(0.499999);
+        assert!(!handback_needs_more_work(
+            &HandbackProbabilities::parse(&value).unwrap()
+        ));
+        value["unfinished"] = serde_json::json!(-0.1);
+        assert!(HandbackProbabilities::parse(&value).is_err());
+        value.as_object_mut().unwrap().remove("unfinished");
+        assert!(HandbackProbabilities::parse(&value).is_err());
+    }
 }
 
 impl Verdict {

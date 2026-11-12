@@ -8,6 +8,9 @@ An ordinary child that reports unfinished authorized work should receive one aut
 
 ## Progress
 
+- [x] (2026-11-11) Replaced handback v7 inference with hosted GLiDE; preserved assignment journal admission, serialization, identity and disabled behavior. Stable bundled question file retains c1 wording.
+- [x] (2026-11-11) Validated GLiDE contract: 15 worker handback tests, 2 core handback tests, workspace clippy, formatting, proxy TypeScript check and all proxy cases pass. Exact request bodies are in this task report directory. Working tree remains uncommitted; no deployment.
+
 - [x] (2026-11-11) Read AGENTS.md and PLANS.md; traced socket admission, daemon delivery, authorization filtering, and launch identity.
 - [x] (2026-11-11) Parent approved optional subagent_kind using the existing enum; absent kind delivers unchecked.
 - [x] (2026-11-11) Implemented explicit handback authorization context, durable per-assignment check admission, and asynchronous socket classification.
@@ -34,7 +37,7 @@ Child kind must be supplied explicitly rather than inferred from report size, mo
 
 ## Outcomes & Retrospective
 
-Implementation and validation are complete. Full checkpoint, controller, core, transcript, and worker suites ran; the one worker attribution failure was fixed and both affected regressions passed on rerun. Final workspace clippy, formatting, Python syntax, and diff checks passed. Exact commands and logs are in the task report directory under .mj/agents/1b3105bf7b56aab2d14b0cf96d340159/validation.md. No commits, pushes, installs, or live-instance checks were made.
+The original v7 checkpoint completed validation before this GLiDE revision. Full checkpoint, controller, core, transcript, and worker suites ran; the one worker attribution failure was fixed and both affected regressions passed on rerun. Final workspace clippy, formatting, Python syntax, and diff checks passed. Exact commands and logs are in the task report directory under .mj/agents/1b3105bf7b56aab2d14b0cf96d340159/validation.md. No commits, pushes, installs, or live-instance checks were made.
 
 ## Context and Orientation
 
@@ -44,7 +47,7 @@ Workers run harness turns independently of the daemon, which stores session meta
 
 First establish an explicit ordinary-child identity at launch, with absent kinds delivered unchecked. Extend GeneratedPrompt interpretation and ContextHistory with an explicit handback evidence mode that admits only parent spawn and input prompts in addition to real user messages. Keep ordinary authorization unchanged. Construct TurnEvidence with the report as the final assistant message and phase replied.
 
-Next add durable check admission keyed by assignment command ID to the relay. Resolve reminder turns through their encoded completed ordinal. Serialize reservation before HTTP work so concurrent handbacks, retries, and restarts cannot reserve the same assignment twice. Add HandbackCheckStarted to the journal and advance relay protocol to 61 and snapshot revision to 22: new workers read old snapshots using a default empty check state, while old writers refuse the newer schema rather than dropping single-attempt admission. Run the HTTP request in supervised asynchronous work, withholding queue publication until it finishes. Bounce using mj_core::assessment::handback_needs_more_work after separately checking complete authorization. The parent revised the design during validation: handback failure confidence and authorized-unfinished work probability are independent named constants, initially both 0.90, with no input condition, and ordinary Verdict::action remains unchanged. Deliver on all other answers, disabled continuation, disabled Jev, or request failure. Finish the Jev decision log with the actual delivery outcome.
+Next add durable check admission keyed by assignment command ID to the relay. Resolve reminder turns through their encoded completed ordinal. Serialize reservation before HTTP work so concurrent handbacks, retries, and restarts cannot reserve the same assignment twice. Add HandbackCheckStarted to the journal and advance relay protocol to 61 and snapshot revision to 22: new workers read old snapshots using a default empty check state, while old writers refuse the newer schema rather than dropping single-attempt admission. Run the HTTP request in supervised asynchronous work, withholding queue publication until it finishes. Bounce using mj_core::assessment::handback_needs_more_work only when the GLiDE unfinished probability is at least HANDBACK_UNFINISHED_PROBABILITY (0.50). The six probabilities are unfinished, needs_parent_input, blocked, permitted_stop, finished, unclear. The earlier v7 rule and its thresholds have been removed; ordinary Verdict::action remains unchanged. Deliver on all other answers, disabled continuation, disabled Jev, or request failure. Finish the Jev decision log with the actual delivery outcome.
 
 Finally verify the MCP handback budget covers the classifier's existing request timeout and worker reply margin; adjust only as required by those known deadlines. Leave existing handback reminders unchanged.
 
@@ -55,7 +58,7 @@ From the repository root, use targeted dev-profile tests while iterating, with e
     cargo test -p brokk-mj-core <affected-filter>
     cargo test -p brokk-mj-worker <affected-filter>
 
-Once the implementation and follow-up fixes are finished, run the full suites of every touched crate, then:
+For this GLiDE revision the parent explicitly requests targeted Cargo tests only, then:
 
     cargo clippy --all-targets -- -D warnings
     cargo fmt --all -- --check
@@ -92,3 +95,11 @@ Revision 2026-11-11: validation complete. The attribution regression and socket 
 Revision 2026-11-11 (review fixes): replied-phase handback evidence now includes a benign end_turn CompletionEvidence with no diagnostic, as required by the deployed proxy. HandbackChecks.context is optional and begins only at the first delivered parent assignment; it retains user-side instruction entries only and never mirrors assistant chunks. The report is appended only to the evidence clone. Snapshot revision stays 22 because this shape is unreleased. The replay regression now checks top-level exclusion and instruction-only retention. A temporary ignored test generates the exact hosted request and parses its live response; its source and request/response evidence are saved in the task report directory, and the test will be removed before handback. Only affected core/worker tests and clippy are run for this review round.
 
 Revision 2026-11-11 (review validation complete): affected core authorization/snapshot tests passed (10), affected worker handback/snapshot tests passed (36), and clippy on brokk-mj-core and brokk-mj-worker passed with warnings denied. The exact generated hosted request returned HTTP 200 with User-Agent suppressed, and the production TurnVerdict parser accepted the saved response with a unified assessment. Evidence is in the task report directory under review-fixes.md and handback-proxy-*. The temporary ignored probe was removed. No commits or remaining failures.
+
+## GLiDE provider contract and rollout
+
+The new POST /v1/handback-verdict accepts the existing TurnEvidence JSON directly, with no client model, questions, or credentials. The proxy bundles mj-core/src/activity/handback_questions.json unchanged from c1 and calls https://api.fastino.ai/v1/systemone with model fastino/GLiDE, state equal to the evidence, questions equal to the bundled file, store false, and X-API-Key from FASTINO_API_KEY. The shared services/jev-proxy/src/glide.ts provider helper accepts another bundled question object for future GitHub classification reuse. No retries, rate caps, or new timeouts are added. Existing worker HTTP timeout stays unchanged; a timeout delivers unchecked.
+
+Verified against Fastino systemone, Choice, and retry docs and the working corrected/glide/run.py client under /mnt/optane/tmp/jev-handback-labels-20261111. GLiDE accepts object state unchanged and returns answers.handback.probabilities. The proxy returns {probabilities: {unfinished, needs_parent_input, blocked, permitted_stop, finished, unclear}}. Both boundaries require six finite probabilities in [0,1] and sum within 0.03 of one, following the measured client tolerance. Provider errors including 425/429/503 and Retry-After pass through; workers report errors and deliver unchecked. Decision diagnostics retain all probabilities for successful checks, including accepted handbacks. The explicit self-check bounce wording is in subagents.rs.
+
+Deployment is parent-owned and is not authorized here. From services/jev-proxy, provision the secret with npx wrangler secret put FASTINO_API_KEY, then npm run deploy. Deploy before installing the changed worker; old proxies return 404 and the worker delivers unchecked. No worker receives the Fastino key. Do not commit, push, install or deploy in this task, and preserve mj-core/src/redact.rs and scripts/__pycache__/.

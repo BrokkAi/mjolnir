@@ -973,13 +973,7 @@ impl SubagentEndpoint {
             .ask_handback_logged(&session, generation, &evidence)
             .await;
         let bounce = match answer {
-            Ok(answer) => answer.assessment.as_ref().is_some_and(|verdict| {
-                evidence
-                    .authorization
-                    .as_ref()
-                    .is_some_and(|c| c.authorization_complete)
-                    && mj_core::assessment::handback_needs_more_work(verdict)
-            }),
+            Ok(answer) => mj_core::assessment::handback_needs_more_work(&answer),
             Err(_) => {
                 attempt.finish("unchanged", "request_failed");
                 return Ok(None);
@@ -995,7 +989,7 @@ impl SubagentEndpoint {
         );
         Ok(bounce.then(|| SubagentToolResult {
             request_id: request.request_id.clone(), completed_at_ms: mj_core::clock::epoch_millis(), is_error: false,
-            message: "Not delivered: an automatic check judged that your assigned task still has unfinished work. Continue it. If the check is wrong — the task is done, your instructions let you stop at this point, what remains is outside your assignment, or you need instructions or a decision from the parent — call handback again (put your question in the report); it will be delivered without another check.".into(),
+            message: "Not delivered yet: an automatic check judged that your assigned task may still have unfinished work. Compare your report with the assignment. If a required item is still undone and needs no new decision, do it, then hand back. If you were told you could stop here, you need instructions or a decision from the parent, or the task is done, call handback again with your report unchanged (put any question in it); it will be delivered without another check.".into(),
         }))
     }
 

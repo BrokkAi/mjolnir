@@ -1,3 +1,5 @@
+import { glide } from "./glide.ts";
+import handbackQuestions from "../../../mj-core/src/activity/handback_questions.json" with { type: "json" };
 import { continuationRequestV2, continuationAnswersV2, continuationQuestionsV2, continuationRequest, continuationAnswers, continuationQuestions, type ContinuationEvidence } from "./continuation.ts";
 import questionsV1 from "../../../mj-core/src/activity/verdict_questions_v1.json" with { type: "json" };
 import questionsV2 from "../../../mj-core/src/activity/verdict_questions_v2.json" with { type: "json" };
@@ -14,6 +16,7 @@ import { afkQuestionRequest, afkQuestionAnswers, afkQuestionQuestions, type AfkQ
 
 export interface Env {
   TYPESAFE_API_KEY: string;
+  FASTINO_API_KEY?: string;
   TURN_RATE_LIMITER: RateLimit;
   HELP_RATE_LIMITER?: RateLimit;
   CONTINUATION_RATE_LIMITER?: RateLimit;
@@ -348,6 +351,29 @@ async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname === "/v1/handback-verdict" && !url.search) {
+      if (request.method !== "POST") return error("method_not_allowed", 405, { Allow: "POST" });
+      if (request.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() !== "application/json") return error("unsupported_media_type", 415);
+      const key = env.FASTINO_API_KEY?.trim();
+      if (!key) return error("service_unavailable", 503);
+      let state: unknown;
+      try { state = await request.json(); } catch { return error("invalid_json", 400); }
+      if (!evidenceV6(state)) return error("invalid_evidence", 400);
+      const response = await glide(state, handbackQuestions, key);
+      // Preserve provider backpressure, including Retry-After, without retrying.
+      if (!response.ok) return response;
+      try {
+        const value: unknown = await response.json();
+        const answers = object(value) && object(value.answers) ? value.answers : {};
+        const answer = object(answers.handback) ? answers.handback : {};
+        const scores = answer.probabilities;
+        const allowed = Object.keys(handbackQuestions.handback.criteria);
+        if (!object(scores) || Object.keys(scores).length !== allowed.length
+          || !allowed.every(k => probability(scores[k]))
+          || Math.abs((Object.values(scores) as number[]).reduce((a,b) => a+b,0)-1) > 0.03) return error("invalid_upstream_response", 502);
+        return json({ probabilities: scores });
+      } catch { return error("invalid_upstream_response", 502); }
+    }
     const search = url.pathname === "/v1/help-search";
     const questionLocator = url.pathname === "/v1/question-locator";
     const afkQuestion = url.pathname === "/v1/afk-question-verdict";

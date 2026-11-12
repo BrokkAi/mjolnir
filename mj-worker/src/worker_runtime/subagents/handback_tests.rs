@@ -79,12 +79,11 @@ async fn pending_handback_check_withholds_publication_and_repeat_is_forwarded_wi
             .send(serde_json::from_slice::<serde_json::Value>(&body).unwrap())
             .unwrap();
         release_rx.await.unwrap();
-        // The handback rule judges unfinished work even when input is required.
-        let response = serde_json::json!({"answers": {
-            "work": {"type":"choice", "choice":"authorized_unfinished", "confidence":0.99, "probabilities":{"authorized_unfinished":1.0,"finished":0.0,"waiting":0.0,"unclear":0.0}},
-            "input": {"type":"choice", "choice":"required", "confidence":0.99, "probabilities":{"none":0.0,"required":1.0,"redundant_request":0.0,"unclear":0.0}},
-            "failure": {"type":"choice", "choice":"none", "confidence":0.99, "probabilities":{"none":1.0,"transient_provider":0.0,"quota":0.0,"other":0.0,"unclear":0.0}}
-        }}).to_string();
+        let response = serde_json::json!({"probabilities": {
+            "unfinished":0.5,"needs_parent_input":0.1,"blocked":0.1,
+            "permitted_stop":0.1,"finished":0.1,"unclear":0.1
+        }})
+        .to_string();
         socket
             .write_all(
                 format!(
@@ -114,6 +113,7 @@ async fn pending_handback_check_withholds_publication_and_repeat_is_forwarded_wi
     }
     let first = tokio::spawn(call(endpoint.clone(), report("first")));
     let evidence = seen_rx.await.unwrap();
+    println!("HANDBACK_WORKER_BODY={}", evidence);
     let retry = tokio::spawn(call(endpoint.clone(), report("first")));
     let retry_gate_refs = Arc::strong_count(&endpoint.handback_gate);
     loop {
