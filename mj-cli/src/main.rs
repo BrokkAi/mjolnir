@@ -289,6 +289,15 @@ struct DaemonArgs {
 
 #[derive(Debug, Subcommand)]
 enum DaemonCommand {
+    /// Print the local authenticated control endpoint for an SSH client.
+    Endpoint {
+        /// Emit exactly one JSON object containing control credentials.
+        #[arg(long, required = true)]
+        json: bool,
+        /// Fail if no daemon is running; never start one.
+        #[arg(long)]
+        existing: bool,
+    },
     /// Set or show whether the operator is away.
     Afk {
         #[command(subcommand)]
@@ -1034,23 +1043,28 @@ async fn run_command(
                 .await
                 .map(|()| DashboardExit::Normal)
         }
-        Some(Command::Ec2(args)) => ec2::run(args).await.map(|()| DashboardExit::Normal),
+        Some(Command::Ec2(args)) => {
+            if daemon::run_where_daemon_lives(&daemon_forwarded_args(), false).await? {
+                return Ok(DashboardExit::Normal);
+            }
+            ec2::run(args).await.map(|()| DashboardExit::Normal)
+        }
         Some(Command::Doctor(args)) => {
-            if daemon::container::exec_in_container(&container_forwarded_args()).await? {
+            if daemon::run_where_daemon_lives(&daemon_forwarded_args(), false).await? {
                 return Ok(DashboardExit::Normal);
             }
             doctor(args).await.map(|()| DashboardExit::Normal)
         }
         Some(Command::Setup(args)) => {
-            if args.command.is_none()
-                && daemon::container::exec_in_container(&["setup".to_owned()]).await?
-            {
+            if daemon::run_where_daemon_lives(&daemon_forwarded_args(), true).await? {
                 return Ok(DashboardExit::Normal);
             }
             setup(args).map(|()| DashboardExit::Normal)
         }
         Some(Command::Import(args)) => {
-            if daemon::container::exec_in_container(&container_forwarded_args()).await? {
+            // Import reads the daemon's profile homes until client-side
+            // source selection lands, so it runs where the daemon lives.
+            if daemon::run_where_daemon_lives(&daemon_forwarded_args(), false).await? {
                 return Ok(DashboardExit::Normal);
             }
             let workspace_id =
@@ -1139,7 +1153,7 @@ async fn run_command(
             if args.cli {
                 forwarded.push("--cli".to_owned());
             }
-            if daemon::container::exec_in_container(&forwarded).await? {
+            if daemon::run_where_daemon_lives(&forwarded, true).await? {
                 return Ok(DashboardExit::Normal);
             }
             login(args).await.map(|()| DashboardExit::Normal)
@@ -2081,10 +2095,10 @@ async fn listed_workspaces_without_starting() -> Option<Vec<mj_core::workspace::
 /// store that does not exist yet has none; one that cannot be read answers
 /// `None`.
 fn stored_workspaces_on_this_computer() -> Option<Vec<mj_core::workspace::WorkspaceRecord>> {
-    let placement = mj_core::config::Config::load_from(&mj_core::config::config_path())
-        .map(|config| config.daemon.runtime)
-        .unwrap_or_default();
-    if placement.engine().is_some() {
+    let placement = mj_core::config::DaemonConfig::load_placement(&mj_core::config::config_path())
+        .ok()?
+        .runtime;
+    if placement != mj_core::config::DaemonRuntime::Host {
         return None;
     }
     if !mj_controller::database::database_path().exists() {
@@ -2185,9 +2199,16 @@ fn workspace_name_for_directory(directory: &std::path::Path) -> String {
 }
 
 fn suggested_workspace_name(workspaces: &[daemon::WorkspaceListing]) -> Result<String> {
-    let base = workspace_name_for_directory(
-        &std::env::current_dir().context("read current directory for workspace name")?,
-    );
+    let base = if mj_core::config::DaemonConfig::load_placement(&mj_core::config::config_path())?
+        .runtime
+        == mj_core::config::DaemonRuntime::Ssh
+    {
+        "workspace".to_owned()
+    } else {
+        workspace_name_for_directory(
+            &std::env::current_dir().context("read current directory for workspace name")?,
+        )
+    };
     // The store keeps the name `default` for sessions made before a
     // workspace was required, even while that workspace is not listed.
     let names = workspaces
@@ -2214,7 +2235,16 @@ fn suggested_workspace_name(workspaces: &[daemon::WorkspaceListing]) -> Result<S
 }
 
 async fn daemon_command(args: DaemonArgs) -> Result<()> {
+    if matches!(
+        args.command,
+        DaemonCommand::Status | DaemonCommand::Stop(_) | DaemonCommand::Restart
+    ) && daemon::run_where_daemon_lives(&daemon_forwarded_args(), false).await?
+    {
+        return Ok(());
+    }
+
     match args.command {
+        DaemonCommand::Endpoint { existing, .. } => daemon::print_endpoint(existing).await?,
         DaemonCommand::Afk { command } => {
             let mut client = daemon::connect_or_start().await?;
             if !matches!(command, AfkCommand::Status) {
@@ -2352,10 +2382,10 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
     Ok(())
 }
 
-/// The command line to replay inside a daemon container. The container is one
-/// instance already, so the host's `--instance` selector is removed; every
+/// The command line to replay where the daemon lives. Placement supplies
+/// the destination instance, so the client instance selector is removed; every
 /// other argument keeps its meaning.
-fn container_forwarded_args() -> Vec<String> {
+fn daemon_forwarded_args() -> Vec<String> {
     let mut args = std::env::args().skip(1);
     let mut forwarded = Vec::new();
     while let Some(argument) = args.next() {

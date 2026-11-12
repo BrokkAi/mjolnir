@@ -2307,7 +2307,13 @@ async fn run_setup_login(context: &mut DashboardContext, profile_id: &str) -> Re
     // daemon's other tasks.
     let joined = tokio::task::spawn_blocking(move || {
         std::process::Command::new(executable)
-            .args(["login", "--profile", &profile])
+            .args([
+                "--instance",
+                &mj_core::config::instance_name().unwrap_or_else(|| "default".to_owned()),
+                "login",
+                "--profile",
+                &profile,
+            ])
             .status()
     })
     .await;

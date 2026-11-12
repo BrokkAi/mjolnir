@@ -212,7 +212,15 @@ pub(super) async fn serve_client(
         );
         // Hold through the acknowledgement, not merely the action's result.
         let activity = upgrade_request_activity(&request.action);
-        let result = if request.token != metadata.token {
+        let result = if let DaemonAction::ProveIdentity { ref nonce } = request.action {
+            use hmac::Mac;
+            Ok(DaemonReply::IdentityProof {
+                mac: mj_client::daemon::identity_proof(&metadata.token, nonce)
+                    .finalize()
+                    .into_bytes()
+                    .to_vec(),
+            })
+        } else if request.token != metadata.token {
             Err("daemon authentication failed".to_owned())
         } else if activity.is_err() {
             // No work was accepted. The client can wait and retry this exact
