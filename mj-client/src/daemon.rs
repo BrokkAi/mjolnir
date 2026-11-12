@@ -3286,8 +3286,9 @@ impl DaemonClient {
 }
 
 impl DaemonAction {
-    /// These disposable machine reads use a dedicated connection. Closing it
-    /// cancels subprocesses; daemon handoff may abandon the read as well.
+    /// Machine reads and install preparation use dedicated connections.
+    /// Closing one cancels subprocesses; admitted install publication finishes
+    /// independently and keeps its handoff admission through acknowledgement.
     pub fn is_cancellable_machine_action(&self) -> bool {
         if let Self::PreflightNewSession { request } = self
             && !request.remote_repairs.is_empty()
@@ -3296,7 +3297,8 @@ impl DaemonAction {
         }
         matches!(
             self,
-            Self::PreviewBuildCache { .. }
+            Self::InstallMbx { .. }
+                | Self::PreviewBuildCache { .. }
                 | Self::CheckpointArchiveSizes { .. }
                 | Self::TestTarget { .. }
                 | Self::ProfileLoginStatuses

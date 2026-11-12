@@ -3,6 +3,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -158,17 +159,63 @@ pub(super) fn install_candidate_kind(preview: &BuildCachePreview) -> Option<MbxI
     }
 }
 
-/// Install or upgrade the pinned Linux mbx on a machine with a persistent host.
-pub fn install_mbx(machine: &Machine, executor: &impl CommandExecutor) -> Result<MbxInstallResult> {
-    install_mbx_with(machine, executor, None, download)
+/// A fully staged install. Dropping it removes unpublished files after executor teardown.
+pub struct PreparedMbx {
+    host: CacheHost,
+    program: PathBuf,
+    kind: MbxInstallKind,
+    staged: Option<PathBuf>,
+    _download: Option<tempfile::TempDir>,
 }
 
+impl Drop for PreparedMbx {
+    fn drop(&mut self) {
+        if let Some(path) = &self.staged {
+            if self.host.ssh().is_none() {
+                if let Err(error) = std::fs::remove_file(path) {
+                    tracing::warn!(%error, path = %path.display(), "remove staged mbx binary");
+                }
+            } else {
+                cleanup_remote_staging(&self.host, path);
+            }
+        }
+    }
+}
+
+/// Probe, fetch, verify and upload without publishing or holding handoff admission.
+pub fn prepare_mbx(machine: &Machine, executor: &impl CommandExecutor) -> Result<PreparedMbx> {
+    let directory = tempfile::tempdir().context("create mbx download staging directory")?;
+    let mut prepared = prepare_mbx_with(machine, executor, None, |triple| {
+        download(triple, directory.path(), executor)
+    })?;
+    prepared._download = Some(directory);
+    Ok(prepared)
+}
+
+/// Install from a standalone CLI operation without a daemon handoff owner.
+pub fn install_mbx(machine: &Machine, executor: &impl CommandExecutor) -> Result<MbxInstallResult> {
+    let prepared = prepare_mbx(machine, executor)?;
+    let publishing =
+        targets::CancellableProcessExecutor::with_timeout(std::time::Duration::from_secs(240));
+    prepared.publish(&publishing)
+}
+
+#[cfg(test)]
 fn install_mbx_with(
     machine: &Machine,
     executor: &impl CommandExecutor,
     home_override: Option<&Path>,
     get_binary: impl FnOnce(&str) -> Result<PathBuf>,
 ) -> Result<MbxInstallResult> {
+    prepare_mbx_with(machine, executor, home_override, get_binary)?.publish(executor)
+}
+
+fn prepare_mbx_with(
+    machine: &Machine,
+    executor: &impl CommandExecutor,
+    home_override: Option<&Path>,
+    get_binary: impl FnOnce(&str) -> Result<PathBuf>,
+) -> Result<PreparedMbx> {
     let host = CacheHost::for_machine(machine)
         .context("this machine has no persistent container host where mbx can be installed")?;
     ensure!(
@@ -202,48 +249,70 @@ fn install_mbx_with(
         "the verified mbx download is not a regular file"
     );
     check_cancelled(executor)?;
-    transfer_binary(&host, &home, &binary, &program, executor)?;
-
-    check_cancelled(executor)?;
-    run_setup(&host, &program, executor)?;
-    let (profile_changed, profile) = update_profile(&host, &program, executor)?;
-
-    check_cancelled(executor)?;
-    let verified =
-        probe_native_version(&host, executor)?.context("mbx was not found after installation")?;
-    ensure!(
-        verified.program == program,
-        "mbx verification found {} instead of the installed path {}",
-        verified.program.display(),
-        program.display()
-    );
-    ensure!(
-        verified.version == MBX_VERSION,
-        "installed mbx reported version {}, expected {MBX_VERSION}",
-        verified.version
-    );
-    if machine.build_cache().and_then(|settings| settings.enabled) != Some(false) {
-        let synchronized =
-            super::native_cache_directory(&host, &verified, executor).and_then(|directory| {
-                super::sync_mbx_binary_from_native(&host, &verified, &directory, executor)
-                    .map(|_| ())
-            });
-        if let Err(error) = synchronized {
-            tracing::warn!(
-                host = host.key(),
-                "mbx installed successfully, but its shared cache copy will be refreshed by reconciliation: {error:#}"
-            );
-        }
-    }
-    Ok(MbxInstallResult {
+    let staged = stage_binary(&host, &home, &binary, &program, executor)?;
+    Ok(PreparedMbx {
+        host,
         program,
-        version: verified.version,
-        profile_changed,
-        profile_file: profile.file,
-        profile_warning: profile.warning,
-        manual_path_line: profile.manual_path_line,
         kind,
+        staged: Some(staged),
+        _download: None,
     })
+}
+
+impl PreparedMbx {
+    /// Publish only after admission. The caller supplies an executor independent of request cancellation.
+    pub fn publish(mut self, executor: &impl CommandExecutor) -> Result<MbxInstallResult> {
+        let host = self.host.clone();
+        let program = self.program.clone();
+        let kind = self.kind;
+        let staged = self
+            .staged
+            .as_ref()
+            .context("mbx install has no staged binary")?;
+        let command = host.shell_command(
+            r#"chmod 755 -- "$1" && mv -f -- "$1" "$2""#,
+            "hel-mbx-install-publish",
+            [
+                staged.to_string_lossy().into_owned(),
+                program.to_string_lossy().into_owned(),
+            ],
+            "publish the mbx binary atomically on the SSH host",
+        );
+        if host.ssh().is_none() {
+            set_executable(staged)?;
+            std::fs::rename(staged, &program).context("publish staged mbx binary")?;
+        } else {
+            checked(executor.execute(&command)?, &command)?;
+        }
+        self.staged = None;
+        check_cancelled(executor)?;
+        run_setup(&host, &program, executor)?;
+        let (profile_changed, profile) = update_profile(&host, &program, executor)?;
+
+        check_cancelled(executor)?;
+        let verified = probe_native_version(&host, executor)?
+            .context("mbx was not found after installation")?;
+        ensure!(
+            verified.program == program,
+            "mbx verification found {} instead of the installed path {}",
+            verified.program.display(),
+            program.display()
+        );
+        ensure!(
+            verified.version == MBX_VERSION,
+            "installed mbx reported version {}, expected {MBX_VERSION}",
+            verified.version
+        );
+        Ok(MbxInstallResult {
+            program: program.clone(),
+            version: verified.version,
+            profile_changed,
+            profile_file: profile.file,
+            profile_warning: profile.warning,
+            manual_path_line: profile.manual_path_line,
+            kind,
+        })
+    }
 }
 
 fn canonical_home(host: &CacheHost, executor: &impl CommandExecutor) -> Result<PathBuf> {
@@ -306,13 +375,13 @@ fn destination(home: &Path, existing: Option<&NativeMbx>) -> Result<InstallDesti
     })
 }
 
-fn transfer_binary(
+fn stage_binary(
     host: &CacheHost,
     home: &Path,
     binary: &Path,
     program: &Path,
     executor: &impl CommandExecutor,
-) -> Result<()> {
+) -> Result<PathBuf> {
     let parent = program
         .parent()
         .context("the selected mbx path has no parent directory")?;
@@ -328,11 +397,11 @@ fn transfer_binary(
         check_cancelled(executor)?;
         temporary.as_file_mut().sync_all()?;
         set_executable(temporary.path())?;
-        temporary
-            .persist(program)
+        return temporary
+            .keep()
+            .map(|(_, path)| path)
             .map_err(|error| error.error)
-            .with_context(|| format!("publish mbx binary {}", program.display()))?;
-        return Ok(());
+            .context("retain staged mbx binary");
     }
 
     let command = host.command(
@@ -363,30 +432,22 @@ fn transfer_binary(
         .execute(&upload)
         .and_then(|output| checked(output, &upload))
     {
-        remove_remote_temporary(host, &temporary, executor);
+        cleanup_remote_staging(host, &temporary);
         return Err(error);
     }
     if let Err(error) = check_cancelled(executor) {
-        remove_remote_temporary(host, &temporary, executor);
+        cleanup_remote_staging(host, &temporary);
         return Err(error);
     }
-    let command = host.shell_command(
-        r#"chmod 755 -- "$1" && mv -f -- "$1" "$2""#,
-        "hel-mbx-install-publish",
-        [
-            temporary.to_string_lossy().into_owned(),
-            program.to_string_lossy().into_owned(),
-        ],
-        "publish the mbx binary atomically on the SSH host",
-    );
-    if let Err(error) = executor
-        .execute(&command)
-        .and_then(|output| checked(output, &command))
-    {
-        remove_remote_temporary(host, &temporary, executor);
-        return Err(error);
-    }
-    Ok(())
+    Ok(temporary)
+}
+
+fn cleanup_remote_staging(host: &CacheHost, path: &Path) {
+    // Use the executor's existing 15-second cleanup bound, independent of the cancelled request.
+    let cleanup = targets::CancellableProcessExecutor::new(std::sync::Arc::new(
+        std::sync::atomic::AtomicBool::new(false),
+    ));
+    remove_remote_temporary(host, path, &cleanup);
 }
 
 fn remove_remote_temporary(host: &CacheHost, path: &Path, executor: &impl CommandExecutor) {
@@ -665,53 +726,42 @@ fn expected_digest(triple: &str) -> Result<&'static str> {
     }
 }
 
-/// Download the pinned release once into the controller data directory and
-/// verify its archive before extracting anything.
-pub(super) fn download(triple: &str) -> Result<PathBuf> {
+/// Fetch with the same cancellable subprocess owner as host probes and uploads.
+fn download(triple: &str, directory: &Path, executor: &impl CommandExecutor) -> Result<PathBuf> {
     let expected = expected_digest(triple)?;
-    let directory = mj_core::config::data_dir()
-        .join("mbx")
-        .join(MBX_VERSION)
-        .join(triple);
-    let destination = directory.join("mbx");
-    if destination.is_file() {
-        return Ok(destination);
-    }
-    std::fs::create_dir_all(&directory)
-        .with_context(|| format!("create the mbx cache {}", directory.display()))?;
-    let url = release_url(triple);
-    let archive = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(120))
-        .build()?
-        .get(&url)
-        .send()
-        .with_context(|| format!("download {url}"))?
-        .error_for_status()
-        .with_context(|| format!("download {url}"))?
-        .bytes()?;
+    let archive_path = directory.join("release.tar.gz");
+    fetch_archive(&release_url(triple), &archive_path, executor)?;
+    check_cancelled(executor)?;
+    let archive = std::fs::read(&archive_path).context("read staged mbx archive")?;
     let actual = mj_core::hex::lower_hex(Sha256::digest(&archive));
     ensure!(
         actual.eq_ignore_ascii_case(expected),
         "downloaded mbx checksum mismatch: expected {expected}, got {actual}"
     );
     let binary = extract_binary(&archive)?;
-    let mut temporary = tempfile::NamedTempFile::new_in(&directory)?;
-    std::io::Write::write_all(&mut temporary, &binary)?;
-    temporary.as_file_mut().sync_all()?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))?;
-    }
-    match temporary.persist_noclobber(&destination) {
-        Ok(_) => Ok(destination),
-        Err(error) if destination.is_file() => {
-            drop(error);
-            Ok(destination)
-        }
-        Err(error) => Err(error.error)
-            .with_context(|| format!("publish the mbx binary {}", destination.display())),
-    }
+    check_cancelled(executor)?;
+    let destination = directory.join("mbx");
+    std::fs::write(&destination, binary).context("write verified staged mbx binary")?;
+    set_executable(&destination)?;
+    Ok(destination)
+}
+
+fn fetch_archive(url: &str, archive: &Path, executor: &impl CommandExecutor) -> Result<()> {
+    let command = CommandSpec::new(
+        "curl",
+        [
+            "--fail",
+            "--location",
+            "--silent",
+            "--show-error",
+            "--output",
+            &archive.to_string_lossy(),
+            url,
+        ],
+    )
+    .purpose("download the pinned mbx release");
+    checked(executor.execute(&command)?, &command)?;
+    Ok(())
 }
 
 /// Extract the archive's single binary; its licence texts are not installed.

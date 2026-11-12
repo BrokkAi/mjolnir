@@ -24,7 +24,9 @@ pub(super) async fn handle_action(
         | DaemonAction::ResolveSetupPath { .. }
         | DaemonAction::ValidateMountSource { .. }
         | DaemonAction::ValidateSessionMounts { .. }) => {
-            super::machine::execute(action, state, Arc::new(AtomicBool::new(false))).await
+            super::machine::execute(action, state, Arc::new(AtomicBool::new(false)))
+                .await?
+                .0
         }
         DaemonAction::RecordOperatorActivity => {
             state.record_operator_activity().await;
@@ -1113,9 +1115,6 @@ pub(super) fn upgrade_request_activity(
         && !request.remote_repairs.is_empty()
     {
         return crate::upgrade::activity("new-session preflight remote repairs").map(Some);
-    }
-    if matches!(action, DaemonAction::InstallMbx { .. }) {
-        return crate::upgrade::activity("mbx installation").map(Some);
     }
     if matches!(action, DaemonAction::SaveSpinnerStyle { .. }) {
         return crate::upgrade::activity("spinner style setting").map(Some);

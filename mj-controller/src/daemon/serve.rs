@@ -240,22 +240,36 @@ pub(super) async fn serve_client(
                 let mut work = Box::pin(super::machine::execute(request.action, &state, cancelled));
                 let mut byte = [0u8; 1];
                 use tokio::io::AsyncReadExt;
+                let mut disconnected = false;
                 let result = tokio::select! {
                     biased;
                     _ = cancellation.cancelled() => None,
                     closed = stream.read(&mut byte) => {
                         if let Err(error) = closed { tracing::debug!(%error, "machine request connection closed"); }
+                        disconnected = true;
                         None
                     },
                     result = &mut work => Some(result),
                 };
-                let Some(result) = result else {
-                    drop(guard);
-                    if let Err(error) = work.await {
-                        tracing::debug!(%error, "cancelled machine request finished");
+                let result = match result {
+                    Some(result) => result,
+                    None => {
+                        drop(guard);
+                        // Preparation tears down its process group before its staging files.
+                        // An already admitted publication ignores cancellation and still acknowledges.
+                        work.await
+                    }
+                };
+                let (result, _publication) = match result {
+                    Ok((reply, publication)) => (reply, publication),
+                    Err(error) => (Err(error), None),
+                };
+                if disconnected {
+                    if let Err(error) = result {
+                        tracing::debug!(%error, "disconnected machine request finished");
                     }
                     return Ok(());
-                };
+                }
                 write_response(
                     &mut stream,
                     ResponseEnvelope {

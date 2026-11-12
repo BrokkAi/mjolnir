@@ -527,31 +527,27 @@ pub(crate) async fn apply_dashboard_action(
             {
                 return Ok(());
             }
-            let operation_label = format!("installing mbx on machine {machine_id}");
             let tracker = context.critical_operations.clone();
-            let install_guard = tracker.begin(operation_label);
-            super::io::spawn_io(
-                "installing mbx",
+            spawn_cancellable_io_with_token(
+                tracker,
+                "preparing mbx installation (publication finishes once admitted)",
                 context.dashboard_io_tx.clone(),
-                move || {
-                    let install_result = mj_core::runtime::block_on(async {
-                        match daemon::connect_or_start()
-                            .await?
-                            .request(MachineAction::InstallMbx {
-                                machine: *machine.clone(),
-                            })
-                            .await?
-                        {
-                            MachineReply::MbxInstalled(message) => Ok(message),
-                            reply => anyhow::bail!("unexpected mbx install reply: {reply:?}"),
-                        }
+                move |cancelled| {
+                    let install_result = super::io::machine_request(
+                        MachineAction::InstallMbx {
+                            machine: *machine.clone(),
+                        },
+                        cancelled.clone(),
+                    )
+                    .and_then(|reply| match reply {
+                        MachineReply::MbxInstalled(message) => Ok(message),
+                        reply => anyhow::bail!("unexpected mbx install reply: {reply:?}"),
                     })
-                    .and_then(|result| result)
-                    .map_err(|error| format!("{error:#}"));
-                    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                    let _preview_guard = tracker
-                        .begin_cancellable("refreshing the build cache preview", cancelled.clone());
-                    drop(install_guard);
+                    .map_err(|error| {
+                        format!(
+                            "mbx installation interrupted or failed; retry to finish: {error:#}"
+                        )
+                    });
                     let (preview_result, install_mbx_available) = match super::io::machine_request(
                         MachineAction::PreviewBuildCache { machine: *machine },
                         cancelled,

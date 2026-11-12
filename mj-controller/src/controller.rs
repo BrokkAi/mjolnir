@@ -92,7 +92,7 @@ pub(crate) use github_app::{
     renew_session_github_app_token,
 };
 pub use mbx::install::{
-    MbxInstallKind, MbxInstallResult, install_kind as mbx_install_kind, install_mbx,
+    MbxInstallKind, MbxInstallResult, install_kind as mbx_install_kind, install_mbx, prepare_mbx,
 };
 pub use mbx::preview_build_cache;
 pub(crate) use mbx::release::{FAILURE_REPORT_SECS, ReleaseFailure, recent_release_failures};

@@ -5,7 +5,7 @@ pub(super) async fn execute(
     action: DaemonAction,
     state: &RuntimeState,
     cancelled: Arc<AtomicBool>,
-) -> Result<DaemonReply> {
+) -> Result<(Result<DaemonReply>, Option<crate::upgrade::Work>)> {
     let config = state.with_config(Clone::clone);
     tokio::task::spawn_blocking(move || {
         let quit = cancelled.clone();
@@ -32,7 +32,7 @@ pub(super) async fn execute(
             _ => executor,
         };
         let controller = crate::controller::config_only_controller(config);
-        match action {
+        let reply = match action {
             DaemonAction::PreviewBuildCache { machine } => {
                 let preview = crate::controller::preview_build_cache(&machine, &executor)?;
                 let available = preview.as_ref().is_some_and(|preview| {
@@ -41,7 +41,12 @@ pub(super) async fn execute(
                 Ok(DaemonReply::BuildCachePreview(preview, available))
             }
             DaemonAction::InstallMbx { machine } => {
-                let result = crate::controller::install_mbx(&machine, &executor)?;
+                let prepared = crate::controller::prepare_mbx(&machine, &executor)?;
+                anyhow::ensure!(!executor.is_cancelled(), "mbx preparation cancelled; retry installation");
+                let publication = crate::upgrade::activity_unless_draining("mbx installation")?;
+                // Admission owns publication; disconnect and handoff cannot cancel it.
+                let publishing = CancellableProcessExecutor::with_timeout(Duration::from_secs(240));
+                let result = prepared.publish(&publishing).map(|result| {
                 let verb = match result.kind {
                     crate::controller::MbxInstallKind::Install => "Installed",
                     crate::controller::MbxInstallKind::Upgrade => "Upgraded",
@@ -67,7 +72,9 @@ pub(super) async fn execute(
                     message.push(' ');
                     message.push_str(&path_line);
                 }
-                Ok(DaemonReply::MbxInstalled(message))
+                    DaemonReply::MbxInstalled(message)
+                });
+                return Ok((result, Some(publication)));
             }
 
             DaemonAction::TestTarget { target_id } => {
@@ -259,16 +266,17 @@ pub(super) async fn execute(
                     if let Err(error) =
                         controller.validate_mount_source(&target_id, &mount.source, &executor)
                     {
-                        return Ok(DaemonReply::SessionMountValidation(Some((
+                        return Ok((Ok(DaemonReply::SessionMountValidation(Some((
                             mount.source.to_string_lossy().into_owned(),
                             format!("{error:#}"),
-                        ))));
+                        )))), None));
                     }
                 }
                 Ok(DaemonReply::SessionMountValidation(None))
             }
             _ => bail!("action is not a machine read"),
-        }
+        };
+        Ok((reply, None))
     })
     .await
     .context("machine request task panicked")?

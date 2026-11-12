@@ -12566,3 +12566,123 @@ async fn superseded_machine_completion_closes_connection_and_reaps_ssh() {
         "superseded completion left its SSH proxy alive"
     );
 }
+
+// Hard-won: #1514: admitted mbx downloads kept daemon handoff waiting for minutes.
+#[cfg(unix)]
+#[tokio::test]
+async fn mbx_preparation_cancels_on_handoff_and_disconnect_before_removing_staging() {
+    const CHILD: &str = "MJ_MBX_CANCELLATION_ROOT";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let bin = root.path().join("bin");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        std::os::unix::fs::symlink("/bin/sh", bin.join("sh")).unwrap();
+        std::os::unix::fs::symlink("/usr/bin/uname", bin.join("uname")).unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "mbx_preparation_cancels_on_handoff_and_disconnect_before_removing_staging",
+            ),
+        )
+        .env(CHILD, root.path())
+        .env("MJ_INSTANCE", "mbx-cancellation")
+        .env("HOME", &home)
+        .env("PATH", &bin)
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let root = PathBuf::from(std::env::var_os(CHILD).unwrap());
+    for handoff in [true, false] {
+        let ready = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let curl = root.join("bin/curl");
+        // A recorded download blocks after more than a pipe buffer, signalling readiness
+        // over a socket. No sleeps or Internet service determine cancellation ordering.
+        fs::write(
+            &curl,
+            format!(
+                r#"#!/usr/bin/python3
+import json, os, socket, sys
+archive = sys.argv[-2]
+with open(archive, 'wb') as output:
+    output.write(b'x' * 131072)
+sys.stdout.buffer.write(b'x' * 131072)
+sys.stdout.buffer.flush()
+with socket.create_connection(('127.0.0.1', {})) as ready:
+    ready.sendall((json.dumps([os.getpid(), archive]) + '\n').encode())
+    ready.recv(1)
+"#,
+                ready.local_addr().unwrap().port()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let metadata = test_metadata(listener.local_addr().unwrap());
+        let server_metadata = metadata.clone();
+        let shutdown = CancellationToken::new();
+        let server_shutdown = shutdown.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_client(
+                stream,
+                server_metadata,
+                test_runtime_state(),
+                server_shutdown,
+            )
+            .await
+        });
+        let mut client = TcpStream::connect(metadata.address).await.unwrap();
+        write_frame(
+            &mut client,
+            &RequestEnvelope {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: 1,
+                token: metadata.token,
+                action: DaemonAction::InstallMbx {
+                    machine: mj_core::config::Machine::Local { build_cache: None },
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let signal = tokio::time::timeout(Duration::from_secs(30), ready.accept()).await;
+        if signal.is_err() {
+            shutdown.cancel();
+            server.await.unwrap().unwrap();
+            panic!("recorded mbx download did not reach readiness");
+        }
+        let (signal, _) = signal.unwrap().unwrap();
+        let mut signal = BufReader::new(signal);
+        let mut line = String::new();
+        signal.read_line(&mut line).await.unwrap();
+        let (pid, archive): (u32, PathBuf) = serde_json::from_str(&line).unwrap();
+        assert!(archive.is_file());
+        assert!(
+            !crate::upgrade::active_labels()
+                .iter()
+                .any(|label| label.contains("mbx installation"))
+        );
+        if handoff {
+            shutdown.cancel();
+            let response: ResponseEnvelope = read_frame(&mut client).await.unwrap();
+            assert!(response.result.unwrap_err().contains("cancel"));
+        } else {
+            drop(client);
+        }
+        server.await.unwrap().unwrap();
+        assert!(
+            !daemon_process_is_alive(pid),
+            "download process survived cancellation"
+        );
+        assert!(
+            !archive.parent().unwrap().exists(),
+            "download staging survived teardown"
+        );
+        assert!(!root.join("home/.local/bin/mbx").exists());
+    }
+}
