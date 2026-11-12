@@ -2800,6 +2800,7 @@ async fn start_without_a_profile_load_balances_with_and_without_explicit_effort(
                 id: "claude4".into(),
                 harness_kind: "codex".into(),
                 capabilities_key: String::new(),
+                quota_pools: Vec::new(),
                 quota: None,
             });
         },

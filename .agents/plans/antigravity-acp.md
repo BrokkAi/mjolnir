@@ -18,7 +18,9 @@ Enable explicit Antigravity profiles using a host-installed agy and isolated cop
 - [x] Added daemon-owned quota polling through the installed CLI, model-scoped selection/recovery, and two visible rows named `agy (Ge)` and `agy (Cl)`.
 - [x] Recorded CLI data proves independent exhaustion and reset recovery; TUI/viewer goldens and four browser quota tests pass. The Claude probe decreased only the third-party pool; Gemini was unchanged.
 - [x] The real Rust quota collector passed against the installed agy using a copied login (2.68 seconds, zero model turns). Fixed the review finding about empty readings: the daemon now publishes the configured pool rows independently of quota windows; the browser preserves both rows and expanded details during failures. Updated viewer and browser goldens pass.
-- [ ] Finish real isolated quota-collector validation, full touched-crate suites, workspace clippy and review before pushing or installing the quota extension.
+- [x] Full merged client/controller/core/TUI/CLI validation passed, including 21 isolated daemon startup regressions. The worker suite exposed a shared fixture omission: its legacy mode list lacked Antigravity's default mode. Add that mode only for Antigravity so the existing rejected-restoration negative case still has no default fallback; all five affected ACP tests pass.
+- [x] Workspace `cargo clippy --all-targets -- -D warnings` passed on the final merged source (2m08s).
+- [ ] Review the final test-fixture corrections before pushing or installing the quota extension.
 - [ ] Install only after quota support is understood and validated; apply the pre-approved migration, add profile `agy` using /home/jonathan/.gemini, and complete the installed-build isolated smoke test.
 
 ## Surprises & Discoveries
@@ -34,6 +36,8 @@ The user requires quota support before installation. Query the CLI's own documen
 Display two rows for this one profile, suffixed (Ge) and (Cl). One shared row list must drive TUI drawing, selection, scrolling and rename lookup so a second quota row does not select another profile. Preserve both pools in the viewer projection and display the same two labels there. Keep the existing persisted quota shape, including its optional string model_scope, and reuse the existing cache and refresh cadence.
 
 Advance the daemon protocol to 93 for the new HarnessKind wire value: a protocol-92 client cannot deserialize Antigravity sessions or profiles. Coordinate the number at the final merge with concurrent wire changes; no additional database migration is required. The merge of subscription-weighting work adds monthly_price_usd to quota reports; Antigravity leaves it unknown, consistent with the other non-Claude adapters.
+
+The user explicitly marked the extra-directory shell-cwd defect as won't fix for now after clarification: a bare pwd can run in the attached memory root instead of the primary project, while explicit command paths work. Keep the additional directories intact and document the upstream behavior; do not hide it with a fallback or remove requested attachments.
 
 ## Outcomes & Retrospective
 
@@ -80,3 +84,5 @@ Reuse generic ACP configOptions and stdio MCP delivery, existing subprocess help
 2026-11-12: User stopped installation until both subscription quota pools are understood. The installer was still compiling and replaced no binaries; live schema remains 125 and no profile was added. The direct quota and Claude probes succeeded using copied credentials under /home/jonathan/.cache/mjolnir/build/agy-quota-probe. User chose two quota rows, (Ge)/(Cl), and shortened the profile name to agy. These later decisions supersede the earlier no-quota cut and profile name above.
 
 2026-11-12: The quota collector and scoped tests passed. Review found that deriving browser rows from available windows collapsed them during failures. ViewerProfile now publishes quota_pools from the same shared Antigravity pool definition as the TUI, keeping row identity independent of readings. The browser golden covers an exhausted Claude pool followed by a failed probe with its details kept open.
+
+2026-11-12: Final merged suites: client 56 passed/1 ignored plus integration, controller 2584 passed/26 ignored, core 645 passed/3 ignored plus compatibility cases, TUI 581 passed/2 ignored, CLI 254 unit tests and all 21 startup tests passed along with the other isolated integration/PTY cases. Worker 833 passed/11 ignored with one negative-mode fixture failure; after restricting the added default mode to Antigravity, that failure and all four earlier cross-harness ACP regressions pass (five tests, 0.28 seconds). The user accepted the observed extra-directory cwd limitation as won't fix for now.
