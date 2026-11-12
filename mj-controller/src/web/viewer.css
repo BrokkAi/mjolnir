@@ -1035,18 +1035,6 @@ details.mailbox-event[open] > summary::before {
   margin: 12px 0;
 }
 
-.recent-projects {
-  display: grid;
-  gap: 6px;
-  margin-bottom: 16px;
-}
-
-.recent-project {
-  text-align: left;
-  overflow-wrap: anywhere;
-  white-space: normal;
-}
-
 .project {
   margin-top: 20px;
 }
