@@ -2401,6 +2401,22 @@ fn daemon_forwarded_args() -> Vec<String> {
 /// Hel never sees the credential contents; it compares fingerprints before and
 /// after so it can tell the operator whether anything changed.
 async fn login(args: LoginArgs) -> Result<()> {
+    let coordinator = args
+        .daemon_local
+        .then(mj_controller::termination::Coordinator::install_login);
+    let cancellation = coordinator
+        .as_ref()
+        .map(|owner| owner.token())
+        .unwrap_or_default();
+    let result =
+        mj_core::subprocess::with_preparation_cancellation(cancellation, login_inner(args)).await;
+    if let Some(coordinator) = coordinator {
+        coordinator.finish_login();
+    }
+    result
+}
+
+async fn login_inner(args: LoginArgs) -> Result<()> {
     // Signing in only needs the configuration and the profile's own home. It
     // must also work before the daemon or its database exists, which is the
     // first thing a freshly configured machine does.

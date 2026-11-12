@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 struct Process {
-    child: Box<dyn portable_pty::Child + Send + Sync>,
+    child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
     armed: bool,
 }
 impl Process {
@@ -21,17 +21,49 @@ impl Process {
         // The root is not reaped until cleanup, so its process-group id cannot
         // be recycled while this owner still has terminal reader/writer tasks.
         #[cfg(unix)]
-        if let Some(pid) = self.child.process_id() {
+        if let Some(pid) = self.child.as_ref().and_then(|child| child.process_id()) {
             mj_core::subprocess::terminate_process_group(pid as i32, libc::SIGKILL);
         }
-        if let Err(error) = self.child.kill() {
+        if let Err(error) = self.child.as_mut().unwrap().kill() {
             tracing::debug!(%error, "terminate login terminal child");
+        }
+    }
+}
+impl Process {
+    fn hangup(&self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.child.as_ref().and_then(|child| child.process_id()) {
+            // Reader/writer duplicates keep the master open, so explicitly
+            // wake the root's cleanup owner before waiting for its exit.
+            if unsafe { libc::kill(pid as i32, libc::SIGHUP) } != 0 {
+                tracing::debug!(error = %std::io::Error::last_os_error(), "hang up login root");
+            }
         }
     }
 }
 impl Drop for Process {
     fn drop(&mut self) {
-        self.terminate();
+        if !self.armed {
+            return;
+        }
+        self.hangup();
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        // Connection tasks are disposable during handoff. Transfer cleanup to
+        // an independent owner; never block the daemon or kill the root first.
+        std::thread::spawn(move || {
+            #[cfg(unix)]
+            if let Some(pid) = child.process_id() {
+                if let Err(error) = wait_for_exit(pid) {
+                    tracing::warn!(%error, "observe abandoned login cleanup");
+                }
+                mj_core::subprocess::terminate_process_group(pid as i32, libc::SIGKILL);
+            }
+            if let Err(error) = child.wait() {
+                tracing::warn!(%error, "reap abandoned login child");
+            }
+        });
     }
 }
 
@@ -41,30 +73,33 @@ impl Drop for Process {
 fn observe_exit(process: &Process) -> Result<tokio::task::JoinHandle<Result<()>>> {
     let pid = process
         .child
-        .process_id()
+        .as_ref()
+        .and_then(|child| child.process_id())
         .context("login child has no process id")?;
-    Ok(tokio::task::spawn_blocking(move || {
-        loop {
-            let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::uninit();
-            // SAFETY: info points to writable siginfo storage; pid is our
-            // unreaped child. WNOWAIT leaves reaping to the sole owner.
-            let result = unsafe {
-                libc::waitid(
-                    libc::P_PID,
-                    pid,
-                    info.as_mut_ptr(),
-                    libc::WEXITED | libc::WNOWAIT,
-                )
-            };
-            if result == 0 {
-                return Ok(());
-            }
-            let error = std::io::Error::last_os_error();
-            if error.kind() != std::io::ErrorKind::Interrupted {
-                return Err(error.into());
-            }
+    Ok(tokio::task::spawn_blocking(move || wait_for_exit(pid)))
+}
+
+#[cfg(unix)]
+fn wait_for_exit(pid: u32) -> Result<()> {
+    loop {
+        let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::uninit();
+        // SAFETY: this is our unreaped child; WNOWAIT reserves its group id.
+        if unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid,
+                info.as_mut_ptr(),
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        } == 0
+        {
+            return Ok(());
         }
-    }))
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error.into());
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -72,6 +107,8 @@ fn observe_exit(process: &Process) -> Result<tokio::task::JoinHandle<Result<()>>
     use std::os::windows::io::{AsRawHandle, BorrowedHandle};
     let raw = process
         .child
+        .as_ref()
+        .context("login child missing")?
         .as_raw_handle()
         .context("login child has no process handle")?;
     // SAFETY: the child owns raw for this call. The observer receives its own
@@ -92,11 +129,28 @@ fn observe_exit(process: &Process) -> Result<tokio::task::JoinHandle<Result<()>>
     }))
 }
 
-type Master = std::sync::Mutex<Option<Box<dyn portable_pty::MasterPty + Send>>>;
+struct Master(std::sync::Mutex<Option<Box<dyn portable_pty::MasterPty + Send>>>);
+impl std::ops::Deref for Master {
+    type Target = std::sync::Mutex<Option<Box<dyn portable_pty::MasterPty + Send>>>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl Drop for Master {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        if let Some(master) = self.0.get_mut().unwrap().take() {
+            // A connection task may be aborted during handoff. ConPTY close
+            // can wait for the login close handler, so keep it off this loop.
+            std::thread::spawn(move || drop(master));
+        }
+    }
+}
 
 fn close_console_on_exit(master: &Master) -> Option<tokio::task::JoinHandle<()>> {
     if cfg!(windows) {
-        // Closing ConPTY terminates its attached descendants. Drain output
+        // Closing ConPTY sends CTRL_CLOSE_EVENT. The login handler retains
+        // cleanup ownership until preparation groups stop. Drain output
         // concurrently: ClosePseudoConsole can emit a final frame and block.
         // https://learn.microsoft.com/en-us/windows/console/closepseudoconsole
         let master = master.lock().unwrap().take();
@@ -129,7 +183,15 @@ pub(crate) async fn serve(
         let reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
         let child = pair.slave.spawn_command(command)?;
-        Ok::<_, anyhow::Error>((pair, Process { child, armed: true }, reader, writer))
+        Ok::<_, anyhow::Error>((
+            pair,
+            Process {
+                child: Some(child),
+                armed: true,
+            },
+            reader,
+            writer,
+        ))
     })
     .await
     .context("start login PTY task")?;
@@ -145,12 +207,13 @@ pub(crate) async fn serve(
         }
     };
     drop(pair.slave);
-    let master = std::sync::Mutex::new(Some(pair.master));
+    let master = Master(std::sync::Mutex::new(Some(pair.master)));
     // A one-chunk rendezvous keeps output backpressure at the PTY instead of
     // accumulating the entire login transcript in daemon memory.
     let (output_tx, mut output_rx) = mpsc::channel(1);
     let output = tokio::task::spawn_blocking(move || -> Result<()> {
         let mut bytes = [0u8; 8192];
+        let mut forwarding = true;
         loop {
             let count = match reader.read(&mut bytes) {
                 Ok(count) => count,
@@ -159,8 +222,14 @@ pub(crate) async fn serve(
                 Err(error) if error.raw_os_error() == Some(libc::EIO) => return Ok(()),
                 Err(error) => return Err(error.into()),
             };
-            if count == 0 || output_tx.blocking_send(bytes[..count].to_vec()).is_err() {
+            if count == 0 {
                 return Ok(());
+            }
+            if forwarding && output_tx.blocking_send(bytes[..count].to_vec()).is_err() {
+                // ConPTY close may emit output until its close handlers finish.
+                // Keep draining after connection cancellation so closing the
+                // console never depends on a client that has disconnected.
+                forwarding = false;
             }
         }
     });
@@ -226,10 +295,12 @@ pub(crate) async fn serve(
             }
         }
     }.await;
-    process.terminate();
     if !observed {
+        process.hangup();
+        closing = close_console_on_exit(&master);
         exited.await.context("join login exit observer")??;
     }
+    process.terminate();
     input.abort();
     match input.await {
         Ok(Err(error)) => tracing::debug!(%error, "login terminal input ended"),
@@ -245,7 +316,7 @@ pub(crate) async fn serve(
     }
     let status = tokio::task::spawn_blocking(move || {
         drop(master);
-        process.child.wait()
+        process.child.as_mut().unwrap().wait()
     })
     .await
     .context("join login child wait")??;

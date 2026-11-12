@@ -95,16 +95,19 @@ pub(crate) async fn login(
         profile.kind.display_name(),
         entrypoint.display()
     );
-    sign_in(
-        profile.kind,
-        &profile.home,
-        &located.command,
-        &located.args,
-        &entrypoint,
-        &launch_environment,
-        requested_method,
-    )
-    .await
+    let cancellation = mj_core::subprocess::preparation_cancellation();
+    tokio::select! {
+        result = sign_in(
+            profile.kind,
+            &profile.home,
+            &located.command,
+            &located.args,
+            &entrypoint,
+            &launch_environment,
+            requested_method,
+        ) => result,
+        _ = cancellation.cancelled() => bail!("login cancelled"),
+    }
 }
 
 /// How a login names where its harness comes from.

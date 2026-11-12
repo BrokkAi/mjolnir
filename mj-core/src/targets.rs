@@ -1257,6 +1257,9 @@ fn stream_command_with_stdin(
 #[derive(Clone)]
 pub struct CancellableProcessExecutor {
     cancelled: Arc<AtomicBool>,
+    token: Option<tokio_util::sync::CancellationToken>,
+    #[cfg(unix)]
+    foreground_terminal: bool,
     deadline: Option<(Instant, Duration)>,
 }
 
@@ -1277,12 +1280,32 @@ impl CancellableProcessExecutor {
     pub fn new(cancelled: Arc<AtomicBool>) -> Self {
         Self {
             cancelled,
+            token: None,
+            #[cfg(unix)]
+            foreground_terminal: false,
             deadline: None,
         }
     }
 
+    /// Use the supervising login's cancellation for blocking preparation.
+    /// Interactive account shells need foreground terminal ownership even
+    /// though their output is captured and cancellation owns their group.
+    #[cfg(unix)]
+    pub fn with_foreground_terminal(mut self) -> Self {
+        self.foreground_terminal = true;
+        self
+    }
+
+    pub fn with_cancellation(mut self, token: tokio_util::sync::CancellationToken) -> Self {
+        self.token = Some(token);
+        self
+    }
+
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
+        self.token
+            .as_ref()
+            .is_some_and(|token| token.is_cancelled())
+            || self.cancelled.load(Ordering::Acquire)
             || self
                 .deadline
                 .is_some_and(|(deadline, _)| Instant::now() >= deadline)
@@ -1291,6 +1314,9 @@ impl CancellableProcessExecutor {
     pub fn with_timeout(timeout: Duration) -> Self {
         Self {
             cancelled: Arc::new(AtomicBool::new(false)),
+            token: None,
+            #[cfg(unix)]
+            foreground_terminal: false,
             deadline: Some((Instant::now() + timeout, timeout)),
         }
     }
@@ -1304,6 +1330,10 @@ impl CancellableProcessExecutor {
 
     fn cancellation_message(&self, purpose: &str) -> String {
         if !self.cancelled.load(Ordering::Acquire)
+            && !self
+                .token
+                .as_ref()
+                .is_some_and(|token| token.is_cancelled())
             && let Some((deadline, timeout)) = self.deadline
             && Instant::now() >= deadline
         {
@@ -1553,11 +1583,18 @@ impl CancellableProcessExecutor {
         command: &CommandSpec,
         gate: Option<&Arc<StartGate>>,
     ) -> Result<CommandOutput> {
+        let mut process = cancellable_command(command);
+        #[cfg(unix)]
+        let _foreground = if self.foreground_terminal {
+            crate::subprocess::ForegroundGroup::prepare(&mut process)?
+        } else {
+            None
+        };
         if let Some(input) = &command.sensitive_stdin {
             let mut input = std::io::Cursor::new(input.0.as_slice());
             // Owned bytes, so each attempt gets its own reader.
             return stream_command_with_stdin(
-                cancellable_command(command),
+                process,
                 command,
                 &mut input,
                 &|| self.is_cancelled(),
@@ -1566,7 +1603,7 @@ impl CancellableProcessExecutor {
         }
         let started = Instant::now();
         self.check_cancelled(&command.purpose)?;
-        let mut child = cancellable_command(command)
+        let mut child = process
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

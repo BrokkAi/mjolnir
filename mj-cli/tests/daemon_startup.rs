@@ -1619,9 +1619,17 @@ fn review_start_fails_with_the_reason_the_daemon_refused_it() {
 }
 
 /// Real daemon/control/PTY/harness boundary, including a disconnected login.
+// Hard-won: 9952f0845: preparation helpers in their own groups survived a closed login pane
 #[cfg(unix)]
 #[test]
 fn daemon_login_terminal_writes_daemon_profile_and_disconnect_kills_harness_group() {
+    for ending in 0..3 {
+        daemon_login_cleanup(ending);
+    }
+}
+
+#[cfg(unix)]
+fn daemon_login_cleanup(ending: u8) {
     use mj_client::daemon::login_terminal::{TerminalInput, TerminalOutput};
     use mj_client::daemon::{DaemonClient, DaemonMetadata, read_frame, write_frame};
     use mj_core::config::{Config, HarnessKind, HarnessProfile};
@@ -1659,6 +1667,46 @@ fi
     let mut profile = HarnessProfile::new(HarnessKind::OpenCode, home.clone());
     profile.environment.insert("PATH".into(), path.clone());
     config.profiles.insert("fixture".into(), profile);
+    let preparation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    preparation.set_nonblocking(true).unwrap();
+    let preparation_address = preparation.local_addr().unwrap();
+    let after_cancel = storage.path().join("written-after-cancel");
+    let helper = storage.path().join("preparation.py");
+    fs::write(
+        &helper,
+        format!(
+            r#"
+import os, socket
+s = socket.create_connection(('127.0.0.1', {port}))
+s.sendall((str(os.getpid()) + '\n').encode())
+s.recv(1)
+open({output:?}, 'w').write('helper survived cancellation')
+"#,
+            port = preparation_address.port(),
+            output = after_cancel.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    mj_core::test_hooks::install_fake_command(
+        &tools,
+        "node",
+        &format!("exec /usr/bin/python3 '{}'", helper.display()),
+    );
+    let mut prepared_profile =
+        HarnessProfile::new(HarnessKind::Claude, storage.path().join("claude"));
+    prepared_profile
+        .environment
+        .insert("PATH".into(), path.clone());
+    prepared_profile
+        .environment
+        .insert("HOME".into(), user.to_string_lossy().into_owned());
+    prepared_profile.environment.insert(
+        "XDG_CACHE_HOME".into(),
+        storage.path().join("cache").to_string_lossy().into_owned(),
+    );
+    config
+        .profiles
+        .insert("preparation".into(), prepared_profile);
     config
         .save_to(&storage.path().join("config/config.toml"))
         .unwrap();
@@ -1693,6 +1741,65 @@ fi
     };
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         tokio::time::timeout(Duration::from_secs(30), async {
+            // Hard-won: 9952f0845: preparation helpers in their own groups survived a closed login pane
+            // The real managed Node probe owns this helper's separate group.
+            // Its socket is a readiness barrier and a post-cancellation write
+            // trigger: killing the group must close it without writing the file.
+            let preparation = tokio::net::TcpListener::from_std(preparation).unwrap();
+            {
+                use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+                let client = DaemonClient::connect(metadata.clone()).await.unwrap();
+                let terminal = client
+                    .login_terminal("preparation".into(), 80, 24)
+                    .await
+                    .unwrap();
+                eprintln!("login ending={ending}: waiting for helper readiness");
+                let (helper, _) = preparation.accept().await.unwrap();
+                eprintln!("login ending={ending}: helper connected");
+                let mut helper = tokio::io::BufReader::new(helper);
+                let mut pid = String::new();
+                helper.read_line(&mut pid).await.unwrap();
+                let pid: i32 = pid.trim().parse().unwrap();
+                assert_eq!(
+                    unsafe { libc::getpgid(pid) },
+                    pid,
+                    "preparation helper needs its own group"
+                );
+                eprintln!("login ending={ending}: helper ready pid={pid}");
+                if ending == 0 {
+                    drop(terminal);
+                } else if ending == 1 {
+                    let reply = DaemonClient::connect(metadata.clone())
+                        .await
+                        .unwrap()
+                        .request(mj_client::daemon::DaemonAction::PrepareUpgrade)
+                        .await
+                        .unwrap();
+                    assert!(matches!(reply, mj_client::daemon::DaemonReply::Done));
+                    drop(terminal);
+                } else {
+                    // Simulate daemon death: all duplicated masters close in
+                    // the kernel. Child cleanup cannot depend on a daemon wait.
+                    daemon.kill().unwrap();
+                    daemon.wait().unwrap();
+                    drop(terminal);
+                }
+                eprintln!("login ending={ending}: waiting for helper EOF");
+                let mut byte = [0];
+                assert_eq!(helper.read(&mut byte).await.unwrap(), 0);
+                let _ = helper.get_mut().write_all(b"write").await;
+                eprintln!("login ending={ending}: helper EOF received");
+                while unsafe { libc::kill(-pid, 0) } == 0 {
+                    tokio::task::yield_now().await;
+                }
+                assert!(
+                    !after_cancel.exists(),
+                    "cancelled preparation wrote after its owner exited"
+                );
+                if ending > 0 {
+                    return;
+                }
+            }
             for mode in 0..3 {
                 let disconnect = mode > 0;
                 if disconnect {

@@ -43,6 +43,10 @@ pub async fn login(
             }
             Ok(acp_login::Outcome::NoLogin(reason)) => bail!("{reason}"),
             Ok(acp_login::Outcome::Unavailable(reason)) => {
+                anyhow::ensure!(
+                    !mj_core::subprocess::preparation_cancellation().is_cancelled(),
+                    "login cancelled"
+                );
                 if options.method.is_some() {
                     bail!("ACP sign-in was requested but is unavailable: {reason}");
                 }
@@ -94,11 +98,17 @@ pub async fn login(
         arguments.join(" "),
         profile.home.display()
     );
-    let status = tokio::process::Command::new(&program)
+    anyhow::ensure!(
+        !mj_core::subprocess::preparation_cancellation().is_cancelled(),
+        "login cancelled"
+    );
+    let mut command = tokio::process::Command::new(&program);
+    command
         .args(&arguments)
         .envs(&environment)
-        .status()
-        .await
+        .kill_on_drop(true);
+    let mut child = command
+        .spawn()
         .map_err(|error| login_spawn_error(error, &program, profile.kind, profile_id))
         .with_context(|| {
             format!(
@@ -107,6 +117,15 @@ pub async fn login(
                 arguments.join(" ")
             )
         })?;
+    let cancellation = mj_core::subprocess::preparation_cancellation();
+    let status = tokio::select! {
+        status = child.wait() => status?,
+        _ = cancellation.cancelled() => {
+            child.start_kill().context("stop login command")?;
+            child.wait().await.context("reap login command")?;
+            bail!("login cancelled");
+        }
+    };
 
     report_login_change(profile_id, profile, before, stored)?;
     Ok(status.code().unwrap_or(1))
@@ -247,33 +266,26 @@ async fn store_claude_setup_token(
         let program = resolve_harness_program("claude", &environment);
         (program, environment)
     };
-    let output = tokio::task::spawn_blocking({
-        let environment = environment.clone();
-        let program = program.clone();
-        move || {
-            let mut command = std::process::Command::new(&program);
-            command.arg("setup-token").envs(&environment);
-            mj_core::subprocess::run_capturing_stdout(&mut command)
-        }
-    })
-    .await
-    .context("run `claude setup-token`")?
-    .map_err(|error| {
-        if error.chain().any(|cause| {
-            cause
-                .downcast_ref::<io::Error>()
-                .is_some_and(|cause| cause.kind() == io::ErrorKind::NotFound)
-        }) {
-            login_spawn_error(
-                io::Error::from(io::ErrorKind::NotFound),
-                &program,
-                mj_core::config::HarnessKind::Claude,
-                profile_id,
-            )
-        } else {
-            error
-        }
-    })?;
+    let mut command = tokio::process::Command::new(&program);
+    command.arg("setup-token").envs(&environment);
+    let output = mj_core::subprocess::run_capturing_stdout_cancellable(&mut command)
+        .await
+        .map_err(|error| {
+            if error.chain().any(|cause| {
+                cause
+                    .downcast_ref::<io::Error>()
+                    .is_some_and(|cause| cause.kind() == io::ErrorKind::NotFound)
+            }) {
+                login_spawn_error(
+                    io::Error::from(io::ErrorKind::NotFound),
+                    &program,
+                    mj_core::config::HarnessKind::Claude,
+                    profile_id,
+                )
+            } else {
+                error
+            }
+        })?;
     if !output.status.success() {
         bail!(
             "`claude setup-token` exited with {} for profile {profile_id}",
@@ -290,16 +302,14 @@ async fn store_claude_setup_token(
 
     let verify_token = token.clone();
     let verify_program = program.clone();
-    let verified = tokio::task::spawn_blocking(move || {
-        let mut command = std::process::Command::new(verify_program);
-        command
-            .args(["auth", "status"])
-            .envs(&environment)
-            .env(CLAUDE_OAUTH_TOKEN_ENV, &verify_token);
-        mj_core::subprocess::run_capturing_stdout(&mut command)
-    })
-    .await
-    .context("run `claude auth status`")??;
+    let mut command = tokio::process::Command::new(verify_program);
+    command
+        .args(["auth", "status"])
+        .envs(&environment)
+        .env(CLAUDE_OAUTH_TOKEN_ENV, &verify_token);
+    let verified = mj_core::subprocess::run_capturing_stdout_cancellable(&mut command)
+        .await
+        .context("run `claude auth status`")?;
     if !verified.status.success() {
         bail!(
             "the stored token did not authenticate: `claude auth status` exited with {}. \
