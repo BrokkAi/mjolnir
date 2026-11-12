@@ -275,7 +275,7 @@ impl ChatState {
             return None;
         }
         self.composer_forward = Some(self.composer_runtime.tx.clone());
-        Some(LiveComposer {
+        let composer = LiveComposer {
             input: std::mem::take(&mut self.input),
             input_cursor: std::mem::take(&mut self.input_cursor),
             input_images: std::mem::take(&mut self.input_images),
@@ -306,7 +306,9 @@ impl ChatState {
             operation_feedback: std::mem::take(&mut self.operation_feedback),
             conversation_notices: std::mem::take(&mut self.conversation_notices),
             composer_runtime: std::mem::take(&mut self.composer_runtime),
-        })
+        };
+        self.sync_inline_submissions();
+        Some(composer)
     }
     pub fn adopt_live_composer(&mut self, composer: LiveComposer) {
         self.composer_forward = None;
@@ -338,10 +340,7 @@ impl ChatState {
         self.operation_feedback = composer.operation_feedback;
         self.conversation_notices = composer.conversation_notices;
         self.composer_runtime = composer.composer_runtime;
-
-        // The destination may already have observed delivery while this
-        // composer was parked or its attachment was being prepared.
-        self.reconcile_submissions();
+        self.sync_inline_submissions();
         self.update_autocomplete();
     }
     /// `Some(None)` means Move preparation has not supplied its stable identity yet.

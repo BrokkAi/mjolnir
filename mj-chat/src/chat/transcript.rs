@@ -1043,6 +1043,9 @@ impl ChatState {
                 row,
             };
         }
+        if self.has_inline_submissions() {
+            self.sync_inline_submissions();
+        }
         self.invalidate_render_cache();
         true
     }

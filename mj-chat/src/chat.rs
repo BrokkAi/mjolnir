@@ -265,6 +265,12 @@ pub enum ChatAction {
     OpenSubagents,
     OpenReviewers,
     Prompt(String),
+    ResendSubmission {
+        command_id: String,
+    },
+    DismissSubmission {
+        command_id: String,
+    },
     RunShell(String),
     RemoveQueuedPrompt {
         id: String,
@@ -541,7 +547,6 @@ pub struct ChatState {
     pending_abandoned_prompt: Option<ChatDaemonRequest>,
     queued_prompts: VecDeque<QueuedPrompt>,
     pending_submissions: Vec<submissions::PendingSubmission>,
-    submission_projection: submissions::SubmissionProjection,
     submission_renders: Vec<(String, std::time::Instant)>,
     /// Queue entries optimistically moved back into the composer. A relay
     /// snapshot can still contain one until its removal command is projected,
@@ -748,7 +753,6 @@ impl ChatState {
             pending_abandoned_prompt: None,
             queued_prompts: VecDeque::new(),
             pending_submissions: Vec::new(),
-            submission_projection: Default::default(),
             submission_renders: Vec::new(),
             pending_queue_removals: BTreeSet::new(),
             pending_queue_images: BTreeMap::new(),
@@ -1030,8 +1034,7 @@ impl ChatState {
     ) {
         self.goal_state.clone_from(goal);
         let started = std::time::Instant::now();
-        self.submission_projection = session.into();
-        self.reconcile_submissions();
+        self.reconcile_submissions(session);
         self.reconcile_notices(session);
         let rebuild_projection = session.applied_event_ordinal != self.latest_seq;
         let phase = match session.execution {
@@ -1071,6 +1074,9 @@ impl ChatState {
                 self.unconverted_prefix,
                 std::mem::take(&mut self.entries),
             );
+            if self.has_inline_submissions() {
+                self.sync_inline_submissions();
+            }
             // Reusing entry rows is safe only after the collapse topology is
             // recomputed. A tool can become completed without changing the
             // transcript length, joining or splitting a collapsed streak.
