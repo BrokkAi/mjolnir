@@ -665,7 +665,9 @@ mod tests {
         )?;
         let before = load_usage_tree_from(&path, "root")?.unwrap();
         assert_eq!(before.sessions.len(), 3);
-        save_state_to(&path, &State::default())?;
+        for id in state.sessions.keys() {
+            super::sessions::delete_session_from(&path, id)?;
+        }
         let after = load_usage_tree_from(&path, "root")?.unwrap();
         assert_eq!(after.sessions.len(), 3);
         assert!(
