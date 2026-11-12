@@ -13,7 +13,7 @@ A Claude $100 Max account must receive half the assignments of a $200 Max accoun
 - [x] Validated compilation and extended captured-credential, cache-persistence, and deterministic assignment regressions.
 - [x] Changed model-first session creation to weighted draws with and without explicit effort, and extended the public API regression.
 - [x] Full client (57 including integration), controller (2574), and TUI (581) suites passed; 50 focused checks passed and the corrected CLI regression passed separately. Final workspace Clippy, formatting, and diff checks passed.
-- [ ] Commit, review, and push to origin/master.
+- [x] Committed implementation as `241155d74` and received a clean review. Merged advanced upstream master as `972200993`; final publication follows the repository review/push hook.
 
 ## Surprises & Discoveries
 
@@ -58,3 +58,5 @@ Add `monthly_price_usd: Option<u32>` to `ProfileQuota`, `ClaudeUsageReport`, and
 Plan update (2026-11-12): included the user's CLI follow-up. The initial final suite began before that request; validate the later session-selection changes with focused API tests and incremental workspace Clippy rather than repeating unrelated suites.
 
 Validation evidence: full controller suite 2574 passed / 19 ignored, client 56 library + 1 integration passed / 1 ignored, TUI 581 passed / 2 ignored. Focused follow-up validated 50 checks before the incomplete fixture stalled; after correcting it, its single rerun passed. Final `cargo clippy --all-targets -- -D warnings` passed.
+
+Publication update (2026-11-12): initial review was clean. The first push found advanced upstream master, which merged without conflicts. The normal push hook requires a review of the merged tree, so request that review before the final push. The merge adds only upstream changes; it does not alter this implementation.
