@@ -89,7 +89,7 @@ enum Device {
     Cpu,
     Needed,
     Preparing(Arc<CancellationToken>),
-    Candidate(Arc<inference::Gpu>),
+    Pending(Arc<inference::Gpu>),
     Benchmarking(Arc<inference::Gpu>),
     Gpu(Arc<inference::Gpu>),
 }
@@ -130,6 +130,8 @@ struct Machine {
     use_gpu: bool,
 }
 struct Inner {
+    #[cfg(test)]
+    probe_control_failures: std::sync::atomic::AtomicUsize,
     machine: Mutex<Machine>,
     changed: Notify,
     notice: Notice,
@@ -222,6 +224,8 @@ impl Student {
         options: PreparationOptions,
     ) -> Self {
         let inner = Arc::new(Inner {
+            #[cfg(test)]
+            probe_control_failures: Default::default(),
             machine: Mutex::new(Machine {
                 state: State::Dormant,
                 use_gpu,
@@ -319,10 +323,15 @@ impl Student {
                     return Err(StudentError::Unavailable(machine.state.public()).into());
                 }
                 let work = match &ready.device {
-                    Device::Candidate(gpu) => {
+                    Device::Pending(gpu) => {
                         let gpu = gpu.clone();
                         ready.device = Device::Benchmarking(gpu.clone());
-                        Work::Benchmark(gpu)
+                        Work::Benchmark(Probe {
+                            inner: self.inner.clone(),
+                            engine: ready.engine.clone(),
+                            gpu,
+                            outcome: ProbeOutcome::ControlFailed,
+                        })
                     }
                     Device::Gpu(gpu) => Work::Gpu(gpu.clone()),
                     Device::Cpu
@@ -393,25 +402,70 @@ impl Drop for Student {
 
 enum Work {
     Cpu,
-    Benchmark(Arc<inference::Gpu>),
+    Benchmark(Probe),
     Gpu(Arc<inference::Gpu>),
 }
+
+/// A control failure makes no device decision. Pending is consumed only by a
+/// later real pair; neither the supervisor nor this probe retries it in a loop.
+enum ProbeOutcome {
+    GpuWins,
+    CpuWins { gpu_ms: u64, cpu_ms: u64 },
+    GpuFailed,
+    ControlFailed,
+}
+
+/// Own the reservation from admission through blocking execution, including
+/// cancellation before execution and unwinding. Exactly one drop resolves it.
+struct Probe {
+    inner: Arc<Inner>,
+    engine: Arc<inference::Engine>,
+    gpu: Arc<inference::Gpu>,
+    outcome: ProbeOutcome,
+}
+impl Probe {
+    fn complete(mut self, outcome: ProbeOutcome) {
+        self.outcome = outcome;
+    }
+}
+impl Drop for Probe {
+    fn drop(&mut self) {
+        device_transition(
+            &self.inner,
+            &self.engine,
+            &self.gpu,
+            std::mem::replace(&mut self.outcome, ProbeOutcome::ControlFailed),
+        );
+    }
+}
+
 fn device_transition(
     inner: &Inner,
     engine: &Arc<inference::Engine>,
     gpu: &Arc<inference::Gpu>,
-    reason: Option<StudentDeviceFallbackReason>,
+    outcome: ProbeOutcome,
 ) {
-    let mut machine = inner.machine.lock().expect("student state poisoned");
+    // Reservation cleanup must work even while another failure is unwinding.
+    let mut machine = inner.machine.lock().unwrap_or_else(|p| p.into_inner());
     if let State::Ready(ready) = &mut machine.state
         && Arc::ptr_eq(&ready.engine, engine)
         && matches!(&ready.device,Device::Gpu(current)|Device::Benchmarking(current) if Arc::ptr_eq(current,gpu))
     {
-        ready.device = if reason.is_some() {
-            Device::Cpu
-        } else {
-            Device::Gpu(gpu.clone())
+        let (device, reason) = match outcome {
+            ProbeOutcome::GpuWins => (Device::Gpu(gpu.clone()), None),
+            ProbeOutcome::ControlFailed => (Device::Pending(gpu.clone()), None),
+            ProbeOutcome::CpuWins { gpu_ms, cpu_ms } => (
+                Device::Cpu,
+                Some(StudentDeviceFallbackReason::Slower { gpu_ms, cpu_ms }),
+            ),
+            ProbeOutcome::GpuFailed => (
+                Device::Cpu,
+                Some(StudentDeviceFallbackReason::Failed(
+                    StudentFailureKind::Inference,
+                )),
+            ),
         };
+        ready.device = device;
         drop(machine);
         if let Some(reason) = reason {
             (inner.notice)(StudentNotice::DeviceFallback {
@@ -421,6 +475,7 @@ fn device_transition(
         }
     }
 }
+
 fn run(
     inner: &Inner,
     engine: &Arc<inference::Engine>,
@@ -428,115 +483,124 @@ fn run(
     item: &str,
     session: &str,
 ) -> Result<f64> {
-    let (ids, mask) = engine.tokens(item, session)?;
-    let (gpu, benchmark) = match work {
-        Work::Cpu => return engine.score_tokens(ids, mask),
-        Work::Benchmark(gpu) => (gpu, true),
-        Work::Gpu(gpu) => (gpu, false),
+    match work {
+        Work::Cpu => {
+            let (ids, mask) = engine.tokens(item, session)?;
+            engine.score_tokens(ids, mask)
+        }
+        Work::Benchmark(probe) => {
+            let (outcome, result) = probe_pair(inner, engine, &probe.gpu, item, session);
+            probe.complete(outcome);
+            result
+        }
+        Work::Gpu(gpu) => {
+            let (ids, mask) = engine.tokens(item, session)?;
+            let result = (|| -> Result<Option<f64>> {
+                // DirectML permits one Run per session. Check selection after
+                // that admission so queued calls cannot undo CPU selection.
+                let mut session = gpu
+                    .session
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("GPU session poisoned"))?;
+                let machine = inner.machine.lock().expect("student state poisoned");
+                let selected = matches!(&machine.state, State::Ready(ready)
+                    if Arc::ptr_eq(&ready.engine, engine)
+                    && matches!(&ready.device, Device::Gpu(current) if Arc::ptr_eq(current, &gpu)));
+                drop(machine);
+                if !selected {
+                    return Ok(None);
+                }
+                session.score(ids.clone(), mask.clone()).map(Some)
+            })();
+            match result {
+                Ok(Some(score)) => Ok(score),
+                Ok(None) => engine.score_tokens(ids, mask),
+                Err(error) => {
+                    tracing::warn!(%error, device=?gpu.device, "GPU student inference failed; retaining CPU");
+                    device_transition(inner, engine, &gpu, ProbeOutcome::GpuFailed);
+                    engine.score_tokens(ids, mask)
+                }
+            }
+        }
+    }
+}
+
+/// Produce one outcome on every ordinary exit; the reservation guard supplies
+/// ControlFailed if this computation unwinds instead of returning an outcome.
+fn probe_pair(
+    inner: &Inner,
+    engine: &Arc<inference::Engine>,
+    gpu: &Arc<inference::Gpu>,
+    item: &str,
+    session: &str,
+) -> (ProbeOutcome, Result<f64>) {
+    let (ids, mask) = match engine.tokens(item, session) {
+        Ok(tokens) => tokens,
+        Err(error) => return (ProbeOutcome::ControlFailed, Err(error)),
     };
-    // DirectML allows one Run per session. Ask the owner after that admission
-    // so queued work cannot run GPU after another call has selected CPU.
+    let start = std::time::Instant::now();
+    #[cfg(test)]
+    if inner
+        .probe_control_failures
+        .try_update(
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+            |n| n.checked_sub(1),
+        )
+        .is_ok()
+    {
+        return (
+            ProbeOutcome::ControlFailed,
+            Err(anyhow::anyhow!("recorded CPU-control inference failure")),
+        );
+    }
+    let control = engine.score_tokens(ids.clone(), mask.clone());
+    let cpu = match control {
+        Ok(score) => score,
+        Err(error) => return (ProbeOutcome::ControlFailed, Err(error)),
+    };
+    let cpu_time = start.elapsed();
     let mut session = match gpu.session.lock() {
         Ok(session) => session,
         Err(error) => {
-            tracing::warn!(%error,"GPU session poisoned; retaining CPU");
-            device_transition(
-                inner,
-                engine,
-                &gpu,
-                Some(StudentDeviceFallbackReason::Failed(
-                    StudentFailureKind::Inference,
-                )),
-            );
-            drop(error);
-            return engine.score_tokens(ids, mask);
+            tracing::warn!(%error, "GPU session poisoned; retaining CPU");
+            return (ProbeOutcome::GpuFailed, Ok(cpu));
         }
     };
-    let selected = {
-        let machine = inner.machine.lock().expect("student state poisoned");
-        matches!(&machine.state,State::Ready(ready) if Arc::ptr_eq(&ready.engine,engine) && match &ready.device {
-            Device::Benchmarking(current) if benchmark=>Arc::ptr_eq(current,&gpu),
-            Device::Gpu(current) if !benchmark=>Arc::ptr_eq(current,&gpu),_=>false,
-        })
-    };
+    let machine = inner.machine.lock().expect("student state poisoned");
+    let selected = matches!(&machine.state, State::Ready(ready)
+        if Arc::ptr_eq(&ready.engine, engine)
+        && matches!(&ready.device, Device::Benchmarking(current) if Arc::ptr_eq(current, gpu)));
+    drop(machine);
+    // A preference or engine change has already released the reservation. Its
+    // epoch check also prevents this stale outcome from changing that choice.
     if !selected {
-        drop(session);
-        return engine.score_tokens(ids, mask);
+        return (ProbeOutcome::ControlFailed, Ok(cpu));
     }
-    if benchmark {
-        // Compile and allocate on the probe pair once; its cold latency is not
-        // evidence of steady-state device speed.
-        if let Err(error) = session.warmup(ids.clone(), mask.clone()) {
-            tracing::warn!(%error, "GPU warmup failed; retaining CPU");
-            device_transition(
-                inner,
-                engine,
-                &gpu,
-                Some(StudentDeviceFallbackReason::Failed(
-                    StudentFailureKind::Inference,
-                )),
-            );
-            drop(session);
-            return engine.score_tokens(ids, mask);
-        }
+    // Discard cold GPU compilation/allocation before comparing warm latency.
+    if let Err(error) = session.warmup(ids.clone(), mask.clone()) {
+        tracing::warn!(%error, "GPU warmup failed; retaining CPU");
+        return (ProbeOutcome::GpuFailed, Ok(cpu));
     }
-    let control = if benchmark {
-        let start = std::time::Instant::now();
-        Some((
-            engine.score_tokens(ids.clone(), mask.clone())?,
-            start.elapsed(),
-        ))
-    } else {
-        None
-    };
     let start = std::time::Instant::now();
-    let score = session.score(ids.clone(), mask.clone());
-    let elapsed = start.elapsed();
-    match (score, control) {
-        (Ok(score), Some((cpu, _))) if (cpu - score).abs() > 0.005 => {
+    let score = session.score(ids, mask);
+    let gpu_time = start.elapsed();
+    match score {
+        Ok(score) if (cpu - score).abs() > 0.005 => {
             tracing::warn!(cpu,score,device=?gpu.device,"GPU student parity failed; retaining CPU");
-            device_transition(
-                inner,
-                engine,
-                &gpu,
-                Some(StudentDeviceFallbackReason::Failed(
-                    StudentFailureKind::Inference,
-                )),
-            );
-            Ok(cpu)
+            (ProbeOutcome::GpuFailed, Ok(cpu))
         }
-        (Ok(_), Some((cpu, cpu_time))) if elapsed >= cpu_time => {
-            device_transition(
-                inner,
-                engine,
-                &gpu,
-                Some(StudentDeviceFallbackReason::Slower {
-                    gpu_ms: elapsed.as_millis() as u64,
-                    cpu_ms: cpu_time.as_millis() as u64,
-                }),
-            );
-            Ok(cpu)
-        }
-        (Ok(score), _) => {
-            if benchmark {
-                device_transition(inner, engine, &gpu, None);
-            }
-            Ok(score)
-        }
-        (Err(error), control) => {
-            tracing::warn!(error=%format!("{error:#}"),device=?gpu.device,"GPU student inference failed; retaining CPU");
-            // Publish CPU before releasing the GPU resource; queued calls
-            // then skip it and can score concurrently on CPU.
-            device_transition(
-                inner,
-                engine,
-                &gpu,
-                Some(StudentDeviceFallbackReason::Failed(
-                    StudentFailureKind::Inference,
-                )),
-            );
-            drop(session);
-            control.map_or_else(|| engine.score_tokens(ids, mask), |(cpu, _)| Ok(cpu))
+        Ok(_) if gpu_time >= cpu_time => (
+            ProbeOutcome::CpuWins {
+                gpu_ms: gpu_time.as_millis() as u64,
+                cpu_ms: cpu_time.as_millis() as u64,
+            },
+            Ok(cpu),
+        ),
+        Ok(score) => (ProbeOutcome::GpuWins, Ok(score)),
+        Err(error) => {
+            tracing::warn!(%error,device=?gpu.device,"GPU student inference failed; retaining CPU");
+            (ProbeOutcome::GpuFailed, Ok(cpu))
         }
     }
 }
@@ -630,7 +694,7 @@ async fn supervise(
                         _ => None,
                     };
                     ready.device = match result {
-                        Ok(Some(gpu)) => Device::Candidate(gpu),
+                        Ok(Some(gpu)) => Device::Pending(gpu),
                         _ => Device::Cpu,
                     };
                     drop(machine);

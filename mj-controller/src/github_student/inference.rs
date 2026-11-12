@@ -53,6 +53,25 @@ impl Engine {
             tokenizer,
         })
     }
+    /// Exercise probe ownership with real ORT inference and no GPU dependency.
+    #[cfg(test)]
+    pub(super) fn cpu_probe(&self, directory: &Path) -> Result<Gpu> {
+        let session = Session::builder(&self.environment)?
+            .with_intra_threads(1)
+            .map_err(ort::Error::<()>::from)?
+            .with_inter_threads(1)
+            .map_err(ort::Error::<()>::from)?
+            .commit_from_file(directory.join("model.onnx"))?;
+        Ok(Gpu {
+            device: StudentDevice::Cpu,
+            session: Mutex::new(GpuSessions::Dynamic(Bucket {
+                length: 0,
+                session,
+                check_placement: None,
+            })),
+        })
+    }
+
     pub fn preferred_device(&self) -> Option<StudentDevice> {
         if super::runtime::directml_selected() {
             Some(StudentDevice::DirectMl)

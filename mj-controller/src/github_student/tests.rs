@@ -178,6 +178,7 @@ fn copy_tree(source: &Path, destination: &Path) {
         }
     }
 }
+// Hard-won: #1513: failed CPU controls left the GPU benchmark reservation stuck.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires verified pinned model/runtime assets for actual ORT loader recovery"]
 async fn owner_reuses_loaded_cpu_across_health_and_preference_changes() {
@@ -337,6 +338,87 @@ async fn owner_reuses_loaded_cpu_across_health_and_preference_changes() {
         assert!(matches!(ready.device, Device::Cpu));
     }
     drop(admitted);
+    // Use a real CPU-backed session as the device candidate: this tests the
+    // owner's probe/error path on every host without probing a local GPU.
+    let directory = root
+        .path()
+        .join("github-student")
+        .join(&assets::Manifest::pinned().revision);
+    let gpu = {
+        let engine = engine.clone();
+        tokio::task::spawn_blocking(move || engine.cpu_probe(&directory))
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    let gpu = Arc::new(gpu);
+    {
+        let mut machine = student.inner.machine.lock().unwrap();
+        let State::Ready(ready) = &mut machine.state else {
+            panic!("lost readiness")
+        };
+        ready.device = Device::Pending(gpu.clone());
+    }
+    let pair = pairs()
+        .into_iter()
+        .min_by_key(|p| p.input_ids.len())
+        .unwrap();
+    let oversized_item = "repository ".repeat(9000);
+    assert!(
+        student
+            .score_segments(&oversized_item, &pair.session)
+            .await
+            .is_err()
+    );
+    {
+        let machine = student.inner.machine.lock().unwrap();
+        let State::Ready(ready) = &machine.state else {
+            panic!("lost readiness")
+        };
+        assert!(
+            matches!(&ready.device, Device::Pending(current) if Arc::ptr_eq(current, &gpu)),
+            "tokenization errors must release the reservation without choosing a device"
+        );
+    }
+    student
+        .inner
+        .probe_control_failures
+        .store(1, Ordering::SeqCst);
+    let error = student
+        .score_segments(&pair.item, &pair.session)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error.downcast_ref::<StudentError>(), Some(StudentError::Inference { cause }) if cause.contains("CPU-control"))
+    );
+    {
+        let machine = student.inner.machine.lock().unwrap();
+        let State::Ready(ready) = &machine.state else {
+            panic!("lost readiness")
+        };
+        assert!(
+            matches!(&ready.device, Device::Pending(current) if Arc::ptr_eq(current, &gpu)),
+            "a failed CPU control must leave the decision pending for the next real pair"
+        );
+        assert!(Arc::ptr_eq(&ready.engine, &engine));
+    }
+    let score = student
+        .score_segments(&pair.item, &pair.session)
+        .await
+        .unwrap();
+    assert!((score - pair.python_fp32).abs() <= 0.005);
+    {
+        let machine = student.inner.machine.lock().unwrap();
+        let State::Ready(ready) = &machine.state else {
+            panic!("lost readiness")
+        };
+        assert!(
+            matches!(&ready.device, Device::Gpu(_) | Device::Cpu),
+            "the later successful probe must resolve its reservation"
+        );
+        assert!(!ready.failing);
+    }
+
     assert_eq!(
         requests.load(Ordering::SeqCst),
         assets::Manifest::pinned().selected(false).files.len()
