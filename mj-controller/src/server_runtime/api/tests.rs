@@ -2125,6 +2125,80 @@ fn a_child_whose_login_was_refused_fails_naming_its_profile_and_the_fix() {
         "{entry}"
     );
 
+    // #1508: a session-load refusal has no new failed turn. Its lifecycle
+    // failure must take precedence over the previous delivered answer.
+    let mut parked = record.clone();
+    parked.state = SessionState::Parked;
+    let mut old_login_failure = finished_turn("previous-login-failure");
+    old_login_failure.outcome = mj_core::state::TurnOutcomeKind::Completed {
+        stop_reason: "authentication_error".into(),
+    };
+    assert!(mj_core::subagent::turn_failed_on_login(&old_login_failure));
+    let mut old_provider_failure = finished_turn("previous-provider-failure");
+    old_provider_failure.outcome = mj_core::state::TurnOutcomeKind::Completed {
+        stop_reason: "error".into(),
+    };
+    old_provider_failure.diagnostic = Some(mj_core::diagnostic::TurnDiagnostic {
+        message: "the old provider outage".into(),
+        code: Some("service".into()),
+        http_status: Some(503),
+        reset_at: None,
+    });
+    assert!(provider_failure(&old_provider_failure).is_some());
+    for old_failure in [&old_login_failure, &old_provider_failure] {
+        for (failure, login_invalid) in [
+            (
+                "login_invalid: workspace routing discovery unauthorized (401); run `mj login --profile codex4` for target ec2",
+                true,
+            ),
+            (
+                "could not start the parked sub-agent: process exhaustion (Cannot fork)",
+                false,
+            ),
+        ] {
+            parked.last_error = Some(failure.into());
+            let current = project_child_failure(
+                child_failure_source(Some(&parked), Some(old_failure)),
+                Some("codex4"),
+                Some("old turn summary"),
+            );
+            assert!(current.failed_turn.is_none());
+            assert!(current.provider_failure.is_none());
+            let lifecycle_progress = ChildProgress {
+                login_failure: current.login_failure,
+                failed_turn: current.failed_turn,
+                provider_failure: current.provider_failure,
+                report: ReportState::Delivered("previous answer".into()),
+                answer: None,
+                ..progress.clone()
+            };
+            let (state, output, finished) = subagent_status(
+                Some(&parked),
+                Some(&summary),
+                None,
+                None,
+                false,
+                &lifecycle_progress,
+            );
+            assert_eq!(state, "failed", "{failure}");
+            assert!(finished, "{failure}");
+            let entry = super::wait_agent_entry(
+                "child",
+                &state,
+                output,
+                finished,
+                &lifecycle_progress,
+                false,
+            );
+            assert_eq!(entry["output"], failure);
+            if login_invalid {
+                assert_eq!(entry["failure"]["kind"], "login_invalid");
+            } else {
+                assert!(entry.get("failure").is_none(), "{entry}");
+            }
+        }
+    }
+
     // A report the child did hand back is still its report.
     let delivered = ChildProgress {
         report: ReportState::Delivered("done".into()),
