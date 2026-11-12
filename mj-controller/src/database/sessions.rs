@@ -3,6 +3,27 @@ use super::*;
 /// Persist one operational session without rewriting unrelated controller
 /// state. Dashboard lifecycle jobs use this path so independent jobs can
 /// commit concurrently without restoring stale copies of other sessions.
+pub(crate) fn save_imported_session(
+    session: &SessionRecord,
+    materialized: &MaterializedSession,
+) -> Result<()> {
+    let session = session.clone();
+    let materialized = materialized.clone();
+    submit_database_write("save_imported_session", move |connection| {
+        validate_session_record(&session)?;
+        materialized.validate()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        ensure!(
+            !session_exists(&tx, &session.id)?,
+            "imported session already exists"
+        );
+        insert_session(&tx, &session)?;
+        write_materialized_session(&tx, &materialized)?;
+        tx.commit()?;
+        Ok(())
+    })
+}
+
 pub fn save_session(session: &SessionRecord) -> Result<()> {
     let session = session.clone();
     submit_database_write("save_session", move |_| {

@@ -24,7 +24,7 @@ This is private-network operation with working SSH authentication and host trust
 - [ ] Implement and validate milestone 6: matching-build PowerShell go script.
 - [ ] Implement milestone 7: user documentation, final validation, platform dispatch and real Windows acceptance.
 
-- [ ] (2026-11-12, import child) Transport checkpoint: CLI and dashboard stage archives in retained client tempdirs, upload on the consuming connection, and register a daemon-owned archive through admitted ImportSession. Import-only container forwarding removed. Dialog path selection, cancellable upload, coherent daemon project-path remapping, and separated-directory CLI acceptance remain outstanding. Validation evidence is recorded in the child report.
+- [ ] (2026-11-12, import child) Client native-home selection and atomic record/projection registration implemented; transport checkpoint retained. Targeted source-selection test passes. Dialog path, cancellation and CLI acceptance remain outstanding; final validation in progress.
 
 ## Surprises & Discoveries
 
@@ -241,3 +241,5 @@ Blob interface (2026-11-12): `DaemonClient::upload(&mut (impl AsyncRead + Unpin)
 Discovery (2026-11-12, blob checkpoint): the full controller suite leaks `sleep 600` from `daemon::tests::child_close_yields_handoff_and_replays_its_durable_request_with_the_final_journal` (blocked phase) and `session_manager::tests::retirement_ends_a_connect_that_never_answers`, identified by the orphan subprocess environment. The checkpoint run terminated its own orphan process groups after validation.
 
 Discovery (2026-11-12, import child): the dashboard applies the prepared SessionRecord after persistence; after moving installation to the daemon, fetch that record back before applying it or the UI retains a deleted client staging path.
+
+Discovery (2026-11-12, import child): save_materialized_session requires a registered session, so ordering those two public writes cannot provide atomic registration. Import now inserts both inside the database writer transaction after archive installation; failed registration removes the archive with its output handle closed.

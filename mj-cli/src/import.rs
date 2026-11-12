@@ -65,7 +65,7 @@ pub(crate) struct NativeImportArgs {
     /// Import the most recently modified session.
     #[arg(long)]
     latest: bool,
-    /// Profile whose home holds the session. Needed only when several
+    /// Daemon profile to associate with the session. Needed when several
     /// enabled profiles run this harness.
     #[arg(long)]
     profile: Option<String>,
@@ -138,19 +138,12 @@ fn daemon_config() -> Result<Config> {
 /// Where one import reads its session from.
 #[derive(Debug, PartialEq, Eq)]
 struct ImportSource {
-    /// The configured profile whose home this is, when one is.
+    /// The daemon profile used for registration, when one is.
     profile_id: Option<String>,
     home: PathBuf,
 }
 
-/// Where `mj import <harness>` reads sessions: the home of the named profile,
-/// else of the one enabled profile that runs this harness, else the harness's
-/// own stock home when no profile runs it.
-///
-/// It used to read the stock home whatever was configured, so on a machine
-/// where a profile keeps its sessions elsewhere, `--latest` picked a session
-/// that belonged to some other `mj` instance or to the user's own harness
-/// (F-18).
+/// Read the client native home; daemon profiles select registration only.
 fn import_source(
     config: &Config,
     harness: HarnessKind,
@@ -170,7 +163,7 @@ fn import_source(
         );
         return Ok(ImportSource {
             profile_id: Some(profile_id.to_owned()),
-            home: profile.home.clone(),
+            home: harness_config_home(harness)?,
         });
     }
     let candidates: Vec<(&String, &mj_core::config::HarnessProfile)> = config
@@ -183,12 +176,12 @@ fn import_source(
             profile_id: None,
             home: harness_config_home(harness)?,
         }),
-        [(profile_id, profile)] => Ok(ImportSource {
+        [(profile_id, _)] => Ok(ImportSource {
             profile_id: Some((*profile_id).clone()),
-            home: profile.home.clone(),
+            home: harness_config_home(harness)?,
         }),
         several => bail!(
-            "several profiles run {}; name the one whose home holds the session with --profile: {}",
+            "several profiles run {}; select the registration profile with --profile: {}",
             harness.display_name(),
             several
                 .iter()
@@ -251,7 +244,7 @@ const fn import_label(harness: HarnessKind) -> &'static str {
 }
 
 /// Where a harness keeps the sessions Mjolnir may read. Never modified.
-fn harness_config_home(harness: HarnessKind) -> Result<PathBuf> {
+pub(crate) fn harness_config_home(harness: HarnessKind) -> Result<PathBuf> {
     mj_controller::import::harness_config_home(harness)
 }
 
@@ -861,9 +854,10 @@ fn import_session_from_profile(
         .with_context(|| format!("unknown profile {profile_id:?}"))?
         .clone();
     ensure!(profile.enabled, "profile {profile_id:?} is disabled");
+    let home = harness_config_home(profile.kind)?;
     let source = locate_native_session(
         profile.kind,
-        &profile.home,
+        &home,
         &ClaudeSessionSelection::NativeSessionId(native_session_id.into()),
     )?;
     let transcript = read_native_transcript(profile.kind, &source.source_path)?;
@@ -871,7 +865,7 @@ fn import_session_from_profile(
     let bundle_id = match resolve_background_import_bundle(
         &mut controller.config,
         &transcript,
-        &profile.home,
+        &home,
         safety.accepted,
     )? {
         BackgroundBundleResolution::Ready(bundle_id) => bundle_id,
@@ -891,7 +885,7 @@ fn import_session_from_profile(
         &mut controller.state,
         NativeImportRequest {
             harness: profile.kind,
-            harness_home: &profile.home,
+            harness_home: &home,
             native_session_id: &source.native_session_id,
             source_path: &source.source_path,
             transcript: &transcript,
@@ -1114,9 +1108,8 @@ mod tests {
 
     /// All harnesses share one implementation, so each subcommand must
     /// still name its own harness and take the same selection arguments.
-    // Hard-won: 03066cfabb: Finding F-18 showed import scanning the stock home instead of the selected profile home; the test checks profile-specific discovery and refuses ambiguous profile guessing.
     #[test]
-    fn an_import_reads_the_configured_profiles_home_not_the_stock_one() {
+    fn an_import_uses_client_history_with_daemon_profile_selection() {
         let profile = |kind: HarnessKind, home: &str| mj_core::config::HarnessProfile {
             enabled: true,
             environment: Default::default(),
@@ -1141,7 +1134,7 @@ mod tests {
             import_source(&config, HarnessKind::Codex, None).unwrap(),
             ImportSource {
                 profile_id: Some("fake".into()),
-                home: PathBuf::from("/lab/profile"),
+                home: harness_config_home(HarnessKind::Codex).unwrap(),
             }
         );
 
@@ -1157,7 +1150,7 @@ mod tests {
             import_source(&config, HarnessKind::Codex, Some("work"))
                 .unwrap()
                 .home,
-            PathBuf::from("/lab/work")
+            harness_config_home(HarnessKind::Codex).unwrap()
         );
         assert!(
             import_source(&config, HarnessKind::Codex, Some("claude")).is_err(),

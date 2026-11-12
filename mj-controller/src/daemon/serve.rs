@@ -339,6 +339,7 @@ pub(super) async fn serve_client(
                             let mut output = std::fs::OpenOptions::new().write(true).create_new(true).open(&destination)?;
                             let registered = (|| -> Result<()> {
                                 std::io::copy(&mut std::fs::File::open(&path)?, &mut output)?;
+                                output.sync_all().context("sync imported archive")?;
                                 if let Some(imported) = bundle {
                                     let ImportedBundle { bundle_id, bundle } = imported;
                                     Config::update(|config| {
@@ -352,6 +353,7 @@ pub(super) async fn serve_client(
                                 }
                                 crate::import::persist_imported_session_locally(&session)
                             })();
+                            drop(output);
                             if registered.is_err() {
                                 std::fs::remove_file(&destination).context("remove failed import archive")?;
                             }

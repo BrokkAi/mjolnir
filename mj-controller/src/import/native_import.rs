@@ -518,7 +518,6 @@ pub(super) fn timestamp() -> String {
 }
 
 pub fn persist_imported_session_locally(session: &SessionRecord) -> Result<()> {
-    crate::database::save_session(session)?;
     let checkpoint = session
         .checkpoint
         .as_ref()
@@ -529,5 +528,5 @@ pub fn persist_imported_session_locally(session: &SessionRecord) -> Result<()> {
         session.id.clone(),
         &canonical,
     )?;
-    crate::database::save_materialized_session(&materialized)
+    crate::database::save_imported_session(session, &materialized)
 }
