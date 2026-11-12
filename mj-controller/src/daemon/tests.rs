@@ -1476,6 +1476,34 @@ async fn daemon_client_eof_does_not_cancel_a_submitted_mutation() {
     let _ = server.await.expect("daemon task panicked");
 }
 
+/// Matching configuration for records produced by runtime_test_session.
+pub(super) fn runtime_test_config() -> Config {
+    use mj_core::config::{
+        HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository, TargetTemplate,
+    };
+    let mut config = Config::default();
+    config.profiles.insert(
+        "codex".into(),
+        HarnessProfile::new(HarnessKind::Codex, PathBuf::from("/home/dev/.codex")),
+    );
+    config
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    config.bundles.insert(
+        "project".into(),
+        ProjectBundle {
+            primary_repo: "main".into(),
+            repositories: vec![ProjectRepository {
+                id: "main".into(),
+                local: Some(PathBuf::from("/workspace/project")),
+                destination: PathBuf::from("."),
+                ..Default::default()
+            }],
+        },
+    );
+    config
+}
+
 pub(super) fn runtime_test_session(
     id: &str,
     workspace_id: &str,

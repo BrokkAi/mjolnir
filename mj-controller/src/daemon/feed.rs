@@ -545,7 +545,10 @@ mod tests {
 
     #[tokio::test]
     async fn attaching_and_then_changing_owner_state_yields_an_incremental_frame() {
-        let state = super::super::tests::test_runtime_state();
+        let state = super::super::tests::test_runtime_state_with(Controller {
+            config: super::super::tests::runtime_test_config(),
+            state: Default::default(),
+        });
         let initial = state.runtime_changes(None, false).await.unwrap();
         let mut replica = RuntimeReplica::default();
         replica.apply(initial).unwrap();
@@ -560,6 +563,10 @@ mod tests {
                 ),
             );
         });
+        state.owner().sessions.insert(
+            "new".into(),
+            RuntimeSessionView::from_managed("new".into(), Default::default()),
+        );
         state.publish_revision();
         let frame = state.runtime_changes(cursor, true).await.unwrap();
         let RuntimeFrame::Delta { changes, .. } = &frame else {
@@ -568,6 +575,26 @@ mod tests {
         assert_eq!(changes.records.len(), 1);
         replica.apply(frame).unwrap();
         assert!(replica.projection.records.contains_key("new"));
+        assert_eq!(
+            replica.projection.sessions["new"].attention,
+            mj_core::attention::SessionAttention::Unreachable
+        );
+        let cursor = replica.cursor.clone();
+        let mut config = (*replica.projection.metadata.config).clone();
+        config.profiles.remove("codex");
+        state.owner().install_config(config);
+        state.publish_revision();
+        replica
+            .apply(state.runtime_changes(cursor, false).await.unwrap())
+            .unwrap();
+        assert_eq!(
+            replica.projection.metadata.session_attention["new"],
+            mj_core::attention::SessionAttention::Failed
+        );
+        assert_eq!(
+            replica.projection.sessions["new"].attention,
+            mj_core::attention::SessionAttention::Failed
+        );
     }
 
     // Hard-won: 8c88175f7: captures copied and compared unchanged metadata on every update.

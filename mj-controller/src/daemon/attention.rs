@@ -76,7 +76,10 @@ pub(super) fn project(runtime: &RuntimeProjection) -> BTreeMap<String, SessionAt
                     .lifecycles
                     .iter()
                     .any(|operation| operation.session_id == *id);
-            let state = if record.last_error.is_some()
+            let state = if record
+                .configuration_issue(&runtime.metadata.config)
+                .is_some()
+                || record.last_error.is_some()
                 || matches!(
                     record.state,
                     mj_core::state::SessionState::Lost
@@ -220,6 +223,7 @@ mod tests {
 
     fn runtime() -> RuntimeProjection {
         let mut runtime = RuntimeProjection::default();
+        runtime.metadata.config = super::super::tests::runtime_test_config().into();
         for id in ["parent", "child"] {
             runtime.records.insert(
                 id.into(),
@@ -327,9 +331,18 @@ mod tests {
         assert_eq!(project(&runtime)["parent"], SessionAttention::Important);
     }
 
+    // Hard-won: 912798901: configuration repair errors lost their failure state.
     #[test]
     fn attention_failure_is_distinct_from_connection_loss_and_reviews_override_questions() {
         let mut runtime = runtime();
+        let normal = project(&runtime)["parent"];
+        let mut config = (*runtime.metadata.config).clone();
+        let profile = config.profiles.remove("codex").unwrap();
+        runtime.metadata.config = config.clone().into();
+        assert_eq!(project(&runtime)["parent"], SessionAttention::Failed);
+        config.profiles.insert("codex".into(), profile);
+        runtime.metadata.config = config.into();
+        assert_eq!(project(&runtime)["parent"], normal);
         let view = runtime.sessions.get_mut("parent").unwrap();
         view.connected = false;
         view.error = Some(mj_client::session::ViewError::Unreachable("offline".into()));

@@ -13,6 +13,11 @@ fn an_unchanged_session_is_recognised_without_reading_its_transcript() {
         "an identical snapshot was treated as a change, so it would be re-read"
     );
 
+    // Config can change attention without changing any worker projection fact.
+    let mut repair = runtime.clone();
+    repair.attention = mj_core::attention::SessionAttention::Failed;
+    assert!(!published.matches(&repair));
+
     // Anything a viewer would notice has to defeat the skip.
     let advanced = runtime_view("session-1", 43, "digest-43");
     assert!(
