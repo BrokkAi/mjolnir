@@ -579,6 +579,5 @@ pub(super) struct PushCompletion {
     pub(super) state: TurnReviewState,
     pub(super) deltas: Vec<mj_core::relay::RepoDelta>,
     pub(super) verdict: ReviewVerdict,
-    pub(super) _admission: crate::upgrade::Work,
     pub(super) delivery: Arc<super::resolve::Delivery>,
 }

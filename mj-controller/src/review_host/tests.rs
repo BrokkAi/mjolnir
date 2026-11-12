@@ -79,6 +79,7 @@ impl FakeManager {
             worker_recovery: None,
             project_memory: None,
         }]);
+        let mut updates = channels.updates;
         let manager = Self {
             session: session.to_owned(),
             control: channels.control,
@@ -104,6 +105,9 @@ impl FakeManager {
             .wait_for_session(session, Duration::from_secs(5))
             .await
             .expect("the fake manager manages the session");
+        // Consume initial publication like the daemon; dropping an undrained
+        // coalescer leaves its session-update admission in the shared mailbox.
+        while updates.try_recv().is_ok() {}
         manager
     }
 
@@ -4696,7 +4700,7 @@ async fn recording_notices_until_closed(
             } => {
                 let terminal = text.starts_with("Review complete:")
                     || text.starts_with("Review failed:")
-                    || text == "Review cancelled";
+                    || text.starts_with("Review cancelled");
                 notices.push(text);
                 let _ = reply.send(Ok(1));
                 if terminal {
@@ -4896,8 +4900,64 @@ async fn push_recording_can_be_cancelled_while_awaiting_acknowledgement() {
     host.resolve(&session, Resolution::Cancelled).await.unwrap();
     reply.closed().await;
     let notices = recording_notices_until_closed(&mut manager, &host, &session).await;
-    assert!(notices.iter().any(|text| text == "Review cancelled"));
+    assert!(notices.iter().any(
+        |text| text.contains("stopped waiting for approval recording")
+            && text.contains("worker may already have recorded approval")
+            && text.contains("push is allowed")
+            && text.contains("request review again")
+    ));
     assert!(environment.mailbox.lock().unwrap().is_empty());
     assert!(environment.state().active_group.is_none());
     host.shutdown().await.unwrap();
+}
+
+// Hard-won: #1502: a recoverable worker wait held admission and prevented daemon shutdown from starting.
+#[tokio::test]
+async fn push_recording_does_not_block_daemon_handoff() {
+    const PROBE: &str = "MJ_TEST_REVIEW_RECORDING_HANDOFF";
+    // Closing the process-wide gate belongs in a separate test process.
+    if std::env::var_os(PROBE).is_none() {
+        tokio::task::spawn_blocking(|| {
+            let root = tempfile::tempdir().unwrap();
+            crate::controller::test_support::IsolatedTest::new(
+                "review_host::tests::push_recording_does_not_block_daemon_handoff",
+            )
+            .env(PROBE, "1")
+            .isolated_store(root.path())
+            .run();
+        })
+        .await
+        .unwrap();
+        return;
+    }
+    let session = session_id("recording-handoff");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    let child = open_push(&mut manager, &host, &environment).await;
+    finish_child(&host, &environment, &session, &child, Some("No findings.")).await;
+    let (_, _, mut reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::RecordReviewed { .. }))
+        .await;
+    assert!(
+        crate::upgrade::gate().try_close(),
+        "a worker recording wait must not hold daemon handoff admission: {:?}",
+        crate::upgrade::gate().active_labels()
+    );
+    tokio::time::timeout(Duration::from_secs(5), host.shutdown())
+        .await
+        .expect("shutdown cancels the recoverable wait")
+        .unwrap();
+    reply.closed().await;
+    assert_eq!(
+        environment
+            .state()
+            .active_group
+            .unwrap()
+            .driver
+            .last_verdict,
+        Some(ReviewVerdict::Clean)
+    );
+    assert!(environment.mailbox.lock().unwrap().is_empty());
 }

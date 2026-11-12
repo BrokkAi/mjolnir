@@ -92,27 +92,25 @@ impl HostState {
         let deltas = slot.driver.deltas().to_vec();
         let epoch = slot.epoch;
         let review_id = slot.driver.snapshot().review_id;
-        let completion =
-            crate::upgrade::activity_unless_draining("push review verdict").map(|admission| {
-                PushCompletion {
-                    session_id: session_id.to_owned(),
-                    epoch,
-                    review_id,
-                    control: self.control.clone(),
-                    state: slot.state.clone(),
-                    deltas,
-                    verdict,
-                    _admission: admission,
-                    delivery: slot.delivery.clone(),
-                }
+        let completion = PushCompletion {
+            session_id: session_id.to_owned(),
+            epoch,
+            review_id,
+            control: self.control.clone(),
+            state: slot.state.clone(),
+            deltas,
+            verdict,
+            delivery: slot.delivery.clone(),
+        };
+        let queued = self
+            .persistence
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("review persistence stopped"))
+            .and_then(|persistence| {
+                persistence
+                    .send(PersistenceRequest::FinishPush(Box::new(completion)))
+                    .map_err(|_| anyhow::anyhow!("review persistence stopped"))
             });
-        let queued = completion.and_then(|completion| {
-            self.persistence
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("review persistence stopped"))?
-                .send(PersistenceRequest::FinishPush(Box::new(completion)))
-                .map_err(|_| anyhow::anyhow!("review persistence stopped"))
-        });
         if let Err(error) = queued {
             self.retry_push_delivery(session_id, format!("Before-push review failed: {error}"));
         }
@@ -151,7 +149,6 @@ pub(super) async fn finish_push_delivery(
         mut state,
         deltas,
         mut verdict,
-        _admission,
         delivery,
         ..
     } = completion;
@@ -216,13 +213,17 @@ pub(super) async fn finish_push_delivery(
             state.push_findings = None;
         }
     }
+    // Worker waits are resumable from the terminal snapshot and must not
+    // delay handoff. Only the final durable delivery owns daemon admission.
+    let admission = crate::upgrade::activity_unless_draining("push review verdict")
+        .map_err(|error| format!("push review delivery deferred for daemon handoff: {error}"))?;
     if !delivery.begin_commit() {
         return Err("approval recording cancelled".into());
     }
     state.active = None;
     state.active_group = None;
     let result = tokio::task::spawn_blocking(move || {
-        let _admission = _admission;
+        let _admission = admission;
         for delta in deltas {
             let event = mj_core::mailbox::MailboxEvent {
                 key: format!("push-review:{owner}:{review_id}:{}", delta.root.display()),
