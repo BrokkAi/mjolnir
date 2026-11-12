@@ -1487,32 +1487,34 @@ test('reviewers open their own workspace and stay out of Subagents', async ({ pa
 
 
 // Hard-won: 6e217adde: rewriting the open workspace select on every snapshot stacked native pickers in Firefox for Android.
-test('snapshots leave the workspace select untouched while it is focused or unchanged', async ({ page }) => {
+test('notification counts change the badge beside the workspace select, never the select', async ({ page }) => {
   const a = session('notice-a', 'a', 'A', { attention: 'needs_input', activity: SERVER_TIME_MS - 2000 });
   const b = session('quiet-b', 'b', 'B', { activity: SERVER_TIME_MS - 1000 });
   const state = await mount(page, [a, b]);
   const select = page.locator('#workspace-select');
-  await expect(select.locator('option').first()).toHaveText('Notifications (1)');
+  const badge = page.locator('#notifications-badge');
+  await expect(badge).toHaveText('1');
+  await expect(select.locator('option').first()).toHaveText('Notifications');
   await page.evaluate(() => {
     window.selectMutations = 0;
     new MutationObserver(records => { window.selectMutations += records.length; })
       .observe(document.querySelector('#workspace-select'), { childList: true, subtree: true, characterData: true, attributes: true });
   });
 
-  // Activity that changes neither the list nor the count writes nothing.
   b.last_activity_at_ms = SERVER_TIME_MS + 5000;
-  await refresh(page, state);
-  await expect(page.locator('#sessions .session[data-session-id="quiet-b"] .session-activity')).toBeVisible();
-  expect(await page.evaluate(() => window.selectMutations)).toBe(0);
-
-  // A focused select, which is what an open picker has, waits for blur.
-  await select.focus();
   b.attention = 'important';
   await refresh(page, state);
-  await expect(page.locator('#sessions .session[data-session-id="quiet-b"] .session-attention-item')).toHaveCount(1);
+  await expect(badge).toHaveText('2');
+  await expect(badge).toHaveAttribute('aria-label', '2 notifications; open Notifications');
   expect(await page.evaluate(() => window.selectMutations)).toBe(0);
-  await select.blur();
-  await expect(select.locator('option').first()).toHaveText('Notifications (2)');
+
+  await badge.click();
+  await expect(select).toHaveValue('notifications');
+  await expect(page.locator('#sessions .session')).toHaveCount(2);
+  a.attention = 'idle';
+  b.attention = 'idle';
+  await refresh(page, state);
+  await expect(badge).toBeHidden();
 });
 
 test('notifications retain handled entries below the band until leaving or reloading', async ({ page }) => {
@@ -1536,7 +1538,7 @@ test('notifications retain handled entries below the band until leaving or reloa
   await refresh(page, state);
   expect(await ids()).toEqual(['notice-a', 'notice-b']);
   expect(await page.evaluate(() => document.querySelector('#workspace-select option') === window.notificationOption)).toBe(true);
-  await expect(page.locator('#workspace-select option').first()).toHaveText('Notifications (1)');
+  await expect(page.locator('#notifications-badge')).toHaveText('1');
   await expect(noticeCard.locator('.session-attention-item')).toHaveCount(0);
   await expect(noticeCard).not.toContainText('Cleared');
   await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toHaveCount(0);

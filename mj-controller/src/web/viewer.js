@@ -35,6 +35,7 @@ const bootStatus = document.querySelector('#boot-status'),
   workspaceStrip = document.querySelector('#workspaces'),
   workspaceSelect = document.querySelector('#workspace-select'),
   subagentWorkspace = document.querySelector('#subagent-workspace'),
+  notificationsBadge = document.querySelector('#notifications-badge'),
   sessions = document.querySelector('#sessions'),
   resumable = document.querySelector('#resumable'),
   resumeListView = document.querySelector('#resume-list-view'),
@@ -997,6 +998,11 @@ function renderWorkspaces() {
   const workspaces = [{ id: 'notifications', name: 'Notifications' }, ...(snapshot.workspaces || [])];
   workspaceSelect.classList.toggle('hidden', Boolean(parentId) || !workspaces.length);
   subagentWorkspace.classList.toggle('hidden', !parentId);
+  const notificationCount = notificationRows().length;
+  notificationsBadge.classList.toggle('hidden', Boolean(parentId) || !notificationCount);
+  notificationsBadge.textContent = String(notificationCount);
+  notificationsBadge.setAttribute('aria-label',
+    `${notificationCount} notification${notificationCount === 1 ? '' : 's'}; open Notifications`);
   if (parentId) {
     const parent = sessionById(parentId);
     const reviewers = route.childKind === 'reviewer';
@@ -1010,10 +1016,9 @@ function renderWorkspaces() {
   }
   // Every snapshot re-renders the route, and Firefox for Android stacks a
   // new native picker on each change to an open select until the page stops
-  // responding. So the select is left alone while it has focus, which covers
-  // an open picker, and blur brings it up to date; otherwise it is written
-  // only where its content differs.
-  if (document.activeElement === workspaceSelect) return;
+  // responding. So nothing that changes with attention lives in the select:
+  // the notification count is the badge beside it, and the options are
+  // rebuilt only when the workspace list itself changes.
   const options = JSON.stringify(workspaces.map(workspace => [workspace.id, workspace.name]));
   if (workspaceSelect.dataset.options !== options) {
     workspaceSelect.dataset.options = options;
@@ -1024,10 +1029,6 @@ function renderWorkspaces() {
         return option;
       }),
     );
-  }
-  const notifications = `Notifications (${notificationRows().length})`;
-  if (workspaceSelect.options[0].textContent !== notifications) {
-    workspaceSelect.options[0].textContent = notifications;
   }
   const selected = selectedWorkspaceId() || '';
   if (workspaceSelect.value !== selected) workspaceSelect.value = selected;
@@ -9234,7 +9235,7 @@ resumeSearch.oninput = () => {
   renderResumable();
 };
 
-workspaceSelect.addEventListener('blur', renderWorkspaces);
+notificationsBadge.onclick = () => navigate({ name: 'dashboard', workspaceId: 'notifications' });
 workspaceSelect.onchange = () => {
   navigate({ name: 'dashboard', workspaceId: workspaceSelect.value });
 };

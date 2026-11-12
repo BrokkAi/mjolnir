@@ -1,5 +1,5 @@
 === dashboard responsive 390 (390x900) ===
-Notifications (0)
+Notifications
 Browser tests
 Other workspace
 New session
@@ -75,7 +75,7 @@ codex
 Idle
 layout: {"appWidth":370,"first":{"x":10,"y":181,"width":370,"height":99},"second":{"x":10,"y":292},"documentWidth":390}
 === dashboard responsive 900 (900x900) ===
-Notifications (0)
+Notifications
 Browser tests
 Other workspace
 New session
@@ -151,7 +151,7 @@ codex
 Idle
 layout: {"appWidth":760,"first":{"x":70,"y":194,"width":760,"height":99},"second":{"x":70,"y":305},"documentWidth":900}
 === dashboard responsive 1024 (1024x900) ===
-Notifications (0)
+Notifications
 Browser tests
 Other workspace
 New session
@@ -227,7 +227,7 @@ codex
 Idle
 layout: {"appWidth":960,"first":{"x":32,"y":194,"width":474,"height":99},"second":{"x":518,"y":194},"documentWidth":1024}
 === dashboard desktop actions open (1440x900) ===
-Notifications (0)
+Notifications
 Browser tests
 Other workspace
 New session
@@ -306,7 +306,7 @@ codex
 Idle
 layout: {"appWidth":1376,"first":{"x":32,"y":194,"width":451,"height":99},"second":{"x":495,"y":194},"documentWidth":1440}
 === dashboard responsive 1920 (1920x900) ===
-Notifications (0)
+Notifications
 Browser tests
 Other workspace
 New session
@@ -382,7 +382,7 @@ codex
 Idle
 layout: {"appWidth":1600,"first":{"x":160,"y":194,"width":391,"height":99},"second":{"x":563,"y":194},"documentWidth":1920}
 === dashboard responsive 2560 (2560x900) ===
-Notifications (0)
+Notifications
 Browser tests
 Other workspace
 New session
@@ -458,7 +458,7 @@ codex
 Idle
 layout: {"appWidth":1600,"first":{"x":480,"y":194,"width":391,"height":99},"second":{"x":883,"y":194},"documentWidth":2560}
 === dashboard responsive 390 (390x900) ===
-Notifications (0)
+Notifications
 Browser tests
 Other workspace
 New session
@@ -534,9 +534,10 @@ codex
 Idle
 layout: {"appWidth":370,"first":{"x":10,"y":181,"width":370,"height":99},"second":{"x":10,"y":292},"documentWidth":390}
 === compact cards with attention and activity clocks (390x844) ===
-Notifications (4)
+Notifications
 Browser tests
 Other workspace
+4
 New session
 Resume a session
 Important result
@@ -655,9 +656,10 @@ codex
 Idle
 layout: {"documentWidth":390,"viewportWidth":390,"cards":[{"title":"Important result","attention":[{"text":"!","label":"Important"}],"meta":["Attention","/work/project","codex"],"activity":"Important","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"Input needed","attention":[{"text":"?","label":"Input needed"}],"meta":["Attention","/work/project","codex"],"activity":"Input needed","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"Unreachable worker","attention":[{"text":"×","label":"Unreachable"}],"meta":["Attention","/work/project","codex"],"activity":"Unreachable","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"A long session title that occupies one ellipsized line on a narrow phone screen","attention":[{"text":"×","label":"Failed"},{"text":"2","label":"2 queued prompts"}],"meta":["Beta","/work/attention","codex"],"activity":"Failed","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"beta-step","attention":[],"meta":["Beta","/work/project","codex"],"activity":"Step 1h00m","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"alpha-background","attention":[],"meta":["Alpha","/work/project","codex"],"activity":"Indexing 1m05s","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"alpha-idle","attention":[],"meta":["Alpha","/work/project","codex"],"activity":"Idle since 14:58","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"alpha-yesterday","attention":[],"meta":["Alpha","/work/project","codex"],"activity":"Idle since yesterday 14:58","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"lifecycle","attention":[],"meta":["Lifecycle","/work/project","codex"],"activity":"Starting target","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"checking-response","attention":[],"meta":["Checking","/work/project","codex"],"activity":"Checking response","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}},{"title":"unknown-idle","attention":[],"meta":["Unknown","/work/project","codex"],"activity":"Idle","titleStyle":{"height":24,"lineHeight":"24px","whiteSpace":"nowrap"}}]}
 === notifications selected by default (390x844) ===
-Notifications (4)
+Notifications
 Browser tests
 Other workspace
+4
 
 A session could not be started. Check the project and target, then retry. Details are in the daemon logs.
 
@@ -708,9 +710,10 @@ codex
 
 Failed
 === flat live dashboard sorted by notification band then latest message (390x844) ===
-Notifications (2)
+Notifications
 Browser tests
 Other workspace
+2
 New session
 Resume a session
 gamma-message
@@ -777,9 +780,10 @@ codex
 Idle
 layout: {"cards":[{"title":"gamma-message","meta":"Gamma\n·\n/work/project\n·\ncodex"},{"title":"alpha-created","meta":"Alpha\n·\n/work/project\n·\ncodex"},{"title":"unread-message","meta":"Unread\n·\n/work/project\n·\ncodex"},{"title":"beta-activity","meta":"Beta\n·\n/work/project\n·\ncodex"},{"title":"delta-tie","meta":"Delta\n·\n/work/project\n·\ncodex"},{"title":"echo-tie","meta":"Echo\n·\n/work/project\n·\ncodex"}]}
 === target capacity omits a missing default candidate (390x844) ===
-Notifications (2)
+Notifications
 Browser tests
 Other workspace
+2
 Targets
 Local workstation
 
@@ -796,7 +800,7 @@ Disk
 Refresh
 layout: {"listedTargets":"container, configured-remote"}
 === initial activity order (390x844) ===
-Notifications (0)
+Notifications
 Browser tests
 Other workspace
 New session
@@ -832,7 +836,7 @@ codex
 Idle
 layout: ["alpha-first","alpha-second","beta"]
 === later sessions inserted in order (390x844) ===
-Notifications (0)
+Notifications
 Browser tests
 Other workspace
 New session
@@ -888,7 +892,7 @@ codex
 Idle
 layout: ["alpha-late","alpha-first","gamma-late","alpha-second","beta"]
 === reappearing session re-sorted while focus stays put (390x844) ===
-Notifications (0)
+Notifications
 Browser tests
 Other workspace
 New session
@@ -944,7 +948,7 @@ codex
 Idle
 layout: {"titles":["beta","alpha-late","alpha-first","gamma-late","alpha-second"],"focused":"gamma-late"}
 === reload uses latest activity order (390x844) ===
-Notifications (0)
+Notifications
 Browser tests
 Other workspace
 New session
@@ -1741,7 +1745,7 @@ Agent
 
 checkpoint conversation remains readable
 === parent dashboard hides child sessions (390x844) ===
-Notifications (0)
+Notifications
 Browser tests
 Other workspace
 New session

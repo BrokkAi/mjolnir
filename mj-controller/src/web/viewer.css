@@ -1016,13 +1016,26 @@ details.mailbox-event[open] > summary::before {
 /* ---- workspace picker ---- */
 
 .workspace-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 4px 0 10px;
   border-bottom: 1px solid var(--border);
 }
 
 /* The select shortens a long workspace name itself; it never widens the page. */
 #workspace-select {
+  min-width: 0;
   max-width: 100%;
+}
+
+.notifications-badge {
+  flex: 0 0 auto;
+  min-width: var(--touch);
+  min-height: var(--touch);
+  padding: 0 8px;
+  color: var(--accent);
+  font-weight: 700;
 }
 
 /* ---- pages ---- */
