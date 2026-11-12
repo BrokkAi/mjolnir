@@ -460,6 +460,7 @@ impl ConfirmDialog {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ImportProgress {
+    pub(crate) cancellable: bool,
     pub(crate) session_title: String,
     pub(crate) step: usize,
     total: Option<usize>,
@@ -470,6 +471,7 @@ pub(crate) struct ImportProgress {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ImportBundleConfirmation {
+    project_root: TextInput,
     managed_worktree: mj_core::state::ManagedWorktreeOptions,
     create_managed_worktree: bool,
     dirty_git_roots: Vec<String>,
@@ -1150,6 +1152,7 @@ impl DashboardState {
 
     pub fn show_import_progress(&mut self, session_title: String) {
         self.mode = Mode::Importing(ImportProgress {
+            cancellable: true,
             session_title,
             step: 1,
             total: None,
@@ -1157,6 +1160,16 @@ impl DashboardState {
             last_updated: Instant::now(),
             form: dialog_form(&[DialogControl::Cancel], DialogControl::Cancel),
         });
+    }
+
+    pub fn show_import_registration(&mut self) {
+        if let Some(progress) = import_progress_mut(&mut self.mode) {
+            progress.cancellable = false;
+            progress.message = "Registering on the daemon — cannot be cancelled.".into();
+            progress.last_updated = Instant::now();
+            // An upload-cancel confirmation cannot outlive that upload phase.
+            self.mode = Mode::Importing(progress.clone());
+        }
     }
 
     pub fn update_import_progress(&mut self, step: usize, total: Option<usize>, message: String) {
@@ -1175,9 +1188,14 @@ impl DashboardState {
         omitted_non_git_dirs: Vec<String>,
         scratch_git_roots: Vec<String>,
         managed_worktree: mj_core::state::ManagedWorktreeOptions,
+        recorded_root: std::path::PathBuf,
     ) {
         let mut form = dialog_form(
-            &[DialogControl::ImportCancel, DialogControl::ImportContinue],
+            &[
+                DialogControl::Field,
+                DialogControl::ImportCancel,
+                DialogControl::ImportContinue,
+            ],
             DialogControl::ImportContinue,
         );
         if managed_worktree.available {
@@ -1188,6 +1206,7 @@ impl DashboardState {
             );
         }
         self.mode = Mode::ConfirmImportBundle(ImportBundleConfirmation {
+            project_root: TextInput::from_value(recorded_root.to_string_lossy().into_owned()),
             managed_worktree,
             create_managed_worktree: managed_worktree.default_create,
             dirty_git_roots,
@@ -1227,6 +1246,10 @@ impl DashboardState {
         event: Event,
         mut progress: ImportProgress,
     ) -> DashboardAction {
+        if !progress.cancellable {
+            self.mode = Mode::Importing(progress);
+            return DashboardAction::None;
+        }
         let result = progress.form.get_mut().handle(&event);
         self.last_event_consumed.set(result.consumed);
         let interaction = result.action;
@@ -1541,6 +1564,7 @@ impl DashboardState {
             Some(Interaction::Cancel)
             | Some(Interaction::Activate(DialogControl::ImportCancel)) => {
                 return DashboardAction::ConfirmImportBundle {
+                    project_root: confirmation.project_root.value().into(),
                     create_managed_worktree: None,
                     accepted: false,
                 };
@@ -1557,8 +1581,13 @@ impl DashboardState {
                         confirmation.managed_worktree.available
                             && confirmation.create_managed_worktree,
                     ),
+                    project_root: confirmation.project_root.value().into(),
                     accepted: true,
                 };
+            }
+            Some(Interaction::Edit(DialogControl::Field, edit)) => {
+                TextField::apply(&mut confirmation.project_root, edit);
+                self.mode = Mode::ConfirmImportBundle(confirmation);
             }
             _ => self.mode = Mode::ConfirmImportBundle(confirmation),
         }

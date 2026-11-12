@@ -12227,6 +12227,7 @@ async fn daemon_upload_exchange() {
         .run();
         return;
     }
+    let _writer = crate::database::start_database_writer().unwrap();
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let metadata = DaemonMetadata {
         protocol_version: PROTOCOL_VERSION,
@@ -12248,7 +12249,7 @@ async fn daemon_upload_exchange() {
             let result = serve_client(
                 stream,
                 server_metadata.clone(),
-                test_runtime_state(),
+                test_runtime_state_loading_the_store(),
                 CancellationToken::new(),
             )
             .await;
@@ -12357,15 +12358,76 @@ async fn daemon_upload_exchange() {
         .await
         .unwrap_err();
     output.push_str(&format!("import unknown blob: {error}\n"));
+    let staging = tempfile::tempdir().unwrap();
+    let archive_path = staging.path().join("import.zip");
+    let mut session = runtime_test_session("import-session", "default", SessionState::Stopped);
+    let verified = mj_checkpoint::archive::write_archive_atomic(
+        &archive_path,
+        &mj_checkpoint::archive::ArchiveInput {
+            session: mj_core::archive::SessionManifest {
+                id: session.id.clone(),
+                title: session.title.clone(),
+                harness_kind: session.harness_kind,
+                profile_id: session.last_profile.clone(),
+                native_session_id: "native-import".into(),
+                created_at: session.created_at.clone(),
+                checkpointed_at: session.created_at.clone(),
+                hel_version: "test".into(),
+                relay_version: "test".into(),
+                adapter_version: "test".into(),
+            },
+            target: mj_core::archive::TargetManifest {
+                template_id: "local".into(),
+                target_kind: "import".into(),
+                details: Default::default(),
+            },
+            bundle: mj_core::archive::BundleManifest {
+                id: session.bundle_id.clone(),
+                primary_repository: "repo".into(),
+            },
+            canonical_session: empty_archive_snapshot(),
+            native_artifacts: Vec::new(),
+            repositories: Vec::new(),
+        },
+    )
+    .unwrap();
+    session.checkpoint = Some(mj_core::state::CheckpointMetadata {
+        archive_path: archive_path.clone(),
+        sha256: verified.archive_sha256,
+        created_at: session.created_at.clone(),
+        event_frontier: 0,
+    });
+    let blob = client
+        .upload(&mut tokio::fs::File::open(&archive_path).await.unwrap())
+        .await
+        .unwrap();
+    let reply = client
+        .request(DaemonAction::ImportSession {
+            session: Box::new(session),
+            bundle: None,
+            blob,
+        })
+        .await
+        .unwrap();
+    output.push_str(&format!(
+        "import verified archive: {}\n",
+        serde_json::to_string(&reply).unwrap()
+    ));
+    assert!(
+        mj_core::config::sessions_dir()
+            .join("import-session.hel.zip")
+            .is_file()
+    );
+    let registered = client
+        .session_record("import-session".into())
+        .await
+        .unwrap()
+        .unwrap();
     let reply = client.request(DaemonAction::Ping).await.unwrap();
     output.push_str(&format!(
         "connection after refusal: {}\n",
         serde_json::to_string(&reply).unwrap()
     ));
-    assert_eq!(
-        output,
-        include_str!("../../tests/golden/daemon-upload-exchange.txt")
-    );
     client
         .upload(&mut b"unconsumed blob".as_slice())
         .await
@@ -12391,12 +12453,79 @@ async fn daemon_upload_exchange() {
             .await
             .is_err()
     );
+    // Inspect raw replies: DaemonClient intentionally reconnects after UpgradePending.
+    async fn exchange(
+        stream: &mut TcpStream,
+        metadata: &DaemonMetadata,
+        action: DaemonAction,
+    ) -> DaemonReply {
+        write_frame(
+            stream,
+            &RequestEnvelope {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: 1,
+                token: metadata.token.clone(),
+                action,
+            },
+        )
+        .await
+        .unwrap();
+        read_frame::<ResponseEnvelope>(stream)
+            .await
+            .unwrap()
+            .result
+            .unwrap()
+    }
     // Hard-won: blob storage admission prevented management connections during handoff.
-    let mut management = DaemonClient::connect(metadata).await.unwrap();
+    let mut management = TcpStream::connect(metadata.address).await.unwrap();
     assert!(matches!(
-        management.request(DaemonAction::Ping).await.unwrap(),
+        exchange(&mut management, &metadata, DaemonAction::Ping).await,
         DaemonReply::Pong
     ));
+    use sha2::Digest as _;
+    let bytes = std::fs::read(&archive_path).unwrap();
+    let digest = mj_core::hex::lower_hex(sha2::Sha256::digest(&bytes));
+    let DaemonReply::BlobUploaded(blob) = exchange(
+        &mut management,
+        &metadata,
+        DaemonAction::UploadChunk {
+            bytes,
+            sha256: Some(digest),
+        },
+    )
+    .await
+    else {
+        panic!("expected blob");
+    };
+    // Hard-won: #1514: archive preparation held daemon handoff admission.
+    let reply = exchange(
+        &mut management,
+        &metadata,
+        DaemonAction::ImportSession {
+            session: Box::new(registered),
+            bundle: None,
+            blob,
+        },
+    )
+    .await;
+    output.push_str(&format!(
+        "import during handoff: {}\n",
+        serde_json::to_string(&reply).unwrap()
+    ));
+    let remaining = std::fs::read_dir(mj_core::config::sessions_dir())
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .filter(|entry| entry.file_type().unwrap().is_file())
+        .map(|entry| entry.file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        remaining,
+        vec![std::ffi::OsString::from("import-session.hel.zip")]
+    );
+    assert_eq!(
+        output,
+        include_str!("../../tests/golden/daemon-upload-exchange.txt")
+    );
     drop(management);
     server.await.unwrap();
 }

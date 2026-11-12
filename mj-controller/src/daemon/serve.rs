@@ -183,7 +183,7 @@ pub(super) async fn serve_client(
 ) -> Result<()> {
     use sha2::{Digest, Sha256};
     use tokio::io::AsyncWriteExt;
-    let mut directory: Option<tempfile::TempDir> = None;
+    let mut directory: Option<Arc<tempfile::TempDir>> = None;
     let mut blobs = std::collections::HashMap::new();
     let mut upload = None;
 
@@ -217,11 +217,11 @@ pub(super) async fn serve_client(
                 if directory.is_none() {
                     let root = mj_core::config::data_dir().join("uploads");
                     tokio::fs::create_dir_all(&root).await?;
-                    directory = Some(
+                    directory = Some(Arc::new(
                         tokio::task::spawn_blocking(move || tempfile::tempdir_in(root))
                             .await
                             .context("upload directory task failed")??,
-                    );
+                    ));
                 }
                 let root = directory
                     .as_ref()
@@ -291,6 +291,7 @@ pub(super) async fn serve_client(
         );
         // Hold through the acknowledgement, not merely the action's result.
         let activity = upgrade_request_activity(&request.action);
+        let mut import_registration = None;
         let result = if request.token != metadata.token {
             Err("daemon authentication failed".to_owned())
         } else if activity.is_err() {
@@ -341,39 +342,113 @@ pub(super) async fn serve_client(
             {
                 match blobs.remove(&blob) {
                     Some(path) => {
-                        let result = blocking(move || {
-                            anyhow::ensure!(session.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'), "invalid imported session id");
-                            let verified = mj_checkpoint::archive::verify_archive_streaming(&path)?;
-                            let checkpoint = session.checkpoint.as_mut().context("imported session has no checkpoint")?;
-                            anyhow::ensure!(verified.archive_sha256 == checkpoint.sha256, "import archive digest mismatch");
-                            let directory = mj_core::config::sessions_dir();
-                            std::fs::create_dir_all(&directory)?;
-                            let destination = directory.join(format!("{}.hel.zip", session.id));
-                            checkpoint.archive_path = destination.clone();
-                            let mut output = std::fs::OpenOptions::new().write(true).create_new(true).open(&destination)?;
-                            let registered = (|| -> Result<()> {
-                                std::io::copy(&mut std::fs::File::open(&path)?, &mut output)?;
-                                output.sync_all().context("sync imported archive")?;
-                                if let Some(imported) = bundle {
-                                    let ImportedBundle { bundle_id, bundle } = imported;
-                                    Config::update(|config| {
-                                        if let Some(existing) = config.bundles.get(&bundle_id) {
-                                            anyhow::ensure!(existing == &bundle, "bundle {bundle_id:?} changed during import; retry the import");
-                                        } else {
-                                            config.bundles.insert(bundle_id.clone(), bundle);
-                                        }
-                                        Ok(())
-                                    })?;
+                        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                        let _cancel = CancelImportPreparation(stopped.clone());
+                        let storage = directory.clone();
+                        let mut prepare = tokio::task::spawn_blocking(move || {
+                            let outcome = (|| -> Result<_> {
+                                // Keep connection storage alive until every reader has stopped.
+                                let _storage = storage;
+                                anyhow::ensure!(
+                                    session
+                                        .id
+                                        .chars()
+                                        .all(|c| c.is_ascii_alphanumeric() || c == '-'),
+                                    "invalid imported session id"
+                                );
+                                let verified =
+                                    mj_checkpoint::archive::verify_archive_streaming_cancellable(
+                                        &path,
+                                        stopped.clone(),
+                                    )?;
+                                let checkpoint = session
+                                    .checkpoint
+                                    .as_mut()
+                                    .context("imported session has no checkpoint")?;
+                                anyhow::ensure!(
+                                    verified.archive_sha256 == checkpoint.sha256,
+                                    "import archive digest mismatch"
+                                );
+                                let materialized =
+                                    mj_transcript::projection::materialized_session_from_canonical(
+                                        session.id.clone(),
+                                        &verified.canonical_session,
+                                    )?;
+                                let root = mj_core::config::sessions_dir();
+                                std::fs::create_dir_all(&root)?;
+                                let mut staged = tempfile::NamedTempFile::new_in(&root)?;
+                                let mut input = std::fs::File::open(&path)?;
+                                let mut buffer = [0u8; 64 * 1024];
+                                loop {
+                                    anyhow::ensure!(
+                                        !stopped.load(std::sync::atomic::Ordering::Acquire),
+                                        "import preparation cancelled"
+                                    );
+                                    let count = std::io::Read::read(&mut input, &mut buffer)?;
+                                    if count == 0 {
+                                        break;
+                                    }
+                                    std::io::Write::write_all(&mut staged, &buffer[..count])?;
                                 }
-                                crate::import::persist_imported_session_locally(&session)
+                                staged
+                                    .as_file()
+                                    .sync_all()
+                                    .context("sync imported archive")?;
+                                Ok((session, bundle, materialized, staged))
                             })();
-                            drop(output);
-                            if registered.is_err() {
-                                std::fs::remove_file(&destination).context("remove failed import archive")?;
+                            if let Err(error) = &outcome {
+                                tracing::debug!(error = %format!("{error:#}"), "import preparation stopped");
                             }
-                            registered?;
-                            Ok(DaemonReply::Done)
-                        }).await;
+                            outcome
+                        });
+                        let prepared = tokio::select! {
+                            result = &mut prepare => result.context("import preparation task panicked")?,
+                            _ = cancellation.cancelled() => {
+                                // The task owns its files and removes the partial only after stopping.
+                                return Err(anyhow::anyhow!("daemon stopped during import preparation; retry the import"));
+                            }
+                        };
+                        let result = match prepared {
+                            Err(error) => Err(error),
+                            Ok((mut session, bundle, materialized, staged)) => {
+                                match crate::upgrade::activity_unless_draining(
+                                    "import registration",
+                                ) {
+                                    Err(_) => {
+                                        drop(staged);
+                                        Ok(DaemonReply::UpgradePending)
+                                    }
+                                    Ok(registration) => {
+                                        // The transaction and its acknowledgement own admission.
+                                        let held = registration.clone();
+                                        let registered = tokio::task::spawn_blocking(move || -> Result<_> {
+                                            let _registration = held;
+                                            let destination = mj_core::config::sessions_dir().join(format!("{}.hel.zip", session.id));
+                                            session.checkpoint.as_mut().context("imported session has no checkpoint")?.archive_path = destination.clone();
+                                            let installed = staged.persist_noclobber(&destination).map_err(|error| error.error)?;
+                                            let registered = (|| -> Result<()> {
+                                                if let Some(ImportedBundle { bundle_id, bundle }) = bundle {
+                                                    Config::update(|config| {
+                                                        if let Some(existing) = config.bundles.get(&bundle_id) {
+                                                            anyhow::ensure!(existing == &bundle, "bundle {bundle_id:?} changed during import; retry the import");
+                                                        } else { config.bundles.insert(bundle_id.clone(), bundle); }
+                                                        Ok(())
+                                                    })?;
+                                                }
+                                                crate::database::save_imported_session(&session, &materialized)
+                                            })();
+                                            drop(installed);
+                                            if registered.is_err() { std::fs::remove_file(&destination).context("remove failed import archive")?; }
+                                            registered?;
+                                            Ok(DaemonReply::Done)
+                                        }).await.context("import registration task panicked")?;
+                                        // Retain admission through write_response below.
+                                        import_registration = Some(registration);
+                                        registered
+                                    }
+                                }
+                            }
+                        };
                         if result.is_ok() {
                             refresh_runtime_controller(&state).await;
                         }
@@ -403,6 +478,7 @@ pub(super) async fn serve_client(
             },
         )
         .await?;
+        drop(import_registration);
     }
 }
 
@@ -489,6 +565,14 @@ pub(super) async fn reach_test_hook(name: &'static str) -> Result<()> {
     #[cfg(not(feature = "test-hooks"))]
     let _ = name;
     Ok(())
+}
+
+/// Dropping an aborted connection asks its file-owning preparation task to stop.
+struct CancelImportPreparation(Arc<std::sync::atomic::AtomicBool>);
+impl Drop for CancelImportPreparation {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
 }
 
 #[cfg(test)]

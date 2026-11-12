@@ -135,6 +135,55 @@ fn daemon_config() -> Result<Config> {
     mj_core::runtime::block_on(async { crate::daemon::connect_or_start().await?.config().await })?
 }
 
+/// Placement is reported by its owner. The connector must also exclude SSH.
+pub(crate) fn daemon_shares_this_machine() -> Result<bool> {
+    mj_core::runtime::block_on(async {
+        let mut client = crate::daemon::connect_or_start().await?;
+        Ok(matches!(
+            client.identity().await?.placement,
+            crate::daemon::DaemonPlacement::Host
+        ))
+    })?
+}
+
+pub(crate) fn client_native_homes(
+    harness: HarnessKind,
+    configured: Option<&std::path::Path>,
+    shares_machine: bool,
+) -> Result<Vec<PathBuf>> {
+    let mut homes = vec![harness_config_home(harness)?];
+    if shares_machine
+        && let Some(home) = configured
+        && !homes.iter().any(|path| path == home)
+    {
+        homes.push(home.to_owned());
+    }
+    Ok(homes)
+}
+
+fn locate_client_native_session(
+    harness: HarnessKind,
+    homes: Vec<PathBuf>,
+    selection: &ClaudeSessionSelection,
+) -> Result<(PathBuf, mj_controller::import::LocatedNativeSession)> {
+    let mut candidates = Vec::new();
+    let mut errors = Vec::new();
+    for home in homes {
+        match locate_native_session(harness, &home, selection) {
+            Ok(located) => {
+                let modified = std::fs::metadata(&located.source_path)?.modified()?;
+                candidates.push((modified, home, located));
+            }
+            Err(error) => errors.push(format!("{}: {error:#}", home.display())),
+        }
+    }
+    candidates.sort_by_key(|(modified, _, _)| *modified);
+    candidates
+        .pop()
+        .map(|(_, home, located)| (home, located))
+        .with_context(|| format!("no importable native session: {}", errors.join("; ")))
+}
+
 /// Where one import reads its session from.
 #[derive(Debug, PartialEq, Eq)]
 struct ImportSource {
@@ -143,7 +192,7 @@ struct ImportSource {
     home: PathBuf,
 }
 
-/// Read the client native home; daemon profiles select registration only.
+/// Select the default client home and registration profile; local profile homes are added by client_native_homes.
 fn import_source(
     config: &Config,
     harness: HarnessKind,
@@ -260,12 +309,21 @@ fn import_native(
 ) -> Result<Option<String>> {
     let review = crate::api_commands::session_review(args.review.as_deref(), &args.reviewers)?;
     let mut config = config.clone();
-    let home = source.home.clone();
     let selection = match args.session {
         Some(session) => ClaudeSessionSelection::NativeSessionId(session),
         None => ClaudeSessionSelection::Latest,
     };
-    let located = locate_native_session(harness, &home, &selection)?;
+    let mut homes = client_native_homes(
+        harness,
+        source
+            .profile_id
+            .as_ref()
+            .and_then(|id| config.profiles.get(id))
+            .map(|profile| profile.home.as_path()),
+        daemon_shares_this_machine()?,
+    )?;
+    homes[0] = source.home.clone();
+    let (home, located) = locate_client_native_session(harness, homes, &selection)?;
     // Printed before anything is read or written, so a `--latest` that picked
     // the wrong session is seen before it is imported.
     println!(
@@ -299,6 +357,7 @@ fn import_native(
         &config,
         &mut state,
         NativeImportRequest {
+            daemon_project_root: args.path.as_deref(),
             harness,
             harness_home: &home,
             native_session_id: &located.native_session_id,
@@ -316,17 +375,18 @@ fn import_native(
         .get_mut(&imported.session_id)
         .context("import did not add its session to controller state")?;
     session.workspace_id = workspace_id.to_owned();
-    if let Some(path) = args.path {
-        session.project_directory = Some(path);
-    }
     let (review, review_notice) = import_review(&config, review);
     session.review = review;
     persist_imported_session(
         session,
-        bundle.map(|bundle| crate::daemon::ImportedBundle {
-            bundle_id: bundle_id.clone(),
-            bundle,
-        }),
+        imported
+            .remapped_bundle
+            .clone()
+            .or(bundle)
+            .map(|bundle| crate::daemon::ImportedBundle {
+                bundle_id: imported.bundle_id.clone(),
+                bundle,
+            }),
     )?;
     println!("{}", import_success_message(&imported));
     if let Some(notice) = review_notice {
@@ -450,9 +510,18 @@ pub(crate) fn persist_imported_session(
     session: &mut SessionRecord,
     bundle: Option<crate::daemon::ImportedBundle>,
 ) -> Result<()> {
+    persist_imported_session_cancellable(session, bundle, None, None).map(|_| ())
+}
+
+fn persist_imported_session_cancellable(
+    session: &mut SessionRecord,
+    bundle: Option<crate::daemon::ImportedBundle>,
+    cancelled: Option<&AtomicBool>,
+    registering: Option<(u64, &tokio::sync::mpsc::Sender<DashboardImportUpdate>)>,
+) -> Result<bool> {
     let prepared = session.clone();
     tokio::runtime::Handle::try_current().context(IMPORT_RUNTIME_CONTEXT)?;
-    *session = mj_core::runtime::block_on(async {
+    let installed = mj_core::runtime::block_on(async {
         let mut client = crate::daemon::connect_or_start().await?;
         let session = prepared;
         let session_id = session.id.clone();
@@ -462,13 +531,45 @@ pub(crate) fn persist_imported_session(
             .context("import has no archive")?
             .archive_path;
         let mut file = tokio::fs::File::open(path).await?;
-        client.import_session(session, bundle, &mut file).await?;
+        let blob = {
+            let upload = client.upload(&mut file);
+            tokio::pin!(upload);
+            loop {
+                if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+                    return Ok(None);
+                }
+                tokio::select! {
+                    result = &mut upload => break result?,
+                    _ = tokio::time::sleep(Duration::from_millis(25)), if cancelled.is_some() => {},
+                }
+            }
+        };
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return Ok(None);
+        }
+        if let Some((task_id, updates)) = registering {
+            updates
+                .send(DashboardImportUpdate::Registering { task_id })
+                .await
+                .context("import progress consumer closed before registration")?;
+        }
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return Ok(None);
+        }
+        // ImportSession has one commit point and no user cancellation protocol.
+        client.import_session(session, bundle, blob).await?;
         client
             .session_record(session_id)
             .await?
             .context("imported session disappeared")
+            .map(Some)
     })??;
-    Ok(())
+    if let Some(installed) = installed {
+        *session = installed;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
 
 #[derive(Clone)]
@@ -478,13 +579,15 @@ pub(crate) struct PendingDashboardImport {
     pub(crate) display_title: String,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct DashboardImportSafety {
     pub(crate) create_managed_worktree: Option<bool>,
     pub(crate) accepted: bool,
+    pub(crate) project_root: Option<PathBuf>,
 }
 
 pub(crate) struct ImportBundlePrompt {
+    pub(crate) recorded_root: PathBuf,
     pub(crate) managed_worktree: mj_core::state::ManagedWorktreeOptions,
     pub(crate) dirty_git_roots: Vec<String>,
     pub(crate) omitted_non_git_dirs: Vec<String>,
@@ -505,6 +608,9 @@ pub(crate) enum DashboardImportTaskResult {
 }
 
 pub(crate) enum DashboardImportUpdate {
+    Registering {
+        task_id: u64,
+    },
     Progress {
         task_id: u64,
         step: usize,
@@ -531,6 +637,51 @@ pub(crate) struct DashboardImportRequest {
 /// quadratic in the session count; the dialog cannot show more than a few
 /// updates a second anyway.
 const SCAN_PUBLISH_INTERVAL: Duration = Duration::from_millis(100);
+
+pub(crate) fn discover_client_import_profile(
+    profile_id: String,
+    profile: mj_core::config::HarnessProfile,
+    cache: &NativeScanCache,
+    mut publish: impl FnMut(&ImportProfileOption),
+) -> ImportProfileOption {
+    let mut combined = ImportProfileOption {
+        profile_id: profile_id.clone(),
+        harness_kind: profile.kind,
+        sessions: Vec::new(),
+        scan_progress: None,
+        error: None,
+    };
+    let homes = daemon_shares_this_machine()
+        .and_then(|shares| client_native_homes(profile.kind, Some(&profile.home), shares));
+    match homes {
+        Err(error) => combined.error = Some(format!("{error:#}")),
+        Ok(homes) => {
+            for home in homes {
+                let scanned = discover_import_profile(
+                    profile_id.clone(),
+                    profile.kind,
+                    home,
+                    cache,
+                    |partial| {
+                        let mut view = partial.clone();
+                        for session in &combined.sessions {
+                            push_unique_session(&mut view.sessions, session.clone());
+                        }
+                        publish(&view);
+                    },
+                );
+                for session in scanned.sessions {
+                    push_unique_session(&mut combined.sessions, session);
+                }
+                if let Some(error) = scanned.error {
+                    combined.error = Some(error);
+                }
+                publish(&combined);
+            }
+        }
+    }
+    combined
+}
 
 pub(crate) fn discover_import_profile(
     profile_id: String,
@@ -704,10 +855,9 @@ pub(crate) fn spawn_dashboard_import(
         };
         let mut result = import_session_from_profile(
             worker_controller,
-            &pending.profile_id,
-            &pending.native_session_id,
-            &pending.display_title,
+            &pending,
             safety,
+            daemon_shares_this_machine(),
             &cancelled,
             report,
         );
@@ -720,19 +870,28 @@ pub(crate) fn spawn_dashboard_import(
         {
             session.workspace_id = workspace_id;
         }
-        if cancelled.load(Ordering::Acquire) {
-            if let Ok(DashboardImportTaskResult::Imported(imported)) = &result
-                && let Some(path) = imported
-                    .controller
-                    .state
-                    .sessions
-                    .get(&imported.session_id)
-                    .and_then(|session| session.checkpoint.as_ref())
-                    .map(|checkpoint| checkpoint.archive_path.clone())
-                && let Err(error) = std::fs::remove_file(&path)
-            {
-                tracing::warn!(path = %path.display(), %error, "could not remove cancelled import checkpoint");
+        if let Ok(DashboardImportTaskResult::Imported(imported)) = &mut result {
+            let session = imported
+                .controller
+                .state
+                .sessions
+                .get_mut(&imported.session_id)
+                .expect("imported record");
+            let bundle = crate::daemon::ImportedBundle {
+                bundle_id: session.bundle_id.clone(),
+                bundle: imported.controller.config.bundles[&session.bundle_id].clone(),
+            };
+            match persist_imported_session_cancellable(
+                session,
+                Some(bundle),
+                Some(&cancelled),
+                Some((task_id, &updates)),
+            ) {
+                Ok(true) => {}
+                Ok(false) => result = Ok(DashboardImportTaskResult::Cancelled),
+                Err(error) => result = Err(error),
             }
+        } else if cancelled.load(Ordering::Acquire) {
             result = Ok(DashboardImportTaskResult::Cancelled);
         }
         if let Err(error) = updates.blocking_send(DashboardImportUpdate::Finished {
@@ -806,14 +965,10 @@ fn resolve_background_import_bundle(
         None => mj_core::state::ManagedWorktreeOptions::default(),
     };
     let issues = import_safety_issues(&targets)?;
-    if !safety_accepted
-        && (managed_worktree.available
-            || !issues.dirty_git_roots.is_empty()
-            || !issues.omitted_non_git_dirs.is_empty()
-            || !issues.scratch_git_roots.is_empty())
-    {
+    if !safety_accepted {
         return Ok(BackgroundBundleResolution::NeedsConfirmation(
             ImportBundlePrompt {
+                recorded_root: mj_controller::import::import_project_root(transcript, &targets),
                 managed_worktree,
                 dirty_git_roots: issues
                     .dirty_git_roots
@@ -838,13 +993,17 @@ fn resolve_background_import_bundle(
 
 fn import_session_from_profile(
     mut controller: Controller,
-    profile_id: &str,
-    native_session_id: &str,
-    display_title: &str,
+    pending: &PendingDashboardImport,
     safety: DashboardImportSafety,
+    shares_machine: Result<bool>,
     cancelled: &AtomicBool,
     report: impl Fn(usize, Option<usize>, &str, bool) + Sync,
 ) -> Result<DashboardImportTaskResult> {
+    let PendingDashboardImport {
+        profile_id,
+        native_session_id,
+        display_title,
+    } = pending;
     report(1, None, "Locating native session…", true);
     let profile = controller
         .config
@@ -853,10 +1012,10 @@ fn import_session_from_profile(
         .with_context(|| format!("unknown profile {profile_id:?}"))?
         .clone();
     ensure!(profile.enabled, "profile {profile_id:?} is disabled");
-    let home = harness_config_home(profile.kind)?;
-    let source = locate_native_session(
+    let homes = client_native_homes(profile.kind, Some(&profile.home), shares_machine?)?;
+    let (home, source) = locate_client_native_session(
         profile.kind,
-        &home,
+        homes,
         &ClaudeSessionSelection::NativeSessionId(native_session_id.into()),
     )?;
     let transcript = read_native_transcript(profile.kind, &source.source_path)?;
@@ -883,6 +1042,7 @@ fn import_session_from_profile(
         &controller.config,
         &mut controller.state,
         NativeImportRequest {
+            daemon_project_root: safety.project_root.as_deref(),
             harness: profile.kind,
             harness_home: &home,
             native_session_id: &source.native_session_id,
@@ -895,6 +1055,12 @@ fn import_session_from_profile(
         },
         Some(&control),
     )?;
+    if let Some(bundle) = imported.remapped_bundle {
+        controller
+            .config
+            .bundles
+            .insert(imported.bundle_id.clone(), bundle);
+    }
     controller
         .state
         .sessions
@@ -1348,13 +1514,17 @@ mod tests {
         };
         let result = import_session_from_profile(
             controller,
-            "codex",
-            native_id,
-            "Imported",
+            &PendingDashboardImport {
+                profile_id: "codex".into(),
+                native_session_id: native_id.into(),
+                display_title: "Imported".into(),
+            },
             DashboardImportSafety {
+                project_root: None,
                 accepted: false,
                 create_managed_worktree: None,
             },
+            Ok(false),
             &AtomicBool::new(false),
             |_, _, _, _| {},
         )
@@ -1372,13 +1542,17 @@ mod tests {
             };
             let result = import_session_from_profile(
                 controller,
-                "codex",
-                native_id,
-                "Imported",
+                &PendingDashboardImport {
+                    profile_id: "codex".into(),
+                    native_session_id: native_id.into(),
+                    display_title: "Imported".into(),
+                },
                 DashboardImportSafety {
+                    project_root: None,
                     accepted: true,
                     create_managed_worktree: Some(choice),
                 },
+                Ok(false),
                 &AtomicBool::new(false),
                 |_, _, _, _| {},
             )
@@ -1408,13 +1582,17 @@ mod tests {
                 config: config.clone(),
                 state: State::default(),
             },
-            "codex",
-            native_id,
-            "Imported",
+            &PendingDashboardImport {
+                profile_id: "codex".into(),
+                native_session_id: native_id.into(),
+                display_title: "Imported".into(),
+            },
             DashboardImportSafety {
+                project_root: None,
                 accepted: false,
                 create_managed_worktree: None,
             },
+            Ok(false),
             &AtomicBool::new(false),
             |_, _, _, _| {},
         )
@@ -1431,13 +1609,17 @@ mod tests {
                 config,
                 state: State::default(),
             },
-            "codex",
-            native_id,
-            "Imported",
+            &PendingDashboardImport {
+                profile_id: "codex".into(),
+                native_session_id: native_id.into(),
+                display_title: "Imported".into(),
+            },
             DashboardImportSafety {
+                project_root: None,
                 accepted: true,
                 create_managed_worktree: Some(false),
             },
+            Ok(false),
             &AtomicBool::new(false),
             |_, _, _, _| {},
         )

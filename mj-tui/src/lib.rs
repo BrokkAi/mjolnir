@@ -596,6 +596,7 @@ pub enum DashboardAction {
     },
     CancelImport,
     ConfirmImportBundle {
+        project_root: std::path::PathBuf,
         create_managed_worktree: Option<bool>,
         accepted: bool,
     },

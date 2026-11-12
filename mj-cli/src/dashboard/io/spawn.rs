@@ -1206,7 +1206,7 @@ pub(crate) fn spawn_imported_session_apply(
         move || {
             // Move the staging guard too: disjoint captures otherwise drop it before upload.
             let _archive_directory = imported._archive_directory;
-            let mut session = imported
+            let session = imported
                 .controller
                 .state
                 .sessions
@@ -1219,11 +1219,6 @@ pub(crate) fn spawn_imported_session_apply(
                 .get(&session.bundle_id)
                 .cloned()
                 .context("import worker did not return its session bundle")?;
-            let imported_bundle = crate::daemon::ImportedBundle {
-                bundle_id: session.bundle_id.clone(),
-                bundle: bundle.clone(),
-            };
-            persist_imported_session(&mut session, Some(imported_bundle))?;
             Ok(ImportedDashboardSessionApply {
                 harness: imported.harness,
                 native_session_id: pending.native_session_id,

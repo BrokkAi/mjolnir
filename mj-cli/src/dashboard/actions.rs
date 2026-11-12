@@ -919,6 +919,7 @@ pub(crate) async fn apply_dashboard_action(
                         display_title,
                     },
                     DashboardImportSafety {
+                        project_root: None,
                         create_managed_worktree: None,
                         accepted: false,
                     },
@@ -926,17 +927,17 @@ pub(crate) async fn apply_dashboard_action(
             }
         }
         DashboardAction::CancelImport => {
-            if let Some(active) = context.active_import.take() {
+            if let Some(active) = context.active_import.as_ref() {
                 active.cancelled.store(true, Ordering::Release);
-                context.dashboard.finish_import();
                 context
                     .dashboard
-                    .set_notice("Import cancellation requested; no Mjolnir state will be changed.");
+                    .update_import_progress(1, None, "Cancelling upload…".into());
             }
         }
         DashboardAction::ConfirmImportBundle {
             create_managed_worktree,
             accepted,
+            project_root,
         } => {
             let Some(pending) = context.pending_import.take() else {
                 context.dashboard.finish_import();
@@ -954,6 +955,7 @@ pub(crate) async fn apply_dashboard_action(
                         pending,
                         DashboardImportSafety {
                             create_managed_worktree,
+                            project_root: Some(project_root),
                             accepted: true,
                         },
                     );
