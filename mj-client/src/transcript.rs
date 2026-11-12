@@ -159,6 +159,9 @@ pub fn mailbox_event_lines<'a>(
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct HistoryEntry {
     pub stable_id: String,
+    /// Stored transcript position: the browser orders history by it and
+    /// matches it against live rows, whose ids are these positions.
+    pub position: u64,
     pub role: &'static str,
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -172,6 +175,7 @@ pub fn history_entries(page: &mj_core::storage::TranscriptHistoryPage) -> Vec<Hi
         .iter()
         .map(|item| HistoryEntry {
             stable_id: item.stable_id.clone(),
+            position: item.position,
             role: mj_core::transcript::transcript_item_role(&item.body),
             text: match &item.body {
                 TranscriptBody::Message { event } => mj_core::transcript::sanitize_terminal_text(
