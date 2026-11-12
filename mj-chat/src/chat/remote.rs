@@ -1534,8 +1534,10 @@ mod tests {
         std::fs::write(metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
         let (upload_started, started) = tokio::sync::oneshot::channel();
         let mut upload_started = Some(upload_started);
+        let (legacy_upload_started, legacy_started) = tokio::sync::oneshot::channel();
+        let mut legacy_upload_started = Some(legacy_upload_started);
         let uploads = tokio::spawn(async move {
-            for attempt in 0..3 {
+            for attempt in 0..4 {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut body = Vec::new();
                 loop {
@@ -1548,8 +1550,12 @@ mod tests {
                     if sha256.is_none() {
                         continue;
                     }
-                    if attempt == 0 {
-                        upload_started.take().unwrap().send(()).unwrap();
+                    if attempt < 2 {
+                        if attempt == 0 {
+                            upload_started.take().unwrap().send(()).unwrap();
+                        } else {
+                            legacy_upload_started.take().unwrap().send(()).unwrap();
+                        }
                         use tokio::io::AsyncReadExt as _;
                         assert_eq!(
                             stream.read(&mut [0u8; 1]).await.unwrap(),
@@ -1656,6 +1662,19 @@ mod tests {
         // Legacy drafts carry inline bytes and must re-enter preparation.
         composer.restore_draft(PromptPayload::with_image("legacy", valid_image()).encode_draft());
         composer.drain_composer();
+        legacy_started.await.unwrap();
+        assert!(composer.draft_payload().images[0].image.is_pending());
+        let saved = composer.encoded_draft();
+        assert_eq!(
+            PromptPayload::decode_draft(&saved).unwrap().images[0].image,
+            valid_image()
+        );
+        drop(composer); // Exit with an unacknowledged legacy upload.
+        let mut composer = crate::chat::test_support::grok_chat();
+        composer.set_prompt_images_supported(true);
+        composer.restore_draft(saved);
+        assert_eq!(composer.draft_payload().images[0].image, valid_image());
+        composer.bind_composer_session(Some("image-session"));
         assert!(composer.draft_payload().encode_draft().len() < 8 * 1024 * 1024);
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
@@ -1674,6 +1693,14 @@ mod tests {
                 .data_base64
                 .is_empty()
         );
+        assert!(
+            PromptPayload::decode_draft(&composer.encoded_draft())
+                .unwrap()
+                .images[0]
+                .image
+                .reference
+                .is_some()
+        );
         composer.clear_input();
         assert!(composer.queue_attachment(
             crate::chat::composer::AttachmentSource::Clipboard(pasted),
@@ -1690,7 +1717,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let draft = composer.draft_payload().encode_draft();
+        let draft = composer.encoded_draft();
         assert!(draft.len() < 8 * 1024 * 1024);
         let restored = PromptPayload::decode_draft(&draft).unwrap();
         let image = restored.images[0].image.clone();

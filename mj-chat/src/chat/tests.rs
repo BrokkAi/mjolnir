@@ -198,6 +198,11 @@ fn pending_attachment_is_failed_when_a_saved_draft_is_restored() {
     assert_eq!(chat.input, "inspect [image 1]");
     assert!(chat.input_images[0].image.is_placeholder());
     assert!(!chat.input_images[0].image.is_pending());
+    assert!(
+        chat.notice()
+            .unwrap()
+            .contains("Re-paste the failed attachment")
+    );
 }
 
 #[test]

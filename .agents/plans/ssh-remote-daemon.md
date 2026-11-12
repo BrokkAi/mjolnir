@@ -253,3 +253,5 @@ Discovery (2026-11-12, retry follow-up): `DaemonClient::upload_and_consume` requ
 Discovery (2026-11-12, composer follow-up): QueueStartupPrompt already validates installed references. Installing in composer preparation fixes startup/move submission without changing its protocol or persistence contract. Dropping the marker cancels the preparation future and closes its upload connection.
 
 Discovery (2026-11-12, composer review): legacy drafts and restored conversation content may still contain inline image bytes. The composer pump adopts every ready inline image into its marker-owned preparation queue, including at session binding, so these drafts become reference-only without submit-time network work.
+
+Discovery (2026-11-12, legacy durability ruling): legacy inline bytes remain in persisted drafts while preparation is pending or failed; only successful installation replaces them with the reference. New incomplete pastes persist pending markers, restore failed, and show a re-paste notice. No staging store or protocol change. Regression exits during an unacknowledged legacy upload, restores the bytes, and completes preparation after restart.
