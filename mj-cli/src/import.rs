@@ -510,13 +510,14 @@ pub(crate) fn persist_imported_session(
     session: &mut SessionRecord,
     bundle: Option<crate::daemon::ImportedBundle>,
 ) -> Result<()> {
-    persist_imported_session_cancellable(session, bundle, None).map(|_| ())
+    persist_imported_session_cancellable(session, bundle, None, None).map(|_| ())
 }
 
 fn persist_imported_session_cancellable(
     session: &mut SessionRecord,
     bundle: Option<crate::daemon::ImportedBundle>,
     cancelled: Option<&AtomicBool>,
+    registering: Option<(u64, &tokio::sync::mpsc::Sender<DashboardImportUpdate>)>,
 ) -> Result<bool> {
     let prepared = session.clone();
     tokio::runtime::Handle::try_current().context(IMPORT_RUNTIME_CONTEXT)?;
@@ -543,7 +544,19 @@ fn persist_imported_session_cancellable(
                 }
             }
         };
-        // Registration is the commit point; cancellation after upload cannot undo it.
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return Ok(None);
+        }
+        if let Some((task_id, updates)) = registering {
+            updates
+                .send(DashboardImportUpdate::Registering { task_id })
+                .await
+                .context("import progress consumer closed before registration")?;
+        }
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return Ok(None);
+        }
+        // ImportSession has one commit point and no user cancellation protocol.
         client.import_session(session, bundle, blob).await?;
         client
             .session_record(session_id)
@@ -595,6 +608,9 @@ pub(crate) enum DashboardImportTaskResult {
 }
 
 pub(crate) enum DashboardImportUpdate {
+    Registering {
+        task_id: u64,
+    },
     Progress {
         task_id: u64,
         step: usize,
@@ -865,7 +881,12 @@ pub(crate) fn spawn_dashboard_import(
                 bundle_id: session.bundle_id.clone(),
                 bundle: imported.controller.config.bundles[&session.bundle_id].clone(),
             };
-            match persist_imported_session_cancellable(session, Some(bundle), Some(&cancelled)) {
+            match persist_imported_session_cancellable(
+                session,
+                Some(bundle),
+                Some(&cancelled),
+                Some((task_id, &updates)),
+            ) {
                 Ok(true) => {}
                 Ok(false) => result = Ok(DashboardImportTaskResult::Cancelled),
                 Err(error) => result = Err(error),

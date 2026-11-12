@@ -773,6 +773,7 @@ fn codex_jsonl_leaves_out_hidden_context_sent_as_a_resource() {
     );
 }
 
+// Hard-won: #1514: choosing a daemon root changed managed imports into attached checkouts.
 #[test]
 fn nonempty_codex_import_materializes_and_validates_canonical_archive() {
     let directory = tempfile::tempdir().unwrap();
@@ -889,7 +890,7 @@ fn nonempty_codex_import_materializes_and_validates_canonical_archive() {
         &config,
         &mut state,
         NativeImportRequest {
-            daemon_project_root: None,
+            daemon_project_root: Some(&source.cwd),
             harness: HarnessKind::Codex,
             harness_home: &codex_home,
             native_session_id: &source.native_session_id,
@@ -905,6 +906,13 @@ fn nonempty_codex_import_materializes_and_validates_canonical_archive() {
     .unwrap();
     let verified =
         mj_checkpoint::archive::verify_archive_streaming(&imported.archive_path).unwrap();
+    // A daemon-root selection relocates sources without changing workspace ownership.
+    let record = &state.sessions[&imported.session_id];
+    assert!(record.project_directory.is_none());
+    assert!(matches!(
+        record.checkout(),
+        mj_core::state::Checkout::ManagedWorkspace
+    ));
     assert_eq!(verified.canonical_session.event_frontier, 3);
     assert_eq!(
         verified.canonical_session.session.last_activity_at_ms,

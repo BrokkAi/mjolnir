@@ -178,9 +178,9 @@ pub fn import_native_session(
             harness_kind: harness,
             last_profile: profile_id,
             bundle_id: bundle_id.to_owned(),
-            project_directory: daemon_project_root
-                .map(Path::to_path_buf)
-                .or_else(|| raw_project.as_ref().map(|(directory, _)| directory.clone())),
+            project_directory: raw_project
+                .as_ref()
+                .map(|(directory, _)| daemon_project_root.unwrap_or(directory).to_path_buf()),
             managed_worktree: None,
             review: None,
             no_project_memory: false,
@@ -602,7 +602,8 @@ impl<'a> ImportProjectRemap<'a> {
                 if relative.as_os_str().is_empty() {
                     destination.to_path_buf()
                 } else {
-                    destination.join(relative)
+                    // Daemon project paths obey the POSIX session-target contract.
+                    mj_core::target_path::join(destination, relative)
                 }
             })
         };

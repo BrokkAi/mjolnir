@@ -1732,6 +1732,22 @@ fn golden_tui_import_confirmation() {
         30,
         &lines,
     );
+    dashboard.show_import_progress("Imported session".into());
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(matches!(dashboard.mode, Mode::Confirm(_)));
+    dashboard.show_import_registration();
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Esc)),
+        DashboardAction::None
+    );
+    assert!(matches!(dashboard.mode, Mode::Importing(_)));
+    append_dialog_render(
+        &mut output,
+        "daemon registration cannot be cancelled",
+        120,
+        30,
+        &drawn(&mut dashboard, 120, 30),
+    );
     mj_core::golden::assert_golden(
         env!("CARGO_MANIFEST_DIR"),
         "tui-import-confirmation",

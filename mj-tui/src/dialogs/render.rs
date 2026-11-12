@@ -258,14 +258,14 @@ pub(crate) fn render_import_progress(
         popup,
         format!("Importing session · progress {}/{}", progress.step, total),
         theme::title(true),
-        true,
+        progress.cancellable,
     );
     frame.render_widget(theme::modal().title(title), popup);
     Button::render(
         frame,
         Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
         "Cancel",
-        true,
+        progress.cancellable,
         &mut form,
         DialogControl::Cancel,
     );

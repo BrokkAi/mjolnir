@@ -460,6 +460,7 @@ impl ConfirmDialog {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ImportProgress {
+    pub(crate) cancellable: bool,
     pub(crate) session_title: String,
     pub(crate) step: usize,
     total: Option<usize>,
@@ -1151,6 +1152,7 @@ impl DashboardState {
 
     pub fn show_import_progress(&mut self, session_title: String) {
         self.mode = Mode::Importing(ImportProgress {
+            cancellable: true,
             session_title,
             step: 1,
             total: None,
@@ -1158,6 +1160,16 @@ impl DashboardState {
             last_updated: Instant::now(),
             form: dialog_form(&[DialogControl::Cancel], DialogControl::Cancel),
         });
+    }
+
+    pub fn show_import_registration(&mut self) {
+        if let Some(progress) = import_progress_mut(&mut self.mode) {
+            progress.cancellable = false;
+            progress.message = "Registering on the daemon — cannot be cancelled.".into();
+            progress.last_updated = Instant::now();
+            // An upload-cancel confirmation cannot outlive that upload phase.
+            self.mode = Mode::Importing(progress.clone());
+        }
     }
 
     pub fn update_import_progress(&mut self, step: usize, total: Option<usize>, message: String) {
@@ -1234,6 +1246,10 @@ impl DashboardState {
         event: Event,
         mut progress: ImportProgress,
     ) -> DashboardAction {
+        if !progress.cancellable {
+            self.mode = Mode::Importing(progress);
+            return DashboardAction::None;
+        }
         let result = progress.form.get_mut().handle(&event);
         self.last_event_consumed.set(result.consumed);
         let interaction = result.action;

@@ -70,6 +70,8 @@ Decision: Default development commit is the remote source checkout's HEAD, resol
 
 Decision (user, 2026-11-12): --path and the dialog field denote the daemon-host project root. A shared remapper relocates operational paths beneath the recorded project root, including project snapshots, bundle sources and archive origins. A remapped import receives a session-specific bundle; existing configured bundles are never modified. Roots outside the recorded root require an actionable refusal naming the roots and explaining how to import separately or record from a common parent.
 
+Decision (parent reaffirming user design, 2026-11-12, review follow-up): User cancellation ends when ImportSession is sent. The dialog disables Cancel and explicitly announces daemon registration; an accepted result is applied. Extending cancellation into verification/copy would require a new progress/commit protocol, outside this design. Handoff may still interrupt preparation without admission. Daemon project paths follow the existing POSIX session-target contract, so remapping uses target_path::join rather than client-native path joining. Managed bundle imports relocate source metadata without setting project_directory, which selects attached-checkout ownership.
+
 ## Outcomes & Retrospective
 
 
