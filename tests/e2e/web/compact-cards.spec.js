@@ -346,6 +346,10 @@ test('golden_viewer_dashboard', async ({ context }) => {
       })(),
     })),
   })));
+  await compactPage.goto('https://viewer.test/');
+  await expect(compactPage.locator('#workspace-select')).toHaveValue('notifications');
+  await expect(compactPage.locator('.notification-entry')).toHaveCount(4);
+  await captureGoldenState(output, compactPage, 'notifications selected by default');
   await compactPage.close();
 
   const orderedPage = await context.newPage();
@@ -1462,4 +1466,33 @@ test('reviewers open their own workspace and stay out of Subagents', async ({ pa
   await expect(page.locator('#reviewers-button')).toBeHidden();
   await expect(page.locator('#reviewers-button-desktop')).toBeHidden();
   await expect(page.locator('#subagents-button')).toHaveText('Subagents · 1');
+});
+
+
+test('notifications retain cleared entries until refresh or leaving the workspace', async ({ page }) => {
+  const a = session('notice-a', 'a', 'A', { attention: 'needs_input', activity: SERVER_TIME_MS - 2000 });
+  const b = session('notice-b', 'b', 'B', { attention: 'important', workspaceId: OTHER_WORKSPACE_ID, activity: SERVER_TIME_MS - 1000 });
+  const state = await mount(page, [a, b]);
+  await page.locator('#workspace-select').selectOption('notifications');
+  const ids = () => page.locator('.notification-entry').evaluateAll(nodes => nodes.map(node => node.dataset.notificationId));
+  expect(await ids()).toEqual(['notice-b', 'notice-a']);
+  b.attention = 'idle';
+  await refresh(page, state);
+  await expect(page.locator('[data-notification-id="notice-b"]')).toHaveClass(/notification-cleared/);
+  const c = session('notice-c', 'c', 'C', { attention: 'failed', activity: SERVER_TIME_MS });
+  state.snapshot.sessions.push(c);
+  await refresh(page, state);
+  expect(await ids()).toEqual(['notice-c', 'notice-b', 'notice-a']);
+  b.attention = 'important';
+  await refresh(page, state);
+  await expect(page.locator('[data-notification-id="notice-b"]')).not.toHaveClass(/notification-cleared/);
+  b.attention = 'idle';
+  await refresh(page, state);
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  expect(await ids()).toEqual(['notice-c', 'notice-a']);
+  a.attention = 'idle';
+  await refresh(page, state);
+  await page.locator('#workspace-select').selectOption(WORKSPACE_ID);
+  await page.locator('#workspace-select').selectOption('notifications');
+  expect(await ids()).toEqual(['notice-c']);
 });

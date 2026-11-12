@@ -1527,3 +1527,20 @@ test('conversation receipts require a visible focused caught-up conversation and
   await vm.runInContext('persistVisibleConversationRead()', context);
   assert.equal(sent.length, 2, 'closed conversations do not read');
 });
+
+
+test('notification snapshot retains cleared positions until refresh or a new visit', () => {
+  const context = vm.createContext({ orderedSessions: rows => [...rows].sort((a, b) => b.time - a.time) });
+  vm.runInContext(sourceBetween('class NotificationSnapshot {', '\nfunction notificationRows()'), context);
+  const update = rows => JSON.parse(vm.runInContext(`JSON.stringify(notificationSnapshot.update(${JSON.stringify(rows)}))`, context));
+  const a = { id: 'a', time: 1 }, b = { id: 'b', time: 2 }, c = { id: 'c', time: 3 };
+  assert.deepEqual(update([a, b]).map(entry => entry.row.id), ['b', 'a']);
+  assert.equal(update([a])[0].cleared, true);
+  assert.deepEqual(update([a, c]).map(entry => [entry.row.id, entry.cleared]), [['c', false], ['b', true], ['a', false]]);
+  assert.deepEqual(update([a, b, c]).map(entry => [entry.row.id, entry.cleared]), [['c', false], ['b', false], ['a', false]]);
+  update([a, c]);
+  vm.runInContext('notificationSnapshot.reset()', context);
+  assert.deepEqual(update([a, c]).map(entry => entry.row.id), ['c', 'a']);
+  vm.runInContext('notificationSnapshot.reset()', context);
+  assert.deepEqual(update([a]).map(entry => entry.row.id), ['a']);
+});
