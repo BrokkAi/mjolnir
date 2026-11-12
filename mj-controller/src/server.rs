@@ -459,6 +459,7 @@ pub use actions::*;
 mod routes;
 use routes::*;
 mod handlers;
+pub(crate) use handlers::validate_new_preflight;
 use handlers::*;
 mod validation;
 use validation::*;

@@ -687,6 +687,40 @@ pub struct DraftPreview {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "action", content = "arguments")]
 pub enum DaemonAction {
+    PreflightNewSession {
+        request: NewSessionPreflightRequest,
+    },
+    ValidateProjectDirectory {
+        target_id: String,
+        directory: PathBuf,
+    },
+    CompletePath {
+        host: mj_core::path_completion::CompletionHost,
+        prefix: String,
+        kind: mj_core::path_completion::CompletionKind,
+    },
+    CheckProjectDirectories {
+        paths: Vec<std::path::PathBuf>,
+    },
+    DiscoverProjects {
+        request: mj_core::project_picker::ProjectDiscoveryRequest,
+    },
+    ResolveContainerPath {
+        target_id: String,
+        source: std::path::PathBuf,
+    },
+    ResolveSetupPath {
+        machine: mj_core::config::Machine,
+        source: std::path::PathBuf,
+    },
+    ValidateMountSource {
+        target_id: String,
+        source: std::path::PathBuf,
+    },
+    ValidateSessionMounts {
+        target_id: String,
+        mounts: Vec<mj_core::targets::AdditionalMount>,
+    },
     RecordOperatorActivity,
     SetOperatorAway {
         away: bool,
@@ -1167,6 +1201,13 @@ pub struct ResponseEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "reply", content = "value")]
 pub enum DaemonReply {
+    NewSessionPreflight(PreflightNew),
+    PathCompletion(mj_core::path_completion::PathCompletion),
+    ProjectDirectories(Vec<(std::path::PathBuf, bool)>),
+    ProjectDiscovery(mj_core::project_picker::ProjectDiscovery),
+    ResolvedPath(std::path::PathBuf),
+    MountValidation(std::path::PathBuf, Option<String>),
+    SessionMountValidation(Option<(String, String)>),
     LifecycleAccepted(LifecycleReceipt),
     /// Only a captured operation result may report this failure.
     LifecycleFailed(String),
@@ -3144,7 +3185,9 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // The host node is gone: NodeConnect is no longer an action.
 // Lifecycle submission acknowledges ownership separately from completion.
 // Clients obtain the HTTP API credential over control with ApiCredential.
-pub const PROTOCOL_VERSION: u32 = 89;
+// The dashboard's path, project and preflight work are daemon actions, and
+// closing a cancellable action's connection cancels it.
+pub const PROTOCOL_VERSION: u32 = 90;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
@@ -3223,6 +3266,82 @@ impl DaemonClient {
             _ => bail!("daemon returned an unexpected move reply"),
         }
     }
+}
+
+impl DaemonAction {
+    /// These disposable machine reads use a dedicated connection. Closing it
+    /// cancels subprocesses; daemon handoff may abandon the read as well.
+    pub fn is_cancellable_machine_action(&self) -> bool {
+        if let Self::PreflightNewSession { request } = self
+            && !request.remote_repairs.is_empty()
+        {
+            return false;
+        }
+        matches!(
+            self,
+            Self::PreflightNewSession { .. }
+                | Self::ValidateProjectDirectory { .. }
+                | Self::CompletePath { .. }
+                | Self::CheckProjectDirectories { .. }
+                | Self::DiscoverProjects { .. }
+                | Self::ResolveContainerPath { .. }
+                | Self::ResolveSetupPath { .. }
+                | Self::ValidateMountSource { .. }
+                | Self::ValidateSessionMounts { .. }
+        )
+    }
+}
+
+/// One configured repository's network clone and publication destinations.
+/// URLs have already been passed through the shared display sanitizer before
+/// they reach a phone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreflightRepository {
+    pub id: String,
+    pub fetch_url: String,
+    pub default_branch: String,
+    pub push_urls: Vec<String>,
+}
+
+/// What a preflight found. Isolated sessions expose their complete network
+/// source plan so the person can review it before creation. Raw-local targets
+/// leave the plan empty because they use the selected checkout directly;
+/// isolated targets set `local_changes_excluded` to make the copy boundary
+/// explicit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreflightNew {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_directory: Option<PathBuf>,
+    #[serde(default)]
+    pub managed_worktree: mj_core::state::ManagedWorktreeOptions,
+    #[serde(default)]
+    pub remote_repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
+    #[serde(default)]
+    pub dirty_repositories: Vec<String>,
+    #[serde(default)]
+    pub remote_repositories: Vec<PreflightRepository>,
+    pub local_changes_excluded: bool,
+    /// Why creating this session turns its review off, when it will.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_notice: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NewSessionPreflightRequest {
+    #[serde(default)]
+    pub additional_mounts: Vec<mj_core::targets::AdditionalMount>,
+    #[serde(default)]
+    pub remote_repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
+    #[serde(default)]
+    pub workspace_id: String,
+    pub profile_id: String,
+    pub bundle_id: String,
+    pub target_id: String,
+    #[serde(default)]
+    pub project_directory: Option<PathBuf>,
 }
 
 #[cfg(test)]

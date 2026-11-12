@@ -8,6 +8,17 @@ pub(super) async fn handle_action(
 ) -> Result<DaemonReply> {
     let _work = upgrade_request_activity(&action)?;
     match action {
+        action @ (DaemonAction::PreflightNewSession { .. }
+        | DaemonAction::ValidateProjectDirectory { .. }
+        | DaemonAction::CompletePath { .. }
+        | DaemonAction::CheckProjectDirectories { .. }
+        | DaemonAction::DiscoverProjects { .. }
+        | DaemonAction::ResolveContainerPath { .. }
+        | DaemonAction::ResolveSetupPath { .. }
+        | DaemonAction::ValidateMountSource { .. }
+        | DaemonAction::ValidateSessionMounts { .. }) => {
+            super::machine::execute(action, state, Arc::new(AtomicBool::new(false))).await
+        }
         DaemonAction::RecordOperatorActivity => {
             state.record_operator_activity().await;
             Ok(DaemonReply::Done)
@@ -1076,6 +1087,11 @@ pub(super) async fn handle_action(
 pub(super) fn upgrade_request_activity(
     action: &DaemonAction,
 ) -> Result<Option<crate::upgrade::Work>> {
+    if let DaemonAction::PreflightNewSession { request } = action
+        && !request.remote_repairs.is_empty()
+    {
+        return crate::upgrade::activity("new-session preflight remote repairs").map(Some);
+    }
     if matches!(action, DaemonAction::SaveSidebarSize { .. }) {
         return crate::upgrade::activity("sidebar size setting").map(Some);
     }
@@ -1084,6 +1100,9 @@ pub(super) fn upgrade_request_activity(
     }
     if matches!(action, DaemonAction::SetOperatorAway { .. }) {
         return crate::upgrade::activity("operator away setting").map(Some);
+    }
+    if action.is_cancellable_machine_action() {
+        return Ok(None);
     }
     if matches!(
         action,
