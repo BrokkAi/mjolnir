@@ -1436,19 +1436,21 @@ async function loadInlineHistory() {
     entries: new Map(),
   };
   const state = inlineHistory;
-  if (state.loading || state.done) return;
+  if (state.loading || (state.done && !state.gap)) return;
   state.loading = true;
   state.failed = false;
   earlierMessages.disabled = true;
   earlierMessages.textContent = 'Loading earlier messages…';
   try {
-    let visibleAdded;
+    let visibleAdded, gap;
     do {
       visibleAdded = false;
       const query = new URLSearchParams();
-      if (state.before) {
-        query.set('before_position', String(state.before.position));
-        query.set('before_id', state.before.stable_id);
+      gap = state.gap;
+      const before = gap ? gap.before : state.before;
+      if (before) {
+        query.set('before_position', String(before.position));
+        query.set('before_id', before.stable_id);
       }
       const page = await request(`/api/v1/sessions/${encodeURIComponent(state.session)}/history${query.size ? `?${query}` : ''}`, { signal: state.controller.signal });
       if (inlineHistory !== state || state.generation !== conversationGeneration) return;
@@ -1460,15 +1462,14 @@ async function loadInlineHistory() {
         if (state.entries.has(item.stable_id)) continue;
         const live = [...liveHistoryRows.values()].find(row => historyMatches(row, item));
         const entry = { ...item, id: item.position, lines: item.text.split('\n'), label: item.label || item.role, tone: item.role };
+        state.entries.set(item.stable_id, entry);
         if (item.position >= oldest) {
           // All members of a collapsed live group belong to that live row.
-          if (!live || !historyMatches(live, item) || !clippedHistoryRow(live)) continue;
-          state.entries.set(item.stable_id, entry);
+          if (!live || !clippedHistoryRow(live)) continue;
           const node = entryNodes.get(live.stable_id || live.id);
           if (node) paintEntry(node, { ...live, lines: entry.lines }, null);
           continue;
         }
-        state.entries.set(item.stable_id, entry);
         const node = el('article');
         node.dataset.entryId = item.stable_id;
         paintEntry(node, entry, null);
@@ -1476,14 +1477,28 @@ async function loadInlineHistory() {
         rows.push(node);
       }
       state.entries = new Map([...state.entries].sort((a, b) => a[1].position - b[1].position || a[0].localeCompare(b[0])));
-      feed.prepend(...rows);
-      state.before = page.before;
-      state.done = !page.before;
-      earlierMessages.classList.toggle('hidden', state.done);
+      for (const node of rows) {
+        const position = state.entries.get(node.dataset.entryId).position;
+        const next = [...feed.children].find(child => {
+          const stored = state.entries.get(child.dataset.entryId);
+          const live = liveHistoryRows.get(child.dataset.entryId) || liveHistoryRows.get(Number(child.dataset.entryId));
+          const nextPosition = stored?.position ?? live?.id;
+          return nextPosition > position || (nextPosition === position && stored && stored.stable_id.localeCompare(node.dataset.entryId) > 0);
+        });
+        feed.insertBefore(node, next || null);
+      }
+      if (gap) {
+        gap.before = page.before;
+        if (state.gap === gap && (!page.before || page.items.some(item => item.position <= gap.boundary))) state.gap = null;
+      } else {
+        state.before = page.before;
+        state.done = !page.before;
+      }
+      earlierMessages.classList.toggle('hidden', state.done && !state.gap);
       earlierMessages.textContent = 'Earlier messages';
       visibleAdded = rows.some(node => node.getBoundingClientRect().height > 0);
       if (anchor) feedScroll.scrollTop += anchor.getBoundingClientRect().top - top;
-    } while (!visibleAdded && !state.done);
+    } while (state.gap || (!visibleAdded && !state.done && !gap));
   } catch (error) {
     if (inlineHistory === state && !state.controller.signal.aborted) {
       state.failed = true;
@@ -8153,11 +8168,22 @@ function turnPromptText(entry, previous) {
 function renderEntries(entries, replace) {
   if (typeof reconcileSubmissions === 'function') reconcileSubmissions(currentSession, entries.map(entry => entry.command_id).filter(Boolean));
   const wasAtTail = atTail();
+  const previousOldest = liveHistoryRows.size ? Math.min(...[...liveHistoryRows.values()].map(entry => entry.id)) : Infinity;
+  const anchor = replace && !wasAtTail ? [...feed.children].find(node => node.getBoundingClientRect().bottom > feedScroll.getBoundingClientRect().top) : null;
+  const anchorId = anchor?.dataset.entryId;
+  const anchorTop = anchor?.getBoundingClientRect().top;
   if (replace) liveHistoryRows.clear();
   for (const entry of entries) liveHistoryRows.set(entry.stable_id || entry.id, entry);
   if (replace) {
     const retained = inlineHistory ? [...inlineHistory.entries.values()] : [];
     const oldest = entries.length ? Math.min(...entries.map(entry => entry.id)) : Infinity;
+    if (inlineHistory && oldest > previousOldest && Number.isFinite(oldest)) {
+      // One loader owns both cursors, including resets during an in-flight page.
+      const boundary = inlineHistory.gap?.boundary ?? previousOldest;
+      inlineHistory.gap = { before: { position: oldest, stable_id: '' }, boundary };
+      earlierMessages.classList.remove('hidden');
+      void loadInlineHistory();
+    }
     feed.replaceChildren();
     entryNodes.clear();
     for (const entry of retained) {
@@ -8191,6 +8217,9 @@ function renderEntries(entries, replace) {
     node.dataset.updatedSeq = entry.updated_seq;
     paintEntry(node, entry, unansweredPrompt);
   }
+  const retainedAnchor = inlineHistory && [...inlineHistory.entries.values()].find(row => row.position === Number(anchorId));
+  const replacementAnchor = anchorId && (entryNodes.get(anchorId) || entryNodes.get(retainedAnchor?.stable_id));
+  if (replacementAnchor) feedScroll.scrollTop += replacementAnchor.getBoundingClientRect().top - anchorTop;
   if (wasAtTail) scrollToTail();
   else if (appended) jumpToLatest.classList.remove('hidden');
   if (typeof renderPendingSubmissions === 'function') renderPendingSubmissions();

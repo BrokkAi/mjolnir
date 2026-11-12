@@ -1189,6 +1189,36 @@ test('inline history reconciles clipped and grouped live rows and continues over
   await expect(page.locator('#earlier-messages')).toBeHidden();
 });
 
+// Hard-won: live resets dropped the interval between retained history and the new tail.
+test('inline history fills an advancing live window and keeps older paging', async ({ page }) => {
+  const state = await mount(page, [session('history', 'alpha', 'Alpha')]);
+  const live = transcript('Row 200');
+  live.entries[0].id = 200;
+  live.entries.unshift({ ...live.entries[0], id: 100, lines: ['Row 100'] });
+  await page.route('**/api/conversations/history*', route => route.fulfill({ json: live }));
+  const queries = [];
+  const item = position => ({ position, stable_id: `agent:${position}`, role: 'agent', text: `Row ${position}` });
+  await page.route('**/api/v1/sessions/history/history*', route => {
+    const before = Number(new URL(route.request().url()).searchParams.get('before_position'));
+    queries.push(before);
+    const positions = before === 101 ? [99, 100] : before === 150 ? [100, 120] : [1];
+    return route.fulfill({ json: { items: positions.map(item), before: before === 99 ? null : { position: positions[0], stable_id: `agent:${positions[0]}` } } });
+  });
+  await card(page, 'history').click();
+  await page.locator('#earlier-messages').click();
+  const reader = page.locator('#conversation-feed');
+  await expect(reader).toContainText('Row 99');
+  live.entries = [{ ...live.entries[0], id: 150, lines: ['Row 150'] }, { ...live.entries[1], id: 250, lines: ['Row 250'] }];
+  state.snapshot.sessions[0].latest_event_ordinal = 251;
+  await refresh(page, state);
+  await expect(reader).toContainText('Row 120');
+  expect(await reader.locator('article').allTextContents()).toEqual([99, 100, 120, 150, 250].map(n => expect.stringContaining(`Row ${n}`)));
+  await page.locator('#conversation-scroll').evaluate(node => { node.scrollTop = 0; node.dispatchEvent(new Event('scroll')); });
+  await expect(reader).toContainText('Row 1');
+  expect(queries).toEqual([101, 150, 99]);
+  await expect(reader.locator('article')).toHaveCount(6);
+});
+
 test('inline history ignores a response after navigation', async ({ page }) => {
   await mount(page, [session('history', 'alpha', 'Alpha'), session('other', 'alpha', 'Alpha')]);
   let release;

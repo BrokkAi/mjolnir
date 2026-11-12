@@ -23,6 +23,8 @@ Use one conversation-owned paging state, retired with the existing request gener
 
 2026-11-12 review corrections: use stored position against live id (the first member position for collapsed groups), checking stable identity only when live supplies it. Start at oldest position + 1 with an empty tie-breaker to include the oldest row for clipped-text reconciliation. Keep full historical text when a refreshed live projection remains clipped. Treat newer stored members as owned by the live window. Continue requests within the same cancellable generation until a rendered row has positive height or the cursor is exhausted; errors retain the retry affordance.
 
+2026-11-12 advancing-window correction: retain every fetched item, including live overlap. A single generation-owned loader serializes older paging and a separate gap cursor when a replacement advances the live lower boundary. Gap pages stop at the previous live boundary, keep the older cursor intact, and share cancellation, retry and anchored insertion. Sort insertions by position; live coverage hides retained overlapping members until they age out.
+
 ## Surprises & Discoveries
 
 HistoryEntry initially omits stable identities although stored items already have them; identity must cross the API for reliable deduplication. Existing CSS overrides the button hidden attribute, requiring the established hidden class. One store regression pinned complete-turn counts for 1,024 items; the corresponding 512-item counts are 600/700.
@@ -42,3 +44,5 @@ Inline loading, retry, scroll anchoring, exhaustion and late-response rejection 
 Updated 2026-11-12 after browser validation and tail audit; documented CSS and fixture findings.
 
 Review correction validation (2026-11-12): web unit files pass (project discovery requires elevated subprocess access); deterministic Playwright: 120 passed, 3 skipped. Final focused paging/mailbox checks: three passed, with the fourth passing after replacing a test-only call to a module-private function with the real snapshot refresh surface. Controller `server::`: 261 passed. No Rust changes; clippy/fmt not required. Mailbox history fixtures now carry their real stored positions. No push or review requested, per delegated scope.
+
+Advancing-window correction validation (2026-11-12): 59 web unit tests pass; deterministic project 120 passed, 3 skipped, with one initial paging failure from a loop-variable scope error fixed during validation; final focused rerun passes all four paging cases. Controller `server::` passes 261 tests. `git diff --check` passes. No Rust changes.
