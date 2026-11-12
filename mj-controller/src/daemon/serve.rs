@@ -181,8 +181,9 @@ pub(super) async fn serve_client(
     state: Arc<RuntimeState>,
     cancellation: CancellationToken,
 ) -> Result<()> {
+    let mut upload: Option<(u64, Vec<u8>)> = None;
     loop {
-        let request: RequestEnvelope = match read_frame(&mut stream).await {
+        let mut request: RequestEnvelope = match read_frame(&mut stream).await {
             Ok(request) => request,
             Err(error)
                 if error.downcast_ref::<std::io::Error>().is_some_and(|io| {
@@ -198,6 +199,29 @@ pub(super) async fn serve_client(
             }
             Err(error) => return Err(error),
         };
+        if let DaemonAction::UploadChunk { bytes, finished } = &request.action {
+            ensure!(
+                request.token == metadata.token,
+                "daemon authentication failed"
+            );
+            ensure!(
+                request.protocol_version == PROTOCOL_VERSION,
+                "incompatible upload protocol"
+            );
+            let (id, body) = upload.get_or_insert_with(|| (request.request_id, Vec::new()));
+            ensure!(*id == request.request_id, "interleaved upload request");
+            body.extend_from_slice(bytes);
+            if !finished {
+                continue;
+            }
+            let (_, body) = upload.take().expect("upload exists");
+            request.action = tokio::task::spawn_blocking(move || serde_json::from_slice(&body))
+                .await
+                .context("upload decoder task failed")??;
+            ensure!(request.action.is_upload(), "invalid upload action");
+        } else {
+            ensure!(upload.is_none(), "interrupted upload request");
+        }
         let request_id = request.request_id;
         // The frozen management subset is served for every protocol version so
         // any Mjolnir build can inspect, stop, or replace this daemon; everything

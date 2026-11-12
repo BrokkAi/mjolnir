@@ -18,12 +18,15 @@ This is private-network operation with working SSH authentication and host trust
 - [ ] Implement and validate milestone 2: direct HTTP credentials and browser opening.
 - [ ] Implement and validate milestone 3: dashboard paths, discovery and preflight.
 - [ ] Implement and validate milestone 4: dashboard setup, probes, settings and cache work.
+- [x] (2026-11-12, upload child) Implement authenticated chunked request transport and daemon-owned image attachment installation for every placement; focused attachment tests and the isolated `daemon_upload_exchange` pass, including 192 KiB, interrupted uploads, authentication rejection, idempotent install and corruption. Full touched-crate suites and Clippy remain in progress. Import and the approved voice split remain unimplemented.
 - [ ] Implement and validate milestone 5: explicit remote paths, attachment uploads, client-side import upload and daemon-side voice transcription.
 - [ ] Remove the native desktop shell (`mj-desktop`, `mj app`, `mj-cli/src/desktop.rs`, release packaging); independent of the other milestones.
 - [ ] Implement and validate milestone 6: matching-build PowerShell go script.
 - [ ] Implement milestone 7: user documentation, final validation, platform dispatch and real Windows acceptance.
 
 ## Surprises & Discoveries
+
+The existing `mj-voice-worker` combines microphone capture, WAV encoding and an HTTP transcription call in one operation requiring `--codex-auth`. It has no capture-only or supplied-audio transcription mode (`voice-worker/src/main.rs`, `backend.rs::run`, `backend.rs::transcribe`). The parent resolved the split below before implementation.
 
 
 `mj-client/src/build_identity.rs::BuildIdentity::same_source` compares release version and a present Git revision, ignoring executable timestamps. It does not hash dirty source. Two differently edited trees at one HEAD can pass. This does not change the chosen matching rule; the development script must build clean, immutable checkouts and disclose that the rule alone cannot detect dirty builds.
@@ -37,6 +40,8 @@ The suggested disposable sshd exists as `LocalSshd` in `mj-core/src/targets/ssh.
 No existing checked-in control-daemon exchange golden was located by searching daemon modules and golden filenames. Existing HTTP goldens include `mj-controller/tests/golden/phone-new-session-preflight.txt` and `viewer-settings-exchange.txt`. Milestone 3 establishes one real control exchange golden and extends it in later milestones, while extending those existing HTTP cases for shared behavior. Do not invent a nonexistent baseline test.
 
 ## Decision Log
+
+Decision (parent, 2026-11-12): Supersede the earlier wording that the daemon "runs the voice worker". The daemon calls `anvil_client::CodexClient::with_auth_path(...).transcribe(...)` asynchronously in-process using its own profile credentials and reports failures to the caller. The client voice worker becomes capture-only, retaining status/level/cancel behavior and writing encoded WAV to a caller-owned temporary path. Upload that WAV using the common authenticated chunked control transport. Client availability requires the local helper and a daemon credential-availability answer that returns no path. Remove client credential probing and `--codex-auth`.
 
 
 Decision: Add `[daemon] runtime = "ssh"`, `host`, optional `instance`, and an SSH argument list `ssh_args` using existing `SshTarget` conventions. The remote instance defaults to the client's selected instance, including default. Only this placement table is client-owned; other settings come from daemon settings APIs. Remote host/container placement is separate and never recursively follows another SSH placement. Rationale: paths, profiles and credentials must have one machine owner. Date/Author: 2026-11-12, user design; argument-list field spelling specified by this plan.

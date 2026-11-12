@@ -1036,6 +1036,35 @@ fn normalize_prompt_images(
         .into_iter()
         .map(|mut image| {
             image.image = attachments::install_clipboard_image(session_id, image.image)?;
+            if image.image.reference.is_none() {
+                use base64::Engine as _;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(image.image.data_base64.as_bytes())?;
+                let optimized = mj_client::image::optimize_image(&bytes)?;
+                let reference = mj_core::attachment::AttachmentRef::new(
+                    &optimized.bytes,
+                    optimized.mime_type,
+                    optimized.width,
+                    optimized.height,
+                )?;
+                let reference = tokio::runtime::Handle::current().block_on(async {
+                    let mut client = mj_client::daemon::connect_existing().await?;
+                    match client
+                        .request(mj_client::daemon::DaemonAction::InstallAttachment {
+                            session_id: session_id.to_owned(),
+                            reference: reference.clone(),
+                            bytes: optimized.bytes,
+                        })
+                        .await?
+                    {
+                        mj_client::daemon::DaemonReply::AttachmentInstalled(reference) => {
+                            Ok(reference)
+                        }
+                        reply => anyhow::bail!("unexpected attachment upload reply {reply:?}"),
+                    }
+                })?;
+                image.image = crate::clipboard::ClipboardImage::from_reference(reference)?;
+            }
             Ok(image)
         })
         .collect()

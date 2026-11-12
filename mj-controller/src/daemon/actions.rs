@@ -8,6 +8,20 @@ pub(super) async fn handle_action(
 ) -> Result<DaemonReply> {
     let _work = upgrade_request_activity(&action)?;
     match action {
+        DaemonAction::UploadChunk { .. } => bail!("upload fragment outside upload transport"),
+        DaemonAction::InstallAttachment {
+            session_id,
+            reference,
+            bytes,
+        } => {
+            let reference = blocking(move || {
+                mj_core::attachment::AttachmentStore::controller(&session_id)?
+                    .install(&reference, &bytes)?;
+                Ok(reference)
+            })
+            .await?;
+            Ok(DaemonReply::AttachmentInstalled(reference))
+        }
         DaemonAction::RecordOperatorActivity => {
             state.record_operator_activity().await;
             Ok(DaemonReply::Done)

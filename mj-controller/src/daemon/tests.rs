@@ -12211,3 +12211,137 @@ async fn suspend_acceptance_survives_client_disconnect_during_checkpoint() {
     );
     assert!(stored.sessions[LATCH_RELAY_SESSION].checkpoint.is_some());
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn daemon_upload_exchange() {
+    const CHILD: &str = "MJ_TEST_UPLOAD_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), "daemon_upload_exchange"),
+        )
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "upload-exchange")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let metadata = DaemonMetadata {
+        protocol_version: PROTOCOL_VERSION,
+        pid: 1,
+        address: listener.local_addr().unwrap(),
+        token: "upload-secret".into(),
+        started_at: "now".into(),
+        build_version: "test".into(),
+        instance_id: "upload-exchange".into(),
+        placement: DaemonPlacement::Host,
+    };
+    let server_metadata = metadata.clone();
+    let server = tokio::spawn(async move {
+        for authenticated in [true, false, true] {
+            let (stream, _) = listener.accept().await.unwrap();
+            let result = serve_client(
+                stream,
+                server_metadata.clone(),
+                test_runtime_state(),
+                CancellationToken::new(),
+            )
+            .await;
+            assert_eq!(result.is_ok(), authenticated);
+        }
+    });
+    let mut partial = TcpStream::connect(metadata.address).await.unwrap();
+    write_frame(
+        &mut partial,
+        &RequestEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: 1,
+            token: metadata.token.clone(),
+            action: DaemonAction::UploadChunk {
+                bytes: vec![0; 96 * 1024],
+                finished: false,
+            },
+        },
+    )
+    .await
+    .unwrap();
+    drop(partial);
+    let mut unauthorized = TcpStream::connect(metadata.address).await.unwrap();
+    write_frame(
+        &mut unauthorized,
+        &RequestEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: 1,
+            token: "wrong-token".into(),
+            action: DaemonAction::UploadChunk {
+                bytes: vec![0; 96 * 1024],
+                finished: false,
+            },
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        read_frame::<ResponseEnvelope>(&mut unauthorized)
+            .await
+            .is_err()
+    );
+    assert!(
+        !mj_core::attachment::AttachmentStore::controller("upload-session")
+            .unwrap()
+            .root()
+            .exists()
+    );
+    // Exercise several transport fragments and the pipe-buffer boundary.
+    let mut bytes = vec![37; 192 * 1024];
+    bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+    let reference =
+        mj_core::attachment::AttachmentRef::new(&bytes, "image/png".into(), 256, 256).unwrap();
+    let mut client = DaemonClient::connect(metadata).await.unwrap();
+    let mut output = String::new();
+    for label in ["install 196608 bytes", "repeat content-addressed install"] {
+        let reply = client
+            .request(DaemonAction::InstallAttachment {
+                session_id: "upload-session".into(),
+                reference: reference.clone(),
+                bytes: bytes.clone(),
+            })
+            .await
+            .unwrap();
+        output.push_str(&format!(
+            "{label}: {}\n",
+            serde_json::to_string(&reply).unwrap()
+        ));
+    }
+    assert_eq!(
+        mj_core::attachment::AttachmentStore::controller("upload-session")
+            .unwrap()
+            .read(&reference)
+            .unwrap(),
+        bytes
+    );
+    let mut corrupt = bytes;
+    corrupt[100] ^= 1;
+    let error = client
+        .request(DaemonAction::InstallAttachment {
+            session_id: "upload-session".into(),
+            reference,
+            bytes: corrupt,
+        })
+        .await
+        .unwrap_err();
+    output.push_str(&format!("corrupt payload: {error}\n"));
+    let reply = client.request(DaemonAction::Ping).await.unwrap();
+    output.push_str(&format!(
+        "connection after refusal: {}\n",
+        serde_json::to_string(&reply).unwrap()
+    ));
+    assert_eq!(
+        output,
+        include_str!("../../tests/golden/daemon-upload-exchange.txt")
+    );
+    drop(client);
+    server.await.unwrap();
+}

@@ -16,7 +16,9 @@ use base64::Engine;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::clipboard::ClipboardImage;
-use mj_core::attachment::{AttachmentRef, AttachmentStore, MAX_IMAGES};
+#[cfg(test)]
+use mj_core::attachment::AttachmentRef;
+use mj_core::attachment::MAX_IMAGES;
 
 /// Prefix used for drafts whose payload is encoded as JSON.
 pub use mj_core::draft::CHAT_DRAFT_PREFIX;
@@ -271,9 +273,9 @@ fn validate_image(image: ClipboardImage) -> Result<ClipboardImage> {
     ClipboardImage::from_base64(image.data_base64, image.mime_type)
 }
 
-/// Normalize one encoded image and install its immutable bytes before a prompt
-/// is allowed to leave the controller. All filesystem and codec work belongs in
-/// the caller's blocking task.
+/// Prepare client image bytes for upload. Installation belongs to the daemon
+/// and must complete before the prompt carries an opaque reference.
+/// Filesystem and codec work belongs in the caller's blocking task.
 pub(super) fn install_clipboard_image(
     session_id: &str,
     image: ClipboardImage,
@@ -290,7 +292,7 @@ pub(super) fn install_clipboard_image(
     install_image_bytes(session_id, &bytes)
 }
 
-/// Read, optimize, and install an image named by `/attach` or a pasted path.
+/// Read and optimize an image named by `/attach` or a pasted path for upload.
 pub(super) fn install_path(session_id: &str, path: &Path) -> Result<ClipboardImage> {
     let metadata = std::fs::symlink_metadata(path)
         .with_context(|| format!("inspect attachment {}", path.display()))?;
@@ -313,16 +315,12 @@ pub(super) fn install_path(session_id: &str, path: &Path) -> Result<ClipboardIma
     })
 }
 
-fn install_image_bytes(session_id: &str, bytes: &[u8]) -> Result<ClipboardImage> {
+fn install_image_bytes(_session_id: &str, bytes: &[u8]) -> Result<ClipboardImage> {
     let optimized = mj_client::image::optimize_image(bytes).context("optimize image attachment")?;
-    let reference = AttachmentRef::new(
-        &optimized.bytes,
+    ClipboardImage::from_base64(
+        base64::engine::general_purpose::STANDARD.encode(&optimized.bytes),
         optimized.mime_type,
-        optimized.width,
-        optimized.height,
-    )?;
-    AttachmentStore::controller(session_id)?.install(&reference, &optimized.bytes)?;
-    ClipboardImage::from_reference(reference)
+    )
 }
 
 fn marker(number: u64) -> String {

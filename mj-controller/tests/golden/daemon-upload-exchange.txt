@@ -1,0 +1,4 @@
+install 196608 bytes: {"reply":"attachment_installed","value":{"sha256":"05200b5e730f97630237e63086ddec3329600a3997d39df5813066acd85724a1","mime_type":"image/png","size":196608,"width":256,"height":256}}
+repeat content-addressed install: {"reply":"attachment_installed","value":{"sha256":"05200b5e730f97630237e63086ddec3329600a3997d39df5813066acd85724a1","mime_type":"image/png","size":196608,"width":256,"height":256}}
+corrupt payload: attachment data does not match its digest or size
+connection after refusal: {"reply":"pong"}

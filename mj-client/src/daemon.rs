@@ -685,6 +685,18 @@ pub struct DraftPreview {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "action", content = "arguments")]
 pub enum DaemonAction {
+    /// Authenticated fragments of one upload action; all share a request ID.
+    UploadChunk {
+        #[serde(with = "chunk_bytes")]
+        bytes: Vec<u8>,
+        finished: bool,
+    },
+    InstallAttachment {
+        session_id: String,
+        reference: mj_core::attachment::AttachmentRef,
+        #[serde(with = "chunk_bytes")]
+        bytes: Vec<u8>,
+    },
     RecordOperatorActivity,
     SetOperatorAway {
         away: bool,
@@ -1153,6 +1165,14 @@ impl DaemonRefusal {
     }
 }
 
+impl DaemonAction {
+    /// Upload actions travel in authenticated request fragments, using the same
+    /// chunk size and base64 convention as chunked replies.
+    pub fn is_upload(&self) -> bool {
+        matches!(self, Self::InstallAttachment { .. })
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResponseEnvelope {
@@ -1164,6 +1184,7 @@ pub struct ResponseEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "reply", content = "value")]
 pub enum DaemonReply {
+    AttachmentInstalled(mj_core::attachment::AttachmentRef),
     LifecycleAccepted(LifecycleReceipt),
     /// Only a captured operation result may report this failure.
     LifecycleFailed(String),
@@ -1747,16 +1768,39 @@ impl DaemonClient {
         let protocol_version = self.metadata.protocol_version;
         let request_id = self.next_request_id;
         self.next_request_id += 1;
-        write_frame(
-            &mut self.stream,
-            &RequestEnvelope {
-                protocol_version,
-                request_id,
-                token: self.metadata.token.clone(),
-                action,
-            },
-        )
-        .await?;
+        let chunked = action.is_upload();
+        if chunked {
+            let body = tokio::task::spawn_blocking(move || serde_json::to_vec(&action))
+                .await
+                .context("upload encoder task failed")??;
+            let mut chunks = body.chunks(64 * 1024).peekable();
+            while let Some(bytes) = chunks.next() {
+                write_frame(
+                    &mut self.stream,
+                    &RequestEnvelope {
+                        protocol_version,
+                        request_id,
+                        token: self.metadata.token.clone(),
+                        action: DaemonAction::UploadChunk {
+                            bytes: bytes.to_vec(),
+                            finished: chunks.peek().is_none(),
+                        },
+                    },
+                )
+                .await?;
+            }
+        } else {
+            write_frame(
+                &mut self.stream,
+                &RequestEnvelope {
+                    protocol_version,
+                    request_id,
+                    token: self.metadata.token.clone(),
+                    action,
+                },
+            )
+            .await?;
+        }
         let response = read_response(&mut self.stream).await?;
         ensure!(
             response.protocol_version == protocol_version,
@@ -3131,7 +3175,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Terminal draft persistence carries per-client revisions and clear tombstones.
 // The host node is gone: NodeConnect is no longer an action.
 // Lifecycle submission acknowledges ownership separately from completion.
-pub const PROTOCOL_VERSION: u32 = 87;
+// Authenticated chunked client uploads and daemon-owned attachment installation.
+pub const PROTOCOL_VERSION: u32 = 88;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
