@@ -53,7 +53,7 @@ impl ManagedSessionLease {
         let connection = self.connection.take();
         if let Err(error) = self.releases.send(ReturnedConnection {
             lease_id,
-            connection,
+            connection: connection.map(Box::new),
         }) {
             tracing::warn!(
                 session_id = %self.session_id,

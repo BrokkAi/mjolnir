@@ -396,7 +396,7 @@ mod tests {
             },
             source_profile_id: session.last_profile.clone(),
             source_target_template_id: session.target_template_id.clone(),
-            source_target: session.target.clone(),
+            source_target: session.target.clone().map(|v| *v),
             source_native_session_id: session.native_session_id.clone(),
             source_additional_mounts: session.additional_mounts.clone(),
             source_resource_allocation: session.resource_allocation.clone(),
@@ -404,7 +404,7 @@ mod tests {
             destination_native_session_id: None,
             destination_store_id: None,
             configuration_fingerprint: "fingerprint".into(),
-            checkpoint: session.checkpoint.clone(),
+            checkpoint: session.checkpoint.clone().map(|v| *v),
             recovery_session: Some(session.clone()),
             queue: ResumeQueueDisposition::Start,
             phase: MovePhase::Preparing,
@@ -513,12 +513,12 @@ mod tests {
         )
         .unwrap();
         session.target_runtime = Some((&template).into());
-        session.target = Some(mj_core::state::TargetLocator::SshPodman {
+        session.target = Some(Box::new(mj_core::state::TargetLocator::SshPodman {
             host: "original.test".into(),
             container_id: "source-container".into(),
             workspace_storage: Default::default(),
             borrowed_from: None,
-        });
+        }));
         save_session_to(&path, &session).unwrap();
         let mut intent = operation(&session);
         for phase in [
@@ -532,7 +532,7 @@ mod tests {
             intent.phase = phase;
             if phase == MovePhase::StartingQueue {
                 intent.queue_admission_started = true;
-                intent.destination_target = session.target.clone();
+                intent.destination_target = session.target.clone().map(|v| *v);
                 intent.destination_store_id = Some("durable-destination".into());
             }
             if phase == MovePhase::Completed {
@@ -546,7 +546,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(restored, intent);
-            assert_eq!(restored.source_target, session.target);
+            assert_eq!(restored.source_target, session.target.as_deref().cloned());
             assert_eq!(restored.retains_checkpoint(), phase != MovePhase::Completed);
         }
     }

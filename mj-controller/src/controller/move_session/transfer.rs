@@ -1126,7 +1126,7 @@ impl Controller {
                     self.cleanup_prepared_move_destination(&mut saved, executor)?;
                 }
                 if let Some(locator) = &current.target
-                    && Some(locator) != prepared.as_ref()
+                    && Some(locator.as_ref()) != prepared.as_ref()
                 {
                     super::super::environment::retire_session_environment(
                         current,
@@ -1182,9 +1182,9 @@ mod tests {
         let id = "11111111111111111111111111111111";
         let mut source = managed_worktree_session(repository.path(), id);
         source.target_template_id = "local-bare".into();
-        source.target = Some(mj_core::state::TargetLocator::LocalBare {
+        source.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: directory.path().join(id),
-        });
+        }));
         std::fs::create_dir_all(directory.path().join(id)).unwrap();
         std::fs::write(directory.path().join(id).join("worker-evidence"), "keep").unwrap();
         let checkout = source
@@ -1206,9 +1206,9 @@ mod tests {
         crate::database::save_move_operation(&operation).unwrap();
         crate::database::retain_move_source(&operation).unwrap();
         let mut destination = source.clone();
-        destination.target = Some(mj_core::state::TargetLocator::LocalBare {
+        destination.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: directory.path().join("destination").join(id),
-        });
+        }));
         crate::database::save_session(&destination).unwrap();
         let controller = Controller {
             config: resume_compatibility_config(),
@@ -1367,9 +1367,9 @@ mod tests {
         session.state = SessionState::Closing;
         let source_root = mj_core::config::data_dir().join("source-workers").join(id);
         std::fs::create_dir_all(&source_root).unwrap();
-        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: source_root.clone(),
-        });
+        }));
         let mut operation = super::super::tests::source_recovery_operation(&session);
         operation
             .selection
@@ -1416,9 +1416,9 @@ mod tests {
             .join(id);
         std::fs::create_dir_all(&destination_root).unwrap();
         let destination_session = controller.state.sessions.get_mut(id).unwrap();
-        destination_session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        destination_session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: destination_root.clone(),
-        });
+        }));
         destination_session.project_directory = Some(destination.path().into());
         controller.restore_move_workspace(id, &executor).unwrap();
         operation = crate::database::load_move_operation(id).unwrap().unwrap();

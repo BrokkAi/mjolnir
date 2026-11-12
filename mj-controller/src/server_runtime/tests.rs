@@ -400,7 +400,7 @@ fn golden_phone_new_session_preflight() {
         effort: None,
     }];
     let mut plain = run_new_preflight(
-        config,
+        config.clone(),
         "hel".into(),
         "raw".into(),
         Some(folder.path().to_path_buf()),
@@ -413,6 +413,28 @@ fn golden_phone_new_session_preflight() {
     )
     .unwrap();
     writeln!(out, "{}", serde_json::to_string_pretty(&plain).unwrap()).unwrap();
+
+    let error = preflight_new_request(
+        config,
+        mj_client::daemon::NewSessionPreflightRequest {
+            workspace_id: String::new(),
+            profile_id: "codex".into(),
+            bundle_id: String::new(),
+            target_id: "raw".into(),
+            project_directory: Some(folder.path().to_path_buf()),
+            remote_repairs: Vec::new(),
+            additional_mounts: vec![crate::targets::AdditionalMount {
+                source: folder.path().to_path_buf(),
+                destination: "/attached".into(),
+                access: crate::targets::MountAccess::Ro,
+            }],
+        },
+        CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false))),
+    )
+    .expect_err("shared preflight refuses mounts on bare targets");
+    writeln!(out, "=== shared HTTP/control launch validation ===").unwrap();
+    writeln!(out, "result: rejected").unwrap();
+    writeln!(out, "reason: {error}").unwrap();
 
     let mut config = Config::default();
     config.targets.insert(
@@ -1757,7 +1779,7 @@ async fn phone_projects_resolve_a_sub_agent_from_its_suspended_parent() {
     parent.state = SessionState::Stopped;
     parent.target_template_id = "local".into();
     parent.project_directory = Some(clone.clone());
-    parent.managed_worktree = Some(mj_core::state::ManagedWorktree {
+    parent.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
         kind: mj_core::state::ManagedCheckoutKind::Clone,
         source_project_directory: project.clone(),
         source_repository: project.clone(),
@@ -1765,7 +1787,7 @@ async fn phone_projects_resolve_a_sub_agent_from_its_suspended_parent() {
         branch: "mj/parent".into(),
         target: mj_core::state::ManagedWorktreeTarget::Local,
         base_commit: None,
-    });
+    }));
     let mut child = phone_session("child", 0);
     child.state = SessionState::Stopped;
     child.target_template_id = "local".into();

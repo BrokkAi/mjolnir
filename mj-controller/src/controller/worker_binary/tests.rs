@@ -19,7 +19,7 @@ fn oracle_launch_requires_a_top_level_session_and_an_effective_choice() {
     session.oracle = false;
     assert!(!oracle_launch_enabled(&session, false, &choices));
     session.oracle = true;
-    session.oracle_choice = Some(choice);
+    session.oracle_choice = Some(Box::new(choice));
     choices.oracle = None;
     assert!(oracle_launch_enabled(&session, false, &choices));
 }
@@ -1235,16 +1235,16 @@ fn starting_a_worker_uses_private_logs_without_touching_incumbent_files() {
         );
         session.target = Some(match &locator {
             targets::TargetLocator::LocalBare { worker_root } => {
-                mj_core::state::TargetLocator::LocalBare {
+                Box::new(mj_core::state::TargetLocator::LocalBare {
                     worker_root: worker_root.into(),
-                }
+                })
             }
             targets::TargetLocator::LocalPodman { container_id, .. } => {
-                mj_core::state::TargetLocator::LocalPodman {
+                Box::new(mj_core::state::TargetLocator::LocalPodman {
                     container_id: container_id.clone(),
                     borrowed_from: None,
                     workspace_storage: Default::default(),
-                }
+                })
             }
             _ => unreachable!(),
         });
@@ -2735,9 +2735,9 @@ fn project_memory_replica_is_separate_from_controller_attachment_directories() {
         session.last_profile = kind.id().into();
         session.target_template_id = "localhost".into();
         session.project_directory = Some(project.clone());
-        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: worker_root.clone(),
-        });
+        }));
 
         let (launch, memory, _) = worker_launch_config(
             &session,
@@ -3876,9 +3876,9 @@ fn launches_on_every_target(
     local.target_template_id = "localhost".into();
     local.project_directory = Some(project.path().to_path_buf());
     let local_root = format!("/home/me/.local/share/hel/workers/{parent_id}");
-    local.target = Some(mj_core::state::TargetLocator::LocalBare {
+    local.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: local_root.clone().into(),
-    });
+    }));
     let localhost = worker_launch_config(
         &local,
         profile,
@@ -4273,9 +4273,9 @@ fn a_custom_provider_session_carries_its_key_and_runs_from_a_private_home() {
     session.last_profile = "glm".into();
     session.target_template_id = "localhost".into();
     session.project_directory = Some(project.path().to_path_buf());
-    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: "/home/me/.local/share/hel/workers/session-glm".into(),
-    });
+    }));
 
     let (launch, _, target_home) = worker_launch_config(
         &session,
@@ -4368,9 +4368,9 @@ fn raw_local_muse_launches_with_guardian_approvals() {
     session.last_profile = "muse".into();
     session.target_template_id = "localhost".into();
     session.project_directory = Some(project.path().to_path_buf());
-    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: "/home/me/.local/share/hel/workers/session-muse".into(),
-    });
+    }));
     let profile = mj_core::config::HarnessProfile {
         ..mj_core::config::HarnessProfile::new(HarnessKind::Muse, PathBuf::from("/profiles/muse"))
     };
@@ -5173,7 +5173,7 @@ fn recovery_preserves_launch_config_until_a_matching_worker_source_is_available(
         },
     };
     let mut record = crate::controller::test_support::checkpoint_test_session(session_id);
-    record.target = Some(plan.source_target.clone());
+    record.target = Some(Box::new(plan.source_target.clone()));
     crate::database::save_session(&record).unwrap();
     let error = crate::session_manager::recover_worker_controlled(
         plan.clone(),
@@ -5601,9 +5601,9 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
         session.last_profile = kind.id().into();
         session.target_template_id = "localhost".into();
         session.project_directory = Some(project.clone());
-        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: worker_root.clone(),
-        });
+        }));
 
         let (launch, _, target_home) = worker_launch_config(
             &session,
@@ -5756,9 +5756,9 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
         session.last_profile = kind.id().into();
         session.target_template_id = "localhost".into();
         session.project_directory = Some(project.clone());
-        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: worker_root.clone(),
-        });
+        }));
         let (_, memory, target_home) = worker_launch_config(
             &session,
             &profile,
@@ -6395,9 +6395,9 @@ fn launching_where_the_role_cannot_apply_announces_why() {
     let mut session = crate::controller::test_support::checkpoint_test_session(id);
     session.last_profile = "bedrock".into();
     session.target_template_id = "localhost".into();
-    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: format!("/home/me/.local/share/hel/workers/{id}").into(),
-    });
+    }));
     let controller = Controller {
         config,
         state: mj_core::state::State {

@@ -13,10 +13,9 @@ impl HostState {
             );
         }
         if resolution == Resolution::Cancelled
-            && let Some(PreparingOperation::Review { cancelled, .. }) =
-                self.preparing.get(session_id)
+            && let Some(PreparingOperation::Review { cancel }) = self.preparing.get(session_id)
         {
-            cancelled.store(true, std::sync::atomic::Ordering::Release);
+            cancel.cancel();
             return Ok(());
         }
         let slot = self

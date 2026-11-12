@@ -667,10 +667,9 @@ impl ProjectionWindow {
                     | TranscriptBody::Thought {
                         streaming: true, ..
                     } => true,
-                    TranscriptBody::Tool { call, .. } => matches!(
-                        call.get("status").and_then(serde_json::Value::as_str),
-                        Some("pending" | "in_progress")
-                    ),
+                    TranscriptBody::Tool { call, .. } => {
+                        matches!(call.raw_status(), Some("pending" | "in_progress"))
+                    }
                     _ => false,
                 });
             keep[start..end].fill(unsettled);
@@ -1600,7 +1599,7 @@ pub struct SessionRecord {
     pub project_directory: Option<PathBuf>,
     /// Git worktree created and owned by Hel for this raw-project session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub managed_worktree: Option<ManagedWorktree>,
+    pub managed_worktree: Option<Box<ManagedWorktree>>,
     /// None preserves automatic selection; false uses the selected directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub create_managed_worktree: Option<bool>,
@@ -1621,10 +1620,10 @@ pub struct SessionRecord {
     /// from the API's `at` and `branch`. Resume preserves checkpointed work
     /// rather than applying this selection again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checkout: Option<crate::remote_git::ExactCheckout>,
+    pub checkout: Option<Box<crate::remote_git::ExactCheckout>>,
     /// Last verified publication verdict, tied to its checkpoint digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub publication: Option<PublicationAssessment>,
+    pub publication: Option<Box<PublicationAssessment>>,
     /// Stored delegation policy. Historical records without a choice use native delegation.
     #[serde(
         default,
@@ -1639,11 +1638,11 @@ pub struct SessionRecord {
     /// This session's own oracle model (`--subagent-oracle`), overriding
     /// `[subagents.oracle]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub oracle_choice: Option<crate::config::SubagentChoice>,
+    pub oracle_choice: Option<Box<crate::config::SubagentChoice>>,
     /// Turn review chosen for this session when it was created. `None`
     /// follows the global `[review]` section.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub review: Option<crate::config::SessionReview>,
+    pub review: Option<Box<crate::config::SessionReview>>,
     /// Chosen when the session is created (`mj new --no-project-memory`): the
     /// session starts with no project memory. The worker gets no memory
     /// directory, no memory index in its context and no history tools, the
@@ -1690,7 +1689,7 @@ pub struct SessionRecord {
     #[serde(default, skip_serializing_if = "is_false")]
     pub archived: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target: Option<TargetLocator>,
+    pub target: Option<Box<TargetLocator>>,
     /// Connection and worker settings captured when this target was selected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_runtime: Option<Arc<TargetRuntimeSettings>>,
@@ -1720,7 +1719,7 @@ pub struct SessionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_checkpoint_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checkpoint: Option<CheckpointMetadata>,
+    pub checkpoint: Option<Box<CheckpointMetadata>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2064,7 +2063,7 @@ impl SessionRecord {
             return None;
         }
         self.oracle_choice
-            .as_ref()
+            .as_deref()
             .or(subagents.oracle.as_ref())
             .filter(|choice| !choice.model.trim().is_empty())
     }
@@ -2178,7 +2177,7 @@ impl SessionRecord {
         target_runtime_settings_for(
             &self.id,
             &self.target_template_id,
-            self.target.as_ref(),
+            self.target.as_deref(),
             self.target_runtime.as_deref(),
             config,
         )
@@ -2332,7 +2331,7 @@ impl SessionRecord {
                 ProjectSourceIdentity::path(&worktree.source_repository, None)
             }
             Checkout::Attached { path } => {
-                let remote = match &self.target {
+                let remote = match self.target.as_deref() {
                     Some(TargetLocator::SshBare { host, .. }) => Some(host.as_str()),
                     _ => None,
                 };
@@ -2649,7 +2648,13 @@ impl State {
                     }
                     current = &child.parent_session_id;
                 }
-                _ => return Ok(self.sessions.get(current).and_then(|s| s.review.as_ref())),
+                _ => {
+                    return Ok(self
+                        .sessions
+                        .get(current)
+                        .and_then(|s| s.review.as_ref())
+                        .map(|v| &**v));
+                }
             }
         }
         Err(session_id.to_owned())

@@ -139,8 +139,9 @@ pub fn materialized_session_from_entries(
                         .or_else(|| Some(tool_call_presentation(&call)))
                         .map(Box::new);
                     TranscriptBody::Tool {
-                        call: serde_json::to_value(call)
-                            .expect("ACP tool call serialization cannot fail"),
+                        call: (serde_json::to_value(call)
+                            .expect("ACP tool call serialization cannot fail"))
+                        .into(),
                         terminal_outputs: Vec::new(),
                         terminal_refs: Vec::new(),
                         presentation,
@@ -334,7 +335,7 @@ pub fn canonical_session_from_materialized(
                     terminal_refs,
                     presentation,
                 } => CanonicalTranscriptBody::Tool {
-                    call: call.clone(),
+                    call: call.value(),
                     terminal_outputs: terminal_outputs
                         .iter()
                         .map(canonical_terminal_output)
@@ -441,7 +442,7 @@ pub fn materialized_session_from_canonical(
                     terminal_refs,
                     presentation,
                 } => TranscriptBody::Tool {
-                    call: call.clone(),
+                    call: call.clone().into(),
                     terminal_outputs: terminal_outputs
                         .iter()
                         .map(materialized_terminal_output)

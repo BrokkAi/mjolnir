@@ -9,8 +9,81 @@ pub fn worker_daemon_identity_script(worker_root: &str) -> String {
 hel_root={root}
 hel_match="hel worker run --root $hel_root"
 hel_match_home="hel worker run --root $HOME/$hel_root"
+# Minimal Linux images need not install procps. The same process facts are in
+# /proc, so use them when `ps` is absent; the controller runs this on the host
+# itself, where /proc is the kernel's own record.
 hel_ps() {{
-    ps -ww "$@" 2>/dev/null || ps "$@" 2>/dev/null
+    if type ps >/dev/null 2>&1; then
+        ps -ww "$@" 2>/dev/null || ps "$@" 2>/dev/null
+        return $?
+    fi
+    if [ -r /proc/self/stat ]; then
+        hel_proc_ps "$@"
+        return $?
+    fi
+    echo "cannot list processes: ps is not installed and /proc is unavailable" >&2
+    return 127
+}}
+hel_proc_args() {{
+    tr '\0' ' ' 2>/dev/null < "/proc/$1/cmdline"
+}}
+hel_proc_processes() {{
+    for hel_proc in /proc/[0-9]*; do
+        hel_proc_pid=${{hel_proc#/proc/}}
+        [ -r "$hel_proc/cmdline" ] || continue
+        printf '%s %s\n' "$hel_proc_pid" "$(hel_proc_args "$hel_proc_pid")"
+    done
+}}
+hel_proc_table() {{
+    for hel_proc in /proc/[0-9]*; do
+        hel_stat=
+        IFS= read -r hel_stat < "$hel_proc/stat" || continue
+        hel_proc_pid=${{hel_proc#/proc/}}
+        hel_rest=${{hel_stat##*) }}
+        set -- $hel_rest
+        printf '%s %s %s %s\n' "$hel_proc_pid" "$2" "$3" "$1"
+    done
+}}
+hel_proc_ps() {{
+    case "$1 $2" in
+        "-o args=")
+            [ "$3" = "-p" ] || return 2
+            [ -r "/proc/$4/cmdline" ] || return 1
+            hel_proc_args "$4"
+            printf '\n'
+            ;;
+        "-o stat=")
+            [ "$3" = "-p" ] || return 2
+            hel_stat=
+            IFS= read -r hel_stat < "/proc/$4/stat" || return 1
+            hel_rest=${{hel_stat##*) }}
+            set -- $hel_rest
+            printf '%s\n' "$1"
+            ;;
+        "-eo pid=,args=")
+            hel_proc_processes
+            ;;
+        "-eo pgid=,stat=")
+            hel_proc_table | awk '{{ print $3, $4 }}'
+            ;;
+        "-eo pid=,ppid=,pgid=")
+            hel_proc_table | awk '{{ print $1, $2, $3 }}'
+            ;;
+        "-eo pid=,stat=")
+            hel_proc_table | awk '{{ print $1, $4 }}'
+            ;;
+        "-eo args=")
+            for hel_proc in /proc/[0-9]*; do
+                [ -r "$hel_proc/cmdline" ] || continue
+                hel_proc_args "${{hel_proc#/proc/}}"
+                printf '\n'
+            done
+            ;;
+        *)
+            echo "unsupported process listing without ps: $*" >&2
+            return 2
+            ;;
+    esac
 }}
 hel_is_worker() {{
     hel_args=$(hel_ps -o args= -p "$1") || return 1
@@ -391,6 +464,22 @@ mod tests {
         )
     }
 
+    /// A PATH holding the tools the stop script needs, but deliberately no
+    /// `ps`, as on a minimal Linux image without procps.
+    #[cfg(target_os = "linux")]
+    fn path_without_ps() -> tempfile::TempDir {
+        let bin = tempfile::tempdir().unwrap();
+        let search = std::env::var_os("PATH").unwrap();
+        for name in ["awk", "cat", "head", "rm", "sed", "sh", "sleep", "tr"] {
+            let source = std::env::split_paths(&search)
+                .map(|directory| directory.join(name))
+                .find(|path| path.is_file())
+                .unwrap_or_else(|| panic!("{name} is not on the test PATH"));
+            std::os::unix::fs::symlink(source, bin.path().join(name)).unwrap();
+        }
+        bin
+    }
+
     // Hard-won: c29b1379c: an in-place Move's relay reset made review rescan the checkout and refuse it.
     #[test]
     #[cfg(unix)]
@@ -687,5 +776,54 @@ mod tests {
                 Err(e) => panic!("{shell}: {e}"),
             }
         }
+    }
+
+    /// A local bare host need not install procps. Cleanup used to return 2
+    /// without printing anything when `ps` was missing, so the session could
+    /// not be closed. `/proc` holds the same facts on Linux.
+    // Hard-won: #1516: local bare destroy failed with status 2 on a host without ps.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn stopping_a_worker_uses_proc_when_ps_is_not_installed() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::process::CommandExt;
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().to_string_lossy().into_owned();
+        let hel = root.path().join("hel");
+        std::fs::write(&hel, "#!/bin/sh\nwhile :; do sleep 1; done\n").unwrap();
+        std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut child = std::process::Command::new(&hel)
+            .args(["worker", "run", "--root", &root_path])
+            .process_group(0)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let _group = mj_core::subprocess::ProcessGroupGuard::new(Some(child.id()));
+        std::fs::write(
+            root.path().join(mj_core::relay::WORKER_PID_FILE),
+            child.id().to_string(),
+        )
+        .unwrap();
+        let script = format!(
+            "{}\nrm -rf -- {}\n",
+            stop_worker_daemon_script(&root_path),
+            posix_quote(&root_path),
+        );
+        let bin = path_without_ps();
+        let output = std::process::Command::new("sh")
+            .args(["-c", &script])
+            .env("PATH", bin.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "status {:?}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let _ = child.wait();
+        assert!(!root.path().exists(), "the worker root is removed");
     }
 }

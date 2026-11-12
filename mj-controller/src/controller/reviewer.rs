@@ -161,7 +161,7 @@ mod tests {
             .unwrap(),
             _ => TargetTemplate::LocalBare,
         };
-        session.target = Some(locator);
+        session.target = Some(Box::new(locator));
         let mut config = Config::default();
         config.targets.insert("local".into(), template);
         for (id, kind) in [

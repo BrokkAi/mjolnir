@@ -1762,6 +1762,31 @@ pub(crate) fn spawn_dashboard_restore_session(
     });
 }
 
+/// Each disposable read owns a connection. Superseding the input closes that
+/// connection, allowing the daemon to stop its executor and reap its children.
+pub(crate) fn machine_request(
+    action: mj_client::daemon::DaemonAction,
+    cancelled: Arc<AtomicBool>,
+) -> Result<mj_client::daemon::DaemonReply> {
+    mj_core::runtime::block_on(async move {
+        let request = async move {
+            let mut client = daemon::connect_or_start().await?;
+            client.request(action).await
+        };
+        tokio::pin!(request);
+        loop {
+            tokio::select! {
+                result = &mut request => return result,
+                _ = tokio::time::sleep(Duration::from_millis(10)) => {
+                    if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                        anyhow::bail!("machine request cancelled");
+                    }
+                }
+            }
+        }
+    })?
+}
+
 #[cfg(test)]
 mod wiki_search_tests {
     use super::*;

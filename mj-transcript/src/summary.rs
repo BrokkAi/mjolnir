@@ -366,8 +366,11 @@ impl TranscriptSummary {
                 TranscriptBody::Tool {
                     call, presentation, ..
                 } => {
-                    let mut value =
-                        tool_value(call, presentation.as_deref(), item.position >= cutoff);
+                    let mut value = tool_value(
+                        &call.value(),
+                        presentation.as_deref(),
+                        item.position >= cutoff,
+                    );
                     attach_terminals(
                         &mut value,
                         outputs.for_tool(&item.stable_id).iter().map(|t| {

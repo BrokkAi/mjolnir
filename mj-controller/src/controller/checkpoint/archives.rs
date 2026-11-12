@@ -35,7 +35,7 @@ pub(super) fn reconcile_managed_checkpoint_archives_in(
     let referenced_names = state
         .sessions
         .values()
-        .filter_map(|session| session.checkpoint.as_ref())
+        .filter_map(|session| session.checkpoint.as_deref())
         .chain(
             operations
                 .iter()

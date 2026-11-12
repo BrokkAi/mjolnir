@@ -1672,12 +1672,12 @@ mod tests {
             tx.commit().unwrap();
         }
         record.state = SessionState::Running;
-        record.checkpoint = Some(CheckpointMetadata {
+        record.checkpoint = Some(Box::new(CheckpointMetadata {
             archive_path: dir.path().join("verified.tar"),
             sha256: "a".repeat(64),
             created_at: "2026-09-27T12:00:00Z".into(),
             event_frontier: 0,
-        });
+        }));
         {
             let tx = connection.transaction().unwrap();
             assert!(save_requested_checkpoint_with(&tx, &record, "stale-owner").is_err());
@@ -1741,12 +1741,12 @@ mod tests {
             let path = dir.path().join("events.sqlite");
             let mut record = super::super::tests::session("session-1", "project-1");
             record.state = SessionState::Running;
-            record.checkpoint = Some(CheckpointMetadata {
+            record.checkpoint = Some(Box::new(CheckpointMetadata {
                 archive_path: dir.path().join("previous.tar"),
                 sha256: "a".repeat(64),
                 created_at: "2026-09-27T12:00:00Z".into(),
                 event_frontier: 0,
-            });
+            }));
             save_session_to(&path, &record).unwrap();
             let previous = record.checkpoint.clone();
             let previous_warning = record.last_checkpoint_error.clone();

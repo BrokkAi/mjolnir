@@ -207,6 +207,7 @@ fn agent_activity_text(item: &TranscriptItem) -> Option<Arc<str>> {
             mj_core::transcript::materialized_chunks_text(chunks)
         }
         TranscriptBody::Tool { call, .. } => call
+            .value()
             .get("title")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("[invalid tool call]")
@@ -543,7 +544,7 @@ impl DashboardState {
     }
     pub fn set_session_attention(
         &mut self,
-        attention: BTreeMap<String, mj_core::attention::SessionAttention>,
+        attention: mj_core::snapshot_map::SnapshotMap<String, mj_core::attention::SessionAttention>,
     ) {
         if self.served_attention != attention {
             *self.served_attention = attention;

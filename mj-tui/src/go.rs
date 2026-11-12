@@ -81,7 +81,7 @@ impl DashboardState {
                 session.state.is_active()
                     && session.target_template_id == SIMPLE_TARGET_ID
                     && session.create_managed_worktree == Some(true)
-                    && session.review == Some(mj_core::config::SessionReview::Off)
+                    && session.review.as_deref() == Some(&mj_core::config::SessionReview::Off)
             });
             if let Some(session) = startup {
                 let session_id = session.id.clone();

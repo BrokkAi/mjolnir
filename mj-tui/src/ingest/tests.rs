@@ -636,7 +636,7 @@ fn projection_cache_keeps_terminal_diffstats_across_unrelated_updates() {
         created_at_ms: 1,
         last_changed_at_ms: 2,
         body: TranscriptBody::Tool {
-            call: serde_json::json!({
+            call: (serde_json::json!({
                 "toolCallId": "edit",
                 "title": "Edit src/lib.rs",
                 "status": "completed",
@@ -646,7 +646,8 @@ fn projection_cache_keeps_terminal_diffstats_across_unrelated_updates() {
                     "oldText": "alpha\n",
                     "newText": "alpha\nbeta\n"
                 }]
-            }),
+            }))
+            .into(),
             terminal_outputs: Vec::new(),
             terminal_refs: Vec::new(),
             presentation: None,

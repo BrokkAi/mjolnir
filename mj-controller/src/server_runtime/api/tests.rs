@@ -6150,10 +6150,10 @@ struct OracleExports {
 impl OracleExports {
     fn new() -> Arc<Self> {
         let mut primary = parent_record("parent-1", "parent");
-        primary.oracle_choice = Some(mj_core::config::SubagentChoice {
+        primary.oracle_choice = Some(Box::new(mj_core::config::SubagentChoice {
             model: "luna".into(),
             effort: Some("low".into()),
-        });
+        }));
         Arc::new(Self {
             records: std::sync::Mutex::new(BTreeMap::from([("parent-1".to_owned(), primary)])),
             requests: Default::default(),
@@ -6502,10 +6502,12 @@ async fn ask_oracle_refuses_a_child_and_a_session_without_an_oracle() {
     for (oracle, choice) in [(false, true), (true, false)] {
         let mut primary = parent_record("parent-1", "parent");
         primary.oracle = oracle;
-        primary.oracle_choice = choice.then(|| mj_core::config::SubagentChoice {
-            model: "luna".into(),
-            effort: None,
-        });
+        primary.oracle_choice = choice
+            .then(|| mj_core::config::SubagentChoice {
+                model: "luna".into(),
+                effort: None,
+            })
+            .map(Box::new);
         exports
             .records
             .lock()

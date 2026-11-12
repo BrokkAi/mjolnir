@@ -11,41 +11,53 @@ pub struct StartupDelivery {
     pub error: Option<String>,
 }
 
-/// Status readers retain neither prompt payloads nor delivery identities.
+/// What status readers need from a session's latest startup group, computed
+/// once when the group is loaded, so the daemon keeps no per-step strings.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StartupStepStatus {
-    pub phase: String,
+pub struct StartupGroupStatus {
     pub group_id: Option<String>,
-    pub accepted_ordinal: Option<u64>,
-    pub error: Option<String>,
-    pub api_prompt: std::result::Result<bool, String>,
+    /// The first failed or rejecting step's error, when any step failed.
+    pub failure: Option<Option<String>>,
+    /// Whether any step is still pending, delivering or accepted.
+    pub pending: bool,
+    /// When the last step is done: whether it was an API prompt (or why its
+    /// payload could not be read) and its acceptance ordinal. Parse failures
+    /// stay visible at the same decision point as before.
+    pub last_done: Option<(std::result::Result<bool, String>, Option<u64>)>,
 }
 
-impl From<StartupDelivery> for StartupStepStatus {
-    fn from(delivery: StartupDelivery) -> Self {
-        // Keep parse failures visible to status readers at the same point as
-        // before: only a terminal group's last done step needs its kind.
-        let api_prompt = serde_json::from_str::<crate::daemon::StartupStep>(&delivery.step_json)
-            .map(|step| matches!(step, crate::daemon::StartupStep::ApiPrompt { .. }))
-            .map_err(|error| error.to_string());
-        Self {
-            phase: delivery.phase,
-            group_id: delivery.group_id,
-            accepted_ordinal: delivery.accepted_ordinal,
-            error: delivery.error,
-            api_prompt,
-        }
+impl StartupGroupStatus {
+    /// `None` when the group has no steps.
+    pub fn of(steps: &[StartupDelivery]) -> Option<Self> {
+        let last = steps.last()?;
+        Some(Self {
+            group_id: last.group_id.clone(),
+            failure: steps
+                .iter()
+                .find(|step| matches!(step.phase.as_str(), "failed" | "rejecting"))
+                .map(|step| step.error.clone()),
+            pending: steps
+                .iter()
+                .any(|step| matches!(step.phase.as_str(), "pending" | "delivering" | "accepted")),
+            last_done: (last.phase == "done").then(|| {
+                (
+                    serde_json::from_str::<crate::daemon::StartupStep>(&last.step_json)
+                        .map(|step| matches!(step, crate::daemon::StartupStep::ApiPrompt { .. }))
+                        .map_err(|error| error.to_string()),
+                    last.accepted_ordinal,
+                )
+            }),
+        })
     }
 }
 
 pub(super) fn load_latest_startup_status_with(
     connection: &Connection,
     session_id: &str,
-) -> Result<Vec<StartupStepStatus>> {
-    Ok(load_latest_startup_group_with(connection, session_id)?
-        .into_iter()
-        .map(StartupStepStatus::from)
-        .collect())
+) -> Result<Option<StartupGroupStatus>> {
+    Ok(StartupGroupStatus::of(&load_latest_startup_group_with(
+        connection, session_id,
+    )?))
 }
 
 pub fn enqueue_startup_deliveries(
