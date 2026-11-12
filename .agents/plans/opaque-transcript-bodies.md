@@ -11,7 +11,7 @@ The daemon's largest heap owner is the decoded live transcript windows: about 44
 - [x] M0: audit every reader of the opaque candidates and measure a prototype on real windows (memory and CPU of the hot paths).
 - [x] M1: introduce the opaque type for `TranscriptBody::Tool.call`, convert readers through accessors and cached metadata, no behavior change (b51237b39).
 - [x] M2: not needed. Agent and Thought chunks and User content total about 10 MiB in the measured windows (see Surprises).
-- [ ] M3: one compressed in-memory text type, applied to the tool-call JSON, terminal output text and the presentation source (approved by the user 2026-11-12, "yes to zstd"; scope and dictionary decisions below).
+- [x] M3: one compressed in-memory text type, applied to the tool-call JSON, terminal output text and the presentation source (approved by the user 2026-11-12, "yes to zstd"; scope and dictionary decisions below).
 - [x] Review, push, install, heap profile for M1 (decoded windows 439 → 206 MB with the halved tail; 184 MB at the next profile).
 - [ ] Review, push, install, heap profile for M3.
 
@@ -48,7 +48,9 @@ The daemon's largest heap owner is the decoded live transcript windows: about 44
 
 ## Outcomes & Retrospective
 
-(none yet)
+M3 uses `PackedText` for call JSON, terminal output and presentation source. ACP terminal metadata appends chunks (`mj-transcript/src/projection/terminals.rs`); it keeps an owned plain buffer until exit. Client-owned terminal observations arrive after reaping/release and pack immediately. No persisted or wire representation changes.
+
+Temporary dev-profile field-load probe on the three M0 JSONL copies (removed before commit): retained text allocations 5,539,640 → 1,435,740; 4,946,754 → 1,427,217; 4,167,870 → 1,405,879 bytes. JSON-string decode including compression: 22.7 → 82.6, 17.2 → 80.5, 12.6 → 66.0 microseconds per field. Packed access: 15.1, 15.8, 13.1 microseconds per field. These measure the selected fields, not the entire decoded window or allocator overhead; dev profile and concurrent host load affect CPU numbers.
 
 ## Context and Orientation
 
@@ -69,3 +71,5 @@ M1: add the type and metadata; convert all readers and writers; keep exactly one
 ## Idempotence and Recovery
 
 No schema, store or protocol change; reverting the commits restores the `Value` representation and reads the same stored text.
+
+M3 validation: all touched-crate suites pass (chat 409, controller 2570, core 638, transcript 98; integration/doc checks also pass), workspace clippy with warnings denied passes, and x86_64-unknown-linux-musl core check passes. Existing goldens unchanged.
