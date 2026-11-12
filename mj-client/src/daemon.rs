@@ -1911,8 +1911,14 @@ impl DaemonClient {
                 return Ok(reply);
             }
             phase(true).await?;
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            *self = reconnect().await?;
+            *self = tokio::select! {
+                biased;
+                _ = &mut cancel => bail!("upload cancelled"),
+                result = async {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    reconnect().await
+                } => result?,
+            };
             reader.seek(std::io::SeekFrom::Start(start)).await?;
         }
     }
@@ -3718,7 +3724,7 @@ mod tests {
         let expected = bytes.clone();
         let server = tokio::spawn(async move {
             let mut accepted = 0;
-            for attempt in 0..3 {
+            for attempt in 0..4 {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut received: Vec<u8> = Vec::new();
                 let upload = loop {
@@ -3749,9 +3755,9 @@ mod tests {
                 };
                 assert_eq!(actual, blob);
                 if attempt == 2 {
-                    break;
+                    continue;
                 } // Lost ACK must not reconnect or replay.
-                let reply = if attempt == 0 {
+                let reply = if attempt == 0 || attempt == 3 {
                     DaemonReply::UpgradePending
                 } else {
                     accepted += 1;
@@ -3792,7 +3798,7 @@ mod tests {
             .unwrap();
         assert!(matches!(reply, DaemonReply::Done));
         reader.set_position(0);
-        let mut client = DaemonClient::connect(metadata).await.unwrap();
+        let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
         assert!(
             client
                 .upload_and_consume_with_reconnect(&mut reader, action, || async {
@@ -3801,6 +3807,26 @@ mod tests {
                 .await
                 .is_err()
         );
+        // Hard-won: af709d6e2: cancellation was ignored during refused-upload reconnection.
+        reader.set_position(0);
+        let mut client = DaemonClient::connect(metadata).await.unwrap();
+        let reconnecting = tokio::sync::Notify::new();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.upload_and_consume_observed_with_reconnect(
+                &mut reader,
+                action,
+                || async {
+                    reconnecting.notify_one();
+                    std::future::pending::<Result<DaemonClient>>().await
+                },
+                |_| std::future::ready(Ok(())),
+                reconnecting.notified(),
+            ),
+        )
+        .await
+        .expect("cancellation must interrupt reconnection");
+        assert!(result.unwrap_err().to_string().contains("upload cancelled"));
         server.await.unwrap();
     }
 
