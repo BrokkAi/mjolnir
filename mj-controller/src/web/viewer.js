@@ -360,6 +360,7 @@ function selectedWorkspaceId() {
   if (route.subagentParentId) {
     return sessionById(route.subagentParentId)?.workspace_id;
   }
+  if (route.workspaceId === 'notifications') return 'notifications';
   if (route.workspaceId && workspaces.some(w => w.id === route.workspaceId)) {
     return route.workspaceId;
   }
@@ -368,7 +369,7 @@ function selectedWorkspaceId() {
     if (session?.workspace_id) return session.workspace_id;
   }
 
-  return workspaces[0]?.id;
+  return route.name === 'dashboard' ? 'notifications' : workspaces[0]?.id;
 }
 
 function applyRoute() {
@@ -382,6 +383,7 @@ function applyRoute() {
     }
   }
   if (!snapshot) return;
+  if (route.name !== 'dashboard' || route.workspaceId !== 'notifications') notificationSnapshot.reset();
 
   // The dashboard names its workspace in the URL, so a reload, a Back press
   // and a shared link all return to the same one. An empty hash is the state
@@ -957,7 +959,9 @@ const dismissedRuntimeNotices = new Set();
 function renderLaunchFailures() {
   const noticeKey = notice => `${viewerState.cursor?.incarnation}:${notice.id}`;
   const notices = (snapshot.launch_failures || []).filter(
-    failure => route.name === 'dashboard' && failure.workspace_id === selectedWorkspaceId() && !dismissedLaunchFailures.has(failure.id),
+    failure => route.name === 'dashboard'
+      && (selectedWorkspaceId() === 'notifications' || failure.workspace_id === selectedWorkspaceId())
+      && !dismissedLaunchFailures.has(failure.id),
   );
   const failureCards = notices.map(failure => {
     const card = el('div', 'card');
@@ -990,7 +994,7 @@ function renderLaunchFailures() {
 
 function renderWorkspaces() {
   const parentId = route.subagentParentId;
-  const workspaces = snapshot.workspaces || [];
+  const workspaces = [{ id: 'notifications', name: 'Notifications' }, ...(snapshot.workspaces || [])];
   workspaceSelect.classList.toggle('hidden', Boolean(parentId) || !workspaces.length);
   subagentWorkspace.classList.toggle('hidden', !parentId);
   if (parentId) {
@@ -1017,6 +1021,8 @@ function renderWorkspaces() {
       }),
     );
   }
+  // Attention changes update the existing option rather than rebuilding an open picker.
+  workspaceSelect.options[0].textContent = `Notifications (${notificationRows().length})`;
   workspaceSelect.value = selectedWorkspaceId() || '';
 }
 
@@ -1125,11 +1131,17 @@ function isDashboardSession(session) {
     || isTransitioningSession(session);
 }
 
-/// Most recent top-level message first. Title and id keep rows that have not
-/// said anything yet in a stable order as new messages re-sort the list.
+function hasNotification(session) {
+  return ['needs_input', 'important', 'failed', 'unreachable'].includes(session.attention);
+}
+
+/// Notifications, unread output, then other sessions; newest message first in each band.
+/// Title and id keep ties stable as messages and attention re-sort the list.
 function orderedSessions(live) {
   return [...live].sort((left, right) =>
-    sessionMessageMs(right) - sessionMessageMs(left)
+    Number(hasNotification(right)) - Number(hasNotification(left))
+    || Number(right.attention === 'unread') - Number(left.attention === 'unread')
+    || sessionMessageMs(right) - sessionMessageMs(left)
     || String(left.title || '').localeCompare(String(right.title || ''))
     || left.id.localeCompare(right.id),
   );
@@ -1149,7 +1161,72 @@ function liveSessions() {
   return [...(viewerState.live.get(selectedWorkspaceId())?.values() || [])];
 }
 
+// Notifications retain cleared rows only for the current inbox visit.
+class NotificationSnapshot {
+  constructor() { this.entries = []; }
+  reset() { this.entries = []; }
+  update(rows, allRows = rows) {
+    const current = new Map(allRows.map(row => [row.id, row]));
+    const retained = new Set(this.entries.map(entry => entry.row.id));
+    this.entries = [
+      ...rows.filter(row => !retained.has(row.id)).map(row => ({ row })),
+      ...this.entries.map(entry => ({
+        row: current.get(entry.row.id) || {
+          ...entry.row, capabilities: {}, operation: null, transitioning: false,
+          lifecycle: 'destroyed', attention: 'inactive', configuration_issue: null, move_recovery: null,
+        },
+        excerpt: entry.excerpt,
+      })),
+    ];
+    const entriesById = new Map(this.entries.map(entry => [entry.row.id, entry]));
+    this.entries = orderedSessions(this.entries.map(entry => entry.row)).map(row => entriesById.get(row.id));
+    return this.entries;
+  }
+}
+const notificationSnapshot = new NotificationSnapshot();
+const notificationItems = new Map();
+
+function notificationRows() {
+  return [...viewerState.rows.values()].filter(row => !isSubagentSession(row)
+    && hasNotification(row));
+}
+
+function renderNotifications() {
+  const header = el('h2', '', 'Notifications');
+  const items = notificationSnapshot.update(notificationRows(), [...viewerState.rows.values()]).map(entry => {
+    const { row } = entry;
+    let item = notificationItems.get(row.id);
+    if (!item) {
+      item = el('div', 'notification-entry');
+      item.dataset.notificationId = row.id;
+      item._excerpt = el('p', 'notification-excerpt');
+      item._meta = el('p', 'dim');
+      item._actions = el('div', 'notification-actions');
+      item._actions.dataset.sessionId = row.id;
+      notificationItems.set(row.id, item);
+    }
+    let card = sessionCards.get(row.id);
+    if (!card) { card = sessionCard(row); sessionCards.set(row.id, card); }
+    else updateSessionCard(card, row);
+    reconcileChildren(item, [card, item._excerpt, item._meta, item._actions]);
+    const excerpt = row.pending_elicitations?.find(request => request.message)?.message || row.preview?.join('\n') || entry.excerpt;
+    entry.excerpt = excerpt;
+    item._excerpt.textContent = excerpt || '';
+    item._excerpt.hidden = !excerpt;
+    const workspace = snapshot.workspaces?.find(workspace => workspace.id === row.workspace_id);
+    const timestamp = sessionMessageMs(row);
+    const age = timestamp ? `${Math.max(0, Math.floor((serverClockMs() - timestamp) / 60000))}m ago` : 'Age unknown';
+    item._meta.textContent = `${workspace?.name || row.workspace_id} · ${age}`;
+    // item._actions is reserved for the daemon-owned Dismiss notification action.
+    return item;
+  });
+  reconcileChildren(sessions, [header, ...items, ...(!items.length ? [el('p', 'dim', 'No notifications.')] : [])]);
+}
+
 function renderSessions() {
+  const notifications = !route.subagentParentId && selectedWorkspaceId() === 'notifications';
+  document.querySelector('#dashboard .page-actions').classList.toggle('hidden', notifications);
+  if (notifications) { renderNotifications(); return; }
   const allSessions = liveSessions();
   const parent = sessionById(route.subagentParentId);
   const subagentView = Boolean(route.subagentParentId);
@@ -1973,7 +2050,7 @@ function beginSessionPress(event) {
         activeSessionPress.id !== card.dataset.sessionId ||
         current !== card ||
         card.isConnected === false ||
-        !sessionInWorkspace(card.dataset.sessionId, selectedWorkspaceId()) ||
+        (selectedWorkspaceId() !== 'notifications' && !sessionInWorkspace(card.dataset.sessionId, selectedWorkspaceId())) ||
         !sessionMenuActions(card._session).length
       ) {
         cancelSessionPress();
@@ -9314,7 +9391,7 @@ async function runSessionAction(dataset, errorNode, extra) {
     // back to what the session last used.
     body.profile_id = extra?.profile_id || dataset.profile;
     body.target_id = extra?.target_id || dataset.target;
-    body.workspace_id = extra?.workspace_id || dataset.workspace_id || selectedWorkspaceId();
+    body.workspace_id = extra?.workspace_id || dataset.workspace_id || sessionById(dataset.id)?.workspace_id;
     body.queue = extra?.queue || 'start';
     if (extra && Object.prototype.hasOwnProperty.call(extra, 'additional_mounts')) {
       body.additional_mounts = extra.additional_mounts;
