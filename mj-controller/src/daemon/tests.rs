@@ -12211,3 +12211,230 @@ async fn suspend_acceptance_survives_client_disconnect_during_checkpoint() {
     );
     assert!(stored.sessions[LATCH_RELAY_SESSION].checkpoint.is_some());
 }
+
+/// Exercise the real authenticated control boundary: these directories exist
+/// only in the server fixture, never in client-side interpretation.
+#[tokio::test]
+async fn daemon_api_exchange() {
+    let root = tempfile::tempdir().unwrap();
+    let server_root = root.path().canonicalize().unwrap();
+    let project = server_root.join("server-only-project");
+    fs::create_dir(&project).unwrap();
+    let mut config = Config::default();
+    config
+        .targets
+        .insert("local".into(), mj_core::config::TargetTemplate::LocalBare);
+    config.profiles.insert(
+        "agent".into(),
+        mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Codex,
+            server_root.as_path().join("profile"),
+        ),
+    );
+    let state = test_runtime_state_with(Controller {
+        config,
+        state: Default::default(),
+    });
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let metadata = test_metadata(listener.local_addr().unwrap());
+    let actions = vec![
+        DaemonAction::CheckProjectDirectories {
+            paths: vec![project.clone(), server_root.as_path().join("absent")],
+        },
+        DaemonAction::CompletePath {
+            host: mj_core::path_completion::CompletionHost::Local,
+            prefix: format!("{}/server-", server_root.as_path().display()),
+            kind: mj_core::path_completion::CompletionKind::Directories,
+        },
+        DaemonAction::DiscoverProjects {
+            request: mj_core::project_picker::ProjectDiscoveryRequest::Directory {
+                path: server_root.as_path().to_string_lossy().into_owned(),
+                filter: String::new(),
+            },
+        },
+        DaemonAction::ResolveSetupPath {
+            machine: mj_core::config::Machine::Local { build_cache: None },
+            source: project.clone(),
+        },
+        DaemonAction::ValidateMountSource {
+            target_id: "missing".into(),
+            source: project.clone(),
+        },
+        DaemonAction::ValidateSessionMounts {
+            target_id: "missing".into(),
+            mounts: vec![mj_core::targets::AdditionalMount {
+                source: project.clone(),
+                destination: "/project".into(),
+                access: mj_core::targets::MountAccess::Ro,
+            }],
+        },
+        DaemonAction::ResolveContainerPath {
+            target_id: "local".into(),
+            source: project.clone(),
+        },
+        DaemonAction::ValidateProjectDirectory {
+            target_id: "local".into(),
+            directory: project.clone(),
+        },
+        DaemonAction::PreflightNewSession {
+            request: NewSessionPreflightRequest {
+                profile_id: "agent".into(),
+                workspace_id: String::new(),
+                bundle_id: String::new(),
+                target_id: "local".into(),
+                project_directory: Some(project.clone()),
+                additional_mounts: Vec::new(),
+                remote_repairs: Vec::new(),
+            },
+        },
+        DaemonAction::ResolveContainerPath {
+            target_id: "missing".into(),
+            source: project,
+        },
+    ];
+    let mut exchange = Vec::new();
+    for (index, action) in actions.into_iter().enumerate() {
+        let server_state = state.clone();
+        let server_metadata = metadata.clone();
+        let server_listener = &listener;
+        let connect = TcpStream::connect(metadata.address);
+        let (stream, accepted) = tokio::join!(connect, server_listener.accept());
+        let (server_stream, _) = accepted.unwrap();
+        let server = tokio::spawn(async move {
+            serve_client(
+                server_stream,
+                server_metadata,
+                server_state,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        });
+        let mut stream = stream.unwrap();
+        let rendered_action = serde_json::to_value(&action).unwrap();
+        write_frame(
+            &mut stream,
+            &RequestEnvelope {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: index as u64,
+                token: metadata.token.clone(),
+                action,
+            },
+        )
+        .await
+        .unwrap();
+        let response: ResponseEnvelope = read_frame(&mut stream).await.unwrap();
+        exchange.push(serde_json::json!({"request": rendered_action, "reply": response.result}));
+        drop(stream);
+        server.await.unwrap();
+    }
+    // Normalize JSON's escaped Windows separators before replacing roots.
+    let rendered = serde_json::to_string_pretty(&exchange)
+        .unwrap()
+        .replace("\\\\", "/")
+        .replace(
+            &server_root.to_string_lossy().replace('\\', "/"),
+            "<server>",
+        )
+        .replace(
+            &server_root
+                .parent()
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/"),
+            "<server-parent>",
+        );
+    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "daemon-api-exchange", &rendered);
+}
+
+/// Real OpenSSH is held in a proxy command. Closing a superseded completion
+/// must reap that command even after it emits more than a pipe buffer.
+#[cfg(unix)]
+#[tokio::test]
+async fn superseded_machine_completion_closes_connection_and_reaps_ssh() {
+    let root = tempfile::tempdir().unwrap();
+    let started = root.path().join("started");
+    let script = root.path().join("proxy.sh");
+    fs::write(
+        &script,
+        format!(
+            "head -c 131072 /dev/zero >&2\nprintf '%s' $$ > {}\nexec sleep 600\n",
+            mj_core::targets::posix_quote(&started.to_string_lossy())
+        ),
+    )
+    .unwrap();
+    let state = test_runtime_state();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let metadata = test_metadata(listener.local_addr().unwrap());
+    let server_metadata = metadata.clone();
+    let shutdown = CancellationToken::new();
+    let server_shutdown = shutdown.clone();
+    let mut server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        serve_client(stream, server_metadata, state, server_shutdown)
+            .await
+            .unwrap();
+    });
+    let mut stream = TcpStream::connect(metadata.address).await.unwrap();
+    let machine = mj_core::config::Machine::Ssh {
+        ssh: mj_core::config::SshConnection {
+            host: "machine-cancellation.invalid".into(),
+            user: None,
+            identity_file: None,
+            extra_args: vec![
+                "-o".into(),
+                format!(
+                    "ProxyCommand=sh {}",
+                    mj_core::targets::posix_quote(&script.to_string_lossy())
+                ),
+                "-o".into(),
+                "ControlMaster=no".into(),
+                "-o".into(),
+                "ControlPath=none".into(),
+            ],
+        },
+        workspace_prefix: "work".into(),
+        build_cache: None,
+    };
+    write_frame(
+        &mut stream,
+        &RequestEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: 1,
+            token: metadata.token,
+            action: DaemonAction::CompletePath {
+                host: mj_core::path_completion::CompletionHost::Machine(Box::new(machine)),
+                prefix: "~/projects".into(),
+                kind: mj_core::path_completion::CompletionKind::Directories,
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let started_result = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Ok(pid) = fs::read_to_string(&started)
+                && let Ok(pid) = pid.parse::<u32>()
+            {
+                break pid;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    // Always cancel/reap before a failed assertion can abandon the fixture.
+    drop(stream);
+    match tokio::time::timeout(Duration::from_secs(30), &mut server).await {
+        Ok(result) => result.unwrap(),
+        Err(_) => {
+            shutdown.cancel();
+            server.await.unwrap();
+            panic!("connection closure did not cancel completion");
+        }
+    }
+    let pid = started_result.expect("OpenSSH proxy never started");
+    assert!(
+        !daemon_process_is_alive(pid),
+        "superseded completion left its SSH proxy alive"
+    );
+}

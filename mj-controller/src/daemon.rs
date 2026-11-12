@@ -839,6 +839,7 @@ pub use process::*;
 mod serve;
 use serve::*;
 mod actions;
+mod machine;
 use actions::*;
 mod guards;
 pub(crate) use guards::*;

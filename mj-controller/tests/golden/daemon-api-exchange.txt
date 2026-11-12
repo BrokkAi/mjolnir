@@ -1,0 +1,217 @@
+[
+  {
+    "request": {
+      "action": "check_project_directories",
+      "arguments": {
+        "paths": [
+          "<server>/server-only-project",
+          "<server>/absent"
+        ]
+      }
+    },
+    "reply": {
+      "Ok": {
+        "reply": "project_directories",
+        "value": [
+          [
+            "<server>/server-only-project",
+            true
+          ],
+          [
+            "<server>/absent",
+            false
+          ]
+        ]
+      }
+    }
+  },
+  {
+    "request": {
+      "action": "complete_path",
+      "arguments": {
+        "host": "Local",
+        "prefix": "<server>/server-",
+        "kind": "directories"
+      }
+    },
+    "reply": {
+      "Ok": {
+        "reply": "path_completion",
+        "value": {
+          "candidates": [
+            "<server>/server-only-project/"
+          ],
+          "insert": "<server>/server-only-project/",
+          "truncated": false
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "action": "discover_projects",
+      "arguments": {
+        "request": {
+          "kind": "directory",
+          "path": "<server>",
+          "filter": ""
+        }
+      }
+    },
+    "reply": {
+      "Ok": {
+        "reply": "project_discovery",
+        "value": {
+          "entries": [
+            {
+              "name": "server-only-project",
+              "source": "<server>/server-only-project",
+              "description": "Directory",
+              "kind": "directory"
+            }
+          ],
+          "directory": "<server>",
+          "parent": "<server-parent>",
+          "truncated": false
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "action": "resolve_setup_path",
+      "arguments": {
+        "machine": {
+          "kind": "local"
+        },
+        "source": "<server>/server-only-project"
+      }
+    },
+    "reply": {
+      "Ok": {
+        "reply": "resolved_path",
+        "value": "<server>/server-only-project"
+      }
+    }
+  },
+  {
+    "request": {
+      "action": "validate_mount_source",
+      "arguments": {
+        "target_id": "missing",
+        "source": "<server>/server-only-project"
+      }
+    },
+    "reply": {
+      "Err": "Unknown path target"
+    }
+  },
+  {
+    "request": {
+      "action": "validate_session_mounts",
+      "arguments": {
+        "target_id": "missing",
+        "mounts": [
+          {
+            "source": "<server>/server-only-project",
+            "destination": "/project",
+            "read_only": true
+          }
+        ]
+      }
+    },
+    "reply": {
+      "Ok": {
+        "reply": "session_mount_validation",
+        "value": [
+          "<server>/server-only-project",
+          "unknown target template \"missing\""
+        ]
+      }
+    }
+  },
+  {
+    "request": {
+      "action": "resolve_container_path",
+      "arguments": {
+        "target_id": "local",
+        "source": "<server>/server-only-project"
+      }
+    },
+    "reply": {
+      "Ok": {
+        "reply": "resolved_path",
+        "value": "<server>/server-only-project"
+      }
+    }
+  },
+  {
+    "request": {
+      "action": "validate_project_directory",
+      "arguments": {
+        "target_id": "local",
+        "directory": "<server>/server-only-project"
+      }
+    },
+    "reply": {
+      "Ok": {
+        "reply": "new_session_preflight",
+        "value": {
+          "project_directory": "<server>/server-only-project",
+          "managed_worktree": {
+            "available": false,
+            "default_create": false
+          },
+          "remote_repairs": [],
+          "dirty_repositories": [],
+          "remote_repositories": [],
+          "local_changes_excluded": false
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "action": "preflight_new_session",
+      "arguments": {
+        "request": {
+          "additional_mounts": [],
+          "remote_repairs": [],
+          "workspace_id": "",
+          "profile_id": "agent",
+          "bundle_id": "",
+          "target_id": "local",
+          "project_directory": "<server>/server-only-project"
+        }
+      }
+    },
+    "reply": {
+      "Ok": {
+        "reply": "new_session_preflight",
+        "value": {
+          "project_directory": "<server>/server-only-project",
+          "managed_worktree": {
+            "available": false,
+            "default_create": false
+          },
+          "remote_repairs": [],
+          "dirty_repositories": [],
+          "remote_repositories": [],
+          "local_changes_excluded": false
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "action": "resolve_container_path",
+      "arguments": {
+        "target_id": "missing",
+        "source": "<server>/server-only-project"
+      }
+    },
+    "reply": {
+      "Err": "Unknown path target"
+    }
+  }
+]

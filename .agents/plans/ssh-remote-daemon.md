@@ -16,8 +16,8 @@ This is private-network operation with working SSH authentication and host trust
 - [x] (2026-11-12) Record settled design, including the user's correction that EC2 CLI commands are forwarded.
 - [ ] Implement and validate milestone 1: endpoint, connector, supervised tunnel and command forwarding.
 - [ ] Implement and validate milestone 2: direct HTTP credentials and browser opening.
-- [ ] Implement and validate milestone 3: dashboard paths, discovery and preflight.
-- [ ] Implement and validate milestone 4: dashboard setup, probes, settings and cache work.
+- [x] (2026-11-12) Implement milestone 3: daemon path/discovery actions, shared HTTP/control launch preflight, dedicated-connection cancellation and dashboard rewiring. Focused 52 tests and full touched-crate suites pass; control exchange and phone preflight goldens reviewed. The separated-machine SSH driver remains integration acceptance with milestones 1–2.
+- [ ] Implement and validate milestone 4: dashboard setup, probes, settings and cache work (deferred to follow-up under the parent-approved milestone-3 budget fallback).
 - [ ] Implement and validate milestone 5: explicit remote paths, attachment uploads, client-side import upload and daemon-side voice transcription.
 - [ ] Remove the native desktop shell (`mj-desktop`, `mj app`, `mj-cli/src/desktop.rs`, release packaging); independent of the other milestones.
 - [ ] Implement and validate milestone 6: matching-build PowerShell go script.
@@ -35,6 +35,8 @@ The container plan says repository preflight moved, but only remote-repair prefl
 The suggested disposable sshd exists as `LocalSshd` in `mj-core/src/targets/ssh.rs`, not as a localhost fixture under `tests/e2e/`. `tests/e2e/ssh_docker_acceptance.py` uses a cloud lab ledger; do not provision EC2 to test this feature. Reuse the local sshd fixture's key/configuration/lifetime pattern in the new driver. The Windows installer is root `install.ps1`, not `scripts/install.ps1`.
 
 No existing checked-in control-daemon exchange golden was located by searching daemon modules and golden filenames. Existing HTTP goldens include `mj-controller/tests/golden/phone-new-session-preflight.txt` and `viewer-settings-exchange.txt`. Milestone 3 establishes one real control exchange golden and extends it in later milestones, while extending those existing HTTP cases for shared behavior. Do not invent a nonexistent baseline test.
+
+Control requests previously correlated replies but had no generic cancellation mechanism: `serve_client` awaited each action without observing disconnect. Milestone 3 now owns disposable work on a dedicated connection, reuses `ProcessCancellationGuard`, and awaits executor teardown after EOF or handoff. A real OpenSSH proxy fixture emits 128 KiB of stderr before its readiness barrier; the superseded-completion test verifies connection closure terminates its process.
 
 ## Decision Log
 
@@ -60,6 +62,8 @@ Decision (user, 2026-11-12, supersedes the earlier deferrals): Remove the native
 Decision: SSH launches require explicit remote project paths wherever cwd was the default. Login uses an interactive SSH terminal; document callback limitations without inventing a harness compatibility matrix. Rationale: client cwd and daemon credential files cannot be used across machines. Date/Author: 2026-11-12, user.
 
 Decision: Default development commit is the remote source checkout's HEAD, resolved once to a full SHA; optional `-Commit` overrides it. Both machines build in one reused, dedicated, clean, detached build worktree each, moved to that SHA (parent review: per-SHA worktrees would make every build cold), without switching the user's current branch. Rationale: the box is the development source of truth, origin/master could omit local committed work, and edits or commits during install split binary stamps. The script's explicitly requested detached build checkouts are build inputs, not development branches. Date/Author: 2026-11-12, plan author within the user's script choice.
+
+Decision (parent approval, 2026-11-12): Cancellable machine requests use dedicated control connections. The action owns its cancellation classification; connection closure cancels its executor and the server awaits cleanup. Disposable probes hold no handoff admission. Reuse ProcessCancellationGuard. Mutating mbx installation holds labeled admission through cleanup and acknowledgement; offer cancellation only if its existing helper safely supports it. Do not introduce a durable generic job owner.
 
 ## Outcomes & Retrospective
 

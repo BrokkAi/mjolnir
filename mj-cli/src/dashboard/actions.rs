@@ -3,6 +3,7 @@
 //! Every arm here either updates UI state directly or starts a background job,
 //! except `SetupLogin`, which hands the terminal to `mj login` and waits for it.
 
+use mj_client::daemon::{DaemonAction as MachineAction, DaemonReply as MachineReply};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -420,7 +421,6 @@ pub(crate) async fn apply_dashboard_action(
         }
         DashboardAction::ResolveContainerPath { session_id, source } => {
             let input_context = context.dashboard.path_input_context();
-            let controller = config_only_controller(context.controller.config.clone());
             let target_id = context
                 .controller
                 .state
@@ -433,14 +433,15 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
                 "resolving attached directory",
                 context.dashboard_io_tx.clone(),
-                move |cancelled| {
-                    let executor = CancellableProcessExecutor::new(cancelled)
-                        .with_deadline(std::time::Duration::from_secs(30));
-                    controller.resolve_input_path(
-                        &target_id,
-                        std::path::Path::new(&source),
-                        &executor,
-                    )
+                move |cancelled| match super::io::machine_request(
+                    MachineAction::ResolveContainerPath {
+                        target_id,
+                        source: source.into(),
+                    },
+                    cancelled,
+                )? {
+                    MachineReply::ResolvedPath(path) => Ok(path),
+                    reply => anyhow::bail!("unexpected path reply: {reply:?}"),
                 },
                 move |result| DashboardIoUpdate::ContainerPathResolved {
                     context: input_context,
@@ -461,14 +462,15 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
                 "resolving setup path",
                 context.dashboard_io_tx.clone(),
-                move |cancelled| {
-                    let executor = CancellableProcessExecutor::new(cancelled)
-                        .with_deadline(std::time::Duration::from_secs(30));
-                    mj_controller::controller::resolve_machine_input_path(
-                        &machine,
-                        std::path::Path::new(&requested),
-                        &executor,
-                    )
+                move |cancelled| match super::io::machine_request(
+                    MachineAction::ResolveSetupPath {
+                        machine: *machine,
+                        source: requested.into(),
+                    },
+                    cancelled,
+                )? {
+                    MachineReply::ResolvedPath(path) => Ok(path),
+                    reply => anyhow::bail!("unexpected setup path reply: {reply:?}"),
                 },
                 move |result| DashboardIoUpdate::SetupPathResolved {
                     generation,
@@ -770,15 +772,14 @@ pub(crate) async fn apply_dashboard_action(
                     context.critical_operations.clone(),
                     label,
                     context.dashboard_io_tx.clone(),
-                    move |_| match std::fs::metadata(&path) {
-                        Ok(metadata) => Ok(Some(metadata.is_dir())),
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                            Ok(Some(false))
+                    move |cancelled| match super::io::machine_request(
+                        MachineAction::CheckProjectDirectories { paths: vec![path] },
+                        cancelled,
+                    )? {
+                        MachineReply::ProjectDirectories(paths) => {
+                            Ok(paths.first().map(|(_, exists)| *exists))
                         }
-                        Err(error) => {
-                            Err(anyhow::Error::new(error)
-                                .context(format!("read {}", path.display())))
-                        }
+                        reply => anyhow::bail!("unexpected directory reply: {reply:?}"),
                     },
                     move |checked| DashboardIoUpdate::ProjectDirectory {
                         path: reported,
@@ -1056,10 +1057,12 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
                 "finding projects",
                 context.dashboard_io_tx.clone(),
-                move |cancelled| {
-                    let executor = CancellableProcessExecutor::new(cancelled)
-                        .with_deadline(std::time::Duration::from_secs(15));
-                    mj_controller::project_picker::discover(&request, &executor)
+                move |cancelled| match super::io::machine_request(
+                    MachineAction::DiscoverProjects { request },
+                    cancelled,
+                )? {
+                    MachineReply::ProjectDiscovery(result) => Ok(result),
+                    reply => anyhow::bail!("unexpected discovery reply: {reply:?}"),
                 },
                 move |result| DashboardIoUpdate::ProjectDiscovery {
                     context: picker_context,
@@ -1070,23 +1073,21 @@ pub(crate) async fn apply_dashboard_action(
         }
         DashboardAction::CompletePath { host, kind, prefix } => {
             let input_context = context.dashboard.path_input_context();
-            let config = context.controller.config.clone();
             let prefix_for_work = prefix.clone();
             let (cancelled, _) = spawn_cancellable_io_with_token(
                 context.critical_operations.clone(),
                 "completing path",
                 context.dashboard_io_tx.clone(),
-                move |cancelled| {
-                    // A completion is worth only a short wait: the person is
-                    // still typing while it runs.
-                    let executor = CancellableProcessExecutor::new(cancelled)
-                        .with_deadline(std::time::Duration::from_secs(5));
-                    config_only_controller(config).complete_path(
-                        &host,
-                        &prefix_for_work,
+                move |cancelled| match super::io::machine_request(
+                    MachineAction::CompletePath {
+                        host,
+                        prefix: prefix_for_work,
                         kind,
-                        &executor,
-                    )
+                    },
+                    cancelled,
+                )? {
+                    MachineReply::PathCompletion(result) => Ok(result),
+                    reply => anyhow::bail!("unexpected completion reply: {reply:?}"),
                 },
                 move |result| DashboardIoUpdate::PathCompletions {
                     context: input_context,
@@ -1102,24 +1103,20 @@ pub(crate) async fn apply_dashboard_action(
         } => {
             let input_context = context.dashboard.path_input_context();
             context.dashboard.set_notice("Checking attached directory…");
-            let config = context.controller.config.clone();
             let requested = source.clone();
             let (cancelled, _) = spawn_cancellable_io_with_token(
                 context.critical_operations.clone(),
                 "validating attached directory",
                 context.dashboard_io_tx.clone(),
-                move |cancelled| {
-                    let executor = CancellableProcessExecutor::new(cancelled)
-                        .with_deadline(std::time::Duration::from_secs(30));
-                    let controller = config_only_controller(config);
-                    let path = controller.resolve_input_path(
-                        &target_template_id,
-                        std::path::Path::new(&requested),
-                        &executor,
-                    )?;
-                    let forced =
-                        controller.validate_mount_source(&target_template_id, &path, &executor)?;
-                    Ok((path, forced))
+                move |cancelled| match super::io::machine_request(
+                    MachineAction::ValidateMountSource {
+                        target_id: target_template_id,
+                        source: requested.into(),
+                    },
+                    cancelled,
+                )? {
+                    MachineReply::MountValidation(path, forced) => Ok((path, forced)),
+                    reply => anyhow::bail!("unexpected mount reply: {reply:?}"),
                 },
                 move |result| DashboardIoUpdate::MountValidation {
                     context: input_context,
@@ -1138,27 +1135,19 @@ pub(crate) async fn apply_dashboard_action(
                 .dashboard
                 .set_notice("Checking attached directories…");
             let generation = context.dashboard.session_preflight_generation();
-            let config = context.controller.config.clone();
             spawn_cancellable_io(
                 context.critical_operations.clone(),
                 "validating session directories",
                 context.dashboard_io_tx.clone(),
-                move |cancelled| {
-                    let controller = config_only_controller(config);
-                    let executor = CancellableProcessExecutor::new(cancelled);
-                    for mount in mounts {
-                        if let Err(error) = controller.validate_mount_source(
-                            &target_template_id,
-                            std::path::Path::new(&mount.source),
-                            &executor,
-                        ) {
-                            return Ok(Some((
-                                mount.source.to_string_lossy().into_owned(),
-                                format!("{error:#}"),
-                            )));
-                        }
-                    }
-                    Ok(None)
+                move |cancelled| match super::io::machine_request(
+                    MachineAction::ValidateSessionMounts {
+                        target_id: target_template_id,
+                        mounts,
+                    },
+                    cancelled,
+                )? {
+                    MachineReply::SessionMountValidation(result) => Ok(result),
+                    reply => anyhow::bail!("unexpected mounts reply: {reply:?}"),
                 },
                 move |result| DashboardIoUpdate::SessionMountValidation {
                     generation,
@@ -1216,29 +1205,26 @@ pub(crate) async fn apply_dashboard_action(
         } => {
             let input_context = context.dashboard.path_input_context();
             context.dashboard.set_notice("Checking project directory…");
-            let config = context.controller.config.clone();
             let requested = directory.clone();
             let (cancelled, _) = spawn_cancellable_io_with_token(
                 context.critical_operations.clone(),
                 "validating project directory",
                 context.dashboard_io_tx.clone(),
-                move |cancelled| {
-                    let executor = CancellableProcessExecutor::new(cancelled)
-                        .with_deadline(std::time::Duration::from_secs(30));
-                    let controller = config_only_controller(config);
-                    let result = controller.preflight_new_session(
-                        "",
-                        &target_template_id,
-                        Some(std::path::Path::new(&requested)),
-                        &executor,
-                    )?;
-                    Ok((
+                move |cancelled| match super::io::machine_request(
+                    MachineAction::ValidateProjectDirectory {
+                        target_id: target_template_id,
+                        directory: requested.into(),
+                    },
+                    cancelled,
+                )? {
+                    MachineReply::NewSessionPreflight(result) => Ok((
                         result
                             .project_directory
                             .context("bare preflight returned no directory")?,
                         result.managed_worktree,
-                        result.review_turns_off,
-                    ))
+                        result.review_notice.is_some(),
+                    )),
+                    reply => anyhow::bail!("unexpected project preflight reply: {reply:?}"),
                 },
                 move |result| DashboardIoUpdate::ProjectValidation {
                     context: input_context,
@@ -1865,9 +1851,24 @@ pub(crate) fn start_create_session_preflight(
         start_session_launch(context, launch);
         return;
     }
-    let config = context.controller.config.clone();
-    let bundle_id = bundle_id.clone();
-    let target_id = target_template_id.clone();
+    let DashboardAction::CreateSession {
+        profile_id,
+        workspace_id,
+        additional_mounts,
+        ..
+    } = &launch
+    else {
+        unreachable!()
+    };
+    let request = mj_client::daemon::NewSessionPreflightRequest {
+        profile_id: profile_id.clone(),
+        workspace_id: workspace_id.clone(),
+        bundle_id: bundle_id.clone(),
+        target_id: target_template_id.clone(),
+        project_directory: None,
+        additional_mounts: additional_mounts.clone(),
+        remote_repairs: Vec::new(),
+    };
     let generation = context.dashboard.session_preflight_generation();
     context.cancel_session_preflight();
     context.dashboard.begin_remote_session_preflight(generation);
@@ -1875,12 +1876,14 @@ pub(crate) fn start_create_session_preflight(
         context.critical_operations.clone(),
         "resolving session repositories",
         context.dashboard_io_tx.clone(),
-        move |cancelled| {
-            let executor = CancellableProcessExecutor::new(cancelled)
-                .with_deadline(std::time::Duration::from_secs(30));
-            config_only_controller(config)
-                .preflight_new_session(&bundle_id, &target_id, None, &executor)
-                .map(super::io::RemotePreflightOutcome::from)
+        move |cancelled| match super::io::machine_request(
+            MachineAction::PreflightNewSession { request },
+            cancelled,
+        )? {
+            MachineReply::NewSessionPreflight(result) => {
+                Ok(super::io::RemotePreflightOutcome::from(result))
+            }
+            reply => anyhow::bail!("unexpected new-session preflight reply: {reply:?}"),
         },
         move |result| DashboardIoUpdate::RemotePreflight {
             generation,

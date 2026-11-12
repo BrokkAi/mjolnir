@@ -338,7 +338,7 @@ fn golden_phone_new_session_preflight() {
         effort: None,
     }];
     let mut plain = run_new_preflight(
-        config,
+        config.clone(),
         "hel".into(),
         "raw".into(),
         Some(folder.path().to_path_buf()),
@@ -351,6 +351,28 @@ fn golden_phone_new_session_preflight() {
     )
     .unwrap();
     writeln!(out, "{}", serde_json::to_string_pretty(&plain).unwrap()).unwrap();
+
+    let error = preflight_new_request(
+        config,
+        mj_client::daemon::NewSessionPreflightRequest {
+            workspace_id: String::new(),
+            profile_id: "codex".into(),
+            bundle_id: String::new(),
+            target_id: "raw".into(),
+            project_directory: Some(folder.path().to_path_buf()),
+            remote_repairs: Vec::new(),
+            additional_mounts: vec![crate::targets::AdditionalMount {
+                source: folder.path().to_path_buf(),
+                destination: "/attached".into(),
+                access: crate::targets::MountAccess::Ro,
+            }],
+        },
+        CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false))),
+    )
+    .expect_err("shared preflight refuses mounts on bare targets");
+    writeln!(out, "=== shared HTTP/control launch validation ===").unwrap();
+    writeln!(out, "result: rejected").unwrap();
+    writeln!(out, "reason: {error}").unwrap();
 
     let mut config = Config::default();
     config.targets.insert(

@@ -74,7 +74,7 @@ mod run;
 pub(crate) use run::*;
 mod support;
 use support::*;
-mod preflight;
+pub(crate) mod preflight;
 use preflight::*;
 mod actions;
 use actions::*;
