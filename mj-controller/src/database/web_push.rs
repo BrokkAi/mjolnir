@@ -124,6 +124,10 @@ fn push_observe_at_with(
                     title: format!("{} sessions need you", unsent.len()),
                     body: "Open Mjolnir to see them".into(),
                     session_id: None,
+                    session_ids: unsent
+                        .iter()
+                        .filter_map(|(_, notice)| notice.session_id.clone())
+                        .collect(),
                     url: "/".into(),
                     tag: "summary".into(),
                 };
@@ -141,16 +145,30 @@ fn push_observe_at_with(
             }
         }
     }
-    // Resolve queued session sends before they can deliver stale attention.
+    // Coverage belongs to the outbox transaction. An unavailable episode keeps
+    // its identity and becomes a paused individual intent; resolved ones retire.
+    tx.execute("UPDATE push_deliveries AS covered SET accepted=0,summary_episode=NULL
+        WHERE accepted=2 AND (NOT EXISTS(SELECT 1 FROM push_deliveries summary WHERE summary.endpoint=covered.endpoint AND summary.episode=covered.summary_episode)
+        OR (EXISTS(SELECT 1 FROM push_deliveries summary WHERE summary.endpoint=covered.endpoint AND summary.episode=covered.summary_episode AND summary.accepted=0)
+        AND episode NOT IN (SELECT identity FROM push_episodes WHERE eligible=1)))",[])?;
     tx.execute("DELETE FROM push_deliveries WHERE accepted=0 AND episode NOT LIKE 'summary:%' AND episode NOT LIKE 'test:%' AND episode NOT IN (SELECT identity FROM push_episodes)", [])?;
-    let any_open: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM push_episodes)", [], |r| {
-        r.get(0)
-    })?;
-    if !any_open {
-        tx.execute(
-            "DELETE FROM push_deliveries WHERE accepted=0 AND episode LIKE 'summary:%'",
-            [],
-        )?;
+    let summaries=tx.prepare("SELECT endpoint,episode,payload FROM push_deliveries WHERE accepted=0 AND episode LIKE 'summary:%'")?.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    for (endpoint, episode, payload) in summaries {
+        let covered=tx.prepare("SELECT e.session FROM push_deliveries covered JOIN push_episodes e ON e.identity=covered.episode WHERE covered.endpoint=?1 AND covered.summary_episode=?2 AND covered.accepted=2 AND e.eligible=1 ORDER BY e.session")?.query_map(params![endpoint,episode],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        if covered.is_empty() {
+            tx.execute(
+                "DELETE FROM push_deliveries WHERE endpoint=?1 AND episode=?2",
+                params![endpoint, episode],
+            )?;
+        } else {
+            let mut notice: Notice = serde_json::from_str(&payload)?;
+            notice.title = format!("{} sessions need you", covered.len());
+            notice.session_ids = covered;
+            tx.execute(
+                "UPDATE push_deliveries SET payload=?3 WHERE endpoint=?1 AND episode=?2",
+                params![endpoint, episode, serde_json::to_string(&notice)?],
+            )?;
+        }
     }
     tx.commit()?;
     Ok(())
@@ -201,6 +219,7 @@ fn push_test_with(db: &mut Connection, endpoint: String) -> Result<()> {
             title: "Mjolnir".into(),
             body: "Notifications are enabled on this device".into(),
             session_id: None,
+            session_ids: Vec::new(),
             url: "/".into(),
             tag: "test".into(),
         },
@@ -341,6 +360,7 @@ mod tests {
                 title: id.into(),
                 body: "Which option?".into(),
                 session_id: Some(id.into()),
+                session_ids: Vec::new(),
                 url: format!("/#conversation/{id}"),
                 tag: id.into(),
             },
@@ -479,8 +499,54 @@ mod tests {
         push_observe_with(&mut db, true, vec![episode("new-after-refusal")]).unwrap();
         assert!(push_due_with(&db, 99).unwrap().is_empty());
         drop(db);
-        let db = open(&path).unwrap();
+        let mut db = open(&path).unwrap();
         assert_eq!(push_due_with(&db, 100).unwrap().len(), 1);
+        // Hard-won: c146a8a89: unrelated attention kept obsolete summaries queued.
+        push_observe_at_with(
+            &mut db,
+            OperatorPresence {
+                away: true,
+                revision: 5,
+            },
+            vec![episode("summary-a"), episode("summary-b")],
+            vec![],
+        )
+        .unwrap();
+        let summary = push_due_with(&db, 100).unwrap();
+        assert_eq!(summary.len(), 1);
+        let notice: Notice = serde_json::from_str(&summary[0].payload).unwrap();
+        assert_eq!(notice.session_ids, vec!["summary-a", "summary-b"]);
+        push_observe_at_with(
+            &mut db,
+            OperatorPresence {
+                away: true,
+                revision: 5,
+            },
+            vec![episode("summary-b"), episode("unrelated")],
+            vec![],
+        )
+        .unwrap();
+        let pending = push_due_with(&db, 100).unwrap();
+        let summary = pending
+            .iter()
+            .find(|item| item.episode.starts_with("summary:"))
+            .unwrap();
+        let notice: Notice = serde_json::from_str(&summary.payload).unwrap();
+        assert_eq!(notice.title, "1 sessions need you");
+        assert_eq!(notice.session_ids, vec!["summary-b"]);
+        push_observe_at_with(
+            &mut db,
+            OperatorPresence {
+                away: true,
+                revision: 5,
+            },
+            vec![episode("unrelated")],
+            vec![],
+        )
+        .unwrap();
+        let pending = push_due_with(&db, 100).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(!pending[0].episode.starts_with("summary:"));
         // HTTP 410 cascades queued intents and receipts.
 
         apply_push_result_with(&db, subscription.clone(), String::new(), Some(410), 0, None)

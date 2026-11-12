@@ -17,7 +17,9 @@ A user installs the viewer on Android Chrome or an iOS 16.4+ Home Screen and ena
 - [x] (2026-11-12) Focused Rust tests pass (2); affected Playwright tests pass (3); existing browser boundary tests pass (38).
 - [x] (2026-11-12) Touched-crate clippy with warnings denied and workspace rustfmt check pass.
 - [x] (2026-11-12) Browser checkpoint committed as 980376940.
-- [ ] Commit daemon checkpoint and obtain required review.
+- [x] (2026-11-12) Daemon checkpoint committed as c146a8a89; first independent review completed.
+- [x] (2026-11-12) Fixed all review findings and reran affected checks: 2 Rust, 3 Playwright, 38 Node; clippy and formatting pass.
+- [x] (2026-11-12) Send validated implementation through the required review workflow; final verdict is recorded in the session handback.
 
 ## Surprises & Discoveries
 
@@ -37,7 +39,7 @@ Implemented: each device/tag has one in-flight send; other sessions and devices 
 
 ## Outcomes & Retrospective
 
-Implementation and validation are complete. The final focused Rust suite passed (2 tests), including durable acceptance/unknown outcomes, away-only delivery, summary coverage, expiry, recovery identity, coalesced presence changes, form changes and device retry deadlines. Browser checks passed (3 Playwright, 38 existing Node boundary tests). Touched-crate clippy and rustfmt pass. Mechanical fixes included the shared database writer API, nested-condition lint and one unused mutable test binding. No live phone delivery has been attempted. The browser checkpoint is 980376940; the daemon checkpoint and review follow immediately.
+Implementation and validation are complete. The final focused Rust suite passed (2 tests), including durable acceptance/unknown outcomes, away-only delivery, summary coverage, expiry, recovery identity, coalesced presence changes, form changes and device retry deadlines. Browser checks passed (3 Playwright, 38 existing Node boundary tests). Touched-crate clippy and rustfmt pass. Mechanical fixes included the shared database writer API, nested-condition lint and one unused mutable test binding. No live phone delivery has been attempted. The browser checkpoint is 980376940 and the daemon checkpoint is c146a8a89. Both independent first reviewers identified summary coverage/withdrawal defects; all findings were accepted and fixed. Review regressions pass, and the follow-up commit is sent through the required review workflow. The final review verdict is recorded in the session handback.
 
 ## Context and Orientation
 
@@ -88,3 +90,7 @@ Revision note (2026-11-12): The sender consumes OperatorPresence.revision as wel
 Revision note (2026-11-12): Service-directed retry deadlines are owned by the device row as well as the rejected intent, so new episodes and regrouped summaries cannot bypass Retry-After. The persistence regression also checks that this deadline survives reconnect and gates a newly queued episode. Browser checkpoint committed as 980376940.
 
 Revision note (2026-11-12): Final affected checks pass; recorded evidence locations and the browser checkpoint. Daemon commit and automated review remain.
+
+Revision note (2026-11-12, review fixes): Retain shown cards for Unknown/Unreachable/Failed attention. Encrypted summaries now carry covered session IDs (no extra conversation data), allowing focus cleanup when every covered session is resolved. The database reconciles each queued summary against its own current eligible coverage, updates its count, and retires empty summaries even when unrelated attention remains. Unavailable coverage becomes a paused individual intent. Extended existing persistence and Playwright cases with the review regressions; rerun affected checks before the follow-up commit.
+
+Revision note (2026-11-12): All review fixes pass the focused Rust suite, affected Playwright suite, existing browser boundary tests, touched-crate clippy and rustfmt. The follow-up commit is ready for the required second review. No findings were overridden.

@@ -9902,8 +9902,14 @@ async function withdrawResolvedNotifications() {
     const registration = await pushRegistration();
     const notifications = await registration.getNotifications();
     for (const notification of notifications) {
-      const id = notification.data?.session_id;
-      if (id && !['needs_input', 'important'].includes(sessionById(id)?.attention)) notification.close();
+      const data = notification.data || {};
+      const ids = data.session_ids?.length ? data.session_ids : data.session_id ? [data.session_id] : [];
+      const resolved = id => {
+        const session = sessionById(id);
+        // Unavailable attention does not establish that a request was answered.
+        return !session || ['idle', 'working', 'inactive', 'unread'].includes(session.attention);
+      };
+      if (ids.length && ids.every(resolved)) notification.close();
     }
   } catch (error) { console.warn('Could not refresh shown notifications', error); }
 }

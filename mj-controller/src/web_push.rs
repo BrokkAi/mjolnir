@@ -65,6 +65,8 @@ pub(crate) struct Notice {
     pub title: String,
     pub body: String,
     pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub session_ids: Vec<String>,
     pub url: String,
     pub tag: String,
 }
@@ -321,6 +323,7 @@ fn episodes(runtime: &mj_client::runtime_feed::RuntimeProjection) -> Vec<(String
                     title: record.listed_title().to_owned(),
                     body,
                     session_id: Some(id.clone()),
+                    session_ids: Vec::new(),
                     url: format!("/#conversation/{id}"),
                     tag: id.clone(),
                 },

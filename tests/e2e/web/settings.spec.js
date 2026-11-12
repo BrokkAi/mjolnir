@@ -197,6 +197,8 @@ test('device notification enrollment starts from a tap and supports test and uns
   await page.addInitScript(() => {
     let subscription = null;
     window.pushPermissionTaps = 0;
+    window.pushShownNotifications = [];
+    window.pushClosedNotifications = [];
     window.Notification = class {
       static permission = 'default';
       static requestPermission() { window.pushPermissionTaps += 1; this.permission = 'granted'; return Promise.resolve('granted'); }
@@ -204,7 +206,7 @@ test('device notification enrollment starts from a tap and supports test and uns
     window.PushManager = class {};
     const registration = {
       active: {},
-      getNotifications: async () => [],
+      getNotifications: async () => window.pushShownNotifications.map(data => ({ data, close: () => window.pushClosedNotifications.push(data.label) })),
       pushManager: {
         getSubscription: async () => subscription,
         subscribe: async () => {
@@ -234,6 +236,23 @@ test('device notification enrollment starts from a tap and supports test and uns
   await page.locator('#device-notification-disable').click();
   await expect(page.locator('#device-notification-state')).toContainText('Not enabled');
   expect(actions.map(action => action.action)).toEqual(['push-subscribe', 'push-test', 'push-unsubscribe']);
+  const states = { unknown: 'unknown', unreachable: 'unreachable', failed: 'failed', idle: 'idle', working: 'working' };
+  await page.route('**/api/snapshot', route => {
+    const next = snapshot();
+    next.sessions = Object.entries(states).map(([id, attention]) => ({ id, title: id, workspace_id: WORKSPACE_ID, attention, active: true, is_idle: true, capabilities: {}, detail: false }));
+    return route.fulfill({ json: viewerWireSnapshot(next) });
+  });
+  // Hard-won: c146a8a89: focus removed unavailable questions but kept resolved summaries.
+  await page.evaluate(() => {
+    window.pushShownNotifications = [
+      { label: 'unknown', session_id: 'unknown' }, { label: 'unreachable', session_id: 'unreachable' },
+      { label: 'failed', session_id: 'failed' }, { label: 'idle', session_id: 'idle' },
+      { label: 'mixed', session_ids: ['idle', 'unknown'] }, { label: 'resolved-summary', session_ids: ['idle', 'working'] },
+    ];
+    window.dispatchEvent(new Event('focus'));
+  });
+  await expect.poll(() => page.evaluate(() => [...new Set(window.pushClosedNotifications)].sort())).toEqual(['idle', 'resolved-summary']);
+
 });
 
 test('service worker push displays and clicks route an existing window to the conversation', async ({ page }) => {
@@ -260,7 +279,7 @@ test('service worker push displays and clicks route an existing window to the co
     return calls;
   }, source);
   expect(result).toEqual([
-    ['show', 'Build', { body: 'Which option?', tag: 'session', data: { url: '/#conversation/session', session_id: 'session' } }],
+    ['show', 'Build', { body: 'Which option?', tag: 'session', data: { url: '/#conversation/session', session_id: 'session', session_ids: [] } }],
     ['close'], ['navigate', 'https://viewer.test/#conversation/session'], ['focus'],
   ]);
 });
