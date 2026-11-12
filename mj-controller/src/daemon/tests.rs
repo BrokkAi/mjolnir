@@ -12313,7 +12313,7 @@ async fn daemon_api_exchange() {
         DaemonAction::CheckpointArchiveSizes {
             paths: [
                 ("archived".into(), archive.clone()),
-                ("unreadable".into(), archive.join("child.tar")),
+                ("unreadable".into(), archive.join("invalid\0archive")),
                 ("missing".into(), server_root.join("missing.tar")),
             ]
             .into(),
@@ -12420,7 +12420,7 @@ async fn daemon_api_exchange() {
         .await
         .unwrap();
         let wire: serde_json::Value = read_frame(&mut stream).await.unwrap();
-        let response: ResponseEnvelope = mj_core::config::with_secret_resolver(
+        let mut response: ResponseEnvelope = mj_core::config::with_secret_resolver(
             mj_core::config::SecretResolver::beside(&client_config_path),
             || serde_json::from_value(wire).unwrap(),
         );
@@ -12439,6 +12439,12 @@ async fn daemon_api_exchange() {
                     .unwrap()
                     .contains("daemon-secret-value")
             );
+        }
+        // Embedded NUL is invalid on every host; only OS diagnostic wording varies.
+        if let Ok(DaemonReply::CheckpointArchiveSizes(sizes)) = &mut response.result {
+            let error = sizes.get_mut("unreadable").unwrap().as_mut().unwrap_err();
+            assert!(error.starts_with("read "), "{error}");
+            *error = "<archive metadata error>".into();
         }
         exchange.push(serde_json::json!({"request": rendered_action, "reply": response.result}));
         drop(stream);

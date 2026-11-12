@@ -25,6 +25,8 @@ This is private-network operation with working SSH authentication and host trust
 
 ## Surprises & Discoveries
 
+- (2026-11-12) Review found the archive-as-parent metadata error differs on Windows. The golden now uses an embedded-NUL path to require an error on all platforms and normalizes OS diagnostic wording only after asserting the real wire reply is an error. Focused golden and controller Clippy pass. A separate review flags mbx admission during slow downloads as conflicting with seconds-long handoff guidance; the existing approved admission decision is retained pending parent direction.
+
 - (2026-11-12) Review found that retaining archive paths in the input snapshot also suppressed retries after errors. Archive completions now carry per-path and whole-request errors into a dashboard notice; the existing Refresh command revisits unanswered paths without discarding successful answers. Focused dashboard/PTY tests and CLI Clippy pass after this correction.
 
 - (2026-11-12) Archive metadata failures must be per-path replies, not batch errors; an archive-as-parent fixture deterministically exercises a read error alongside a readable archive. Profile probe deadlines use real Instant and external harness probes; no deterministic per-profile timeout test was added because that would require injecting a clock/probe factory solely for the test. Existing executor deadline regressions cover expiration itself.
