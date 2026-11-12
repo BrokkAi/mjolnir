@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeSet;
 
 #[cfg(test)]
 thread_local! {
@@ -193,6 +194,22 @@ impl ViewerSnapshot {
         records: impl Iterator<Item = &'a mj_core::state::SessionRecord>,
         children: &ViewerChildren,
     ) -> Self {
+        // Snapshot-local interning shares storage without caching compatibility decisions.
+        let targets: Vec<Arc<str>> = config
+            .targets
+            .keys()
+            .map(|id| Arc::from(id.as_str()))
+            .collect();
+        let mut reasons = BTreeSet::<Arc<str>>::new();
+        let mut target_lists = BTreeSet::<Arc<[Arc<str>]>>::new();
+        let mut intern_list = |ids: Vec<Arc<str>>| {
+            if let Some(existing) = target_lists.get(ids.as_slice()) {
+                return existing.clone();
+            }
+            let shared: Arc<[Arc<str>]> = ids.into();
+            target_lists.insert(shared.clone());
+            shared
+        };
         let sessions = records
             .map(|session| {
                 #[cfg(test)]
@@ -200,18 +217,33 @@ impl ViewerSnapshot {
                 let checkout = state
                     .checkout(&session.id)
                     .expect("viewer session has a valid checkout owner");
-                let resume_refusals = config
-                    .targets
-                    .keys()
+                let resume_refusals = targets
+                    .iter()
                     .filter_map(|target_id| {
                         crate::controller::resume_compatibility_with_checkout(
                             session, &checkout, config, target_id,
                         )
                         .err()
-                        .map(|reason| (target_id.clone(), reason))
+                        .map(|reason| {
+                            let shared = if let Some(existing) = reasons.get(reason.as_str()) {
+                                existing.clone()
+                            } else {
+                                let shared: Arc<str> = reason.into();
+                                reasons.insert(shared.clone());
+                                shared
+                            };
+                            (target_id.clone(), shared)
+                        })
                     })
                     .collect::<BTreeMap<_, _>>();
-                let incompatible = resume_refusals.keys().cloned().collect::<Vec<_>>();
+                let incompatible = intern_list(resume_refusals.keys().cloned().collect());
+                let compatible = intern_list(
+                    targets
+                        .iter()
+                        .filter(|id| !resume_refusals.contains_key(*id))
+                        .cloned()
+                        .collect(),
+                );
                 let lifecycle = ViewerLifecycleCategory::of(session.state);
                 // A sub-agent child works in its parent's checkout and owns no
                 // worktree, so its project identity has to come from the
@@ -316,14 +348,9 @@ impl ViewerSnapshot {
                     pending_elicitations: Vec::new(),
                     conversation_available: false,
                     prompt_images_supported: false,
-                    incompatible_resume_targets: incompatible.clone(),
+                    incompatible_resume_targets: incompatible,
                     resume_refusals,
-                    compatible_resume_targets: config
-                        .targets
-                        .keys()
-                        .filter(|target_id| !incompatible.contains(*target_id))
-                        .cloned()
-                        .collect(),
+                    compatible_resume_targets: compatible,
                     project_label: source.short,
                     project_key: project_key(&source.key),
                     display_location: project.project_target(config, &session.target_template_id),
@@ -646,18 +673,18 @@ pub struct ViewerSession {
     ///
     /// Retained beside `compatible_resume_targets` so a viewer cached from
     /// before that field existed keeps working through a deployment.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub incompatible_resume_targets: Vec<String>,
+    #[serde(default, skip_serializing_if = "<[_]>::is_empty")]
+    pub incompatible_resume_targets: Arc<[Arc<str>]>,
     /// The controller's reason for each id in `incompatible_resume_targets`.
     /// It names project paths and SSH hosts, so it is never serialized: only
     /// in-process validation reads it, to tell the caller why a resume or move
     /// was refused.
     #[serde(skip)]
-    pub resume_refusals: BTreeMap<String, String>,
+    pub resume_refusals: BTreeMap<Arc<str>, Arc<str>>,
     /// Target ids this session can resume on, so the browser never has to
     /// subtract one set from another to find out.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub compatible_resume_targets: Vec<String>,
+    #[serde(default, skip_serializing_if = "<[_]>::is_empty")]
+    pub compatible_resume_targets: Arc<[Arc<str>]>,
     /// The canonical short source label for this session: a bundle name, path
     /// leaf, or repository name, never a source path itself.
     #[serde(default, skip_serializing_if = "String::is_empty")]

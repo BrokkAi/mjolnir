@@ -175,7 +175,7 @@ pub(super) fn validate_move_selection(
         if session
             .incompatible_resume_targets
             .iter()
-            .any(|id| id == target_id)
+            .any(|id| id.as_ref() == target_id)
         {
             return Err(resume_refusal(session, target_id));
         }
@@ -609,7 +609,7 @@ fn validate_action_against(
             if session
                 .incompatible_resume_targets
                 .iter()
-                .any(|incompatible| incompatible == target_id)
+                .any(|incompatible| incompatible.as_ref() == target_id)
             {
                 return Err(resume_refusal(session, target_id));
             }

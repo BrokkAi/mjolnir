@@ -3274,7 +3274,7 @@ fn resume_action_refuses_a_target_the_session_cannot_use() {
     });
     assert_eq!(
         snapshot.sessions[0].incompatible_resume_targets,
-        vec!["raw".to_owned()]
+        Arc::<[Arc<str>]>::from(vec![Arc::from("raw")])
     );
 
     let error = validate_action(

@@ -4934,8 +4934,8 @@ fn make_stopped(snapshot: &mut ViewerSnapshot) {
     session.has_checkpoint = true;
     session.capabilities.resume = true;
     session.capabilities.prompt = false;
-    session.incompatible_resume_targets.clear();
-    session.compatible_resume_targets = vec!["podman".into(), "raw".into()];
+    session.incompatible_resume_targets = Arc::from([]);
+    session.compatible_resume_targets = vec!["podman".into(), "raw".into()].into();
 }
 
 #[tokio::test]
