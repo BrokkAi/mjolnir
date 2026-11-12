@@ -206,7 +206,25 @@ pub fn browser_transcript(
         &collapsed_restarts,
         TranscriptRenderMode::Rich,
     );
-    let mut entries = browser_projection_entries(source_entries, &collapse, last_compaction_seq)
+    browser_transcript_collapsed(
+        source_entries,
+        &collapse,
+        latest_seq,
+        last_compaction_seq,
+        after_seq,
+        restart_collapse_window_start,
+    )
+}
+
+fn browser_transcript_collapsed(
+    source_entries: &[ChatEntry],
+    collapse: &[EntryCollapse],
+    latest_seq: u64,
+    last_compaction_seq: u64,
+    after_seq: Option<u64>,
+    restart_collapse_window_start: Option<u64>,
+) -> BrowserTranscript {
+    let mut entries = browser_projection_entries(source_entries, collapse, last_compaction_seq)
         .into_iter()
         .map(|entry| browser_entry(&entry))
         .collect::<Vec<_>>();
@@ -262,7 +280,7 @@ pub fn browser_transcript(
     }
     BrowserTranscript {
         latest_seq,
-        presentation_key: rich_presentation_key(source_entries, &collapse, last_compaction_seq),
+        presentation_key: rich_presentation_key(source_entries, collapse, last_compaction_seq),
         window_start_seq,
         reset,
         entries: entries.into_iter().map(Arc::new).collect(),
@@ -324,12 +342,24 @@ pub fn materialized_chat_entries_reusing(
     skip: usize,
     previous: Vec<ChatEntry>,
 ) -> Vec<ChatEntry> {
+    materialized_chat_entries_selected(session, skip, false, previous)
+}
+
+fn materialized_chat_entries_selected(
+    session: &MaterializedSession,
+    skip: usize,
+    messages: bool,
+    previous: Vec<ChatEntry>,
+) -> Vec<ChatEntry> {
     let mut previous = previous.into_iter().peekable();
     let mut entries = session
         .transcript
         .iter()
-        .skip(skip)
-        .map(|item| {
+        .enumerate()
+        .filter(|(index, item)| {
+            *index >= skip || (messages && matches!(item.body, TranscriptBody::Message { .. }))
+        })
+        .map(|(_, item)| {
             // A bounded canonical tail slides forward as messages arrive.
             // Align by durable position so appending one message does not
             // reparse every unchanged tool body in the window.
@@ -1341,6 +1371,8 @@ pub fn materialized_browser_transcript(session: &MaterializedSession) -> Browser
 pub struct BrowserTranscriptProjector {
     facts: Vec<EntryFacts>,
     entries: Vec<ChatEntry>,
+    // Sparse Message entries precede this independently retained suffix.
+    suffix_start: Option<u64>,
     /// The entries this projector last published, by id.
     published: BTreeMap<String, Arc<BrowserTranscriptEntry>>,
 }
@@ -1357,33 +1389,32 @@ impl BrowserTranscriptProjector {
     /// the oldest entry as the window slides.
     pub fn project(&mut self, session: &MaterializedSession) -> BrowserTranscript {
         let count = session.transcript.len();
-        let oldest_message = session
-            .transcript
-            .iter()
-            .position(|item| matches!(item.body, TranscriptBody::Message { .. }))
-            .unwrap_or(count);
-        let cached_start = self.entries.first().and_then(|entry| {
-            session
-                .transcript
-                .iter()
-                .position(|item| item.position >= entry.start_seq)
-        });
-        let mut start = cached_start
-            .unwrap_or(count.saturating_sub(1))
-            .min(oldest_message);
-        self.entries =
-            materialized_chat_entries_reusing(session, start, std::mem::take(&mut self.entries));
+        let mut start = self
+            .suffix_start
+            .and_then(|position| {
+                session
+                    .transcript
+                    .iter()
+                    .position(|item| item.position >= position)
+            })
+            .unwrap_or(count.saturating_sub(1));
+        self.entries = materialized_chat_entries_selected(
+            session,
+            start,
+            true,
+            std::mem::take(&mut self.entries),
+        );
+        let mut converted = self.entries.iter().peekable();
         let mut previous = std::mem::take(&mut self.facts).into_iter().peekable();
         self.facts = session
             .transcript
             .iter()
-            .enumerate()
-            .map(|(index, item)| {
-                // Converted entries already carry decoded facts. In particular,
-                // an old Message can make the suffix span most of the window;
-                // never decode those tools a second time for topology.
-                if index >= start {
-                    return EntryFacts::of(&self.entries[index - start]);
+            .map(|item| {
+                if converted
+                    .peek()
+                    .is_some_and(|entry| entry.start_seq == item.position)
+                {
+                    return EntryFacts::of(converted.next().expect("matched entry"));
                 }
                 while previous
                     .peek()
@@ -1429,23 +1460,47 @@ impl BrowserTranscriptProjector {
                     break;
                 }
             }
-            if self.entries.len() != count - start {
-                self.entries = materialized_chat_entries_reusing(
-                    session,
-                    start,
-                    std::mem::take(&mut self.entries),
-                );
+            self.entries = materialized_chat_entries_selected(
+                session,
+                start,
+                true,
+                std::mem::take(&mut self.entries),
+            );
+            let indices = self
+                .facts
+                .iter()
+                .enumerate()
+                .filter(|(index, fact)| *index >= start || fact.role == ChatRole::Message)
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            let sparse_collapse = indices
+                .iter()
+                .map(|&index| match collapse[index] {
+                    EntryCollapse::Summary { end, fingerprint } => EntryCollapse::Summary {
+                        end: indices.partition_point(|&member| member < end),
+                        fingerprint,
+                    },
+                    state => state,
+                })
+                .collect::<Vec<_>>();
+            for (entry, &index) in self.entries.iter_mut().zip(&indices) {
+                entry.raw_only = self.facts[index].raw_only;
+                entry.ended_after_interrupt = self.facts[index].ended_after_interrupt;
             }
-            for (entry, fact) in self.entries.iter_mut().zip(&self.facts[start..]) {
-                entry.raw_only = fact.raw_only;
-                entry.ended_after_interrupt = fact.ended_after_interrupt;
-            }
-            let rendered =
-                browser_transcript(&self.entries, session.applied_event_ordinal, 0, None);
+            // Use the full-window decisions: sparse gaps must never join groups.
+            let rendered = browser_transcript_collapsed(
+                &self.entries,
+                &sparse_collapse,
+                session.applied_event_ordinal,
+                0,
+                None,
+                boundary,
+            );
             if start == 0
                 || rendered
                     .entries
                     .iter()
+                    .filter(|entry| entry.id >= self.facts[start].start_seq)
                     .map(|entry| entry.lines.len())
                     .sum::<usize>()
                     >= BROWSER_TRANSCRIPT_LINES
@@ -1460,7 +1515,19 @@ impl BrowserTranscriptProjector {
             .max(boundary.unwrap_or_default());
         // Discard converted content preceding the oldest surviving row, but
         // retain the complete group that owns a surviving synthetic row.
-        if let Some(first_id) = transcript.entries.iter().map(|entry| entry.id).min() {
+        if let Some(first_id) = transcript
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.id
+                    >= self
+                        .facts
+                        .get(start)
+                        .map_or(u64::MAX, |fact| fact.start_seq)
+            })
+            .map(|entry| entry.id)
+            .min()
+        {
             let mut keep = self
                 .facts
                 .iter()
@@ -1472,11 +1539,15 @@ impl BrowserTranscriptProjector {
                     break;
                 }
             }
-            self.entries.drain(..keep.saturating_sub(start));
+            self.suffix_start = self.facts.get(keep).map(|fact| fact.start_seq);
+            self.entries.retain(|entry| {
+                entry.role == ChatRole::Message || entry.start_seq >= self.facts[keep].start_seq
+            });
         } else {
             // No row survives in Rich mode (for example only successful
             // standalone terminal output): retain no converted content.
-            self.entries.clear();
+            self.entries.retain(|entry| entry.role == ChatRole::Message);
+            self.suffix_start = None;
         }
         let first = self.published.is_empty();
         for entry in &mut transcript.entries {
@@ -1615,6 +1686,7 @@ mod tests {
         }
     }
 
+    // Hard-won: 27bd415fa: old Messages retained the intervening window.
     #[test]
     fn browser_suffix_matches_full_window_across_topology_and_content_changes() {
         let mut session = MaterializedSession::empty("suffix-topology");
@@ -1688,8 +1760,8 @@ mod tests {
         let mut projector = BrowserTranscriptProjector::default();
         for round in 0..3 {
             assert_eq!(
-                serde_json::to_value(projector.project(&session)).unwrap(),
-                serde_json::to_value(reference.project(&session)).unwrap()
+                serde_json::to_vec(&projector.project(&session)).unwrap(),
+                serde_json::to_vec(&reference.project(&session)).unwrap()
             );
             assert!(projector.entries.len() < 200);
             // Equal content with a new Arc exercises field-equality reuse.
@@ -1709,26 +1781,50 @@ mod tests {
                 changed.last_changed_at_ms += 1;
             }
         }
-        // An old Message remains visible despite the line budget. Extending
-        // to it must also preserve all intervening topology and identities.
-        session.transcript[0] = item(
-            1,
-            TranscriptBody::Message {
-                event: Box::new(mj_core::mailbox::MailboxEvent {
-                    key: "old-message".into(),
-                    source: "session_message".into(),
-                    wake: false,
-                    created_at_ms: 1,
-                    body: mj_core::mailbox::MailboxEventBody::ParentMessage {
-                        text: "old message".into(),
+        // Messages split tool groups and restart runs; change their placement
+        // and content over successive projections, including rebuilt Arcs.
+        for position in [399, 400, 402, 403, 1_499, 1_500, 1_502, 1_503] {
+            session.transcript[position - 1] = tool(position as u64, json!([]));
+        }
+        for position in [100, 101, 103, 104] {
+            session.transcript[position - 1] = item(
+                position as u64,
+                TranscriptBody::System {
+                    text: SESSION_RESTART_TEXT.into(),
+                },
+            );
+        }
+        for round in 0..4 {
+            for index in [0, 2, 4, 12, 101, 400, 1_500, 2_800] {
+                session.transcript[index] = item(
+                    index as u64 + 1,
+                    TranscriptBody::Message {
+                        event: Box::new(mj_core::mailbox::MailboxEvent {
+                            key: format!("message-{index}-{round}"),
+                            source: "session_message".into(),
+                            wake: false,
+                            created_at_ms: 1,
+                            body: mj_core::mailbox::MailboxEventBody::ParentMessage {
+                                text: format!(
+                                    "message {index} round {round}\nMailbox events:\n  - payload"
+                                ),
+                            },
+                        }),
                     },
-                }),
-            },
-        );
-        assert_eq!(
-            serde_json::to_value(projector.project(&session)).unwrap(),
-            serde_json::to_value(reference.project(&session)).unwrap()
-        );
+                );
+            }
+            session.applied_event_ordinal += 1;
+            assert_eq!(
+                serde_json::to_vec(&projector.project(&session)).unwrap(),
+                serde_json::to_vec(&reference.project(&session)).unwrap()
+            );
+            assert!(projector.entries.len() < 200);
+            session.transcript = session
+                .transcript
+                .iter()
+                .map(|item| Arc::new((**item).clone()))
+                .collect();
+        }
     }
 
     #[test]
