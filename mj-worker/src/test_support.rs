@@ -17,6 +17,21 @@ pub(crate) async fn wait_for<T>(
 #[cfg(unix)]
 use std::path::Path;
 
+/// A real file read that cannot finish until this writer is dropped. Keeping
+/// the gate in the test also releases the read if an assertion panics.
+#[cfg(unix)]
+pub(crate) fn stalled_read_file(path: &Path) -> std::fs::File {
+    use std::os::unix::ffi::OsStrExt;
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: name is a terminated path, and mkfifo retains no pointer.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap()
+}
+
 /// Run Git in `repository` and return its trimmed standard output.
 ///
 /// Every test that builds a repository needs this, so it lives here rather

@@ -499,6 +499,7 @@ async fn credential_request(
         },
         &Ok(endpoint.clone()),
         &endpoint.home,
+        &Default::default(),
     )
     .await;
     match response.body {
@@ -1804,6 +1805,254 @@ async fn next_command(commands: &mut mpsc::Receiver<CommandRequest>) -> CommandR
         .expect("the ACP command channel closed")
 }
 
+// Hard-won: #1515: credential installs did not resume an auth-failed Claude turn.
+#[tokio::test]
+async fn authentication_recovery_handles_both_orders_of_install_and_failure() {
+    use base64::Engine as _;
+    for install_first in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("relay");
+        let home = temp.path().join("claude");
+        std::fs::create_dir_all(&home).unwrap();
+        let path = home.join(".credentials.json");
+        let old = br#"{"claudeAiOauth":{"accessToken":"old-access","refreshToken":"remove-me","expiresAt":1000}}"#;
+        let stripped = br#"{"claudeAiOauth":{"accessToken":"old-access","expiresAt":1000}}"#;
+        let fresh = br#"{"claudeAiOauth":{"accessToken":"new-access","expiresAt":2000}}"#;
+        std::fs::write(&path, old).unwrap();
+        let mut durable = DurableRelay::open(&root, SESSION_ID, "test").unwrap();
+        durable.set_turn_verdict_harness(HarnessKind::Claude);
+        durable.authentication_login_path = Some(path.clone());
+        let initial_revision = durable.login_identity.snapshot().0;
+        let relay = Arc::new(RelayCell::new(durable));
+        let (events, event_rx) = mpsc::channel(16);
+        let (wakes, wake_rx) = mpsc::channel(1);
+        let (commands, mut command_rx) = mpsc::channel(8);
+        let coordinator = tokio::spawn(run_relay_coordinator(
+            relay.clone(),
+            event_rx,
+            wake_rx,
+            commands.clone(),
+        ));
+        events
+            .send(RuntimeEvent::SessionConfigured {
+                config_options: vec![],
+            })
+            .await
+            .unwrap();
+
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let (fatal, _failures) = fatal_reports();
+        let serving = tokio::spawn(unix::serve_client(
+            server,
+            relay.clone(),
+            wakes,
+            Ok(CredentialEndpoint {
+                harness: HarnessKind::Claude,
+                home,
+                marker: path,
+                no_github_credentials: false,
+            }),
+            Some(commands),
+            fatal,
+        ));
+        let (read, mut writer) = client.into_split();
+        let mut reader = BufReader::new(read).lines();
+        delegation_exchange(
+            &mut reader,
+            &mut writer,
+            RelayRequest::Submit {
+                command_id: "user-request".into(),
+                command: prompt("finish this task"),
+            },
+        )
+        .await;
+        assert_prompt(
+            next_command(&mut command_rx).await,
+            "user-request",
+            "finish this task",
+        );
+        let mut diagnostic = mj_core::diagnostic::TurnDiagnostic::from_acp(
+            &agent_client_protocol::Error::auth_required(),
+        );
+        diagnostic.login_fingerprint =
+            Some(mj_core::credentials::credential_fingerprint(b"old-access"));
+        let failed = RuntimeEvent::PromptFinished {
+            request_id: "user-request".into(),
+            stop_reason: "error".into(),
+            diagnostic: Some(diagnostic),
+            usage: None,
+        };
+        if !install_first {
+            events.send(failed.clone()).await.unwrap();
+            wait_until(
+                || {
+                    relay
+                        .lock()
+                        .unwrap()
+                        .operational_state()
+                        .continuation
+                        .completed_command_id
+                        .as_deref()
+                        == Some("user-request")
+                },
+                "failure was not recorded",
+            )
+            .await;
+        }
+        // A document change without an access-token change is not recovery.
+        delegation_exchange(
+            &mut reader,
+            &mut writer,
+            RelayRequest::InstallCredentials {
+                data: base64::engine::general_purpose::STANDARD.encode(stripped),
+            },
+        )
+        .await;
+        events
+            .send(RuntimeEvent::Warning {
+                message: "unchanged-login-checked".into(),
+            })
+            .await
+            .unwrap();
+        wait_until(
+            || recorded_warning(&relay, "unchanged-login-checked"),
+            "credential check was not drained",
+        )
+        .await;
+        assert!(command_rx.try_recv().is_err());
+        delegation_exchange(
+            &mut reader,
+            &mut writer,
+            RelayRequest::InstallCredentials {
+                data: base64::engine::general_purpose::STANDARD.encode(fresh),
+            },
+        )
+        .await;
+        if install_first {
+            // A startup sample that predates the push cannot overwrite the
+            // identity published with the successful install.
+            relay.lock().unwrap().login_identity.observe(
+                initial_revision,
+                Some(mj_core::credentials::credential_fingerprint(b"old-access")),
+            );
+            events.send(failed).await.unwrap();
+        }
+        let CommandRequest::Prompt {
+            request_id,
+            prompt: retry,
+        } = next_command(&mut command_rx).await
+        else {
+            panic!("recovery must dispatch a prompt");
+        };
+        assert!(request_id.starts_with("auth-retry-"));
+        assert_eq!(retry, mj_core::continuation::prompt_blocks());
+        assert_eq!(
+            relay
+                .lock()
+                .unwrap()
+                .operational_state()
+                .continuation
+                .user_command_id
+                .as_deref(),
+            Some("user-request")
+        );
+        // Repeated delivery cannot queue another recovery while the first runs.
+        delegation_exchange(
+            &mut reader,
+            &mut writer,
+            RelayRequest::InstallCredentials {
+                data: base64::engine::general_purpose::STANDARD.encode(fresh),
+            },
+        )
+        .await;
+        events
+            .send(RuntimeEvent::Warning {
+                message: "duplicate-login-checked".into(),
+            })
+            .await
+            .unwrap();
+        wait_until(
+            || recorded_warning(&relay, "duplicate-login-checked"),
+            "duplicate credential check was not drained",
+        )
+        .await;
+        assert!(command_rx.try_recv().is_err());
+        events
+            .send(RuntimeEvent::PromptFinished {
+                request_id,
+                stop_reason: "EndTurn".into(),
+                diagnostic: None,
+                usage: None,
+            })
+            .await
+            .unwrap();
+        events.send(RuntimeEvent::Stopped).await.unwrap();
+        coordinator.await.unwrap().unwrap();
+        writer.shutdown().await.unwrap();
+        serving.await.unwrap().unwrap();
+    }
+}
+
+// Hard-won: #1515: awaiting credential I/O parked the coordinator's event loop.
+#[tokio::test]
+async fn a_stalled_login_read_does_not_block_relay_events_or_shutdown() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("login.json");
+    let gate = crate::test_support::stalled_read_file(&path);
+    let mut durable = DurableRelay::open(root.path(), SESSION_ID, "test").unwrap();
+    durable.set_turn_verdict_harness(HarnessKind::Claude);
+    durable.authentication_login_path = Some(path);
+    durable
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+    submit(&mut durable, "user-request", prompt("finish this task"));
+    durable.claim_pending_commands(true).unwrap();
+    let mut diagnostic = mj_core::diagnostic::TurnDiagnostic::from_acp(
+        &agent_client_protocol::Error::auth_required(),
+    );
+    diagnostic.login_fingerprint = Some("old-login".into());
+    durable
+        .record_command_completed(
+            "user-request",
+            mj_core::relay::RelayCommandOutcome::Prompt {
+                work_facts: None,
+                stop_reason: "error".into(),
+                diagnostic: Some(diagnostic),
+                usage: None,
+            },
+        )
+        .unwrap();
+    let relay = Arc::new(RelayCell::new(durable));
+    let (events, event_rx) = mpsc::channel(4);
+    let (_wakes, wake_rx) = mpsc::channel(1);
+    let (commands, _command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(run_relay_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        commands,
+    ));
+    events
+        .send(RuntimeEvent::Warning {
+            message: "read-is-stalled".into(),
+        })
+        .await
+        .unwrap();
+    wait_until(
+        || recorded_warning(&relay, "read-is-stalled"),
+        "login read blocked runtime events",
+    )
+    .await;
+    events.send(RuntimeEvent::Stopped).await.unwrap();
+    crate::test_support::wait_for("coordinator shutdown during a login read", coordinator)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(gate);
+}
+
 /// Wait for a coordinator-side condition. Everything this guards against
 /// wedges permanently, so a generous deadline still fails fast enough.
 async fn wait_until(mut condition: impl FnMut() -> bool, blocked: &str) {
@@ -1985,6 +2234,7 @@ async fn an_empty_kimi_turn_with_a_journalled_login_failure_reports_the_failure(
                 code: Some(mj_core::acp::PROMPT_UNANSWERED_STOP_REASON.into()),
                 http_status: None,
                 reset_at: None,
+                login_fingerprint: None,
             }),
         },
     ];
@@ -5771,6 +6021,7 @@ async fn daemon_restart_records_one_marker_after_recovering_in_flight_work() {
     );
 }
 
+// Hard-won: #1515: two relay locks in LaunchSpec field initializers deadlocked startup.
 #[tokio::test]
 async fn first_daemon_start_does_not_record_a_restart_marker() {
     let temp = tempfile::tempdir().unwrap();

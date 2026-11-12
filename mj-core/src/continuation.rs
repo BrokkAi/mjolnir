@@ -276,6 +276,8 @@ generated_prompts! {
         AutoContinue => "auto-continue-",
         /// The retry a quota recovery submits.
         QuotaRetry => "quota-retry-",
+        /// Resume a turn whose rejected Claude access token was replaced.
+        AuthenticationRetry => "auth-retry-",
         /// Review findings forwarded to the author. No current producer; older
         /// transcripts still carry it.
         ReviewForward => "review-forward-",
@@ -323,7 +325,10 @@ impl GeneratedPrompt {
     /// Retry ids end in the ordinal of the turn they retry, and nothing else
     /// counts as one.
     pub const fn is_retry(self) -> bool {
-        matches!(self, Self::ServerRetry | Self::CapacityRetry)
+        matches!(
+            self,
+            Self::ServerRetry | Self::CapacityRetry | Self::AuthenticationRetry
+        )
     }
 
     fn recognizes(self, command_id: &str) -> bool {

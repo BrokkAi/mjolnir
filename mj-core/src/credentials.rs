@@ -52,6 +52,39 @@ pub fn credential_fingerprint(bytes: &[u8]) -> String {
     lower_hex(Sha256::digest(bytes))
 }
 
+/// The staged OAuth login, excluding setup tokens and API-key/Bedrock launches.
+pub fn claude_oauth_login_path(
+    environment: &std::collections::BTreeMap<String, String>,
+) -> Option<PathBuf> {
+    if [
+        CLAUDE_OAUTH_TOKEN_ENV,
+        "ANTHROPIC_API_KEY",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+    ]
+    .iter()
+    .any(|key| {
+        environment
+            .get(*key)
+            .is_some_and(|value| !value.is_empty() && value != "0")
+    }) {
+        return None;
+    }
+    let home = Path::new(environment.get(HarnessKind::Claude.home_env())?);
+    Some(crate::config::harness_authentication_marker(
+        HarnessKind::Claude,
+        home,
+    ))
+}
+
+/// Identity of the access token itself. Stripping a refresh token or rewriting
+/// the JSON cannot authorize recovery of a prompt that used the same login.
+pub fn claude_access_token_fingerprint(bytes: &[u8]) -> Option<String> {
+    let login: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let token = login.pointer("/claudeAiOauth/accessToken")?.as_str()?;
+    (!token.is_empty()).then(|| credential_fingerprint(token.as_bytes()))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GithubTokenSnapshot {
     pub present: bool,
@@ -603,9 +636,10 @@ pub fn turn_diagnostic_reports_auth_failure(diagnostic: &TurnDiagnostic) -> bool
         return false;
     }
     diagnostic.code.as_deref().is_some_and(|code| {
-        AUTH_FAILURE_ERROR_KINDS
-            .iter()
-            .any(|kind| code.eq_ignore_ascii_case(kind))
+        code == agent_client_protocol::ErrorCode::AUTH_REQUIRED.to_string()
+            || AUTH_FAILURE_ERROR_KINDS
+                .iter()
+                .any(|kind| code.eq_ignore_ascii_case(kind))
     }) || contains_auth_failure_signature(&diagnostic.message)
 }
 
