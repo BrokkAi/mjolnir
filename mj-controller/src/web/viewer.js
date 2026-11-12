@@ -994,7 +994,7 @@ function renderLaunchFailures() {
 
 function renderWorkspaces() {
   const parentId = route.subagentParentId;
-  const workspaces = [{ id: 'notifications', name: `Notifications (${notificationRows().length})` }, ...(snapshot.workspaces || [])];
+  const workspaces = [{ id: 'notifications', name: 'Notifications' }, ...(snapshot.workspaces || [])];
   workspaceSelect.classList.toggle('hidden', Boolean(parentId) || !workspaces.length);
   subagentWorkspace.classList.toggle('hidden', !parentId);
   if (parentId) {
@@ -1021,6 +1021,8 @@ function renderWorkspaces() {
       }),
     );
   }
+  // Attention changes update the existing option rather than rebuilding an open picker.
+  workspaceSelect.options[0].textContent = `Notifications (${notificationRows().length})`;
   workspaceSelect.value = selectedWorkspaceId() || '';
 }
 

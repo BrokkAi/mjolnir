@@ -1483,6 +1483,7 @@ test('notifications retain handled entries below the band until leaving or reloa
   const ids = () => page.locator('.notification-entry').evaluateAll(nodes => nodes.map(node => node.dataset.notificationId));
   expect(await ids()).toEqual(['notice-b', 'notice-a']);
   await expect(page.locator('[data-notification-id="unread-notice"]')).toHaveCount(0);
+  await page.evaluate(() => { window.notificationOption = document.querySelector('#workspace-select option'); });
   const noticeCard = page.locator('[data-notification-id="notice-b"] .session');
   await noticeCard.dispatchEvent('pointerdown', { pointerId: 1, button: 0, isPrimary: true, clientX: 10, clientY: 10 });
   await expect(noticeCard.locator('.session-menu')).toBeVisible();
@@ -1493,6 +1494,8 @@ test('notifications retain handled entries below the band until leaving or reloa
   b.capabilities = { open: false, resume: true };
   await refresh(page, state);
   expect(await ids()).toEqual(['notice-a', 'notice-b']);
+  expect(await page.evaluate(() => document.querySelector('#workspace-select option') === window.notificationOption)).toBe(true);
+  await expect(page.locator('#workspace-select option').first()).toHaveText('Notifications (1)');
   await expect(noticeCard.locator('.session-attention-item')).toHaveCount(0);
   await expect(page.locator('[data-notification-id="notice-b"]')).not.toContainText('Cleared');
   await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toHaveCount(0);
