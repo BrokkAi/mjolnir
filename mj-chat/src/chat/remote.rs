@@ -1579,6 +1579,66 @@ mod tests {
         ) {
             return;
         }
+        // The session actor fixture and the control endpoint change independently:
+        // require upload acknowledgement before the actor receives a reference.
+        use mj_client::daemon::{
+            DaemonAction, DaemonMetadata, DaemonPlacement, DaemonReply, PROTOCOL_VERSION,
+            RequestEnvelope, ResponseEnvelope, read_frame, write_frame,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address: listener.local_addr().unwrap(),
+            token: "test-upload-token".into(),
+            started_at: "now".into(),
+            build_version: "test".into(),
+            instance_id: "chat-upload".into(),
+            placement: DaemonPlacement::Host,
+        };
+        let metadata_path = mj_client::daemon::metadata_path();
+        std::fs::create_dir_all(metadata_path.parent().unwrap()).unwrap();
+        std::fs::write(metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        let uploads = tokio::spawn(async move {
+            for _ in 0..4 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut body = Vec::new();
+                loop {
+                    let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                    assert_eq!(request.token, metadata.token);
+                    let DaemonAction::UploadChunk { bytes, finished } = request.action else {
+                        panic!("expected upload fragment");
+                    };
+                    body.extend_from_slice(&bytes);
+                    if !finished {
+                        continue;
+                    }
+                    let DaemonAction::InstallAttachment {
+                        session_id,
+                        reference,
+                        bytes,
+                    } = serde_json::from_slice(&body).unwrap()
+                    else {
+                        panic!("expected attachment installation");
+                    };
+                    mj_core::attachment::AttachmentStore::controller(&session_id)
+                        .unwrap()
+                        .install(&reference, &bytes)
+                        .unwrap();
+                    write_frame(
+                        &mut stream,
+                        &ResponseEnvelope {
+                            protocol_version: PROTOCOL_VERSION,
+                            request_id: request.request_id,
+                            result: Ok(DaemonReply::AttachmentInstalled(reference)),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    break;
+                }
+            }
+        });
         let mut fixture = mj_client::session::replacement_session_test_fixture("image-session", 19);
         let materialized = mj_core::state::MaterializedSession::empty("image-session");
         let mut operational =
@@ -1711,6 +1771,7 @@ mod tests {
             fixture.submitted.try_recv().is_err(),
             "oversized input must not reach the actor"
         );
+        uploads.await.unwrap();
     }
 
     #[tokio::test]
