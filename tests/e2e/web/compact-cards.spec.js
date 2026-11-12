@@ -1149,17 +1149,17 @@ test('earlier messages page backwards, retry errors, and preserve the live draft
   await expect(reader).toContainText('First stored answer');
   await expect(reader).toContainText('Recent stored request');
   await expect(page.locator('#earlier-messages')).toBeHidden();
-  expect(queries).toEqual(['?before_position=2&before_id=', '?before_position=101&before_id=user%3A101', '?before_position=101&before_id=user%3A101']);
+  expect(queries).toEqual(['?before_position=1&before_id=', '?before_position=101&before_id=user%3A101', '?before_position=101&before_id=user%3A101']);
   await expect(page.locator('#prompt-text')).toHaveText('Keep my draft');
 });
 
 // Hard-won: inline history used stable IDs to match live numeric positions.
-test('inline history reconciles clipped and grouped live rows and continues overlap pages', async ({ page }) => {
+test('inline history leaves live rows intact and continues pages without visible rows', async ({ page }) => {
   const state = await mount(page, [session('history', 'alpha', 'Alpha')]);
   await page.addStyleTag({ content: '.entry.tone-thought { display: none; }' });
   const live = transcript('Newest live answer');
   live.entries[0].id = 30;
-  live.entries.unshift({ ...live.entries[0], id: 20, lines: ['[… 12 earlier lines omitted …]', 'Clipped tail'] });
+  live.entries.unshift({ ...live.entries[0], id: 20, lines: ['Complete live row'] });
   await page.route('**/api/conversations/history*', route => route.fulfill({ json: live }));
   const queries = [];
   await page.route('**/api/v1/sessions/history/history*', route => {
@@ -1172,20 +1172,20 @@ test('inline history reconciles clipped and grouped live rows and continues over
     return route.fulfill({ json: pages[queries.length - 1] });
   });
   await card(page, 'history').click();
-  await expect(page.locator('#conversation-feed')).toContainText('Clipped tail');
+  await expect(page.locator('#conversation-feed')).toContainText('Complete live row');
   await page.locator('#earlier-messages').click();
   const reader = page.locator('#conversation-feed');
   await expect(reader).toContainText('Oldest stored request');
-  await expect(reader).toContainText('Restored beginning');
+  await expect(reader).toContainText('Complete live row');
   await expect(reader.locator('article:visible')).toHaveCount(3);
   expect(await reader.locator('article:visible').allTextContents()).toEqual([
-    expect.stringContaining('Oldest stored request'), expect.stringContaining('Restored beginning'), expect.stringContaining('Newest live answer'),
+    expect.stringContaining('Oldest stored request'), expect.stringContaining('Complete live row'), expect.stringContaining('Newest live answer'),
   ]);
   state.snapshot.sessions[0].latest_event_ordinal = 31;
   await refresh(page, state);
-  await expect(reader).toContainText('Restored beginning');
+  await expect(reader).toContainText('Complete live row');
   await expect(reader.locator('article:visible')).toHaveCount(3);
-  expect(queries).toEqual(['?before_position=21&before_id=', '?before_position=20&before_id=agent%3A20', '?before_position=10&before_id=thought%3A10']);
+  expect(queries).toEqual(['?before_position=20&before_id=', '?before_position=20&before_id=agent%3A20', '?before_position=10&before_id=thought%3A10']);
   await expect(page.locator('#earlier-messages')).toBeHidden();
 });
 
@@ -1201,10 +1201,9 @@ test('inline history fills an advancing live window and keeps older paging', asy
   await page.route('**/api/v1/sessions/history/history*', route => {
     const before = Number(new URL(route.request().url()).searchParams.get('before_position'));
     queries.push(before);
-    const positions = before === 101 ? [99, 100] : before === 151 ? [100, 120] : [1];
-    // The first page captures row 100 while it is still changing; the gap
-    // page carries its final stored text.
-    const items = positions.map(item).map(row => before === 101 && row.position === 100 ? { ...row, text: 'Row 100 draft' } : row);
+    const positions = before === 100 ? [99] : before === 150 ? [100, 120] : [1];
+    // The gap contains rows that have just left the live window.
+    const items = positions.map(item);
     return route.fulfill({ json: { items, before: before === 99 ? null : { position: positions[0], stable_id: `agent:${positions[0]}` } } });
   });
   await card(page, 'history').click();
@@ -1216,77 +1215,12 @@ test('inline history fills an advancing live window and keeps older paging', asy
   await refresh(page, state);
   await expect(reader).toContainText('Row 120');
   expect(await reader.locator('article').allTextContents()).toEqual([99, 100, 120, 150, 250].map(n => expect.stringContaining(`Row ${n}`)));
-  await expect(reader).not.toContainText('Row 100 draft');
   await page.locator('#conversation-scroll').evaluate(node => { node.scrollTop = 0; node.dispatchEvent(new Event('scroll')); });
   await expect(reader).toContainText('Row 1');
-  expect(queries).toEqual([101, 151, 99]);
+  expect(queries).toEqual([100, 150, 99]);
   await expect(reader.locator('article')).toHaveCount(6);
 });
 
-// Hard-won: restored history froze a clipped live row that was still growing.
-test('inline history refetches a restored clipped row that keeps growing', async ({ page }) => {
-  const state = await mount(page, [session('history', 'alpha', 'Alpha')]);
-  const live = transcript('Newest live answer');
-  live.entries[0].id = 30;
-  live.entries.unshift({ ...live.entries[0], id: 20, updated_seq: 20, lines: ['[… 12 earlier lines omitted …]', 'Clipped tail'] });
-  await page.route('**/api/conversations/history*', route => route.fulfill({ json: live }));
-  const queries = [];
-  let stored = 'Restored beginning\nClipped tail';
-  await page.route('**/api/v1/sessions/history/history*', route => {
-    const search = new URL(route.request().url()).search;
-    queries.push(search);
-    if (search === '?before_position=21&before_id=') {
-      return route.fulfill({ json: { items: [{ position: 20, stable_id: 'agent:20', role: 'agent', text: stored }], before: { position: 20, stable_id: 'agent:20' } } });
-    }
-    return route.fulfill({ json: { items: [], before: null } });
-  });
-  await card(page, 'history').click();
-  await page.locator('#earlier-messages').click();
-  const reader = page.locator('#conversation-feed');
-  await expect(reader).toContainText('Restored beginning');
-  // The row keeps streaming: the live feed carries a newer clipped version.
-  stored = 'Restored beginning\nClipped tail\nNew streamed line';
-  live.entries[0] = { ...live.entries[0], updated_seq: 25, lines: ['[… 13 earlier lines omitted …]', 'Clipped tail', 'New streamed line'] };
-  state.snapshot.sessions[0].latest_event_ordinal = 32;
-  await refresh(page, state);
-  await expect(reader).toContainText('New streamed line');
-  await expect(reader).toContainText('Restored beginning');
-  expect(queries.filter(query => query === '?before_position=21&before_id=').length).toBeGreaterThanOrEqual(2);
-});
-
-// Hard-won: a clipped-row refetch was dropped while a boundary gap was pending.
-test('inline history refetches a changed clipped row after a pending boundary gap', async ({ page }) => {
-  const state = await mount(page, [session('history', 'alpha', 'Alpha')]);
-  const live = transcript('Row 200');
-  live.entries[0].id = 200;
-  live.entries.unshift({ ...live.entries[0], id: 100, updated_seq: 100, lines: ['[… 5 earlier lines omitted …]', 'Row 100 tail'] });
-  await page.route('**/api/conversations/history*', route => route.fulfill({ json: live }));
-  const queries = [];
-  let row150 = 'Row 150 beginning\nRow 150 tail';
-  await page.route('**/api/v1/sessions/history/history*', route => {
-    const before = Number(new URL(route.request().url()).searchParams.get('before_position'));
-    queries.push(before);
-    const items = before === 101 ? [{ position: 100, stable_id: 'agent:100', role: 'agent', text: 'Row 100 beginning\nRow 100 tail' }]
-      : before === 151 ? [{ position: 120, stable_id: 'agent:120', role: 'agent', text: 'Row 120' }, { position: 150, stable_id: 'agent:150', role: 'agent', text: row150 }]
-      : [];
-    return route.fulfill({ json: { items, before: items.length ? { position: items[0].position, stable_id: items[0].stable_id } : null } });
-  });
-  await card(page, 'history').click();
-  await page.locator('#earlier-messages').click();
-  const reader = page.locator('#conversation-feed');
-  await expect(reader).toContainText('Row 100 beginning');
-  // One refresh both advances the live boundary and makes the new oldest row a
-  // growing clipped row.
-  live.entries = [
-    { ...live.entries[0], id: 150, stable_id: undefined, updated_seq: 160, lines: ['[… 5 earlier lines omitted …]', 'Row 150 tail'] },
-    { ...live.entries[1], id: 250, lines: ['Row 250'] },
-  ];
-  state.snapshot.sessions[0].latest_event_ordinal = 251;
-  await refresh(page, state);
-  await expect(reader).toContainText('Row 120');
-  await expect(reader).toContainText('Row 150 beginning');
-  await expect(reader).not.toContainText('earlier lines omitted');
-});
 
 test('replacing the live window keeps a mid-feed live row in place', async ({ page }) => {
   const state = await mount(page, [session('history', 'alpha', 'Alpha')]);

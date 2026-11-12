@@ -19,11 +19,9 @@ Scrolling to the top of a conversation loads stored older rows above the live fe
 
 ## Decision Log
 
-Use one conversation-owned paging state, retired with the existing request generation. Keep fetched rows across live refreshes, deduplicate by stored stable identity, and reuse `paintEntry`. Preserve an existing visible row's screen offset when prepending. Show errors with a retry button. Keep BROWSER_TRANSCRIPT_LINES at 1,000 because rendered lines and stored items are different units.
+2026-11-12 user decision: remove the browser's 1,000-line clip. Render the complete live SessionTail, bounded to PROJECTION_TAIL_ITEMS = 512 stored items. Rich rendering is sufficient; browser full-text access is not required. Remove suffix growth, sparse Message caching and EntryFacts; reuse converted entries over the complete input, release terminal-only detail, and retain Arc-shared published rows.
 
-2026-11-12 review corrections: use stored position against live id (the first member position for collapsed groups), checking stable identity only when live supplies it. Start at oldest position + 1 with an empty tie-breaker to include the oldest row for clipped-text reconciliation. Keep full historical text when a refreshed live projection remains clipped. Treat newer stored members as owned by the live window. Continue requests within the same cancellable generation until a rendered row has positive height or the cursor is exhausted; errors retain the retry affordance.
-
-2026-11-12 advancing-window correction: retain every fetched item, including live overlap. A single generation-owned loader serializes older paging and a separate gap cursor when a replacement advances the live lower boundary. Gap pages stop at the previous live boundary, keep the older cursor intact, and share cancellation, retry and anchored insertion. Sort insertions by position; live coverage hides retained overlapping members until they age out.
+Inline history requests strictly older positions with before_position equal to the oldest live position and an empty before_id. Remove clipped-row restoration, restoredFor stamps, refetch queues and overlap retention/repainting. A single generation-owned loader retains older paging and gap cursors. When the live boundary advances, fetch backwards from the new boundary to the previous one. Retain cancellation, automatic continuation for invisible pages, visible retry on every failure, and numeric live-row scroll anchors.
 
 ## Surprises & Discoveries
 
@@ -39,9 +37,9 @@ Failed history requests retain their cursor for retry. Session changes abort req
 
 ## Outcomes & Retrospective
 
-Inline loading, retry, scroll anchoring, exhaustion and late-response rejection pass deterministic browser tests. Overlapping mailbox rows retain one identity each. Web unit tests pass; workspace clippy and formatting pass. Controller suites passed 674 tests with one stale numeric fixture, whose corrected focused rerun passed. Client transcript tests passed 11 cases with one expected identity golden update, whose focused rerun passed. BROWSER_TRANSCRIPT_LINES stays unchanged. The complete audit is included in the parent report directory.
+Inline loading, retry, scroll anchoring, exhaustion and late-response rejection pass deterministic browser tests. Overlapping mailbox rows retain one identity each. Web unit tests pass; workspace clippy and formatting pass. Controller suites passed 674 tests with one stale numeric fixture, whose corrected focused rerun passed. Client transcript tests passed 11 cases with one expected identity golden update, whose focused rerun passed. This was the initial implementation; the subsequent user decision above removes the line budget. The complete audit is included in the parent report directory.
 
-Updated 2026-11-12 after browser validation and tail audit; documented CSS and fixture findings.
+Initial implementation updated 2026-11-12 after browser validation and tail audit; documented CSS and fixture findings.
 
 Review correction validation (2026-11-12): web unit files pass (project discovery requires elevated subprocess access); deterministic Playwright: 120 passed, 3 skipped. Final focused paging/mailbox checks: three passed, with the fourth passing after replacing a test-only call to a module-private function with the real snapshot refresh surface. Controller `server::`: 261 passed. No Rust changes; clippy/fmt not required. Mailbox history fixtures now carry their real stored positions. No push or review requested, per delegated scope.
 

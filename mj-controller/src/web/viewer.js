@@ -1414,8 +1414,6 @@ async function openNativeHistory(owner, agent) {
 const earlierMessages = document.querySelector('#earlier-messages');
 let inlineHistory = null;
 const liveHistoryRows = new Map();
-const clippedHistoryRow = entry => /^\[… \d+ earlier lines omitted …\]/.test(entry.lines?.[0] || '');
-const historyMatches = (live, stored) => live.id === stored.position && (!live.stable_id || live.stable_id === stored.stable_id);
 function resetInlineHistory() {
   inlineHistory?.controller.abort();
   inlineHistory = null;
@@ -1429,17 +1427,12 @@ async function loadInlineHistory() {
   if (!inlineHistory) inlineHistory = {
     session: currentSession, generation: conversationGeneration,
     controller: new AbortController(),
-    // Positions are integral; the next position includes every stored member
-    // of the oldest row, including a clipped row or a collapsed group.
-    before: liveHistoryRows.size ? { position: Math.min(...[...liveHistoryRows.values()].map(entry => entry.id)) + 1, stable_id: '' } : null,
+    before: liveHistoryRows.size ? { position: Math.min(...[...liveHistoryRows.values()].map(entry => entry.id)), stable_id: '' } : null,
     done: false, loading: false,
     entries: new Map(),
-    // Positions of restored clipped rows whose live version changed; the
-    // loader fetches them once any boundary gap is finished.
-    refetch: new Set(),
   };
   const state = inlineHistory;
-  if (state.loading || (state.done && !state.gap && !state.refetch.size)) return;
+  if (state.loading || (state.done && !state.gap)) return;
   state.loading = true;
   state.failed = false;
   earlierMessages.disabled = true;
@@ -1448,12 +1441,6 @@ async function loadInlineHistory() {
     let visibleAdded, gap;
     do {
       visibleAdded = false;
-      if (!state.gap && state.refetch.size) {
-        // One backwards pass from the newest requested row to the oldest.
-        const positions = [...state.refetch];
-        state.refetch.clear();
-        state.gap = { before: { position: Math.max(...positions) + 1, stable_id: '' }, boundary: Math.min(...positions) };
-      }
       const query = new URLSearchParams();
       gap = state.gap;
       const before = gap ? gap.before : state.before;
@@ -1468,27 +1455,9 @@ async function loadInlineHistory() {
       const rows = [];
       const oldest = liveHistoryRows.size ? Math.min(...[...liveHistoryRows.values()].map(entry => entry.id)) : Infinity;
       for (const item of page.items) {
-        const live = [...liveHistoryRows.values()].find(row => historyMatches(row, item));
+        if (item.position >= oldest || state.entries.has(item.stable_id)) continue;
         const entry = { ...item, id: item.position, lines: item.text.split('\n'), label: item.label || item.role, tone: item.role };
-        // A later page carries the stored content as it is now, so it always
-        // replaces a copy retained while the item was still changing.
-        const known = state.entries.has(item.stable_id);
         state.entries.set(item.stable_id, entry);
-        if (item.position >= oldest) {
-          // All members of a collapsed live group belong to that live row.
-          if (!live || !clippedHistoryRow(live)) continue;
-          // The full stored text stands in for a clipped live row only while
-          // that row keeps this update; renderEntries checks it.
-          entry.restoredFor = live.updated_seq;
-          const node = entryNodes.get(live.stable_id || live.id);
-          if (node) paintEntry(node, { ...live, lines: entry.lines }, null);
-          continue;
-        }
-        if (known) {
-          const shown = entryNodes.get(item.stable_id);
-          if (shown?.dataset.history) paintEntry(shown, entry, null);
-          continue;
-        }
         const node = el('article');
         node.dataset.entryId = item.stable_id;
         node.dataset.history = '1';
@@ -1518,10 +1487,11 @@ async function loadInlineHistory() {
       earlierMessages.textContent = 'Earlier messages';
       visibleAdded = rows.some(node => node.getBoundingClientRect().height > 0);
       if (anchor) feedScroll.scrollTop += anchor.getBoundingClientRect().top - top;
-    } while (state.gap || state.refetch.size || (!visibleAdded && !state.done && !gap));
+    } while (state.gap || (!visibleAdded && !state.done && !gap));
   } catch (error) {
     if (inlineHistory === state && !state.controller.signal.aborted) {
       state.failed = true;
+      earlierMessages.classList.remove('hidden');
       earlierMessages.textContent = `Retry earlier messages: ${error.message}`;
     }
   } finally {
@@ -8200,9 +8170,7 @@ function renderEntries(entries, replace) {
     if (inlineHistory && oldest > previousOldest && Number.isFinite(oldest)) {
       // One loader owns both cursors, including resets during an in-flight page.
       const boundary = inlineHistory.gap?.boundary ?? previousOldest;
-      // Include the new oldest live position, as the first page does, so a
-      // clipped oldest row gets its full stored text.
-      inlineHistory.gap = { before: { position: oldest + 1, stable_id: '' }, boundary };
+      inlineHistory.gap = { before: { position: oldest, stable_id: '' }, boundary };
       earlierMessages.classList.remove('hidden');
       void loadInlineHistory();
     }
@@ -8220,19 +8188,7 @@ function renderEntries(entries, replace) {
   }
   let appended = false;
   let lastUserText = null;
-  for (let entry of entries) {
-    const stored = inlineHistory && [...inlineHistory.entries.values()].find(row => historyMatches(entry, row));
-    if (stored && clippedHistoryRow(entry)) {
-      if (stored.restoredFor === entry.updated_seq) {
-        entry = { ...entry, lines: stored.lines };
-      } else {
-        // The live row changed after its full text was fetched (it is still
-        // growing): show the live lines and fetch the row again through the
-        // one serialized loader, after any pending boundary gap.
-        inlineHistory.refetch.add(entry.id);
-        void loadInlineHistory();
-      }
-    }
+  for (const entry of entries) {
     lastUserText = turnPromptText(entry, lastUserText);
     const unansweredPrompt = unansweredPromptFor(entry, lastUserText);
     const identity = entry.stable_id || entry.id;
