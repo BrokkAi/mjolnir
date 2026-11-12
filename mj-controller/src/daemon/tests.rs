@@ -12251,7 +12251,23 @@ async fn daemon_api_exchange() {
     });
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let metadata = test_metadata(listener.local_addr().unwrap());
+    let unsupported_machine = mj_core::config::Machine::AwsEc2 {
+        aws_profile: None,
+        region: "test-region".into(),
+        launch_template: "test-template".into(),
+        launch_template_version: None,
+        ssh_user: "test".into(),
+        address_source: Default::default(),
+        identity_file: None,
+        ssh_args: vec![],
+    };
     let actions = vec![
+        DaemonAction::PreviewBuildCache {
+            machine: unsupported_machine.clone(),
+        },
+        DaemonAction::InstallMbx {
+            machine: unsupported_machine,
+        },
         DaemonAction::CheckpointArchiveSizes {
             paths: [
                 ("archived".into(), archive),

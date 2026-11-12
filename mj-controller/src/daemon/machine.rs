@@ -12,6 +12,8 @@ pub(super) async fn execute(
         // Preserve the dashboard's existing command deadlines, including the
         // bound on preflight when it applies confirmed Git repairs.
         let executor = match &action {
+            DaemonAction::PreviewBuildCache { .. } => executor.with_deadline(Duration::from_secs(60)),
+            DaemonAction::InstallMbx { .. } => executor.with_deadline(Duration::from_secs(240)),
             DaemonAction::TestTarget { .. } => executor.with_deadline(Duration::from_secs(15)),
             DaemonAction::ProfileLoginStatuses => executor.with_deadline(Duration::from_secs(10)),
             DaemonAction::CompletePath { .. } => executor.with_deadline(Duration::from_secs(5)),
@@ -29,6 +31,43 @@ pub(super) async fn execute(
         };
         let controller = crate::controller::config_only_controller(config);
         match action {
+            DaemonAction::PreviewBuildCache { machine } => {
+                let preview = crate::controller::preview_build_cache(&machine, &executor)?;
+                let available = preview.as_ref().is_some_and(|preview| {
+                    crate::controller::mbx_install_kind(preview).is_some()
+                });
+                Ok(DaemonReply::BuildCachePreview(preview, available))
+            }
+            DaemonAction::InstallMbx { machine } => {
+                let result = crate::controller::install_mbx(&machine, &executor)?;
+                let verb = match result.kind {
+                    crate::controller::MbxInstallKind::Install => "Installed",
+                    crate::controller::MbxInstallKind::Upgrade => "Upgraded",
+                };
+                let profile = if result.profile_changed {
+                    format!("updated {}", result.profile_file)
+                } else {
+                    format!(
+                        "left {} unchanged because its marked PATH block already exists",
+                        result.profile_file
+                    )
+                };
+                let mut message = format!(
+                    "{verb} mbx at {} (version {}). {profile}. New login shells will pick up the PATH change.",
+                    result.program.display(),
+                    result.version
+                );
+                if let Some(warning) = result.profile_warning {
+                    message.push(' ');
+                    message.push_str(&warning);
+                }
+                if let Some(path_line) = result.manual_path_line {
+                    message.push(' ');
+                    message.push_str(&path_line);
+                }
+                Ok(DaemonReply::MbxInstalled(message))
+            }
+
             DaemonAction::TestTarget { target_id } => {
                 controller.test_target(&target_id, &executor)?;
                 Ok(DaemonReply::Done)

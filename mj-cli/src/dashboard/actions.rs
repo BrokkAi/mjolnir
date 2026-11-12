@@ -12,7 +12,6 @@ use mj_core::config::is_bare_project_target;
 use mj_core::state::{MoveSelection, MoveSessionRequest};
 
 use mj_controller::controller::ResumeRepositorySourceReceipt;
-use mj_controller::targets::CancellableProcessExecutor;
 use mj_tui::WebViewerAccess;
 use mj_tui::{DashboardAction, SessionOperationKind};
 
@@ -493,17 +492,12 @@ pub(crate) async fn apply_dashboard_action(
                 context.critical_operations.clone(),
                 "previewing the build cache",
                 context.dashboard_io_tx.clone(),
-                move |cancelled| {
-                    // Several host commands, one of which may be an SSH
-                    // round trip each.
-                    let executor = CancellableProcessExecutor::new(cancelled)
-                        .with_deadline(std::time::Duration::from_secs(60));
-                    let result =
-                        mj_controller::controller::preview_build_cache(&machine, &executor)?;
-                    let install_mbx_available = result.as_ref().is_some_and(|preview| {
-                        mj_controller::controller::mbx_install_kind(preview).is_some()
-                    });
-                    Ok((result, install_mbx_available))
+                move |cancelled| match super::io::machine_request(
+                    MachineAction::PreviewBuildCache { machine: *machine },
+                    cancelled,
+                )? {
+                    MachineReply::BuildCachePreview(preview, available) => Ok((preview, available)),
+                    reply => anyhow::bail!("unexpected build cache reply: {reply:?}"),
                 },
                 move |result| match result {
                     Ok((result, install_mbx_available)) => DashboardIoUpdate::BuildCachePreviewed {
@@ -534,58 +528,43 @@ pub(crate) async fn apply_dashboard_action(
                 return Ok(());
             }
             let operation_label = format!("installing mbx on machine {machine_id}");
-            spawn_cancellable_io_with_token(
-                context.critical_operations.clone(),
-                operation_label,
+            let tracker = context.critical_operations.clone();
+            let install_guard = tracker.begin(operation_label);
+            super::io::spawn_io(
+                "installing mbx",
                 context.dashboard_io_tx.clone(),
-                move |cancelled| {
-                    let install_executor = CancellableProcessExecutor::new(cancelled.clone())
-                        .with_deadline(std::time::Duration::from_secs(240));
-                    let install_result = mj_controller::controller::install_mbx(
-                        &machine,
-                        &install_executor,
-                    )
-                    .map(|result| {
-                        let verb = match result.kind {
-                            mj_controller::controller::MbxInstallKind::Install => "Installed",
-                            mj_controller::controller::MbxInstallKind::Upgrade => "Upgraded",
-                        };
-                        let profile = if result.profile_changed {
-                            format!("updated {}", result.profile_file)
-                        } else {
-                            format!(
-                                "left {} unchanged because its marked PATH block already exists",
-                                result.profile_file
-                            )
-                        };
-                        let mut message = format!(
-                            "{verb} mbx at {} (version {}). {profile}. New login shells will pick up the PATH change.",
-                            result.program.display(),
-                            result.version
-                        );
-                        if let Some(warning) = result.profile_warning {
-                            message.push(' ');
-                            message.push_str(&warning);
+                move || {
+                    let install_result = mj_core::runtime::block_on(async {
+                        match daemon::connect_or_start()
+                            .await?
+                            .request(MachineAction::InstallMbx {
+                                machine: *machine.clone(),
+                            })
+                            .await?
+                        {
+                            MachineReply::MbxInstalled(message) => Ok(message),
+                            reply => anyhow::bail!("unexpected mbx install reply: {reply:?}"),
                         }
-                        if let Some(path_line) = result.manual_path_line {
-                            message.push(' ');
-                            message.push_str(&path_line);
-                        }
-                        message
                     })
+                    .and_then(|result| result)
                     .map_err(|error| format!("{error:#}"));
-                    let preview_executor = CancellableProcessExecutor::new(cancelled)
-                        .with_deadline(std::time::Duration::from_secs(60));
-                    let preview_result =
-                        mj_controller::controller::preview_build_cache(&machine, &preview_executor)
-                            .map_err(|error| format!("{error:#}"));
-                    let install_mbx_available = preview_result
-                        .as_ref()
-                        .ok()
-                        .and_then(Option::as_ref)
-                        .is_some_and(|preview| {
-                            mj_controller::controller::mbx_install_kind(preview).is_some()
-                        });
+                    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let _preview_guard = tracker
+                        .begin_cancellable("refreshing the build cache preview", cancelled.clone());
+                    drop(install_guard);
+                    let (preview_result, install_mbx_available) = match super::io::machine_request(
+                        MachineAction::PreviewBuildCache { machine: *machine },
+                        cancelled,
+                    ) {
+                        Ok(MachineReply::BuildCachePreview(preview, available)) => {
+                            (Ok(preview), available)
+                        }
+                        Ok(reply) => (
+                            Err(format!("unexpected build cache reply: {reply:?}")),
+                            false,
+                        ),
+                        Err(error) => (Err(format!("{error:#}")), false),
+                    };
                     Ok(MbxInstallCompletion {
                         install_result,
                         preview_result,

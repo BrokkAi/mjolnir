@@ -685,6 +685,12 @@ pub struct DraftPreview {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "action", content = "arguments")]
 pub enum DaemonAction {
+    PreviewBuildCache {
+        machine: mj_core::config::Machine,
+    },
+    InstallMbx {
+        machine: mj_core::config::Machine,
+    },
     PreflightNewSession {
         request: NewSessionPreflightRequest,
     },
@@ -1208,6 +1214,8 @@ pub struct ResponseEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "reply", content = "value")]
 pub enum DaemonReply {
+    BuildCachePreview(Option<mj_core::state::BuildCachePreview>, bool),
+    MbxInstalled(String),
     CheckpointArchiveSizes(std::collections::BTreeMap<String, Option<u64>>),
     ProfileLoginStatuses(std::collections::BTreeMap<String, mj_core::credentials::LoginStatus>),
     NewSessionPreflight(PreflightNew),
@@ -3276,7 +3284,8 @@ impl DaemonAction {
         }
         matches!(
             self,
-            Self::CheckpointArchiveSizes { .. }
+            Self::PreviewBuildCache { .. }
+                | Self::CheckpointArchiveSizes { .. }
                 | Self::TestTarget { .. }
                 | Self::ProfileLoginStatuses
                 | Self::PreflightNewSession { .. }

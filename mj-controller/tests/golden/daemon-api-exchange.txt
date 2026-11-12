@@ -1,6 +1,46 @@
 [
   {
     "request": {
+      "action": "preview_build_cache",
+      "arguments": {
+        "machine": {
+          "kind": "aws-ec2",
+          "region": "test-region",
+          "launch_template": "test-template",
+          "ssh_user": "test",
+          "address_source": "public-dns"
+        }
+      }
+    },
+    "reply": {
+      "Ok": {
+        "reply": "build_cache_preview",
+        "value": [
+          null,
+          false
+        ]
+      }
+    }
+  },
+  {
+    "request": {
+      "action": "install_mbx",
+      "arguments": {
+        "machine": {
+          "kind": "aws-ec2",
+          "region": "test-region",
+          "launch_template": "test-template",
+          "ssh_user": "test",
+          "address_source": "public-dns"
+        }
+      }
+    },
+    "reply": {
+      "Err": "this machine has no persistent container host where mbx can be installed"
+    }
+  },
+  {
+    "request": {
       "action": "checkpoint_archive_sizes",
       "arguments": {
         "paths": {

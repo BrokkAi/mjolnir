@@ -8,7 +8,9 @@ pub(super) async fn handle_action(
 ) -> Result<DaemonReply> {
     let _work = upgrade_request_activity(&action)?;
     match action {
-        action @ (DaemonAction::CheckpointArchiveSizes { .. }
+        action @ (DaemonAction::PreviewBuildCache { .. }
+        | DaemonAction::InstallMbx { .. }
+        | DaemonAction::CheckpointArchiveSizes { .. }
         | DaemonAction::TestTarget { .. }
         | DaemonAction::ProfileLoginStatuses
         | DaemonAction::PreflightNewSession { .. }
@@ -1109,6 +1111,9 @@ pub(super) fn upgrade_request_activity(
         && !request.remote_repairs.is_empty()
     {
         return crate::upgrade::activity("new-session preflight remote repairs").map(Some);
+    }
+    if matches!(action, DaemonAction::InstallMbx { .. }) {
+        return crate::upgrade::activity("mbx installation").map(Some);
     }
     if matches!(action, DaemonAction::SaveSpinnerStyle { .. }) {
         return crate::upgrade::activity("spinner style setting").map(Some);
