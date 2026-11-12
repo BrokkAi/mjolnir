@@ -62,6 +62,7 @@ pub mod recovery_gate;
 
 mod continuation;
 pub mod github_item_verdict;
+pub(crate) mod github_relevance;
 mod github_watch;
 mod jev_transport;
 mod mailbox_outbox;

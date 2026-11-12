@@ -5425,3 +5425,59 @@ async fn settings_review_autoconfigure_returns_preset_draft_without_saving() {
     assert!(reply["draft"]["review"].get("profile").is_none());
     assert_eq!(std::fs::read(&path).unwrap(), stored);
 }
+
+#[tokio::test]
+async fn github_relevance_daemon_notices_snapshot_golden() {
+    use crate::github_relevance::{
+        Classifier, ScoreFuture, StudentFailureKind, StudentOwner, StudentState,
+    };
+    struct Loading;
+    impl StudentOwner for Loading {
+        fn state(&self) -> StudentState {
+            StudentState::Loading
+        }
+        fn manifest_revision(&self) -> &str {
+            "recorded"
+        }
+        fn score_segments<'a>(&'a self, _: &'a str, _: &'a str) -> ScoreFuture<'a> {
+            Box::pin(async { unreachable!() })
+        }
+    }
+    let notices = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let capture = notices.clone();
+    let classifier = Classifier::new(Arc::new(Loading), move |text| {
+        let mut notices = capture.lock().unwrap();
+        let id = notices.len() as u64 + 1;
+        notices.push(mj_client::daemon::RuntimeNotice {
+            id,
+            session_id: String::new(),
+            text,
+        });
+    });
+    classifier.observe(Some((
+        Some(StudentFailureKind::Download),
+        "download failed: secret details stay in daemon logs",
+    )));
+    classifier.observe(Some((Some(StudentFailureKind::Download), "same episode")));
+    classifier.observe(None);
+    let notices = notices.lock().unwrap().clone();
+    let (app, _, _, _, _) = app_with_snapshot(move |snapshot| snapshot.notices = notices);
+    let cookie = login_cookie(&app).await;
+    let response = app
+        .oneshot(
+            Request::get("/api/snapshot")
+                .header(COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "github-relevance-notices",
+        &serde_json::to_string_pretty(&snapshot["notices"]).unwrap(),
+    );
+}

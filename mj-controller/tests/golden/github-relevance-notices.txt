@@ -1,0 +1,12 @@
+[
+  {
+    "id": 1,
+    "session_id": "",
+    "text": "Local GitHub relevance scoring is unavailable (download). Every GitHub item is scored by GLiDE while the model retries automatically."
+  },
+  {
+    "id": 2,
+    "session_id": "",
+    "text": "GitHub relevance local model recovered."
+  }
+]

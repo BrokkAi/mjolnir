@@ -13,7 +13,7 @@ const HOSTED_ENDPOINT: &str =
     "https://mj-jev-proxy.eng-admin-a63.workers.dev/v2/github-item-verdict";
 
 pub async fn classify(evidence: &GithubItemEvidence) -> Result<GithubItemVerdict> {
-    let evidence = evidence.bounded_for_request()?;
+    // Watcher prepares and bounds the shared evidence exactly once.
     let key = tokio::task::spawn_blocking(mj_core::activity::verdict::api_key)
         .await
         .context("resolve Jev key")?;

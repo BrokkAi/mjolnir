@@ -26,12 +26,16 @@ use crate::daemon::RuntimeState;
 const MAX_CLASSIFICATIONS_PER_POLL: usize = 50;
 const ITEMS_PER_PAGE: usize = 100;
 const MERGE_CLOSE_TOLERANCE_MS: i64 = 5_000;
-const CLASSIFICATION_CONCURRENCY: usize = 4;
 const REPOSITORY_CONCURRENCY: usize = 4;
 const API_TIMEOUT: Duration = Duration::from_secs(20);
 const CONFIG_RECHECK_INTERVAL: Duration = Duration::from_secs(5);
 const MIN_INTERVAL: Duration = Duration::from_secs(10);
 const MAX_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+type SessionEvidenceSnapshot = (
+    SessionContext,
+    Arc<Vec<mj_transcript::github_history::HistoryRow>>,
+);
 
 type ClassifyFuture<'a> = Pin<Box<dyn Future<Output = Result<GithubItemVerdict>> + Send + 'a>>;
 
@@ -78,6 +82,12 @@ trait GithubClassifier: Send + Sync {
 
 struct JevGithubClassifier;
 
+impl GithubClassifier for crate::github_relevance::Classifier {
+    fn classify<'a>(&'a self, evidence: &'a GithubItemEvidence) -> ClassifyFuture<'a> {
+        Box::pin(self.classify(evidence))
+    }
+}
+
 impl GithubClassifier for JevGithubClassifier {
     fn classify<'a>(&'a self, evidence: &'a GithubItemEvidence) -> ClassifyFuture<'a> {
         Box::pin(crate::github_item_verdict::classify(evidence))
@@ -88,6 +98,22 @@ impl GithubClassifier for JevGithubClassifier {
 /// replacement daemon can resume from the same repo cursors and event keys.
 pub(crate) async fn run(state: Arc<RuntimeState>, stop: CancellationToken) -> Result<()> {
     run_with_classifier(state, stop, Arc::new(JevGithubClassifier)).await
+}
+
+/// The concrete preparation owner is supplied by Milestone 3.
+#[allow(dead_code)]
+pub(crate) async fn run_with_student(
+    state: Arc<RuntimeState>,
+    stop: CancellationToken,
+    student: Arc<dyn crate::github_relevance::StudentOwner>,
+) -> Result<()> {
+    let notice_state = Arc::downgrade(&state);
+    let classifier = crate::github_relevance::Classifier::new(student, move |text| {
+        if let Some(state) = notice_state.upgrade() {
+            state.push_public_notice("", mj_core::redact::redact_secrets(&text));
+        }
+    });
+    run_with_classifier(state, stop, Arc::new(classifier)).await
 }
 
 async fn run_with_classifier(
@@ -518,7 +544,7 @@ async fn classify_recorded_items(
             // Retain failures per pair, just like classifier failures, without reloading.
             digests.insert(
                 session.id.clone(),
-                session_digest(session.id.clone())
+                session_evidence_snapshot(session.id.clone())
                     .await
                     .map_err(|e| format!("{e:#}")),
             );
@@ -526,6 +552,7 @@ async fn classify_recorded_items(
     }
     let login = api.credential_login().await?;
     let login = login.as_deref();
+    let concurrency = pending.len();
     let results = stream::iter(pending).map(|(item, session, _, attempts)| {
         let classifier = classifier.clone(); let control = api.control.clone();
         let digest = digests[&session.id].clone();
@@ -545,7 +572,7 @@ async fn classify_recorded_items(
                 }
             }
         }
-    }).buffer_unordered(CLASSIFICATION_CONCURRENCY).collect::<Vec<Result<()>>>().await;
+    }).buffer_unordered(concurrency).collect::<Vec<Result<()>>>().await;
     for result in results {
         result?;
     }
@@ -556,12 +583,12 @@ async fn classify_for_session(
     owner: &str,
     repo: &str,
     item: crate::database::GithubSeenItem,
-    session: (SessionRecord, SessionContext),
+    session: (SessionRecord, SessionEvidenceSnapshot),
     credential_login: Option<&str>,
     classifier: Arc<dyn GithubClassifier>,
     control: PollControl,
 ) -> Result<()> {
-    let (session, digest) = session;
+    let (session, (digest, history)) = session;
     let repo_label = format!("{owner}/{repo}");
     let kind = item_kind_from_watch(&item.kind);
     // Sessions share one GitHub account, so the author cannot name a session,
@@ -575,7 +602,7 @@ async fn classify_for_session(
             kind,
             number: item.number as u64,
             title: item.title.clone(),
-            body: item.body,
+            body: item.body.clone(),
             author: item.author,
             url: item.url.clone(),
         },
@@ -591,6 +618,26 @@ async fn classify_for_session(
         false
     } else {
         control.check_enabled()?;
+        let original = evidence.item.clone();
+        let session_id = session.id.clone();
+        let cutoff =
+            timestamp_millis(&item.created_at).context("invalid GitHub item creation time")?;
+        let evidence = tokio::task::spawn_blocking(move || {
+            let mut base = serde_json::to_value(evidence.bounded_for_request()?)?;
+            mj_core::redact::redact_json_strings(&mut base);
+            let base = serde_json::from_value(base)?;
+            let transcript = mj_transcript::github_history::render(
+                &session_id,
+                &history,
+                cutoff,
+                &original.repo,
+                original.number,
+            )?;
+            mj_transcript::github_history::build_evidence(&original, &transcript, &base)
+                .map(|(evidence, _)| evidence)
+        })
+        .await
+        .context("build GitHub history evidence")??;
         let verdict = classifier.classify(&evidence).await?;
         control.check_enabled()?;
         verdict.interested
@@ -676,6 +723,22 @@ async fn opened_by_session(
     }))
 }
 
+async fn session_evidence_snapshot(session_id: String) -> Result<SessionEvidenceSnapshot> {
+    tokio::task::spawn_blocking(move || {
+        let history = crate::database::load_github_history_snapshot(&session_id)?;
+        let digest = crate::database::load_materialized_recent_turns(
+            &session_id,
+            mj_core::github_item::SESSION_TURNS,
+        )?
+        .map(|materialized| mj_transcript::github_item::session_digest(&materialized))
+        .unwrap_or_default();
+        Ok((digest, Arc::new(history)))
+    })
+    .await
+    .context("load GitHub session evidence snapshot")?
+}
+
+#[cfg(test)]
 async fn session_digest(session_id: String) -> Result<SessionContext> {
     tokio::task::spawn_blocking(move || {
         const TURNS: usize = mj_core::github_item::SESSION_TURNS;
@@ -1819,6 +1882,10 @@ mod tests {
         fn classify<'a>(&'a self, evidence: &'a GithubItemEvidence) -> ClassifyFuture<'a> {
             Box::pin(async move {
                 self.calls.fetch_add(1, Ordering::SeqCst);
+                assert!(
+                    evidence.session.history.is_some(),
+                    "watcher must prepare shared history evidence"
+                );
                 let title = evidence.item.title.to_ascii_lowercase();
                 Ok(GithubItemVerdict {
                     interested: title.contains("interesting"),
