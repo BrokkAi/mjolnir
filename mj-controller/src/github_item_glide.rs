@@ -11,7 +11,6 @@ pub async fn classify_probability(evidence: &GithubItemEvidence) -> Result<f64> 
 }
 
 async fn classify_at(evidence: &GithubItemEvidence, endpoint: &str) -> Result<f64> {
-    let evidence = evidence.bounded_for_request()?;
     let response = crate::jev_transport::post_bounded_json(
         endpoint,
         None,
@@ -37,14 +36,10 @@ mod tests {
 
     #[tokio::test]
     async fn github_glide_http_contract() {
-        let mut fixture: serde_json::Value = serde_json::from_str(include_str!(
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../services/jev-proxy/tests/fixtures/github-item-aliases600.json"
         ))
         .unwrap();
-        fixture["evidence"]["session"]
-            .as_object_mut()
-            .unwrap()
-            .remove("history");
         let evidence: GithubItemEvidence =
             serde_json::from_value(fixture["evidence"].clone()).unwrap();
         for body in [
