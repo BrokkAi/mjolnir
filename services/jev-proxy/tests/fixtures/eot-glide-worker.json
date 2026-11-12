@@ -1,0 +1,43 @@
+{
+  "authorization": {
+    "messages": [
+      {
+        "id": "user:user-turn",
+        "role": "user",
+        "text": "Run the workspace checks and report failures."
+      },
+      {
+        "id": "agent:3",
+        "role": "assistant",
+        "text": "The workspace checks passed. All requested checks are complete."
+      }
+    ],
+    "authorization_complete": true,
+    "assistant_history_omitted": false,
+    "open_assistant_id": null,
+    "final_reply_omitted": false
+  },
+  "harness": "claude",
+  "phase": "replied",
+  "silent_for_s": 0,
+  "tools_in_flight": [],
+  "transcript_summary": "",
+  "background_commands": 0,
+  "queued_commands": 0,
+  "user_prompt_tail": "Run the workspace checks and report failures.",
+  "assistant_text_tail": "The workspace checks passed. All requested checks are complete.",
+  "completion": {
+    "stop_reason": "end_turn",
+    "diagnostic": null
+  },
+  "latest_user_message": "Run the workspace checks and report failures.",
+  "current_assistant_replies": [
+    "The workspace checks passed. All requested checks are complete."
+  ],
+  "runtime_observations": [
+    "Current phase Replied, silence 0 seconds.",
+    "Currently observed tools: []; background commands: 0; queued prompts: 0.",
+    "Final tool outcomes: []; background inventory: [].",
+    "Currently running native agents: 0. Goal active: false; running: false; pending resume: false."
+  ]
+}

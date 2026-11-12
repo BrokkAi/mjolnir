@@ -763,7 +763,7 @@ fn spawn_with_gate(
                         // to record the worker's actual acceptance or rejection.
                         // Its atomic frontier guard still lets new input win.
                     }
-                    let worker_assessment = view.snapshot.as_ref().filter(|s| unified(s)).and_then(|s| s.operational.assessment.as_ref()).filter(|a| a.current() && a.verdict.is_some());
+                    let worker_assessment = view.snapshot.as_ref().filter(|s| unified(s)).and_then(|s| s.operational.assessment.as_ref()).filter(|a| a.current() && (a.verdict.is_some() || a.glide.is_some()));
                     // A quota wait is restartable from this durable turn. Legacy
                     // workers have no persisted verdict, so attachment reuses the
                     // normal classifier; its frontier and eligibility guards still

@@ -1,10 +1,22 @@
 //! Optional, bounded TypeSafe turn classification. Failures leave activity alone.
 use anyhow::{Context, Result, ensure};
 use mj_core::activity::question_locator;
-use mj_core::activity::verdict::{TurnEvidence, TurnVerdict, api_key, questions, request_fits};
+use mj_core::activity::verdict::{TurnEvidence, api_key, request_fits};
+#[cfg(test)]
+use mj_core::activity::verdict::{TurnVerdict, questions};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
+
+fn is_glide_size_refusal(status: reqwest::StatusCode, body: &[u8]) -> bool {
+    let Ok(body) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    (status == reqwest::StatusCode::PAYLOAD_TOO_LARGE && body["error"] == "body_too_large")
+        // Verified against Fastino with synthetic oversized input, 2026-11-12.
+        || (status == reqwest::StatusCode::BAD_REQUEST
+            && body["error"]["code"] == "input_too_long")
+}
 
 /// The Unix worker is the only production caller of the classifier client;
 /// these items stay compiled on Windows alongside the shared source type.
@@ -446,6 +458,7 @@ impl VerdictClient {
         self
     }
 
+    #[cfg(test)]
     fn request_body(
         &self,
         evidence: &TurnEvidence,
@@ -458,6 +471,7 @@ impl VerdictClient {
         mj_core::jev::request_body(evidence, direct_questions)
     }
 
+    #[cfg(test)]
     pub(crate) async fn ask_logged(
         &self,
         session: &str,
@@ -507,7 +521,10 @@ impl VerdictClient {
             finished: false,
             dispatch: tracing::dispatcher::get_default(Clone::clone),
         };
-        let result = async {
+        // User requires fail-open after a few seconds to save the parent's time.
+        // Fresh 268-case GLiDE latency: p50 1.1s / p95 2.8s; 5s admits nearly all normal calls.
+        let timeout = Duration::from_secs(5);
+        let result = tokio::time::timeout(timeout, async {
             // Explicit endpoints support isolated proxy fixtures; no provider key leaves the worker.
             let endpoint = match &self.source {
                 VerdictSource::Direct { endpoint, .. } if cfg!(test) => endpoint.clone(),
@@ -520,17 +537,27 @@ impl VerdictClient {
                     url.to_string()
                 }
             };
-            let response = self.client.post(endpoint).json(&body).send().await?;
-            ensure!(
-                response.status().is_success(),
-                "GLiDE proxy HTTP {} (Retry-After: {:?})",
-                response.status(),
-                response.headers().get(reqwest::header::RETRY_AFTER)
-            );
+            let response = self
+                .post_glide(
+                    reqwest::Url::parse(&endpoint)?,
+                    evidence
+                        .authorization
+                        .clone()
+                        .context("missing handback authorization")?,
+                    timeout,
+                    |history| {
+                        let mut evidence = evidence.clone();
+                        evidence.authorization = Some(history.clone());
+                        Ok(mj_core::jev::request_body(&evidence, None))
+                    },
+                )
+                .await?;
             let response = response.json::<serde_json::Value>().await?;
             mj_core::assessment::HandbackProbabilities::parse(&response["probabilities"])
-        }
-        .await;
+        })
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(std::convert::identity);
         if let Some(log) = &attempt.diagnostic {
             match &result {
                 Ok(probabilities) => {
@@ -545,6 +572,7 @@ impl VerdictClient {
         (attempt, result)
     }
 
+    #[cfg(test)]
     async fn ask_logged_for(
         &self,
         session: &str,
@@ -620,6 +648,140 @@ impl VerdictClient {
         (attempt, result)
     }
 
+    pub(crate) async fn ask_glide_logged(
+        &self,
+        session: &str,
+        generation: u64,
+        evidence: &TurnEvidence,
+        facts: &mj_core::activity::ActivityFacts,
+        native: usize,
+    ) -> (VerdictAttempt, Result<glide_turn::Probabilities>) {
+        let diagnostic = self.log.as_ref().map(|log| {
+            log.start(
+                session,
+                "activity",
+                "Assess the completed turn",
+                "Authorization and runtime observations.",
+            )
+        });
+        let attempt = VerdictAttempt {
+            diagnostic,
+            decision: None,
+            uncertain: false,
+            id: NEXT_REQUEST.fetch_add(1, Ordering::Relaxed),
+            session: session.into(),
+            generation,
+            phase: evidence.phase,
+            started: std::time::Instant::now(),
+            finished: false,
+            dispatch: tracing::dispatcher::get_default(Clone::clone),
+        };
+        tracing::info!(target: "mj_jev", session, generation, summary_bytes = evidence.transcript_summary.len(), "GLiDE classification requested");
+        let result = async {
+            let history = evidence.authorization.clone().context("missing completed-turn authorization")?;
+            let body = glide_turn::project(evidence, history.clone(), facts, native)?;
+            if let Some(log) = &attempt.diagnostic { log.update(None, serde_json::json!({"request":body,"contract":"glide-turn-v1"})); }
+            let answer = self.ask_glide_turn(evidence, history, facts, native).await?;
+            if let Some(log) = &attempt.diagnostic { log.update(None, serde_json::json!({"probabilities":answer,"action":mj_core::activity::eot_glide::action(&serde_json::to_value(&answer)?, evidence.authorization.as_ref().is_some_and(|h| h.authorization_complete && !h.final_reply_omitted))})); }
+            Ok(answer)
+        }.await;
+        match &result {
+            Ok(answer) => {
+                tracing::info!(target: "mj_jev", session, generation, probabilities = ?answer, "GLiDE classification received")
+            }
+            Err(error) => {
+                tracing::warn!(target: "mj_jev", session, generation, %error, "GLiDE classification failed")
+            }
+        }
+        (attempt, result)
+    }
+
+    /// Retry only an explicit size refusal, and only with a strictly smaller body.
+    async fn post_glide(
+        &self,
+        endpoint: reqwest::Url,
+        mut history: mj_core::assessment::ContextHistory,
+        timeout: Duration,
+        project: impl Fn(&mj_core::assessment::ContextHistory) -> Result<serde_json::Value>,
+    ) -> Result<reqwest::Response> {
+        let mut body = serde_json::to_vec(&project(&history)?)?;
+        loop {
+            let response = self
+                .client
+                .post(endpoint.clone())
+                .timeout(timeout)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body.clone())
+                .send()
+                .await
+                .context("request GLiDE verdict")?;
+            if response.status().is_success() {
+                return Ok(response);
+            }
+            let status = response.status();
+            let bytes = response.bytes().await.context("read GLiDE refusal")?;
+            if is_glide_size_refusal(status, &bytes) {
+                let mut smaller = None;
+                while glide_turn::shrink(&mut history) {
+                    let candidate = serde_json::to_vec(&project(&history)?)?;
+                    if candidate.len() < body.len() {
+                        smaller = Some(candidate);
+                        break;
+                    }
+                }
+                if let Some(candidate) = smaller {
+                    body = candidate;
+                    continue;
+                }
+            }
+            anyhow::bail!(
+                "GLiDE verdict HTTP {status}: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+        }
+    }
+
+    /// Completed-turn transport only; callers retain ownership of action and logging.
+    pub(crate) async fn ask_glide_turn(
+        &self,
+        evidence: &TurnEvidence,
+        authorization: mj_core::assessment::ContextHistory,
+        facts: &mj_core::activity::ActivityFacts,
+        native_agent_count: usize,
+    ) -> Result<glide_turn::Probabilities> {
+        // GLiDE is hosted even when the unrelated locator uses a Direct source.
+        let endpoint = match &self.source {
+            VerdictSource::Hosted { endpoint } => {
+                reqwest::Url::parse(endpoint)?.join("/v1/glide-turn-verdict")?
+            }
+            VerdictSource::Direct { .. } => reqwest::Url::parse(
+                "https://mj-jev-proxy.eng-admin-a63.workers.dev/v1/glide-turn-verdict",
+            )?,
+        };
+        // Fastino: "set your client read timeout above 170 seconds"
+        // https://docs.fastino.ai/troubleshooting/retries (supersedes older 300s notes).
+        let mut response = self
+            .post_glide(
+                endpoint,
+                authorization,
+                Duration::from_secs(180),
+                |history| glide_turn::project(evidence, history.clone(), facts, native_agent_count),
+            )
+            .await?;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.context("read GLiDE verdict")? {
+            ensure!(
+                bytes.len().saturating_add(chunk.len()) <= 64 * 1024,
+                "GLiDE response exceeds proxy response bound"
+            );
+            bytes.extend_from_slice(&chunk);
+        }
+        glide_turn::Probabilities::parse(
+            &serde_json::from_slice(&bytes).context("decode GLiDE verdict")?,
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) async fn ask(
         &self,
         evidence: &TurnEvidence,
@@ -754,6 +916,113 @@ mod tests {
             .unwrap(),
             task,
         )
+    }
+
+    // Hard-won: dc4c34617: a client-side byte cap made long turns permanently unclassifiable
+    #[tokio::test]
+    async fn glide_handback_large_requests_shrink_only_after_size_refusal() {
+        for handback in [false, true] {
+            for refusal in [false, true] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+                let server = tokio::spawn(async move {
+                    let mut sizes = Vec::new();
+                    loop {
+                        let (socket, _) = listener.accept().await.unwrap();
+                        let mut socket = BufReader::new(socket);
+                        let mut length = 0usize;
+                        loop {
+                            let mut line = String::new();
+                            socket.read_line(&mut line).await.unwrap();
+                            if line == "\r\n" {
+                                break;
+                            }
+                            if let Some(value) =
+                                line.to_ascii_lowercase().strip_prefix("content-length:")
+                            {
+                                length = value.trim().parse().unwrap();
+                            }
+                        }
+                        let mut body = vec![0; length];
+                        socket.read_exact(&mut body).await.unwrap();
+                        sizes.push(length);
+                        let reject = refusal && sizes.len() <= 3;
+                        let (status, answer) = if reject {
+                            if sizes.len() == 1 {
+                                (
+                                    "413 Payload Too Large",
+                                    serde_json::json!({"error":"body_too_large"}),
+                                )
+                            } else {
+                                (
+                                    "400 Bad Request",
+                                    serde_json::json!({"error":{"code":"input_too_long","message":"prompt exceeds the maximum context length"}}),
+                                )
+                            }
+                        } else if handback {
+                            (
+                                "200 OK",
+                                serde_json::json!({"probabilities":{"unfinished":0.0,"needs_parent_input":0.0,"blocked":0.0,"permitted_stop":0.0,"finished":1.0,"unclear":0.0}}),
+                            )
+                        } else {
+                            let samples: serde_json::Value = serde_json::from_str(include_str!(
+                                "../../../mj-core/src/activity/eot_glide_fresh_sample.json"
+                            ))
+                            .unwrap();
+                            ("200 OK", samples[0].clone())
+                        };
+                        // Hard-won: 8ad2f6a1d: GLiDE inherited Jev's ten-second timeout.
+                        if !handback && !refusal {
+                            tokio::time::sleep(Duration::from_secs(15)).await;
+                        }
+                        let answer = answer.to_string();
+                        socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}", answer.len()).as_bytes()).await.unwrap();
+                        if !reject {
+                            return sizes;
+                        }
+                    }
+                });
+                let client = VerdictClient::new(VerdictSource::Hosted { endpoint }).unwrap();
+                let mut completed = evidence();
+                completed.phase = TurnPhase::Replied;
+                completed.authorization = Some(ContextHistory {
+                    messages: vec![
+                        EvidenceMessage {
+                            id: "u".into(),
+                            role: "user".into(),
+                            text: "Complete task".into(),
+                        },
+                        EvidenceMessage {
+                            id: "a".into(),
+                            role: "assistant".into(),
+                            text: "synthetic reply ".repeat(14000),
+                        },
+                    ],
+                    ..Default::default()
+                });
+                if handback {
+                    client
+                        .ask_handback_logged("isolated", 1, &completed)
+                        .await
+                        .1
+                        .unwrap();
+                } else {
+                    client
+                        .ask_glide_turn(
+                            &completed,
+                            completed.authorization.clone().unwrap(),
+                            &Default::default(),
+                            0,
+                        )
+                        .await
+                        .unwrap();
+                }
+                let sizes = server.await.unwrap();
+                assert!(sizes[0] > 200 * 1024);
+                assert_eq!(sizes.len(), if refusal { 4 } else { 1 });
+                assert!(sizes.windows(2).all(|pair| pair[1] < pair[0]));
+            }
+        }
     }
 
     fn evidence() -> TurnEvidence {
@@ -1066,3 +1335,5 @@ mod tests {
         .to_string()
     }
 }
+
+pub(crate) mod glide_turn;

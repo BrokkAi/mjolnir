@@ -974,8 +974,21 @@ impl SubagentEndpoint {
             .await;
         let bounce = match answer {
             Ok(answer) => mj_core::assessment::handback_needs_more_work(&answer),
-            Err(_) => {
-                attempt.finish("unchanged", "request_failed");
+            Err(error) => {
+                let timed_out = error.chain().any(|cause| {
+                    cause.is::<tokio::time::error::Elapsed>()
+                        || cause
+                            .downcast_ref::<reqwest::Error>()
+                            .is_some_and(reqwest::Error::is_timeout)
+                });
+                attempt.finish(
+                    "delivered",
+                    if timed_out {
+                        "timeout"
+                    } else {
+                        "request_failed"
+                    },
+                );
                 return Ok(None);
             }
         };
@@ -3151,8 +3164,7 @@ async fn serve_one(stream: UnixStream, endpoint: SubagentEndpoint) -> Result<()>
         Some(gate) => Some(gate.lock().await),
         None => None,
     };
-    // The classifier's 10-second HTTP deadline is inside this call's existing
-    // 120-second reply budget, including the worker's response margin.
+    // The optional classifier fails open after five seconds.
     if let Some(result) = endpoint.check_handback(&mut request).await? {
         endpoint.complete(result)?;
     }
