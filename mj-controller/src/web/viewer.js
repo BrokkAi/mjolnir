@@ -1175,7 +1175,6 @@ class NotificationSnapshot {
           ...entry.row, capabilities: {}, operation: null, transitioning: false,
           lifecycle: 'destroyed', attention: 'inactive', configuration_issue: null, move_recovery: null,
         },
-        excerpt: entry.excerpt,
       })),
     ];
     const entriesById = new Map(this.entries.map(entry => [entry.row.id, entry]));
@@ -1184,7 +1183,6 @@ class NotificationSnapshot {
   }
 }
 const notificationSnapshot = new NotificationSnapshot();
-const notificationItems = new Map();
 
 function notificationRows() {
   return [...viewerState.rows.values()].filter(row => !isSubagentSession(row)
@@ -1193,29 +1191,11 @@ function notificationRows() {
 
 function renderNotifications() {
   const header = el('h2', '', 'Notifications');
-  const items = notificationSnapshot.update(notificationRows(), [...viewerState.rows.values()]).map(entry => {
-    const { row } = entry;
-    let item = notificationItems.get(row.id);
-    if (!item) {
-      item = el('div', 'notification-entry');
-      item.dataset.notificationId = row.id;
-      item._excerpt = el('p', 'notification-excerpt');
-      item._meta = el('p', 'dim');
-      notificationItems.set(row.id, item);
-    }
+  const items = notificationSnapshot.update(notificationRows(), [...viewerState.rows.values()]).map(({ row }) => {
     let card = sessionCards.get(row.id);
     if (!card) { card = sessionCard(row); sessionCards.set(row.id, card); }
     else updateSessionCard(card, row);
-    reconcileChildren(item, [card, item._excerpt, item._meta]);
-    const excerpt = row.pending_elicitations?.find(request => request.message)?.message || row.preview?.join('\n') || entry.excerpt;
-    entry.excerpt = excerpt;
-    item._excerpt.textContent = excerpt || '';
-    item._excerpt.hidden = !excerpt;
-    const workspace = snapshot.workspaces?.find(workspace => workspace.id === row.workspace_id);
-    const timestamp = sessionMessageMs(row);
-    const age = timestamp ? `${Math.max(0, Math.floor((serverClockMs() - timestamp) / 60000))}m ago` : 'Age unknown';
-    item._meta.textContent = `${workspace?.name || row.workspace_id} · ${age}`;
-    return item;
+    return card;
   });
   reconcileChildren(sessions, [header, ...items, ...(!items.length ? [el('p', 'dim', 'No notifications.')] : [])]);
 }

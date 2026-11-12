@@ -351,7 +351,7 @@ test('golden_viewer_dashboard', async ({ context }) => {
   await compactPage.goto('https://viewer.test/');
   await expect(compactPage.locator('#launch-failures')).toContainText('A session could not be started.');
   await expect(compactPage.locator('#workspace-select')).toHaveValue('notifications');
-  await expect(compactPage.locator('.notification-entry')).toHaveCount(4);
+  await expect(compactPage.locator('#sessions .session')).toHaveCount(4);
   await captureGoldenState(output, compactPage, 'notifications selected by default');
   await compactPage.close();
 
@@ -1492,11 +1492,11 @@ test('notifications retain handled entries below the band until leaving or reloa
   const unread = session('unread-notice', 'unread', 'Unread', { attention: 'unread', activity: SERVER_TIME_MS + 1000 });
   const state = await mount(page, [a, b, unread]);
   await page.locator('#workspace-select').selectOption('notifications');
-  const ids = () => page.locator('.notification-entry').evaluateAll(nodes => nodes.map(node => node.dataset.notificationId));
+  const ids = () => page.locator('#sessions .session').evaluateAll(nodes => nodes.map(node => node.dataset.sessionId));
   expect(await ids()).toEqual(['notice-b', 'notice-a']);
-  await expect(page.locator('[data-notification-id="unread-notice"]')).toHaveCount(0);
+  await expect(page.locator('#sessions .session[data-session-id="unread-notice"]')).toHaveCount(0);
   await page.evaluate(() => { window.notificationOption = document.querySelector('#workspace-select option'); });
-  const noticeCard = page.locator('[data-notification-id="notice-b"] .session');
+  const noticeCard = page.locator('#sessions .session[data-session-id="notice-b"]');
   await noticeCard.dispatchEvent('pointerdown', { pointerId: 1, button: 0, isPrimary: true, clientX: 10, clientY: 10 });
   await expect(noticeCard.locator('.session-menu')).toBeVisible();
   await noticeCard.dispatchEvent('pointerup', { pointerId: 1 });
@@ -1509,7 +1509,7 @@ test('notifications retain handled entries below the band until leaving or reloa
   expect(await page.evaluate(() => document.querySelector('#workspace-select option') === window.notificationOption)).toBe(true);
   await expect(page.locator('#workspace-select option').first()).toHaveText('Notifications (1)');
   await expect(noticeCard.locator('.session-attention-item')).toHaveCount(0);
-  await expect(page.locator('[data-notification-id="notice-b"]')).not.toContainText('Cleared');
+  await expect(noticeCard).not.toContainText('Cleared');
   await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toHaveCount(0);
   await expect(noticeCard).not.toHaveAttribute('role', 'link');
   await noticeCard.locator('button[aria-label^="Actions for"]').click();
