@@ -5,6 +5,8 @@ pub struct Distribution<T> {
 }
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Probabilities {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention: Option<Distribution<Attention>>,
     pub input: Distribution<Input>,
     pub failure: Distribution<Failure>,
     pub work: Distribution<Work>,
@@ -90,4 +92,14 @@ impl Probabilities {
         }
         Ok(serde_json::from_value(answers.clone())?)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Attention {
+    pub needs_input: f64,
+    pub important: f64,
+    pub redundant_request: f64,
+    pub none: f64,
+    pub unclear: f64,
 }

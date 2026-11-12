@@ -8026,6 +8026,7 @@ function atTail() {
 function scrollToTail() {
   feedScroll.scrollTop = feedScroll.scrollHeight;
   jumpToLatest.classList.add('hidden');
+  scheduleConversationRead();
 }
 
 function entryBody(entry) {
@@ -8306,6 +8307,58 @@ function renderConversationTransition(session) {
   );
 }
 
+// Receipts share the daemon's read cursor with the TUI. Keep one request per
+// session in flight and coalesce scroll/layout events into the next paint.
+const conversationReads = new Map();
+let conversationReadFrame = null;
+function scheduleConversationRead() {
+  if (conversationReadFrame !== null) return;
+  conversationReadFrame = requestAnimationFrame(() => {
+    conversationReadFrame = null;
+    void persistVisibleConversationRead();
+  });
+}
+
+async function persistVisibleConversationRead() {
+  const sessionId = currentSession;
+  if (document.visibilityState !== 'visible' || route.name !== 'conversation'
+    || route.sessionId !== sessionId || !sessionId) return;
+  const session = sessionById(sessionId);
+  if (!session?.capabilities?.open || isTransitioningSession(session)) return;
+  const latest = feed.lastElementChild;
+  if (!latest) return;
+  const viewport = feedScroll.getBoundingClientRect();
+  const message = latest.getBoundingClientRect();
+  const bottom = Math.min(viewport.bottom, window.innerHeight);
+  if (message.bottom > bottom || message.bottom <= Math.max(viewport.top, 0)
+    || message.top >= bottom) return;
+  let receipt = conversationReads.get(sessionId);
+  if (!receipt) {
+    receipt = { through: 0, inFlight: false };
+    conversationReads.set(sessionId, receipt);
+  }
+  const through = cursor;
+  if (!Number.isSafeInteger(through) || through <= Math.max(receipt.through, acknowledged)
+    || receipt.inFlight) return;
+  receipt.inFlight = true;
+  try {
+    await request(`/api/conversations/${encodeURIComponent(sessionId)}/read`, {
+      method: 'POST', body: JSON.stringify({ through }),
+    });
+    receipt.through = Math.max(receipt.through, through);
+    if (currentSession === sessionId) acknowledged = Math.max(acknowledged, through);
+    // A newer loaded cursor may have arrived while this request was pending.
+    if (currentSession === sessionId && cursor > through) scheduleConversationRead();
+  } catch (err) {
+    if (currentSession === sessionId) {
+      if (err.message === 'unauthorized') showLogin();
+      else document.querySelector('#conversation-error').textContent = err.message;
+    }
+  } finally {
+    receipt.inFlight = false;
+  }
+}
+
 async function loadConversation(delta = false) {
   if (!currentSession) return;
   const current = sessionById(currentSession);
@@ -8352,21 +8405,7 @@ async function loadConversation(delta = false) {
       ? result.presentation_key
       : null;
     cursor = result.latest_seq;
-    if (cursor > acknowledged) {
-      const through = cursor;
-      await request(`/api/conversations/${encodeURIComponent(sessionId)}/read`, {
-        method: 'POST',
-        signal: operation.controller.signal,
-        body: JSON.stringify({ through }),
-      });
-      const latest = sessionById(sessionId);
-      if (
-        generation !== conversationGeneration
-        || !latest?.capabilities?.open
-        || isTransitioningSession(latest)
-      ) return;
-      acknowledged = through;
-    }
+    scheduleConversationRead();
   } catch (err) {
     const latest = sessionById(sessionId);
     if (
@@ -9427,6 +9466,7 @@ feed.onclick = event => {
 
 jumpToLatest.onclick = scrollToTail;
 feedScroll.addEventListener('scroll', () => {
+  scheduleConversationRead();
   if (!inlineHistory?.failed && feedScroll.scrollTop <= earlierMessages.offsetHeight) void loadInlineHistory();
   if (atTail()) jumpToLatest.classList.add('hidden');
 });
@@ -9725,6 +9765,7 @@ if (window.visualViewport) {
   window.visualViewport.addEventListener('scroll', () => syncElicitationFocus());
 }
 window.addEventListener('resize', () => {
+  scheduleConversationRead();
   syncKeyboardInset();
   syncElicitationFocus();
 });
@@ -9776,6 +9817,7 @@ window.addEventListener('offline', () => setConnection('offline'));
 // A backgrounded progressive web app gets no `online` event, so the first
 // signal that it is back is somebody unlocking the screen.
 document.addEventListener('visibilitychange', () => {
+  scheduleConversationRead();
   if (document.visibilityState === 'visible' && navigator.onLine) reconnect();
 });
 // Clocks are presentation-only updates.  The keyed card nodes remain mounted
