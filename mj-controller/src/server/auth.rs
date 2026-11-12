@@ -83,21 +83,6 @@ pub(super) fn session_cookie_valid(key: &[u8], value: &str, now: u64) -> bool {
     cookie_viewer(key, value, now).is_some()
 }
 
-/// Mint a signed viewer-session cookie value without the HTTP login flow.
-///
-/// The desktop shell pre-authorizes its WebView with this: it runs as the same
-/// user as the daemon and reads the same persisted signing key, so possession
-/// of the key is the credential. The cookie carries the ephemeral TTL — a
-/// desktop window re-mints on every launch, so it never needs a long life.
-pub fn mint_desktop_session_cookie(key: &[u8]) -> AnyResult<String> {
-    let viewer = generate_viewer_id()?;
-    Ok(signed_cookie_value(
-        key,
-        &viewer,
-        now_unix().saturating_add(EPHEMERAL_SESSION_TTL.as_secs()),
-    ))
-}
-
 /// The viewer a cookie names, or `None` when the cookie is not valid.
 pub(super) fn cookie_viewer(key: &[u8], value: &str, now: u64) -> Option<String> {
     validate_cookie(key, Some(value), now)
@@ -161,7 +146,7 @@ pub(super) fn authenticated_viewer(
     Ok(cookie)
 }
 
-/// Only phone logins explicitly opt into sliding expiry. Legacy and desktop
+/// Only phone logins explicitly opt into sliding expiry. Legacy
 /// cookies have no signed policy marker, so retain their original expiry.
 fn renewal_policy(state: &ServerState, viewer: &str) -> Option<(Duration, bool)> {
     if viewer.starts_with("session:") {

@@ -27,7 +27,6 @@ mod api_client;
 mod api_commands;
 mod daemon;
 mod dashboard;
-mod desktop;
 mod ec2;
 mod go;
 mod hints;
@@ -108,11 +107,6 @@ enum Command {
     /// Open the workspace selector even when Mjolnir could auto-attach, or
     /// list and create workspaces without a terminal.
     Workspaces(WorkspacesArgs),
-    /// Open the web viewer in a native desktop window.
-    App,
-    /// Mint the private launch document consumed by `mj-desktop`.
-    #[command(hide = true)]
-    DesktopBootstrap,
     /// Inspect or control the persistent per-user daemon.
     Daemon(DaemonArgs),
     /// Internal persistent controller process.
@@ -845,8 +839,7 @@ fn process_kind(command: Option<&Command>) -> logging::ProcessKind {
         None
         | Some(Command::Go(_))
         | Some(Command::Simple(_))
-        | Some(Command::Workspaces(WorkspacesArgs { command: None }))
-        | Some(Command::App) => logging::ProcessKind::Tui,
+        | Some(Command::Workspaces(WorkspacesArgs { command: None })) => logging::ProcessKind::Tui,
         _ => logging::ProcessKind::Cli,
     }
 }
@@ -857,8 +850,6 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Go(_)) => "go",
         Some(Command::Simple(_)) => "simple",
         Some(Command::Workspaces(_)) => "workspaces",
-        Some(Command::App) => "app",
-        Some(Command::DesktopBootstrap) => "desktop-bootstrap",
         Some(Command::Daemon(_)) => "daemon",
         Some(Command::DaemonRun) => "daemon-run",
         Some(Command::Acp(_)) => "acp",
@@ -1026,12 +1017,6 @@ async fn run_command(
                 .await
                 .map(|()| DashboardExit::Normal),
         },
-        Some(Command::App) => desktop::run_desktop_app()
-            .await
-            .map(|()| DashboardExit::Normal),
-        Some(Command::DesktopBootstrap) => desktop::desktop_bootstrap()
-            .await
-            .map(|()| DashboardExit::Normal),
         Some(Command::Daemon(args)) => daemon_command(args).await.map(|()| DashboardExit::Normal),
         Some(Command::DaemonRun) => daemon::run_daemon_process()
             .await

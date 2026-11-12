@@ -465,7 +465,7 @@ use validation::*;
 mod errors;
 use errors::*;
 mod auth;
-pub use auth::*;
+use auth::*;
 mod assets;
 use assets::*;
 mod config_view;

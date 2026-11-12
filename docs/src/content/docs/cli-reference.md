@@ -11,7 +11,7 @@ mj [--instance <name>] [--workspace <name>] [command]
 
 `mj --workspace <name>` with no command opens the dashboard in that workspace. Given before a command that works in a workspace, it applies to that command. It is not a global option: the commands that work in a workspace (`mj new`, `mj acp`, `mj sessions`, `mj events`, `mj resume`, and `mj import`) take `--workspace <name>` after the command name too, and the other commands refuse it there. `mj new` and `mj acp` require it. `mj sessions` and `mj events` show only that workspace when it is given, and every workspace when it is not. `mj import`, and `mj resume --wiki` when it imports another tool's session, put the session in it and need it when the instance has more than one workspace.
 
-`--instance` (`-i`, or `MJ_INSTANCE`) is global and runs a fully isolated copy — configuration, database, daemon, and logs under `instances/<name>` (for example `mj -i dev daemon status`). Hidden worker, broker, daemon-run, and desktop-bootstrap commands are internal implementation interfaces and are intentionally omitted here.
+`--instance` (`-i`, or `MJ_INSTANCE`) is global and runs a fully isolated copy — configuration, database, daemon, and logs under `instances/<name>` (for example `mj -i dev daemon status`). Hidden worker, broker, and daemon-run commands are internal implementation interfaces and are intentionally omitted here.
 
 `mj acp` is listed in `mj --help`. It is the ACP agent a program starts instead
 of a coding harness, and is documented in [ACP agent](/acp-agent/).
@@ -27,9 +27,8 @@ of a coding harness, and is documented in [ACP agent](/acp-agent/).
 | `mj workspaces create <name> [--json]` | Create a workspace, or select the one that already has the name. |
 | `mj go [--setup] [--global-default] [<folder>]` | Open the dashboard on a folder (default: the current directory) with its remembered account and target. `--setup` changes that folder's setup; `--global-default` also makes it the default for new projects. |
 | `mj simple [<folder>]` | Open the folder's last running Simple session or start one immediately with the default enabled agent, the local `localhost` target, and an isolated checkout. Commands are direct Ctrl-key chords with no prefix, so Ctrl+B remains available to tmux. |
-| `mj app` | Open the authenticated web viewer in the separate `mj-desktop` application. |
 
-Use `prefix+q` to detach from the dashboard without stopping the daemon or any session. The [terminal surface](/terminal-surface/) documents its keys; the [web viewer](/web-viewer/) covers `mj app` and browser access.
+Use `prefix+q` to detach from the dashboard without stopping the daemon or any session. The [terminal surface](/terminal-surface/) documents its keys; the [web viewer](/web-viewer/) covers browser access.
 
 `mj simple` is intentionally narrower than `mj go`: it does not show the
 profile, target, project, or review wizard, does not choose a remote or
@@ -695,7 +694,7 @@ default role selection or the repeated `--role` selection before paging, and
 returns `next_after_seq` and `latest_seq` with the response. `--finished-only`
 filters agent messages and uses the finished-prefix cursor described above.
 `mj events` always prints JSON lines.
-`mj checkpoint`, `mj login`, `mj app`, `mj go`, `mj setup`, and the
+`mj checkpoint`, `mj login`, `mj go`, `mj setup`, and the
 `mj daemon` commands do not take `--json`. The commands in this section are
 clients for the [HTTP API](/api-reference/), which documents the routes,
 the wait outcomes, the export preconditions, and the bearer token these
@@ -713,8 +712,6 @@ Most behavior belongs in [configuration](/configuration/). These environment var
 | `MJ_WORKER_DIR` | Directory searched for bundled worker binaries. |
 | `MJ_WORKER_URL` | Remote worker URL fallback; it may contain `{target}` and requires `MJ_WORKER_SHA256`. |
 | `MJ_WORKER_SHA256` | Required 64-character hexadecimal digest when `MJ_WORKER_URL` is set. |
-| `MJ_DESKTOP_BINARY` | Explicit `mj-desktop` executable used by `mj app`. |
-| `MJ_CONTROLLER_BINARY` | Explicit controller executable used by companion launchers. |
 | `MJ_VOICE_WORKER` | Explicit local voice-worker executable. |
 | `CODEX_HOME` | Codex home used by setup discovery and native import. |
 | `CLAUDE_CONFIG_DIR` | Claude Code home used by setup discovery and native import. |

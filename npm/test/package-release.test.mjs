@@ -20,7 +20,7 @@ test("declares every release target exactly once", () => {
     ],
   );
   assert.equal(new Set(PLATFORMS.map((platform) => platform.target)).size, PLATFORMS.length);
-  assert.equal(PLATFORMS.filter((platform) => !platform.desktop).length, 0);
+  assert.equal(PLATFORMS.filter((platform) => !platform.companions).length, 0);
 });
 
 test("derives publishable package versions from the release tag", () => {
@@ -58,7 +58,7 @@ test("stages each platform's declared session workers and nothing else", async (
   const source = path.join(root, "source");
   await mkdir(path.join(source, "licenses"), { recursive: true });
   const workers = [...new Set(PLATFORMS.flatMap((platform) => platform.sessionWorkers))];
-  for (const name of ["README.md", "LICENSE", "mj", "mj-worker", "mj-desktop", "mj-voice-worker", ...workers]) {
+  for (const name of ["README.md", "LICENSE", "mj", "mj-worker", "mj-voice-worker", ...workers]) {
     await writeFile(path.join(source, name), name, { mode: 0o755 });
   }
   for (const platform of PLATFORMS) {
