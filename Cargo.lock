@@ -803,6 +803,7 @@ dependencies = [
  "tar",
  "tempfile",
  "tiny_http",
+ "tokenizers",
  "tokio",
  "toml",
  "toml_edit 0.20.2",
@@ -859,10 +860,14 @@ dependencies = [
  "agent-client-protocol",
  "anyhow",
  "brokk-mj-core",
+ "chrono",
+ "indexmap 2.14.0",
+ "regex",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
+ "tokenizers",
  "tracing",
  "tree-sitter",
  "tree-sitter-bash",
@@ -2051,6 +2056,17 @@ checksum = "b95f7c0680e4142284cf8b22c14a476e87d61b004a3a0861872b32ef7ead40a2"
 dependencies = [
  "bit-set 0.5.3",
  "regex",
+]
+
+[[package]]
+name = "fancy-regex"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e24cb5a94bcae1e5408b0effca5cd7172ea3c5755049c5f3af4cd283a165298"
+dependencies = [
+ "bit-set 0.8.0",
+ "regex-automata",
+ "regex-syntax",
 ]
 
 [[package]]
@@ -6434,6 +6450,7 @@ dependencies = [
  "dary_heap",
  "derive_builder",
  "esaxx-rs",
+ "fancy-regex 0.14.0",
  "getrandom 0.3.4",
  "itertools 0.14.0",
  "log",

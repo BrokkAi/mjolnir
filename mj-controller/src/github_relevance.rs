@@ -1,5 +1,8 @@
 //! Frozen student/GLiDE relevance policy. Evidence arrives bounded exactly once.
-#![allow(dead_code)] // Concrete model owner is wired when Milestone 3 lands.
+use crate::github_student::{
+    Student, StudentDevice, StudentDeviceFallbackReason, StudentError, StudentFailureKind,
+    StudentNotice, StudentState,
+};
 use anyhow::{Result, ensure};
 use mj_core::github_item::{GithubItemEvidence, GithubItemVerdict};
 use serde::Serialize;
@@ -20,57 +23,44 @@ pub(crate) type ScoreFuture<'a> =
     Pin<Box<dyn Future<Output = std::result::Result<f64, StudentError>> + Send + 'a>>;
 type GlideFuture<'a> = Pin<Box<dyn Future<Output = Result<f64>> + Send + 'a>>;
 
-// These owner types move to crate::github_student when Milestone 3 merges.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum StudentFailureKind {
-    Download,
-    Verification,
-    Load,
-    Inference,
-}
-impl StudentFailureKind {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Download => "download",
-            Self::Verification => "verification",
-            Self::Load => "load",
-            Self::Inference => "inference",
-        }
+fn failure_label(kind: StudentFailureKind) -> &'static str {
+    match kind {
+        StudentFailureKind::Download => "download",
+        StudentFailureKind::Verification => "verification",
+        StudentFailureKind::Load => "load",
+        StudentFailureKind::Inference => "inference",
+        StudentFailureKind::WindowsRuntimeMissing => "Windows runtime",
     }
 }
-#[derive(Clone, Debug)]
-pub(crate) enum StudentState {
-    Loading,
-    Ready,
-    Failed {
-        kind: StudentFailureKind,
-        cause: String,
-        next_retry_at_ms: i64,
-    },
-}
-
-// Moves to crate::github_student::StudentError when Milestone 3 merges.
-#[derive(Debug)]
-pub(crate) enum StudentError {
-    Unavailable(StudentState),
-    Inference(anyhow::Error),
-}
-impl std::fmt::Display for StudentError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Unavailable(state) => write!(f, "student unavailable: {state:?}"),
-            Self::Inference(error) => write!(f, "student inference failed: {error:#}"),
-        }
-    }
-}
-impl std::error::Error for StudentError {}
 
 /// Readiness, preparation/retry and inference concurrency belong to this owner.
 /// Scoring must run blocking inference off the async runtime.
 pub(crate) trait StudentOwner: Send + Sync {
-    fn state(&self) -> StudentState;
+    fn set_use_gpu(&self, enabled: bool);
     fn manifest_revision(&self) -> &str;
     fn score_segments<'a>(&'a self, item: &'a str, session: &'a str) -> ScoreFuture<'a>;
+}
+
+impl StudentOwner for Student {
+    fn set_use_gpu(&self, enabled: bool) {
+        Student::set_use_gpu(self, enabled);
+    }
+    fn manifest_revision(&self) -> &str {
+        Student::manifest_revision(self)
+    }
+    fn score_segments<'a>(&'a self, item: &'a str, session: &'a str) -> ScoreFuture<'a> {
+        Box::pin(async move {
+            Student::score_segments(self, item, session)
+                .await
+                .map_err(|error| {
+                    error.downcast::<StudentError>().unwrap_or_else(|error| {
+                        StudentError::Inference {
+                            cause: format!("{error:#}"),
+                        }
+                    })
+                })
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq)]
@@ -81,30 +71,24 @@ pub(crate) enum Route {
     GlideDegraded,
 }
 
-pub(crate) struct Classifier {
-    student: Arc<dyn StudentOwner>,
+pub(crate) struct Notices {
     degraded: Mutex<bool>,
     notice: Box<dyn Fn(String) + Send + Sync>,
 }
-impl Classifier {
-    pub(crate) fn new(
-        student: Arc<dyn StudentOwner>,
-        notice: impl Fn(String) + Send + Sync + 'static,
-    ) -> Self {
+impl Notices {
+    pub(crate) fn new(notice: impl Fn(String) + Send + Sync + 'static) -> Self {
         Self {
-            student,
             degraded: Mutex::new(false),
             notice: Box::new(notice),
         }
     }
-
     pub(crate) fn observe(&self, failure: Option<(Option<StudentFailureKind>, &str)>) {
         let mut degraded = self.degraded.lock().unwrap_or_else(|p| p.into_inner());
         match (failure, *degraded) {
             (Some((kind, cause)), false) => {
                 *degraded = true;
                 tracing::warn!(cause, "GitHub local relevance scoring unavailable");
-                let stage = kind.map_or("preparation", StudentFailureKind::label);
+                let stage = kind.map_or("preparation", failure_label);
                 (self.notice)(format!(
                     "Local GitHub relevance scoring is unavailable ({stage}). Every GitHub item is scored by GLiDE while the model retries automatically."
                 ));
@@ -115,6 +99,40 @@ impl Classifier {
             }
             _ => {}
         }
+    }
+    pub(crate) fn student_notice(&self, notice: StudentNotice) {
+        let text = match notice {
+            StudentNotice::InferenceFailing { cause } => {
+                self.observe(Some((Some(StudentFailureKind::Inference), &cause)));
+                return;
+            }
+            StudentNotice::InferenceRecovered => { self.observe(None); return; }
+            StudentNotice::DeviceFallback { from, reason } => {
+                let device = match from { StudentDevice::Cpu => "CPU", StudentDevice::Cuda => "CUDA", StudentDevice::CoreMl => "CoreML", StudentDevice::DirectMl => "DirectML" };
+                match reason {
+                    StudentDeviceFallbackReason::Slower { gpu_ms, cpu_ms } => format!("GitHub relevance switched from {device} to CPU: GPU scoring took {gpu_ms} ms versus {cpu_ms} ms on CPU."),
+                    StudentDeviceFallbackReason::Failed(kind) => format!("GitHub relevance switched from {device} to CPU because {} failed.", failure_label(kind)),
+                }
+            }
+            StudentNotice::CudaLibrariesMissing { missing } => format!("GitHub relevance uses CPU because CUDA libraries are missing: {}. Install CUDA 12 and cuDNN 9, then restart the daemon to enable CUDA.", missing.join(", ")),
+            StudentNotice::GpuAfterRestart => "GitHub relevance continues on CPU. Restart the daemon to enable GPU scoring with the updated preference.".into(),
+            StudentNotice::PlatformUnsupported => "Local GitHub relevance scoring is unavailable on this platform. Every GitHub item is scored by GLiDE.".into(),
+            StudentNotice::WindowsRuntimeMissing { missing } => format!("Local GitHub relevance scoring needs the Microsoft Visual C++ Redistributable (x64): missing {}. Every GitHub item is scored by GLiDE while model preparation retries automatically.", missing.join(", ")),
+        };
+        (self.notice)(text);
+    }
+}
+
+pub(crate) struct Classifier {
+    student: Arc<dyn StudentOwner>,
+    notices: Arc<Notices>,
+}
+impl Classifier {
+    pub(crate) fn new(student: Arc<dyn StudentOwner>, notices: Arc<Notices>) -> Self {
+        Self { student, notices }
+    }
+    pub(crate) fn set_use_gpu(&self, enabled: bool) {
+        self.student.set_use_gpu(enabled);
     }
 
     pub(crate) async fn classify(
@@ -158,38 +176,43 @@ impl Classifier {
         let mut failure_kind = None;
         let (item, session) = mj_transcript::github_history::student_segments(evidence)?;
         // Scoring is the owner's atomic decision point and starts lazy preparation.
-        let student_probability = match self
-            .student
-            .score_segments(&item, &session)
-            .await
-            .and_then(|p| valid_probability(p).map_err(StudentError::Inference))
-        {
-            Ok(p) => Some(p),
-            Err(StudentError::Unavailable(StudentState::Failed {
-                kind,
-                cause,
-                next_retry_at_ms,
-            })) => {
-                failure_kind = Some(kind);
-                failure = Some(format!(
-                    "{cause}; automatic retry at epoch milliseconds {next_retry_at_ms}"
-                ));
-                None
-            }
-            Err(StudentError::Unavailable(state)) => {
-                failure = Some(format!(
-                    "model unavailable ({state:?}); automatic preparation is running"
-                ));
-                None
-            }
-            Err(StudentError::Inference(error)) => {
-                failure_kind = Some(StudentFailureKind::Inference);
-                failure = Some(format!("{error:#}; model owner will retry preparation"));
-                tracing::warn!(%error, "GitHub student inference failed; using GLiDE");
-                None
-            }
-        };
-        self.observe(failure.as_deref().map(|cause| (failure_kind, cause)));
+        let student_probability =
+            match self
+                .student
+                .score_segments(&item, &session)
+                .await
+                .and_then(|p| {
+                    valid_probability(p).map_err(|error| StudentError::Inference {
+                        cause: format!("{error:#}"),
+                    })
+                }) {
+                Ok(p) => Some(p),
+                Err(StudentError::Unavailable(StudentState::Failed {
+                    kind,
+                    cause,
+                    next_retry_at_ms,
+                })) => {
+                    failure_kind = Some(kind);
+                    failure = Some(format!(
+                        "{cause}; automatic retry at epoch milliseconds {next_retry_at_ms}"
+                    ));
+                    None
+                }
+                Err(StudentError::Unavailable(state)) => {
+                    failure = Some(format!(
+                        "model unavailable ({state:?}); automatic preparation is running"
+                    ));
+                    None
+                }
+                Err(StudentError::Inference { cause }) => {
+                    failure_kind = Some(StudentFailureKind::Inference);
+                    failure = Some(format!("{cause}; model owner will retry preparation"));
+                    tracing::warn!(cause, "GitHub student inference failed; using GLiDE");
+                    None
+                }
+            };
+        self.notices
+            .observe(failure.as_deref().map(|cause| (failure_kind, cause)));
         let route = match student_probability {
             Some(s) if s >= NOTIFY => Route::StudentNotify,
             Some(s) if s < REJECT => Route::StudentReject,
@@ -246,9 +269,7 @@ mod tests {
         calls: std::sync::atomic::AtomicUsize,
     }
     impl StudentOwner for RecordedStudent {
-        fn state(&self) -> StudentState {
-            panic!("policy must not poll readiness before scoring")
-        }
+        fn set_use_gpu(&self, _: bool) {}
         fn manifest_revision(&self) -> &str {
             "recorded-boundary"
         }
@@ -305,7 +326,7 @@ mod tests {
                 score,
                 calls: Default::default(),
             });
-            let classifier = Classifier::new(student, |_| {});
+            let classifier = Classifier::new(student, Arc::new(Notices::new(|_| {})));
             let used = std::sync::atomic::AtomicUsize::new(0);
             let result = classifier
                 .classify_with(&evidence, |_| {
@@ -324,8 +345,10 @@ mod tests {
         });
         let notices = Arc::new(Mutex::new(Vec::new()));
         let captured = notices.clone();
-        let classifier =
-            Classifier::new(student.clone(), move |s| captured.lock().unwrap().push(s));
+        let classifier = Classifier::new(
+            student.clone(),
+            Arc::new(Notices::new(move |s| captured.lock().unwrap().push(s))),
+        );
         for _ in 0..2 {
             assert!(
                 classifier

@@ -78,41 +78,48 @@ fn is_github_events_disabled(error: &anyhow::Error) -> bool {
 
 trait GithubClassifier: Send + Sync {
     fn classify<'a>(&'a self, evidence: &'a GithubItemEvidence) -> ClassifyFuture<'a>;
+    fn set_use_gpu(&self, _: bool) {}
 }
-
-struct JevGithubClassifier;
 
 impl GithubClassifier for crate::github_relevance::Classifier {
+    fn set_use_gpu(&self, enabled: bool) {
+        self.set_use_gpu(enabled);
+    }
     fn classify<'a>(&'a self, evidence: &'a GithubItemEvidence) -> ClassifyFuture<'a> {
         Box::pin(self.classify(evidence))
-    }
-}
-
-impl GithubClassifier for JevGithubClassifier {
-    fn classify<'a>(&'a self, evidence: &'a GithubItemEvidence) -> ClassifyFuture<'a> {
-        Box::pin(crate::github_item_verdict::classify(evidence))
     }
 }
 
 /// Cancellable periodic poller. Poll progress lives only in the database; a
 /// replacement daemon can resume from the same repo cursors and event keys.
 pub(crate) async fn run(state: Arc<RuntimeState>, stop: CancellationToken) -> Result<()> {
-    run_with_classifier(state, stop, Arc::new(JevGithubClassifier)).await
+    let notice_state = Arc::downgrade(&state);
+    let notices = Arc::new(crate::github_relevance::Notices::new(move |text| {
+        if let Some(state) = notice_state.upgrade() {
+            state.push_public_notice("", text);
+        }
+    }));
+    let owner_notices = notices.clone();
+    let student = Arc::new(crate::github_student::Student::new(
+        mj_core::config::data_dir(),
+        state.controller_projection().config.github.watch.use_gpu,
+        Arc::new(move |notice| owner_notices.student_notice(notice)),
+    ));
+    let result = run_with_student(state, stop, student.clone(), notices).await;
+    let shutdown = student.shutdown().await;
+    if let Err(error) = &shutdown {
+        tracing::warn!(%error, "GitHub student shutdown failed");
+    }
+    result.and(shutdown)
 }
 
-/// The concrete preparation owner is supplied by Milestone 3.
-#[allow(dead_code)]
-pub(crate) async fn run_with_student(
+async fn run_with_student(
     state: Arc<RuntimeState>,
     stop: CancellationToken,
     student: Arc<dyn crate::github_relevance::StudentOwner>,
+    notices: Arc<crate::github_relevance::Notices>,
 ) -> Result<()> {
-    let notice_state = Arc::downgrade(&state);
-    let classifier = crate::github_relevance::Classifier::new(student, move |text| {
-        if let Some(state) = notice_state.upgrade() {
-            state.push_public_notice("", mj_core::redact::redact_secrets(&text));
-        }
-    });
+    let classifier = crate::github_relevance::Classifier::new(student, notices);
     run_with_classifier(state, stop, Arc::new(classifier)).await
 }
 
@@ -123,6 +130,7 @@ async fn run_with_classifier(
 ) -> Result<()> {
     loop {
         let projection = state.controller_projection();
+        classifier.set_use_gpu(projection.config.github.watch.use_gpu);
         let mailboxes_enabled = projection.config.github_events_enabled();
         let config = projection.config.github.watch;
         let delay = if mailboxes_enabled {
@@ -138,6 +146,7 @@ async fn run_with_classifier(
             return Ok(());
         }
         let projection = state.controller_projection();
+        classifier.set_use_gpu(projection.config.github.watch.use_gpu);
         if !projection.config.github_events_enabled() {
             continue;
         }
@@ -613,7 +622,7 @@ async fn classify_for_session(
     let bare_is_item_repo = session_github_repositories(&session).len() == 1;
     evidence.session = evidence.session.for_item(&evidence.item, bare_is_item_repo);
     // The creator already knows its item, so it is never told about it and
-    // Jev is not asked; its stored interest is false.
+    // The classifier is not asked; its stored interest is false.
     let interested = if created {
         false
     } else {
@@ -1802,7 +1811,7 @@ mod tests {
         assert_eq!(
             calls.load(Ordering::SeqCst),
             0,
-            "Jev is not called after opt-out"
+            "The classifier is not called after opt-out"
         );
         assert_eq!(state.requests.load(Ordering::SeqCst), 1);
         assert!(is_github_events_disabled(
