@@ -776,9 +776,16 @@ impl VerdictClient {
             );
             bytes.extend_from_slice(&chunk);
         }
-        glide_turn::Probabilities::parse(
+        let probabilities = glide_turn::Probabilities::parse(
             &serde_json::from_slice(&bytes).context("decode GLiDE verdict")?,
-        )
+        )?;
+        if probabilities.attention.is_none() {
+            tracing::warn!(
+                operation = "glide_turn_verdict",
+                "the verdict proxy returned no attention answer; Important attention stays off until the proxy is updated"
+            );
+        }
+        Ok(probabilities)
     }
 
     #[cfg(test)]

@@ -136,6 +136,20 @@ mod tests {
             let mut invalid = sample.clone();
             invalid["answers"]["turn_state"]["probabilities"]["finished"] = 2.0.into();
             assert!(Probabilities::parse(&invalid).is_err());
+            let mut older_proxy = sample.clone();
+            older_proxy["answers"]
+                .as_object_mut()
+                .unwrap()
+                .remove("attention");
+            // Hard-won: 4dbf5e62d: a proxy without the attention question failed every verdict.
+            let parsed = Probabilities::parse(&older_proxy).unwrap();
+            assert!(parsed.attention.is_none());
+            let mut partial_attention = sample.clone();
+            partial_attention["answers"]["attention"]["probabilities"]
+                .as_object_mut()
+                .unwrap()
+                .remove("important");
+            assert!(Probabilities::parse(&partial_attention).is_err());
         }
     }
 }
