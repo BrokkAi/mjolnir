@@ -1,10 +1,8 @@
 //! Prompt dictation support.
 //!
-//! Non-Android platforms run an `mj-voice-worker` sidecar. The worker receives
-//! the Codex authentication path as a command-line argument and streams
-//! progress to the parent as JSON lines on stdout. A newline on stdin ends
-//! capture and starts upload/transcription; EOF cancels the request without
-//! uploading it.
+//! Non-Android platforms record WAV with an `mj-voice-worker` sidecar.
+//! JSON lines carry progress and completion. A newline ends capture; EOF
+//! cancels. The chat uploads the recording to the daemon for transcription.
 
 use anyhow::Result;
 #[cfg(target_os = "android")]
@@ -14,9 +12,9 @@ use std::path::Path;
 /// Command sent from the chat input to the dictation transport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VoiceCommand {
-    /// End microphone capture and let the worker upload and transcribe it.
+    /// End microphone capture and save the WAV.
     Finish,
-    /// Cancel capture. The worker must not upload or return a transcript.
+    /// Cancel capture.
     Cancel,
 }
 
@@ -65,11 +63,11 @@ mod worker {
 
     /// Parent-side dictation: spawn the sidecar and relay its events.
     pub(super) fn run<F, G, H>(
-        auth_path: &Path,
+        output_path: &Path,
         on_partial: F,
         on_level: G,
         on_status: H,
-        cancel_rx: mpsc::Receiver<VoiceCommand>,
+        cancel_rx: &mpsc::Receiver<VoiceCommand>,
     ) -> Result<String>
     where
         F: FnMut(String),
@@ -79,8 +77,8 @@ mod worker {
         let exe = voice_worker_executable()?;
         let mut command = Command::new(&exe);
         command
-            .arg("--codex-auth")
-            .arg(auth_path)
+            .arg("--output")
+            .arg(output_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -130,7 +128,7 @@ mod worker {
         mut on_partial: F,
         mut on_level: G,
         mut on_status: H,
-        cancel_rx: mpsc::Receiver<VoiceCommand>,
+        cancel_rx: &mpsc::Receiver<VoiceCommand>,
     ) -> Result<String>
     where
         F: FnMut(String),
@@ -398,37 +396,37 @@ pub fn voice_input_unavailable_reason() -> Option<String> {
     }
 }
 
-/// Capture microphone audio and return the recognized transcript.
+/// Capture microphone audio to the supplied WAV path.
 ///
 /// `on_partial` receives the cumulative transcript as it grows, `on_level`
 /// receives normalized microphone levels for the input meter, and `on_status`
 /// receives transient progress messages. `VoiceCommand::Finish` stops capture
-/// and starts transcription; `VoiceCommand::Cancel`, or a dropped command
+/// and saves the recording; `VoiceCommand::Cancel`, or a dropped command
 /// sender, closes the worker's stdin and returns a cancellation error without
 /// a transcript.
 #[cfg(not(target_os = "android"))]
 pub fn run_dictation<F, G, H>(
-    auth_path: &Path,
+    output_path: &Path,
     on_partial: F,
     on_level: G,
     on_status: H,
-    cancel_rx: std::sync::mpsc::Receiver<VoiceCommand>,
+    cancel_rx: &std::sync::mpsc::Receiver<VoiceCommand>,
 ) -> Result<String>
 where
     F: FnMut(String),
     G: FnMut(f32),
     H: FnMut(String),
 {
-    worker::run(auth_path, on_partial, on_level, on_status, cancel_rx)
+    worker::run(output_path, on_partial, on_level, on_status, cancel_rx)
 }
 
 #[cfg(target_os = "android")]
 pub fn run_dictation<F, G, H>(
-    _auth_path: &Path,
+    _output_path: &Path,
     _on_partial: F,
     _on_level: G,
     _on_status: H,
-    _cancel_rx: std::sync::mpsc::Receiver<VoiceCommand>,
+    _cancel_rx: &std::sync::mpsc::Receiver<VoiceCommand>,
 ) -> Result<String>
 where
     F: FnMut(String),
@@ -531,7 +529,7 @@ mod tests {
                 |text| partials.push(text),
                 |_level| {},
                 |message| statuses.push(message),
-                cancel_rx,
+                &cancel_rx,
             );
             (result, partials, statuses)
         }
