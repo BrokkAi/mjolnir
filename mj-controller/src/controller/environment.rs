@@ -633,6 +633,10 @@ mod tests {
 
     // Hard-won: old-placement cleanup cleared the replacement worker's restart intent.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+    )]
     fn retiring_a_move_source_preserves_the_destination_restart_intent() {
         const TEST: &str = "retiring_a_move_source_preserves_the_destination_restart_intent";
         const CHILD: &str = "MJ_TEST_MOVE_SOURCE_RETIREMENT";
@@ -692,6 +696,10 @@ mod tests {
 
     // Hard-won: #1506: retirement serialized historical workers and stopped each twice.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+    )]
     fn retirement_drains_an_admitted_child_and_refuses_later_launch_and_registration() {
         const TEST: &str =
             "retirement_drains_an_admitted_child_and_refuses_later_launch_and_registration";
