@@ -528,6 +528,13 @@ impl DashboardState {
                 .insert(session_id.to_owned(), attention);
         }
     }
+    pub fn set_unread_frontiers(
+        &mut self,
+        frontiers: mj_core::snapshot_map::SnapshotMap<String, u64>,
+    ) {
+        self.unread_frontiers = frontiers;
+    }
+
     pub fn set_notification_dismissals(
         &mut self,
         targets: mj_core::snapshot_map::SnapshotMap<

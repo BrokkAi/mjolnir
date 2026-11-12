@@ -1265,34 +1265,37 @@ impl RuntimeState {
             )
             .into());
         }
-        match target {
+        let (through, command_ordinal) = match target {
             mj_core::attention::NotificationDismissal::Question(question) => {
-                self.session_manager
+                let through = question.completed_ordinal;
+                let ordinal = self
+                    .session_manager
                     .session(&session_id)
                     .await?
                     .submit(
-                        format!("dismiss-question-{}", question.completed_ordinal),
+                        format!("dismiss-question-{through}"),
                         RelayCommand::DismissQuestion { question },
                     )
-                    .await
+                    .await?;
+                (through, Some(ordinal))
             }
-            mj_core::attention::NotificationDismissal::ReadThrough(through) => {
-                let workspace_id = runtime
-                    .records
-                    .get(&session_id)
-                    .context("session missing")?
-                    .workspace_id
-                    .clone();
-                blocking(move || {
-                    crate::database::persist_read_receipt(
-                        "notification-dismissal",
-                        &workspace_id,
-                        &session_id,
-                        through,
-                    )
-                })
-                .await
-            }
-        }
+            mj_core::attention::NotificationDismissal::ReadThrough(through) => (through, None),
+        };
+        let workspace_id = runtime
+            .records
+            .get(&session_id)
+            .context("session missing")?
+            .workspace_id
+            .clone();
+        let frontier = blocking(move || {
+            crate::database::persist_read_receipt(
+                "notification-dismissal",
+                &workspace_id,
+                &session_id,
+                through,
+            )
+        })
+        .await?;
+        Ok(command_ordinal.unwrap_or(frontier))
     }
 }

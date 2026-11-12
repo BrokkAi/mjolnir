@@ -1184,19 +1184,17 @@ impl DashboardState {
             .collect::<Vec<_>>();
         let mut receipts = Vec::new();
         for session_id in listed {
-            if !matches!(
-                self.served_attention.get(&session_id),
-                Some(
-                    mj_core::attention::SessionAttention::Unread
-                        | mj_core::attention::SessionAttention::Important
-                )
-            ) {
-                continue;
-            }
-            let Some(detail) = self.session_details.get_mut(&session_id) else {
-                continue;
-            };
-            let Some(through) = detail.materialized_applied_event_ordinal else {
+            let through = self.unread_frontiers.get(&session_id).copied().max(
+                self.notification_dismissals
+                    .get(&session_id)
+                    .and_then(|target| match target {
+                        mj_core::attention::NotificationDismissal::ReadThrough(through) => {
+                            Some(*through)
+                        }
+                        mj_core::attention::NotificationDismissal::Question(_) => None,
+                    }),
+            );
+            let Some(through) = through else {
                 continue;
             };
             let Some(session) = self.state.sessions.get_mut(&session_id) else {
@@ -1204,7 +1202,9 @@ impl DashboardState {
             };
             if through > session.viewed_through_event_ordinal {
                 session.viewed_through_event_ordinal = through;
-                detail.clear_unread();
+                if let Some(detail) = self.session_details.get_mut(&session_id) {
+                    detail.clear_unread();
+                }
                 receipts.push((session_id, through));
             }
         }

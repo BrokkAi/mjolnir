@@ -301,6 +301,8 @@ pub struct RuntimeContainerCapacity {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeMetadata {
     #[serde(default)]
+    pub unread_frontiers: SnapshotMap<String, u64>,
+    #[serde(default)]
     pub notification_dismissals: SnapshotMap<String, mj_core::attention::NotificationDismissal>,
     pub session_attention: SnapshotMap<String, mj_core::attention::SessionAttention>,
     #[serde(default)]
@@ -426,7 +428,7 @@ pub type TailKey = (u64, String);
 /// changed rather than the whole tail.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionTail {
-    pub latest_agent_content_ordinal: Option<u64>,
+    pub latest_unread_event_ordinal: Option<u64>,
     /// Daemon-local fact retained before trimming items or clearing the header
     /// transcript. Clients consume served attention, not this watermark.
     pub latest_user_position: Option<u64>,
@@ -441,7 +443,7 @@ impl SessionTail {
     /// what `materialized.transcript` already leaves out.
     pub fn of(materialized: &MaterializedSession, window: &ProjectionWindow, limit: usize) -> Self {
         let mut tail = Self {
-            latest_agent_content_ordinal: None,
+            latest_unread_event_ordinal: None,
             latest_user_position: materialized.latest_user_position(),
             header: transcript_header(materialized),
             window: window.clone(),
@@ -462,11 +464,12 @@ impl SessionTail {
         limit: usize,
     ) {
         self.latest_user_position = materialized.latest_user_position();
-        self.latest_agent_content_ordinal = materialized
+        self.latest_unread_event_ordinal = materialized
             .transcript
             .iter()
             .filter(|item| item.is_nonempty_agent_message())
             .filter_map(|item| item.latest_content_event_ordinal)
+            .chain(materialized.interruption_event_ordinals())
             .max();
         let start = materialized.transcript.len().saturating_sub(limit);
         // The daemon calls this for every view it publishes, so it walks the
@@ -654,7 +657,7 @@ impl SessionTail {
             header,
             window,
             items: map,
-            latest_agent_content_ordinal: None,
+            latest_unread_event_ordinal: None,
             latest_user_position: None,
         }
     }

@@ -1590,6 +1590,7 @@ mod tests {
         );
     }
 
+    // Hard-won: 92684ad3b: dismissing a question must also acknowledge its unread turn.
     #[test]
     fn golden_session_action_menu() {
         let mut output = String::new();
@@ -1795,20 +1796,18 @@ mod tests {
         crate::test_support::serve_attention(
             &mut dashboard,
             &[&session_id],
-            mj_core::attention::SessionAttention::Unread,
+            mj_core::attention::SessionAttention::Idle,
         );
+        dashboard
+            .state
+            .sessions
+            .get_mut(&session_id)
+            .unwrap()
+            .viewed_through_event_ordinal = 3;
         project(&mut dashboard, &materialized, &assessment);
         assert_ne!(
             dashboard.attention_level(&session_id),
             crate::AttentionLevel::Waiting
-        );
-        dashboard.set_notification_dismissals(
-            [(
-                session_id.clone(),
-                mj_core::attention::NotificationDismissal::ReadThrough(2),
-            )]
-            .into_iter()
-            .collect(),
         );
         dashboard.begin_session_palette();
         let lines = drawn(&mut dashboard, 120, 40);

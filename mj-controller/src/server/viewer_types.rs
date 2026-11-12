@@ -271,6 +271,7 @@ impl ViewerSnapshot {
                     .for_session(state.effective_review_or_off(&session.id));
                 ViewerSession {
                     attention: Default::default(),
+                    unread_frontier: None,
                     notification_dismissal: None,
                     oracle: session.oracle,
                     oracle_choice: session.oracle_choice.clone().map(|v| *v),
@@ -542,6 +543,8 @@ impl ViewerSession {
 pub struct ViewerSession {
     #[serde(default)]
     pub attention: mj_core::attention::SessionAttention,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread_frontier: Option<u64>,
     #[serde(default)]
     pub notification_dismissal: Option<mj_core::attention::NotificationDismissal>,
     #[serde(default = "oracle_default_enabled")]

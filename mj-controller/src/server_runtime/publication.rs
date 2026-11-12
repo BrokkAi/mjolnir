@@ -108,6 +108,14 @@ impl ViewerPublication {
         {
             self.dirty.insert(id.clone());
         }
+        for (id, _) in self
+            .runtime
+            .metadata
+            .unread_frontiers
+            .changes(&next.metadata.unread_frontiers)
+        {
+            self.dirty.insert(id.clone());
+        }
         self.runtime = next.clone();
     }
 
@@ -203,6 +211,7 @@ impl ViewerPublication {
                 .get(&id)
                 .copied()
                 .unwrap_or_default();
+            row.unread_frontier = self.runtime.metadata.unread_frontiers.get(&id).copied();
             row.notification_dismissal = self
                 .runtime
                 .metadata

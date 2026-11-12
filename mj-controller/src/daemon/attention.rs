@@ -59,6 +59,7 @@ pub(super) fn update(previous: &RuntimeProjection, next: &mut RuntimeProjection)
             .collect()
     };
     if ids.is_empty() {
+        next.metadata.unread_frontiers = previous.metadata.unread_frontiers.clone();
         next.metadata.notification_dismissals = previous.metadata.notification_dismissals.clone();
         next.metadata.session_attention = previous.metadata.session_attention.clone();
         return;
@@ -82,7 +83,15 @@ pub(super) fn update(previous: &RuntimeProjection, next: &mut RuntimeProjection)
     let (states, targets) = project_states(next, ids.clone());
     next.metadata.session_attention = previous.metadata.session_attention.clone();
     next.metadata.notification_dismissals = previous.metadata.notification_dismissals.clone();
+    next.metadata.unread_frontiers = previous.metadata.unread_frontiers.clone();
     for id in ids {
+        if let Some(frontier) = unread_frontier(next, &id) {
+            if next.metadata.unread_frontiers.get(&id) != Some(&frontier) {
+                next.metadata.unread_frontiers.insert(id.clone(), frontier);
+            }
+        } else {
+            next.metadata.unread_frontiers.remove(&id);
+        }
         let target = targets.get(&id).cloned();
         if let Some(target) = target {
             if next.metadata.notification_dismissals.get(&id) != Some(&target) {
@@ -103,6 +112,11 @@ pub(super) fn update(previous: &RuntimeProjection, next: &mut RuntimeProjection)
     }
 }
 
+fn unread_frontier(runtime: &RuntimeProjection, id: &str) -> Option<u64> {
+    let frontier = runtime.transcripts.get(id)?.latest_unread_event_ordinal?;
+    (frontier > runtime.records.get(id)?.viewed_through_event_ordinal).then_some(frontier)
+}
+
 fn dismissal(
     runtime: &RuntimeProjection,
     id: &str,
@@ -110,11 +124,7 @@ fn dismissal(
 ) -> Option<mj_core::attention::NotificationDismissal> {
     use mj_core::attention::NotificationDismissal;
     if attention == SessionAttention::Unread {
-        return runtime
-            .transcripts
-            .get(id)?
-            .latest_agent_content_ordinal
-            .map(NotificationDismissal::ReadThrough);
+        return unread_frontier(runtime, id).map(NotificationDismissal::ReadThrough);
     }
     let live = runtime.sessions.get(id)?.operational.as_deref()?;
     let assessment = live.assessment.as_deref()?;
@@ -328,13 +338,7 @@ fn project_states(
             } else {
                 Unknown
             };
-            let state = if state == Idle
-                && runtime
-                    .transcripts
-                    .get(id)
-                    .and_then(|tail| tail.latest_agent_content_ordinal)
-                    .is_some_and(|ordinal| ordinal > record.viewed_through_event_ordinal)
-            {
+            let state = if state == Idle && unread_frontier(runtime, id).is_some() {
                 Unread
             } else {
                 state
@@ -532,6 +536,7 @@ mod tests {
         }
     }
 
+    // Hard-won: 92684ad3b: hidden output and interruptions lost their unread frontier.
     #[test]
     fn unread_tracks_content_and_cursor_only_changes_incrementally_without_overriding_attention() {
         use mj_core::attention::NotificationDismissal;
@@ -622,6 +627,27 @@ mod tests {
             SessionAttention::Working
         );
         assert!(!next.metadata.notification_dismissals.contains_key("parent"));
+        assert_eq!(next.metadata.unread_frontiers["parent"], 11);
+        previous = next.clone();
+        next.records
+            .get_mut("parent")
+            .unwrap()
+            .viewed_through_event_ordinal = 11;
+        update(&previous, &mut next);
+        assert_eq!(
+            next.metadata.session_attention["parent"],
+            SessionAttention::Working
+        );
+        assert!(!next.metadata.unread_frontiers.contains_key("parent"));
+        previous = next.clone();
+        next.sessions.get_mut("parent").unwrap().operational =
+            Some(relay.operational_state().into());
+        update(&previous, &mut next);
+        assert_eq!(
+            next.metadata.session_attention["parent"],
+            SessionAttention::Idle,
+            "acknowledged output does not return when work stops"
+        );
         previous = next.clone();
         next.sessions.get_mut("parent").unwrap().operational =
             Some(relay.operational_state().into());
@@ -662,6 +688,72 @@ mod tests {
             SessionAttention::Failed
         );
         assert!(!next.metadata.notification_dismissals.contains_key("parent"));
+        previous = next.clone();
+        next.records.get_mut("parent").unwrap().state = SessionState::Running;
+        next.sessions.get_mut("parent").unwrap().connected = true;
+        materialized.pending_elicitations.clear();
+        materialized.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
+            command_id: "interrupted".into(),
+            accepted_ordinal: Some(1),
+            turn_start_position: Some(1),
+            completed_ordinal: 12,
+            completed_at_ms: 12,
+            outcome: mj_core::state::TurnOutcomeKind::Interrupted {
+                message: "stopped".into(),
+                reason: None,
+            },
+            answered_through: None,
+            diagnostic: None,
+            usage: None,
+            work_facts: None,
+        });
+        next.transcripts.get_mut("parent").unwrap().publish(
+            &materialized,
+            &ProjectionWindow::of(&materialized),
+            0,
+        );
+        update(&previous, &mut next);
+        assert_eq!(
+            next.metadata.session_attention["parent"],
+            SessionAttention::Unread
+        );
+        assert_eq!(next.metadata.unread_frontiers["parent"], 12);
+        assert_eq!(
+            next.metadata.notification_dismissals["parent"],
+            NotificationDismissal::ReadThrough(12)
+        );
+        previous = next.clone();
+        next.records
+            .get_mut("parent")
+            .unwrap()
+            .viewed_through_event_ordinal = 12;
+        materialized
+            .transcript
+            .push(std::sync::Arc::new(TranscriptItem {
+                stable_id: format!("{}13", mj_core::transcript::WORK_INTERRUPTED_ITEM_PREFIX),
+                position: 13,
+                latest_content_event_ordinal: None,
+                created_at_ms: 13,
+                last_changed_at_ms: 13,
+                body: TranscriptBody::System {
+                    text: "Work interrupted".into(),
+                },
+            }));
+        next.transcripts.get_mut("parent").unwrap().publish(
+            &materialized,
+            &ProjectionWindow::of(&materialized),
+            0,
+        );
+        update(&previous, &mut next);
+        assert_eq!(
+            next.metadata.session_attention["parent"],
+            SessionAttention::Unread
+        );
+        assert_eq!(next.metadata.unread_frontiers["parent"], 13);
+        assert_eq!(
+            next.metadata.notification_dismissals["parent"],
+            NotificationDismissal::ReadThrough(13)
+        );
     }
 
     fn runtime() -> RuntimeProjection {
@@ -687,6 +779,7 @@ mod tests {
     }
 
     // Hard-won: e569a20c5: unassessed harness questions disappeared and answered questions lingered.
+    // Hard-won: 92684ad3b: dismissed questions reappeared as unread without a turn read receipt.
     #[test]
     fn attention_uses_the_unanswered_latest_outcome_even_when_the_answer_is_trimmed() {
         use mj_core::assessment::{Action, Status, TurnAssessment};
@@ -803,6 +896,72 @@ mod tests {
         relay.assessment = Some(std::sync::Arc::new(assessment));
         publish(&mut runtime, &materialized, &relay);
         assert_eq!(project(&runtime)["parent"], SessionAttention::NeedsInput);
+        materialized
+            .transcript
+            .push(std::sync::Arc::new(TranscriptItem {
+                stable_id: "question-text".into(),
+                position: 2,
+                latest_content_event_ordinal: Some(9),
+                created_at_ms: 9,
+                last_changed_at_ms: 9,
+                body: TranscriptBody::Agent {
+                    chunks: vec![
+                        serde_json::json!({"content": {"type": "text", "text": "Which branch?"}}),
+                    ],
+                    streaming: false,
+                },
+            }));
+        runtime
+            .records
+            .get_mut("parent")
+            .unwrap()
+            .viewed_through_event_ordinal = 0;
+        publish(&mut runtime, &materialized, &relay);
+        let mut previous = RuntimeProjection::default();
+        update(&previous, &mut runtime);
+        let Some(mj_core::attention::NotificationDismissal::Question(target)) = runtime
+            .metadata
+            .notification_dismissals
+            .get("parent")
+            .cloned()
+        else {
+            panic!("dismissible question");
+        };
+        assert_eq!(runtime.metadata.unread_frontiers["parent"], 9);
+        let mut dismissed = (*relay.assessment.as_ref().unwrap().as_ref()).clone();
+        dismissed.status = Status::Superseded;
+        dismissed.reason = "question_dismissed".into();
+        relay.assessment = Some(std::sync::Arc::new(dismissed));
+        previous = runtime.clone();
+        runtime
+            .records
+            .get_mut("parent")
+            .unwrap()
+            .viewed_through_event_ordinal = target.completed_ordinal;
+        publish(&mut runtime, &materialized, &relay);
+        update(&previous, &mut runtime);
+        assert_eq!(
+            runtime.metadata.session_attention["parent"],
+            SessionAttention::Idle
+        );
+        assert!(!runtime.metadata.unread_frontiers.contains_key("parent"));
+        assert!(
+            !runtime
+                .metadata
+                .notification_dismissals
+                .contains_key("parent")
+        );
+        previous = runtime.clone();
+        let mut later = (*materialized.transcript[0]).clone();
+        later.latest_content_event_ordinal = Some(11);
+        materialized.transcript[0] = std::sync::Arc::new(later);
+        publish(&mut runtime, &materialized, &relay);
+        update(&previous, &mut runtime);
+        assert_eq!(
+            runtime.metadata.session_attention["parent"],
+            SessionAttention::Unread
+        );
+        assert_eq!(runtime.metadata.unread_frontiers["parent"], 11);
     }
 
     // Hard-won: 912798901: configuration repair errors lost their failure state.

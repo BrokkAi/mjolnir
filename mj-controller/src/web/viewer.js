@@ -8436,7 +8436,8 @@ async function persistVisibleConversationRead() {
     receipt = { through: 0, inFlight: false };
     conversationReads.set(sessionId, receipt);
   }
-  const through = cursor;
+  const through = Math.min(cursor, Math.max(session.unread_frontier || 0,
+    session.notification_dismissal?.read_through || 0));
   if (!Number.isSafeInteger(through) || through <= Math.max(receipt.through, acknowledged)
     || receipt.inFlight) return;
   receipt.inFlight = true;

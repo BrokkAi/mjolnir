@@ -1476,6 +1476,7 @@ fn workspace_switch_restores_selection_and_pane_layout_without_losing_local_edit
 }
 
 // Hard-won: 19a4148: mark-all-read cleared unread state in other workspaces.
+// Hard-won: 92684ad3b: mark-read skipped output hidden behind working attention.
 #[test]
 fn mark_all_read_leaves_another_workspaces_session_unread() {
     let mut dashboard = dashboard_with_attention_mix();
@@ -1486,13 +1487,28 @@ fn mark_all_read_leaves_another_workspaces_session_unread() {
             id,
             vec![agent_message(4, "unread response")],
         );
-        dashboard.set_session_attention_for(id, mj_core::attention::SessionAttention::Unread);
+        let served = if id == "done" {
+            mj_core::attention::SessionAttention::Working
+        } else {
+            mj_core::attention::SessionAttention::Unread
+        };
+        dashboard.set_session_attention_for(id, served);
         assert_eq!(
             dashboard.attention_level(id),
-            AttentionLevel::Unread,
+            if id == "done" {
+                AttentionLevel::Working
+            } else {
+                AttentionLevel::Unread
+            },
             "{id}"
         );
     }
+
+    dashboard.set_unread_frontiers(
+        [("done".into(), 4), ("remote".into(), 4)]
+            .into_iter()
+            .collect(),
+    );
 
     assert_eq!(
         chord(&mut dashboard, CommandId::MarkAllRead),
@@ -1507,6 +1523,28 @@ fn mark_all_read_leaves_another_workspaces_session_unread() {
     assert_eq!(
         dashboard.state.sessions["remote"].viewed_through_event_ordinal,
         0
+    );
+    assert_eq!(
+        dashboard.state.sessions["done"].viewed_through_event_ordinal,
+        4
+    );
+    dashboard.set_session_attention_for("done", mj_core::attention::SessionAttention::Idle);
+    dashboard.set_unread_frontiers([("remote".into(), 4)].into_iter().collect());
+    assert_eq!(dashboard.attention_level("done"), AttentionLevel::Idle);
+    dashboard.set_session_attention_for("done", mj_core::attention::SessionAttention::Important);
+    dashboard.set_notification_dismissals(
+        [(
+            "done".into(),
+            mj_core::attention::NotificationDismissal::ReadThrough(5),
+        )]
+        .into_iter()
+        .collect(),
+    );
+    assert_eq!(
+        chord(&mut dashboard, CommandId::MarkAllRead),
+        DashboardAction::MarkAllRead {
+            receipts: vec![("done".into(), 5)]
+        }
     );
 }
 
@@ -2064,6 +2102,7 @@ fn dashboard_with_attention_mix() -> DashboardState {
         .get_mut("done")
         .unwrap()
         .unread_agent_messages = 1;
+    dashboard.set_unread_frontiers([("done".into(), 4)].into_iter().collect());
     dashboard
 }
 

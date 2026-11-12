@@ -417,12 +417,12 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 dismissal failure: Some("Could not dismiss notification: Worker disconnected")
 === question dismissed (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default ✓1                         ≡ ││                                                                              │
+│ default                            ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
-│› ✓ ACP pretty                                                                                                        │
+│› ○ ACP pretty                                                                                                        │
 │  Idle  podman                                                                                                        │
 │  │ Waiting on  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
 │  │             │  Sub-agents Native                                                                 │                │
@@ -430,9 +430,9 @@ dismissal failure: Some("Could not dismiss notification: Worker disconnected")
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
-│                │› Dismiss notification                                                              │                │
+│                │  Dismiss notification — No dismissible notification is active.                     │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
-│                │  Rename…                                                           ctrl+b shift+t  │                │
+│                │› Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
 │                │  Unpin — This session is not pinned.                                               │                │
 │                │  Change Workspace › — There is no other workspace.                                 │                │
@@ -445,7 +445,7 @@ dismissal failure: Some("Could not dismiss notification: Worker disconnected")
 │                │  ────────────────────────────────────────────────────────────────────────────────  │  ──────────────╮
 │                │  Copy session ID                                                                   │                │
 │                │  Destroy…                                                                          │                │
-│                │Dismiss this notification without sending input or granting approval.               │  ──────────────╯
+│                │Give the selected session your own title.                                           │  ──────────────╯
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ─────── ▁   ▄ ╮
 │                                                                                                                      │
 │                                                                                                        ──────────────╯

@@ -1500,6 +1500,7 @@ test('review settings action renders a button that sends its action id', () => {
 });
 
 
+// Hard-won: 92684ad3b: browser read receipts need the same served frontier as workspace mark-read.
 test('conversation receipts require a visible focused caught-up conversation and coalesce monotonic cursors', async () => {
   const frames = [];
   const sent = [];
@@ -1508,11 +1509,12 @@ test('conversation receipts require a visible focused caught-up conversation and
   const context = vm.createContext({
     currentSession: 's', route: { name: 'conversation', sessionId: 's' },
     cursor: 42, acknowledged: 0,
+    session: { capabilities: { open: true }, attention: 'working', unread_frontier: 42 },
     document: { visibilityState: 'hidden', hasFocus: () => focused, querySelector: () => ({ textContent: '' }) },
     window: { innerHeight: 800 },
     feedScroll: { getBoundingClientRect: () => ({ top: 100, bottom: 700 }) },
     feed: { lastElementChild: { getBoundingClientRect: () => ({ top: 500, bottom: 650 }) } },
-    sessionById: () => ({ capabilities: { open: true } }),
+    sessionById: () => context.session,
     isTransitioningSession: () => false,
     requestAnimationFrame: fn => { frames.push(fn); return frames.length; },
     request: (url, options) => { sent.push([url, JSON.parse(options.body).through]); return new Promise(resolve => { finish = resolve; }); },
@@ -1536,6 +1538,7 @@ test('conversation receipts require a visible focused caught-up conversation and
   frames.shift()();
   assert.deepEqual(sent, [['/api/conversations/s/read', 42]]);
   context.cursor = 43;
+  context.session.unread_frontier = 43;
   await vm.runInContext('persistVisibleConversationRead()', context);
   assert.equal(sent.length, 1, 'only one receipt is in flight');
   finish();
@@ -1547,10 +1550,22 @@ test('conversation receipts require a visible focused caught-up conversation and
   context.cursor = 41;
   await vm.runInContext('persistVisibleConversationRead()', context);
   assert.equal(sent.length, 2, 'older loaded cursors never move the frontier back');
+  context.cursor = 50;
+  context.session.unread_frontier = 44;
+  const masked = vm.runInContext('persistVisibleConversationRead()', context);
+  assert.equal(sent[2][1], 44, 'marks the served frontier even behind working, not unseen or state-only events');
+  finish();
+  await masked;
+  context.session.unread_frontier = null;
+  context.session.notification_dismissal = { read_through: 45 };
+  const important = vm.runInContext('persistVisibleConversationRead()', context);
+  assert.equal(sent[3][1], 45, 'viewing still acknowledges the served Important completion');
+  finish();
+  await important;
   context.cursor = 44;
   context.route.name = 'sessions';
   await vm.runInContext('persistVisibleConversationRead()', context);
-  assert.equal(sent.length, 2, 'closed conversations do not read');
+  assert.equal(sent.length, 4, 'closed conversations do not read');
 });
 
 
