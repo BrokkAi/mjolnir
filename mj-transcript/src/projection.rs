@@ -61,9 +61,14 @@ pub struct ProjectionIndex {
     terminal_referrers: HashMap<String, BTreeSet<String>>,
 }
 
+pub struct HistoricalReferences {
+    pub ids: Vec<String>,
+    pub terminals: Vec<String>,
+}
+
 /// Explicit references that may address rows older than a live window. Keep
 /// identity interpretation beside the projector that consumes these events.
-pub fn historical_references(events: &[RelayEvent]) -> Result<(Vec<String>, Vec<String>)> {
+pub fn historical_references(events: &[RelayEvent]) -> Result<HistoricalReferences> {
     let mut ids = BTreeSet::new();
     let mut terminals = BTreeSet::new();
     for event in events {
@@ -148,7 +153,10 @@ pub fn historical_references(events: &[RelayEvent]) -> Result<(Vec<String>, Vec<
         ids.insert(terminal_item_id(terminal));
         ids.insert(fallback_terminal_tool_item_id(terminal));
     }
-    Ok((ids.into_iter().collect(), terminals.into_iter().collect()))
+    Ok(HistoricalReferences {
+        ids: ids.into_iter().collect(),
+        terminals: terminals.into_iter().collect(),
+    })
 }
 
 impl ProjectionIndex {

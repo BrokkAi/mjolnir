@@ -242,35 +242,35 @@ pub(super) fn materialized_user_message(
     Ok(None)
 }
 
+/// SQL form of `TranscriptItem::is_turn_start`: a user prompt (a user item
+/// that is not an elicitation reply) or a harness-started turn marker. Every
+/// store query that finds turn boundaries uses this, so loaded windows agree
+/// with `ProjectionWindow::trim`.
+fn turn_start_sql() -> String {
+    format!(
+        "(stable_id GLOB '{}*' OR (stable_id NOT GLOB '{}*' AND json_extract(body_json, '$.kind')='user'))",
+        mj_core::transcript::HARNESS_TURN_ITEM_PREFIX,
+        mj_core::transcript::ELICITATION_REPLY_ITEM_PREFIX,
+    )
+}
+
 /// Where the newest turn began: a user message, or the marker for a turn the
-/// harness started on its own. This is the recovery boundary, so it reads a
-/// position only and never has to decode a transcript body.
+/// harness started on its own. This is the recovery boundary; it reads a
+/// position only, scanning back from the newest item.
 pub(super) fn last_materialized_turn_start(
     connection: &Connection,
     session_id: &str,
 ) -> Result<Option<u64>> {
     Ok(connection
         .query_row(
-            "SELECT position
-             FROM materialized_transcript_items
-             WHERE session_id = ?1
-               AND (
-                   stable_id GLOB ?2
-                   OR json_extract(
-                       CASE
-                           WHEN stable_id GLOB 'user:*' OR stable_id GLOB 'user-*'
-                           THEN body_json
-                           ELSE '{}'
-                       END,
-                       '$.kind'
-                   ) = 'user'
-               )
-             ORDER BY position DESC, stable_id DESC
-             LIMIT 1",
-            params![
-                session_id,
-                format!("{}*", mj_core::transcript::HARNESS_TURN_ITEM_PREFIX)
-            ],
+            &format!(
+                "SELECT position FROM materialized_transcript_items
+                 WHERE session_id = ?1 AND {}
+                 ORDER BY position DESC, stable_id DESC
+                 LIMIT 1",
+                turn_start_sql()
+            ),
+            params![session_id],
             |row| row.get::<_, u64>(0),
         )
         .optional()?)
@@ -884,33 +884,64 @@ pub(super) fn load_materialized_actor_projection_from(
             |row| row.get(0),
         )
         .optional()?;
-    // Pending tools and streams can outlive their initiating turn. Keep their
-    // turn too; the same rule is applied by ProjectionWindow::trim.
-    let mutable: Option<u64> = connection.query_row(
-        "SELECT MIN(position) FROM materialized_transcript_items WHERE session_id=?1
-         AND (json_extract(body_json, '$.streaming')=1
-              OR (json_extract(body_json, '$.kind')='tool'
-                  AND json_extract(body_json, '$.call.status') IN ('pending','in_progress')))",
-        [session_id],
-        |row| row.get(0),
-    )?;
-    let boundary = desired
-        .unwrap_or(0)
-        .min(latest_turn.unwrap_or(0))
-        .min(mutable.unwrap_or(u64::MAX));
+    let boundary = desired.unwrap_or(0).min(latest_turn.unwrap_or(0));
+    let turn_start = turn_start_sql();
     let start: u64 = connection.query_row(
-        "SELECT COALESCE(MAX(position),0) FROM materialized_transcript_items
-         WHERE session_id=?1 AND position<=?2
-         AND (json_extract(body_json, '$.kind')='user' OR stable_id LIKE 'harness-turn:%')",
+        &format!(
+            "SELECT COALESCE(MAX(position),0) FROM materialized_transcript_items
+             WHERE session_id=?1 AND position<=?2 AND {turn_start}"
+        ),
         params![session_id, boundary],
         |row| row.get(0),
     )?;
-    let transcript = read_transcript_range(&connection, session_id, start, None, None)?;
-    let omitted_items = connection.query_row(
-        "SELECT COUNT(*) FROM materialized_transcript_items WHERE session_id=?1 AND position<?2",
-        params![session_id, start],
+    // Find old unsettled turns in one JSON pass, then read only their ranges.
+    let ranges = {
+        let mut statement = connection.prepare(&format!(
+            "WITH starts AS MATERIALIZED (
+                SELECT position FROM materialized_transcript_items WHERE session_id=?1
+                AND {turn_start}
+             ), unsettled AS (
+                SELECT position FROM materialized_transcript_items WHERE session_id=?1 AND position<?2
+                AND ((json_extract(body_json, '$.kind') IN ('agent','thought') AND json_extract(body_json, '$.streaming')=1)
+                  OR (json_extract(body_json, '$.kind')='tool' AND json_extract(body_json, '$.call.status') IN ('pending','in_progress')))
+             )
+             SELECT DISTINCT COALESCE((SELECT MAX(position) FROM starts WHERE position<=u.position),0),
+                 COALESCE((SELECT MIN(position) FROM starts WHERE position>u.position),?2)
+             FROM unsettled u ORDER BY 1"
+        ))?;
+        statement
+            .query_map(params![session_id, start], |row| {
+                Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let mut transcript = Vec::new();
+    for (begin, end) in ranges {
+        let before = mj_core::storage::TranscriptCursor {
+            position: end,
+            stable_id: String::new(),
+        };
+        transcript.extend(read_transcript_range(
+            &connection,
+            session_id,
+            begin,
+            Some(&before),
+            None,
+        )?);
+    }
+    transcript.extend(read_transcript_range(
+        &connection,
+        session_id,
+        start,
+        None,
+        None,
+    )?);
+    let total: usize = connection.query_row(
+        "SELECT COUNT(*) FROM materialized_transcript_items WHERE session_id=?1",
+        [session_id],
         |row| row.get(0),
     )?;
+    let omitted_items = total - transcript.len();
     let window = ProjectionWindow {
         omitted_items,
         provisional_title: first_materialized_user_message(&connection, session_id)?
@@ -1029,7 +1060,8 @@ fn read_transcript_range(
     Ok(items)
 }
 
-/// Rehydrate explicitly referenced historical tools before deriving a delta.
+/// Rehydrate referenced historical tools and possible raw-result terminal matches
+/// before deriving a delta.
 /// A window is a cache, never evidence that a durable tool does not exist.
 pub fn load_projection_references(
     projection: &MaterializedSession,
@@ -1043,7 +1075,8 @@ pub(super) fn load_projection_references_from(
     projection: &MaterializedSession,
     events: &[mj_core::relay::RelayEvent],
 ) -> Result<Vec<Arc<TranscriptItem>>> {
-    let (mut ids, terminals) = mj_transcript::projection::historical_references(events)?;
+    let mj_transcript::projection::HistoricalReferences { mut ids, terminals } =
+        mj_transcript::projection::historical_references(events)?;
     let retained = projection
         .transcript
         .iter()
