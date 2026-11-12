@@ -3224,7 +3224,9 @@ async fn clipboard_and_attachment_results_follow_the_live_composer_across_regist
         generation: launch.input_generation(),
         target: launch.clipboard_target(),
         staging: true,
-        result: Ok(ClipboardContent::Image(super::super::tests::test_image())),
+        result: Ok(ClipboardContent::Image(
+            super::super::tests::test_reference_image(),
+        )),
     };
     launch.begin_submission(
         "accepted-before-parking".into(),
@@ -3255,7 +3257,7 @@ async fn clipboard_and_attachment_results_follow_the_live_composer_across_regist
         .attachment_queue
         .pop_front()
         .unwrap();
-    let image = super::super::tests::test_image();
+    let image = super::super::tests::test_reference_image();
     destination
         .send(ComposerIoUpdate::AttachmentFinished(AttachmentResult {
             sequence,
@@ -3304,7 +3306,7 @@ async fn pending_image_submission_and_deleted_markers_survive_a_live_composer_tr
         .send(ComposerIoUpdate::AttachmentFinished(AttachmentResult {
             sequence: 17,
             fallback: AttachmentFallback::FailedMarker,
-            result: Ok(super::super::tests::test_image()),
+            result: Ok(super::super::tests::test_reference_image()),
         }))
         .unwrap();
     assert_eq!(
@@ -3328,7 +3330,7 @@ async fn pending_image_submission_and_deleted_markers_survive_a_live_composer_tr
         .send(ComposerIoUpdate::AttachmentFinished(AttachmentResult {
             sequence: 18,
             fallback: AttachmentFallback::FailedMarker,
-            result: Ok(super::super::tests::test_image()),
+            result: Ok(super::super::tests::test_reference_image()),
         }))
         .unwrap();
     attached.state.drain_composer();
@@ -3704,7 +3706,7 @@ async fn deferred_move_prompts_keep_their_original_operation_through_attach_and_
     attached.apply_attachment_result(AttachmentResult {
         sequence: 1,
         fallback: AttachmentFallback::FailedMarker,
-        result: Ok(super::super::tests::test_image()),
+        result: Ok(super::super::tests::test_reference_image()),
     });
     attached.drain().await;
     let prompt = attached.take_prepared_startup_prompts().pop().unwrap();

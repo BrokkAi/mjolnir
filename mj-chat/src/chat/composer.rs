@@ -585,6 +585,23 @@ impl ChatState {
     }
 
     pub(crate) fn pump_attachment_queue(&mut self) {
+        // Older drafts and conversation history may carry inline bytes. Adopt
+        // them into the same marker-owned jobs before they can be submitted.
+        for image in &mut self.input_images {
+            if image.image.reference.is_none() && !image.image.is_placeholder() {
+                let sequence = self.composer_runtime.next_attachment_sequence;
+                self.composer_runtime.next_attachment_sequence = sequence.wrapping_add(1);
+                let source = std::mem::replace(&mut image.image, ClipboardImage::pending());
+                self.pending_attachment_markers
+                    .insert(sequence, image.number);
+                self.composer_runtime.attachment_queue.push_back((
+                    sequence,
+                    AttachmentSource::Clipboard(source),
+                    AttachmentFallback::FailedMarker,
+                ));
+                self.input_generation = self.input_generation.wrapping_add(1);
+            }
+        }
         self.composer_runtime
             .attachment_cancellations
             .retain(|sequence, _| {

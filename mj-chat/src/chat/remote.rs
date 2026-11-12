@@ -1535,7 +1535,7 @@ mod tests {
         let (upload_started, started) = tokio::sync::oneshot::channel();
         let mut upload_started = Some(upload_started);
         let uploads = tokio::spawn(async move {
-            for attempt in 0..2 {
+            for attempt in 0..3 {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut body = Vec::new();
                 loop {
@@ -1653,9 +1653,31 @@ mod tests {
         composer.elicitation = None;
         composer.clear_input();
         composer.drain_composer();
+        // Legacy drafts carry inline bytes and must re-enter preparation.
+        composer.restore_draft(PromptPayload::with_image("legacy", valid_image()).encode_draft());
+        composer.drain_composer();
+        assert!(composer.draft_payload().encode_draft().len() < 8 * 1024 * 1024);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                composer.drain_composer();
+                if composer.draft_payload().images[0].image.reference.is_some() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            composer.draft_payload().images[0]
+                .image
+                .data_base64
+                .is_empty()
+        );
+        composer.clear_input();
         assert!(composer.queue_attachment(
             crate::chat::composer::AttachmentSource::Clipboard(pasted),
-            crate::chat::input_state::AttachmentFallback::FailedMarker
+            crate::chat::input_state::AttachmentFallback::FailedMarker,
         ));
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {

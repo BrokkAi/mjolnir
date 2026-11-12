@@ -109,6 +109,18 @@ pub(super) fn test_image() -> ClipboardImage {
     ClipboardImage::from_png_base64(encoded).unwrap()
 }
 
+pub(super) fn test_reference_image() -> ClipboardImage {
+    use base64::Engine as _;
+    let image = test_image();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(image.data_base64.as_bytes())
+        .unwrap();
+    ClipboardImage::from_reference(
+        mj_core::attachment::AttachmentRef::new(&bytes, image.mime_type, 2, 2).unwrap(),
+    )
+    .unwrap()
+}
+
 fn background_task(id: &str, command: &str, can_stop: bool) -> mj_core::relay::BackgroundCommand {
     mj_core::relay::BackgroundCommand {
         id: id.into(),
