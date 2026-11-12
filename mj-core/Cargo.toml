@@ -21,6 +21,7 @@ include = [
     "src/help_search/question.json",
     "src/continuation/questions.json",
     "src/github_item/questions_v2.json",
+    "src/github_item/ettin-tokenizer.json",
     # Recorded ACP bridge traffic the step-clock tests replay.
     "src/**/testdata/**/*.jsonl",
     # Mjolnir-authored skills embedded with `include_str!`.
@@ -47,6 +48,7 @@ include = [
 name = "mj_core"
 
 [features]
+github-history = ["dep:tokenizers"]
 default = []
 golden = []
 test-hooks = []
@@ -69,6 +71,7 @@ jsonc-parser = { version = "0.34", features = ["serde"] }
 libc.workspace = true
 memchr.workspace = true
 regex = "1"
+tokenizers = { version = "0.22", optional = true, default-features = false, features = ["fancy-regex"] }
 reqwest.workspace = true
 ruzstd.workspace = true
 rustls.workspace = true

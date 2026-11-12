@@ -1,3 +1,4 @@
+import { githubItemGlideRequest, githubItemGlideQuestions } from "./github-item.ts";
 import eotQuestions from "../../../mj-core/src/activity/eot_glide_questions.json" with { type: "json" };
 import { glide } from "./glide.ts";
 import handbackQuestions from "../../../mj-core/src/activity/handback_questions.json" with { type: "json" };
@@ -442,18 +443,19 @@ export default {
     const questionLocator = url.pathname === "/v1/question-locator";
     const afkQuestion = url.pathname === "/v1/afk-question-verdict";
     const githubItem = url.pathname === "/v1/github-item-verdict";
+    const githubGlide = url.pathname === "/v1/github-item-glide";
     const githubItemV2 = url.pathname === "/v2/github-item-verdict";
     const continuationV2 = url.pathname === "/v2/continuation-verdict";
     const continuation = continuationV2 || url.pathname === "/v1/continuation-verdict";
-    if ((!eot && !handback && !afkQuestion && !search && !questionLocator && !githubItem && !githubItemV2 && !continuation && url.pathname !== "/v1/turn-verdict" && url.pathname !== "/v2/turn-verdict" && url.pathname !== "/v3/turn-verdict" && url.pathname !== "/v4/turn-verdict" && url.pathname !== "/v5/turn-verdict" && url.pathname !== "/v6/turn-verdict" && url.pathname !== "/v7/turn-verdict") || url.search) return error("not_found", 404);
+    if ((!eot && !handback && !afkQuestion && !search && !questionLocator && !githubItem && !githubItemV2 && !githubGlide && !continuation && url.pathname !== "/v1/turn-verdict" && url.pathname !== "/v2/turn-verdict" && url.pathname !== "/v3/turn-verdict" && url.pathname !== "/v4/turn-verdict" && url.pathname !== "/v5/turn-verdict" && url.pathname !== "/v6/turn-verdict" && url.pathname !== "/v7/turn-verdict") || url.search) return error("not_found", 404);
     if (request.method !== "POST") return error("method_not_allowed", 405, { Allow: "POST" });
     if (request.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
       return error("unsupported_media_type", 415);
     }
     // Handback and completed-turn GLiDE checks use Fastino.
-    const key = ((handback || eot) ? env.FASTINO_API_KEY : env.TYPESAFE_API_KEY)?.trim();
+    const key = ((handback || eot || githubGlide) ? env.FASTINO_API_KEY : env.TYPESAFE_API_KEY)?.trim();
     const ip = request.headers.get("CF-Connecting-IP");
-    const limiter = (githubItem || githubItemV2) ? env.GITHUB_ITEM_RATE_LIMITER : continuation ? env.CONTINUATION_RATE_LIMITER : search ? env.HELP_RATE_LIMITER : env.TURN_RATE_LIMITER;
+    const limiter = (githubItem || githubItemV2 || githubGlide) ? env.GITHUB_ITEM_RATE_LIMITER : continuation ? env.CONTINUATION_RATE_LIMITER : search ? env.HELP_RATE_LIMITER : env.TURN_RATE_LIMITER;
     if (!key || !ip || !limiter) return error("service_unavailable", 503);
     try {
       const { success } = await limiter.limit({ key: ip });
@@ -469,6 +471,16 @@ export default {
     }
     if (eot) return eotEvidence(state) ? eotVerdict(state, key) : error("invalid_evidence", 400);
     if (handback) return glideEvidence(state) ? handbackVerdict(state, key) : error("invalid_evidence", 400);
+    if (githubGlide) {
+      if (!githubItemGlideRequest(state)) return error("invalid_github_item_request", 400);
+      const response = await glide(state, githubItemGlideQuestions, key);
+      if (!response.ok) return response;
+      try {
+        const answers = githubItemAnswersV2(await response.json());
+        if (!answers) return error("invalid_upstream_response", 502);
+        return json({ probability: (answers.interested as { noul: number }).noul });
+      } catch { return error("invalid_upstream_response", 502); }
+    }
     if (githubItem) return githubItemRequest(state) ? classify(state, key) : error("invalid_github_item_request", 400);
     if (githubItemV2) return githubItemRequestV2(state) ? classify(state, key, 1, false, true) : error("invalid_github_item_request", 400);
     if (questionLocator) return questionLocatorRequest(state) ? classify(state, key) : error("invalid_evidence", 400);

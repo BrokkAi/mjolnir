@@ -3648,6 +3648,7 @@ mod tests {
     fn subscription_report(profile: &str, harness: HarnessKind) -> ProfileQuota {
         ProfileQuota {
             paid_credits: None,
+            monthly_price_usd: None,
             banked_resets: None,
             profile_id: profile.into(),
             harness,

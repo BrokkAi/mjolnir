@@ -122,3 +122,48 @@ test("GitHub item v1 remains accepted with its frozen answer shape", async t => 
   t.mock.method(globalThis, "fetch", async () => Response.json({ answers }));
   assert.equal((await proxy.fetch(request(), env())).status, 200);
 });
+
+import aliases from "./fixtures/github-item-aliases600.json" with { type: "json" };
+
+function glideRequest(body: unknown = aliases.evidence) {
+  return new Request("https://proxy.example/v1/github-item-glide", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "CF-Connecting-IP": "192.0.2.1" },
+    body: JSON.stringify(body),
+  });
+}
+const glideEnv = () => ({ ...env(), FASTINO_API_KEY: "fixture-key" });
+
+test("aliases600 GLiDE emits the frozen provider request and probability response", async t => {
+  t.mock.method(globalThis, "fetch", async (url: unknown, options: RequestInit) => {
+    assert.equal(url, "https://api.fastino.ai/v1/systemone");
+    assert.deepEqual(options.headers, { "Content-Type": "application/json", "X-API-Key": "fixture-key" });
+    assert.deepEqual(JSON.parse(options.body as string), aliases.provider_request);
+    return Response.json(aliases.provider_response);
+  });
+  const response = await proxy.fetch(glideRequest(), glideEnv());
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), aliases.response);
+});
+
+test("aliases600 rejects malformed evidence and probabilities, and preserves provider errors", async t => {
+  let upstream = Response.json(aliases.provider_response);
+  const fetch = t.mock.method(globalThis, "fetch", async () => upstream.clone());
+  for (const history of [null, {}, [{ time: 1, text: "x" }], [{ time: "x", text: "y", extra: true }]]) {
+    assert.equal((await proxy.fetch(glideRequest({ ...aliases.evidence, session: { ...aliases.evidence.session, history } }), glideEnv())).status, 400);
+  }
+  assert.equal(fetch.mock.callCount(), 0);
+  for (const value of [null, "0.1", -0.01, 1.01, Infinity, NaN]) {
+    upstream = Response.json({ answers: { interested: { type: "noul", noul: value } } });
+    assert.equal((await proxy.fetch(glideRequest(), glideEnv())).status, 502);
+  }
+  upstream = new Response('{"answers":{"interested":{"type":"noul","noul":1e999}}}');
+  assert.equal((await proxy.fetch(glideRequest(), glideEnv())).status, 502);
+  upstream = new Response("provider busy", { status: 429, headers: { "Retry-After": "17" } });
+  const response = await proxy.fetch(glideRequest(), glideEnv());
+  assert.equal(response.status, 429);
+  assert.equal(response.headers.get("Retry-After"), "17");
+  assert.equal(await response.text(), "provider busy");
+  t.mock.method(globalThis, "fetch", async () => { throw new Error("offline"); });
+  assert.equal((await proxy.fetch(glideRequest(), glideEnv())).status, 502);
+});

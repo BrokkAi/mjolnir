@@ -9,6 +9,8 @@ pub enum CandidateQuota {
     /// Billed per use, with no allowance to run out of.
     UsagePriced,
     Subscription {
+        /// Monthly list price as a capacity proxy, when the plan is recognized.
+        monthly_price_usd: Option<u32>,
         windows: Vec<crate::quota::QuotaWindow>,
         paid_credits: Option<mj_client::quota::PaidCredits>,
         /// When the windows were read, which is when their usage was measured.
@@ -25,6 +27,7 @@ impl CandidateQuota {
         match report.billing_class() {
             QuotaBilling::Usage => Self::UsagePriced,
             QuotaBilling::Subscription => Self::Subscription {
+                monthly_price_usd: report.monthly_price_usd,
                 windows: report.windows.clone(),
                 paid_credits: report.paid_credits.clone(),
                 refreshed_at_epoch_seconds: report.refreshed_at_epoch_seconds,
@@ -120,7 +123,7 @@ pub(crate) fn order_by_draw(
 
 /// Order candidates by [`QuotaRank`] tier; within a tier, profiles on course
 /// to run out of their five-hour window before it resets come last, and
-/// subscriptions with quota left are ordered by pace score. Then the optional
+/// subscriptions with quota left are ordered by price-weighted pace score. Then the optional
 /// anchor's profile and profile id, so the order never depends on how the
 /// configuration happens to list them.
 pub(crate) fn rank_candidates(
@@ -190,9 +193,18 @@ fn quota_rank(candidate: &SubagentCandidate, model: &str, now_seconds: i64) -> Q
         CandidateQuota::Subscription {
             windows,
             paid_credits,
+            monthly_price_usd,
             ..
         } => match crate::quota::quota_score(windows, model, now_seconds) {
-            Some(score) if score > 0.0 => QuotaRank::Available(score),
+            // $100 is the reference weight; unreported plans retain unit weight.
+            // Price is a proxy: advertised session multipliers do not describe
+            // the relative weekly allowances of Claude Max plans (#1519).
+            Some(score) if score > 0.0 => QuotaRank::Available(
+                score
+                    * monthly_price_usd
+                        .filter(|price| *price > 0)
+                        .map_or(1.0, |price| f64::from(price) / 100.0),
+            ),
             score => paid_weight(paid_credits.as_ref())
                 .map(QuotaRank::Paid)
                 .unwrap_or(
