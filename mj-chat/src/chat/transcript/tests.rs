@@ -16,19 +16,37 @@ use mj_core::acp::RuntimeEvent;
 use mj_core::relay::{SequencedEvent, WorkerEvent};
 use mj_transcript::transcript::{TerminalOutputRecord, tool_content_details};
 
+// Hard-won: e13ed5c7c: one parked terminal record disabled reuse of every unchanged entry.
 #[test]
 fn background_conversion_reuses_unchanged_entries_and_refreshes_changed_text() {
     let mut session = MaterializedSession::empty("incremental");
-    session.applied_event_ordinal = 2;
+    session.applied_event_ordinal = 3;
     session.transcript = vec![
         user_transcript_item(1, "first"),
         user_transcript_item(2, "second"),
+        // Output parked because its owner had left the live window.
+        std::sync::Arc::new(mj_core::transcript::TranscriptItem {
+            stable_id: "terminal:parked".into(),
+            position: 3,
+            latest_content_event_ordinal: None,
+            created_at_ms: 3,
+            last_changed_at_ms: 3,
+            body: mj_core::transcript::TranscriptBody::TerminalOutput {
+                record: TerminalOutputRecord {
+                    terminal_id: "parked".into(),
+                    output: "done\n".into(),
+                    truncated: false,
+                    exit_code: Some(0),
+                    signal: None,
+                },
+            },
+        }),
     ];
     let first = TranscriptSnapshot::from_materialized(&session);
     let previous = first.converted_entries();
-    session.applied_event_ordinal = 3;
+    session.applied_event_ordinal = 4;
     session.transcript[1] = user_transcript_item(2, "edited");
-    session.transcript.push(user_transcript_item(3, "third"));
+    session.transcript.push(user_transcript_item(4, "third"));
     let reused = TranscriptSnapshot::from_materialized_reusing(
         &session,
         &BTreeMap::new(),
