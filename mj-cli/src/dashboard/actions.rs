@@ -1,7 +1,7 @@
 //! What the dashboard does with the work its key handling asks for.
 //!
 //! Every arm here either updates UI state directly or starts a background job,
-//! except `SetupLogin`, which hands the terminal to `mj login` and waits for it.
+//! including `SetupLogin`, whose terminal connection runs in a background task.
 
 use mj_client::daemon::{DaemonAction as MachineAction, DaemonReply as MachineReply};
 use std::sync::Arc;
@@ -670,13 +670,14 @@ pub(crate) async fn apply_dashboard_action(
         DashboardAction::SetupLogin {
             generation,
             profile_id,
-        } => {
-            let result = run_setup_login(context, &profile_id).await;
-            context.loop_stalls.forget_pass();
-            context
-                .dashboard
-                .setup_login_finished(generation, &profile_id, result);
-        }
+        } => match super::login_terminal::ActiveLogin::start(&profile_id, generation) {
+            Ok(login) => context.login = Some(login),
+            Err(error) => context.dashboard.setup_login_finished(
+                generation,
+                &profile_id,
+                Err(format!("{error:#}")),
+            ),
+        },
         // One key refreshes both panes, so it runs both requests rather than
         // leaving the user to focus each pane in turn.
         DashboardAction::RefreshAll => {
@@ -2278,63 +2279,6 @@ async fn dispatch_restart(
     daemon
         .restart_session_with_ack(session_id, acknowledge_container_recreation)
         .await
-}
-
-/// Run `mj login` for one profile with the dashboard's terminal handed over.
-///
-/// The interactive child must own standard input for browser and device-code
-/// prompts, so the event stream is dropped before the child starts and the
-/// terminal is restored on every path, including a failed spawn.
-async fn run_setup_login(context: &mut DashboardContext, profile_id: &str) -> Result<(), String> {
-    let executable =
-        std::env::current_exe().map_err(|error| format!("find the mj executable: {error}"))?;
-    // The event stream must be gone before the child owns stdin. Crossterm
-    // stops its reader thread when the stream is dropped, so releasing the
-    // last handle here (rather than after the child) is what makes the
-    // handover safe.
-    let events = context.events.take();
-    drop(events);
-    if let Err(error) = context.terminal.suspend() {
-        context.events = Some(crossterm::event::EventStream::new());
-        return Err(format!("{error:#}"));
-    }
-    let profile = profile_id.to_owned();
-    // Ctrl+C belongs to the login child, not to the dashboard's shutdown
-    // coordinator, while the terminal is handed over.
-    let _interrupts = mj_controller::termination::suppress_interrupts();
-    // The interactive child cannot run on a runtime worker. The dashboard
-    // waits for the handover, but the Tokio worker remains available for the
-    // daemon's other tasks.
-    let joined = tokio::task::spawn_blocking(move || {
-        std::process::Command::new(executable)
-            .args([
-                "--instance",
-                &mj_core::config::instance_name().unwrap_or_else(|| "default".to_owned()),
-                "login",
-                "--profile",
-                &profile,
-            ])
-            .status()
-    })
-    .await;
-    // Restore the terminal on every path: a failed spawn or a panicking child
-    // must not leave the dashboard on the primary screen with no input.
-    let resumed = context.terminal.resume();
-    context.events = Some(crossterm::event::EventStream::new());
-    if let Err(error) = resumed {
-        context.request_shutdown();
-        return Err(format!("{error:#}"));
-    }
-    let status = joined
-        .map_err(|error| format!("sign-in task failed: {error}"))?
-        .map_err(|error| format!("could not start `mj login --profile {profile_id}`: {error}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "`mj login --profile {profile_id}` exited with {status}; rerun it from a shell for the full output"
-        ))
-    }
 }
 
 #[cfg(test)]

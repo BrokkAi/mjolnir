@@ -29,9 +29,11 @@ This is private-network operation with working SSH authentication and host trust
 - [ ] Implement and validate milestone 6: matching-build PowerShell go script.
 - [ ] Implement milestone 7: user documentation, final validation, platform dispatch and real Windows acceptance.
 
-- [ ] (2026-11-12, daemon login worker) Extract shared ACP/native/setup-token login driver into mj-controller; 11 focused tests, full controller/CLI suites and workspace clippy pass. Daemon PTY/control transport implemented; real daemon e2e passes success, >128KiB output, input/credential write, disconnect teardown and handoff termination. Client full suite passes; controller full suite has one unrelated rsync ETXTBSY failure that passes alone; CLI full suite and final blocked-input/handoff regression pass; workspace clippy passes. Dashboard pane remains.
+- [x] (2026-11-12, daemon login worker) Implement shared CLI login driver, daemon-owned PTY/control stream and responsive dashboard terminal pane with the existing status-refresh path. Golden and real isolated daemon regressions pass (>128KiB output/input, resize, credentials, disconnect and handoff); client/CLI suites and workspace clippy pass. Controller timer passes alone; two TUI attention failures reproduce with pre-pane sources. Parent renumbers protocol 91 and merges the milestone-4 status action.
 
 ## Surprises & Discoveries
+
+- (2026-11-12, daemon login worker) Full validation found two unchanged TUI attention failures: `the_done_filter_keeps_the_row_it_found_and_leaves_the_open_conversation_alone` (beta is not marked unread) and `viewing_one_failure_reveals_the_five_unread_sessions_without_relabeling_them` (None instead of Unread 5). Both reproduce in isolation and with `mj-tui/src/lib.rs`, its Cargo manifest and Cargo.lock restored from pre-pane commit `29354e991`; all pane changes were restored afterward. The known continuation timer also timed out at timed-other-lifecycle (3 seconds) in the full run and passed its isolated rerun. Login-specific golden/e2e tests pass.
 
 - (2026-11-12, daemon login worker) This worktree still has no saved-profile login-status DaemonAction: `dashboard/io/spawn.rs::spawn_profile_login_statuses` calls `mj_controller::profile_login::statuses` locally. Dashboard login integration must consume the milestone-4 status action when that parallel work is merged. `run_setup_login` here also directly spawns the current executable; it has not yet been replaced by the streaming pane.
 
@@ -101,6 +103,8 @@ Decision (parent approval, 2026-11-12): There is no existing PTY transport or em
 Decision (parent approval, 2026-11-12): The daemon PTY launches its own current executable through an internal login entrypoint that bypasses placement forwarding. The shared driver inherits terminal stdio and restores process-wide SIGINT, so it must run in this child, never in the daemon process. The daemon owns the PTY and process group; the dashboard never launches mj.
 
 Decision (2026-11-12, daemon login worker): A dedicated LoginTerminal control connection switches from the authenticated request/reply handshake to shared terminal byte, resize, exit and failure frames. The PTY owner takes no handoff admission and terminates on disconnect or daemon cancellation. Daemon-local ACP bridges inherit this owned process group; ordinary CLI login retains its ACP group ownership. Observe root exit without reaping before group teardown so process ids cannot be recycled while cleanup owns the group. portable-pty 0.9 is MIT, accepted by the existing license policy, and already present in Cargo.lock through the CLI test infrastructure.
+
+Decision (2026-11-12, daemon login worker): Keep the login pane on the dashboard’s existing event/render loop with its connection in supervised cancellable tasks. A fair wait pumps login output and warm chats; other dashboard feeds continue normally. Ctrl+] closes the disposable connection, Ctrl+Q quits, and Enter/Escape dismiss completion. Terminal input otherwise goes to the harness, including Escape. Keep the existing setup_login_finished → profile-login refresh path as the sole status-refresh call site for the milestone-4 merge. Use vt100/tui-term for split UTF-8/ANSI output and terminal query replies; keep close/quit controls visible independently of wrapped status text.
 
 ## Outcomes & Retrospective
 

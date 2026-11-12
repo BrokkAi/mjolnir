@@ -15,6 +15,7 @@ mod attachment;
 mod auto_afk;
 mod composer_drafts;
 pub(crate) mod io;
+mod login_terminal;
 mod loop_stalls;
 mod read_receipts;
 mod shutdown;
@@ -367,6 +368,7 @@ pub(crate) struct DashboardContext {
     daemon_running_again_since: Option<std::time::Instant>,
     /// Terminal input remains owned by this event loop, including during Setup.
     events: Option<event::EventStream>,
+    login: Option<login_terminal::ActiveLogin>,
     /// The startup splash, drawn in place of the dashboard until it has
     /// played out. Everything behind it is already running.
     splash: Option<crate::splash::SplashPlayback>,
@@ -803,6 +805,10 @@ pub(crate) async fn run_dashboard_for_workspace(
                 if context.splash.is_some() {
                     continue;
                 }
+                if context.login.is_some() {
+                    context.login_event(event);
+                    continue;
+                }
                 // The user acting is the strongest signal there is about which
                 // conversation they want, so it takes the choice away from the
                 // startup pick before that pick can override their input.
@@ -1016,13 +1022,15 @@ pub(crate) async fn run_dashboard_for_workspace(
             // and history I/O, dictation, and the session view. They run
             // whether or not the chat is on screen, which is what keeps an
             // off-screen chat current.
-            () = paced(feed_gate, pump_chats(&mut context.chats)) => {
-                context.loop_stalls.woke("chats");
+            update = paced(feed_gate, login_terminal::pump(&mut context.login, &mut context.chats)) => {
+                context.loop_stalls.woke("conversation terminals");
                 pacer.mark();
-                // A warm chat may be hidden by another tab or selection.
-                // Only conversations that were on screen advance their read
-                // receipts.
-                context.acknowledge_visible_chats();
+                if let Some(update) = update {
+                    context.accept_login_update(update);
+                } else {
+                    // Only conversations visible in the frame advance receipts.
+                    context.acknowledge_visible_chats();
+                }
             }
             update = paced(feed_gate, context.quota.wait()), if context.quota.is_open() => {
                 context.loop_stalls.woke("quota");
@@ -1409,6 +1417,7 @@ impl DashboardContext {
     /// the launch itself is doing.
     fn ready_for_a_hint(&self) -> bool {
         self.splash.is_none()
+            && self.login.is_none()
             && !self.startup.pick_pending()
             && self.opening_chat_sessions.is_empty()
             && !self.dashboard.modal_open()
@@ -1704,6 +1713,8 @@ impl DashboardContext {
         if self.shutdown_requested_at.is_some() {
             return;
         }
+        // Closing this disposable stream never waits for the login process.
+        drop(self.login.take());
         // Timed from here so saving the drafts below counts toward the quit.
         let requested_at = Instant::now();
         self.collect_prepared_startup_prompts();
@@ -1771,7 +1782,7 @@ impl DashboardContext {
     pub(super) fn acknowledge_visible_chats(&mut self) {
         // Freeze the final receipt set so ongoing worker output cannot keep
         // extending shutdown while its existing saves drain.
-        if self.shutdown_requested_at.is_some() {
+        if self.shutdown_requested_at.is_some() || self.login.is_some() {
             return;
         }
         let mut sessions = self.drawn_chat_sessions.clone();
@@ -2009,6 +2020,7 @@ impl DashboardContext {
             notices,
             daemon_running_again_since: None,
             events: Some(events),
+            login: None,
             splash: None,
             chats: BTreeMap::new(),
             runtime_sessions: Default::default(),

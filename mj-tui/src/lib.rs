@@ -52,6 +52,7 @@ mod dialogs;
 mod go;
 mod ingest;
 mod keybinds;
+pub mod login_terminal;
 mod modal_surface;
 mod notify;
 mod row_index;

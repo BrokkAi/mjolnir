@@ -1647,6 +1647,7 @@ else
   head -c 131072 /dev/zero | tr '\000' x
   printf '\nCode: '
   read -r code
+  stty size > "$login_home/size"
   printf '%s' "$code" > "$login_home/credential"
   printf 'saved\n'
 fi
@@ -1662,6 +1663,7 @@ fi
         .save_to(&storage.path().join("config/config.toml"))
         .unwrap();
     let mut command = upgrade_command(&storage);
+    common::AgentIsolation::under(storage.path()).apply(&mut command);
     command
         .arg("daemon-run")
         .env("HOME", &user)
@@ -1781,6 +1783,15 @@ fi
                     assert!(transcript.len() > 131072);
                     write_frame(
                         &mut terminal.stream,
+                        &TerminalInput::Resize {
+                            cols: 100,
+                            rows: 40,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    write_frame(
+                        &mut terminal.stream,
                         &TerminalInput::Bytes(b"daemon-code\n".to_vec()),
                     )
                     .await
@@ -1801,6 +1812,10 @@ fi
                     assert_eq!(
                         fs::read_to_string(home.join("credential")).unwrap(),
                         "daemon-code"
+                    );
+                    assert_eq!(
+                        fs::read_to_string(home.join("size")).unwrap().trim(),
+                        "40 100"
                     );
                     assert!(String::from_utf8_lossy(&transcript).contains("saved"));
                 }
