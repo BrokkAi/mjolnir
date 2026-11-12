@@ -63,6 +63,9 @@ pub struct QuotaSnapshot {
 /// The quota report shown for one harness profile.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProfileQuota {
+    /// Monthly USD list price used as a subscription capacity proxy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monthly_price_usd: Option<u32>,
     /// Paid extra usage, independent of included quota and banked resets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paid_credits: Option<PaidCredits>,

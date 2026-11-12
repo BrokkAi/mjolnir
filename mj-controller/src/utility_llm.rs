@@ -877,6 +877,7 @@ mod tests {
 
         let stale = ProfileQuota {
             paid_credits: None,
+            monthly_price_usd: None,
             banked_resets: None,
             profile_id: "grok".into(),
             harness: HarnessKind::Grok,
@@ -1112,6 +1113,7 @@ mod tests {
     fn zero_quota_is_excluded_and_api_ranks_last() {
         let mut report = ProfileQuota {
             paid_credits: None,
+            monthly_price_usd: None,
             banked_resets: None,
             profile_id: "p".into(),
             harness: HarnessKind::Codex,
