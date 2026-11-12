@@ -6874,102 +6874,179 @@ fn history_window_deduplicates_deliveries_after_their_row_leaves_the_live_tail()
     }
 }
 
-// Hard-won: 312cdbd23: late completion must preserve partial output after evicting an unfinished tool.
+// Hard-won: 312cdbd23: late completion must preserve evicted tools and uniquely claim parked output.
 #[test]
 fn history_window_rehydrates_late_tool_updates_before_durable_projection() {
     use agent_client_protocol::v1::schema::{
         SessionUpdate, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
     };
     use mj_core::relay::{RELAY_EVENT_FORMAT_V1, RelayEvent, RelayObservation};
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("history.sqlite3");
-    let mut full = long_conversation();
-    let mut old_tool = materialized_session(&full.session_id).transcript[2].clone();
-    let partial_output = serde_json::json!({"partial": "old output ".repeat(10_000)});
-    if let TranscriptBody::Tool { call, .. } = &mut Arc::make_mut(&mut old_tool).body {
-        call["status"] = "in_progress".into();
-        call["rawOutput"] = partial_output.clone();
-    }
-    full.transcript[2] = old_tool.clone();
-    save_session_to(&path, &session(&full.session_id, "project-1")).unwrap();
-    save_materialized_session_to(&path, &full).unwrap();
-    let (mut live, mut window) = load_materialized_actor_projection_from(&path, &full.session_id)
-        .unwrap()
-        .unwrap();
-    assert!(
-        !live
-            .transcript
-            .iter()
-            .any(|item| item.stable_id == old_tool.stable_id)
-    );
-    let mut event = RelayEvent {
-        format: RELAY_EVENT_FORMAT_V1,
-        ordinal: 2501,
-        previous_digest: full.applied_event_digest.clone(),
-        digest: String::new(),
-        recorded_at_ms: 5000,
-        command_id: None,
-        observation: RelayObservation::SessionUpdate {
-            update: Box::new(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                "call-1",
-                ToolCallUpdateFields::new()
-                    .status(ToolCallStatus::Completed)
-                    .title("Late result"),
-            ))),
-        },
-    };
-    event.digest = mj_core::relay::relay_event_digest(&event).unwrap();
-    let restored =
-        load_projection_references_from(&path, &live, std::slice::from_ref(&event)).unwrap();
-    assert_eq!(restored, vec![old_tool.clone()]);
-    window.omitted_items -= restored.len();
-    live.transcript.splice(0..0, restored);
-    assert!(
-        load_projection_references_from(&path, &live, std::slice::from_ref(&event))
+    for (parked_count, raw_on_completion, standalone) in [
+        (0, false, false),
+        (1, false, false),
+        (2, false, false),
+        (1, true, true),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("history.sqlite3");
+        let mut full = long_conversation();
+        let mut old_tool = materialized_session(&full.session_id).transcript[2].clone();
+        let output = "old output ".repeat(10_000);
+        let partial_output = serde_json::json!({"partial": output});
+        let raw_output = if parked_count == 0 {
+            partial_output.clone()
+        } else {
+            serde_json::json!({"exit_code": 0, "output": output.as_bytes()})
+        };
+        if let TranscriptBody::Tool { call, .. } = &mut Arc::make_mut(&mut old_tool).body {
+            call["status"] = "in_progress".into();
+            call["rawOutput"] = if raw_on_completion {
+                partial_output
+            } else {
+                raw_output.clone()
+            };
+        }
+        full.transcript[2] = old_tool.clone();
+        for index in 0..parked_count {
+            let terminal_id = format!("late-terminal-{index}");
+            let record = mj_core::state::TerminalOutputRecord {
+                terminal_id: terminal_id.clone(),
+                output: output.clone(),
+                truncated: false,
+                exit_code: Some(0),
+                signal: None,
+            };
+            let call = mj_core::acp::fallback_terminal_tool_call(&terminal_id, "cargo test".into())
+                .status(ToolCallStatus::Completed);
+            let (stable_id, body) = if standalone {
+                (
+                    format!("terminal:{terminal_id}"),
+                    TranscriptBody::TerminalOutput { record },
+                )
+            } else {
+                (
+                    format!("tool:{}", call.tool_call_id),
+                    TranscriptBody::Tool {
+                        call: serde_json::to_value(call).unwrap(),
+                        terminal_outputs: vec![record],
+                        terminal_refs: vec![terminal_id],
+                        presentation: None,
+                    },
+                )
+            };
+            full.transcript[3 + index] = Arc::new(TranscriptItem {
+                stable_id,
+                position: 4 + index as u64,
+                latest_content_event_ordinal: None,
+                created_at_ms: 1_250,
+                last_changed_at_ms: 1_400,
+                body,
+            });
+        }
+        save_session_to(&path, &session(&full.session_id, "project-1")).unwrap();
+        save_materialized_session_to(&path, &full).unwrap();
+        let (mut live, mut window) =
+            load_materialized_actor_projection_from(&path, &full.session_id)
+                .unwrap()
+                .unwrap();
+        assert!(
+            !live
+                .transcript
+                .iter()
+                .any(|item| item.stable_id == old_tool.stable_id)
+        );
+        let mut fields = ToolCallUpdateFields::new()
+            .status(ToolCallStatus::Completed)
+            .title("Late result");
+        if raw_on_completion {
+            fields = fields.raw_output(raw_output.clone());
+        }
+        let mut event = RelayEvent {
+            format: RELAY_EVENT_FORMAT_V1,
+            ordinal: 2501,
+            previous_digest: full.applied_event_digest.clone(),
+            digest: String::new(),
+            recorded_at_ms: 5000,
+            command_id: None,
+            observation: RelayObservation::SessionUpdate {
+                update: Box::new(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                    "call-1", fields,
+                ))),
+            },
+        };
+        event.digest = mj_core::relay::relay_event_digest(&event).unwrap();
+        let restored =
+            load_projection_references_from(&path, &live, std::slice::from_ref(&event)).unwrap();
+        assert_eq!(restored.len(), 1 + parked_count);
+        assert!(restored.contains(&old_tool));
+        window.omitted_items -= restored.len();
+        live.transcript.splice(0..0, restored);
+        assert!(
+            load_projection_references_from(&path, &live, std::slice::from_ref(&event))
+                .unwrap()
+                .is_empty()
+        );
+        let mutation = mj_transcript::projection::project_relay_event(&live, &event)
             .unwrap()
-            .is_empty()
-    );
-    let mutation = mj_transcript::projection::project_relay_event(&live, &event)
-        .unwrap()
-        .mutation;
-    apply_projection_page_to(&path, &full.session_id, |page| {
-        page.apply(
-            event.ordinal,
-            &event.previous_digest,
-            &event.digest,
-            &mutation,
-        )
-    })
-    .unwrap();
-    mj_transcript::projection::apply_committed_projection_event(&mut live, &event, mutation)
+            .mutation;
+        apply_projection_page_to(&path, &full.session_id, |page| {
+            page.apply(
+                event.ordinal,
+                &event.previous_digest,
+                &event.digest,
+                &mutation,
+            )
+        })
         .unwrap();
-    window.trim(&mut live, PROJECTION_TAIL_ITEMS);
-    let saved = load_materialized_session_from(&path, &full.session_id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(saved.transcript.len(), 2500);
-    let tool = saved
-        .transcript
-        .iter()
-        .find(|item| item.stable_id == old_tool.stable_id)
-        .unwrap();
-    assert_eq!(tool.position, old_tool.position);
-    assert_eq!(tool.created_at_ms, old_tool.created_at_ms);
-    let TranscriptBody::Tool { call, .. } = &tool.body else {
-        panic!("tool remains a tool")
-    };
-    assert_eq!(call["title"], "Late result");
-    assert_eq!(call["rawOutput"], partial_output);
-    assert!(
-        !live
+        mj_transcript::projection::apply_committed_projection_event(&mut live, &event, mutation)
+            .unwrap();
+        window.trim(&mut live, PROJECTION_TAIL_ITEMS);
+        let saved = load_materialized_session_from(&path, &full.session_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            saved.transcript.len(),
+            2500 - usize::from(parked_count == 1)
+        );
+        let tool = saved
             .transcript
             .iter()
-            .any(|item| item.stable_id == old_tool.stable_id)
-    );
-    assert_eq!(
-        live.transcript.len() + window.omitted_items,
-        saved.transcript.len()
-    );
+            .find(|item| item.stable_id == old_tool.stable_id)
+            .unwrap();
+        assert_eq!(tool.position, old_tool.position);
+        assert_eq!(tool.created_at_ms, old_tool.created_at_ms);
+        let TranscriptBody::Tool {
+            call,
+            terminal_outputs,
+            terminal_refs,
+            ..
+        } = &tool.body
+        else {
+            panic!("tool remains a tool")
+        };
+        assert_eq!(call["title"], "Late result");
+        assert_eq!(call["rawOutput"], raw_output);
+        if parked_count == 1 {
+            assert_eq!(terminal_refs, &["late-terminal-0"]);
+            assert_eq!(terminal_outputs[0].output, output);
+        } else {
+            assert!(terminal_refs.is_empty());
+            assert!(
+                terminal_outputs.is_empty(),
+                "ambiguous output must remain parked"
+            );
+        }
+        assert!(
+            !live
+                .transcript
+                .iter()
+                .any(|item| item.stable_id == old_tool.stable_id)
+        );
+        assert_eq!(
+            live.transcript.len() + window.omitted_items,
+            saved.transcript.len()
+        );
+    }
 }
 
 #[test]

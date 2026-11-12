@@ -1027,7 +1027,8 @@ fn read_transcript_range(
     Ok(items)
 }
 
-/// Rehydrate explicitly referenced historical tools before deriving a delta.
+/// Rehydrate referenced historical tools and possible raw-result terminal matches
+/// before deriving a delta.
 /// A window is a cache, never evidence that a durable tool does not exist.
 pub fn load_projection_references(
     projection: &MaterializedSession,
@@ -1041,18 +1042,63 @@ pub(super) fn load_projection_references_from(
     projection: &MaterializedSession,
     events: &[mj_core::relay::RelayEvent],
 ) -> Result<Vec<Arc<TranscriptItem>>> {
-    let (mut ids, terminals) = mj_transcript::projection::historical_references(events)?;
+    let mj_transcript::projection::HistoricalReferences {
+        mut ids,
+        terminals,
+        mut may_claim_raw_terminal,
+    } = mj_transcript::projection::historical_references(projection, events)?;
     let retained = projection
         .transcript
         .iter()
         .map(|item| item.stable_id.as_str())
         .collect::<std::collections::HashSet<_>>();
     ids.retain(|id| !retained.contains(id.as_str()));
-    if ids.is_empty() && terminals.is_empty() {
+    if ids.is_empty() && terminals.is_empty() && !may_claim_raw_terminal {
         return Ok(Vec::new());
     }
     let mut reader = open_reader(path)?;
     let connection = reader.transaction()?;
+    if !may_claim_raw_terminal && !ids.is_empty() {
+        // The referenced provider tool may itself be outside the live window.
+        may_claim_raw_terminal = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM materialized_transcript_items
+             WHERE session_id=?1 AND stable_id IN (SELECT value FROM json_each(?2))
+               AND json_type(body_json, '$.call.rawOutput') IS NOT NULL
+               AND json_type(body_json, '$.call.rawOutput') != 'null')",
+            params![projection.session_id, serde_json::to_string(&ids)?],
+            |row| row.get(0),
+        )?;
+    }
+    if may_claim_raw_terminal {
+        // Kimi can claim parked output by its exact raw result, with no terminal
+        // ID. Load all candidates so identical results remain ambiguous. This
+        // reads indexed IDs first; only missing candidates have bodies decoded.
+        let [terminal_prefix, fallback_prefix] =
+            mj_transcript::projection::parked_terminal_item_prefixes();
+        let mut statement = connection.prepare(
+            "SELECT stable_id FROM materialized_transcript_items
+             WHERE session_id=?1 AND stable_id GLOB ?2
+             UNION ALL
+             SELECT stable_id FROM materialized_transcript_items
+             WHERE session_id=?1 AND stable_id GLOB ?3",
+        )?;
+        let candidates = statement.query_map(
+            params![
+                projection.session_id,
+                format!("{terminal_prefix}*"),
+                format!("{fallback_prefix}*")
+            ],
+            |row| row.get::<_, String>(0),
+        )?;
+        for candidate in candidates {
+            let id = candidate?;
+            if !retained.contains(id.as_str()) {
+                ids.push(id);
+            }
+        }
+        ids.sort();
+        ids.dedup();
+    }
     // Ordinary tool updates use the stable-ID index. Only terminal attachment
     // events need the JSON reverse-reference scan.
     let mut parameters = vec![projection.session_id.clone(), serde_json::to_string(&ids)?];

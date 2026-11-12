@@ -4,7 +4,7 @@ This is a code-backed ownership audit from the daemon CPU/RSS investigation. Raw
 
 ## 1. Old unfinished tools pin the live actor's whole history — confirmed
 
-`ProjectionWindow::trim` in `mj-core/src/state.rs` and the matching loader in `mj-controller/src/database/materialized.rs` move the window boundary back to the oldest streaming message or pending/in-progress tool. All intervening turns stay live. The 1,024-item target is consequently not a bound.
+Before the correction, `ProjectionWindow::trim` in `mj-core/src/state.rs` and the matching loader in `mj-controller/src/database/materialized.rs` moved the window boundary back to the oldest streaming message or pending/in-progress tool. All intervening turns stay live. The 1,024-item target is consequently not a bound.
 
 A read-only probe using the exact production boundary calculation found:
 
@@ -18,7 +18,7 @@ These byte counts cover serialized bodies, before decoded JSON allocations, inde
 
 Both measured pins are `in_progress` tool calls, last changed on 2026-10-31 and 2026-10-05. A transactional read-only probe applying the proposed rule retains 1,029 items / 1,951,417 bytes and 1,029 items / 1,457,784 bytes respectively: about 97.5% less serialized live-window body data for these two conversations. This is a query projection; actual actor ownership is verified after installation.
 
-The existing `load_projection_references` path already rehydrates explicitly named tools, messages, streams and terminal references from durable storage before applying an event. The correction removes the old-tool pin while retaining current and recent complete turns. Open text streams retain their existing rule: anonymous chunks select the latest open stream implicitly, and many projector events close all open streams. Dropping those streams without expanding reference resolution would change transcript semantics.
+The existing `load_projection_references` path already rehydrates explicitly named tools, messages, streams and terminal references from durable storage before applying an event. The correction removes the old-tool pin while retaining current and recent complete turns. Review also identified implicit Kimi terminal ownership through raw output. For those updates the reader loads missing parked terminal candidates by indexed identity prefixes; the existing projector still decides exact matches and rejects ambiguous identical results. Open text streams retain their existing rule: anonymous chunks select the latest open stream implicitly, and many projector events close all open streams. Dropping those streams without expanding reference resolution would change transcript semantics.
 
 Regressions must prove that an evicted unfinished tool's partial output survives a late completion, the store remains complete, loaded and live-trimmed windows agree, and open streams keep their existing behavior. A single exceptionally long current turn or old open text stream remains a separate condition.
 
