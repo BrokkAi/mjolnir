@@ -32,6 +32,7 @@ use mj_core::local_git::{MINIMUM_GIT_VERSION, parse_git_version};
 
 mod catalog;
 mod github;
+mod sshd;
 pub use catalog::{Catalogs, LARGE_CATALOG, catalog_checks, catalog_profile_ids};
 
 // Only the image for the Apple container smoke test when the config has no
@@ -226,6 +227,7 @@ pub fn run_with_config_path(
     checks.extend(podman);
     checks.extend(docker);
     checks.extend(local_bare_github_checks(config, executor));
+    checks.extend(sshd::checks(config, executor));
     checks.extend(ssh_bare_checks(config, executor));
     checks.extend(ssh_podman_checks(config, executor, options.smoke));
     checks.extend(ssh_docker_checks(config, executor, options.smoke));
