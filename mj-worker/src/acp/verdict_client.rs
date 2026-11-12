@@ -1256,6 +1256,7 @@ mod tests {
                 code: None,
                 http_status: Some(401),
                 reset_at: None,
+                login_fingerprint: None,
             }),
         ));
         secret_bearing.background = vec![mj_core::activity::verdict::BackgroundEvidence {

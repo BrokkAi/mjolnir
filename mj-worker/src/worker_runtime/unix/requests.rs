@@ -237,6 +237,7 @@ pub(crate) async fn credential_response(
     envelope: RelayRequestEnvelope,
     credentials: &std::result::Result<CredentialEndpoint, String>,
     relay_root: &std::path::Path,
+    login_identity: &crate::acp::ClaudeLoginIdentity,
 ) -> RelayResponseEnvelope {
     let body = match credentials {
         Err(message) => RelayResponseBody::Error {
@@ -261,7 +262,7 @@ pub(crate) async fn credential_response(
                     .await
                 }
                 RelayRequest::InstallCredentials { data } => {
-                    Ok(apply_install_credentials(&endpoint, data).await)
+                    Ok(apply_install_credentials(&endpoint, data, login_identity).await)
                 }
                 request => {
                     let request = request.clone();
@@ -302,6 +303,7 @@ pub(crate) async fn credential_response(
 async fn apply_install_credentials(
     endpoint: &CredentialEndpoint,
     data: &str,
+    login_identity: &crate::acp::ClaudeLoginIdentity,
 ) -> Result<RelayResponsePayload> {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64;
@@ -317,6 +319,9 @@ async fn apply_install_credentials(
         .decode(data.as_bytes())
         .context("decode credential payload")?;
     validate_credential_payload(endpoint.harness, &bytes)?;
+    // File commit and identity publication have the same owner and order,
+    // including when several clients install credentials concurrently.
+    let _installation = login_identity.installation().await;
     let installed = mj_core::credentials::install_session_credentials(
         endpoint.harness,
         &endpoint.marker,
@@ -324,6 +329,13 @@ async fn apply_install_credentials(
     )
     .await
     .with_context(|| format!("install credentials at {}", endpoint.marker.display()))?;
+    if endpoint.harness == HarnessKind::Claude
+        && installed.snapshot.fingerprint == mj_core::credentials::credential_fingerprint(&bytes)
+    {
+        login_identity.installed(mj_core::credentials::claude_access_token_fingerprint(
+            &bytes,
+        ));
+    }
     Ok(credential_state_payload(&installed.snapshot))
 }
 
@@ -1002,6 +1014,7 @@ mod tests {
                 },
                 &Ok(endpoint.clone()),
                 &endpoint.home,
+                &Default::default(),
             )
             .await
         });

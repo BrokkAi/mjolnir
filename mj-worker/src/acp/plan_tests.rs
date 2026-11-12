@@ -692,6 +692,7 @@ impl PlanProbe {
         let spec = LaunchSpec {
             operator_away: Default::default(),
             imported_logins: None,
+            login_identity: Default::default(),
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             managed_subagent,

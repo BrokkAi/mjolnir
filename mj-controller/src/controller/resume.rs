@@ -1345,12 +1345,7 @@ fn fetch_source_commit(
             .context("configured repository is not a GitHub source")?;
         if github_token.is_some() {
             token_auth = true;
-            arguments.extend([
-                "-c".to_owned(),
-                "credential.helper=".to_owned(),
-                "-c".to_owned(),
-                "credential.helper=!f() { if [ \"$1\" = get ]; then echo username=x-access-token; echo \"password=$GH_TOKEN\"; fi; }; f".to_owned(),
-            ]);
+            arguments.extend(mj_core::remote_git::github_token_credential_config());
             format!(
                 "https://github.com/{}/{}.git",
                 github.owner, github.repository
@@ -1363,10 +1358,7 @@ fn fetch_source_commit(
     if accepted_source.is_some() {
         if github_token.is_some() && is_github_https_url(&source) {
             token_auth = true;
-            arguments.extend([
-                "-c".to_owned(), "credential.helper=".to_owned(), "-c".to_owned(),
-                "credential.helper=!f() { if [ \"$1\" = get ]; then echo username=x-access-token; echo \"password=$GH_TOKEN\"; fi; }; f".to_owned(),
-            ]);
+            arguments.extend(mj_core::remote_git::github_token_credential_config());
         }
         ssh_transport = source.starts_with("git@") || source.starts_with("ssh://");
     }

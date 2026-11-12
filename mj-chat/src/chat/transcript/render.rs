@@ -381,8 +381,11 @@ fn inline_tool_rows(
 ) -> Vec<Line<'static>> {
     let (glyph, _, status_style) = tool_row_presentation(entry);
     let presentation = entry.tool_presentation.as_ref();
-    let source = presentation.map_or(entry.text.as_str(), |presentation| &presentation.source);
-    let source = sanitize_terminal_text(source);
+    let source = presentation.map_or(
+        std::borrow::Cow::Borrowed(entry.text.as_str()),
+        |presentation| presentation.source.text(),
+    );
+    let source = sanitize_terminal_text(&source);
     let mut source_lines = source.lines().filter(|line| !line.trim().is_empty());
     let mut command = source_lines.next().unwrap_or("").trim().to_owned();
     if source_lines.next().is_some() {

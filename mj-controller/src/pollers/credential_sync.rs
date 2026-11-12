@@ -200,7 +200,7 @@ impl CredentialSyncNotices {
             return Some(warning(
                 match (trigger.reason, result.pushed_to(session_id)) {
                     (CredentialSyncReason::AuthenticationFailure, true) => format!(
-                        "Auth failure on profile {} (session {}); refreshed credentials were pushed. Retry the prompt, and if it repeats run `mj login --profile {}`{advice}.",
+                        "Auth failure on profile {} (session {}); refreshed credentials were pushed. If the session remains stopped, retry the prompt; if it repeats run `mj login --profile {}`{advice}.",
                         result.profile_id, session, result.profile_id
                     ),
                     (CredentialSyncReason::AuthenticationFailure, false) => format!(

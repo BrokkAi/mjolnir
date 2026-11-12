@@ -64,7 +64,7 @@ pub(super) fn apply_terminal_metadata(
             None => {
                 terminal_outputs.push(TerminalOutputRecord {
                     terminal_id: id.clone(),
-                    output: String::new(),
+                    output: Default::default(),
                     truncated: false,
                     exit_code: None,
                     signal: None,
@@ -83,16 +83,21 @@ pub(super) fn apply_terminal_metadata(
                     .as_ref()
                     .is_some_and(|exit| exit.terminal_id == record.terminal_id)
             {
-                record.output = output.data;
+                record.output = mj_core::packed_text::PackedText::plain(output.data);
                 record.truncated = false;
             } else {
-                record.output.push_str(&output.data);
+                let mut text = std::mem::take(&mut record.output).into_text();
+                text.push_str(&output.data);
+                record.output = mj_core::packed_text::PackedText::plain(text);
             }
+            let mut text = std::mem::take(&mut record.output).into_text();
             record.truncated |=
-                mj_core::transcript::truncate_string_start(&mut record.output, 4 * 1024 * 1024);
+                mj_core::transcript::truncate_string_start(&mut text, 4 * 1024 * 1024);
+            record.output = mj_core::packed_text::PackedText::plain(text);
         } else if let Some(exit) = &exit {
             record.exit_code = exit.exit_code;
             record.signal = exit.signal.clone();
+            record.output = std::mem::take(&mut record.output).into_text().into();
         }
     }
 }
@@ -380,7 +385,7 @@ pub(super) fn attach_terminal_outputs(
 pub(super) fn canonical_terminal_output(record: &TerminalOutputRecord) -> CanonicalTerminalOutput {
     CanonicalTerminalOutput {
         terminal_id: record.terminal_id.clone(),
-        output: record.output.clone(),
+        output: record.output.text().into_owned(),
         truncated: record.truncated,
         exit_code: record.exit_code,
         signal: record.signal.clone(),
@@ -392,7 +397,7 @@ pub(super) fn materialized_terminal_output(
 ) -> TerminalOutputRecord {
     TerminalOutputRecord {
         terminal_id: record.terminal_id.clone(),
-        output: record.output.clone(),
+        output: record.output.clone().into(),
         truncated: record.truncated,
         exit_code: record.exit_code,
         signal: record.signal.clone(),

@@ -428,7 +428,7 @@ fn presentation_from_source(
     };
     ToolCallPresentation {
         summary,
-        source,
+        source: source.into(),
         source_kind,
         tool_kind,
         summary_version: TOOL_SUMMARY_VERSION,
@@ -451,7 +451,7 @@ fn presentation_from_title(title: &str, tool_kind: ToolKind) -> ToolCallPresenta
     };
     ToolCallPresentation {
         summary,
-        source: bounded,
+        source: bounded.into(),
         source_kind: ToolSummarySourceKind::Title,
         tool_kind,
         summary_version: TOOL_SUMMARY_VERSION,
@@ -1311,9 +1311,9 @@ pub fn tool_content_details(
     let terminal_detail = |record: &TerminalOutputRecord| {
         if !terminal_finished(record) {
             if record.truncated {
-                format!("{}\noutput truncated", record.output)
+                format!("{}\noutput truncated", record.output.text())
             } else {
-                record.output.clone()
+                record.output.text().into_owned()
             }
         } else {
             terminal_output_detail(record)
@@ -1353,7 +1353,7 @@ pub fn tool_content_details(
         if referenced.contains(&record.terminal_id.as_str()) {
             continue;
         }
-        let output = sanitize_terminal_text(&record.output);
+        let output = sanitize_terminal_text(&record.output.text());
         if !output.is_empty() && details.iter().any(|detail| detail == &output) {
             // Kimi sends the captured stdout as ordinary tool content and in
             // its raw result. Keep the exit summary without printing those
@@ -1409,7 +1409,7 @@ pub fn terminal_output_detail(record: &TerminalOutputRecord) -> String {
     if record.output.is_empty() {
         return summary;
     }
-    format!("{}\n{summary}", record.output)
+    format!("{}\n{summary}", record.output.text())
 }
 
 /// How a terminal ended, in one line.
@@ -1858,7 +1858,7 @@ mod tests {
         assert_eq!(tool_call_presentation(&read).summary, "Read");
         let stale = ToolCallPresentation {
             summary: "Which".into(),
-            source: call.title.clone(),
+            source: call.title.clone().into(),
             source_kind: ToolSummarySourceKind::Title,
             tool_kind: ToolKind::Other,
             summary_version: 1,
@@ -1999,7 +1999,7 @@ mod tests {
         };
         assert_eq!(presentation(script).summary, "python3");
         assert_eq!(presentation(&wrapped).summary, "python3");
-        assert_eq!(presentation(&wrapped).source, script);
+        assert_eq!(presentation(&wrapped).source.text(), script);
 
         let cases = [
             ("bash -c 'python x.py'", "python"),
