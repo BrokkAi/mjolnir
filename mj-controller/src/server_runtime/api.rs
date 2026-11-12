@@ -2781,7 +2781,12 @@ async fn load_startup_context(session_id: String) -> Result<(Option<String>, Opt
             .unwrap_or_default(),
         None => Arc::new(
             blocking("read durable startup status", move || {
-                crate::database::load_latest_startup_group(&session_id)
+                crate::database::load_latest_startup_group(&session_id).map(|steps| {
+                    steps
+                        .into_iter()
+                        .map(crate::database::StartupStepStatus::from)
+                        .collect()
+                })
             })
             .await?,
         ),
@@ -2790,7 +2795,7 @@ async fn load_startup_context(session_id: String) -> Result<(Option<String>, Opt
 }
 
 fn startup_context(
-    steps: &[crate::database::StartupDelivery],
+    steps: &[crate::database::StartupStepStatus],
 ) -> Result<(Option<String>, Option<StartStatus>)> {
     let group_id = steps.last().and_then(|step| step.group_id.clone());
     if let Some(step) = steps
@@ -2817,10 +2822,10 @@ fn startup_context(
         return Ok((group_id, None));
     };
     if last.phase == "done"
-        && matches!(
-            serde_json::from_str::<crate::daemon::StartupStep>(&last.step_json)?,
-            crate::daemon::StartupStep::ApiPrompt { .. }
-        )
+        && *last
+            .api_prompt
+            .as_ref()
+            .map_err(|error| anyhow::anyhow!("{error}"))?
     {
         return Ok((
             group_id,

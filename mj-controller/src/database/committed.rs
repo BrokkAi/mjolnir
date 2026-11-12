@@ -131,7 +131,7 @@ pub struct CommittedState {
     /// Each session's latest startup group, keyed by session. A session with
     /// no group has no entry. API status readers ask this record instead of
     /// the store, and a change to it publishes a revision.
-    pub startup_groups: SnapshotMap<String, Vec<StartupDelivery>>,
+    pub startup_groups: SnapshotMap<String, Vec<StartupStepStatus>>,
     /// Each sub-agent child's recorded report, keyed by child session. A
     /// child with nothing recorded has no entry.
     pub subagent_reports: SnapshotMap<String, mj_core::subagent::SubagentReport>,
@@ -197,7 +197,7 @@ impl CommittedState {
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for session_id in session_ids {
-            let group = startup::load_latest_startup_group_with(&transaction, &session_id)?;
+            let group = startup::load_latest_startup_status_with(&transaction, &session_id)?;
             if !group.is_empty() {
                 startup_groups.insert(session_id, group);
             }
@@ -478,7 +478,7 @@ pub(super) fn finish_operation(
                 }
             }
             "startup" => {
-                let group = startup::load_latest_startup_group_with(&transaction, key)?;
+                let group = startup::load_latest_startup_status_with(&transaction, key)?;
                 let group = (!group.is_empty()).then_some(group);
                 if startup_groups.get(key) != group.as_ref() {
                     match group {
@@ -743,7 +743,7 @@ mod tests {
         for session in ["first", "second"] {
             assert_eq!(
                 queued.startup_groups[session],
-                startup::load_latest_startup_group_with(&reader, session).unwrap()
+                startup::load_latest_startup_status_with(&reader, session).unwrap()
             );
         }
 

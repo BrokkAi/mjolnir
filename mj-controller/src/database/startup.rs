@@ -11,6 +11,43 @@ pub struct StartupDelivery {
     pub error: Option<String>,
 }
 
+/// Status readers retain neither prompt payloads nor delivery identities.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartupStepStatus {
+    pub phase: String,
+    pub group_id: Option<String>,
+    pub accepted_ordinal: Option<u64>,
+    pub error: Option<String>,
+    pub api_prompt: std::result::Result<bool, String>,
+}
+
+impl From<StartupDelivery> for StartupStepStatus {
+    fn from(delivery: StartupDelivery) -> Self {
+        // Keep parse failures visible to status readers at the same point as
+        // before: only a terminal group's last done step needs its kind.
+        let api_prompt = serde_json::from_str::<crate::daemon::StartupStep>(&delivery.step_json)
+            .map(|step| matches!(step, crate::daemon::StartupStep::ApiPrompt { .. }))
+            .map_err(|error| error.to_string());
+        Self {
+            phase: delivery.phase,
+            group_id: delivery.group_id,
+            accepted_ordinal: delivery.accepted_ordinal,
+            error: delivery.error,
+            api_prompt,
+        }
+    }
+}
+
+pub(super) fn load_latest_startup_status_with(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<Vec<StartupStepStatus>> {
+    Ok(load_latest_startup_group_with(connection, session_id)?
+        .into_iter()
+        .map(StartupStepStatus::from)
+        .collect())
+}
+
 pub fn enqueue_startup_deliveries(
     deliveries: Vec<StartupDelivery>,
 ) -> Result<Vec<StartupDelivery>> {
