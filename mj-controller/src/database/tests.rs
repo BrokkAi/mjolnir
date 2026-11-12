@@ -6660,11 +6660,11 @@ fn actor_history_window_keeps_open_streams_and_rehydrates_old_tools() {
         assert_eq!(window, expected);
         assert_eq!(
             loaded.transcript.len(),
-            if pending == "none" { 1100 } else { 1200 }
+            if pending == "none" { 600 } else { 700 }
         );
         if pending != "none" {
             assert_eq!(&loaded.transcript[..100], &full.transcript[..100]);
-            assert_eq!(loaded.transcript[100], full.transcript[1400]);
+            assert_eq!(loaded.transcript[100], full.transcript[1900]);
         }
         assert_eq!(window.provisional_title.as_deref(), Some("request 1"));
         assert_eq!(window.latest_turn_start_position, Some(2401));

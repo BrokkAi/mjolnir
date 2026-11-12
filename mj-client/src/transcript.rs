@@ -158,6 +158,7 @@ pub fn mailbox_event_lines<'a>(
 /// surfaces, without the live feed's presentation collapse or tail clipping.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct HistoryEntry {
+    pub stable_id: String,
     pub role: &'static str,
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -170,6 +171,7 @@ pub fn history_entries(page: &mj_core::storage::TranscriptHistoryPage) -> Vec<Hi
     page.items
         .iter()
         .map(|item| HistoryEntry {
+            stable_id: item.stable_id.clone(),
             role: mj_core::transcript::transcript_item_role(&item.body),
             text: match &item.body {
                 TranscriptBody::Message { event } => mj_core::transcript::sanitize_terminal_text(

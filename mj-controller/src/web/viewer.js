@@ -1410,7 +1410,71 @@ async function openNativeHistory(owner, agent) {
   await load();
 }
 
-document.querySelector('#earlier-messages').onclick = () => openConversationHistory(currentSession);
+// The control doubles as a visible retry affordance when automatic paging fails.
+const earlierMessages = document.querySelector('#earlier-messages');
+let inlineHistory = null;
+function resetInlineHistory() {
+  inlineHistory?.controller.abort();
+  inlineHistory = null;
+  earlierMessages.classList.remove('hidden');
+  earlierMessages.disabled = false;
+  earlierMessages.textContent = 'Earlier messages';
+}
+async function loadInlineHistory() {
+  if (!currentSession || conversationMode !== 'conversation') return;
+  if (!inlineHistory) inlineHistory = {
+    session: currentSession, generation: conversationGeneration,
+    controller: new AbortController(), before: null, done: false, loading: false,
+    entries: new Map(),
+  };
+  const state = inlineHistory;
+  if (state.loading || state.done) return;
+  state.loading = true;
+  state.failed = false;
+  earlierMessages.disabled = true;
+  earlierMessages.textContent = 'Loading earlier messages…';
+  try {
+    const query = new URLSearchParams();
+    if (state.before) {
+      query.set('before_position', String(state.before.position));
+      query.set('before_id', state.before.stable_id);
+    }
+    const page = await request(`/api/v1/sessions/${encodeURIComponent(state.session)}/history${query.size ? `?${query}` : ''}`, { signal: state.controller.signal });
+    if (inlineHistory !== state || state.generation !== conversationGeneration) return;
+    const anchor = [...feed.children].find(node => node.getBoundingClientRect().bottom > feedScroll.getBoundingClientRect().top);
+    const top = anchor?.getBoundingClientRect().top;
+    const rows = [];
+    for (const item of page.items) {
+      if (state.entries.has(item.stable_id)) continue;
+      const entry = { ...item, lines: item.text.split('\n'), label: item.label || item.role, tone: item.role };
+      state.entries.set(item.stable_id, entry);
+      if (entryNodes.has(item.stable_id)) continue;
+      const node = el('article');
+      node.dataset.entryId = item.stable_id;
+      paintEntry(node, entry, null);
+      entryNodes.set(item.stable_id, node);
+      rows.push(node);
+    }
+    state.entries = new Map([...page.items.map(item => [item.stable_id, state.entries.get(item.stable_id)]), ...state.entries]);
+    feed.prepend(...rows);
+    state.before = page.before;
+    state.done = !page.before;
+    earlierMessages.classList.toggle('hidden', state.done);
+    earlierMessages.textContent = 'Earlier messages';
+    if (anchor) feedScroll.scrollTop += anchor.getBoundingClientRect().top - top;
+  } catch (error) {
+    if (inlineHistory === state && !state.controller.signal.aborted) {
+      state.failed = true;
+      earlierMessages.textContent = `Retry earlier messages: ${error.message}`;
+    }
+  } finally {
+    if (inlineHistory === state) {
+      state.loading = false;
+      earlierMessages.disabled = false;
+    }
+  }
+}
+earlierMessages.onclick = () => void loadInlineHistory();
 
 /// Page through a session's stored messages, newest page first. Opened for
 /// the current conversation it shows the pages before the feed and closes if
@@ -8068,8 +8132,18 @@ function renderEntries(entries, replace) {
   if (typeof reconcileSubmissions === 'function') reconcileSubmissions(currentSession, entries.map(entry => entry.command_id).filter(Boolean));
   const wasAtTail = atTail();
   if (replace) {
+    const retained = inlineHistory ? [...inlineHistory.entries.values()] : [];
+    const liveIds = new Set(entries.map(entry => entry.stable_id || entry.id));
     feed.replaceChildren();
     entryNodes.clear();
+    for (const entry of retained) {
+      if (liveIds.has(entry.stable_id)) continue;
+      const node = el('article');
+      node.dataset.entryId = entry.stable_id;
+      paintEntry(node, entry, null);
+      entryNodes.set(entry.stable_id, node);
+      feed.append(node);
+    }
   }
   let appended = false;
   let lastUserText = null;
@@ -8077,6 +8151,7 @@ function renderEntries(entries, replace) {
     lastUserText = turnPromptText(entry, lastUserText);
     const unansweredPrompt = unansweredPromptFor(entry, lastUserText);
     const identity = entry.stable_id || entry.id;
+    if (inlineHistory?.entries.has(identity)) inlineHistory.entries.set(identity, entry);
     let node = entryNodes.get(identity);
     if (!node) {
       node = el('article');
@@ -8106,6 +8181,7 @@ let conversationGeneration = 0;
 let conversationRequest = null;
 
 function retireConversationRequest() {
+  resetInlineHistory();
   conversationRequest?.controller.abort();
   conversationRequest = null;
   historyRequest?.controller.abort();
@@ -9318,6 +9394,7 @@ feed.onclick = event => {
 
 jumpToLatest.onclick = scrollToTail;
 feedScroll.addEventListener('scroll', () => {
+  if (!inlineHistory?.failed && feedScroll.scrollTop <= earlierMessages.offsetHeight) void loadInlineHistory();
   if (atTail()) jumpToLatest.classList.add('hidden');
 });
 
