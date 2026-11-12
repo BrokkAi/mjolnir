@@ -2363,6 +2363,9 @@ pub(crate) async fn api_info(args: ApiInfoArgs) -> Result<()> {
 /// Explicit credential output for callers authenticating outside the CLI.
 pub(crate) async fn api_token() -> Result<()> {
     let mut client = crate::daemon::connect_or_start().await?;
+    // The daemon sets the credential before it publishes viewer readiness;
+    // a daemon this command just started may not have reached that point.
+    crate::daemon::wait_for_web_access(&mut client).await?;
     println!("{}", client.api_credential().await?);
     Ok(())
 }
