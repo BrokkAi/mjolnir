@@ -9,8 +9,34 @@ pub(crate) fn push_subscribe(subscription: Subscription) -> Result<()> {
 }
 fn push_subscribe_with(db: &Connection, subscription: Subscription) -> Result<()> {
     let tx = db.unchecked_transaction()?;
-    tx.execute("INSERT INTO push_devices(endpoint,subscription) VALUES (?1,?2) ON CONFLICT(endpoint) DO UPDATE SET subscription=excluded.subscription",
-        params![subscription.endpoint, serde_json::to_string(&subscription)?])?;
+    let encoded = serde_json::to_string(&subscription)?;
+    let previous: Option<(String, String)> = tx
+        .query_row(
+            "SELECT subscription,enrollment FROM push_devices WHERE endpoint=?1",
+            [&subscription.endpoint],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let previous = previous
+        .map(|(old, enrollment)| {
+            Ok::<_, anyhow::Error>((serde_json::from_str::<Subscription>(&old)?, enrollment))
+        })
+        .transpose()?;
+    let enrollment = match previous {
+        // Expiry metadata does not change the encryption capability: keep its
+        // owner so an already admitted response can still complete normally.
+        Some((old, enrollment)) if old.keys == subscription.keys => enrollment,
+        _ => {
+            // Replacement releases the old owner's reservations in the same
+            // transaction. An opaque ID also prevents ABA after delete/recreate.
+            tx.execute(
+                "UPDATE push_deliveries SET accepted=0 WHERE endpoint=?1 AND accepted=3",
+                [&subscription.endpoint],
+            )?;
+            mj_core::state::new_session_id().context("generate Web Push enrollment identifier")?
+        }
+    };
+    tx.execute("INSERT INTO push_devices(endpoint,subscription,enrollment) VALUES(?1,?2,?3) ON CONFLICT(endpoint) DO UPDATE SET subscription=excluded.subscription,enrollment=excluded.enrollment",params![subscription.endpoint,encoded,enrollment])?;
     tx.execute("UPDATE push_deliveries SET retry_at=0,failures=0,error=NULL WHERE endpoint=?1 AND accepted=0",[subscription.endpoint])?;
     tx.commit()?;
     Ok(())
@@ -235,6 +261,7 @@ fn push_test_with(db: &mut Connection, endpoint: String) -> Result<()> {
 #[derive(Clone)]
 pub(crate) struct PushDelivery {
     pub subscription: Subscription,
+    pub enrollment: String,
     pub episode: String,
     pub payload: String,
     pub failures: u32,
@@ -248,17 +275,24 @@ const READY_PUSH: &str = "FROM push_deliveries q JOIN push_devices d USING(endpo
  AND NOT EXISTS(SELECT 1 FROM push_deliveries flight WHERE flight.endpoint=q.endpoint AND flight.accepted=3 AND json_extract(flight.payload,'$.tag')=json_extract(q.payload,'$.tag'))";
 fn push_due_with(db: &Connection, now: i64) -> Result<Vec<PushDelivery>> {
     let sql = format!(
-        "SELECT d.subscription,q.episode,q.payload,q.failures {READY_PUSH} AND q.retry_at<=?1 AND d.retry_at<=?1"
+        "SELECT d.subscription,q.episode,q.payload,q.failures,d.enrollment {READY_PUSH} AND q.retry_at<=?1 AND d.retry_at<=?1"
     );
     db.prepare(&sql)?
         .query_map([now], |r| {
-            Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+            ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?
         .into_iter()
-        .map(|(subscription, episode, payload, failures)| {
+        .map(|(subscription, episode, payload, failures, enrollment)| {
             Ok(PushDelivery {
                 subscription: serde_json::from_str(&subscription)?,
+                enrollment,
                 episode,
                 payload,
                 failures,
@@ -296,18 +330,28 @@ fn push_recover_with(db: &Connection) -> Result<()> {
 }
 pub(crate) fn push_result(
     subscription: Subscription,
+    enrollment: String,
     episode: String,
     status: Option<u16>,
     retry_at: i64,
     error: Option<String>,
 ) -> Result<()> {
     submit_database_write("record Web Push receipt", move |db| {
-        apply_push_result_with(db, subscription, episode, status, retry_at, error)
+        apply_push_result_with(
+            db,
+            subscription,
+            &enrollment,
+            episode,
+            status,
+            retry_at,
+            error,
+        )
     })
 }
 fn apply_push_result_with(
     db: &Connection,
     subscription: Subscription,
+    enrollment: &str,
     episode: String,
     status: Option<u16>,
     retry_at: i64,
@@ -316,19 +360,19 @@ fn apply_push_result_with(
     let tx = db.unchecked_transaction()?;
     let current: Option<String> = tx
         .query_row(
-            "SELECT subscription FROM push_devices WHERE endpoint=?1",
+            "SELECT enrollment FROM push_devices WHERE endpoint=?1",
             [&subscription.endpoint],
             |r| r.get(0),
         )
         .optional()?;
-    if current.as_deref() != Some(serde_json::to_string(&subscription)?.as_str()) {
+    if current.as_deref() != Some(enrollment) {
         return Ok(());
     }
     if matches!(status, Some(404 | 410)) {
         // A response from an older enrollment cannot delete its replacement.
         tx.execute(
-            "DELETE FROM push_devices WHERE endpoint=?1 AND subscription=?2",
-            params![subscription.endpoint, serde_json::to_string(&subscription)?],
+            "DELETE FROM push_devices WHERE endpoint=?1 AND enrollment=?2",
+            params![subscription.endpoint, enrollment],
         )?;
         tx.commit()?;
         return Ok(());
@@ -408,6 +452,29 @@ pub(crate) fn push_device_status(endpoint: String) -> Result<serde_json::Value> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn service_result(
+        db: &Connection,
+        subscription: Subscription,
+        episode: String,
+        status: Option<u16>,
+        retry_at: i64,
+        error: Option<String>,
+    ) -> Result<()> {
+        let enrollment: String = db.query_row(
+            "SELECT enrollment FROM push_devices WHERE endpoint=?1",
+            [&subscription.endpoint],
+            |r| r.get(0),
+        )?;
+        super::apply_push_result_with(
+            db,
+            subscription,
+            &enrollment,
+            episode,
+            status,
+            retry_at,
+            error,
+        )
+    }
     fn push_observe_with(
         db: &mut Connection,
         away: bool,
@@ -557,7 +624,7 @@ mod tests {
         // A real service refusal blocks follow-up requests to the device,
         // including a new episode, until the persisted service deadline.
         let pending = push_claim_with(&db, 0).unwrap();
-        apply_push_result_with(
+        service_result(
             &db,
             subscription.clone(),
             pending[0].episode.clone(),
@@ -645,7 +712,7 @@ mod tests {
         .unwrap();
         let rejected = push_claim_with(&db, 100).unwrap();
         assert_eq!(rejected.len(), 1);
-        apply_push_result_with(
+        service_result(
             &db,
             subscription.clone(),
             rejected[0].episode.clone(),
@@ -658,7 +725,7 @@ mod tests {
         let test = push_claim_with(&db, 100).unwrap();
         assert_eq!(test.len(), 1);
         assert!(test[0].episode.starts_with("test:"));
-        apply_push_result_with(
+        service_result(
             &db,
             subscription.clone(),
             test[0].episode.clone(),
@@ -684,7 +751,7 @@ mod tests {
         let later = push_claim_with(&db, 100).unwrap();
         assert_eq!(later.len(), 1);
         assert!(later[0].episode.starts_with("after-rejection:"));
-        apply_push_result_with(
+        service_result(
             &db,
             subscription.clone(),
             later[0].episode.clone(),
@@ -727,7 +794,7 @@ mod tests {
         )
         .unwrap();
         assert!(push_claim_with(&db, 100).unwrap().is_empty());
-        apply_push_result_with(
+        service_result(
             &db,
             subscription.clone(),
             flight[0].episode.clone(),
@@ -745,7 +812,7 @@ mod tests {
         push_recover_with(&db).unwrap();
         let retry = push_claim_with(&db, 101).unwrap();
         assert_eq!(retry.len(), 1);
-        apply_push_result_with(
+        service_result(
             &db,
             subscription.clone(),
             retry[0].episode.clone(),
@@ -791,7 +858,7 @@ mod tests {
         )
         .unwrap();
         assert!(push_claim_with(&db, 101).unwrap().is_empty());
-        apply_push_result_with(
+        service_result(
             &db,
             subscription.clone(),
             flight[0].episode.clone(),
@@ -801,7 +868,7 @@ mod tests {
         )
         .unwrap();
         // A stale completion cannot turn summary-covered work back into a retry.
-        apply_push_result_with(
+        service_result(
             &db,
             subscription.clone(),
             "summary-flight:1".into(),
@@ -835,10 +902,167 @@ mod tests {
         let coverage = push_summary_coverage_with(&db, reference).unwrap().unwrap();
         assert_eq!(coverage.len(), 1000);
         assert!(serde_json::to_string(&coverage).unwrap().len() > 4096);
+        service_result(
+            &db,
+            subscription.clone(),
+            large[0].episode.clone(),
+            Some(201),
+            0,
+            None,
+        )
+        .unwrap();
+        // Hard-won: 5c5ff2233: changed enrollment stranded its previous flight.
+        push_observe_at_with(
+            &mut db,
+            OperatorPresence {
+                away: true,
+                revision: 15,
+            },
+            vec![episode("enrollment-flight")],
+            vec![],
+        )
+        .unwrap();
+        let first = push_claim_with(&db, 103).unwrap();
+        assert_eq!(first.len(), 1);
+        let mut refreshed = subscription.clone();
+        refreshed.expiration_time = Some(123456.0);
+        push_subscribe_with(&db, refreshed).unwrap();
+        assert!(push_claim_with(&db, 103).unwrap().is_empty());
+        // A metadata-only refresh keeps its legitimate response admissible.
+        super::apply_push_result_with(
+            &db,
+            first[0].subscription.clone(),
+            &first[0].enrollment,
+            first[0].episode.clone(),
+            Some(201),
+            0,
+            None,
+        )
+        .unwrap();
+        assert!(push_claim_with(&db, 103).unwrap().is_empty());
+        push_observe_at_with(
+            &mut db,
+            OperatorPresence {
+                away: true,
+                revision: 15,
+            },
+            vec![episode("enrollment-keys")],
+            vec![],
+        )
+        .unwrap();
+        let first = push_claim_with(&db, 103).unwrap();
+        assert_eq!(first.len(), 1);
+        let mut changed = subscription.clone();
+        changed.keys.auth = "changed-authentication-secret".into();
+        push_subscribe_with(&db, changed.clone()).unwrap();
+        let second = push_claim_with(&db, 103).unwrap();
+        assert_eq!(second.len(), 1);
+        assert_ne!(first[0].enrollment, second[0].enrollment);
+        // Repeating identical data keeps the current owner's reservation.
+        push_subscribe_with(&db, changed.clone()).unwrap();
+        assert!(push_claim_with(&db, 103).unwrap().is_empty());
+        super::apply_push_result_with(
+            &db,
+            first[0].subscription.clone(),
+            &first[0].enrollment,
+            first[0].episode.clone(),
+            Some(503),
+            i64::MAX,
+            Some("stale".into()),
+        )
+        .unwrap();
+        push_subscribe_with(&db, subscription.clone()).unwrap();
+        let third = push_claim_with(&db, 103).unwrap();
+        assert_eq!(third.len(), 1);
+        assert_ne!(third[0].enrollment, first[0].enrollment);
+        // Returning to identical subscription bytes cannot revive an old owner.
+        super::apply_push_result_with(
+            &db,
+            second[0].subscription.clone(),
+            &second[0].enrollment,
+            second[0].episode.clone(),
+            Some(201),
+            0,
+            None,
+        )
+        .unwrap();
+        super::apply_push_result_with(
+            &db,
+            first[0].subscription.clone(),
+            &first[0].enrollment,
+            first[0].episode.clone(),
+            Some(410),
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            db.query_row(
+                "SELECT accepted FROM push_deliveries WHERE endpoint=?1 AND episode=?2",
+                params![endpoint, third[0].episode],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            3
+        );
+        super::apply_push_result_with(
+            &db,
+            third[0].subscription.clone(),
+            &third[0].enrollment,
+            third[0].episode.clone(),
+            Some(201),
+            0,
+            None,
+        )
+        .unwrap();
+        assert!(push_claim_with(&db, 103).unwrap().is_empty());
+        // Deleting/recreating the same endpoint also assigns a distinct owner.
+        push_observe_at_with(
+            &mut db,
+            OperatorPresence {
+                away: true,
+                revision: 15,
+            },
+            vec![episode("recreated-flight")],
+            vec![],
+        )
+        .unwrap();
+        let old = push_claim_with(&db, 103).unwrap();
+        assert_eq!(old.len(), 1);
+        push_unsubscribe_with(&db, &endpoint).unwrap();
+        push_subscribe_with(&db, subscription.clone()).unwrap();
+        push_observe_at_with(
+            &mut db,
+            OperatorPresence {
+                away: true,
+                revision: 15,
+            },
+            vec![episode("recreated-flight")],
+            vec![],
+        )
+        .unwrap();
+        let recreated = push_claim_with(&db, 103).unwrap();
+        assert_eq!(recreated.len(), 1);
+        assert_ne!(old[0].enrollment, recreated[0].enrollment);
+        super::apply_push_result_with(
+            &db,
+            old[0].subscription.clone(),
+            &old[0].enrollment,
+            old[0].episode.clone(),
+            Some(410),
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM push_devices", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
         // HTTP 410 cascades queued intents and receipts.
 
-        apply_push_result_with(&db, subscription.clone(), String::new(), Some(410), 0, None)
-            .unwrap();
+        service_result(&db, subscription.clone(), String::new(), Some(410), 0, None).unwrap();
         assert_eq!(
             db.query_row("SELECT count(*) FROM push_deliveries", [], |r| r
                 .get::<_, i64>(0))

@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS push_devices(endpoint TEXT PRIMARY KEY, subscription TEXT NOT NULL, retry_at INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS push_devices(endpoint TEXT PRIMARY KEY, subscription TEXT NOT NULL, enrollment TEXT NOT NULL, retry_at INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS push_observation(singleton INTEGER PRIMARY KEY CHECK(singleton=1), away INTEGER NOT NULL, revision INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS push_episodes(session TEXT PRIMARY KEY, identity TEXT NOT NULL, payload TEXT NOT NULL, signature TEXT NOT NULL, eligible INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS push_episode_counters(session TEXT PRIMARY KEY, sequence INTEGER NOT NULL);

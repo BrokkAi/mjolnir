@@ -459,8 +459,17 @@ async fn deliver(
     // prevents hot retry loops when the service omits Retry-After.
     let seconds = 1_i64.checked_shl(delivery.failures).unwrap_or(i64::MAX);
     let at = retry_after.unwrap_or_else(|| chrono::Utc::now().timestamp().saturating_add(seconds));
-    blocking(move || db::push_result(delivery.subscription, episode, service_status, at, error))
-        .await
+    blocking(move || {
+        db::push_result(
+            delivery.subscription,
+            delivery.enrollment,
+            episode,
+            service_status,
+            at,
+            error,
+        )
+    })
+    .await
 }
 
 #[cfg(test)]

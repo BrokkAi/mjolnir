@@ -15,6 +15,7 @@ A user installs the viewer on Android Chrome or an iOS 16.4+ Home Screen and ena
 - [x] (2026-11-12) Committed browser checkpoint 980376940 and daemon checkpoint c146a8a89.
 - [x] (2026-11-12) Addressed first-review coverage and withdrawal defects in 4c4eefc4c.
 - [x] (2026-11-12) Addressed second-review device rejection and in-flight ownership defects, including the underlying summary payload growth.
+- [x] (2026-11-12) Addressed third-review enrollment replacement ownership; expiry refresh, key replacement, ABA and endpoint recreation regressions pass.
 - [x] (2026-11-12) Final affected checks pass: 2 Rust, 3 Playwright, 38 browser boundary tests, touched-crate clippy and rustfmt.
 - [x] (2026-11-12) Send validated implementation through required review; the final verdict is recorded in the session handback.
 
@@ -32,7 +33,7 @@ The parent approved durable intent before send, retries for unknown outcomes, du
 
 The database writer allocates a monotonic per-session sequence. Episode identity is session ID plus sequence. Stored source signatures include attention category, completed outcome ordinals, pending form IDs/messages from the session and managed descendants, and native question owner/generation identities. Repeated observations and removal of answered forms retain the episode. New sources, category changes and re-entry after confirmed clearance allocate another sequence. Unknown, Unreachable and Failed observations retain identity and pause sends. Eligibility is one policy expression containing NeedsInput and Important; attention classification itself remains daemon-owned.
 
-One outbox state owns each delivery: queued, accepted, summary-covered or in flight. The database writer atomically claims eligible sends and enforces one in-flight request per device/tag. Summary regrouping excludes in-flight individuals and episodes covered by an in-flight summary. Completion updates only the admitted row, so a late failure cannot uncover a summary-covered episode. Startup resets uncertain in-flight rows to queued and preserves acceptance receipts. The sender has no separate busy flag or active set.
+One outbox state owns each delivery: queued, accepted, summary-covered or in flight. The database writer atomically claims eligible sends and enforces one in-flight request per device/tag. Summary regrouping excludes in-flight individuals and episodes covered by an in-flight summary. Completion updates only the admitted row, so a late failure cannot uncover a summary-covered episode. Startup resets uncertain in-flight rows to queued and preserves acceptance receipts. The sender has no separate busy flag or active set. Device rows carry an opaque enrollment ownership ID, captured by admitted sends. An expiry-only refresh preserves this owner because its encryption keys are unchanged. Replacing keys releases the old flights and replaces the ownership ID atomically. Completions fence on that ID, including when keys return to earlier values or the endpoint is deleted and recreated.
 
 Reuse existing ring for P-256 agreement, HKDF-SHA256, AES-GCM and ES256 VAPID signing, and existing reqwest for HTTPS. No production or test dependency was added. Published RFC 8291 Appendix A values validate encryption, and ring's separate signature verifier validates the JWT. VAPID keys are private PKCS8 files, published with restrictive temporary-file permissions, atomic no-clobber publication and directory fsync. Never regenerate a valid key on restart.
 
@@ -44,7 +45,7 @@ Push payloads contain only title, first-line body, session ID, URL and notificat
 
 ## Outcomes & Retrospective
 
-Implementation and affected validation are complete; no real phone delivery has been attempted. Both independent review rounds' findings were accepted and fixed. The latest change makes races unrepresentable by giving the database writer sole ownership of send admission and coverage, rather than narrowing a task-bookkeeping window. It also removes session-list-sized push bodies instead of adding a guessed limit or a fallback.
+Implementation and affected validation are complete; no real phone delivery has been attempted. Findings from three independent review rounds were accepted and fixed. The latest change makes races unrepresentable by giving the database writer sole ownership of send admission and coverage, rather than narrowing a task-bookkeeping window. It also removes session-list-sized push bodies instead of adding a guessed limit or a fallback.
 
 ## Context and Orientation
 
@@ -79,7 +80,7 @@ Expected results are 3 Playwright cases and 38 existing browser boundary tests p
 
 ## Validation and Acceptance
 
-The encryption/JWT test checks RFC 8291 Appendix A ciphertext and derivation values, JWT audience/expiry and signature verification. The database regression covers acknowledged and unknown outcomes across reconnect, present suppression, away summaries, form removal/re-entry, worker recovery, coalesced presence revisions, device deadlines, expiry, summary shrinking/retirement, permanent rejection followed by test/new sends, in-flight individual/summary ownership, stale completions and restart admission. A real 1,000-session summary proves the stored coverage exceeds 4096 bytes while its actual push plaintext stays within the documented RFC 8291 section 4 allowance of 3993 bytes; lookup survives endpoint expiry.
+The encryption/JWT test checks RFC 8291 Appendix A ciphertext and derivation values, JWT audience/expiry and signature verification. The database regression covers acknowledged and unknown outcomes across reconnect, present suppression, away summaries, form removal/re-entry, worker recovery, coalesced presence revisions, device deadlines, expiry, summary shrinking/retirement, permanent rejection followed by test/new sends, in-flight individual/summary ownership, stale completions, restart admission and enrollment replacement/refresh ownership. A real 1,000-session summary proves the stored coverage exceeds 4096 bytes while its actual push plaintext stays within the documented RFC 8291 section 4 allowance of 3993 bytes; lookup survives endpoint expiry.
 
 The browser regression drives the real Settings UI with mocked routes and browser push APIs. It checks permission only from a tap, test/unsubscribe actions, temporary-unavailability retention, resolved individual/summary cleanup through the coverage API, and service-worker click routing. The existing Settings golden still fits a 390x844 viewport without sideways overflow.
 
@@ -100,3 +101,7 @@ Evidence is in `/home/jonathan/Projects/mjolnir/.mj/clones/4f86b847ae014721aac99
 The public viewer action variants are `PushSubscribe`, `PushUnsubscribe` and `PushTest`. Viewer-only GET routes are `/api/push/key`, `/api/push/status?endpoint=...` and `/api/push/summary?id=...`. The dispatcher calls `push_observe`, `push_claim`, `push_result` and startup-only `push_recover`; these all use the single database writer. `READY_PUSH` is shared by admission and scheduling. All background failures propagate or are reported with context, and subscription capability URLs are removed from transport diagnostics.
 
 Revision note (2026-11-12): Consolidated the final design and evidence after two review rounds, replacing interim mechanisms with durable admission and independent immutable summary coverage. The follow-up commit is ready for required review.
+
+Revision note (2026-11-12, third review): Enrollment replacement now releases old in-flight reservations atomically. Each new/replaced cryptographic enrollment has an opaque durable ownership identifier captured at send admission and checked on completion. Expiry-only refreshes keep the same owner, so already admitted responses still complete normally. Repeating the same keys preserves ownership; changing keys and later changing them back, or deleting/recreating the endpoint, cannot revive an old response. Extended the persistence regression for changed expiry metadata, identical re-enrollment, ABA and delete/recreate ownership. The identifier reuses the existing opaque ID generator and does not add a daemon-memory flag or a public payload field.
+
+Revision note (2026-11-12): Third-review fixes pass the focused Rust suite, touched-crate clippy and rustfmt. Browser surfaces did not change in this round; their previous affected checks remain valid. The final ownership fix is ready for required review.
