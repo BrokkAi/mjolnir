@@ -25,6 +25,8 @@ This is private-network operation with working SSH authentication and host trust
 
 ## Surprises & Discoveries
 
+- (2026-11-12) Review found that retaining archive paths in the input snapshot also suppressed retries after errors. Archive completions now carry per-path and whole-request errors into a dashboard notice; the existing Refresh command revisits unanswered paths without discarding successful answers. Focused dashboard/PTY tests and CLI Clippy pass after this correction.
+
 - (2026-11-12) Archive metadata failures must be per-path replies, not batch errors; an archive-as-parent fixture deterministically exercises a read error alongside a readable archive. Profile probe deadlines use real Instant and external harness probes; no deterministic per-profile timeout test was added because that would require injecting a clock/probe factory solely for the test. Existing executor deadline regressions cover expiration itself.
 
 - (2026-11-12) mbx install uses a blocking HTTP download outside the executor and publishes its binary before setup/profile updates; safe whole-install cancellation is unavailable. Install therefore holds labeled admission through response delivery and disables UI cancellation, while preview and re-preview use disposable dedicated connections with the existing 60-second deadline. Existing core preview types now derive wire serialization; no persisted format changes.

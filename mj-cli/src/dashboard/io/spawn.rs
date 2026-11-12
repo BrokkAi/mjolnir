@@ -1182,7 +1182,7 @@ pub(crate) fn spawn_checkpoint_archive_size_refresh(
     updates: UnboundedSender<DashboardIoUpdate>,
 ) {
     tokio::task::spawn_blocking(move || {
-        let results = match machine_request(
+        let sizes = match machine_request(
             mj_client::daemon::DaemonAction::CheckpointArchiveSizes {
                 paths: targets.clone(),
             },
@@ -1190,20 +1190,16 @@ pub(crate) fn spawn_checkpoint_archive_size_refresh(
         ) {
             Ok(mj_client::daemon::DaemonReply::CheckpointArchiveSizes(sizes)) => sizes,
             result => {
-                tracing::warn!(?result, "checkpoint archive size request failed");
-                return;
+                let error = match result {
+                    Err(error) => format!("{error:#}"),
+                    Ok(reply) => format!("unexpected archive size reply: {reply:?}"),
+                };
+                targets
+                    .keys()
+                    .map(|id| (id.clone(), Err(error.clone())))
+                    .collect()
             }
         };
-        let sizes = results
-            .into_iter()
-            .filter_map(|(id, result)| match result {
-                Ok(size) => Some((id, size)),
-                Err(error) => {
-                    tracing::warn!(%id, %error, "checkpoint archive size failed");
-                    None
-                }
-            })
-            .collect();
         report(
             "checkpoint archive sizes",
             &updates,

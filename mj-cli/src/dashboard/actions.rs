@@ -659,6 +659,9 @@ pub(crate) async fn apply_dashboard_action(
         // One key refreshes both panes, so it runs both requests rather than
         // leaving the user to focus each pane in turn.
         DashboardAction::RefreshAll => {
+            // Revisit unanswered archive paths even when the dialog's rows did not change.
+            context.checkpoint_archive_records.clear();
+            context.controller_changed = true;
             context.request_quota_refresh();
             context.request_capacity_refresh();
             context.dashboard.set_notice(QUOTA_REFRESH_NOTICE);

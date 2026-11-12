@@ -370,7 +370,7 @@ pub(crate) enum DashboardIoUpdate {
     CheckpointArchiveSizes {
         generation: u64,
         targets: BTreeMap<String, std::path::PathBuf>,
-        sizes: BTreeMap<String, Option<u64>>,
+        sizes: BTreeMap<String, Result<Option<u64>, String>>,
     },
     WorkerDiagnosis {
         session_id: String,
@@ -1485,24 +1485,32 @@ impl DashboardContext {
                 targets,
                 sizes,
             } => {
-                for (id, path) in &targets {
-                    if self.checkpoint_archive_pending.get(id) == Some(&generation)
-                        && self.checkpoint_archive_records.get(id) == Some(path)
-                        && sizes.contains_key(id)
+                let mut answered = BTreeMap::new();
+                let mut errors = Vec::new();
+                for (id, result) in sizes {
+                    if self.checkpoint_archive_pending.get(&id) != Some(&generation)
+                        || targets.get(&id) != self.checkpoint_archive_records.get(&id)
                     {
-                        self.checkpoint_archive_targets_seen
-                            .insert(id.clone(), path.clone());
+                        continue;
+                    }
+                    self.checkpoint_archive_pending.remove(&id);
+                    match result {
+                        Ok(size) => {
+                            if let Some(path) = targets.get(&id) {
+                                self.checkpoint_archive_targets_seen.insert(id.clone(), path.clone());
+                            }
+                            answered.insert(id, size);
+                        }
+                        Err(error) => errors.push(format!("{id}: {error}")),
                     }
                 }
-                self.dashboard.patch_checkpoint_archive_sizes(
-                    sizes
-                        .into_iter()
-                        .filter(|(id, _)| {
-                            targets.get(id) == self.checkpoint_archive_targets_seen.get(id)
-                                && self.checkpoint_archive_pending.get(id) == Some(&generation)
-                        })
-                        .collect(),
-                );
+                self.dashboard.patch_checkpoint_archive_sizes(answered);
+                if !errors.is_empty() {
+                    self.dashboard.set_notice(format!(
+                        "Could not read checkpoint archive sizes: {}. Use Refresh to retry.",
+                        errors.join("; ")
+                    ));
+                }
             }
             DashboardIoUpdate::WorkerDiagnosis {
                 session_id,
