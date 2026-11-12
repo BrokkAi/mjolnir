@@ -16,7 +16,9 @@ const NOTIFY: f64 = 0.2830;
 const REJECT: f64 = 0.0716;
 const GLIDE_NOTIFY: f64 = 0.1123;
 
-pub(crate) type ScoreFuture<'a> = Pin<Box<dyn Future<Output = Result<f64>> + Send + 'a>>;
+pub(crate) type ScoreFuture<'a> =
+    Pin<Box<dyn Future<Output = std::result::Result<f64, StudentError>> + Send + 'a>>;
+type GlideFuture<'a> = Pin<Box<dyn Future<Output = Result<f64>> + Send + 'a>>;
 
 // These owner types move to crate::github_student when Milestone 3 merges.
 #[derive(Clone, Copy, Debug)]
@@ -46,6 +48,22 @@ pub(crate) enum StudentState {
         next_retry_at_ms: i64,
     },
 }
+
+// Moves to crate::github_student::StudentError when Milestone 3 merges.
+#[derive(Debug)]
+pub(crate) enum StudentError {
+    Unavailable(StudentState),
+    Inference(anyhow::Error),
+}
+impl std::fmt::Display for StudentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable(state) => write!(f, "student unavailable: {state:?}"),
+            Self::Inference(error) => write!(f, "student inference failed: {error:#}"),
+        }
+    }
+}
+impl std::error::Error for StudentError {}
 
 /// Readiness, preparation/retry and inference concurrency belong to this owner.
 /// Scoring must run blocking inference off the async runtime.
@@ -115,7 +133,7 @@ impl Classifier {
         glide: F,
     ) -> Result<GithubItemVerdict>
     where
-        F: for<'a> FnOnce(&'a GithubItemEvidence) -> ScoreFuture<'a>,
+        F: for<'a> FnOnce(&'a GithubItemEvidence) -> GlideFuture<'a>,
     {
         let started = Instant::now();
         let attempt = match mj_core::jev::DecisionLog::open(mj_core::jev::controller_log_dir()) {
@@ -138,37 +156,36 @@ impl Classifier {
         }
         let mut failure = None;
         let mut failure_kind = None;
-        let student_probability = match self.student.state() {
-            StudentState::Ready => {
-                let (item, session) = mj_transcript::github_history::student_segments(evidence)?;
-                match self
-                    .student
-                    .score_segments(&item, &session)
-                    .await
-                    .and_then(valid_probability)
-                {
-                    Ok(p) => Some(p),
-                    Err(error) => {
-                        failure_kind = Some(StudentFailureKind::Inference);
-                        failure = Some(format!("{error:#}; model owner will retry preparation"));
-                        None
-                    }
-                }
-            }
-            StudentState::Loading => {
-                failure =
-                    Some("model preparation in progress; automatic preparation is running".into());
-                None
-            }
-            StudentState::Failed {
+        let (item, session) = mj_transcript::github_history::student_segments(evidence)?;
+        // Scoring is the owner's atomic decision point and starts lazy preparation.
+        let student_probability = match self
+            .student
+            .score_segments(&item, &session)
+            .await
+            .and_then(|p| valid_probability(p).map_err(StudentError::Inference))
+        {
+            Ok(p) => Some(p),
+            Err(StudentError::Unavailable(StudentState::Failed {
                 kind,
                 cause,
                 next_retry_at_ms,
-            } => {
+            })) => {
                 failure_kind = Some(kind);
                 failure = Some(format!(
                     "{cause}; automatic retry at epoch milliseconds {next_retry_at_ms}"
                 ));
+                None
+            }
+            Err(StudentError::Unavailable(state)) => {
+                failure = Some(format!(
+                    "model unavailable ({state:?}); automatic preparation is running"
+                ));
+                None
+            }
+            Err(StudentError::Inference(error)) => {
+                failure_kind = Some(StudentFailureKind::Inference);
+                failure = Some(format!("{error:#}; model owner will retry preparation"));
+                tracing::warn!(%error, "GitHub student inference failed; using GLiDE");
                 None
             }
         };
@@ -226,10 +243,11 @@ mod tests {
     struct RecordedStudent {
         state: Mutex<StudentState>,
         score: f64,
+        calls: std::sync::atomic::AtomicUsize,
     }
     impl StudentOwner for RecordedStudent {
         fn state(&self) -> StudentState {
-            self.state.lock().unwrap().clone()
+            panic!("policy must not poll readiness before scoring")
         }
         fn manifest_revision(&self) -> &str {
             "recorded-boundary"
@@ -241,7 +259,11 @@ mod tests {
                     serde_json::from_str::<serde_json::Value>(session).unwrap()["history"]
                         .is_array()
                 );
-                Ok(self.score)
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                match self.state.lock().unwrap().clone() {
+                    StudentState::Ready => Ok(self.score),
+                    state => Err(StudentError::Unavailable(state)),
+                }
             })
         }
     }
@@ -252,6 +274,7 @@ mod tests {
         .unwrap();
         serde_json::from_value(fixture["evidence"].clone()).unwrap()
     }
+    // Hard-won: #1513: a readiness pre-check left lazy model preparation dormant.
     #[tokio::test]
     async fn github_relevance_exact_boundaries_and_failure_episodes() {
         const CHILD: &str = "MJ_GITHUB_RELEVANCE_TEST_CHILD";
@@ -280,6 +303,7 @@ mod tests {
             let student = Arc::new(RecordedStudent {
                 state: Mutex::new(StudentState::Ready),
                 score,
+                calls: Default::default(),
             });
             let classifier = Classifier::new(student, |_| {});
             let used = std::sync::atomic::AtomicUsize::new(0);
@@ -296,6 +320,7 @@ mod tests {
         let student = Arc::new(RecordedStudent {
             state: Mutex::new(StudentState::Loading),
             score: 0.5,
+            calls: Default::default(),
         });
         let notices = Arc::new(Mutex::new(Vec::new()));
         let captured = notices.clone();
@@ -311,6 +336,11 @@ mod tests {
                     .is_err()
             );
         }
+        assert_eq!(
+            student.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "Loading must still call score_segments to start preparation"
+        );
         *student.state.lock().unwrap() = StudentState::Failed {
             kind: StudentFailureKind::Download,
             cause: "download failed".into(),
