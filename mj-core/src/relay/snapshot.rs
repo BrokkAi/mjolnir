@@ -6,6 +6,7 @@
 //! Nothing in this module touches the filesystem.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use agent_client_protocol::schema::ProtocolVersion as AcpProtocolVersion;
 use agent_client_protocol::v1::schema::{
@@ -634,7 +635,7 @@ pub struct RelayOperationalState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assessment: Option<Box<crate::assessment::TurnAssessment>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assessment_context: Option<Box<crate::assessment::ContextHistory>>,
+    pub assessment_context: Option<Arc<crate::assessment::ContextHistory>>,
     /// The latest prompt's completion identity; see `TurnCompletion`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_completion: Option<crate::activity::verdict::TurnCompletion>,
@@ -1475,7 +1476,7 @@ pub struct RelaySnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assessment: Option<crate::assessment::TurnAssessment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assessment_context: Option<crate::assessment::ContextHistory>,
+    pub assessment_context: Option<Arc<crate::assessment::ContextHistory>>,
     /// The latest prompt's completion identity; see `TurnCompletion`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_completion: Option<crate::activity::verdict::TurnCompletion>,
@@ -1624,7 +1625,7 @@ impl RelaySnapshot {
     /// hands it to Jev or the question locator goes through here.
     pub fn authorization_context(&self) -> Option<crate::assessment::ContextHistory> {
         self.assessment_context
-            .as_ref()
+            .as_deref()
             .map(crate::assessment::ContextHistory::without_generated_prompts)
     }
 
@@ -1724,7 +1725,7 @@ impl RelaySnapshot {
     pub fn operational_state(&self) -> RelayOperationalState {
         RelayOperationalState {
             assessment: self.assessment.clone().map(Box::new),
-            assessment_context: self.assessment_context.clone().map(Box::new),
+            assessment_context: self.assessment_context.clone(),
             turn_completion: self.turn_completion.clone(),
             continuation: self.continuation.clone(),
             relay_protocol_version: None,

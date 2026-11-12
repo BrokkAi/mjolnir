@@ -464,7 +464,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     assessment.retry_at_ms = None;
                 }
                 RelayCommand::SeedAssessmentContext { context, .. } => {
-                    snapshot.assessment_context = Some((**context).clone());
+                    snapshot.assessment_context = Some(Arc::new((**context).clone()));
                     if let Some(a) = snapshot.assessment.as_mut().filter(|a| {
                         a.current()
                             && !matches!(
@@ -1927,7 +1927,7 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
             .and_then(|d| d.command.prompt_blocks())
         && let Some(context) = &mut snapshot.assessment_context
     {
-        context.user(id, &prompt);
+        Arc::make_mut(context).user(id, &prompt);
     }
     match &event.observation {
         RelayObservation::ElicitationRequested { request } => {
@@ -1944,7 +1944,7 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
                 && let ContentBlock::Text(text) = &chunk.content
                 && let Some(context) = &mut snapshot.assessment_context
             {
-                context.assistant(
+                Arc::make_mut(context).assistant(
                     chunk.message_id.as_ref().map(|id| id.0.as_ref()),
                     event.ordinal,
                     &text.text,
@@ -1977,7 +1977,7 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
             }
             snapshot.assessment = Some(a);
             if let Some(context) = &mut snapshot.assessment_context {
-                context.open_assistant_id = None;
+                Arc::make_mut(context).open_assistant_id = None;
             }
         }
         RelayObservation::HarnessTurnSettled {
@@ -1985,7 +1985,7 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
             ..
         } => {
             if let Some(context) = &mut snapshot.assessment_context {
-                context.open_assistant_id = None;
+                Arc::make_mut(context).open_assistant_id = None;
             }
         }
         RelayObservation::CommandCompleted {

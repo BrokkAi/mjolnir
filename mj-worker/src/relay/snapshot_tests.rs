@@ -221,7 +221,17 @@ mod tests {
         let mut state = RelaySnapshot::new(SESSION.into()).operational_state();
         state.native_session_id = Some("legacy-native-session".into());
         assert_eq!(state.acp_ready, None);
-        let mut encoded = serde_json::to_value(state).unwrap();
+        let mut history = mj_core::assessment::ContextHistory::default();
+        history.user("prompt", &[]);
+        state.assessment_context = Some(std::sync::Arc::new(history.clone()));
+        let mut encoded = serde_json::to_value(&state).unwrap();
+        // Arc and the older Box/owned representation must encode identically.
+        assert_eq!(
+            serde_json::to_string(&state.assessment_context).unwrap(),
+            serde_json::to_string(&Some(Box::new(history))).unwrap(),
+        );
+        let round_trip: RelayOperationalState = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(round_trip, state);
         encoded.as_object_mut().unwrap().remove("acp_ready");
 
         let restored: RelayOperationalState = serde_json::from_value(encoded).unwrap();

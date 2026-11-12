@@ -556,7 +556,7 @@ fn a_checkpoint_seed_preserves_pending_assessment_and_full_authorization() {
     relay.prepare_pending_assessment().unwrap();
     let state = mj_core::assessment::Checkpoint {
         version: 1,
-        context: relay.snapshot.assessment_context.clone(),
+        context: relay.snapshot.assessment_context.as_deref().cloned(),
         assessment: relay.snapshot.assessment.clone(),
         continuation: relay.snapshot.continuation.clone(),
         capacity_retry: relay.snapshot.capacity_retry.clone(),
@@ -576,7 +576,10 @@ fn a_checkpoint_seed_preserves_pending_assessment_and_full_authorization() {
     let mut restored = open(destination.path());
     let (_, evidence, _) = restored.pending_replied_verdict().unwrap();
     assert_eq!(evidence, state.assessment.unwrap().evidence.unwrap());
-    assert_eq!(restored.snapshot.assessment_context, state.context);
+    assert_eq!(
+        restored.snapshot.assessment_context.as_deref(),
+        state.context.as_ref()
+    );
 }
 
 /// A routine checkpoint is Mjolnir's housekeeping, not user work, so it keeps

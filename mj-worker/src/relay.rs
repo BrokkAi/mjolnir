@@ -445,7 +445,7 @@ impl DurableRelay {
                 snapshot.assessment_context = None;
                 if let Some(value) = &restored.assessment_state {
                     let state = mj_core::assessment::Checkpoint::decode(value)?;
-                    snapshot.assessment_context = state.context;
+                    snapshot.assessment_context = state.context.map(Arc::new);
                     snapshot.assessment = state.assessment;
                     snapshot.continuation = state.continuation;
                     snapshot.capacity_retry = state.capacity_retry;
