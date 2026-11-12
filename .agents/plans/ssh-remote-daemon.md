@@ -67,6 +67,10 @@ Decision: Default development commit is the remote source checkout's HEAD, resol
 
 Decision (parent approval, 2026-11-12): Cancellable machine requests use dedicated control connections. The action owns its cancellation classification; connection closure cancels its executor and the server awaits cleanup. Disposable probes hold no handoff admission. Reuse ProcessCancellationGuard. Mutating mbx installation holds labeled admission through cleanup and acknowledgement; offer cancellation only if its existing helper safely supports it. Do not introduce a durable generic job owner.
 
+Decision (user, 2026-11-12): The CLI's HTTP client goes directly to the advertised viewer URL in SSH placement, like the browser; it is not tunneled. The remote client this plan supports is the dashboard (TUI) and the browser, not the `mj` CLI: CLI commands that use the HTTP API may fail from a computer that cannot reach the viewer, and that is acceptable. The dashboard must not run the `mj` CLI for any of its features. Rationale: keeps one HTTP path; the dashboard is the product surface for remote use.
+
+Decision (user, 2026-11-12): Settings → Login no longer runs `mj login` as a subprocess. The daemon starts the harness login in a pseudo-terminal on its own machine and streams it to a dashboard pane, reusing the terminal streaming that session user shells already use; input from the pane goes back to the login process. This works in every placement. Browser OAuth flows that call back to `localhost` on the daemon's machine may not complete from another computer; paste-code and API-key flows work. Rationale: the dashboard must not depend on the CLI, and credentials live with the daemon.
+
 ## Outcomes & Retrospective
 
 
