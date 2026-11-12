@@ -12240,7 +12240,10 @@ async fn daemon_upload_exchange() {
     };
     let server_metadata = metadata.clone();
     let server = tokio::spawn(async move {
-        for authenticated in [true, false, true, false] {
+        for (index, authenticated) in [true, false, true, false, true].into_iter().enumerate() {
+            if index == 4 {
+                assert!(crate::upgrade::gate().try_close());
+            }
             let (stream, _) = listener.accept().await.unwrap();
             let result = serve_client(
                 stream,
@@ -12374,7 +12377,7 @@ async fn daemon_upload_exchange() {
         &RequestEnvelope {
             protocol_version: PROTOCOL_VERSION,
             request_id: 1,
-            token: metadata.token,
+            token: metadata.token.clone(),
             action: DaemonAction::UploadChunk {
                 bytes: vec![1; 96 * 1024],
                 sha256: Some("wrong".into()),
@@ -12388,5 +12391,12 @@ async fn daemon_upload_exchange() {
             .await
             .is_err()
     );
+    // Hard-won: blob storage admission prevented management connections during handoff.
+    let mut management = DaemonClient::connect(metadata).await.unwrap();
+    assert!(matches!(
+        management.request(DaemonAction::Ping).await.unwrap(),
+        DaemonReply::Pong
+    ));
+    drop(management);
     server.await.unwrap();
 }

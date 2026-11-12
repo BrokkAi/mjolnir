@@ -183,9 +183,7 @@ pub(super) async fn serve_client(
 ) -> Result<()> {
     use sha2::{Digest, Sha256};
     use tokio::io::AsyncWriteExt;
-    let root = mj_core::config::data_dir().join("uploads");
-    tokio::fs::create_dir_all(&root).await?;
-    let directory = blocking(move || Ok(tempfile::tempdir_in(root)?)).await?;
+    let mut directory: Option<tempfile::TempDir> = None;
     let mut blobs = std::collections::HashMap::new();
     let mut upload = None;
 
@@ -216,10 +214,26 @@ pub(super) async fn serve_client(
                 "incompatible upload protocol"
             );
             if upload.is_none() {
-                let root = directory.path().to_owned();
-                let (file, path) =
-                    blocking(move || Ok(tempfile::NamedTempFile::new_in(root)?.into_parts()))
-                        .await?;
+                if directory.is_none() {
+                    let root = mj_core::config::data_dir().join("uploads");
+                    tokio::fs::create_dir_all(&root).await?;
+                    directory = Some(
+                        tokio::task::spawn_blocking(move || tempfile::tempdir_in(root))
+                            .await
+                            .context("upload directory task failed")??,
+                    );
+                }
+                let root = directory
+                    .as_ref()
+                    .context("upload directory missing")?
+                    .path()
+                    .to_owned();
+                // Connection storage must remain available while admission drains.
+                let (file, path) = tokio::task::spawn_blocking(move || {
+                    Ok::<_, std::io::Error>(tempfile::NamedTempFile::new_in(root)?.into_parts())
+                })
+                .await
+                .context("upload file task failed")??;
                 let id = path
                     .file_name()
                     .context("blob filename missing")?
