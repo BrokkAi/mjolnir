@@ -133,6 +133,7 @@ const PAGES = {
 const entryNodes = new Map();
 let snapshot,
   route = { name: 'dashboard' },
+  initialWorkspaceSelectionDone = false,
   resumeRouteVisit = 0,
   currentSession,
   moveDraft,
@@ -360,6 +361,7 @@ function selectedWorkspaceId() {
   if (route.subagentParentId) {
     return sessionById(route.subagentParentId)?.workspace_id;
   }
+  if (route.workspaceId === 'notifications') return 'notifications';
   if (route.workspaceId && workspaces.some(w => w.id === route.workspaceId)) {
     return route.workspaceId;
   }
@@ -382,6 +384,7 @@ function applyRoute() {
     }
   }
   if (!snapshot) return;
+  if (route.name !== 'dashboard' || route.workspaceId !== 'notifications') notificationSnapshot.reset();
 
   // The dashboard names its workspace in the URL, so a reload, a Back press
   // and a shared link all return to the same one. An empty hash is the state
@@ -437,7 +440,7 @@ function applyRoute() {
       quota: 'Quota',
       settings: 'Settings',
       conversation: 'Conversation',
-    }[name] || 'MJ';
+    }[name] || 'Mjolnir';
 
   if (name === 'conversation') {
     openConversation(route.sessionId);
@@ -958,7 +961,9 @@ const dismissedRuntimeNotices = new Set();
 function renderLaunchFailures() {
   const noticeKey = notice => `${viewerState.cursor?.incarnation}:${notice.id}`;
   const notices = (snapshot.launch_failures || []).filter(
-    failure => route.name === 'dashboard' && failure.workspace_id === selectedWorkspaceId() && !dismissedLaunchFailures.has(failure.id),
+    failure => route.name === 'dashboard'
+      && (selectedWorkspaceId() === 'notifications' || failure.workspace_id === selectedWorkspaceId())
+      && !dismissedLaunchFailures.has(failure.id),
   );
   const failureCards = notices.map(failure => {
     const card = el('div', 'card');
@@ -991,7 +996,7 @@ function renderLaunchFailures() {
 
 function renderWorkspaces() {
   const parentId = route.subagentParentId;
-  const workspaces = snapshot.workspaces || [];
+  const workspaces = [{ id: 'notifications', name: 'Notifications' }, ...(snapshot.workspaces || [])];
   workspaceSelect.classList.toggle('hidden', Boolean(parentId) || !workspaces.length);
   subagentWorkspace.classList.toggle('hidden', !parentId);
   if (parentId) {
@@ -1018,6 +1023,8 @@ function renderWorkspaces() {
       }),
     );
   }
+  // Attention changes update the existing option rather than rebuilding an open picker.
+  workspaceSelect.options[0].textContent = `Notifications (${notificationRows().length})`;
   workspaceSelect.value = selectedWorkspaceId() || '';
 }
 
@@ -1126,11 +1133,17 @@ function isDashboardSession(session) {
     || isTransitioningSession(session);
 }
 
-/// Most recent top-level message first. Title and id keep rows that have not
-/// said anything yet in a stable order as new messages re-sort the list.
+function hasNotification(session) {
+  return ['needs_input', 'important', 'failed', 'unreachable'].includes(session.attention);
+}
+
+/// Notifications, unread output, then other sessions; newest message first in each band.
+/// Title and id keep ties stable as messages and attention re-sort the list.
 function orderedSessions(live) {
   return [...live].sort((left, right) =>
-    sessionMessageMs(right) - sessionMessageMs(left)
+    Number(hasNotification(right)) - Number(hasNotification(left))
+    || Number(right.attention === 'unread') - Number(left.attention === 'unread')
+    || sessionMessageMs(right) - sessionMessageMs(left)
     || String(left.title || '').localeCompare(String(right.title || ''))
     || left.id.localeCompare(right.id),
   );
@@ -1150,7 +1163,49 @@ function liveSessions() {
   return [...(viewerState.live.get(selectedWorkspaceId())?.values() || [])];
 }
 
+// Notifications retain cleared rows only for the current inbox visit.
+class NotificationSnapshot {
+  constructor() { this.entries = []; }
+  reset() { this.entries = []; }
+  update(rows, allRows = rows) {
+    const current = new Map(allRows.map(row => [row.id, row]));
+    const retained = new Set(this.entries.map(entry => entry.row.id));
+    this.entries = [
+      ...rows.filter(row => !retained.has(row.id)).map(row => ({ row })),
+      ...this.entries.map(entry => ({
+        row: current.get(entry.row.id) || {
+          ...entry.row, capabilities: {}, operation: null, transitioning: false,
+          lifecycle: 'destroyed', attention: 'inactive', configuration_issue: null, move_recovery: null,
+        },
+      })),
+    ];
+    const entriesById = new Map(this.entries.map(entry => [entry.row.id, entry]));
+    this.entries = orderedSessions(this.entries.map(entry => entry.row)).map(row => entriesById.get(row.id));
+    return this.entries;
+  }
+}
+const notificationSnapshot = new NotificationSnapshot();
+
+function notificationRows() {
+  return [...viewerState.rows.values()].filter(row => !isSubagentSession(row)
+    && hasNotification(row));
+}
+
+function renderNotifications() {
+  const header = el('h2', '', 'Notifications');
+  const items = notificationSnapshot.update(notificationRows(), [...viewerState.rows.values()]).map(({ row }) => {
+    let card = sessionCards.get(row.id);
+    if (!card) { card = sessionCard(row); sessionCards.set(row.id, card); }
+    else updateSessionCard(card, row);
+    return card;
+  });
+  reconcileChildren(sessions, [header, ...items, ...(!items.length ? [el('p', 'dim', 'No notifications.')] : [])]);
+}
+
 function renderSessions() {
+  const notifications = !route.subagentParentId && selectedWorkspaceId() === 'notifications';
+  document.querySelector('#dashboard .page-actions').classList.toggle('hidden', notifications);
+  if (notifications) { renderNotifications(); return; }
   const allSessions = liveSessions();
   const parent = sessionById(route.subagentParentId);
   const subagentView = Boolean(route.subagentParentId);
@@ -1609,13 +1664,14 @@ function sessionCard(session) {
   return card;
 }
 
-/// Severity is served by the daemon. This viewer has no output read receipts.
+/// Severity, including unread, is served by the daemon.
 function attentionParts(session) {
   const parts = [];
   if (session.operation?.kind === 'move') parts.push(['→', 'Moving']);
   const attention = {
     needs_input: ['?', 'Input needed'],
     important: ['!', 'Important'],
+    unread: ['✓', 'Unread'],
     failed: ['×', 'Failed'],
     unreachable: ['×', 'Unreachable'],
   }[session.attention];
@@ -1632,6 +1688,7 @@ function sessionMenuActions(session) {
   const actions = [];
   if (session.configuration_issue) actions.push(['Repair configuration…', 'secondary', 'repair-config']);
   if (session.lifecycle === 'live' && !isTransitioningSession(session)) actions.push(['Changed files…', 'secondary', 'changed-files']);
+  if (can.dismiss_notification) actions.push(['Dismiss notification', 'secondary', 'dismiss-notification']);
   if (can.rename) actions.push(['Rename', 'secondary', 'rename']);
   if (can.change_workspace) actions.push(['Change workspace…', 'secondary', 'change-workspace']);
   if (can.container_settings) actions.push(['Container settings…', 'secondary', 'container-settings']);
@@ -1696,6 +1753,34 @@ function updateSessionCard(card, session) {
   updateSessionMenu(card, session);
 }
 
+function renderNotificationDismissal(container, session, errorNode) {
+  let control = container.querySelector('[data-dismiss-notification]');
+  if (!session.capabilities?.dismiss_notification) {
+    control?.remove();
+    return;
+  }
+  if (!control) {
+    control = button('Dismiss notification', 'secondary');
+    control.dataset.dismissNotification = 'true';
+    container.append(control);
+  }
+  control.disabled = pendingActions.has(`dismiss-notification:${session.id}`);
+  control.dataset.action = 'dismiss-notification';
+  control.dataset.id = session.id;
+  markNotificationDismissal(control, session);
+  control.onclick = event => {
+    event.stopPropagation();
+    return runSessionAction(control.dataset, errorNode);
+  };
+}
+
+/// A dismissal names the notification its control showed, so a tap clears
+/// what the person saw and not one that arrived after the last render.
+function markNotificationDismissal(control, session) {
+  if (control.dataset.action !== 'dismiss-notification') return;
+  control.dataset.notificationDismissal = JSON.stringify(session.notification_dismissal ?? null);
+}
+
 function updateSessionMenu(card, session) {
   const actions = sessionMenuActions(session);
   const signature = actions.map(action => action[2]).join('|');
@@ -1711,6 +1796,7 @@ function updateSessionMenu(card, session) {
           target: session.target_id,
         });
         control.setAttribute('role', 'menuitem');
+        markNotificationDismissal(control, session);
         return control;
       }),
     );
@@ -1724,6 +1810,7 @@ function updateSessionMenu(card, session) {
     for (const control of card._menu.querySelectorAll?.('button[data-action]') || []) {
       control.dataset.profile = session.profile_id || '';
       control.dataset.target = session.target_id || '';
+      markNotificationDismissal(control, session);
       control.disabled = pendingActions.has(`${control.dataset.action}:${session.id}`);
     }
   }
@@ -1952,7 +2039,7 @@ function beginSessionPress(event) {
         activeSessionPress.id !== card.dataset.sessionId ||
         current !== card ||
         card.isConnected === false ||
-        !sessionInWorkspace(card.dataset.sessionId, selectedWorkspaceId()) ||
+        (selectedWorkspaceId() !== 'notifications' && !sessionInWorkspace(card.dataset.sessionId, selectedWorkspaceId())) ||
         !sessionMenuActions(card._session).length
       ) {
         cancelSessionPress();
@@ -2361,7 +2448,7 @@ function renderNewTargetSizingControls(draft, host) {
     } else if (target.container_host_limits) {
       host.append(el('p', 'dim', `Host: ${target.container_host_limits.cpus} CPUs and ${capacityGiBText(target.container_host_limits.memory_bytes)} GiB RAM. RAM left is unavailable until the capacity probe answers.`));
     }
-    const saveDefault = el('label', 'field');
+    const saveDefault = el('label', 'field-inline');
     const saveDefaultInput = el('input');
     saveDefaultInput.type = 'checkbox';
     saveDefaultInput.id = 'new-save-default-size';
@@ -2369,7 +2456,7 @@ function renderNewTargetSizingControls(draft, host) {
     saveDefaultInput.onchange = () => {
       draft.rememberContainerSize = saveDefaultInput.checked;
     };
-    saveDefault.append(saveDefaultInput, document.createTextNode(' Save as default sizing'));
+    saveDefault.append(saveDefaultInput, document.createTextNode('Save as default sizing'));
     host.append(saveDefault);
     const error = el('p', 'error', newResourceAllocationError(draft));
     error.id = 'new-resource-error';
@@ -2705,21 +2792,34 @@ function renderNewForm() {
         if (!newDraft.projectDirectory && !Object.hasOwn(newDraft.projectDirectories, newDraft.targetId)) {
           newDraft.projectDirectory = recents[0] || '';
         }
-        if (recents.length) {
-          const recentList = el('div', 'recent-projects');
-          recentList.append(el('p', 'dim', 'Recent projects on this host'));
-          for (const directory of recents) {
-            const pick = el('button', 'secondary recent-project', directory);
-            pick.type = 'button';
-            pick.onclick = () => {
-              newDraft.projectDirectory = directory;
-              newDraft.projectDirectories[newDraft.targetId] = directory;
-              newDraft.preflighted = false;
-              document.querySelector('#new-project-directory').value = directory;
-            };
-            recentList.append(pick);
+        // Only the ten most recent projects earn a row in the picker; older
+        // entries stay reachable by typing the path or browsing folders.
+        const shownRecents = recents.slice(0, 10);
+        if (shownRecents.length) {
+          const field = el('label', 'field');
+          field.append(el('span', '', 'Recent projects on this host'));
+          const select = el('select');
+          select.id = 'new-recent-project';
+          const placeholder = el('option', '', 'Choose a recent project…');
+          placeholder.value = '';
+          placeholder.disabled = true;
+          placeholder.hidden = true;
+          select.append(placeholder);
+          for (const directory of shownRecents) {
+            const option = el('option', '', directory);
+            option.value = directory;
+            select.append(option);
           }
-          body.append(recentList);
+          select.value = shownRecents.includes(newDraft.projectDirectory) ? newDraft.projectDirectory : '';
+          select.onchange = () => {
+            if (!select.value) return;
+            newDraft.projectDirectory = select.value;
+            newDraft.projectDirectories[newDraft.targetId] = select.value;
+            newDraft.preflighted = false;
+            document.querySelector('#new-project-directory').value = select.value;
+          };
+          field.append(select);
+          body.append(field);
         }
         body.append(
           pathField(
@@ -2730,6 +2830,8 @@ function renderNewForm() {
               newDraft.projectDirectory = value;
               newDraft.projectDirectories[newDraft.targetId] = value;
               newDraft.preflighted = false;
+              const picker = document.querySelector('#new-recent-project');
+              if (picker) picker.value = shownRecents.includes(value) ? value : '';
             },
             {
               host: () => newDraft.targetId,
@@ -5117,6 +5219,10 @@ function renderQuota() {
     [...quotaPanel.querySelectorAll('details[open]')].map(row => row.dataset.profileId),
   );
   const profiles = snapshot.profiles || [];
+  const rows = profiles.flatMap(profile => {
+    const pools = profile.quota_pools || [];
+    return pools.length ? pools.map(pool => ({ profile, pool })) : [{ profile, pool: null }];
+  });
   if (!profiles.length) {
     quotaPanel.replaceChildren(el('p', 'dim', 'No profiles configured.'));
     return;
@@ -5138,19 +5244,24 @@ function renderQuota() {
   quotaPanel.replaceChildren(
     hint,
     heading,
-    ...profiles.map(profile => {
+    ...rows.map(({ profile, pool }) => {
       const disclosure = el('details', 'quota-profile');
-      disclosure.dataset.profileId = profile.id;
-      disclosure.open = expanded.has(profile.id);
+      const rowId = pool ? `${profile.id}:${pool}` : profile.id;
+      const displayName = pool ? `${profile.id} (${pool})` : profile.id;
+      disclosure.dataset.profileId = rowId;
+      disclosure.open = expanded.has(rowId);
       const summary = el('summary', 'quota-overview-row');
-      const quota = profile.quota;
-      const name = el('span', 'quota-profile-name', profile.id);
+      const quota = pool && profile.quota ? {
+        ...profile.quota,
+        windows: (profile.quota.windows || []).filter(window => window.pool === pool),
+      } : profile.quota;
+      const name = el('span', 'quota-profile-name', displayName);
       const hold = quotaHoldText(Math.floor(serverClockMs() / 1000), quota);
       if (hold) name.append(el('small', 'reading-mid', hold));
       else if (quota?.has_error) name.append(el('small', 'reading-low', 'probe failed'));
       else if (quota?.stale) name.append(el('small', 'reading-mid', 'stale'));
       summary.append(name);
-      const spoken = [profile.id, hold || (quota?.has_error ? 'probe failed; last reading' : quota?.stale ? 'stale reading' : '')];
+      const spoken = [displayName, hold || (quota?.has_error ? 'probe failed; last reading' : quota?.stale ? 'stale reading' : '')];
       if (quota?.windows?.length) {
         for (const label of labels) {
           const window = quota.windows.find(window => window.label === label);
@@ -6189,6 +6300,16 @@ function refreshOpenSubagentContext(id) {
 
 function presentSnapshot(detailChangedIds = []) {
   snapshot = viewerState.metadata;
+  if (!initialWorkspaceSelectionDone) {
+    initialWorkspaceSelectionDone = true;
+    route = parseRoute(location.hash);
+    // Only workspace views; a conversation or sub-agent link opens as linked.
+    if (route.name === 'dashboard' && !route.subagentParentId && notificationRows().length > 0) {
+      const hash = routeHash({ name: 'dashboard', workspaceId: 'notifications' });
+      history.replaceState(history.state, '', `${location.pathname}${location.search}${hash}`);
+      route = parseRoute(hash);
+    }
+  }
   withdrawResolvedNotifications();
   discardQueuedOperatorActivityIfDisabled();
   activitySignalFailed = false;
@@ -8342,6 +8463,9 @@ async function persistVisibleConversationRead() {
     receipt = { through: 0, inFlight: false };
     conversationReads.set(sessionId, receipt);
   }
+  // Acknowledge what this reader has loaded and seen. Bounding it by the
+  // row's served frontier would stall: the conversation cursor advances
+  // before the row republishes, and a row update schedules no receipt.
   const through = cursor;
   if (!Number.isSafeInteger(through) || through <= Math.max(receipt.through, acknowledged)
     || receipt.inFlight) return;
@@ -8787,6 +8911,8 @@ function renderTurnControl(session) {
 }
 
 function renderConversationHeader(session) {
+  renderNotificationDismissal(document.querySelector('.conversation-header'), session,
+    document.querySelector('#conversation-error'));
   syncConversationMode(session);
   renderSessionTitle(document.querySelector('#conversation-title'), session);
   renderPromptSettings(session);
@@ -9280,6 +9406,9 @@ async function runSessionAction(dataset, errorNode, extra) {
     if (choice === null) return false;
     extra = { ...extra, delete_branch: choice };
   }
+  if (dataset.action === 'dismiss-notification') {
+    extra = { ...extra, target: JSON.parse(dataset.notificationDismissal) };
+  }
   const body = { action: dataset.action, session_id: dataset.id, ...extra };
   if (dataset.action === 'rename') {
     const session = sessionById(dataset.id);
@@ -9292,7 +9421,7 @@ async function runSessionAction(dataset, errorNode, extra) {
     // back to what the session last used.
     body.profile_id = extra?.profile_id || dataset.profile;
     body.target_id = extra?.target_id || dataset.target;
-    body.workspace_id = extra?.workspace_id || dataset.workspace_id || selectedWorkspaceId();
+    body.workspace_id = extra?.workspace_id || dataset.workspace_id || sessionById(dataset.id)?.workspace_id;
     body.queue = extra?.queue || 'start';
     if (extra && Object.prototype.hasOwnProperty.call(extra, 'additional_mounts')) {
       body.additional_mounts = extra.additional_mounts;
@@ -9555,16 +9684,27 @@ promptText.addEventListener('drop', e => {
   const text = e.dataTransfer?.getData('text/plain') || '';
   if (text) insertComposerText(text);
 });
+// A touch keyboard has no Shift+Enter, so where touch is the primary input
+// its Enter key starts a new line and the Send button sends. This one query
+// decides both the key label the keyboard shows and what Enter does.
+const touchComposer = window.matchMedia('(hover: none) and (pointer: coarse)');
+function syncComposerEnterKey() {
+  promptText.setAttribute('enterkeyhint', touchComposer.matches ? 'enter' : 'send');
+}
+syncComposerEnterKey();
+touchComposer.addEventListener('change', syncComposerEnterKey);
 // An active IME composition steers its candidate with Enter and the arrows,
 // so the composer must not read those keys until the composition ends.
 promptText.addEventListener('keydown', e => {
   if (e.isComposing || e.keyCode === 229) return;
   // The palette owns the arrows, Tab and Enter while it is open, and gives
-  // them back the moment it closes.
+  // them back the moment it closes. On a touch keyboard Enter is the only way
+  // to start a new line, so it stays a return key and a tap picks a row.
   if (paletteMatches.length) {
     if (e.key === 'ArrowDown' && moveCommandSelection(1)) return e.preventDefault();
     if (e.key === 'ArrowUp' && moveCommandSelection(-1)) return e.preventDefault();
-    if ((e.key === 'Tab' || e.key === 'Enter') && !e.shiftKey && acceptCommandSelection()) {
+    const accepts = e.key === 'Tab' || (e.key === 'Enter' && !touchComposer.matches);
+    if (accepts && !e.shiftKey && acceptCommandSelection()) {
       return e.preventDefault();
     }
     if (e.key === 'Escape') {
@@ -9587,7 +9727,8 @@ promptText.addEventListener('keydown', e => {
   }
   if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
     e.preventDefault();
-    submitPrompt();
+    if (touchComposer.matches) insertComposerLineBreak();
+    else submitPrompt();
     return;
   }
   if (e.key === 'Enter' && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {

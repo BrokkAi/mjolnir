@@ -323,6 +323,7 @@ Cancel
 Restart agent
 Upgrade container and restart…
 === existing container settings preserve mount access modes (390x844) ===
+Notifications (0)
 Test
 Other
 New session
@@ -346,7 +347,7 @@ Step 3 of 4 · Project
 Choose an existing directory. Review whether to create an isolated clone before launching.
 
 Recent projects on this host
-
+Choose a recent project…
 /work/recent
 /work/older
 Project files
@@ -359,7 +360,7 @@ Browse folders
 Back
 Next
 Cancel
-controls: [{"tag":"button","id":null,"label":"/work/recent","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"/work/older","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-directory","label":null,"value":"/work/re","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"/work/recent/","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"/work/repos/","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-browse","label":"Browse folders","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"select","id":"new-recent-project","label":"Choose a recent project…\n/work/recent\n/work/older","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-directory","label":null,"value":"/work/re","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"/work/recent/","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"/work/repos/","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-browse","label":"Browse folders","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 0
 request: POST /api/paths/complete [{"target_id":"local","prefix":"/work/re","kind":"directories"}]
 project creation requests: 0
@@ -371,7 +372,7 @@ Step 3 of 4 · Project
 Choose an existing directory. Review whether to create an isolated clone before launching.
 
 Recent projects on this host
-
+Choose a recent project…
 /work/recent
 /work/older
 Project files
@@ -384,7 +385,7 @@ Browse folders
 Back
 Next
 Cancel
-controls: [{"tag":"button","id":null,"label":"/work/recent","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"/work/older","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-directory","label":null,"value":"/work/repos/","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"/work/recent/","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"/work/repos/","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-browse","label":"Browse folders","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"select","id":"new-recent-project","label":"Choose a recent project…\n/work/recent\n/work/older","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-directory","label":null,"value":"/work/repos/","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"/work/recent/","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"/work/repos/","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-browse","label":"Browse folders","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 0
 request: POST /api/paths/complete [{"target_id":"local","prefix":"/work/re","kind":"directories"},{"target_id":"local","prefix":"/work/repos/","kind":"directories"}]
 project creation requests: 0

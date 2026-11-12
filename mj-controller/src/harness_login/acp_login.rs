@@ -10,7 +10,7 @@
 //!
 //! The command runs with inherited standard input and output because it is an
 //! interactive browser or device-code flow. That is why this belongs to the
-//! terminal CLI rather than to the detached worker.
+//! terminal owner rather than to the detached worker.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -32,6 +32,7 @@ const AUTHENTICATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Debug)]
 pub(crate) enum Outcome {
+    DeviceAuth,
     SignedIn {
         method: String,
     },
@@ -95,16 +96,19 @@ pub(crate) async fn login(
         profile.kind.display_name(),
         entrypoint.display()
     );
-    sign_in(
-        profile.kind,
-        &profile.home,
-        &located.command,
-        &located.args,
-        &entrypoint,
-        &launch_environment,
-        requested_method,
-    )
-    .await
+    let cancellation = mj_core::subprocess::preparation_cancellation();
+    tokio::select! {
+        result = sign_in(
+            profile.kind,
+            &profile.home,
+            &located.command,
+            &located.args,
+            &entrypoint,
+            &launch_environment,
+            requested_method,
+        ) => result,
+        _ = cancellation.cancelled() => bail!("login cancelled"),
+    }
 }
 
 /// How a login names where its harness comes from.
@@ -239,14 +243,13 @@ async fn sign_in(
             }
         }
     };
-    if !has_desktop_session(environment)
+    if kind == HarnessKind::Codex
+        && !has_desktop_session(environment)
         && method.id.eq_ignore_ascii_case("chat-gpt")
         && !api_key_present(environment)
     {
         session.shutdown().await;
-        bail!(
-            "the Codex ChatGPT sign-in needs a desktop browser; set CODEX_API_KEY or OPENAI_API_KEY, or run `mj login --cli` on a desktop"
-        );
+        return Ok(Outcome::DeviceAuth);
     }
     println!("Signing in with {} ({}).", method.name, method.id);
     let terminal = match method.terminal_command(kind, entrypoint) {
@@ -532,6 +535,7 @@ fn render_command(command: &TerminalCommand) -> String {
 }
 
 struct AcpSession {
+    owns_group: bool,
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
@@ -560,8 +564,10 @@ impl AcpSession {
             .kill_on_drop(true);
         // A shell bootstrap or npx can leave a native server in the bridge's
         // process group. Own that group so shutdown reaches it.
-        #[cfg(unix)]
-        command.process_group(0);
+        let owns_group = std::env::var_os("MJ_LOGIN_TERMINAL").is_none();
+        if owns_group {
+            command.process_group(0);
+        }
         let mut child = command.spawn().with_context(|| {
             format!(
                 "start the {} ACP bridge {}",
@@ -572,6 +578,7 @@ impl AcpSession {
         let stdin = child.stdin.take().context("ACP bridge has no stdin")?;
         let stdout = BufReader::new(child.stdout.take().context("ACP bridge has no stdout")?);
         let mut session = Self {
+            owns_group,
             child,
             stdin,
             stdout,
@@ -707,13 +714,24 @@ impl AcpSession {
         let _ = self.stdin.shutdown().await;
         #[cfg(unix)]
         if let Some(pid) = self.child.id() {
-            mj_core::subprocess::terminate_process_group(pid as i32, libc::SIGTERM);
+            if self.owns_group {
+                mj_core::subprocess::terminate_process_group(pid as i32, libc::SIGTERM);
+            } else {
+                // The daemon owns this entire terminal group; leave its
+                // descendants in that group for connection teardown.
+                // SAFETY: pid is a live unreaped child owned by this session.
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGTERM);
+                }
+            }
         }
         match tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await {
             Ok(_) => {}
             Err(_) => {
                 #[cfg(unix)]
-                if let Some(pid) = self.child.id() {
+                if self.owns_group
+                    && let Some(pid) = self.child.id()
+                {
                     mj_core::subprocess::terminate_process_group(pid as i32, libc::SIGKILL);
                 }
                 let _ = self.child.start_kill();
@@ -729,7 +747,8 @@ impl Drop for AcpSession {
         // with it. `try_wait` distinguishes a live child from one already
         // reaped, so a recycled pid is never signaled.
         #[cfg(unix)]
-        if self.child.try_wait().ok().flatten().is_none()
+        if self.owns_group
+            && self.child.try_wait().ok().flatten().is_none()
             && let Some(pid) = self.child.id()
         {
             mj_core::subprocess::terminate_process_group(pid as i32, libc::SIGKILL);
@@ -911,6 +930,117 @@ mod tests {
                 .any(|entry| Path::new(entry) == tools)
         );
         assert!(bridge.exists());
+    }
+
+    // Hard-won: d42fd3cbe: headless daemon login refused Codex ChatGPT sign-in with no recovery
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn headless_daemon_login_streams_codex_device_auth() {
+        let _guard = TEST_LOCK.lock().await;
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let tools = root.join("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        for name in ["node", "npm", "npx"] {
+            write_script(
+                &tools,
+                name,
+                if name == "node" {
+                    "#!/bin/sh\nif [ \"$1\" = --version ]; then echo v24.22.1; fi\n"
+                } else {
+                    "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 11.6.2; fi\n"
+                },
+            );
+        }
+        let cache = root.join("cache");
+        let cache_root = mj_core::harness_runtime::managed_harness_cache_root(
+            Some(cache.as_os_str()),
+            Some(root.as_os_str()),
+        )
+        .unwrap();
+        let install =
+            mj_core::harness_runtime::managed_harness_install_dir(&cache_root, HarnessKind::Codex);
+        let selected = mj_core::harness_runtime::pin(HarnessKind::Codex);
+        let bridge_path = install.join(selected.entrypoint);
+        let cli_path = install.join(selected.cli_entrypoint);
+        std::fs::create_dir_all(bridge_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(cli_path.parent().unwrap()).unwrap();
+        let script = bridge(root, r#"[{"id":"chat-gpt","name":"ChatGPT"}]"#);
+        std::fs::copy(script, &bridge_path).unwrap();
+        write_script(
+            cli_path.parent().unwrap(),
+            cli_path.file_name().unwrap().to_str().unwrap(),
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$HOME/argv\"\necho 'https://auth.openai.com/codex/device CODE-1234'\n",
+        );
+        let manifest =
+            mj_core::harness_runtime::ManagedHarnessManifest::for_harness(HarnessKind::Codex);
+        mj_core::config::atomic_write(
+            &install.join(mj_core::harness_runtime::MANIFEST_FILE),
+            &serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "harness_login::acp_login::tests::daemon_login_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("MJ_DEVICE_LOGIN_TEST_ROOT", root)
+            .env("MJ_DATA_DIR", root.join("data"));
+        let output = mj_core::subprocess::run_capturing_stdout_cancellable(&mut command)
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("argv")).unwrap(),
+            "login\n--device-auth\n"
+        );
+        let output = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            output.contains("https://auth.openai.com/codex/device CODE-1234"),
+            "{output}"
+        );
+        assert!(output.contains("no desktop browser"), "{output}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "subprocess fixture for the daemon terminal login driver"]
+    async fn daemon_login_child() {
+        let root = PathBuf::from(std::env::var_os("MJ_DEVICE_LOGIN_TEST_ROOT").unwrap());
+        let mut environment = home(&root);
+        for name in [
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
+            "CODEX_API_KEY",
+            "OPENAI_API_KEY",
+        ] {
+            environment.insert(name.into(), String::new());
+        }
+        environment.insert(
+            "XDG_CACHE_HOME".into(),
+            root.join("cache").display().to_string(),
+        );
+        environment.insert(
+            "PATH".into(),
+            format!("{}:/usr/bin:/bin", root.join("tools").display()),
+        );
+        let profile = HarnessProfile {
+            environment: environment.into(),
+            ..HarnessProfile::new(HarnessKind::Codex, root.clone())
+        };
+        assert_eq!(
+            super::super::login("device-test", &profile, Default::default())
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     /// A bridge that answers initialize with `methods` and records every later

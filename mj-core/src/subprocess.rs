@@ -24,6 +24,28 @@ use std::process::{Command, ExitStatus, Output, Stdio};
 
 use anyhow::{Context, Result, anyhow};
 
+tokio::task_local! {
+    static CANCELLATION: tokio_util::sync::CancellationToken;
+}
+
+/// Give all preparation commands in this future the same owner. Blocking
+/// work receives `preparation_cancellation()` explicitly before being spawned.
+pub async fn with_preparation_cancellation<F: std::future::Future>(
+    token: tokio_util::sync::CancellationToken,
+    future: F,
+) -> F::Output {
+    let _cancel_on_drop = token.clone().drop_guard();
+    CANCELLATION.scope(token, future).await
+}
+
+pub(crate) fn scoped_preparation_cancellation() -> Option<tokio_util::sync::CancellationToken> {
+    CANCELLATION.try_with(Clone::clone).ok()
+}
+
+pub fn preparation_cancellation() -> tokio_util::sync::CancellationToken {
+    scoped_preparation_cancellation().unwrap_or_default()
+}
+
 /// Own a child-created process group through all of its I/O and cleanup.
 /// The group can outlive its leader, so reaping the child does not disarm it.
 pub struct ProcessGroupGuard {
@@ -317,6 +339,8 @@ pub async fn run_bounded_observed(
     spawned: impl FnOnce(Option<u32>),
 ) -> Result<Output> {
     use tokio::io::AsyncReadExt;
+    let cancellation = preparation_cancellation();
+    anyhow::ensure!(!cancellation.is_cancelled(), "preparation cancelled");
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -326,6 +350,8 @@ pub async fn run_bounded_observed(
     command.process_group(0);
     let mut child = command.spawn().context("start bounded subprocess")?;
     spawned(child.id());
+    #[cfg(windows)]
+    let job = ChildJob::attach(&child)?;
     let group = ProcessGroupGuard::new(child.id());
     // Bytes go to buffers owned here, so output read while draining survives
     // the reader being dropped at the drain deadline.
@@ -347,7 +373,7 @@ pub async fn run_bounded_observed(
     let stdout = child.stdout.take().context("missing subprocess stdout")?;
     let stderr = child.stderr.take().context("missing subprocess stderr")?;
     let (mut stdout_bytes, mut stderr_bytes) = (Vec::new(), Vec::new());
-    let result = tokio::time::timeout(timeout, async {
+    let work = tokio::time::timeout(timeout, async {
         // Owning the pipes here closes our ends when the readers are dropped.
         let mut readers = std::pin::pin!(async {
             tokio::try_join!(
@@ -372,8 +398,11 @@ pub async fn run_bounded_observed(
             }
         };
         Ok::<_, anyhow::Error>(status)
-    })
-    .await;
+    });
+    let result = tokio::select! {
+        result = work => result,
+        _ = cancellation.cancelled() => Ok(Err(anyhow!("preparation cancelled"))),
+    };
     let result = result.map(|status| {
         status.map(|status| Output {
             status,
@@ -390,6 +419,8 @@ pub async fn run_bounded_observed(
         }
         outcome => {
             drop(group);
+            #[cfg(windows)]
+            drop(job);
             if let Err(error) = child.start_kill() {
                 tracing::debug!(%error, "bounded subprocess already exited during termination");
             }
@@ -1025,6 +1056,119 @@ pub fn run_with_input(command: &mut Command, input: &[u8]) -> Result<Output> {
     Ok(output)
 }
 
+#[cfg(unix)]
+pub(crate) struct ForegroundGroup {
+    tty: std::fs::File,
+    previous: libc::pid_t,
+}
+
+#[cfg(unix)]
+fn foreground_group(fd: std::os::fd::RawFd, group: libc::pid_t) -> std::io::Result<()> {
+    // The root is temporarily behind the interactive helper. Block SIGTTOU
+    // only around this ioctl, restoring this thread's mask before returning.
+    unsafe {
+        let mut blocked = std::mem::zeroed();
+        let mut previous = std::mem::zeroed();
+        libc::sigemptyset(&mut blocked);
+        libc::sigaddset(&mut blocked, libc::SIGTTOU);
+        let error = libc::pthread_sigmask(libc::SIG_BLOCK, &blocked, &mut previous);
+        if error != 0 {
+            return Err(std::io::Error::from_raw_os_error(error));
+        }
+        let result = libc::tcsetpgrp(fd, group);
+        let error = std::io::Error::last_os_error();
+        libc::pthread_sigmask(libc::SIG_SETMASK, &previous, std::ptr::null_mut());
+        if result == 0 { Ok(()) } else { Err(error) }
+    }
+}
+
+#[cfg(unix)]
+impl ForegroundGroup {
+    pub(crate) fn prepare(command: &mut std::process::Command) -> Result<Option<Self>> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
+        let tty = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+        {
+            Ok(tty) => tty,
+            Err(error) if matches!(error.raw_os_error(), Some(libc::ENXIO | libc::ENODEV)) => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error).context("open login terminal"),
+        };
+        let fd = tty.as_raw_fd();
+        let previous = unsafe { libc::tcgetpgrp(fd) };
+        anyhow::ensure!(
+            previous >= 0,
+            "read login terminal foreground group: {}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: fd remains owned through spawn; the child only changes its
+        // terminal group using async-signal-safe syscalls before exec.
+        unsafe {
+            command.pre_exec(move || foreground_group(fd, libc::getpgrp()));
+        }
+        Ok(Some(Self { tty, previous }))
+    }
+}
+#[cfg(unix)]
+impl Drop for ForegroundGroup {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        if let Err(error) = foreground_group(self.tty.as_raw_fd(), self.previous) {
+            tracing::debug!(%error, "restore login terminal foreground group");
+        }
+    }
+}
+
+/// Capture an interactive answer while retaining cancellation ownership of
+/// the command's group. Cancellation finishes cleanup before the caller returns.
+pub async fn run_capturing_stdout_cancellable(
+    command: &mut tokio::process::Command,
+) -> Result<Output> {
+    use tokio::io::AsyncReadExt;
+    let cancellation = preparation_cancellation();
+    anyhow::ensure!(!cancellation.is_cancelled(), "preparation cancelled");
+    command
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    #[cfg(unix)]
+    let _foreground = ForegroundGroup::prepare(command.as_std_mut())?;
+    let mut child = command.spawn().context("spawn interactive command")?;
+    #[cfg(windows)]
+    let job = ChildJob::attach(&child)?;
+    let group = ProcessGroupGuard::new(child.id());
+    let mut stdout = child.stdout.take().context("interactive stdout missing")?;
+    let mut bytes = Vec::new();
+    let result = tokio::select! {
+        result = async {
+            let (status, _) = tokio::try_join!(child.wait(), stdout.read_to_end(&mut bytes))?;
+            Ok::<_, anyhow::Error>(status)
+        } => result,
+        _ = cancellation.cancelled() => Err(anyhow!("preparation cancelled")),
+    };
+    drop(group);
+    #[cfg(windows)]
+    drop(job);
+    if result.is_err() {
+        child
+            .start_kill()
+            .context("terminate interactive command")?;
+        child.wait().await.context("reap interactive command")?;
+    }
+    Ok(Output {
+        status: result?,
+        stdout: bytes,
+        stderr: Vec::new(),
+    })
+}
+
 /// Run a foreground child that talks to the terminal but whose stdout the
 /// caller needs to read.
 ///
@@ -1310,6 +1454,78 @@ mod tests {
     }
     #[cfg(unix)]
     use super::*;
+
+    // The capture helper moves its child into a separate group without
+    // losing interactive terminal input to SIGTTIN.
+    #[cfg(unix)]
+    #[test]
+    fn interactive_capture_keeps_terminal_input_in_its_owned_group() {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::process::CommandExt;
+        const CHILD: &str = "MJ_TEST_INTERACTIVE_CAPTURE_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let mut command = tokio::process::Command::new("/bin/sh");
+                command.args([
+                    "-c",
+                    r#"read -r answer; head -c 131072 /dev/zero; printf '%s' "$answer""#,
+                ]);
+                let result = super::run_capturing_stdout_cancellable(&mut command)
+                    .await
+                    .unwrap();
+                assert!(result.status.success());
+                assert_eq!(result.stdout.len(), 131072 + b"terminal-answer".len());
+                assert!(result.stdout[..131072].iter().all(|byte| *byte == 0));
+                assert!(result.stdout.ends_with(b"terminal-answer"));
+            });
+            return;
+        }
+        let mut master = -1;
+        let mut slave = -1;
+        // SAFETY: writable descriptors, default terminal mode and size.
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    // macOS declares these `*mut`, Linux `*const`; a null
+                    // `*mut` coerces to either.
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        let mut master = unsafe { std::fs::File::from_raw_fd(master) };
+        let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+        let master_fd = master.as_raw_fd();
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "subprocess::tests::interactive_capture_keeps_terminal_input_in_its_owned_group",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .stdin(slave)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit());
+        // SAFETY: only session/terminal syscalls between fork and exec. Close
+        // the inherited master so only this parent controls terminal hangup.
+        unsafe {
+            command.pre_exec(move || {
+                libc::close(master_fd);
+                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().unwrap();
+        master.write_all(b"terminal-answer\n").unwrap();
+        assert!(child.wait().unwrap().success());
+    }
 
     // Hard-won: 6dec78fe: A real large-repository resume deadlocked while stdin and stdout pipes were both full.
     #[cfg(unix)]

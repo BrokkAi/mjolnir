@@ -36,6 +36,10 @@ pub enum ControllerAction {
     PushTest {
         endpoint: String,
     },
+    DismissNotification {
+        session_id: String,
+        target: mj_core::attention::NotificationDismissal,
+    },
     RecordOperatorActivity,
     SetOperatorAway {
         away: bool,

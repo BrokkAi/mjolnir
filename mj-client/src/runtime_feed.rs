@@ -300,6 +300,10 @@ pub struct RuntimeContainerCapacity {
 /// Configuration and bounded active-operation views are separate from history.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeMetadata {
+    #[serde(default)]
+    pub unread_frontiers: SnapshotMap<String, u64>,
+    #[serde(default)]
+    pub notification_dismissals: SnapshotMap<String, mj_core::attention::NotificationDismissal>,
     pub session_attention: SnapshotMap<String, mj_core::attention::SessionAttention>,
     #[serde(default)]
     pub operator_presence: mj_core::state::OperatorPresence,
@@ -1081,7 +1085,11 @@ mod tests {
             "s".into(),
             SessionTail::from_parts(*header, fetched_window, fetched),
         );
-        assert_eq!(replica.projection.transcripts["s"], daemon);
+        // Daemon-local watermarks are deliberately absent from the transport.
+        assert_eq!(
+            wire(&SessionTailReply::of(&replica.projection.transcripts["s"])),
+            wire(&SessionTailReply::of(&daemon))
+        );
         let mut with_answer = daemon.clone();
         with_answer.header.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
             work_facts: None,
@@ -1165,7 +1173,12 @@ mod tests {
                 })
                 .unwrap();
             let held = &replica.projection.transcripts["s"];
-            assert_eq!(held, &daemon, "after step {}", sequence - 1);
+            assert_eq!(
+                wire(&SessionTailReply::of(held)),
+                wire(&SessionTailReply::of(&daemon)),
+                "after step {}",
+                sequence - 1
+            );
             assert_eq!(held.materialized(), daemon.materialized());
             for (key, now) in held.items.iter() {
                 if let Some(before) = held_before.items.get(key)

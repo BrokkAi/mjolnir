@@ -633,6 +633,10 @@ fn validate_action_against(
                 return Err(ApiError::bad_request("this session cannot be renamed"));
             }
         }
+        ControllerAction::DismissNotification { session_id, .. } => {
+            validate_public_id(session_id)?;
+            require_session_record(snapshot, session_id)?;
+        }
         ControllerAction::TurnControl {
             session_id,
             command,

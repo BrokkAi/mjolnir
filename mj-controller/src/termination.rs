@@ -54,13 +54,25 @@ fn next_signal_action(signals_seen: &AtomicU8) -> SignalAction {
 pub struct Coordinator {
     token: CancellationToken,
     signals_seen: Arc<AtomicU8>,
+    login: bool,
 }
 
 impl Coordinator {
     pub fn install() -> Self {
+        Self::install_mode(false)
+    }
+
+    /// Login owns preparation groups and must unwind on hangup, including
+    /// repeated signals. The dashboard retains its immediate hangup behavior.
+    pub fn install_login() -> Self {
+        Self::install_mode(true)
+    }
+
+    fn install_mode(login: bool) -> Self {
         let coordinator = Self {
             token: CancellationToken::new(),
             signals_seen: Arc::new(AtomicU8::new(0)),
+            login,
         };
         #[cfg(unix)]
         install_unix_signals(&coordinator);
@@ -72,6 +84,9 @@ impl Coordinator {
             let (ctrl_c, ctrl_break) = install_windows_signals();
             let listener = coordinator.clone();
             tokio::spawn(async move { listener.listen(ctrl_c, ctrl_break).await });
+            if login {
+                install_login_close_handler(coordinator.token.clone());
+            }
         }
         coordinator
     }
@@ -81,6 +96,10 @@ impl Coordinator {
     }
 
     fn received_signal(&self, signal: i32) {
+        if self.login {
+            self.token.cancel();
+            return;
+        }
         #[cfg(unix)]
         if signal == libc::SIGINT && SUPPRESSED_INTERRUPTS.load(Ordering::Acquire) > 0 {
             return;
@@ -142,16 +161,23 @@ fn install_unix_signals(coordinator: &Coordinator) {
     let wake_writer = Arc::new(wake_writer);
 
     let requested = Arc::new(AtomicBool::new(false));
-    for signal in [libc::SIGINT, libc::SIGTERM] {
+    let signals = if coordinator.login {
+        vec![libc::SIGINT, libc::SIGTERM, libc::SIGHUP]
+    } else {
+        vec![libc::SIGINT, libc::SIGTERM]
+    };
+    for signal in signals {
         // Registration order matters: the first handler exits only when a
         // previous signal armed the flag; the second one arms it. A signal
         // that arrives after the flag is armed exits before any pipe write.
-        signal_hook::flag::register_conditional_shutdown(
-            signal,
-            exit_code(signal),
-            requested.clone(),
-        )
-        .expect("install forced termination signal handler");
+        if !coordinator.login {
+            signal_hook::flag::register_conditional_shutdown(
+                signal,
+                exit_code(signal),
+                requested.clone(),
+            )
+            .expect("install forced termination signal handler");
+        }
         let requested = requested.clone();
         let wake_writer = wake_writer.clone();
         // SAFETY: the handler only touches lock-free atomics and calls
@@ -171,12 +197,14 @@ fn install_unix_signals(coordinator: &Coordinator) {
         .expect("install graceful termination signal handler");
     }
 
-    signal_hook::flag::register_conditional_shutdown(
-        libc::SIGHUP,
-        exit_code(libc::SIGHUP),
-        Arc::new(AtomicBool::new(true)),
-    )
-    .expect("install hangup signal handler");
+    if !coordinator.login {
+        signal_hook::flag::register_conditional_shutdown(
+            libc::SIGHUP,
+            exit_code(libc::SIGHUP),
+            Arc::new(AtomicBool::new(true)),
+        )
+        .expect("install hangup signal handler");
+    }
 
     let listener = coordinator.clone();
     std::thread::Builder::new()
@@ -210,6 +238,62 @@ fn install_unix_signals(coordinator: &Coordinator) {
             listener.received_signal(0);
         })
         .expect("spawn termination signal listener");
+}
+
+#[cfg(windows)]
+struct LoginClose {
+    token: CancellationToken,
+    finished: std::sync::Mutex<bool>,
+    ready: std::sync::Condvar,
+}
+#[cfg(windows)]
+static LOGIN_CLOSE: std::sync::OnceLock<LoginClose> = std::sync::OnceLock::new();
+
+#[cfg(windows)]
+fn install_login_close_handler(token: CancellationToken) {
+    unsafe extern "system" fn close(event: u32) -> i32 {
+        if !matches!(event, 2 | 5 | 6) {
+            return 0;
+        }
+        let owner = LOGIN_CLOSE.get().expect("login close owner installed");
+        owner.token.cancel();
+        let mut finished = owner.finished.lock().unwrap();
+        while !*finished {
+            finished = owner.ready.wait(finished).unwrap();
+        }
+        1
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn SetConsoleCtrlHandler(
+            handler: Option<unsafe extern "system" fn(u32) -> i32>,
+            add: i32,
+        ) -> i32;
+    }
+    assert!(
+        LOGIN_CLOSE
+            .set(LoginClose {
+                token,
+                finished: std::sync::Mutex::new(false),
+                ready: std::sync::Condvar::new()
+            })
+            .is_ok()
+    );
+    // Windows terminates the process after the close handler returns. Retain
+    // that handler until every login preparation helper has been stopped.
+    assert_ne!(unsafe { SetConsoleCtrlHandler(Some(close), 1) }, 0);
+}
+
+impl Coordinator {
+    pub fn finish_login(&self) {
+        #[cfg(windows)]
+        if self.login
+            && let Some(owner) = LOGIN_CLOSE.get()
+        {
+            *owner.finished.lock().unwrap() = true;
+            owner.ready.notify_all();
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -252,6 +336,7 @@ mod tests {
         let coordinator = Coordinator {
             token: CancellationToken::new(),
             signals_seen: Arc::new(AtomicU8::new(0)),
+            login: false,
         };
 
         let guard = suppress_interrupts();
@@ -271,6 +356,7 @@ mod tests {
         let coordinator = Coordinator {
             token: CancellationToken::new(),
             signals_seen: Arc::new(AtomicU8::new(0)),
+            login: false,
         };
         let early = coordinator.token().child_token();
         coordinator.received_signal(0);

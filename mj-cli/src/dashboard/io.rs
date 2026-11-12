@@ -22,11 +22,10 @@ use mj_core::state::{
 
 use mj_controller::controller::Controller;
 use mj_controller::controller::ResumeRepositorySourcePreflight;
-use mj_controller::targets::CancellableProcessExecutor;
 use mj_tui::{
     DashboardAction, DetectScope, PreparedMaterializedSessionDetail,
-    PreparedMaterializedSessionSummary, RejectedRuntime, RemoteRepositoryPreview,
-    SessionOperationKind, SetupDetection, WebViewerAccess,
+    PreparedMaterializedSessionSummary, RemoteRepositoryPreview, SessionOperationKind,
+    WebViewerAccess,
 };
 use mj_tui::{WorkspaceDraftEntry, WorkspaceManagementEntry};
 use tokio::sync::mpsc::UnboundedSender;
@@ -86,9 +85,9 @@ pub(crate) enum DashboardIoUpdate {
         session_id: String,
         result: std::result::Result<Box<PreparedMaterializedSessionDetail>, String>,
     },
-    QuestionDismissed {
+    NotificationDismissed {
         session_id: String,
-        question: mj_core::assessment::InferredQuestion,
+        target: mj_core::attention::NotificationDismissal,
         result: std::result::Result<u64, String>,
     },
     /// A bounded tail of a resumed session's stored transcript, loaded off the
@@ -371,7 +370,7 @@ pub(crate) enum DashboardIoUpdate {
     CheckpointArchiveSizes {
         generation: u64,
         targets: BTreeMap<String, std::path::PathBuf>,
-        sizes: BTreeMap<String, Option<u64>>,
+        sizes: BTreeMap<String, Result<Option<u64>, String>>,
     },
     WorkerDiagnosis {
         session_id: String,
@@ -804,8 +803,8 @@ impl DashboardContext {
             DashboardIoUpdate::MaterializedSessionProjection { session_id, result } => {
                 self.finish_materialized_projection(session_id, result);
             }
-            DashboardIoUpdate::QuestionDismissed { session_id, question, result } => {
-                self.dashboard.question_dismissal_finished(&session_id, question, result);
+            DashboardIoUpdate::NotificationDismissed { session_id, target, result } => {
+                self.dashboard.notification_dismissal_finished(&session_id, target, result);
             }
             DashboardIoUpdate::TranscriptTailSeed { materialized } => {
                 let viewed_through_event_ordinal = self
@@ -1486,15 +1485,32 @@ impl DashboardContext {
                 targets,
                 sizes,
             } => {
-                self.dashboard.patch_checkpoint_archive_sizes(
-                    sizes
-                        .into_iter()
-                        .filter(|(id, _)| {
-                            targets.get(id) == self.checkpoint_archive_targets_seen.get(id)
-                                && self.checkpoint_archive_pending.get(id) == Some(&generation)
-                        })
-                        .collect(),
-                );
+                let mut answered = BTreeMap::new();
+                let mut errors = Vec::new();
+                for (id, result) in sizes {
+                    if self.checkpoint_archive_pending.get(&id) != Some(&generation)
+                        || targets.get(&id) != self.checkpoint_archive_records.get(&id)
+                    {
+                        continue;
+                    }
+                    self.checkpoint_archive_pending.remove(&id);
+                    match result {
+                        Ok(size) => {
+                            if let Some(path) = targets.get(&id) {
+                                self.checkpoint_archive_targets_seen.insert(id.clone(), path.clone());
+                            }
+                            answered.insert(id, size);
+                        }
+                        Err(error) => errors.push(format!("{id}: {error}")),
+                    }
+                }
+                self.dashboard.patch_checkpoint_archive_sizes(answered);
+                if !errors.is_empty() {
+                    self.dashboard.set_notice(format!(
+                        "Could not read checkpoint archive sizes: {}. Use Refresh to retry.",
+                        errors.join("; ")
+                    ));
+                }
             }
             DashboardIoUpdate::WorkerDiagnosis {
                 session_id,

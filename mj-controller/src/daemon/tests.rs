@@ -12247,12 +12247,48 @@ async fn suspend_acceptance_survives_client_disconnect_during_checkpoint() {
 
 /// Exercise the real authenticated control boundary: these directories exist
 /// only in the server fixture, never in client-side interpretation.
+// Hard-won: #1514: one archive metadata error discarded readable sizes in the batch.
 #[tokio::test]
 async fn daemon_api_exchange() {
+    const CHILD: &str = "MJ_TEST_DAEMON_API_EXCHANGE";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        // Keep probes isolated, but give macOS version detection a stable answer.
+        // Apple container discovery is intentionally specific to the host OS.
+        let bin = directory.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let probe = bin.join("sw_vers");
+            fs::write(&probe, "#!/bin/sh\nprintf '25.0\\n'\n").unwrap();
+            fs::set_permissions(probe, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut child = crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), "daemon_api_exchange"),
+        )
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "machine-exchange")
+        .env("PATH", &bin)
+        .env("HOME", directory.path().join("home"))
+        .env("USERPROFILE", directory.path().join("home"))
+        .isolated_store(directory.path());
+        for kind in mj_core::config::HarnessKind::ALL {
+            child = child.env(kind.home_env(), directory.path().join("absent-home"));
+            if let Some(key) = kind.api_key_variable() {
+                child = child.env(key, "");
+            }
+        }
+        child.run();
+        return;
+    }
+
     let root = tempfile::tempdir().unwrap();
     let server_root = root.path().canonicalize().unwrap();
     let project = server_root.join("server-only-project");
     fs::create_dir(&project).unwrap();
+    let archive = server_root.join("daemon-only.tar");
+    fs::write(&archive, b"daemon archive bytes").unwrap();
     let mut config = Config::default();
     config
         .targets
@@ -12264,13 +12300,81 @@ async fn daemon_api_exchange() {
             server_root.as_path().join("profile"),
         ),
     );
+    config.profiles.get_mut("agent").unwrap().environment = serde_json::from_value(
+        serde_json::json!({"DAEMON_TEST_KEY": {"from_secret": "missing-test-key"}}),
+    )
+    .unwrap();
+    let ready_home = server_root.join("ready-profile");
+    fs::create_dir(&ready_home).unwrap();
+    let mut ready =
+        mj_core::config::HarnessProfile::new(mj_core::config::HarnessKind::Codex, ready_home);
+    ready.environment = serde_json::from_value(serde_json::json!({
+        "DAEMON_TEST_KEY": {"from_secret": "daemon-only-key"}
+    }))
+    .unwrap();
+    fs::create_dir_all(mj_core::config::config_dir()).unwrap();
+    fs::write(
+        mj_core::config::config_dir().join("secrets.toml"),
+        r#"daemon-only-key = "daemon-secret-value""#,
+    )
+    .unwrap();
+    config.profiles.insert("ready".into(), ready);
+    config.save().unwrap();
     let state = test_runtime_state_with(Controller {
         config,
         state: Default::default(),
     });
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let metadata = test_metadata(listener.local_addr().unwrap());
+    let unsupported_machine = mj_core::config::Machine::AwsEc2 {
+        aws_profile: None,
+        region: "test-region".into(),
+        launch_template: "test-template".into(),
+        launch_template_version: None,
+        ssh_user: "test".into(),
+        address_source: Default::default(),
+        identity_file: None,
+        ssh_args: vec![],
+    };
+    let client_root = tempfile::tempdir().unwrap();
+    let client_config_path = client_root.path().join("config/config.toml");
+    fs::create_dir_all(client_config_path.parent().unwrap()).unwrap();
+    fs::create_dir(client_root.path().join("data")).unwrap();
+    fs::write(&client_config_path, "").unwrap();
+    assert!(
+        Config::load_from(&client_config_path)
+            .unwrap()
+            .profiles
+            .is_empty()
+    );
     let actions = vec![
+        DaemonAction::PreviewBuildCache {
+            machine: unsupported_machine.clone(),
+        },
+        DaemonAction::InstallMbx {
+            machine: unsupported_machine,
+        },
+        DaemonAction::CheckpointArchiveSizes {
+            paths: [
+                ("archived".into(), archive.clone()),
+                ("unreadable".into(), archive.join("invalid\0archive")),
+                ("missing".into(), server_root.join("missing.tar")),
+            ]
+            .into(),
+        },
+        DaemonAction::TestTarget {
+            target_id: "missing".into(),
+        },
+        DaemonAction::ProfileLoginStatuses,
+        DaemonAction::CheckAvailability,
+        DaemonAction::DiscoverSetup {
+            scope: mj_client::discovery::DetectScope::Profiles,
+            machines: Vec::new(),
+        },
+        DaemonAction::DiscoverSetup {
+            scope: mj_client::discovery::DetectScope::Runtimes,
+            machines: Vec::new(),
+        },
         DaemonAction::CheckProjectDirectories {
             paths: vec![project.clone(), server_root.as_path().join("absent")],
         },
@@ -12324,6 +12428,9 @@ async fn daemon_api_exchange() {
             target_id: "missing".into(),
             source: project,
         },
+        DaemonAction::SaveSpinnerStyle {
+            style: mj_core::config::SpinnerStyle::Wave,
+        },
     ];
     let mut exchange = Vec::new();
     for (index, action) in actions.into_iter().enumerate() {
@@ -12356,7 +12463,33 @@ async fn daemon_api_exchange() {
         )
         .await
         .unwrap();
-        let response: ResponseEnvelope = read_frame(&mut stream).await.unwrap();
+        let wire: serde_json::Value = read_frame(&mut stream).await.unwrap();
+        let mut response: ResponseEnvelope = mj_core::config::with_secret_resolver(
+            mj_core::config::SecretResolver::beside(&client_config_path),
+            || serde_json::from_value(wire).unwrap(),
+        );
+        if let Ok(DaemonReply::Availability(report)) = &response.result {
+            assert!(report.profiles["ready"].1.is_none());
+            assert!(report.profiles["agent"].1.is_some());
+            assert_eq!(
+                report.profiles["ready"]
+                    .0
+                    .environment
+                    .get("DAEMON_TEST_KEY"),
+                None
+            );
+            assert!(
+                !serde_json::to_string(report)
+                    .unwrap()
+                    .contains("daemon-secret-value")
+            );
+        }
+        // Embedded NUL is invalid on every host; only OS diagnostic wording varies.
+        if let Ok(DaemonReply::CheckpointArchiveSizes(sizes)) = &mut response.result {
+            let error = sizes.get_mut("unreadable").unwrap().as_mut().unwrap_err();
+            assert!(error.starts_with("read "), "{error}");
+            *error = "<archive metadata error>".into();
+        }
         exchange.push(serde_json::json!({"request": rendered_action, "reply": response.result}));
         drop(stream);
         server.await.unwrap();
@@ -12365,6 +12498,12 @@ async fn daemon_api_exchange() {
     let rendered = serde_json::to_string_pretty(&exchange)
         .unwrap()
         .replace("\\\\", "/")
+        .replace(
+            &mj_core::config::config_dir()
+                .to_string_lossy()
+                .replace('\\', "/"),
+            "<daemon-config>",
+        )
         .replace(
             &server_root.to_string_lossy().replace('\\', "/"),
             "<server>",
@@ -12377,7 +12516,11 @@ async fn daemon_api_exchange() {
                 .replace('\\', "/"),
             "<server-parent>",
         );
-    mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "daemon-api-exchange", &rendered);
+    mj_core::golden::assert_platform_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "daemon-api-exchange",
+        &rendered,
+    );
 }
 
 /// Real OpenSSH is held in a proxy command. Closing a superseded completion
@@ -12818,4 +12961,143 @@ async fn daemon_upload_exchange() {
     );
     drop(management);
     server.await.unwrap();
+}
+
+// Hard-won: #1514: admitted mbx downloads kept daemon handoff waiting for minutes.
+// The pinned mbx executable installs only on Linux container hosts.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn mbx_preparation_cancels_on_handoff_and_disconnect_before_removing_staging() {
+    const CHILD: &str = "MJ_MBX_CANCELLATION_ROOT";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let bin = root.path().join("bin");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        std::os::unix::fs::symlink("/bin/sh", bin.join("sh")).unwrap();
+        std::os::unix::fs::symlink("/usr/bin/uname", bin.join("uname")).unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "mbx_preparation_cancels_on_handoff_and_disconnect_before_removing_staging",
+            ),
+        )
+        .env(CHILD, root.path())
+        .env("MJ_INSTANCE", "mbx-cancellation")
+        .env("HOME", &home)
+        .env("PATH", &bin)
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let root = PathBuf::from(std::env::var_os(CHILD).unwrap());
+    let download_server = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    crate::controller::MBX_TEST_RELEASE_URL
+        .set(format!(
+            "http://{}/archive",
+            download_server.local_addr().unwrap()
+        ))
+        .unwrap();
+    for handoff in [true, false] {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let metadata = test_metadata(listener.local_addr().unwrap());
+        let server_metadata = metadata.clone();
+        let shutdown = CancellationToken::new();
+        let server_shutdown = shutdown.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_client(
+                stream,
+                server_metadata,
+                test_runtime_state(),
+                server_shutdown,
+            )
+            .await
+        });
+        let mut client = TcpStream::connect(metadata.address).await.unwrap();
+        write_frame(
+            &mut client,
+            &RequestEnvelope {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: 1,
+                token: metadata.token,
+                action: DaemonAction::InstallMbx {
+                    machine: mj_core::config::Machine::Local { build_cache: None },
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let download =
+            tokio::time::timeout(Duration::from_secs(30), download_server.accept()).await;
+        if download.is_err() {
+            shutdown.cancel();
+            server.await.unwrap().unwrap();
+            panic!("mbx download never reached HTTP fixture");
+        }
+        let (mut download, _) = download.unwrap().unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            request.push(download.read_u8().await.unwrap());
+        }
+        // The body remains incomplete. The real reqwest future must be dropped on cancellation.
+        download
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\n\r\n")
+            .await
+            .unwrap();
+        download.write_all(&vec![b'x'; 131072]).await.unwrap();
+        assert!(
+            !crate::upgrade::active_labels()
+                .iter()
+                .any(|label| label.contains("mbx installation"))
+        );
+        if handoff {
+            shutdown.cancel();
+            let response: ResponseEnvelope = read_frame(&mut client).await.unwrap();
+            assert!(response.result.unwrap_err().contains("cancel"));
+        } else {
+            drop(client);
+        }
+        server.await.unwrap().unwrap();
+        let mut remaining = Vec::new();
+        // A dropped response closes the incomplete HTTP body, instead of waiting for its deadline.
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            download.read_to_end(&mut remaining),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            fs::read_dir(mj_core::config::data_dir().join("mbx-download"))
+                .unwrap()
+                .count(),
+            0
+        );
+        assert!(!root.join("home/.local/bin/mbx").exists());
+    }
+}
+
+#[tokio::test]
+async fn dismiss_notification_refuses_a_stale_target_before_dispatch() {
+    let state = test_runtime_state();
+    let error = state
+        .dismiss_notification(
+            "session-no-longer-current".into(),
+            mj_core::attention::NotificationDismissal::Question(
+                mj_core::assessment::InferredQuestion {
+                    turn_id: "stale".into(),
+                    completed_ordinal: 10,
+                },
+            ),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("notification is no longer current")
+    );
 }

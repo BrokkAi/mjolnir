@@ -614,10 +614,15 @@ pub struct ManagedSessionSnapshot {
 /// it whenever a single turn is longer than the window. Both are read
 /// separately, with one indexed query each, rather than found by scanning.
 ///
-/// A complete projection answers both by scanning what it already holds, which
-/// is what [`ProjectionWindow::of`] does.
+/// The unread event watermark is also retained here and restored from the
+/// stored summary ordinals when an actor reloads. A complete projection finds
+/// these facts in the items it already holds, via [`ProjectionWindow::of`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectionWindow {
+    /// Retained across actor trimming and restored from stored projection rows.
+    /// Clients consume served attention rather than this daemon-local fact.
+    #[serde(skip)]
+    pub latest_unread_event_ordinal: Option<u64>,
     /// Transcript items before the window. Zero when the projection is whole.
     pub omitted_items: usize,
     /// The title derived from the first user message.
@@ -632,6 +637,9 @@ impl ProjectionWindow {
     /// Keep the tail and complete turns containing unsettled content.
     pub fn trim(&mut self, session: &mut MaterializedSession, target: usize) {
         let observed = Self::of(session);
+        self.latest_unread_event_ordinal = self
+            .latest_unread_event_ordinal
+            .max(observed.latest_unread_event_ordinal);
         if self.provisional_title.is_none() {
             self.provisional_title = observed.provisional_title;
         }
@@ -690,6 +698,13 @@ impl ProjectionWindow {
     #[must_use]
     pub fn of(session: &MaterializedSession) -> Self {
         Self {
+            latest_unread_event_ordinal: session
+                .transcript
+                .iter()
+                .filter(|item| item.is_nonempty_agent_message())
+                .filter_map(|item| item.latest_content_event_ordinal)
+                .chain(session.interruption_event_ordinals())
+                .max(),
             omitted_items: 0,
             provisional_title: session.transcript.iter().find_map(|item| {
                 if !item.is_user_prompt() {
@@ -1484,7 +1499,7 @@ pub struct ArchiveSpacePreview {
 /// What a container target's host resolves for its blank build cache
 /// settings right now. Settings shows this beside each "automatic" field so
 /// the values a session would actually run with are visible before one starts.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildCachePreview {
     /// The host's own mbx version, or `None` when it has none on `PATH`.
     pub native_mbx: Option<String>,
@@ -1517,7 +1532,7 @@ pub struct BuildCachePreview {
 /// native builds the user ran themselves are counted together, since they
 /// share one cache. They answer whether the cache is being used at all, not
 /// what one session got out of it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildCacheStats {
     /// Builds that went through mbx. Zero means nothing has used the shim.
     pub builds: u64,
@@ -1530,7 +1545,7 @@ pub struct BuildCacheStats {
 }
 
 /// Why a target's sessions run without the build cache.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BuildCacheOff {
     /// This machine's own `enabled = false`.
     TurnedOff,
@@ -1556,7 +1571,7 @@ impl std::fmt::Display for BuildCacheOff {
 }
 
 /// Where a machine build cache budget comes from.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BuildCacheLimit {
     /// An explicit mj machine setting written to shared mbx configuration.
     Size(String),
@@ -1569,7 +1584,7 @@ pub enum BuildCacheLimit {
     MbxDefault(Option<String>),
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BuildCacheApplication {
     #[default]
     Pending,

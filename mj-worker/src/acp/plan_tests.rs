@@ -773,18 +773,26 @@ impl PlanProbe {
         }
         let new = probe.message().await;
         assert_eq!(new["method"], "session/new");
+        // Hard-won: 49d62f2d8: the all-harness fixture omitted Antigravity's default mode.
         probe
             .result(
                 &new,
                 if legacy_modes {
+                    let mut modes = json!([
+                        {"id": "plan", "name": "Plan"}, {"id": "auto", "name": "Auto"},
+                        {"id": "bypassPermissions", "name": "Bypass"},
+                        {"id": "agent", "name": "Agent"},
+                        {"id": "agent-full-access", "name": "Full access"},
+                        {"id": "allowAll", "name": "Allow all"}
+                    ]);
+                    if harness == HarnessKind::Antigravity {
+                        modes
+                            .as_array_mut()
+                            .unwrap()
+                            .push(json!({"id": "default", "name": "Default"}));
+                    }
                     json!({"sessionId": "plan-session", "configOptions": options.clone(), "modes": {
-                        "currentModeId": "plan", "availableModes": [
-                            {"id": "plan", "name": "Plan"}, {"id": "auto", "name": "Auto"},
-                            {"id": "bypassPermissions", "name": "Bypass"},
-                            {"id": "agent", "name": "Agent"},
-                            {"id": "agent-full-access", "name": "Full access"},
-                            {"id": "allowAll", "name": "Allow all"}
-                        ]
+                        "currentModeId": "plan", "availableModes": modes
                     }})
                 } else {
                     json!({"sessionId": "plan-session", "configOptions": options.clone()})

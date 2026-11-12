@@ -759,10 +759,9 @@ impl DashboardState {
 
     pub(crate) fn begin_profile_rename(&mut self) {
         let Some(old_id) = self
-            .config
-            .enabled_profiles()
-            .nth(self.quota_index)
-            .map(|(id, _)| id.to_owned())
+            .quota_profile_rows()
+            .get(self.quota_index)
+            .map(|row| row.id.to_owned())
         else {
             self.notices.set("No profile is selected.");
             return;

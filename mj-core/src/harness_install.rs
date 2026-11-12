@@ -188,23 +188,7 @@ pub async fn locate(
         || crate::harness_runtime::is_fallback_launch(harness, execution_policy, command, args);
     match policy {
         _ if harness == HarnessKind::Antigravity && built_in => {
-            let search = environment.clone();
-            let executable = tokio::task::spawn_blocking(move || -> Result<PathBuf> {
-                if let Some(path) = find_command(Path::new("agy"), &search)? {
-                    return Ok(path);
-                }
-                if let Some(home) = search.get("HOME") {
-                    let path = Path::new(home).join(".local/bin/agy");
-                    if entrypoint_is_executable(&path) {
-                        return Ok(path);
-                    }
-                }
-                bail!(
-                    "Antigravity requires agy installed on this target (PATH or ~/.local/bin/agy)"
-                )
-            })
-            .await
-            .context("find target Antigravity task failed")??;
+            let executable = crate::program_path::antigravity_program(environment).await?;
             let home = environment
                 .get(harness.home_env())
                 .context("Antigravity staged home is missing")?;
@@ -701,7 +685,9 @@ async fn resolve_at_async(
 
 async fn lock_file(file: File, shared: bool, purpose: &str) -> Result<FileLock> {
     let started = Instant::now();
+    let cancellation = crate::subprocess::preparation_cancellation();
     loop {
+        anyhow::ensure!(!cancellation.is_cancelled(), "preparation cancelled");
         let result = if shared {
             file.try_lock_shared()
         } else {
@@ -720,7 +706,10 @@ async fn lock_file(file: File, shared: bool, purpose: &str) -> Result<FileLock> 
                 INSTALL_LOCK_TIMEOUT.as_secs()
             );
         }
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(25)) => {},
+            _ = cancellation.cancelled() => bail!("preparation cancelled"),
+        }
     }
 }
 
@@ -1092,7 +1081,9 @@ async fn download_verified_async(
     expected: &str,
     environment: &BTreeMap<String, String>,
 ) -> Result<()> {
-    let result = async {
+    let cancellation = crate::subprocess::preparation_cancellation();
+    anyhow::ensure!(!cancellation.is_cancelled(), "preparation cancelled");
+    let work = async {
         download_verified_inner(url, destination, environment).await?;
         let actual = crate::worker_launch::worker_executable_digest(destination)?;
         anyhow::ensure!(
@@ -1101,8 +1092,11 @@ async fn download_verified_async(
             destination.display()
         );
         Ok(())
-    }
-    .await;
+    };
+    let result = tokio::select! {
+        result = work => result,
+        _ = cancellation.cancelled() => Err(anyhow!("preparation cancelled")),
+    };
     if result.is_err() {
         let _ = std::fs::remove_file(destination);
     }

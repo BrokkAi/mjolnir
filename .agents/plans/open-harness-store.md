@@ -13,6 +13,7 @@ New harness kinds must require no schema changes. Unsupported sessions remain st
 - [x] Final controller suite: 2570 passed, 20 ignored; one unrelated worker-stop fixture failed with OS Text file busy and has a focused retry pending. Store review had no findings.
 - [x] Collected the passing worker-stop retry and clean combined login-fix review through dae8ecdde.
 - [x] Restored the revision-43 harness constraints in the CLI upgrade fixture; all three affected isolated startup regressions pass (12.14 seconds).
+- [x] Installed reviewed source a31379ca4 with user approval. Ordinary startup completed the live migration; revision and minimum compatible revision are 126, and both tables no longer constrain harness names.
 
 ## Surprises & Discoveries
 
@@ -29,6 +30,8 @@ Revision 126 and snapshot ownership changes pass focused validation. Historical 
 The worker-stop fixture passed its focused retry. The final CLI suite separately exposed three startup regressions sharing an old-store fixture: rewinding its ledger left modern unconstrained harness columns behind. Restore the actual revision-43 CHECK lists in that fixture so the shipped OpenCode, MiMo and DSH migrations still run during the upgrade test; no production migration changes are needed.
 
 The corrected fixture passes ordinary startup, automatic upgrade after admitted work, and concurrent-client daemon replacement. The focused command was `cargo test -p brokk-mjolnir --test daemon_startup -- ordinary_startup_migrates_an_old_store_without_a_daemon automatic_upgrade_waits_for_work_then_migrates_without_another_invocation concurrent_clients_replace_obsolete_daemons_once_and_reuse_the_winner`, run outside the sandbox with the tests' existing isolated stores.
+
+The final merged controller and CLI suites passed all store and startup cases. After the authorized installation, normal startup migrated the live 23 GB store and started the protocol-93 daemon. Read-only verification found revision/floor 126 and no harness CHECK on sessions or hidden_native_sessions. New harness kinds now need application support without another schema admission migration.
 
 ## Context and Orientation
 
@@ -59,3 +62,5 @@ Evidence is in .mj/agents/6856201e667dfc419aa2578076f6ed4f/.
 Reuse rusqlite transactions and existing explicit delete_session_from. No new public or persisted record format is introduced.
 
 2026-11-12: Parent verified the final child reports, accepted the clean combined review and passing worker-stop retry, and took ownership of the CLI historical-fixture correction before installation.
+
+2026-11-12: Recorded final validation and the completed live migration after installation. The revision-126 compatibility boundary is now active; preserve forward progress rather than attempting to downgrade the live daemon.

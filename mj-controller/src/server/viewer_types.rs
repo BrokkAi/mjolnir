@@ -271,6 +271,8 @@ impl ViewerSnapshot {
                     .for_session(state.effective_review_or_off(&session.id));
                 ViewerSession {
                     attention: Default::default(),
+                    unread_frontier: None,
+                    notification_dismissal: None,
                     oracle: session.oracle,
                     oracle_choice: session.oracle_choice.clone().map(|v| *v),
                     subagents: session.subagents.clone().unwrap_or_default(),
@@ -384,6 +386,7 @@ impl ViewerSnapshot {
                     // widens these once it knows whether the session manager holds
                     // the session and what the agent has advertised.
                     capabilities: ViewerSessionCapabilities {
+                        dismiss_notification: false,
                         clear_context: false,
                         open: false,
                         read_history: false,
@@ -414,6 +417,14 @@ impl ViewerSnapshot {
             .map(|(id, profile)| ViewerProfile {
                 id: id.to_owned(),
                 harness_kind: profile.kind.id().into(),
+                quota_pools: if profile.kind == mj_core::config::HarnessKind::Antigravity {
+                    mj_client::quota::AntigravityQuotaPool::ALL
+                        .into_iter()
+                        .map(|pool| pool.label().to_owned())
+                        .collect()
+                } else {
+                    Vec::new()
+                },
                 capabilities_key: profile.capabilities_key(id),
                 quota: None,
             })
@@ -540,6 +551,10 @@ impl ViewerSession {
 pub struct ViewerSession {
     #[serde(default)]
     pub attention: mj_core::attention::SessionAttention,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread_frontier: Option<u64>,
+    #[serde(default)]
+    pub notification_dismissal: Option<mj_core::attention::NotificationDismissal>,
     #[serde(default = "oracle_default_enabled")]
     pub oracle: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1057,6 +1072,9 @@ pub struct ViewerProfile {
     #[serde(default)]
     pub capabilities_key: String,
     pub harness_kind: String,
+    /// Rows exist before the first reading and survive a failed quota probe.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quota_pools: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota: Option<ViewerQuota>,
 }
@@ -1070,6 +1088,9 @@ pub struct ViewerProfile {
 #[serde(deny_unknown_fields)]
 pub struct ViewerQuotaWindow {
     pub label: String,
+    /// Independent model pool, displayed as a separate row for the profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resets_at_epoch_seconds: Option<i64>,
     #[serde(default)]
@@ -1291,6 +1312,8 @@ pub struct ViewerSessionCapabilities {
     pub suspend: bool,
     pub destroy: bool,
     pub rename: bool,
+    #[serde(default)]
+    pub dismiss_notification: bool,
     pub resume: bool,
     /// Prepare and confirm a daemon-owned move to a compatible profile or
     /// target. The browser must never compose Stop and Resume itself.

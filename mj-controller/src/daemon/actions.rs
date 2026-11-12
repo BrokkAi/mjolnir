@@ -8,7 +8,17 @@ pub(super) async fn handle_action(
 ) -> Result<DaemonReply> {
     let _work = upgrade_request_activity(&action)?;
     match action {
-        action @ (DaemonAction::PreflightNewSession { .. }
+        DaemonAction::LoginTerminal { .. } => {
+            bail!("login requires a dedicated terminal connection")
+        }
+        action @ (DaemonAction::PreviewBuildCache { .. }
+        | DaemonAction::InstallMbx { .. }
+        | DaemonAction::CheckpointArchiveSizes { .. }
+        | DaemonAction::TestTarget { .. }
+        | DaemonAction::DiscoverSetup { .. }
+        | DaemonAction::CheckAvailability
+        | DaemonAction::ProfileLoginStatuses
+        | DaemonAction::PreflightNewSession { .. }
         | DaemonAction::ValidateProjectDirectory { .. }
         | DaemonAction::CompletePath { .. }
         | DaemonAction::CheckProjectDirectories { .. }
@@ -274,6 +284,10 @@ pub(super) async fn handle_action(
             state.attachments().remove(&client_id);
             Ok(DaemonReply::Done)
         }
+        DaemonAction::DismissNotification { session_id, target } => {
+            let ordinal = state.dismiss_notification(session_id, target).await?;
+            Ok(DaemonReply::Ordinal(ordinal))
+        }
         DaemonAction::PersistReadReceipt {
             client_id,
             workspace_id,
@@ -328,6 +342,28 @@ pub(super) async fn handle_action(
                     "abandoned prompt history could not be stored"
                 );
             }
+            Ok(DaemonReply::Done)
+        }
+        DaemonAction::SaveSpinnerStyle { style } => {
+            // Hold the configuration owner through persistence and publication:
+            // an acknowledged save must be visible to the next dashboard.
+            let mut inactivity = state.config_mutation.lock().await;
+            let config = blocking(move || {
+                Config::update(|config| {
+                    config.spinner = style;
+                    Ok(())
+                })
+                .map(|(config, ())| config)
+            })
+            .await?;
+            state.configure_inactivity(&mut inactivity, config.advanced.auto_afk_minutes);
+            state
+                .review_config
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone_from(&config.review);
+            state.owner().install_config(config);
+            state.publish_revision();
             Ok(DaemonReply::Done)
         }
         DaemonAction::SaveSidebarSize { size } => {
@@ -1086,6 +1122,12 @@ pub(super) fn upgrade_request_activity(
     {
         return crate::upgrade::activity("new-session preflight remote repairs").map(Some);
     }
+    if matches!(action, DaemonAction::SaveSpinnerStyle { .. }) {
+        return crate::upgrade::activity("spinner style setting").map(Some);
+    }
+    if matches!(action, DaemonAction::DismissNotification { .. }) {
+        return crate::upgrade::activity("notification dismissal").map(Some);
+    }
     if matches!(action, DaemonAction::SaveSidebarSize { .. }) {
         return crate::upgrade::activity("sidebar size setting").map(Some);
     }
@@ -1095,7 +1137,9 @@ pub(super) fn upgrade_request_activity(
     if matches!(action, DaemonAction::SetOperatorAway { .. }) {
         return crate::upgrade::activity("operator away setting").map(Some);
     }
-    if action.is_cancellable_machine_action() {
+    if matches!(action, DaemonAction::LoginTerminal { .. })
+        || action.is_cancellable_machine_action()
+    {
         return Ok(None);
     }
     if matches!(
@@ -1239,4 +1283,56 @@ fn available_auth(paths: Vec<PathBuf>) -> Option<PathBuf> {
             }
         },
     )
+}
+
+impl RuntimeState {
+    pub(crate) async fn dismiss_notification(
+        &self,
+        session_id: String,
+        target: mj_core::attention::NotificationDismissal,
+    ) -> Result<u64> {
+        let runtime = self.runtime_publication()?;
+        if matches!(
+            target,
+            mj_core::attention::NotificationDismissal::Question(_)
+        ) && runtime.metadata.notification_dismissals.get(&session_id) != Some(&target)
+        {
+            return Err(mj_core::refusal::Refusal::precondition(
+                "notification is no longer current",
+            )
+            .into());
+        }
+        let (through, command_ordinal) = match target {
+            mj_core::attention::NotificationDismissal::Question(question) => {
+                let through = question.completed_ordinal;
+                let ordinal = self
+                    .session_manager
+                    .session(&session_id)
+                    .await?
+                    .submit(
+                        format!("dismiss-question-{through}"),
+                        RelayCommand::DismissQuestion { question },
+                    )
+                    .await?;
+                (through, Some(ordinal))
+            }
+            mj_core::attention::NotificationDismissal::ReadThrough(through) => (through, None),
+        };
+        let workspace_id = runtime
+            .records
+            .get(&session_id)
+            .context("session missing")?
+            .workspace_id
+            .clone();
+        let frontier = blocking(move || {
+            crate::database::persist_read_receipt(
+                "notification-dismissal",
+                &workspace_id,
+                &session_id,
+                through,
+            )
+        })
+        .await?;
+        Ok(command_ordinal.unwrap_or(frontier))
+    }
 }

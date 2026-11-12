@@ -4,8 +4,24 @@ use mj_chat::text_input::EditOutcome;
 use ratatui::style::Style;
 
 use mj_client::daemon::SessionTextMatchKind;
+use mj_client::quota::AntigravityQuotaPool;
 
 use crate::render::{headroom_color, quota_remaining_percent, weekly_quota_exhausted};
+
+pub(crate) struct QuotaProfileRow<'a> {
+    pub id: &'a str,
+    pub harness: HarnessKind,
+    pub pool: Option<AntigravityQuotaPool>,
+}
+
+impl QuotaProfileRow<'_> {
+    pub fn label(&self) -> String {
+        self.pool.map_or_else(
+            || self.id.to_owned(),
+            |pool| format!("{} ({})", self.id, pool.label()),
+        )
+    }
+}
 
 /// How much a session needs a person right now, from least to most.
 ///
@@ -75,7 +91,7 @@ pub(crate) fn presentation_attention(
     session_id: &str,
 ) -> AttentionLevel {
     use mj_core::attention::SessionAttention;
-    let level = match dashboard
+    match dashboard
         .served_attention
         .get(session_id)
         .copied()
@@ -83,21 +99,12 @@ pub(crate) fn presentation_attention(
     {
         SessionAttention::NeedsInput => AttentionLevel::Waiting,
         SessionAttention::Important => AttentionLevel::Important,
+        SessionAttention::Unread => AttentionLevel::Unread,
         SessionAttention::Failed => AttentionLevel::Failed,
         SessionAttention::Unreachable => AttentionLevel::Unreachable,
         SessionAttention::Working => AttentionLevel::Working,
         SessionAttention::Idle => AttentionLevel::Idle,
         SessionAttention::Inactive | SessionAttention::Unknown => AttentionLevel::Inactive,
-    };
-    if level == AttentionLevel::Idle
-        && dashboard
-            .session_details
-            .get(session_id)
-            .is_some_and(SessionDetail::has_unread)
-    {
-        AttentionLevel::Unread
-    } else {
-        level
     }
 }
 
@@ -1193,13 +1200,17 @@ impl DashboardState {
             .collect::<Vec<_>>();
         let mut receipts = Vec::new();
         for session_id in listed {
-            let Some(detail) = self.session_details.get_mut(&session_id) else {
-                continue;
-            };
-            if !detail.has_unread() {
-                continue;
-            }
-            let Some(through) = detail.materialized_applied_event_ordinal else {
+            let through = self.unread_frontiers.get(&session_id).copied().max(
+                self.notification_dismissals
+                    .get(&session_id)
+                    .and_then(|target| match target {
+                        mj_core::attention::NotificationDismissal::ReadThrough(through) => {
+                            Some(*through)
+                        }
+                        mj_core::attention::NotificationDismissal::Question(_) => None,
+                    }),
+            );
+            let Some(through) = through else {
                 continue;
             };
             let Some(session) = self.state.sessions.get_mut(&session_id) else {
@@ -1207,7 +1218,9 @@ impl DashboardState {
             };
             if through > session.viewed_through_event_ordinal {
                 session.viewed_through_event_ordinal = through;
-                detail.clear_unread();
+                if let Some(detail) = self.session_details.get_mut(&session_id) {
+                    detail.clear_unread();
+                }
                 receipts.push((session_id, through));
             }
         }
@@ -1269,6 +1282,29 @@ impl DashboardState {
         }
         if let Some(label) = quota.windowless_label() {
             return plain(label);
+        }
+        if quota.harness == HarnessKind::Antigravity {
+            let pool_cell = |weekly: bool| {
+                PickerCell::text(
+                    AntigravityQuotaPool::ALL
+                        .into_iter()
+                        .map(|pool| {
+                            let report = quota.for_antigravity_pool(pool);
+                            let window = if weekly {
+                                report.weekly_window()
+                            } else {
+                                report.five_hour_window()
+                            };
+                            let value = window
+                                .and_then(quota_remaining_percent)
+                                .map_or_else(|| "?".into(), |value| format!("{value}%"));
+                            format!("{} {value}", pool.label())
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" / "),
+                )
+            };
+            return (pool_cell(true), pool_cell(false));
         }
         let Some(primary) = quota.summary_window().and_then(quota_remaining_percent) else {
             return plain("unavailable");
@@ -1332,11 +1368,31 @@ impl DashboardState {
         self.rebuild_resume_rows();
     }
 
+    /// The same ordered rows drive drawing, pointer/keyboard selection and
+    /// profile actions. Both Antigravity pools still act on one profile.
+    pub(crate) fn quota_profile_rows(&self) -> Vec<QuotaProfileRow<'_>> {
+        self.config
+            .enabled_profiles()
+            .flat_map(|(id, profile)| {
+                let pools = if profile.kind == HarnessKind::Antigravity {
+                    AntigravityQuotaPool::ALL.map(Some).to_vec()
+                } else {
+                    vec![None]
+                };
+                pools.into_iter().map(move |pool| QuotaProfileRow {
+                    id,
+                    harness: profile.kind,
+                    pool,
+                })
+            })
+            .collect()
+    }
+
     pub(crate) fn focus_len_for(&self, focus: Focus) -> usize {
         match focus {
             Focus::Sessions => self.visible_session_indices().len(),
             Focus::Targets => self.capacity_details.len(),
-            Focus::Quota => self.config.enabled_profiles().count(),
+            Focus::Quota => self.quota_profile_rows().len(),
             Focus::Workspaces | Focus::Prompt => 0,
         }
     }
@@ -1438,7 +1494,7 @@ impl DashboardState {
             .retain(|key| project_keys.contains(key));
         self.quota_index = self
             .quota_index
-            .min(self.config.enabled_profiles().count().saturating_sub(1));
+            .min(self.quota_profile_rows().len().saturating_sub(1));
         self.capacity_index = self
             .capacity_index
             .min(self.capacity_details.len().saturating_sub(1));
@@ -1473,7 +1529,8 @@ mod verdict_tests {
             (SessionAttention::Important, AttentionLevel::Important),
             (SessionAttention::Working, AttentionLevel::Working),
             (SessionAttention::Inactive, AttentionLevel::Inactive),
-            (SessionAttention::Idle, AttentionLevel::Unread),
+            (SessionAttention::Unread, AttentionLevel::Unread),
+            (SessionAttention::Idle, AttentionLevel::Idle),
         ] {
             dashboard.set_session_attention(mj_core::snapshot_map::SnapshotMap::from([(
                 "session".to_owned(),

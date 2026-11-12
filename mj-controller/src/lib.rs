@@ -1,6 +1,7 @@
 //! Hel's daemon-side controller: provisioning, session management, the web
 //! server, and the surrounding host-side services.
 
+mod antigravity_usage;
 mod aws_assume_role;
 mod aws_credentials;
 mod claude_login;
@@ -9,6 +10,7 @@ mod codex_usage;
 mod grok_usage;
 mod kimi_auth;
 mod launch_timing;
+mod login_terminal;
 mod muse_usage;
 mod quota_runtime;
 mod zai_usage;
@@ -17,6 +19,7 @@ pub mod compaction;
 pub mod controller;
 pub mod doctor;
 pub(crate) mod handoff;
+pub mod harness_login;
 pub mod image;
 pub mod import;
 pub mod opencode_logins;
