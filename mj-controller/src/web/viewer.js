@@ -1685,7 +1685,9 @@ function attentionParts(session) {
   const queued = session.detail === false
     ? session.queued_prompt_count || 0
     : (session.queued_prompts || []).length;
-  if (queued) parts.push([String(queued), `${queued} queued prompt${queued === 1 ? '' : 's'}`]);
+  // Q marks the count as queued prompts, as the TUI does, so it does not
+  // read as a notification count.
+  if (queued) parts.push([`Q${queued}`, `${queued} queued prompt${queued === 1 ? '' : 's'}`, 'queue']);
   return parts;
 }
 
@@ -1734,8 +1736,8 @@ function updateSessionCard(card, session) {
   );
   renderSessionTitle(card._heading, session);
   card._attention.replaceChildren(
-    ...attention.map(([glyph, label]) => {
-      const node = el('span', `session-attention-item ${['Failed', 'Unreachable', 'Input needed', 'Important'].includes(label) ? 'alert' : ''}`, glyph);
+    ...attention.map(([glyph, label, kind]) => {
+      const node = el('span', `session-attention-item ${kind || (['Failed', 'Unreachable', 'Input needed', 'Important'].includes(label) ? 'alert' : '')}`, glyph);
       node.setAttribute('aria-label', label);
       node.setAttribute('role', 'img');
       node.title = label;

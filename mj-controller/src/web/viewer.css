@@ -295,6 +295,13 @@ button:disabled {
   line-height: 1;
 }
 
+.session-attention-item.queue {
+  width: auto;
+  min-width: 1.25em;
+  padding: 0 0.35em;
+  border-radius: 999px;
+}
+
 .session-attention-item.alert {
   border-color: var(--failed);
   color: var(--failed);
