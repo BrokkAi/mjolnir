@@ -1077,6 +1077,7 @@ async fn refresh_profile_with_cache_root(
             .await
             .map(|windows| ProfileQuota {
                 paid_credits: None,
+                monthly_price_usd: None,
                 banked_resets: None,
                 profile_id: profile_id.clone(),
                 harness,

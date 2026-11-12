@@ -33,6 +33,8 @@ The user requires quota support before installation. Query the CLI's own documen
 
 Display two rows for this one profile, suffixed (Ge) and (Cl). One shared row list must drive TUI drawing, selection, scrolling and rename lookup so a second quota row does not select another profile. Preserve both pools in the viewer projection and display the same two labels there. Keep the existing persisted quota shape, including its optional string model_scope, and reuse the existing cache and refresh cadence.
 
+Advance the daemon protocol to 93 for the new HarnessKind wire value: a protocol-92 client cannot deserialize Antigravity sessions or profiles. Coordinate the number at the final merge with concurrent wire changes; no additional database migration is required. The merge of subscription-weighting work adds monthly_price_usd to quota reports; Antigravity leaves it unknown, consistent with the other non-Claude adapters.
+
 ## Outcomes & Retrospective
 
 The isolated session completed edits, commands and mj-memory search, and applied base-model and thought-level changes through mj. Direct ACP restart/resume preserves conversation history. The parent verified these results and accepted the clean combined review. Final validation results are recorded in the report directory. The store plan tracks the remaining CLI historical-fixture correction before the user-authorized installation and profile setup.
