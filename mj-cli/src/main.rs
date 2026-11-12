@@ -1062,6 +1062,11 @@ async fn run_command(
             setup(args).map(|()| DashboardExit::Normal)
         }
         Some(Command::Import(args)) => {
+            // Import reads the daemon's profile homes until client-side
+            // source selection lands, so it runs where the daemon lives.
+            if daemon::run_where_daemon_lives(&daemon_forwarded_args(), false).await? {
+                return Ok(DashboardExit::Normal);
+            }
             let workspace_id =
                 resolve_store_workspace(args.workspace().or(requested_workspace).as_deref())
                     .await?;

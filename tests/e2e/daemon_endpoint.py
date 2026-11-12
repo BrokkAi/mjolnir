@@ -40,7 +40,8 @@ def main():
             assert started.returncode == 0, started.stderr
             endpoint = json.loads(started.stdout)
             assert set(endpoint) == {
-                "protocol_version", "build_version", "control_address", "token", "instance_id"
+                "config_path", "protocol_version", "build_version", "control_address", "token",
+                "instance_id",
             }
             existing = run("daemon", "endpoint", "--json", "--existing")
             assert existing.returncode == 0, existing.stderr

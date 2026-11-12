@@ -129,7 +129,7 @@ async fn open_with_port(
     intent: DiscoveryIntent,
     mut port: impl FnMut() -> Result<u16>,
 ) -> Result<SshLease> {
-    let endpoint = discover(placement, remote_instance, intent).await?;
+    let mut endpoint = discover(placement, remote_instance, intent).await?;
     loop {
         let local_addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port()?));
         let mut command = tokio::process::Command::new("ssh");
@@ -156,21 +156,47 @@ async fn open_with_port(
             child,
         };
         let metadata = lease.metadata();
+        // A refused local connection means ssh is not listening yet, so keep
+        // waiting while the child runs. Once the tunnel accepts, one Ping
+        // decides: if it fails, the daemon behind the discovered endpoint is
+        // gone, because `ssh -N` keeps running when a forwarded connection is
+        // refused.
         let ready = async {
             loop {
-                if let Ok(mut client) = super::DaemonClient::connect(metadata.clone()).await
-                    && matches!(
-                        client.request_once(super::DaemonAction::Ping).await,
-                        Ok(super::DaemonReply::Pong)
-                    )
-                {
-                    return;
+                match super::DaemonClient::connect(metadata.clone()).await {
+                    Ok(mut client) => {
+                        return matches!(
+                            client.request_once(super::DaemonAction::Ping).await,
+                            Ok(super::DaemonReply::Pong)
+                        );
+                    }
+                    Err(_) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         };
         tokio::select! {
-            () = ready => return Ok(lease),
+            answered = ready => {
+                if answered {
+                    return Ok(lease);
+                }
+                // The remote daemon stopped or was replaced after discovery.
+                // Discover again; the new endpoint is the state change that
+                // ends this loop, and an unchanged one is an error.
+                lease.terminate().await?;
+                let stale = std::mem::replace(
+                    &mut endpoint,
+                    discover(placement, remote_instance, intent).await?,
+                );
+                if stale.instance_id == endpoint.instance_id
+                    && stale.control_address == endpoint.control_address
+                {
+                    bail!(
+                        "the daemon at {} on {} answers discovery but not through the SSH tunnel",
+                        endpoint.control_address,
+                        placement.host.as_deref().unwrap_or_default()
+                    );
+                }
+            }
             status = lease.child.wait() => {
                 let status = status?;
                 let stderr = String::from_utf8_lossy(&lease.child.stderr()).into_owned();
