@@ -4967,7 +4967,7 @@ async fn resume_response_waits_until_a_stale_stopped_snapshot_shows_the_operatio
 
     snapshot_tx.send_modify(|snapshot| {
         let session = &mut snapshot.sessions[0];
-        session.operation = Some(ViewerOperation {
+        session.operation = Some(Box::new(ViewerOperation {
             id: "resume-op".into(),
             session_id: session.id.clone(),
             kind: ViewerOperationKind::Resume,
@@ -4975,7 +4975,7 @@ async fn resume_response_waits_until_a_stale_stopped_snapshot_shows_the_operatio
             stages: Vec::new(),
             notice: None,
             cancellable: true,
-        });
+        }));
     });
     let response = tokio::time::timeout(Duration::from_secs(2), &mut response)
         .await
@@ -5034,7 +5034,7 @@ fn a_resume_refused_for_a_move_held_environment_names_the_move() {
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     let mut session = snapshot.sessions[0].clone();
     session.lifecycle = ViewerLifecycleCategory::Failed;
-    session.move_recovery = Some(crate::server::ViewerMoveRecovery {
+    session.move_recovery = Some(Box::new(crate::server::ViewerMoveRecovery {
         failure_notice: None,
         oracle: None,
         oracle_choice: None,
@@ -5055,7 +5055,7 @@ fn a_resume_refused_for_a_move_held_environment_names_the_move() {
         destination_ready: false,
         queue_admission_started: false,
         queue_admission_finished: false,
-    });
+    }));
     let refusal = resume_refusal(&session);
     assert!(
         refusal.contains("retry the Move to fake / localhost"),
@@ -6389,7 +6389,7 @@ async fn review_status_reports_the_open_review_or_none() {
             .unwrap()
             .clone();
         session.review_trigger = mj_core::config::ReviewTrigger::Push;
-        session.turn_review = Some(crate::server::ViewerTurnReview {
+        session.turn_review = Some(Box::new(crate::server::ViewerTurnReview {
             child_session_id: None,
             status: "sending findings to the primary agent…".into(),
             roles: vec![crate::server::ViewerReviewRole {
@@ -6401,7 +6401,7 @@ async fn review_status_reports_the_open_review_or_none() {
                 kind: "findings".into(),
                 text: "[P1] src/lib.rs:1 -- unbounded retry loop".into(),
             }),
-        });
+        }));
         snapshot.sessions.push(session);
     });
     let body = json_body(app.clone().oneshot(get()).await.unwrap()).await;

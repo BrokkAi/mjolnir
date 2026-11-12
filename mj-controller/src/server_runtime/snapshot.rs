@@ -312,10 +312,12 @@ pub(super) fn phone_prompt_blocks(
 pub(super) fn phone_commands(
     session: &crate::server::ViewerSession,
     operational: Option<&mj_core::relay::RelayOperationalState>,
-) -> Vec<crate::server::ViewerMjCommand> {
+) -> std::sync::Arc<Vec<crate::server::ViewerMjCommand>> {
     use crate::server::ViewerCommandSource;
     use agent_client_protocol::v1::schema::AvailableCommandInput;
 
+    static BASE_COMMANDS: std::sync::OnceLock<std::sync::Arc<Vec<crate::server::ViewerMjCommand>>> =
+        std::sync::OnceLock::new();
     let command =
         |name: &str, description: &str, argument: Option<&str>| crate::server::ViewerMjCommand {
             name: name.to_owned(),
@@ -323,14 +325,18 @@ pub(super) fn phone_commands(
             source: ViewerCommandSource::Mj,
             argument: argument.map(str::to_owned),
         };
-    let mut commands = vec![
-        command("help", "show available Mjolnir and agent commands", None),
-        command(
-            "detach",
-            "leave the conversation without stopping the worker",
-            None,
-        ),
-    ];
+    let mut commands = BASE_COMMANDS
+        .get_or_init(|| {
+            std::sync::Arc::new(vec![
+                command("help", "show available Mjolnir and agent commands", None),
+                command(
+                    "detach",
+                    "leave the conversation without stopping the worker",
+                    None,
+                ),
+            ])
+        })
+        .clone();
     let option = |key: &str| {
         session
             .config_options
@@ -338,14 +344,18 @@ pub(super) fn phone_commands(
             .any(|option| option.key == key)
     };
     if session.capabilities.set_config && !session.config_options.is_empty() {
-        commands.push(command(
+        std::sync::Arc::make_mut(&mut commands).push(command(
             "config",
             "change any setting advertised by the active agent",
             Some("key [value]"),
         ));
     }
     if option("model") {
-        commands.push(command("model", "change the active model", Some("value")));
+        std::sync::Arc::make_mut(&mut commands).push(command(
+            "model",
+            "change the active model",
+            Some("value"),
+        ));
     }
     // Same condition as the dashboard (`AcpSurface::supports_fast_mode`):
     // the harness advertises `fast-mode` with both on and off.
@@ -355,25 +365,33 @@ pub(super) fn phone_commands(
                 .iter()
                 .all(|value| option.choices.iter().any(|choice| choice.value == *value))
     }) {
-        commands.push(command("fast", "toggle Codex Fast mode", None));
+        std::sync::Arc::make_mut(&mut commands).push(command(
+            "fast",
+            "toggle Codex Fast mode",
+            None,
+        ));
     }
     if option("effort") {
-        commands.push(command(
+        std::sync::Arc::make_mut(&mut commands).push(command(
             "effort",
             "change the active reasoning effort",
             Some("value"),
         ));
     }
     if session.plan_mode_active.is_some() && session.capabilities.set_plan_mode {
-        commands.push(command("plan", "toggle plan mode", Some("message")));
-        commands.push(command(
+        std::sync::Arc::make_mut(&mut commands).push(command(
+            "plan",
+            "toggle plan mode",
+            Some("message"),
+        ));
+        std::sync::Arc::make_mut(&mut commands).push(command(
             "implement",
             "leave plan mode and implement",
             Some("instruction"),
         ));
     }
     if session.capabilities.prompt || session.turn_review.is_some() {
-        commands.push(command(
+        std::sync::Arc::make_mut(&mut commands).push(command(
             "review",
             "review the finished turn now, or report how review is configured",
             Some("status"),
@@ -383,7 +401,7 @@ pub(super) fn phone_commands(
     // is unavailable for this session. An agent cannot claim one and turn a
     // locally interpreted slash command into a misleading palette entry.
     if session.capabilities.clear_context {
-        commands.push(command(
+        std::sync::Arc::make_mut(&mut commands).push(command(
             "clear",
             "start a new conversation and clear pending mail, keeping workspace and history",
             None,
@@ -423,7 +441,7 @@ pub(super) fn phone_commands(
             }
             _ => None,
         });
-        commands.push(crate::server::ViewerMjCommand {
+        std::sync::Arc::make_mut(&mut commands).push(crate::server::ViewerMjCommand {
             name: name.to_owned(),
             description: advertised.description.trim().to_owned(),
             source: ViewerCommandSource::Agent,
@@ -650,10 +668,9 @@ pub(super) fn viewer_snapshot_selected(
             .0
             .get_mut(&session_id)
             .expect("selected session");
-        session.move_recovery = move_recoveries
-            .get(&session.id)
-            .cloned()
-            .map(|recovery| recovery.with_public_failure(session.launch_error.as_deref()));
+        session.move_recovery = move_recoveries.get(&session.id).cloned().map(|recovery| {
+            Box::new(recovery.with_public_failure(session.launch_error.as_deref()))
+        });
         if let Some(record) = controller.state.sessions.get(&session.id)
             && let Some(source) = project_sources.source(record, controller)
         {
@@ -715,7 +732,7 @@ pub(super) fn viewer_snapshot_selected(
             );
         }
         session.prompt_images_supported = prompt_images.contains(&session.id);
-        session.operation = operations.get(&session.id).cloned();
+        session.operation = operations.get(&session.id).cloned().map(Box::new);
         // Runtime ownership takes precedence over the durable record. Move
         // can still look Running while its old conversation is no longer a
         // valid destination, and stopped cleanup/destroy operations have no
@@ -745,8 +762,8 @@ pub(super) fn viewer_snapshot_selected(
         session.native_subagents = native_agents.get(&session.id).cloned().unwrap_or_default();
         session.targeted_turn_control_supported =
             live.is_some_and(|state| state.supports_targeted_turn_control());
-        session.turn_controls = live.and_then(|s| s.turn_controls.clone());
-        session.steering = live.and_then(|s| s.steering.clone());
+        session.turn_controls = live.and_then(|s| s.turn_controls.clone()).map(Box::new);
+        session.steering = live.and_then(|s| s.steering.clone()).map(Box::new);
         session.active_prompt_id =
             live.and_then(|s| s.active_prompt.as_ref().map(|p| p.command_id.clone()));
         session.cancelling_prompt_id = live.and_then(|s| s.cancelling_prompt_id.clone());
@@ -832,12 +849,13 @@ pub(super) fn viewer_snapshot_selected(
             let turn_started_at = turn_started_at_ms
                 .and_then(|started_at_ms| u64::try_from(started_at_ms).ok())
                 .map(|started_at_ms| started_at_ms / 1_000);
-            session.capacity_retry = state.capacity_retry.clone();
+            session.capacity_retry = state.capacity_retry.clone().map(Box::new);
             session.quota_recovery = state
                 .continuation
                 .quota_recovery
                 .clone()
-                .filter(|r| !r.submitted);
+                .filter(|r| !r.submitted)
+                .map(Box::new);
             let activity = mj_client::usage_format::SessionActivity::of(state);
             session.retry_assessment_pending = activity.checking_response;
             let activity_details =
@@ -861,7 +879,8 @@ pub(super) fn viewer_snapshot_selected(
             .map(mj_core::acp::AcpSessionFacts::plan_mode_active);
         session.turn_review = reviews
             .get(&session.id)
-            .map(crate::server::ViewerTurnReview::from_runtime);
+            .map(crate::server::ViewerTurnReview::from_runtime)
+            .map(Box::new);
         // Two capability inputs the session row itself does not carry: whether
         // its configured target template runs a container, and whether any
         // session in its sub-agent tree has a turn running. The InterruptAll

@@ -350,7 +350,7 @@ impl ViewerSnapshot {
                     config_options: Vec::new(),
                     plan_mode_active: None,
                     turn_review: None,
-                    available_commands: Vec::new(),
+                    available_commands: Default::default(),
                     // What the durable record alone can justify. The phone server
                     // widens these once it knows whether the session manager holds
                     // the session and what the agent has advertised.
@@ -545,21 +545,21 @@ pub struct ViewerSession {
     #[serde(default)]
     pub targeted_turn_control_supported: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub turn_controls: Option<mj_core::relay::TurnControls>,
+    pub turn_controls: Option<Box<mj_core::relay::TurnControls>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub native_subagents: Vec<mj_core::native_agent::NativeAgent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub steering: Option<mj_core::relay::SteeringOperation>,
+    pub steering: Option<Box<mj_core::relay::SteeringOperation>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_prompt_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancelling_prompt_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capacity_retry: Option<mj_core::relay::CapacityRetry>,
+    pub capacity_retry: Option<Box<mj_core::relay::CapacityRetry>>,
     #[serde(default)]
     pub retry_assessment_pending: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quota_recovery: Option<mj_core::continuation::QuotaRecovery>,
+    pub quota_recovery: Option<Box<mj_core::continuation::QuotaRecovery>>,
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publication_state: Option<mj_core::state::PublicationState>,
@@ -710,12 +710,12 @@ pub struct ViewerSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity_details: Option<ViewerActivityDetails>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operation: Option<ViewerOperation>,
+    pub operation: Option<Box<ViewerOperation>>,
     /// Safe recovery choices for a failed or cancelled Move. Diagnostics and
     /// checkpoint paths remain on the controller; this contains only the
     /// settings a person may choose again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub move_recovery: Option<ViewerMoveRecovery>,
+    pub move_recovery: Option<Box<ViewerMoveRecovery>>,
     #[serde(default)]
     pub chat_phase: ViewerChatPhase,
     /// Known live activity is idle: no foreground turn, tool, or background work.
@@ -748,12 +748,12 @@ pub struct ViewerSession {
     /// The review the daemon is running for this session, if any. A phone
     /// renders the same review the terminal does and resolves it the same way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub turn_review: Option<ViewerTurnReview>,
+    pub turn_review: Option<Box<ViewerTurnReview>>,
     /// The Mjolnir commands this session accepts, published rather than hardcoded
     /// in the browser: a command list kept in two places is a command list that
     /// drifts, which is how `/review` went missing from the phone.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub available_commands: Vec<ViewerMjCommand>,
+    pub available_commands: Arc<Vec<ViewerMjCommand>>,
     pub capabilities: ViewerSessionCapabilities,
 }
 

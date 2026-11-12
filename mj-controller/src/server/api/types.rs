@@ -203,7 +203,7 @@ impl From<&ViewerSession> for ApiSession {
             last_turn_outcome: None,
             last_turn_diagnostic: None,
             config_options: session.config_options.clone(),
-            turn_controls: session.turn_controls.clone(),
+            turn_controls: session.turn_controls.as_deref().cloned(),
             pending_elicitations: session.pending_elicitations.clone(),
         }
     }

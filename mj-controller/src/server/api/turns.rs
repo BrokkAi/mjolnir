@@ -648,7 +648,10 @@ pub(super) async fn review_status(
     let (trigger, review) = {
         let snapshot = state.snapshot_rx.borrow();
         let session = require_session_record(&snapshot, &session_id)?;
-        (session.review_trigger, session.turn_review.clone())
+        (
+            session.review_trigger,
+            session.turn_review.as_deref().cloned(),
+        )
     };
     Ok(Json(ReviewStatusResponse {
         session_id,

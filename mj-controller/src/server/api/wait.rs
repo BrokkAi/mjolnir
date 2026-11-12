@@ -370,8 +370,8 @@ pub(super) fn build_observation(
             .find(|failure| failure.session_id.as_deref() == Some(session.id.as_str()))
             .and_then(|failure| failure.error.clone())
             .or_else(|| session.launch_error.clone()),
-        capacity_retry: session.capacity_retry.clone(),
-        quota_recovery: session.quota_recovery.clone(),
+        capacity_retry: session.capacity_retry.as_deref().cloned(),
+        quota_recovery: session.quota_recovery.as_deref().cloned(),
         start_status,
         ..WaitObservation::default()
     };
