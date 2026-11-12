@@ -375,10 +375,12 @@ impl DurableRelay {
         self.apply_assessment_result(ordinal, Some(verdict), None)
     }
 
+    #[cfg(any(unix, test))]
     pub(crate) fn glide_runtime(&self) -> (ActivityFacts, usize) {
         (self.activity_facts(), self.native_agent_count())
     }
 
+    #[cfg(any(unix, test))]
     pub(crate) fn apply_glide_assessment(
         &mut self,
         ordinal: u64,
@@ -387,6 +389,7 @@ impl DurableRelay {
         self.apply_assessment_result(ordinal, None, Some(glide))
     }
 
+    #[cfg(any(unix, test))]
     fn apply_assessment_result(
         &mut self,
         ordinal: u64,

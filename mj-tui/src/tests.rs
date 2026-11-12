@@ -2242,6 +2242,11 @@ fn viewing_one_failure_reveals_the_five_unread_sessions_without_relabeling_them(
         &["failed"],
         mj_core::attention::SessionAttention::Failed,
     );
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &["done-0", "done-1", "done-2", "done-3", "done-4"],
+        mj_core::attention::SessionAttention::Idle,
+    );
     dashboard.select_active_session("failed");
     assert_eq!(
         dashboard.workspace_attention_summary("default"),
@@ -3168,6 +3173,11 @@ fn dashboard_with_an_unread_reply_off_screen() -> DashboardState {
     );
     reply.execution = MaterializedExecutionState::Idle;
     dashboard.apply_materialized_session(&reply);
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &["alpha", "beta"],
+        mj_core::attention::SessionAttention::Idle,
+    );
     dashboard
 }
 
