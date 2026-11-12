@@ -50,7 +50,7 @@ import dashboard from '../../assets/screenshots/dashboard.svg';
 <section class="home-section">
   <p class="section-label">The current surface</p>
   <h2>Sessions, conversation, targets, and quota on one screen.</h2>
-  <p>The terminal opens on the session that spoke most recently. Every support pane stays visible, resizes independently, and shares the same daemon-owned state with the authenticated web viewer and desktop app.</p>
+  <p>The terminal opens on the session that spoke most recently. Every support pane stays visible, resizes independently, and shares the same daemon-owned state with the authenticated web viewer.</p>
   <figure class="shot">
     <a class="shot__zoom" href={dashboard.src} aria-label="Open the full-size Mjolnir terminal dashboard screenshot">
       <Image src={dashboard} alt="Mjolnir 2.0 terminal dashboard with three active sessions, conversation and prompt regions, local target capacity, four profile quota rows, and contextual shortcuts." />
@@ -75,7 +75,7 @@ import dashboard from '../../assets/screenshots/dashboard.svg';
         <span>03 / CAPACITY</span><h3>Profiles and quota</h3><p>Keep several accounts per harness and see their usable capacity in one consistent view.</p>
       </a>
       <a href="web-viewer/">
-        <span>04 / REMOTE</span><h3>Web and desktop</h3><p>Open the same daemon-owned sessions in a browser, on a phone over Tailscale, or in the native shell.</p>
+        <span>04 / REMOTE</span><h3>Web viewer</h3><p>Open the same daemon-owned sessions in a browser, on a phone over Tailscale.</p>
       </a>
       <a href="durability/">
         <span>05 / RECOVER</span><h3>Verified checkpoints</h3><p>Stop only after byte-for-byte verification, then resume into a freshly provisioned target.</p>

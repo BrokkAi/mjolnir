@@ -29,7 +29,7 @@ pub enum CompletionKind {
 }
 
 /// The machine whose filesystem a path belongs to.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CompletionHost {
     /// The machine running the controller.
     Local,

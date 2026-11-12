@@ -93,6 +93,7 @@ impl RuntimeState {
             attachments: Mutex::new(BTreeMap::new()),
             phone_status: Mutex::new(WebViewerStatus::Starting),
             web_viewer: crate::web_viewer::ViewerControl::new(),
+            api_credential: std::sync::OnceLock::new(),
             ever_attached: AtomicBool::new(false),
             revisions,
             workspaces_tx,

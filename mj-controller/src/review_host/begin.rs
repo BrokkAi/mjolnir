@@ -66,36 +66,42 @@ impl HostState {
         let control = self.control.clone();
         let environment = self.environment.clone();
         let events = self.events.clone();
-        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancel = tokio_util::sync::CancellationToken::new();
         self.preparing.insert(
             session_id.clone(),
             PreparingOperation::Review {
-                cancelled: cancelled.clone(),
+                cancel: cancel.clone(),
             },
         );
         self.publish(&session_id);
         tokio::spawn(async move {
-            let prepared = tokio::time::timeout(
-                std::time::Duration::from_secs(90),
-                prepare(
+            // No deadline covers preparation as a whole: most of it is waiting
+            // on the session actor, the worker or other work holding the
+            // session, and each step that does work carries its own bound
+            // (#1503). A cancellation drops whichever step is running.
+            let started = std::time::Instant::now();
+            let stages = PreparationStages::default();
+            let prepared = tokio::select! {
+                biased;
+                () = cancel.cancelled() => Err(StartRefusal(stages.cancelled())),
+                prepared = prepare(
                     &control,
                     &environment,
                     &session_id,
                     config,
-                    cancelled.clone(),
+                    &stages,
                     path.map(|path| vec![std::path::PathBuf::from(path)]),
-                ),
-            )
-            .await;
-            let prepared = match prepared {
-                Ok(prepared) => prepared,
-                Err(_) => {
-                    cancelled.store(true, std::sync::atomic::Ordering::Release);
-                    Err(StartRefusal(
-                        "review preparation exceeded 90 seconds; call request_review again".into(),
-                    ))
-                }
+                ) => prepared,
             };
+            tracing::info!(
+                %session_id,
+                elapsed_ms = started.elapsed().as_millis(),
+                outcome = match &prepared {
+                    Ok(_) => "prepared",
+                    Err(refusal) => refusal.0.as_str(),
+                },
+                "review preparation finished"
+            );
             let accepted = prepared.as_ref().ok().map(|prepared| {
                 let repositories: Vec<_> = prepared.captured.iter().map(|delta| serde_json::json!({
                     "repository": delta.root, "base_commit": delta.base_commit, "base_kind": delta.base_kind,

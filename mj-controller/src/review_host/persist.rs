@@ -7,11 +7,13 @@ impl HostState {
         reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
         prepared: Result<Prepared, StartRefusal>,
     ) {
-        let cancelled = matches!(self.preparing.get(&session_id), Some(PreparingOperation::Review { cancelled, .. }) if cancelled.load(std::sync::atomic::Ordering::Acquire));
-        let prepared = if cancelled {
-            Err(StartRefusal("review preparation cancelled".into()))
-        } else {
-            prepared
+        // A cancellation that arrives after preparation succeeded still wins:
+        // nothing has opened yet. A preparation that failed keeps its own
+        // reason, which says more than the cancellation that followed it.
+        let cancelled = matches!(self.preparing.get(&session_id), Some(PreparingOperation::Review { cancel }) if cancel.is_cancelled());
+        let prepared = match prepared {
+            Ok(_) if cancelled => Err(StartRefusal("review preparation cancelled".into())),
+            prepared => prepared,
         };
         let prepared = match prepared {
             Ok(prepared) => prepared,
@@ -164,7 +166,7 @@ impl HostState {
                 let Some(pending) = self.pending_open.remove(&session_id) else {
                     return;
                 };
-                let cancelled = matches!(self.preparing.remove(&session_id), Some(PreparingOperation::Review { cancelled, .. }) if cancelled.load(std::sync::atomic::Ordering::Acquire));
+                let cancelled = matches!(self.preparing.remove(&session_id), Some(PreparingOperation::Review { cancel }) if cancel.is_cancelled());
                 if cancelled && result.is_ok() {
                     let mut state = pending.prepared.state;
                     state.active = None;
