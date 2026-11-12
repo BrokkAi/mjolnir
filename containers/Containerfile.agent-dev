@@ -343,6 +343,11 @@ COPY scripts/install-muse.py /opt/mjolnir/install-muse.py
 RUN python3 /opt/mjolnir/install-muse.py /opt/mjolnir/muse-runtime.json /usr/local/bin
 ENV MUSE_CLI=/usr/local/bin/muse
 
+COPY mj-core/assets/antigravity/runtime.json /opt/mjolnir/antigravity-runtime.json
+COPY scripts/install-antigravity.py /opt/mjolnir/install-antigravity.py
+RUN python3 /opt/mjolnir/install-antigravity.py /opt/mjolnir/antigravity-runtime.json /usr/local/bin
+ENV AGY_CLI_DISABLE_AUTO_UPDATE=true
+
 # Session workers construct a clean login environment instead of inheriting
 # the container exec environment. Keep image tool settings in that login too.
 RUN printf '%s\n' \
@@ -350,6 +355,7 @@ RUN printf '%s\n' \
         'export PLAYWRIGHT_BROWSERS_PATH=/ms-playwright' \
         'export MUSE_CLI=/usr/local/bin/muse' \
         'export OPENCODE_DISABLE_AUTOUPDATE=1' \
+        'export AGY_CLI_DISABLE_AUTO_UPDATE=true' \
         > /etc/profile.d/20-mjolnir-tools.sh
 
 RUN useradd --create-home --shell /bin/bash hel \

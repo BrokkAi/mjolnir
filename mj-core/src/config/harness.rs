@@ -344,6 +344,10 @@ impl HarnessKind {
             self.home_env().into(),
             crate::target_path::text(config_root),
         );
+        if self == Self::Antigravity {
+            // The managed pin owns updates, including during login/discovery.
+            environment.insert("AGY_CLI_DISABLE_AUTO_UPDATE".into(), "true".into());
+        }
         if self == Self::Kimi {
             // Kimi treats a session lock recorded under another hostname, or
             // under a live process with the recorded PID, as held forever.
