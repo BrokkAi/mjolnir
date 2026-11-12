@@ -1706,7 +1706,7 @@ fn only_a_finished_turn_that_produced_nothing_counts_as_unanswered() {
 
 /// Answers `initialize` and `session/new`, then fails the first
 /// `session/prompt` with a JSON-RPC error and completes the second.
-async fn scripted_bridge(stream: tokio::io::DuplexStream) -> usize {
+async fn scripted_bridge(stream: tokio::io::DuplexStream, login_path: PathBuf) -> usize {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let (read, mut write) = tokio::io::split(stream);
@@ -1739,6 +1739,13 @@ async fn scripted_bridge(stream: tokio::io::DuplexStream) -> usize {
             "session/prompt" => {
                 prompts += 1;
                 if prompts == 1 {
+                    // Delivery precedes failure: the diagnostic must retain
+                    // the login from before this prompt, not reread this one.
+                    std::fs::write(
+                        &login_path,
+                        br#"{"claudeAiOauth":{"accessToken":"new-access","expiresAt":2000}}"#,
+                    )
+                    .unwrap();
                     serde_json::json!({
                         "jsonrpc": "2.0",
                         "id": id,
@@ -3169,10 +3176,18 @@ async fn a_failure_the_harness_already_streamed_is_not_repeated_as_a_warning() {
     bridge.abort();
 }
 
+// Hard-won: #1515: delivery before the auth failure lost the rejected login's identity.
 #[tokio::test]
 async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
-    let bridge = tokio::spawn(scripted_bridge(bridge_stream));
+    let home = tempfile::tempdir().unwrap();
+    let login_path = home.path().join(".credentials.json");
+    std::fs::write(
+        &login_path,
+        br#"{"claudeAiOauth":{"accessToken":"old-access","expiresAt":1000}}"#,
+    )
+    .unwrap();
+    let bridge = tokio::spawn(scripted_bridge(bridge_stream, login_path));
     let (client_read, client_write) = tokio::io::split(client_stream);
     let transport = ByteStreams::new(client_write.compat_write(), client_read.compat());
 
@@ -3190,7 +3205,10 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
         goal_recovery: Default::default(),
         command: "scripted".into(),
         args: Vec::new(),
-        environment: BTreeMap::new(),
+        environment: BTreeMap::from([(
+            "CLAUDE_CONFIG_DIR".into(),
+            home.path().to_string_lossy().into_owned(),
+        )]),
         cwd: std::env::current_dir().unwrap(),
         additional_directories: Vec::new(),
         extra_mcp_servers: Vec::new(),
@@ -3244,12 +3262,24 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
             RuntimeEvent::PromptFinished {
                 request_id,
                 stop_reason,
+                diagnostic,
                 ..
-            } => break (request_id, stop_reason),
+            } => break (request_id, stop_reason, diagnostic),
             _ => {}
         }
     };
-    assert_eq!(failed, ("first".to_owned(), "error".to_owned()));
+    assert_eq!(
+        (&failed.0, &failed.1),
+        (&"first".to_owned(), &"error".to_owned())
+    );
+    let diagnostic = failed.2.expect("auth failure retains its diagnostic");
+    assert!(mj_core::credentials::turn_diagnostic_reports_auth_failure(
+        &diagnostic
+    ));
+    assert_eq!(
+        diagnostic.login_fingerprint,
+        Some(mj_core::credentials::credential_fingerprint(b"old-access"))
+    );
     let warning = warning.expect("a failed prompt must warn before it finishes the turn");
     assert!(warning.contains("Authentication required"), "{warning}");
     assert!(mj_core::credentials::auth_failure_signature(

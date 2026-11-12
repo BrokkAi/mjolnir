@@ -900,6 +900,10 @@ pub async fn run_daemon_owned(
     // Running. See `.agents/docs/claude-autonomous-turns.md`.
     durable_relay.set_managed_subagent(config.is_managed_subagent())?;
     durable_relay.set_turn_verdict_harness(config.harness);
+    if config.harness == HarnessKind::Claude {
+        durable_relay.authentication_login_path =
+            mj_core::credentials::claude_oauth_login_path(&config.environment);
+    }
     // Worker admission opens before profile preparation finishes. Claude must
     // already be protected from ACP steering during that window.
     durable_relay.set_steering_delivery_mode(config.harness, false);
@@ -2344,7 +2348,11 @@ pub(super) async fn serve_client_with_memory(
                 // They never reach DurableRelay, its journal, or its
                 // command ledger.
                 let operation = envelope.request.method_name();
+                let login_installed = matches!(&envelope.request, RelayRequest::InstallCredentials { .. });
                 let response = credential_response(envelope, &credentials, &relay_root).await;
+                if login_installed && matches!(response.body, RelayResponseBody::Ok { .. }) {
+                    wake_dispatch(&relay, &dispatch_wake)?;
+                }
                 write_logged_response(&mut writer, &response, &session_id, operation).await?;
                 continue;
             }

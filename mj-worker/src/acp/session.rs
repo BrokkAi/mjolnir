@@ -967,6 +967,20 @@ pub(super) async fn serve_session(
                 // `session/prompt` reply, so there is no harness that is safe
                 // to exempt and nothing left to special-case.
                 let stall_policy = spec.stall_policy.unwrap_or_else(turn_stall_policy);
+                let login_fingerprint = if spec.harness == HarnessKind::Claude
+                    && let Some(path) =
+                        mj_core::credentials::claude_oauth_login_path(&spec.environment)
+                {
+                    match read_claude_login_fingerprint(path).await {
+                        Ok(fingerprint) => fingerprint,
+                        Err(error) => {
+                            tracing::warn!(%error, "could not read the Claude login before prompting");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
                 let mut prompt: ActivePrompt = Box::pin(
                     connection
                         .send_request(PromptRequest::new(session_id.clone(), prompt))
@@ -1097,6 +1111,7 @@ pub(super) async fn serve_session(
                                             code: Some(PROMPT_UNANSWERED_STOP_REASON.to_owned()),
                                             http_status: None,
                                             reset_at: None,
+                                            login_fingerprint: None,
                                         });
                                         PROMPT_UNANSWERED_STOP_REASON.to_owned()
                                     } else {
@@ -1126,6 +1141,11 @@ pub(super) async fn serve_session(
                                     stop_reason
                                 }
                             };
+                            if let Some(diagnostic) = diagnostic.as_mut()
+                                && mj_core::credentials::turn_diagnostic_reports_auth_failure(diagnostic)
+                            {
+                                diagnostic.login_fingerprint = login_fingerprint.clone();
+                            }
                             emit_runtime_event(
                                 events,
                                 RuntimeEvent::PromptFinished {
@@ -1212,6 +1232,7 @@ pub(super) async fn serve_session(
                                         code: Some(TURN_STALLED_STOP_REASON.to_owned()),
                                         http_status: None,
                                         reset_at: None,
+                                        login_fingerprint: None,
                                     }),
                                 },
                             )

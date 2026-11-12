@@ -67,6 +67,7 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
     let mut session_configured = false;
     let mut kimi_poll = tokio::time::interval(KIMI_TASK_POLL_INTERVAL);
     kimi_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    recover_authentication(&relay).await?;
     dispatch_pending(
         &relay,
         &commands,
@@ -225,6 +226,7 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
                         verdict_tasks.shutdown().await;
                         return Ok(());
                     }
+                    recover_authentication(&relay).await?;
                     dispatch_pending(
                         &relay,
                         &commands,
@@ -261,6 +263,7 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
                     verdict_tasks.shutdown().await;
                     return Ok(());
                 }
+                recover_authentication(&relay).await?;
                 dispatch_pending(
                     &relay,
                     &commands,
@@ -385,6 +388,38 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
             }
         }
     }
+}
+
+/// Read the login outside the relay lock, then let the relay recheck the exact
+/// completion when admitting recovery. Both prompt completion and installs
+/// reach here, so their order cannot strand a failed turn.
+async fn recover_authentication(relay: &Arc<RelayCell>) -> Result<()> {
+    let pending = {
+        let relay = relay.lock().expect("relay state lock poisoned");
+        relay
+            .authentication_retry_identity()
+            .and_then(|(ordinal, _)| {
+                relay
+                    .authentication_login_path
+                    .clone()
+                    .map(|path| (ordinal, path))
+            })
+    };
+    if let Some((ordinal, path)) = pending {
+        match crate::acp::read_claude_login_fingerprint(path).await {
+            Ok(Some(login)) => {
+                relay
+                    .lock()
+                    .expect("relay state lock poisoned")
+                    .submit_authentication_retry(ordinal, &login)?;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, "could not check the Claude login for authentication recovery")
+            }
+        }
+    }
+    Ok(())
 }
 
 /// What observing a sub-agent's finishing prompt needs from its coordinator:

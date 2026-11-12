@@ -1657,6 +1657,80 @@ impl DurableRelay {
             && self.pending_close_barrier_id().is_none()
     }
 
+    /// One owner decides whether the interrupted turn still belongs to us.
+    /// The completion and its login evidence are durable; a newer prompt,
+    /// cancellation or another driver always wins over credential recovery.
+    #[cfg_attr(not(unix), allow(dead_code))] // The worker control runtime is Unix-only.
+    pub(crate) fn authentication_retry_identity(&self) -> Option<(u64, &str)> {
+        let facts = self.activity_facts();
+        if self.verdict_harness != Some(mj_core::config::HarnessKind::Claude)
+            || self.snapshot.continuation.quota_suppressed
+            || !self.snapshot.assessment_questions.is_empty()
+            || self.snapshot.goal.budget_limited()
+            || self
+                .snapshot
+                .goal
+                .snapshot
+                .as_ref()
+                .is_some_and(|g| g.status == "paused")
+            || !mj_core::activity::can_submit(&facts)
+            || mj_core::activity::driver_present(&facts)
+            || self.pending_checkpoint_barrier()
+            || self.pending_close_barrier_id().is_some()
+        {
+            return None;
+        }
+        let completed = self.snapshot.continuation.completed_command_id.as_ref()?;
+        let receipt = self.snapshot.handled_commands.get(completed)?;
+        let ordinal = receipt.terminal_ordinal?;
+        if self
+            .snapshot
+            .latest_prompt_accepted_ordinal
+            .is_some_and(|input| input > receipt.accepted_ordinal)
+            || self
+                .snapshot
+                .last_harness_turn_started_ordinal
+                .is_some_and(|start| start > ordinal)
+        {
+            return None;
+        }
+        let RelayCommandOutcome::Prompt {
+            diagnostic: Some(diagnostic),
+            ..
+        } = receipt.outcome.as_ref()?
+        else {
+            return None;
+        };
+        mj_core::credentials::turn_diagnostic_reports_auth_failure(diagnostic)
+            .then_some((ordinal, diagnostic.login_fingerprint.as_deref()?))
+    }
+
+    #[cfg_attr(not(unix), allow(dead_code))] // The worker control runtime is Unix-only.
+    pub(crate) fn submit_authentication_retry(
+        &mut self,
+        expected: u64,
+        login: &str,
+    ) -> Result<bool> {
+        let Some((ordinal, rejected)) = self.authentication_retry_identity() else {
+            return Ok(false);
+        };
+        if ordinal != expected || rejected == login {
+            return Ok(false);
+        }
+        let id = mj_core::continuation::GeneratedPrompt::AuthenticationRetry.command_id(ordinal);
+        self.submit_command(
+            &id,
+            RelayCommand::Prompt {
+                prompt: mj_core::continuation::prompt_blocks(),
+            },
+        )?
+        .map_err(|error| anyhow!("submit authentication recovery: {error:?}"))?;
+        self.append_relay_event(Some(&id), RelayObservation::Notice {
+            message: "Claude's login changed after an authentication failure. Automatically continuing the interrupted work.".into(),
+        })?;
+        Ok(true)
+    }
+
     pub fn capacity_retry_deadline(&self) -> Option<i64> {
         self.snapshot
             .capacity_retry

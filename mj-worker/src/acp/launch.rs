@@ -1,5 +1,16 @@
 use super::*;
 
+pub(crate) async fn read_claude_login_fingerprint(path: PathBuf) -> Result<Option<String>> {
+    tokio::task::spawn_blocking(move || {
+        let (_, bytes) = mj_core::credentials::read_credential_file(HarnessKind::Claude, &path)?;
+        Ok(mj_core::credentials::claude_access_token_fingerprint(
+            &bytes,
+        ))
+    })
+    .await
+    .context("read Claude login identity")?
+}
+
 /// The worker's sub-agent socket and the `mj-agents` role it backs: a parent
 /// delegates through it, a child only hands its report back.
 #[derive(Debug, Clone, PartialEq, Eq)]

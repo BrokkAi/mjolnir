@@ -3622,6 +3622,7 @@ fn an_unanswered_turn_reaches_wait_as_a_named_error() {
         code: Some("prompt_unanswered".into()),
         http_status: None,
         reset_at: None,
+        login_fingerprint: None,
     });
     let decision = WaitDecision::from_outcome(&outcome);
     assert_eq!(decision.outcome, WaitOutcome::Error);

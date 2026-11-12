@@ -2144,6 +2144,7 @@ fn a_child_whose_login_was_refused_fails_naming_its_profile_and_the_fix() {
         code: Some("service".into()),
         http_status: Some(503),
         reset_at: None,
+        login_fingerprint: None,
     });
     assert!(provider_failure(&old_provider_failure).is_some());
     for old_failure in [&old_login_failure, &old_provider_failure] {
@@ -5891,6 +5892,7 @@ async fn child_provider_retry_keeps_listings_notifications_and_parking_pending()
         code: Some("service".into()),
         http_status: None,
         reset_at: None,
+        login_fingerprint: None,
     });
     snapshot.materialized.applied_event_ordinal = turn.completed_ordinal;
     snapshot.materialized.applied_event_digest = format!("{:064x}", turn.completed_ordinal);
@@ -6041,6 +6043,7 @@ async fn provider_failed_child_report_names_its_turn_profile_and_backoff() {
         code: Some("limit".into()),
         http_status: None,
         reset_at: None,
+        login_fingerprint: None,
     };
     let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
     conversation.applied_event_ordinal = 9;
