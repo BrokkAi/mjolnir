@@ -68,27 +68,28 @@ fi
 [ "$action" = update ] || { echo 'unknown profile action' >&2; exit 2; }
 posix_block=$3
 fish_block=$4
-start='# >>> mbx (added by Mjolnir) >>>'
-if grep -Fq "$start" "$profile" 2>/dev/null; then
-    status=unchanged
-else
-    profile_dir=${profile%/*}
-    mkdir -p -- "$profile_dir"
-    # Preserve symlinked dotfiles by replacing their target, not the link.
-    if [ -L "$profile" ]; then profile=$(readlink -f -- "$profile"); fi
-    temporary=$(mktemp "${profile}.mjolnir.XXXXXX")
-    trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
-    if [ -e "$profile" ]; then cp -p -- "$profile" "$temporary"; fi
-    if [ -s "$temporary" ]; then printf '\n' >> "$temporary"; fi
-    if [ "$shell_kind" = fish ]; then
-        printf '%s\n' "$fish_block" >> "$temporary"
-    else
-        printf '%s\n' "$posix_block" >> "$temporary"
-    fi
-    mv -f -- "$temporary" "$profile"
-    trap - EXIT HUP INT TERM
-    status=changed
+# Local callers hold this same host lock through Rust; SSH callers acquire it here.
+lock=${5-"$HOME/.mbx.lock"}
+if [ -n "$lock" ]; then
+    exec 9>"$lock"
+    flock -x 9
 fi
+if [ "$shell_kind" = fish ]; then block=$fish_block; else block=$posix_block; fi
+existing=
+if [ -e "$profile" ]; then existing=$(cat -- "$profile"); fi
+case "$existing" in
+    *"$block"*) status=unchanged ;;
+    *)
+        profile_dir=${profile%/*}
+        mkdir -p -- "$profile_dir"
+        # One append preserves user bytes and follows profile symlinks.
+        block="
+$block
+"
+        printf '%s' "$block" >> "$profile"
+        status=changed
+        ;;
+esac
 printf '%s\n%s\n%s\n%s' "$status" "$shown" "$shell_kind" "$shim_dir"
 "#;
 
@@ -174,6 +175,7 @@ pub(super) fn install_candidate_kind(preview: &BuildCachePreview) -> Option<MbxI
 /// A fully staged install. Dropping it removes unpublished files after executor teardown.
 struct PreparedMbx {
     host: CacheHost,
+    home: PathBuf,
     program: PathBuf,
     kind: MbxInstallKind,
     staged: Option<PathBuf>,
@@ -264,6 +266,7 @@ fn prepare_mbx_with(
     let staged = stage_binary(&host, &home, &binary, &program, executor)?;
     Ok(PreparedMbx {
         host,
+        home,
         program,
         kind,
         staged: Some(staged),
@@ -299,7 +302,7 @@ impl PreparedMbx {
         self.staged = None;
         check_cancelled(executor)?;
         run_setup(&host, &program, executor)?;
-        let (profile_changed, profile) = update_profile(&host, &program, executor)?;
+        let (profile_changed, profile) = update_profile(&host, &self.home, &program, executor)?;
 
         check_cancelled(executor)?;
         let verified = probe_native_version(&host, executor)?
@@ -545,14 +548,43 @@ fn inspect_profile_selection(
     parse_profile_selection(&output.stdout)
 }
 
+fn lock_local_mbx(
+    home: &Path,
+    executor: &impl CommandExecutor,
+) -> Result<mj_core::file_lock::FileLock> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(home.join(".mbx.lock"))
+        .context("open mbx install lock")?;
+    loop {
+        check_cancelled(executor)?;
+        match file.try_lock() {
+            Ok(()) => return Ok(mj_core::file_lock::FileLock::new(file)),
+            Err(std::fs::TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(25)),
+            Err(std::fs::TryLockError::Error(error)) => {
+                return Err(error).context("lock mbx profile installation");
+            }
+        }
+    }
+}
+
 fn update_profile(
     host: &CacheHost,
+    home: &Path,
     program: &Path,
     executor: &impl CommandExecutor,
 ) -> Result<(bool, MbxProfileDetails)> {
     let binary_dir = program
         .parent()
         .context("the selected mbx path has no parent directory")?;
+    let _lock = if host.ssh().is_none() {
+        Some(lock_local_mbx(home, executor)?)
+    } else {
+        None
+    };
     let selection = inspect_profile_selection(host, binary_dir, executor)?;
     let posix_block = posix_profile_block(binary_dir, &selection.shim_dir);
     let fish_block = fish_profile_block(binary_dir, &selection.shim_dir);
@@ -564,6 +596,11 @@ fn update_profile(
             binary_dir.to_string_lossy().into_owned(),
             posix_block,
             fish_block,
+            if _lock.is_some() {
+                String::new()
+            } else {
+                home.join(".mbx.lock").to_string_lossy().into_owned()
+            },
         ],
         "add the mbx PATH block to the container host login profile",
     );
@@ -1279,23 +1316,44 @@ else:
         );
         let rerun_home = home.clone();
         let result = tokio::task::spawn_blocking(move || {
-            let executor = FixtureExecutor {
-                executor: targets::CancellableProcessExecutor::new(Arc::new(AtomicBool::new(
-                    false,
-                ))),
-                home: rerun_home.clone(),
-            };
-            install_mbx_with(&local_machine(), &executor, Some(&rerun_home), |_| {
-                Ok(binary)
+            std::thread::scope(|scope| {
+                let installs: Vec<_> = (0..2)
+                    .map(|_| {
+                        let home = rerun_home.clone();
+                        let binary = binary.clone();
+                        scope.spawn(move || {
+                            let executor = FixtureExecutor {
+                                executor: targets::CancellableProcessExecutor::new(Arc::new(
+                                    AtomicBool::new(false),
+                                )),
+                                home: home.clone(),
+                            };
+                            install_mbx_with(&local_machine(), &executor, Some(&home), |_| {
+                                Ok(binary)
+                            })
+                            .unwrap()
+                        })
+                    })
+                    .collect();
+                installs
+                    .into_iter()
+                    .map(|install| install.join().unwrap())
+                    .collect::<Vec<_>>()
             })
         })
         .await
-        .unwrap()
         .unwrap();
+        assert!(result.iter().all(|install| install.version == MBX_VERSION));
+        let result = &result[0];
         assert_eq!(result.version, MBX_VERSION);
         let profile = home.join(result.profile_file.trim_start_matches("~/"));
         let body = std::fs::read_to_string(profile).unwrap();
         assert_eq!(body.matches("# >>> mbx (added by Mjolnir) >>>").count(), 1);
+        assert_eq!(body.matches("# <<< mbx <<<").count(), 1);
+        assert!(body.contains(&posix_profile_block(
+            program.parent().unwrap(),
+            &home.join("data/mbx/bin")
+        )));
         assert!(
             !std::fs::read_dir(program.parent().unwrap())
                 .unwrap()
@@ -1452,10 +1510,12 @@ else:
                     binary_dir.to_str().unwrap(),
                     &posix_block,
                     &fish_block,
+                    "", // The local test caller owns the host lock below.
                 ],
             );
             let mut update = update;
             update.env.clone_from(&command.env);
+            let _profile_lock = lock_local_mbx(&home, &executor).unwrap();
             let first_update = executor.execute(&update).unwrap();
             assert_eq!(
                 std::str::from_utf8(&first_update.stdout).unwrap(),
@@ -1583,7 +1643,7 @@ else:
     fn profile_preview_and_install_use_one_shared_rule_script() {
         assert!(PROFILE_SCRIPT.contains("getent passwd"));
         assert!(PROFILE_SCRIPT.contains("${SHELL:-sh}"));
-        assert!(PROFILE_SCRIPT.contains("grep -Fq \"$start\" \"$profile\""));
+        assert!(PROFILE_SCRIPT.contains("case \"$existing\" in"));
         assert!(PROFILE_SCRIPT.contains("fish/conf.d/mbx.fish"));
         assert!(PROFILE_SCRIPT.contains("XDG_DATA_HOME"));
         let directory = Path::new("/home/example/.local/bin");
