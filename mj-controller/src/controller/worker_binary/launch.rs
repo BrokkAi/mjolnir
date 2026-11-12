@@ -557,7 +557,7 @@ impl Controller {
         let launch = self.worker_launch_config_for_move(session_id, &backend, operation)?;
         let workspace = worker_workspace_for_recovery(&backend, &launch.cwd);
         Ok(WorkerRecoveryPlan {
-            source_target: self.state.sessions[session_id]
+            source_target: *self.state.sessions[session_id]
                 .target
                 .clone()
                 .context("session target is missing")?,
@@ -846,7 +846,7 @@ impl Controller {
                         | mj_core::state::MovePhase::Cancelled
                 )
                 && session.last_profile == operation.source_profile_id
-                && session.target == operation.source_target
+                && session.target.as_deref() == operation.source_target.as_ref()
                 && matches!(
                     session.state,
                     mj_core::state::SessionState::Running

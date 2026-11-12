@@ -272,7 +272,7 @@ impl ViewerSnapshot {
                 ViewerSession {
                     attention: Default::default(),
                     oracle: session.oracle,
-                    oracle_choice: session.oracle_choice.clone(),
+                    oracle_choice: session.oracle_choice.clone().map(|v| *v),
                     subagents: session.subagents.clone().unwrap_or_default(),
                     at: start.at,
                     branch: start.branch,

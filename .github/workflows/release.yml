@@ -89,7 +89,7 @@ jobs:
 
   # Session workers run inside disposable Linux targets (containers and
   # instances), so they are static musl builds of the dedicated worker binary
-  # the controller's platform. Desktop bundles ship both architectures beside
+  # the controller's platform. Release bundles ship both architectures beside
   # the controller as mj-worker-<triple>, which is where the controller's
   # worker lookup expects them.
   build-worker-x64:
@@ -196,10 +196,10 @@ jobs:
         with:
           targets: x86_64-unknown-linux-gnu
 
-      - name: Install Linux desktop and audio dependencies
+      - name: Install Linux audio dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --assume-yes libasound2-dev libwebkit2gtk-4.1-dev
+          sudo apt-get install --no-install-recommends --assume-yes libasound2-dev
 
       - name: Install pinned Linux CLI toolchain
         run: bash scripts/setup-linux-cli-toolchain.sh
@@ -207,14 +207,14 @@ jobs:
       - name: Build and verify glibc 2.28 CLI
         run: bash scripts/build-linux-cli.sh x86_64-unknown-linux-gnu
 
-      - name: Build desktop and voice worker
-        run: cargo build --release --locked -p brokk-mj-desktop -p brokk-mj-voice-worker --target x86_64-unknown-linux-gnu
+      - name: Build voice worker
+        run: cargo build --release --locked -p brokk-mj-voice-worker --target x86_64-unknown-linux-gnu
 
       - name: Stage native binaries
         run: |
           mkdir native
           cp target/release-cli/x86_64-unknown-linux-gnu/release/mj native/
-          cp target/x86_64-unknown-linux-gnu/release/mj-desktop target/x86_64-unknown-linux-gnu/release/mj-voice-worker native/
+          cp target/x86_64-unknown-linux-gnu/release/mj-voice-worker native/
 
       - uses: actions/upload-artifact@v7
         with:
@@ -253,13 +253,12 @@ jobs:
           name="brokk-mjolnir-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu"
           mkdir "$name"
           cp "native/mj" "$name/"
-          cp "native/mj-desktop" "$name/"
           cp "native/mj-voice-worker" "$name/"
           cp workers/mj-worker-x86_64-unknown-linux-musl/mj-worker "$name/mj-worker-x86_64-unknown-linux-musl"
           cp workers/mj-worker-aarch64-unknown-linux-musl/mj-worker "$name/mj-worker-aarch64-unknown-linux-musl"
           cp workers/mj-worker-x86_64-apple-darwin/mj-worker "$name/mj-worker-x86_64-apple-darwin"
           cp workers/mj-worker-aarch64-apple-darwin/mj-worker "$name/mj-worker-aarch64-apple-darwin"
-          chmod 0755 "$name/mj" "$name/mj-desktop" "$name/mj-voice-worker" "$name"/mj-worker-*
+          chmod 0755 "$name/mj" "$name/mj-voice-worker" "$name"/mj-worker-*
           cp README.md LICENSE "$name/"
           mkdir "$name/licenses"
           cp licenses/SOURCE.md licenses/OFL-1.1.md release-notices/THIRD_PARTY_LICENSES.html release-notices/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt "$name/licenses/"
@@ -279,7 +278,7 @@ jobs:
   build-linux-arm64:
     name: Build aarch64-unknown-linux-gnu
     needs: verify-version
-    # Build natively so desktop and audio system dependencies match the target.
+    # Build natively so audio system dependencies match the target.
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v6
@@ -291,10 +290,10 @@ jobs:
         with:
           targets: aarch64-unknown-linux-gnu
 
-      - name: Install Linux desktop and audio dependencies
+      - name: Install Linux audio dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --assume-yes libasound2-dev libwebkit2gtk-4.1-dev
+          sudo apt-get install --no-install-recommends --assume-yes libasound2-dev
 
       - name: Install pinned Linux CLI toolchain
         run: bash scripts/setup-linux-cli-toolchain.sh
@@ -302,14 +301,14 @@ jobs:
       - name: Build and verify glibc 2.28 CLI
         run: bash scripts/build-linux-cli.sh aarch64-unknown-linux-gnu
 
-      - name: Build desktop and voice worker
-        run: cargo build --release --locked -p brokk-mj-desktop -p brokk-mj-voice-worker --target aarch64-unknown-linux-gnu
+      - name: Build voice worker
+        run: cargo build --release --locked -p brokk-mj-voice-worker --target aarch64-unknown-linux-gnu
 
       - name: Stage native binaries
         run: |
           mkdir native
           cp target/release-cli/aarch64-unknown-linux-gnu/release/mj native/
-          cp target/aarch64-unknown-linux-gnu/release/mj-desktop target/aarch64-unknown-linux-gnu/release/mj-voice-worker native/
+          cp target/aarch64-unknown-linux-gnu/release/mj-voice-worker native/
 
       - uses: actions/upload-artifact@v7
         with:
@@ -348,13 +347,12 @@ jobs:
           name="brokk-mjolnir-${GITHUB_REF_NAME}-aarch64-unknown-linux-gnu"
           mkdir "$name"
           cp "native/mj" "$name/"
-          cp "native/mj-desktop" "$name/"
           cp "native/mj-voice-worker" "$name/"
           cp workers/mj-worker-x86_64-unknown-linux-musl/mj-worker "$name/mj-worker-x86_64-unknown-linux-musl"
           cp workers/mj-worker-aarch64-unknown-linux-musl/mj-worker "$name/mj-worker-aarch64-unknown-linux-musl"
           cp workers/mj-worker-x86_64-apple-darwin/mj-worker "$name/mj-worker-x86_64-apple-darwin"
           cp workers/mj-worker-aarch64-apple-darwin/mj-worker "$name/mj-worker-aarch64-apple-darwin"
-          chmod 0755 "$name/mj" "$name/mj-desktop" "$name/mj-voice-worker" "$name"/mj-worker-*
+          chmod 0755 "$name/mj" "$name/mj-voice-worker" "$name"/mj-worker-*
           cp README.md LICENSE "$name/"
           mkdir "$name/licenses"
           cp licenses/SOURCE.md licenses/OFL-1.1.md release-notices/THIRD_PARTY_LICENSES.html release-notices/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt "$name/licenses/"
@@ -387,7 +385,7 @@ jobs:
       - name: Build native binaries
         run: |
           for target in x86_64-apple-darwin aarch64-apple-darwin; do
-            cargo build --release --locked -p brokk-mjolnir -p brokk-mj-worker -p brokk-mj-desktop -p brokk-mj-voice-worker --target "$target"
+            cargo build --release --locked -p brokk-mjolnir -p brokk-mj-worker -p brokk-mj-voice-worker --target "$target"
           done
 
       - name: Stage native binaries
@@ -395,7 +393,7 @@ jobs:
           for target in x86_64-apple-darwin aarch64-apple-darwin; do
             mkdir -p "native/$target"
             cp "target/$target/release/mj" "target/$target/release/mj-worker" \
-              "target/$target/release/mj-desktop" "target/$target/release/mj-voice-worker" "native/$target/"
+              "target/$target/release/mj-voice-worker" "native/$target/"
           done
 
       - uses: actions/upload-artifact@v7
@@ -456,13 +454,12 @@ jobs:
           mkdir "$name"
           cp "native/mj" "$name/"
           cp "native/mj-worker" "$name/"
-          cp "native/mj-desktop" "$name/"
           cp "native/mj-voice-worker" "$name/"
           cp workers/mj-worker-x86_64-unknown-linux-musl/mj-worker "$name/mj-worker-x86_64-unknown-linux-musl"
           cp workers/mj-worker-aarch64-unknown-linux-musl/mj-worker "$name/mj-worker-aarch64-unknown-linux-musl"
           cp workers/mj-worker-x86_64-apple-darwin/mj-worker "$name/mj-worker-x86_64-apple-darwin"
           cp workers/mj-worker-aarch64-apple-darwin/mj-worker "$name/mj-worker-aarch64-apple-darwin"
-          chmod 0755 "$name/mj" "$name/mj-worker" "$name/mj-desktop" "$name/mj-voice-worker" "$name"/mj-worker-*
+          chmod 0755 "$name/mj" "$name/mj-worker" "$name/mj-voice-worker" "$name"/mj-worker-*
           cp README.md LICENSE "$name/"
           mkdir "$name/licenses"
           cp licenses/SOURCE.md licenses/OFL-1.1.md release-notices/THIRD_PARTY_LICENSES.html release-notices/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt "$name/licenses/"
@@ -510,13 +507,12 @@ jobs:
           mkdir "$name"
           cp "native/mj" "$name/"
           cp "native/mj-worker" "$name/"
-          cp "native/mj-desktop" "$name/"
           cp "native/mj-voice-worker" "$name/"
           cp workers/mj-worker-x86_64-unknown-linux-musl/mj-worker "$name/mj-worker-x86_64-unknown-linux-musl"
           cp workers/mj-worker-aarch64-unknown-linux-musl/mj-worker "$name/mj-worker-aarch64-unknown-linux-musl"
           cp workers/mj-worker-x86_64-apple-darwin/mj-worker "$name/mj-worker-x86_64-apple-darwin"
           cp workers/mj-worker-aarch64-apple-darwin/mj-worker "$name/mj-worker-aarch64-apple-darwin"
-          chmod 0755 "$name/mj" "$name/mj-worker" "$name/mj-desktop" "$name/mj-voice-worker" "$name"/mj-worker-*
+          chmod 0755 "$name/mj" "$name/mj-worker" "$name/mj-voice-worker" "$name"/mj-worker-*
           cp README.md LICENSE "$name/"
           mkdir "$name/licenses"
           cp licenses/SOURCE.md licenses/OFL-1.1.md release-notices/THIRD_PARTY_LICENSES.html release-notices/SUPPLEMENTAL_THIRD_PARTY_NOTICES.txt "$name/licenses/"
@@ -550,14 +546,14 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Build controller and desktop
-        run: cargo build --release --locked -p brokk-mjolnir -p brokk-mj-desktop --target x86_64-pc-windows-msvc
+      - name: Build controller
+        run: cargo build --release --locked -p brokk-mjolnir --target x86_64-pc-windows-msvc
 
       - name: Stage native binaries
         shell: bash
         run: |
           mkdir native
-          cp target/x86_64-pc-windows-msvc/release/mj.exe target/x86_64-pc-windows-msvc/release/mj-desktop.exe native/
+          cp target/x86_64-pc-windows-msvc/release/mj.exe native/
           native/mj.exe --version
 
       - uses: actions/upload-artifact@v7
@@ -599,7 +595,6 @@ jobs:
           name="brokk-mjolnir-${GITHUB_REF_NAME}-x86_64-pc-windows-msvc"
           mkdir "$name"
           cp "native/mj.exe" "$name/"
-          cp "native/mj-desktop.exe" "$name/"
           cp workers/mj-worker-x86_64-unknown-linux-musl/mj-worker "$name/mj-worker-x86_64-unknown-linux-musl"
           cp workers/mj-worker-aarch64-unknown-linux-musl/mj-worker "$name/mj-worker-aarch64-unknown-linux-musl"
           cp README.md LICENSE "$name/"

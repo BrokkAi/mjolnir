@@ -404,10 +404,8 @@ async fn autoconfigure_settings(
                 }
             }
         },
-        None,
     )
-    .await
-    .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    .await;
     let mut reviewers = configured.reviewers;
     if reviewers.is_empty() {
         return Err(ApiError::bad_request(

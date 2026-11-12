@@ -173,6 +173,145 @@ pub struct ToolCallPresentation {
     pub summary_version: u8,
 }
 
+/// An ACP call retained as JSON text. All cached interpretations are built
+/// together; replacing the call cannot leave metadata from an older update.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(from = "serde_json::Value")]
+pub struct OpaqueToolCall {
+    json: Box<serde_json::value::RawValue>,
+    metadata: Box<ToolCallMetadata>,
+}
+
+#[derive(Debug, Clone)]
+struct ToolCallMetadata {
+    raw_status: Option<Box<str>>,
+    typed_status: Option<ToolCallStatus>,
+    id: Option<Box<str>>,
+    terminal_ids: Vec<String>,
+    fallback: bool,
+    raw_result: Option<(u32, usize, [u8; 32])>,
+}
+
+impl Serialize for OpaqueToolCall {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.json.serialize(serializer)
+    }
+}
+impl PartialEq for OpaqueToolCall {
+    fn eq(&self, other: &Self) -> bool {
+        self.json.get() == other.json.get() || self.value() == other.value()
+    }
+}
+impl Eq for OpaqueToolCall {}
+
+impl From<serde_json::Value> for OpaqueToolCall {
+    fn from(value: serde_json::Value) -> Self {
+        use agent_client_protocol::v1::schema::ToolCall;
+        use sha2::{Digest, Sha256};
+        let decoded = ToolCall::deserialize(&value).ok();
+        let raw_result = (|| {
+            if !matches!(
+                value.get("status").and_then(serde_json::Value::as_str),
+                Some("completed" | "failed")
+            ) {
+                return None;
+            }
+            let raw = value.get("rawOutput")?;
+            let exit = u32::try_from(raw.get("exit_code")?.as_u64()?).ok()?;
+            let output = raw.get("output")?;
+            let (len, digest) = match output {
+                serde_json::Value::String(s) => (s.len(), Sha256::digest(s.as_bytes()).into()),
+                serde_json::Value::Array(values) => {
+                    let mut hash = Sha256::new();
+                    for value in values {
+                        hash.update([u8::try_from(value.as_u64()?).ok()?]);
+                    }
+                    (values.len(), hash.finalize().into())
+                }
+                _ => return None,
+            };
+            Some((exit, len, digest))
+        })();
+        let metadata = ToolCallMetadata {
+            raw_status: value
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .map(Into::into),
+            typed_status: decoded.as_ref().map(|call| call.status),
+            id: value
+                .get("toolCallId")
+                .and_then(serde_json::Value::as_str)
+                .map(Into::into),
+            terminal_ids: tool_call_terminal_ids(&value),
+            fallback: decoded
+                .as_ref()
+                .is_some_and(crate::acp::is_fallback_terminal_tool_call),
+            raw_result,
+        };
+        Self {
+            json: serde_json::value::to_raw_value(&value).expect("JSON Value serializes"),
+            metadata: Box::new(metadata),
+        }
+    }
+}
+
+impl OpaqueToolCall {
+    pub fn edit<R>(&mut self, edit: impl FnOnce(&mut serde_json::Value) -> R) -> R {
+        let mut value = self.value();
+        let result = edit(&mut value);
+        *self = value.into();
+        result
+    }
+    pub fn value(&self) -> serde_json::Value {
+        serde_json::from_str(self.json.get()).expect("opaque call contains valid JSON")
+    }
+    pub fn decode(&self) -> serde_json::Result<agent_client_protocol::v1::schema::ToolCall> {
+        serde_json::from_str(self.json.get())
+    }
+    pub fn raw_status(&self) -> Option<&str> {
+        self.metadata.raw_status.as_deref()
+    }
+    pub fn typed_status(&self) -> ToolCallStatus {
+        self.metadata
+            .typed_status
+            .unwrap_or(ToolCallStatus::Pending)
+    }
+    pub fn typed_valid(&self) -> bool {
+        self.metadata.typed_status.is_some()
+    }
+    pub fn id(&self) -> Option<&str> {
+        self.metadata.id.as_deref()
+    }
+    pub fn terminal_ids(&self) -> &[String] {
+        &self.metadata.terminal_ids
+    }
+    pub fn is_fallback(&self) -> bool {
+        self.metadata.fallback
+    }
+    pub fn matches_raw_result(&self, record: &TerminalOutputRecord, digest: &[u8; 32]) -> bool {
+        self.metadata.raw_result.is_some_and(|(exit, len, expected)| {
+            record.exit_code == Some(exit) && record.signal.is_none() && record.output.len() == len
+                && &expected == digest
+                // Keep exact ownership even in the event of a digest collision.
+                && record.matches_tool_raw_result(&self.value())
+        })
+    }
+}
+
+/// One interpretation of ACP terminal references for opaque metadata and
+/// transient JSON readers (for example summaries and relay update fields).
+pub fn tool_call_terminal_ids(call: &serde_json::Value) -> Vec<String> {
+    use agent_client_protocol::v1::schema::ToolCallContent;
+    let Some(serde_json::Value::Array(content)) = call.get("content") else {
+        return Vec::new();
+    };
+    content.iter().filter_map(|value| match ToolCallContent::deserialize(value) {
+        Ok(ToolCallContent::Terminal(terminal)) => Some(terminal.terminal_id.0.to_string()),
+        Ok(_) => None,
+        Err(error) => { tracing::warn!(%error, "ignoring malformed tool-call content while locating terminal output"); None }
+    }).collect()
+}
+
 /// The current value of one logical transcript item. ACP structures whose
 /// schemas can grow are kept as JSON values, while logical item identity and
 /// lifecycle remain controller-owned and stable.
@@ -201,7 +340,7 @@ pub enum TranscriptBody {
     Tool {
         /// Complete current ACP `ToolCall`, updated field-for-field as
         /// `ToolCallUpdate` notifications arrive.
-        call: serde_json::Value,
+        call: OpaqueToolCall,
         /// Output of the terminals this call's content refers to. It is a
         /// sibling of `call` rather than part of it because `ToolCall::update`
         /// replaces `content` wholesale, which would discard anything injected
@@ -354,6 +493,12 @@ pub struct TerminalOutputRecord {
 }
 
 impl TerminalOutputRecord {
+    /// Compute once before comparing one terminal event with the tool window.
+    pub fn raw_result_digest(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(self.output.as_bytes()).into()
+    }
+
     /// Whether the command ended the way a caller asked for: exit status zero
     /// and no signal. Anything else — a nonzero exit, a signal, or no status at
     /// all because the terminal was released before one was observed — is

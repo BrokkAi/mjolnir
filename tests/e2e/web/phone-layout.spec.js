@@ -388,15 +388,15 @@ test('delivered messages in one batch keep separate prose rows after reload', as
   await page.route('**/api/v1/sessions/parent/history*', route => route.fulfill({
     contentType: 'application/json',
     body: JSON.stringify({ frontier: 17, before: null, items: messages.map(message => ({
-      role: message.role, label: message.label, text: message.lines.join('\n'), recorded_at_ms: message.recorded_at_ms,
+      position: message.id, stable_id: message.stable_id, role: message.role, label: message.label, text: message.lines.join('\n'), recorded_at_ms: message.recorded_at_ms,
     })) }),
   }));
   await page.locator('#earlier-messages').click();
-  const history = page.getByRole('dialog', { name: 'Earlier messages' });
+  const history = page.locator('#conversation-feed');
   await expect(history).toContainText('Message from Review helper');
   await expect(history).toContainText('The second message arrived in the same delivery.');
-  await expect(history.locator('time')).toHaveCount(2);
-  await history.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(history.locator('[data-entry-id="message:review"] time, [data-entry-id="message:build"] time')).toHaveCount(2);
+
   await page.reload();
   await expect(page.locator('.entry.tone-message')).toHaveCount(2);
   await expect(page.locator('.entry[data-entry-id="message:build"]')).toContainText('The second message arrived in the same delivery.');

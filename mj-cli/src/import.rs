@@ -319,7 +319,7 @@ fn import_native(
         .context("import did not add its session to controller state")?;
     session.workspace_id = workspace_id.to_owned();
     let (review, review_notice) = import_review(&config, review);
-    session.review = review;
+    session.review = review.map(Box::new);
     persist_imported_session(
         session,
         bundle.map(|bundle| crate::daemon::ImportedBundle {

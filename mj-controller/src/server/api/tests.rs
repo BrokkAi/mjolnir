@@ -5123,12 +5123,12 @@ fn a_published_session_says_whether_it_has_a_checkpoint() {
     assert!(!snapshot.sessions[0].has_checkpoint);
 
     state.sessions.get_mut("session-1").unwrap().checkpoint =
-        Some(mj_core::state::CheckpointMetadata {
+        Some(Box::new(mj_core::state::CheckpointMetadata {
             archive_path: "/private/archive.hel.zip".into(),
             sha256: "a".repeat(64),
             created_at: "now".into(),
             event_frontier: 3,
-        });
+        }));
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     assert!(snapshot.sessions[0].has_checkpoint);
     let published = serde_json::to_string(&snapshot.sessions[0]).unwrap();

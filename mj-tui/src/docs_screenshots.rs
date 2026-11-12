@@ -293,13 +293,14 @@ fn documentation_conversation() -> MaterializedSession {
             transcript_item(
                 3,
                 TranscriptBody::Tool {
-                    call: serde_json::json!({
+                    call: (serde_json::json!({
                         "toolCallId": "inspect-terminal",
                         "title": "Inspect terminal layout and shared styles",
                         "kind": "read",
                         "status": "completed",
                         "content": []
-                    }),
+                    }))
+                    .into(),
                     terminal_outputs: Vec::new(),
                     terminal_refs: Vec::new(),
                     presentation: None,

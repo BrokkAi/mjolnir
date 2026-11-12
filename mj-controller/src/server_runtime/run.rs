@@ -178,9 +178,12 @@ pub(crate) async fn run_server(
     startup.finished("load cookie credentials");
     // The documented `/api/v1` surface authenticates with a persisted bearer
     // token and drives sessions through the daemon-side backend.
-    options.set_api_token(crate::server::load_or_create_api_token(
-        &crate::server::api_token_path(),
-    )?);
+    let token = crate::server::load_or_create_api_token(&crate::server::api_token_path())?;
+    daemon_runtime
+        .api_credential
+        .set(token)
+        .map_err(|_| anyhow::anyhow!("API credential already initialized"))?;
+    options.set_api_token(daemon_runtime.api_credential.get().unwrap().clone());
     options.set_subagent_backend(api_backend.clone());
     // A launch onto a target the daemon has no worker binary for is refused at
     // admission, from the configuration as it is on disk right now.
@@ -931,6 +934,7 @@ pub(crate) async fn run_server(
                     // same disk, so it runs on the same supervised task set
                     // and under the same cap as a new-session preflight.
                     let crate::server::NewPreflightRequest {
+                        profile_id, workspace_id,
                         additional_mounts,
                         bundle_id,
                         target_id,
@@ -977,7 +981,14 @@ pub(crate) async fn run_server(
                     let config = controller.config.clone();
                     let project_validation = project_directory.is_some();
                     let task_termination = termination.clone();
-                    let Ok(upgrade_task) = crate::upgrade::activity("project preflight") else { continue };
+                    // Disposable reads are cancelled with the server during
+                    // handoff. Only confirmed Git repairs mutate machine state.
+                    let upgrade_task = if remote_repairs.is_empty() {
+                        None
+                    } else {
+                        let Ok(work) = crate::upgrade::activity("new-session preflight remote repairs") else { continue };
+                        Some(work)
+                    };
                     preflight_jobs.spawn(async move {
                         let _upgrade_task = upgrade_task;
                         let cancelled = Arc::new(AtomicBool::new(false));
@@ -985,25 +996,13 @@ pub(crate) async fn run_server(
                         let mut blocking = tokio::task::spawn_blocking(move || {
                             let executor = CancellableProcessExecutor::new(cancelled.clone())
                                 .with_deadline(Duration::from_secs(30));
-                            let mount_controller = config_only_controller(config.clone());
-                            for mount in &additional_mounts {
-                                if let Err(error) = mount_controller.validate_mount_source(
-                                    &target_id, &mount.source, &executor,
-                                ) {
-                                    tracing::debug!(%error, "phone attached directory check failed");
-                                    return Err(PreflightFailure::InvalidMount);
-                                }
-                            }
-                            run_new_preflight_with_cancellation(
-                                config,
-                                bundle_id,
-                                target_id,
-                                project_directory,
-                                cancelled,
-                                remote_repairs,
-                            ).map_err(|error| {
-                                tracing::debug!(%error, project_validation, "phone preflight check failed");
-                                if project_validation {
+                            preflight_new_request(config, mj_client::daemon::NewSessionPreflightRequest {
+                                additional_mounts, bundle_id, target_id, project_directory,
+                                remote_repairs, profile_id, workspace_id,
+                            }, executor).map_err(|error| {
+                                if error.downcast_ref::<InvalidNewMount>().is_some() {
+                                    PreflightFailure::InvalidMount
+                                } else if project_validation {
                                     PreflightFailure::Validation
                                 } else {
                                     PreflightFailure::InvalidRepository(format!("{error:#}"))

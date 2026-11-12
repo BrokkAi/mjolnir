@@ -908,12 +908,10 @@ pub(super) fn compact_materialized_transcript_in(
 
 /// How many transcript items a polled projection carries.
 ///
-/// Every viewer of a polled projection is bounded already: the conversation
-/// pane keeps `chat::TAIL_SEED_ITEMS` (256) entries, and the browser
-/// transcript keeps 1,000 rendered lines. This is set above both, since an
-/// entry renders to at least one line, so the window is the whole of what any
-/// of them would show.
-pub const PROJECTION_TAIL_ITEMS: usize = 1_024;
+/// Both the browser and TUI page older history inline from the store. Keep
+/// twice the TUI's 256 seed entries for the initial window; the browser's
+/// independent 1,000 rendered-line budget may clip this window further.
+pub const PROJECTION_TAIL_ITEMS: usize = 512;
 
 /// Load the same safe window the live projector maintains, without first
 /// deserializing all of the conversation. Read metadata and bodies together.

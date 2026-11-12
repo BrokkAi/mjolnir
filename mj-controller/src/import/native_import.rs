@@ -185,7 +185,7 @@ pub fn import_native_session(
             draft_input: String::new(),
             last_error: None,
             last_checkpoint_error: None,
-            checkpoint: Some(checkpoint),
+            checkpoint: Some(Box::new(checkpoint)),
         },
     );
     Ok(ImportedClaudeSession {
