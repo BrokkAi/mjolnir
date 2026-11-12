@@ -86,6 +86,12 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
         "StrictHostKeyChecking=yes",
         "-o",
         "UserKnownHostsFile=" + str(p / "known_hosts"),
+        # Hard-won: acf349c6b: a user's shared ControlMaster connection took
+        # over the tunnel's forward, so its listening line never appeared.
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPath=" + str(p / "cm"),
     ]
     (p / "client-config").mkdir()
     (p / "client-data").mkdir()
@@ -113,6 +119,12 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
                 os.environ,
                 MJ_CONFIG_DIR=str(p / "client-config"),
                 MJ_DATA_DIR=str(p / "client-data"),
+            )
+            # An existing shared master, as a user's ssh_config would create.
+            subprocess.run(
+                ["ssh", "-M", "-N", "-f", "-o", "ControlPersist=yes", *args, "127.0.0.1"],
+                check=True,
+                timeout=60,
             )
             if options.scenario == "control":
                 subprocess.run(
@@ -284,6 +296,7 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
                     "PASS: SSH sessions before/after remote restart; no client metadata/store"
                 )
         finally:
+            subprocess.run(["ssh", "-O", "exit", *args, "127.0.0.1"], capture_output=True)
             if options.scenario == "control":
                 subprocess.run([str(wrapper), "--instance", "ssh-discovery-e2e",
                                 "daemon", "stop"])

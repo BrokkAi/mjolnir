@@ -118,6 +118,21 @@ pub async fn open(
     }
 }
 
+/// The `-L` destination for the discovered control address, as seen from the
+/// remote host. A daemon listening on a wildcard is reached through loopback
+/// of the same family; IPv6 needs brackets in OpenSSH forwarding syntax.
+fn forward_destination(address: std::net::SocketAddr) -> String {
+    let ip = match address.ip() {
+        std::net::IpAddr::V4(ip) if ip.is_unspecified() => std::net::Ipv4Addr::LOCALHOST.into(),
+        std::net::IpAddr::V6(ip) if ip.is_unspecified() => std::net::Ipv6Addr::LOCALHOST.into(),
+        ip => ip,
+    };
+    match ip {
+        std::net::IpAddr::V4(ip) => format!("{ip}:{}", address.port()),
+        std::net::IpAddr::V6(ip) => format!("[{ip}]:{}", address.port()),
+    }
+}
+
 fn select_port() -> Result<u16> {
     let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
     Ok(listener.local_addr()?.port())
@@ -133,10 +148,19 @@ async fn open_with_port(
     loop {
         let local_addr = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port()?));
         let mut command = tokio::process::Command::new("ssh");
+        // The tunnel needs its own connection. Through a shared ControlMaster
+        // connection the master would own the listener: its "listening" line
+        // would not reach this child's stderr, and stopping this child would
+        // not remove the forward. OpenSSH keeps the first value of an option,
+        // so these override the user's `ssh_args` and ssh_config.
         command
             .args([
                 "-N",
                 "-v",
+                "-o",
+                "ControlMaster=no",
+                "-o",
+                "ControlPath=none",
                 "-o",
                 "ExitOnForwardFailure=yes",
                 "-o",
@@ -145,9 +169,9 @@ async fn open_with_port(
             .args(&placement.ssh_args)
             .arg("-L")
             .arg(format!(
-                "127.0.0.1:{}:127.0.0.1:{}",
+                "127.0.0.1:{}:{}",
                 local_addr.port(),
-                endpoint.control_address.port()
+                forward_destination(endpoint.control_address)
             ))
             .arg(placement.host.as_deref().context("missing SSH host")?);
         let child = mj_core::subprocess::SupervisedChild::spawn(&mut command)?;
