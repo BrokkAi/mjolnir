@@ -821,15 +821,12 @@ name = "brokk-mj-voice-worker"
 version = "2.71.0"
 dependencies = [
  "anyhow",
- "brokk-anvil-client",
  "brokk-mj-core",
- "bytes",
  "cpal",
  "libloading",
  "serde",
  "serde_json",
  "tempfile",
- "tokio",
  "tokio-util",
 ]
 

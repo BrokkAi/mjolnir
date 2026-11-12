@@ -121,6 +121,12 @@ impl ActiveChat {
                 self.state.dismiss_submission(&command_id);
             }
             ChatAction::ResendSubmission { command_id } => {
+                if self
+                    .state
+                    .prepare_receipt_retry(&command_id, self.session.session_id())
+                {
+                    return ChatEventOutcome::Handled;
+                }
                 if let Some(operation) = self.state.resend_submission(&command_id) {
                     queue_chat_remote_operation(
                         self.remote.operations(),
@@ -371,14 +377,21 @@ impl ActiveChat {
                     } else {
                         self.state.set_notice(notice);
                     }
-                } else if let Some(auth_path) = self.voice_auth.clone() {
+                } else if self.state.voice_available {
                     let (cancel_tx, cancel_rx) = std::sync::mpsc::channel();
                     self.voice_cancel = Some(cancel_tx);
                     self.voice_finishing = false;
                     self.state.voice_active = true;
                     self.state
                         .set_notice("Starting microphone… click it again to transcribe");
-                    spawn_dictation(auth_path, self.voice_updates_tx.clone(), cancel_rx);
+                    spawn_dictation(
+                        self.context
+                            .as_ref()
+                            .map(|context| context.session.last_profile.clone())
+                            .unwrap_or_default(),
+                        self.voice_updates_tx.clone(),
+                        cancel_rx,
+                    );
                 }
             }
             // Moving the keyboard to another pane is not leaving the

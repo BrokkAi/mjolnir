@@ -739,6 +739,24 @@ pub enum DaemonAction {
         target_id: String,
         mounts: Vec<mj_core::targets::AdditionalMount>,
     },
+    /// Raw file fragments. Completion supplies the SHA-256 of all bytes.
+    UploadChunk {
+        #[serde(with = "chunk_bytes")]
+        bytes: Vec<u8>,
+        sha256: Option<String>,
+    },
+    InstallAttachment {
+        session_id: String,
+        reference: mj_core::attachment::AttachmentRef,
+        blob: String,
+    },
+    TranscriptionAvailable {
+        preferred_profile: String,
+    },
+    TranscribeAudio {
+        preferred_profile: String,
+        blob: String,
+    },
     RecordOperatorActivity,
     SetOperatorAway {
         away: bool,
@@ -861,7 +879,8 @@ pub enum DaemonAction {
         workspace_id: String,
         layout: mj_core::workspace::ConversationLayout,
     },
-    PersistImportedSession {
+    ImportSession {
+        blob: String,
         session: Box<SessionRecord>,
         /// A project the import synthesized. The daemon writes it with the
         /// session, so a client never edits the daemon's configuration.
@@ -1229,6 +1248,10 @@ pub enum DaemonReply {
     ResolvedPath(std::path::PathBuf),
     MountValidation(std::path::PathBuf, Option<String>),
     SessionMountValidation(Option<(String, String)>),
+    TranscriptionAvailable(bool),
+    Transcription(String),
+    BlobUploaded(String),
+    AttachmentInstalled(mj_core::attachment::AttachmentRef),
     LifecycleAccepted(LifecycleReceipt),
     /// Only a captured operation result may report this failure.
     LifecycleFailed(String),
@@ -1851,6 +1874,163 @@ impl DaemonClient {
         }
     }
 
+    /// Streams raw bytes on this connection. The returned blob is connection-scoped;
+    /// consume it before disconnecting. Delivery failures are never replayed.
+    pub async fn upload(
+        &mut self,
+        reader: &mut (impl tokio::io::AsyncRead + Unpin),
+    ) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        let mut digest = Sha256::new();
+        let request_id = self.next_request_id;
+        self.next_request_id += 1;
+        let mut buffer = vec![0; 64 * 1024];
+        loop {
+            let n = reader.read(&mut buffer).await?;
+            digest.update(&buffer[..n]);
+            write_frame(
+                &mut self.stream,
+                &RequestEnvelope {
+                    protocol_version: self.metadata.protocol_version,
+                    request_id,
+                    token: self.metadata.token.clone(),
+                    action: DaemonAction::UploadChunk {
+                        bytes: buffer[..n].to_vec(),
+                        sha256: (n == 0).then(|| {
+                            digest
+                                .clone()
+                                .finalize()
+                                .iter()
+                                .map(|byte| format!("{byte:02x}"))
+                                .collect::<String>()
+                        }),
+                    },
+                },
+            )
+            .await?;
+            if n == 0 {
+                break;
+            }
+        }
+        let response = read_response(&mut self.stream).await?;
+        ensure!(
+            response.request_id == request_id
+                && response.protocol_version == self.metadata.protocol_version,
+            "daemon crossed upload response"
+        );
+        match response.result.map_err(anyhow::Error::msg)? {
+            DaemonReply::BlobUploaded(blob) => Ok(blob),
+            reply => bail!("unexpected blob upload reply {reply:?}"),
+        }
+    }
+
+    /// Upload and consume on one connection. Only explicit non-admission permits
+    /// replay; a transport error may hide acceptance and is returned to the caller.
+    pub async fn upload_and_consume<R, A>(
+        &mut self,
+        reader: &mut R,
+        action: A,
+    ) -> Result<DaemonReply>
+    where
+        R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin,
+        A: Fn(String) -> DaemonAction,
+    {
+        self.upload_and_consume_with_reconnect(reader, action, reconnect_after_upload_refusal)
+            .await
+    }
+
+    async fn upload_and_consume_with_reconnect<R, A, F, Fut>(
+        &mut self,
+        reader: &mut R,
+        action: A,
+        mut reconnect: F,
+    ) -> Result<DaemonReply>
+    where
+        R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin,
+        A: Fn(String) -> DaemonAction,
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<Self>>,
+    {
+        self.upload_and_consume_observed_with_reconnect(
+            reader,
+            action,
+            &mut reconnect,
+            |_| std::future::ready(Ok(())),
+            std::future::pending(),
+        )
+        .await
+    }
+
+    /// Report each phase; cancellation is observed only during byte upload.
+    pub async fn upload_and_consume_observed<R, A, P, PF, C>(
+        &mut self,
+        reader: &mut R,
+        action: A,
+        phase: P,
+        cancel: C,
+    ) -> Result<DaemonReply>
+    where
+        R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin,
+        A: Fn(String) -> DaemonAction,
+        P: FnMut(bool) -> PF,
+        PF: Future<Output = Result<()>>,
+        C: Future<Output = ()>,
+    {
+        self.upload_and_consume_observed_with_reconnect(
+            reader,
+            action,
+            reconnect_after_upload_refusal,
+            phase,
+            cancel,
+        )
+        .await
+    }
+
+    async fn upload_and_consume_observed_with_reconnect<R, A, F, Fut, P, PF, C>(
+        &mut self,
+        reader: &mut R,
+        action: A,
+        mut reconnect: F,
+        mut phase: P,
+        cancel: C,
+    ) -> Result<DaemonReply>
+    where
+        R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin,
+        A: Fn(String) -> DaemonAction,
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<Self>>,
+        P: FnMut(bool) -> PF,
+        PF: Future<Output = Result<()>>,
+        C: Future<Output = ()>,
+    {
+        tokio::pin!(cancel);
+        use tokio::io::AsyncSeekExt;
+        let start = reader.stream_position().await?;
+        phase(true).await?;
+        loop {
+            let blob = tokio::select! {
+                biased;
+                _ = &mut cancel => bail!("upload cancelled"),
+                result = self.upload(reader) => result?,
+            };
+            phase(false).await?;
+            let reply = self.request_once(action(blob)).await?;
+            if !matches!(reply, DaemonReply::UpgradePending) {
+                return Ok(reply);
+            }
+            phase(true).await?;
+            *self = tokio::select! {
+                biased;
+                _ = &mut cancel => bail!("upload cancelled"),
+                result = async {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    reconnect().await
+                } => result?,
+            };
+            reader.seek(std::io::SeekFrom::Start(start)).await?;
+        }
+    }
+
     async fn request_once(&mut self, action: DaemonAction) -> Result<DaemonReply> {
         let protocol_version = self.metadata.protocol_version;
         let request_id = self.next_request_id;
@@ -2252,15 +2432,17 @@ impl DaemonClient {
         }
     }
 
-    pub async fn persist_imported_session(
+    pub async fn import_session(
         &mut self,
         session: SessionRecord,
         bundle: Option<ImportedBundle>,
+        reader: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin),
     ) -> Result<()> {
         match self
-            .request(DaemonAction::PersistImportedSession {
-                session: Box::new(session),
-                bundle,
+            .upload_and_consume(reader, |blob| DaemonAction::ImportSession {
+                blob,
+                session: Box::new(session.clone()),
+                bundle: bundle.clone(),
             })
             .await?
         {
@@ -3251,7 +3433,10 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // The dashboard's path, project and preflight work are daemon actions, and
 // closing a cancellable action's connection cancels it.
 // Version 91: unauthenticated nonce proof before SSH tunnel credentials.
-pub const PROTOCOL_VERSION: u32 = 91;
+// Authenticated chunked client uploads and daemon-owned attachment installation.
+// Daemon-owned voice credential discovery and uploaded-audio transcription.
+// Version 92: streamed uploads, client imports and daemon voice actions.
+pub const PROTOCOL_VERSION: u32 = 92;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
@@ -3416,6 +3601,15 @@ pub fn identity_proof(token: &str, nonce: &str) -> hmac::Hmac<sha2::Sha256> {
     mac.update(b"mj-daemon-identity-v1");
     mac.update(nonce.as_bytes());
     mac
+}
+
+async fn reconnect_after_upload_refusal() -> Result<DaemonClient> {
+    loop {
+        if let Ok(client) = connect_existing().await {
+            return Ok(client);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 }
 
 #[cfg(test)]
@@ -3716,6 +3910,130 @@ mod tests {
                 .await
                 .is_err()
         );
+        server.await.unwrap();
+    }
+
+    // Hard-won: #1514: a refused consumer reused a blob from the old connection.
+    #[tokio::test]
+    async fn refused_blob_consumer_reuploads_before_single_acceptance() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address: listener.local_addr().unwrap(),
+            token: "test".into(),
+            started_at: "test".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
+        };
+        let bytes = vec![42; 192 * 1024];
+        let expected = bytes.clone();
+        let server = tokio::spawn(async move {
+            let mut accepted = 0;
+            for attempt in 0..4 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut received: Vec<u8> = Vec::new();
+                let upload = loop {
+                    let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                    let DaemonAction::UploadChunk { bytes, sha256 } = &request.action else {
+                        panic!("expected upload before consuming action");
+                    };
+                    received.extend(bytes);
+                    if sha256.is_some() {
+                        break request;
+                    }
+                };
+                assert_eq!(received, expected);
+                let blob = format!("connection-{attempt}");
+                write_frame(
+                    &mut stream,
+                    &ResponseEnvelope {
+                        protocol_version: upload.protocol_version,
+                        request_id: upload.request_id,
+                        result: Ok(DaemonReply::BlobUploaded(blob.clone())),
+                    },
+                )
+                .await
+                .unwrap();
+                let consume: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                let DaemonAction::InstallAttachment { blob: actual, .. } = consume.action else {
+                    panic!("expected consumer");
+                };
+                assert_eq!(actual, blob);
+                if attempt == 2 {
+                    continue;
+                } // Lost ACK must not reconnect or replay.
+                let reply = if attempt == 0 || attempt == 3 {
+                    DaemonReply::UpgradePending
+                } else {
+                    accepted += 1;
+                    DaemonReply::Done
+                };
+                write_frame(
+                    &mut stream,
+                    &ResponseEnvelope {
+                        protocol_version: consume.protocol_version,
+                        request_id: consume.request_id,
+                        result: Ok(reply),
+                    },
+                )
+                .await
+                .unwrap();
+            }
+            assert_eq!(accepted, 1);
+        });
+        let reference = mj_core::attachment::AttachmentRef {
+            sha256: "a".repeat(64),
+            mime_type: "image/png".into(),
+            size: bytes.len(),
+            width: 1,
+            height: 1,
+        };
+        let action = |blob| DaemonAction::InstallAttachment {
+            session_id: "session".into(),
+            reference: reference.clone(),
+            blob,
+        };
+        let mut reader = std::io::Cursor::new(bytes);
+        let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
+        let reply = client
+            .upload_and_consume_with_reconnect(&mut reader, action, || {
+                DaemonClient::connect(metadata.clone())
+            })
+            .await
+            .unwrap();
+        assert!(matches!(reply, DaemonReply::Done));
+        reader.set_position(0);
+        let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
+        assert!(
+            client
+                .upload_and_consume_with_reconnect(&mut reader, action, || async {
+                    panic!("lost acknowledgement cannot authorize replay");
+                })
+                .await
+                .is_err()
+        );
+        // Hard-won: af709d6e2: cancellation was ignored during refused-upload reconnection.
+        reader.set_position(0);
+        let mut client = DaemonClient::connect(metadata).await.unwrap();
+        let reconnecting = tokio::sync::Notify::new();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.upload_and_consume_observed_with_reconnect(
+                &mut reader,
+                action,
+                || async {
+                    reconnecting.notify_one();
+                    std::future::pending::<Result<DaemonClient>>().await
+                },
+                |_| std::future::ready(Ok(())),
+                reconnecting.notified(),
+            ),
+        )
+        .await
+        .expect("cancellation must interrupt reconnection");
+        assert!(result.unwrap_err().to_string().contains("upload cancelled"));
         server.await.unwrap();
     }
 

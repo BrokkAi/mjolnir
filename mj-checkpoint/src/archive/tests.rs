@@ -408,6 +408,14 @@ fn streaming_verification_does_not_retain_large_noncanonical_payloads() {
             .len()
         + verified.archive_sha256.len();
     assert!(retained_metadata_bytes < LARGE_PAYLOAD_BYTES / 100);
+    // A preparation cancellation reaches readers cloned for parallel verification.
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let archive = open_archive_cancellable(&path, Some(cancelled.clone())).unwrap();
+    let mut parallel_reader = archive.clone();
+    cancelled.store(true, std::sync::atomic::Ordering::Release);
+    let mut entry = parallel_reader.by_index(0).unwrap();
+    assert!(entry.read_to_end(&mut Vec::new()).is_err());
+    assert!(verify_archive_streaming_cancellable(&path, cancelled).is_err());
 }
 
 const TEST_PART_BYTES: usize = 4096;

@@ -20,6 +20,7 @@ default = []
 test-hooks = ["mj-core/test-hooks", "mj-controller/test-hooks", "mj-chat/test-hooks"]
 
 [dependencies]
+tempfile.workspace = true
 mj-core.workspace = true
 mj-checkpoint.workspace = true
 mj-client.workspace = true
@@ -78,7 +79,6 @@ libc.workspace = true
 # The store-divergence test migrates the daemon's store from outside the
 # daemon, which is exactly what the incident it reproduces did.
 rusqlite.workspace = true
-tempfile.workspace = true
 # Project cursor-addressed PTY redraws into the screen visible to the user.
 vte = { version = "0.14", default-features = false }
 # `start_paused` drives the force-destroy preemption timeout instantly.

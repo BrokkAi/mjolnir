@@ -796,6 +796,7 @@ fn the_detach_chord_quits_without_mutating_any_dashboard_modal() {
         Vec::new(),
         Vec::new(),
         Default::default(),
+        "/work/repo".into(),
     );
 
     let mut confirm = dashboard_with_session(stopped_session());
