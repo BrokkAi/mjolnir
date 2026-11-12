@@ -250,6 +250,7 @@ pub(super) fn session_capabilities(
                     | crate::server::ViewerOperationKind::Cleanup
             )
         }),
+        dismiss_notification: session.notification_dismissal.is_some(),
         rename: !session.transitioning,
         // A Move that holds the source environment refuses Resume; it is
         // retried or the session is destroyed.

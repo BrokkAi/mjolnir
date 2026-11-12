@@ -614,10 +614,15 @@ pub struct ManagedSessionSnapshot {
 /// it whenever a single turn is longer than the window. Both are read
 /// separately, with one indexed query each, rather than found by scanning.
 ///
-/// A complete projection answers both by scanning what it already holds, which
-/// is what [`ProjectionWindow::of`] does.
+/// The unread event watermark is also retained here and restored from the
+/// stored summary ordinals when an actor reloads. A complete projection finds
+/// these facts in the items it already holds, via [`ProjectionWindow::of`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectionWindow {
+    /// Retained across actor trimming and restored from stored projection rows.
+    /// Clients consume served attention rather than this daemon-local fact.
+    #[serde(skip)]
+    pub latest_unread_event_ordinal: Option<u64>,
     /// Transcript items before the window. Zero when the projection is whole.
     pub omitted_items: usize,
     /// The title derived from the first user message.
@@ -632,6 +637,9 @@ impl ProjectionWindow {
     /// Keep the tail and complete turns containing unsettled content.
     pub fn trim(&mut self, session: &mut MaterializedSession, target: usize) {
         let observed = Self::of(session);
+        self.latest_unread_event_ordinal = self
+            .latest_unread_event_ordinal
+            .max(observed.latest_unread_event_ordinal);
         if self.provisional_title.is_none() {
             self.provisional_title = observed.provisional_title;
         }
@@ -690,6 +698,13 @@ impl ProjectionWindow {
     #[must_use]
     pub fn of(session: &MaterializedSession) -> Self {
         Self {
+            latest_unread_event_ordinal: session
+                .transcript
+                .iter()
+                .filter(|item| item.is_nonempty_agent_message())
+                .filter_map(|item| item.latest_content_event_ordinal)
+                .chain(session.interruption_event_ordinals())
+                .max(),
             omitted_items: 0,
             provisional_title: session.transcript.iter().find_map(|item| {
                 if !item.is_user_prompt() {

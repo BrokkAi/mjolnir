@@ -702,6 +702,10 @@ pub struct DraftPreview {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "action", content = "arguments")]
 pub enum DaemonAction {
+    DismissNotification {
+        session_id: String,
+        target: mj_core::attention::NotificationDismissal,
+    },
     ProveIdentity {
         nonce: String,
     },
@@ -3437,7 +3441,9 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Daemon-owned voice credential discovery and uploaded-audio transcription.
 // Version 92: streamed uploads, client imports and daemon voice actions.
 // Version 93: Antigravity harness identities in session and profile snapshots.
-pub const PROTOCOL_VERSION: u32 = 93;
+// Version 94: served unread attention, notification dismissal targets and
+// unread frontiers.
+pub const PROTOCOL_VERSION: u32 = 94;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

@@ -47,9 +47,21 @@ fn delayed_projection_and_summary_cannot_revive_acknowledged_content() {
         .unwrap()
         .viewed_through_event_ordinal = 3;
     assert!(dashboard.apply_prepared_materialized_session_summary(summary));
-    assert!(!dashboard.session_details["session-1"].has_unread());
+    assert_eq!(
+        (
+            dashboard.session_details["session-1"].unread_agent_messages,
+            dashboard.session_details["session-1"].unread_interruptions
+        ),
+        (0, 0)
+    );
     assert!(dashboard.apply_prepared_materialized_session(prepared));
-    assert!(!dashboard.session_details["session-1"].has_unread());
+    assert_eq!(
+        (
+            dashboard.session_details["session-1"].unread_agent_messages,
+            dashboard.session_details["session-1"].unread_interruptions
+        ),
+        (0, 0)
+    );
     let newer = materialized_session_for(
         "session-1",
         vec![

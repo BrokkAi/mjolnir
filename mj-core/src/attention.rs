@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub enum SessionAttention {
     NeedsInput,
     Important,
+    Unread,
     Failed,
     Unreachable,
     Working,
@@ -21,4 +22,12 @@ pub enum SessionAttention {
 #[serde(rename_all = "snake_case")]
 pub enum AssessmentAttention {
     Important,
+}
+
+/// Exact notification identity served by the daemon and echoed by clients.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationDismissal {
+    Question(crate::assessment::InferredQuestion),
+    ReadThrough(u64),
 }

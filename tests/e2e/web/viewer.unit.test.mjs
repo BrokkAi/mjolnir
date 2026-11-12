@@ -331,6 +331,7 @@ test('session titles stay blue while truly idle and clear blue when activity res
   delete context.session.attention;
   vm.runInContext('renderSessionTitle(node, session)', context);
   assert.ok(!classes.has('idle-title'), 'unknown activity is not confirmed idle');
+
 });
 
 test('project preflight prevents duplicate checks and ignores a cancelled wizard response', async () => {
@@ -1472,9 +1473,34 @@ test('review settings action renders a button that sends its action id', () => {
   assert.equal(control.textContent, 'Autoconfigure');
   control.onclick();
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{page: ['review'], edit: {kind: 'action', id: 'review.autoconfigure'}}]);
+  const controls = [];
+  context.pendingActions = new Set();
+  context.container = {
+    querySelector: () => controls[0],
+    append: control => controls.push(control),
+  };
+  context.button = label => ({ textContent: label, dataset: {}, remove: () => controls.pop() });
+  context.runSessionAction = (dataset, error, extra) => calls.push({ dataset, extra });
+  context.session = { id: 's', capabilities: {}, notification_dismissal: { read_through: 10 } };
+  vm.runInContext(sourceBetween('function renderNotificationDismissal(', '\nfunction updateSessionMenu('), context);
+  vm.runInContext('renderNotificationDismissal(container, session, null)', context);
+  assert.equal(controls.length, 0, 'no dismissal control without capability');
+  context.session.capabilities.dismiss_notification = true;
+  vm.runInContext('renderNotificationDismissal(container, session, null)', context);
+  assert.equal(controls[0].textContent, 'Dismiss notification');
+  context.session.notification_dismissal = { read_through: 11 };
+  controls[0].onclick({ stopPropagation() {} });
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[1])), { dataset: { action: 'dismiss-notification', id: 's' }, extra: { target: { read_through: 10 } } });
+  context.pendingActions.add('dismiss-notification:s');
+  vm.runInContext('renderNotificationDismissal(container, session, null)', context);
+  assert.equal(controls[0].disabled, true);
+  context.session.capabilities.dismiss_notification = false;
+  vm.runInContext('renderNotificationDismissal(container, session, null)', context);
+  assert.equal(controls.length, 0, 'withdrawing capability removes dismissal control');
 });
 
 
+// Hard-won: 92684ad3b: browser read receipts need the same served frontier as workspace mark-read.
 test('conversation receipts require a visible focused caught-up conversation and coalesce monotonic cursors', async () => {
   const frames = [];
   const sent = [];
@@ -1483,11 +1509,12 @@ test('conversation receipts require a visible focused caught-up conversation and
   const context = vm.createContext({
     currentSession: 's', route: { name: 'conversation', sessionId: 's' },
     cursor: 42, acknowledged: 0,
+    session: { capabilities: { open: true }, attention: 'working', unread_frontier: 42 },
     document: { visibilityState: 'hidden', hasFocus: () => focused, querySelector: () => ({ textContent: '' }) },
     window: { innerHeight: 800 },
     feedScroll: { getBoundingClientRect: () => ({ top: 100, bottom: 700 }) },
     feed: { lastElementChild: { getBoundingClientRect: () => ({ top: 500, bottom: 650 }) } },
-    sessionById: () => ({ capabilities: { open: true } }),
+    sessionById: () => context.session,
     isTransitioningSession: () => false,
     requestAnimationFrame: fn => { frames.push(fn); return frames.length; },
     request: (url, options) => { sent.push([url, JSON.parse(options.body).through]); return new Promise(resolve => { finish = resolve; }); },
@@ -1511,6 +1538,7 @@ test('conversation receipts require a visible focused caught-up conversation and
   frames.shift()();
   assert.deepEqual(sent, [['/api/conversations/s/read', 42]]);
   context.cursor = 43;
+  context.session.unread_frontier = 43;
   await vm.runInContext('persistVisibleConversationRead()', context);
   assert.equal(sent.length, 1, 'only one receipt is in flight');
   finish();
@@ -1522,8 +1550,36 @@ test('conversation receipts require a visible focused caught-up conversation and
   context.cursor = 41;
   await vm.runInContext('persistVisibleConversationRead()', context);
   assert.equal(sent.length, 2, 'older loaded cursors never move the frontier back');
-  context.cursor = 44;
+  context.cursor = 50;
+  context.session.unread_frontier = 44;
+  const loaded = vm.runInContext('persistVisibleConversationRead()', context);
+  // Hard-won: 6a0981b02: receipts bounded by the row's lagging frontier left seen output unread.
+  assert.equal(sent[2][1], 50, 'acknowledges everything loaded and seen, even before the row republishes');
+  finish();
+  await loaded;
+  context.cursor = 51;
   context.route.name = 'sessions';
   await vm.runInContext('persistVisibleConversationRead()', context);
-  assert.equal(sent.length, 2, 'closed conversations do not read');
+  assert.equal(sent.length, 3, 'closed conversations do not read');
+});
+
+
+test('notification snapshot retains handled entries below the notification band until a new visit', () => {
+  const context = vm.createContext({ sessionMessageMs: row => row.time });
+  vm.runInContext(sourceBetween('function hasNotification(', '/// Whether a session is a sub-agent'), context);
+  vm.runInContext(sourceBetween('class NotificationSnapshot {', '\nfunction notificationRows()'), context);
+  const update = (rows, allRows = rows) => JSON.parse(vm.runInContext(`JSON.stringify(notificationSnapshot.update(${JSON.stringify(rows)}, ${JSON.stringify(allRows)}))`, context));
+  const a = { id: 'a', time: 1, attention: 'needs_input' }, b = { id: 'b', time: 2, attention: 'important' }, c = { id: 'c', time: 3, attention: 'failed' };
+  assert.deepEqual(update([a, b]).map(entry => entry.row.id), ['b', 'a']);
+  const handled = { ...b, attention: 'working', capabilities: { open: false } };
+  let retained = update([a], [a, handled]);
+  assert.deepEqual(retained.map(entry => entry.row.id), ['a', 'b']);
+  assert.equal(retained[1].row.capabilities.open, false);
+  assert.deepEqual(update([a, c], [a, handled, c]).map(entry => entry.row.id), ['c', 'a', 'b']);
+  assert.deepEqual(update([a, b, c]).map(entry => entry.row.id), ['c', 'b', 'a']);
+  retained = update([a, c]);
+  assert.equal(retained[2].row.lifecycle, 'destroyed');
+  assert.deepEqual(retained[2].row.capabilities, {});
+  vm.runInContext('notificationSnapshot.reset()', context);
+  assert.deepEqual(update([a, c]).map(entry => entry.row.id), ['c', 'a']);
 });

@@ -91,7 +91,7 @@ pub(crate) fn presentation_attention(
     session_id: &str,
 ) -> AttentionLevel {
     use mj_core::attention::SessionAttention;
-    let level = match dashboard
+    match dashboard
         .served_attention
         .get(session_id)
         .copied()
@@ -99,21 +99,12 @@ pub(crate) fn presentation_attention(
     {
         SessionAttention::NeedsInput => AttentionLevel::Waiting,
         SessionAttention::Important => AttentionLevel::Important,
+        SessionAttention::Unread => AttentionLevel::Unread,
         SessionAttention::Failed => AttentionLevel::Failed,
         SessionAttention::Unreachable => AttentionLevel::Unreachable,
         SessionAttention::Working => AttentionLevel::Working,
         SessionAttention::Idle => AttentionLevel::Idle,
         SessionAttention::Inactive | SessionAttention::Unknown => AttentionLevel::Inactive,
-    };
-    if level == AttentionLevel::Idle
-        && dashboard
-            .session_details
-            .get(session_id)
-            .is_some_and(SessionDetail::has_unread)
-    {
-        AttentionLevel::Unread
-    } else {
-        level
     }
 }
 
@@ -1209,13 +1200,17 @@ impl DashboardState {
             .collect::<Vec<_>>();
         let mut receipts = Vec::new();
         for session_id in listed {
-            let Some(detail) = self.session_details.get_mut(&session_id) else {
-                continue;
-            };
-            if !detail.has_unread() {
-                continue;
-            }
-            let Some(through) = detail.materialized_applied_event_ordinal else {
+            let through = self.unread_frontiers.get(&session_id).copied().max(
+                self.notification_dismissals
+                    .get(&session_id)
+                    .and_then(|target| match target {
+                        mj_core::attention::NotificationDismissal::ReadThrough(through) => {
+                            Some(*through)
+                        }
+                        mj_core::attention::NotificationDismissal::Question(_) => None,
+                    }),
+            );
+            let Some(through) = through else {
                 continue;
             };
             let Some(session) = self.state.sessions.get_mut(&session_id) else {
@@ -1223,7 +1218,9 @@ impl DashboardState {
             };
             if through > session.viewed_through_event_ordinal {
                 session.viewed_through_event_ordinal = through;
-                detail.clear_unread();
+                if let Some(detail) = self.session_details.get_mut(&session_id) {
+                    detail.clear_unread();
+                }
                 receipts.push((session_id, through));
             }
         }
@@ -1532,7 +1529,8 @@ mod verdict_tests {
             (SessionAttention::Important, AttentionLevel::Important),
             (SessionAttention::Working, AttentionLevel::Working),
             (SessionAttention::Inactive, AttentionLevel::Inactive),
-            (SessionAttention::Idle, AttentionLevel::Unread),
+            (SessionAttention::Unread, AttentionLevel::Unread),
+            (SessionAttention::Idle, AttentionLevel::Idle),
         ] {
             dashboard.set_session_attention(mj_core::snapshot_map::SnapshotMap::from([(
                 "session".to_owned(),

@@ -556,9 +556,9 @@ pub enum DashboardAction {
     MarkAllRead {
         receipts: Vec<(String, u64)>,
     },
-    DismissQuestion {
+    DismissNotification {
         session_id: String,
-        question: mj_core::assessment::InferredQuestion,
+        target: mj_core::attention::NotificationDismissal,
     },
     OpenResumeDialog,
     ImportSession {
@@ -893,6 +893,9 @@ pub struct DashboardPasteTarget {
 }
 
 pub struct DashboardState {
+    pub(crate) unread_frontiers: mj_core::snapshot_map::SnapshotMap<String, u64>,
+    pub(crate) notification_dismissals:
+        mj_core::snapshot_map::SnapshotMap<String, mj_core::attention::NotificationDismissal>,
     pub(crate) served_attention:
         Tracked<mj_core::snapshot_map::SnapshotMap<String, mj_core::attention::SessionAttention>>,
     paste_revision: u64,
@@ -1283,6 +1286,8 @@ impl DashboardState {
             session_order: RefCell::default(),
             checkpoint_archive_sizes: BTreeMap::new(),
             stopped_records: Default::default(),
+            unread_frontiers: Default::default(),
+            notification_dismissals: Default::default(),
             served_attention: Tracked::new(Default::default()),
             launch_recency,
             recent_launch: None,
