@@ -665,10 +665,14 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(current.pending_elicitations.is_empty());
+        let outputs =
+            mj_core::transcript::TerminalOutputs::of(current.transcript.iter().map(AsRef::as_ref));
         let transcript = current
             .transcript
             .iter()
-            .map(|item| mj_transcript::transcript::transcript_item_text(item))
+            .map(|item| {
+                mj_transcript::transcript::transcript_item_text_with_outputs(item, &outputs)
+            })
             .collect::<Vec<_>>()
             .join("\n");
         assert!(transcript.contains("Not shown because you were away: Which architecture?"));

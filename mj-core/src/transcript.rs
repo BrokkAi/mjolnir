@@ -30,6 +30,127 @@ pub const HARNESS_TURN_ITEM_PREFIX: &str = "harness-turn:";
 /// User replies within an existing turn, rather than prompts that start one.
 pub const ELICITATION_REPLY_ITEM_PREFIX: &str = "elicitation-reply:";
 
+/// Shared read-time join of embedded and parked terminal output.
+/// Standalone close-time records override embedded streaming records.
+pub struct TerminalOutputs<'a, R = TerminalOutputRecord> {
+    standalone: std::collections::HashMap<&'a str, &'a R>,
+    tools: std::collections::HashMap<&'a str, (&'a [R], &'a [String])>,
+    referenced: std::collections::HashSet<&'a str>,
+}
+
+pub trait TerminalRecord: Clone {
+    fn terminal_id(&self) -> &str;
+}
+impl TerminalRecord for TerminalOutputRecord {
+    fn terminal_id(&self) -> &str {
+        &self.terminal_id
+    }
+}
+impl TerminalRecord for crate::archive::CanonicalTerminalOutput {
+    fn terminal_id(&self) -> &str {
+        &self.terminal_id
+    }
+}
+impl<'a, R: TerminalRecord> TerminalOutputs<'a, R> {
+    fn new() -> Self {
+        Self {
+            standalone: Default::default(),
+            tools: Default::default(),
+            referenced: Default::default(),
+        }
+    }
+    fn tool(&mut self, id: &'a str, embedded: &'a [R], refs: &'a [String]) {
+        self.tools.insert(id, (embedded, refs));
+        self.referenced.extend(refs.iter().map(String::as_str));
+        self.referenced
+            .extend(embedded.iter().map(TerminalRecord::terminal_id));
+    }
+    pub fn for_tool(&self, stable_id: &str) -> std::borrow::Cow<'a, [R]> {
+        let Some((embedded, refs)) = self.tools.get(stable_id) else {
+            return std::borrow::Cow::Borrowed(&[]);
+        };
+        let mut seen = std::collections::HashSet::new();
+        if embedded.iter().all(|record| {
+            seen.insert(record.terminal_id()) && !self.standalone.contains_key(record.terminal_id())
+        }) && !refs
+            .iter()
+            .any(|id| self.standalone.contains_key(id.as_str()))
+        {
+            return std::borrow::Cow::Borrowed(embedded);
+        }
+        seen.clear();
+        let mut records = Vec::new();
+        for record in *embedded {
+            let id = record.terminal_id();
+            if seen.insert(id) {
+                records.push((*self.standalone.get(id).unwrap_or(&record)).clone());
+            }
+        }
+        for id in *refs {
+            if seen.insert(id.as_str())
+                && let Some(record) = self.standalone.get(id.as_str())
+            {
+                records.push((*record).clone());
+            }
+        }
+        std::borrow::Cow::Owned(records)
+    }
+    pub fn embedded_for_tool(&self, stable_id: &str) -> &[R] {
+        self.tools
+            .get(stable_id)
+            .map_or(&[], |(records, _)| *records)
+    }
+    pub fn referenced_terminal_ids(&self) -> impl Iterator<Item = &str> {
+        self.referenced.iter().copied()
+    }
+    pub fn has_standalone(&self) -> bool {
+        !self.standalone.is_empty()
+    }
+    pub fn shown_under_tool(&self, terminal_id: &str) -> bool {
+        self.referenced.contains(terminal_id)
+    }
+}
+impl<'a> TerminalOutputs<'a> {
+    pub fn of(items: impl IntoIterator<Item = &'a TranscriptItem>) -> Self {
+        let mut outputs = Self::new();
+        for item in items {
+            match &item.body {
+                TranscriptBody::Tool {
+                    terminal_outputs,
+                    terminal_refs,
+                    ..
+                } => outputs.tool(&item.stable_id, terminal_outputs, terminal_refs),
+                TranscriptBody::TerminalOutput { record } => {
+                    outputs.standalone.insert(&record.terminal_id, record);
+                }
+                _ => {}
+            }
+        }
+        outputs
+    }
+}
+impl<'a> TerminalOutputs<'a, crate::archive::CanonicalTerminalOutput> {
+    pub fn of_canonical(
+        items: impl IntoIterator<Item = &'a crate::archive::CanonicalTranscriptItem>,
+    ) -> Self {
+        let mut outputs = Self::new();
+        for item in items {
+            match &item.body {
+                crate::archive::CanonicalTranscriptBody::Tool {
+                    terminal_outputs,
+                    terminal_refs,
+                    ..
+                } => outputs.tool(&item.stable_id, terminal_outputs, terminal_refs),
+                crate::archive::CanonicalTranscriptBody::TerminalOutput { record } => {
+                    outputs.standalone.insert(&record.terminal_id, record);
+                }
+                _ => {}
+            }
+        }
+        outputs
+    }
+}
+
 /// Where a tool's compact presentation source came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

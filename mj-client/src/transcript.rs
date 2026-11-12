@@ -81,15 +81,17 @@ pub struct HistoryEntry {
 }
 
 pub fn history_entries(page: &mj_core::storage::TranscriptHistoryPage) -> Vec<HistoryEntry> {
+    let outputs = TerminalOutputs::of(page.items.iter().map(AsRef::as_ref));
     page.items
         .iter()
+        .filter(|item| !matches!(&item.body, TranscriptBody::TerminalOutput { record } if outputs.shown_under_tool(&record.terminal_id)))
         .map(|item| HistoryEntry {
             role: mj_core::transcript::transcript_item_role(&item.body),
             text: match &item.body {
                 TranscriptBody::Message { event } => mj_core::transcript::sanitize_terminal_text(
                     event.message_text().expect("message entry metadata"),
                 ),
-                _ => mj_transcript::transcript::transcript_item_text(item),
+                _ => mj_transcript::transcript::transcript_item_text_with_outputs(item, &outputs),
             },
             label: match &item.body {
                 TranscriptBody::Message { event } => Some(event.message_label()),
@@ -191,17 +193,20 @@ pub fn materialized_chat_entries_with_diffstats(
     session: &MaterializedSession,
     diffstats: &BTreeMap<String, Vec<String>>,
 ) -> Vec<ChatEntry> {
+    let outputs = TerminalOutputs::of(session.transcript.iter().map(AsRef::as_ref));
     let mut entries = session
         .transcript
         .iter()
         .map(|item| {
-            materialized_chat_entry_with_diffstats(
+            materialized_chat_entry_with_outputs(
                 item,
+                &outputs,
                 session.applied_event_ordinal,
                 diffstats.get(&item.stable_id),
             )
         })
         .collect::<Vec<_>>();
+    entries.retain(|entry| !entry.source.0.as_ref().is_some_and(|item| matches!(&item.body, TranscriptBody::TerminalOutput { record } if outputs.shown_under_tool(&record.terminal_id))));
     apply_entry_list_rules(&mut entries);
     entries
 }
@@ -216,10 +221,12 @@ pub const TAIL_SEED_ITEMS: usize = 256;
 /// session's transcript. Runs off the event loop, so it takes the items by
 /// slice rather than the session.
 pub fn materialized_prefix_entries(items: &[Arc<TranscriptItem>], frontier: u64) -> Vec<ChatEntry> {
+    let outputs = TerminalOutputs::of(items.iter().map(AsRef::as_ref));
     let mut entries = items
         .iter()
-        .map(|item| materialized_chat_entry(item, frontier))
+        .map(|item| materialized_chat_entry_with_outputs(item, &outputs, frontier, None))
         .collect::<Vec<_>>();
+    entries.retain(|entry| !entry.source.0.as_ref().is_some_and(|item| matches!(&item.body, TranscriptBody::TerminalOutput { record } if outputs.shown_under_tool(&record.terminal_id))));
     apply_entry_list_rules(&mut entries);
     entries
 }
@@ -239,6 +246,7 @@ pub fn materialized_chat_entries_reusing(
     previous: Vec<ChatEntry>,
 ) -> Vec<ChatEntry> {
     let mut previous = previous.into_iter().peekable();
+    let outputs = TerminalOutputs::of(session.transcript.iter().map(AsRef::as_ref));
     let mut entries = session
         .transcript
         .iter()
@@ -257,11 +265,29 @@ pub fn materialized_chat_entries_reusing(
                 .peek()
                 .is_none_or(|entry| entry.start_seq != item.position)
             {
-                return materialized_chat_entry(item, session.applied_event_ordinal);
+                return materialized_chat_entry_with_outputs(
+                    item,
+                    &outputs,
+                    session.applied_event_ordinal,
+                    None,
+                );
             }
             let Some(mut entry) = previous.next() else {
-                return materialized_chat_entry(item, session.applied_event_ordinal);
+                return materialized_chat_entry_with_outputs(
+                    item,
+                    &outputs,
+                    session.applied_event_ordinal,
+                    None,
+                );
             };
+            if outputs.has_standalone() {
+                return materialized_chat_entry_with_outputs(
+                    item,
+                    &outputs,
+                    session.applied_event_ordinal,
+                    None,
+                );
+            }
             if entry.source.is(item) {
                 entry.seq = item_update_ordinal(item, session.applied_event_ordinal);
                 return entry;
@@ -271,9 +297,15 @@ pub fn materialized_chat_entries_reusing(
                 entry.source = TranscriptSource(Some(item.clone()));
                 return entry;
             }
-            materialized_chat_entry(item, session.applied_event_ordinal)
+            materialized_chat_entry_with_outputs(
+                item,
+                &outputs,
+                session.applied_event_ordinal,
+                None,
+            )
         })
         .collect::<Vec<_>>();
+    entries.retain(|entry| !entry.source.0.as_ref().is_some_and(|item| matches!(&item.body, TranscriptBody::TerminalOutput { record } if outputs.shown_under_tool(&record.terminal_id))));
     apply_entry_list_rules(&mut entries);
     entries
 }
@@ -442,6 +474,20 @@ pub fn materialized_chat_entry_with_diffstats(
     frontier: u64,
     exact_diffstats: Option<&Vec<String>>,
 ) -> ChatEntry {
+    materialized_chat_entry_with_outputs(
+        item,
+        &TerminalOutputs::of([item.as_ref()]),
+        frontier,
+        exact_diffstats,
+    )
+}
+
+pub fn materialized_chat_entry_with_outputs(
+    item: &Arc<TranscriptItem>,
+    outputs: &TerminalOutputs<'_>,
+    frontier: u64,
+    exact_diffstats: Option<&Vec<String>>,
+) -> ChatEntry {
     let mut entry = match &item.body {
         TranscriptBody::User { content } => ChatEntry::plain(
             item.position,
@@ -460,11 +506,9 @@ pub fn materialized_chat_entry_with_diffstats(
             materialized_chunks_text(chunks),
         ),
         TranscriptBody::Tool {
-            call,
-            terminal_outputs,
-            presentation,
-            ..
+            call, presentation, ..
         } => {
+            let terminal_outputs = outputs.for_tool(&item.stable_id);
             let call = match ToolCall::deserialize(call) {
                 Ok(call) => Some(call),
                 Err(error) => {
@@ -494,7 +538,7 @@ pub fn materialized_chat_entry_with_diffstats(
                 let fallback_terminal = mj_core::acp::is_fallback_terminal_tool_call(&call);
                 entry.tool_content = tool_content_details(
                     &call.content,
-                    terminal_outputs,
+                    &terminal_outputs,
                     call.raw_output.as_ref(),
                     tool_status(&call.status),
                 );

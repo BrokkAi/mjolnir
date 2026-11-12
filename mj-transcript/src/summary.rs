@@ -236,6 +236,8 @@ impl TranscriptSummary {
         full_tool_calls: usize,
     ) -> Self {
         let mut summary = Self::default();
+        let outputs =
+            mj_core::transcript::TerminalOutputs::of_canonical(snapshot.transcript.iter());
         let start = snapshot.current_context_start();
         let cutoff = snapshot
             .transcript
@@ -269,16 +271,13 @@ impl TranscriptSummary {
                     None,
                 ),
                 CanonicalTranscriptBody::Tool {
-                    call,
-                    terminal_outputs,
-                    presentation,
-                    ..
+                    call, presentation, ..
                 } => {
                     let mut value =
                         tool_value(call, presentation.as_ref(), item.position >= cutoff);
                     attach_terminals(
                         &mut value,
-                        terminal_outputs.iter().map(|t| {
+                        outputs.for_tool(&item.stable_id).iter().map(|t| {
                             (
                                 &t.terminal_id,
                                 &t.output,
@@ -340,6 +339,8 @@ impl TranscriptSummary {
             .map(|i| i.position)
             .min()
             .unwrap_or(u64::MAX);
+        let outputs =
+            mj_core::transcript::TerminalOutputs::of(session.transcript.iter().map(AsRef::as_ref));
         let mut summary = Self::default();
         for item in session
             .transcript
@@ -363,16 +364,13 @@ impl TranscriptSummary {
                     None,
                 ),
                 TranscriptBody::Tool {
-                    call,
-                    terminal_outputs,
-                    presentation,
-                    ..
+                    call, presentation, ..
                 } => {
                     let mut value =
                         tool_value(call, presentation.as_deref(), item.position >= cutoff);
                     attach_terminals(
                         &mut value,
-                        terminal_outputs.iter().map(|t| {
+                        outputs.for_tool(&item.stable_id).iter().map(|t| {
                             (
                                 &t.terminal_id,
                                 &t.output,

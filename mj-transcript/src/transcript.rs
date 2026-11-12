@@ -1698,6 +1698,13 @@ pub fn apply_runtime_event_to_entries(
 /// reading, built from the same flatteners every other surface uses so that a
 /// tool call reads as the command it ran rather than as JSON.
 pub fn transcript_item_text(item: &TranscriptItem) -> String {
+    transcript_item_text_with_outputs(item, &TerminalOutputs::of([item]))
+}
+
+pub fn transcript_item_text_with_outputs(
+    item: &TranscriptItem,
+    outputs: &TerminalOutputs<'_>,
+) -> String {
     match &item.body {
         TranscriptBody::User { content } => {
             sanitize_terminal_text(&materialized_content_text(content))
@@ -1713,10 +1720,7 @@ pub fn transcript_item_text(item: &TranscriptItem) -> String {
             materialized_chunks_text(chunks)
         }
         TranscriptBody::Tool {
-            call,
-            terminal_outputs,
-            presentation,
-            ..
+            call, presentation, ..
         } => {
             let Ok(call) = ToolCall::deserialize(call) else {
                 return "[invalid tool call]".to_owned();
@@ -1727,13 +1731,16 @@ pub fn transcript_item_text(item: &TranscriptItem) -> String {
             if text.trim().is_empty() {
                 text = call.title.clone();
             }
-            for record in terminal_outputs {
+            for record in outputs.for_tool(&item.stable_id).iter() {
                 text.push('\n');
                 text.push_str(&terminal_output_detail(record));
             }
             sanitize_terminal_text(&text)
         }
         TranscriptBody::TerminalOutput { record } => {
+            if outputs.shown_under_tool(&record.terminal_id) {
+                return String::new();
+            }
             sanitize_terminal_text(&terminal_output_detail(record))
         }
         TranscriptBody::Plan { plan } => {

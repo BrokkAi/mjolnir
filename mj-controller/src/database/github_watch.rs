@@ -556,29 +556,42 @@ fn load_github_session_creation_output_from(
 ) -> Result<Vec<String>> {
     let connection = open_reader(path)?;
     let mut statement = connection.prepare(
-        "SELECT body_json FROM materialized_transcript_items
+        "SELECT stable_id, body_json FROM materialized_transcript_items
          WHERE session_id=?1 AND created_at_ms <= ?2 + 1000
            AND (last_changed_at_ms >= ?2 - 1000
                 OR json_extract(body_json, '$.call.status') IN ('pending', 'in_progress'))
            AND json_extract(body_json, '$.kind') = 'tool'",
     )?;
     let bodies = statement
-        .query_map(params![session_id, at_ms], |row| row.get::<_, String>(0))?
+        .query_map(params![session_id, at_ms], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut items = bodies
+        .into_iter()
+        .map(|(stable_id, body)| {
+            Ok(std::sync::Arc::new(mj_core::transcript::TranscriptItem {
+                stable_id,
+                position: 0,
+                latest_content_event_ordinal: None,
+                created_at_ms: 0,
+                last_changed_at_ms: 0,
+                body: serde_json::from_str(&body)?,
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    super::materialized::hydrate_terminal_outputs(&connection, session_id, &mut items)?;
+    let outputs = mj_core::transcript::TerminalOutputs::of(items.iter().map(AsRef::as_ref));
     let mut output = Vec::new();
-    for body in bodies {
-        let mj_core::transcript::TranscriptBody::Tool {
-            call,
-            terminal_outputs,
-            ..
-        } = serde_json::from_str(&body)?
-        else {
+    for item in &items {
+        let mj_core::transcript::TranscriptBody::Tool { call, .. } = &item.body else {
             continue;
         };
-        let call: agent_client_protocol::v1::schema::ToolCall = serde_json::from_value(call)?;
+        let call: agent_client_protocol::v1::schema::ToolCall =
+            serde_json::from_value(call.clone())?;
         output.extend(mj_transcript::transcript::tool_content_details(
             &call.content,
-            &terminal_outputs,
+            &outputs.for_tool(&item.stable_id),
             call.raw_output.as_ref(),
             mj_transcript::transcript::tool_status(&call.status),
         ));

@@ -297,6 +297,8 @@ impl TranscriptSnapshot {
         previous: &[ChatEntry],
         previous_diffstats: &BTreeMap<String, Vec<String>>,
     ) -> Self {
+        let outputs =
+            mj_core::transcript::TerminalOutputs::of(session.transcript.iter().map(AsRef::as_ref));
         let mut entries = session
             .transcript
             .iter()
@@ -305,6 +307,7 @@ impl TranscriptSnapshot {
                 let exact = diffstats.get(&item.stable_id);
                 if let Some(entry) = previous.get(index)
                     && (entry.source.is(item) || entry.source.0.as_deref() == Some(item.as_ref()))
+                    && !outputs.has_standalone()
                     && exact == previous_diffstats.get(&item.stable_id)
                 {
                     let mut entry = entry.clone();
@@ -312,14 +315,16 @@ impl TranscriptSnapshot {
                     entry.source = TranscriptSource(Some(item.clone()));
                     entry
                 } else {
-                    materialized_chat_entry_with_diffstats(
+                    mj_client::transcript::materialized_chat_entry_with_outputs(
                         item,
+                        &outputs,
                         session.applied_event_ordinal,
                         exact,
                     )
                 }
             })
             .collect::<Vec<_>>();
+        entries.retain(|entry| !entry.source.0.as_ref().is_some_and(|item| matches!(&item.body, mj_core::transcript::TranscriptBody::TerminalOutput { record } if outputs.shown_under_tool(&record.terminal_id))));
         apply_entry_list_rules(&mut entries);
         Self::from_entries_at(entries, session.applied_event_ordinal)
     }

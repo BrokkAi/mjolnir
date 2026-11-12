@@ -604,6 +604,60 @@ pub fn load_materialized_transcript_filtered(
     )
 }
 
+/// Join parked output for presentation without changing stored bodies or page boundaries.
+pub(super) fn hydrate_terminal_outputs(
+    connection: &Connection,
+    session_id: &str,
+    items: &mut [Arc<TranscriptItem>],
+) -> Result<()> {
+    let held = mj_core::transcript::TerminalOutputs::of(items.iter().map(AsRef::as_ref));
+    let ids = held
+        .referenced_terminal_ids()
+        .map(|id| format!("terminal:{id}"))
+        .collect::<std::collections::BTreeSet<_>>();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let mut context = Vec::new();
+    let mut statement = connection.prepare(
+        "SELECT body_json FROM materialized_transcript_items WHERE session_id=?1 AND stable_id=?2",
+    )?;
+    for id in ids {
+        let body: Option<String> = statement
+            .query_row(params![session_id, id], |row| row.get(0))
+            .optional()?;
+        if let Some(body) = body {
+            context.push(TranscriptItem {
+                stable_id: id,
+                position: 0,
+                latest_content_event_ordinal: None,
+                created_at_ms: 0,
+                last_changed_at_ms: 0,
+                body: decode_transcript_body(&body, session_id)?,
+            });
+        }
+    }
+    let outputs = mj_core::transcript::TerminalOutputs::of(
+        items.iter().map(AsRef::as_ref).chain(context.iter()),
+    );
+    let joined = items
+        .iter()
+        .map(|item| outputs.for_tool(&item.stable_id).into_owned())
+        .collect::<Vec<_>>();
+    for (item, records) in items.iter_mut().zip(joined) {
+        if matches!(item.body, TranscriptBody::Tool { .. }) {
+            let TranscriptBody::Tool {
+                terminal_outputs, ..
+            } = &mut Arc::make_mut(item).body
+            else {
+                unreachable!()
+            };
+            *terminal_outputs = records;
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn load_materialized_transcript_filtered_from(
     path: &Path,
     session_id: &str,
@@ -677,7 +731,7 @@ pub(super) fn load_materialized_transcript_filtered_from(
             },
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let items = rows
+    let mut items = rows
         .into_iter()
         .map(
             |(
@@ -739,6 +793,7 @@ pub(super) fn load_materialized_transcript_filtered_from(
     } else {
         latest_seq.max(after_seq)
     };
+    hydrate_terminal_outputs(&connection, session_id, &mut items)?;
     Ok(Some(TranscriptPage {
         next_after_seq,
         items,
@@ -992,6 +1047,7 @@ pub(super) fn load_transcript_history_from(
         items.remove(0);
     }
     let before = has_more.then(|| mj_core::storage::TranscriptCursor::of(&items[0]));
+    hydrate_terminal_outputs(&connection, session_id, &mut items)?;
     Ok(Some(mj_core::storage::TranscriptHistoryPage {
         items,
         before,

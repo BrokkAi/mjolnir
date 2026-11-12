@@ -7992,3 +7992,105 @@ fn obsolete_turn_review_rows_are_retired_before_recovery() {
         None
     );
 }
+
+#[test]
+fn history_pages_join_parked_terminal_output_without_changing_page_boundaries() {
+    use mj_core::state::TerminalOutputRecord;
+    for output_first in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("history.sqlite3");
+        let mut full = materialized_session("joined-history");
+        let mut owner = full.transcript[2].clone();
+        let record = TerminalOutputRecord {
+            terminal_id: "parked".into(),
+            output: "authoritative terminal output".into(),
+            truncated: false,
+            exit_code: Some(0),
+            signal: None,
+        };
+        if let TranscriptBody::Tool {
+            terminal_outputs,
+            terminal_refs,
+            ..
+        } = &mut Arc::make_mut(&mut owner).body
+        {
+            terminal_refs.push(record.terminal_id.clone());
+            terminal_outputs.push(TerminalOutputRecord {
+                output: "older streamed output".into(),
+                ..record.clone()
+            });
+            terminal_outputs.push(TerminalOutputRecord {
+                terminal_id: "embedded-only".into(),
+                output: "embedded terminal output".into(),
+                ..record.clone()
+            });
+        }
+        let parked = Arc::new(TranscriptItem {
+            stable_id: "terminal:parked".into(),
+            position: if output_first { 1 } else { 4 },
+            latest_content_event_ordinal: None,
+            created_at_ms: 1,
+            last_changed_at_ms: 1,
+            body: TranscriptBody::TerminalOutput { record },
+        });
+        full.transcript = if output_first {
+            vec![parked, owner.clone()]
+        } else {
+            vec![owner.clone(), parked]
+        };
+        save_session_to(&path, &session(&full.session_id, "project-1")).unwrap();
+        save_materialized_session_to(&path, &full).unwrap();
+        let filtered = load_materialized_transcript_filtered_from(
+            &path,
+            &full.session_id,
+            0,
+            1,
+            vec![mj_core::transcript::TranscriptRole::Tool],
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(filtered.items.len(), 1);
+        assert_eq!(filtered.items[0].stable_id, owner.stable_id);
+        let text = mj_transcript::transcript::transcript_item_text(&filtered.items[0]);
+        assert!(text.contains("authoritative terminal output"));
+        assert!(text.contains("embedded terminal output"));
+        assert!(!text.contains("older streamed output"));
+        let before = if output_first {
+            None
+        } else {
+            Some(mj_core::storage::TranscriptCursor::of(&full.transcript[1]))
+        };
+        let page = load_transcript_history_from(&path, &full.session_id, before.as_ref(), 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(page.items[0].stable_id, owner.stable_id);
+        assert!(
+            mj_client::transcript::history_entries(&page)[0]
+                .text
+                .contains("authoritative terminal output")
+        );
+        // A remote client may later hold both the hydrated tool and its source record.
+        let mut held = full.clone();
+        held.transcript = full
+            .transcript
+            .iter()
+            .map(|item| {
+                if item.stable_id == owner.stable_id {
+                    filtered.items[0].clone()
+                } else {
+                    item.clone()
+                }
+            })
+            .collect();
+        let entries = mj_client::transcript::materialized_chat_entries(&held);
+        assert_eq!(entries.len(), 1);
+        let stored = load_materialized_session_from(&path, &full.session_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.transcript, full.transcript,
+            "presentation joins never write to storage"
+        );
+    }
+}
