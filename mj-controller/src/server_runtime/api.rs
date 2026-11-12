@@ -2288,11 +2288,9 @@ fn subagent_status(
             true,
         );
     }
-    if progress.login_failure.is_some()
-        && let Some(record) = record
-            .filter(|record| record.state == SessionState::Parked && record.last_error.is_some())
-    {
-        return ("failed".into(), record.last_error.clone(), true);
+    // A failed wake owns the output even when an earlier turn delivered a report.
+    if let Some((failure, _)) = parked_wake_failure(record) {
+        return ("failed".into(), Some(failure.to_owned()), true);
     }
     let start_pending = matches!(start, Some(StartStatus::Pending));
     let lifecycle = record.map(|record| record.state);
@@ -2524,17 +2522,29 @@ fn child_progress(committed: &crate::database::CommittedState, child_id: &str) -
     }
 }
 
+/// The current parked wake failure and its login classification take precedence
+/// over historical turns and reports.
+fn parked_wake_failure(record: Option<&mj_core::state::SessionRecord>) -> Option<(&str, bool)> {
+    let failure = record
+        .filter(|record| record.state == SessionState::Parked)?
+        .last_error
+        .as_deref()?;
+    Some((
+        failure,
+        mj_core::credentials::text_reports_auth_failure(failure),
+    ))
+}
+
 /// One projection for provider refusals before a turn and during a turn.
 fn child_login_failure(
     record: Option<&mj_core::state::SessionRecord>,
     last: Option<&mj_core::state::MaterializedTurnOutcome>,
     profile: Option<&str>,
 ) -> Option<String> {
-    let refused = record
-        .filter(|record| record.state == SessionState::Parked)
-        .and_then(|record| record.last_error.as_deref())
-        .is_some_and(mj_core::credentials::text_reports_auth_failure)
-        || last.is_some_and(mj_core::subagent::turn_failed_on_login);
+    let refused = match parked_wake_failure(record) {
+        Some((_, refused)) => refused,
+        None => last.is_some_and(mj_core::subagent::turn_failed_on_login),
+    };
     profile.filter(|_| refused).map(str::to_owned)
 }
 
