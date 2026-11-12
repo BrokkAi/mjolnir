@@ -181,7 +181,7 @@ fn an_installed_harness_is_offered_before_its_first_login() {
     let directory = tempfile::tempdir().unwrap();
     let executor = FakeExecutor {
         commands: RefCell::new(Vec::new()),
-        statuses: vec![1, 1, 1, 1, 1, 0, 1],
+        statuses: vec![1, 1, 1, 1, 1, 0, 1, 1],
     };
     let mut homes = Vec::new();
 
@@ -221,7 +221,7 @@ fn an_installed_dsh_is_offered_before_its_first_login() {
     let directory = tempfile::tempdir().unwrap();
     let executor = FakeExecutor {
         commands: RefCell::new(Vec::new()),
-        statuses: vec![1, 1, 1, 1, 1, 1, 0],
+        statuses: vec![1, 1, 1, 1, 1, 1, 0, 1],
     };
     let mut homes = Vec::new();
 

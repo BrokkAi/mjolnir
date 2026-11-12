@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 124;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 126;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2405,6 +2405,13 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
         )?;
     }
 
+    // Breaking once: older snapshot writers delete unsupported sessions they
+    // did not load. Revision 126 writers preserve them, so future harness kinds
+    // require neither a schema change nor a new compatibility floor.
+    if version < 126 {
+        remove_harness_constraints(connection)?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -2793,6 +2800,71 @@ fn admit_harness_kind(
     Ok(())
 }
 
+fn remove_harness_constraints(connection: &Connection) -> Result<()> {
+    let legacy_alter_table: bool =
+        connection.pragma_query_value(None, "legacy_alter_table", |row| row.get(0))?;
+    connection.execute_batch("PRAGMA foreign_keys = OFF; PRAGMA legacy_alter_table = ON;")?;
+    let migration = (|| -> Result<()> {
+        let transaction = connection.unchecked_transaction()?;
+        for table in ["sessions", "hidden_native_sessions"] {
+            let sql: String = transaction.query_row(
+                "SELECT sql FROM sqlite_schema WHERE type='table' AND name=?1",
+                [table],
+                |row| row.get(0),
+            )?;
+            let (_, definition) = sql
+                .split_once('(')
+                .context("missing harness table definition")?;
+            let Some(start) = definition.find(" CHECK(harness_kind IN (") else {
+                continue;
+            };
+            let end = start
+                + definition[start..]
+                    .find("))")
+                    .context("unterminated harness constraint")?
+                + 2;
+            let definition = format!("{}{}", &definition[..start], &definition[end..]);
+            let objects: Vec<String> = transaction
+                .prepare(
+                    "SELECT sql FROM sqlite_schema WHERE tbl_name=?1
+                     AND type IN ('index','trigger') AND sql IS NOT NULL",
+                )?
+                .query_map([table], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            transaction.execute_batch(&format!(
+                "CREATE TABLE {table}_unconstrained_v126 ({definition};
+                 INSERT INTO {table}_unconstrained_v126 SELECT * FROM {table};
+                 DROP TABLE {table};
+                 ALTER TABLE {table}_unconstrained_v126 RENAME TO {table};"
+            ))?;
+            for object in objects {
+                transaction.execute_batch(&object)?;
+            }
+        }
+        ensure!(
+            !transaction
+                .prepare("PRAGMA foreign_key_check")?
+                .exists([])?,
+            "foreign key violation while removing harness constraints"
+        );
+        transaction.execute_batch(
+            "UPDATE schema_compatibility SET minimum_compatible_version = 126
+                 WHERE singleton = 1;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (126, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 126;",
+        )?;
+        transaction.commit()?;
+        Ok(())
+    })();
+    let restored = connection.execute_batch("PRAGMA foreign_keys = ON;");
+    let restored_alter = connection.pragma_update(None, "legacy_alter_table", legacy_alter_table);
+    migration?;
+    restored_alter.context("restore table rename behavior after harness migration")?;
+    restored.context("restore foreign key enforcement after a harness-kind migration")?;
+    Ok(())
+}
+
 // Rebuild from the stored definition so every shipped column and trigger survives.
 fn migrate_startup_cleanup_state(connection: &Connection) -> Result<()> {
     const BEFORE: &str = "'stopped','parked','lost',";
@@ -3014,6 +3086,16 @@ pub(super) fn restore_pre101_subagent_preference(connection: &Connection) {
 /// Historical fixtures must remove review columns introduced afterward.
 #[cfg(test)]
 pub(super) fn restore_review_state_schema(connection: &Connection, version: i64) {
+    // Rewinding the ledger must also restore the constraint removed by 126,
+    // otherwise historical harness-admission migrations see a modern table.
+    if version < 126 {
+        connection.execute_batch("PRAGMA writable_schema=ON;
+            UPDATE sqlite_schema SET sql=replace(sql, 'harness_kind TEXT NOT NULL',
+                'harness_kind TEXT NOT NULL CHECK(harness_kind IN (''codex'',''claude'',''kimi'',''grok'',''deepseek'',''muse'',''opencode'',''mimo'',''dsh''))')
+            WHERE name IN ('sessions','hidden_native_sessions') AND sql NOT LIKE '%CHECK(harness_kind IN (%';
+            PRAGMA writable_schema=RESET;").unwrap();
+    }
+
     if version < 122 {
         drop_environment_schema(connection);
     }
@@ -3093,6 +3175,71 @@ pub(super) fn restore_pre116_prompt_history(connection: &Connection, version: i6
 #[cfg(test)]
 mod reader_tests {
     use super::*;
+
+    // Hard-won: unknown harness rows were erased by full snapshot saves.
+    #[test]
+    fn unknown_harness_survives_migration_and_snapshot_save() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("future.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        create_baseline_schema(&connection).unwrap();
+        connection.execute_batch("CREATE TRIGGER stop_harness BEFORE INSERT ON schema_migrations WHEN NEW.version > 125 BEGIN SELECT RAISE(ABORT, 'boundary'); END;").unwrap();
+        assert!(migrate_schema(&connection).is_err());
+        connection.execute_batch("DROP TRIGGER stop_harness;
+        INSERT INTO session_contexts(session_id,bundle_id,created_at) VALUES ('kept','project','now');
+        INSERT INTO sessions(session_id,title,harness_kind,last_profile,target_template_id,state,updated_at) VALUES ('kept','kept','codex','codex','target','stopped','now');
+        CREATE INDEX harness_fixture_index ON sessions(title);
+        CREATE TRIGGER harness_external_trigger AFTER UPDATE ON session_contexts BEGIN SELECT count(*) FROM sessions; END;
+        CREATE TRIGGER harness_fixture_trigger AFTER UPDATE OF title ON sessions BEGIN SELECT 1; END;").unwrap();
+        migrate_schema(&connection).unwrap();
+        connection.execute_batch("UPDATE sessions SET harness_kind='future-harness'; INSERT INTO hidden_native_sessions VALUES ('future-harness','native','now');").unwrap();
+        let snapshot = || {
+            let mut query = connection
+                .prepare("SELECT * FROM sessions WHERE session_id='kept'")
+                .unwrap();
+            let columns = query.column_count();
+            query
+                .query_row([], |row| {
+                    (0..columns)
+                        .map(|i| row.get::<_, rusqlite::types::Value>(i))
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .unwrap()
+        };
+        let before = snapshot();
+        let state = load_state_from(&path).unwrap();
+        assert!(!state.sessions.contains_key("kept"));
+        save_state_to(&path, &state).unwrap();
+        assert_eq!(before, snapshot());
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT harness_kind FROM sessions WHERE session_id='kept'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "future-harness"
+        );
+        assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM hidden_native_sessions WHERE harness_kind='future-harness'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+        assert_eq!(connection.query_row("SELECT count(*) FROM sqlite_schema WHERE name IN ('harness_fixture_index','harness_fixture_trigger')", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+        assert!(
+            !connection
+                .prepare("PRAGMA foreign_key_check")
+                .unwrap()
+                .exists([])
+                .unwrap()
+        );
+    }
 
     #[test]
     fn terminal_draft_migration_preserves_archives_and_admits_tombstones() {
@@ -3256,7 +3403,7 @@ mod reader_tests {
         );
         let state = read_schema_state(&connection).unwrap();
         assert_eq!(state.revision, SCHEMA_VERSION);
-        assert_eq!(state.minimum_compatible, Some(124));
+        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         assert!(state.ensure_supported_by(123).is_err());
     }
 
