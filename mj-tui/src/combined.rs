@@ -651,7 +651,7 @@ fn render_combined_themed(
             SupportPane::Quota,
             PaneDimensions {
                 minimized: SUMMARY_ROW,
-                full: table_height(dashboard.config.enabled_profiles().count()),
+                full: table_height(dashboard.quota_profile_rows().len()),
                 standard_cap: area.height / 4,
             },
         ),

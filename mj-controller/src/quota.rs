@@ -26,9 +26,12 @@ pub use mj_client::quota::{
 };
 
 /// Clone a daemon report for a user-facing quota surface, retaining only
-/// unscoped windows and Claude's Fable weekly allowance. Internal selection
-/// and health keep the complete report.
+/// unscoped windows, Claude's Fable allowance and Antigravity's two pools.
+/// Internal selection and health keep the complete report.
 pub(crate) fn surface_quota_report(report: &ProfileQuota) -> ProfileQuota {
+    if report.harness == HarnessKind::Antigravity {
+        return report.clone();
+    }
     let mut visible = report.clone();
     let fable_weekly = report.fable_weekly_window().cloned();
     visible
@@ -1063,7 +1066,19 @@ async fn refresh_profile_with_cache_root(
         }),
         // dsh-acp talks to DeepSeek's API, which bills by usage.
         HarnessKind::Dsh => Ok(usage_priced()),
-        HarnessKind::Antigravity => Ok(not_reported()),
+        HarnessKind::Antigravity => crate::antigravity_usage::query(&source_home, &environment)
+            .await
+            .map(|windows| ProfileQuota {
+                paid_credits: None,
+                banked_resets: None,
+                profile_id: profile_id.clone(),
+                harness,
+                windows,
+                extra: None,
+                error: None,
+                refreshed_at_epoch_seconds,
+                rate_limited_until_epoch_seconds: None,
+            }),
     };
     let report = result.unwrap_or_else(|error| ProfileQuota {
         paid_credits: None,

@@ -283,3 +283,32 @@
 │  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · : / ? palette
+=== Antigravity Gemini and Claude quota pools (140x28) ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ default                                  ≡ ││                                                                                            │
+╰────────────────────────────────────────────╯│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
+│ Create   Open   Filter: ___________________││                                      ✦  M J O L N I R                                      │
+│No sessions yet                             ││                                                                                            │
+│Create new work or open a session.          ││                             Create a session to start building.                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ No live session ───────────────────────────────────────────────────────────────────────────╮
+│                                            ││No live session in this workspace.                                                          │
+│                                            ││Press ctrl+b c to create a session or ctrl+b g to find one.                                 │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Profiles ▾ (refreshed 0s ago)─────────────────────────────────────────────────── ▁   ▄   □ ╮
+│                                            ││            Harness      Weekly          Resets  5H              Resets                     ▐
+│                                            ││  agy (Ge)  Antigravity  ▕███████▎  ▏73%         ▕████▊     ▏48%                            ▐
+│                                            ││› agy (Cl)  Antigravity  ▕          ▏0%                                                     ▐
+│                                            ││  claude-1  Claude Code  refreshing…                                                        ▐
+│                                            ││  codex-1   Codex        refreshing…                                                        │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter rename profile · . menu · Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · : / ? palette

@@ -138,6 +138,74 @@ deepseek
 API
 ›
 layout: {"documentWidth":320,"documentHeight":912,"rows":[56,44,44,44,44,44,44],"profiles":[{"id":"claude","open":true,"label":"claude. Week: 83% left; Fable weekly 17% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"claude\"}","focused":true},{"id":"claude2","open":false,"label":"claude2. Week: 80% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"claude2\"}","focused":false},{"id":"codex","open":false,"label":"codex. Week: 60% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"codex\"}","focused":false},{"id":"codex2","open":false,"label":"codex2. Week: 40% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"codex2\"}","focused":false},{"id":"codex3","open":false,"label":"codex3. Week: 20% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"codex3\"}","focused":false},{"id":"kimi","open":false,"label":"kimi. Week: 0% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"kimi\"}","focused":false},{"id":"deepseek","open":false,"label":"deepseek. API","refreshPayload":"{\"profile_id\":\"deepseek\"}","focused":false}]}
+=== Antigravity pools remain separate with Claude exhausted (320x568) ===
+Quota
+
+Tap a profile for resets and details.
+
+% left
+Week
+5H
+claude
+83% (17%)
+90% !
+›
+
+claude
+
+Week (Fable 17% left)
+17% used
+
+resets 12:00 Sep 12
+
+5H
+10% used
+
+on course to run out first
+
+Last refreshed 9:04:11 PM
+
+Refresh
+claude2
+80%
+—
+›
+codex
+60%
+90% !
+›
+codex2
+40%
+—
+›
+codex3
+20%
+90% !
+›
+kimi
+0%
+—
+›
+deepseek
+API
+›
+agy (Ge)
+73%
+48%
+›
+agy (Cl)
+0%
+81%
+›
+
+antigravity
+
+Week
+100% used
+5H
+19% used
+Refresh
+layout: {"documentWidth":320,"documentHeight":1216,"rows":[56,44,44,44,44,44,44,44,44],"profiles":[{"id":"claude","open":true,"label":"claude. Week: 83% left; Fable weekly 17% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"claude\"}","focused":false},{"id":"claude2","open":false,"label":"claude2. Week: 80% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"claude2\"}","focused":false},{"id":"codex","open":false,"label":"codex. Week: 60% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"codex\"}","focused":false},{"id":"codex2","open":false,"label":"codex2. Week: 40% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"codex2\"}","focused":false},{"id":"codex3","open":false,"label":"codex3. Week: 20% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"codex3\"}","focused":false},{"id":"kimi","open":false,"label":"kimi. Week: 0% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"kimi\"}","focused":false},{"id":"deepseek","open":false,"label":"deepseek. API","refreshPayload":"{\"profile_id\":\"deepseek\"}","focused":false},{"id":"agy:Ge","open":false,"label":"agy (Ge). Week: 73% left. 5H: 48% left","refreshPayload":"{\"profile_id\":\"agy\"}","focused":false},{"id":"agy:Cl","open":true,"label":"agy (Cl). Week: 0% left. 5H: 81% left","refreshPayload":"{\"profile_id\":\"agy\"}","focused":true}]}
 === six quotas and API at a glance (390x844) ===
 Quota
 
@@ -278,3 +346,71 @@ deepseek
 API
 ›
 layout: {"documentWidth":390,"documentHeight":876,"rows":[44,44,44,44,44,44,44],"profiles":[{"id":"claude","open":true,"label":"claude. Week: 83% left; Fable weekly 17% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"claude\"}","focused":true},{"id":"claude2","open":false,"label":"claude2. Week: 80% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"claude2\"}","focused":false},{"id":"codex","open":false,"label":"codex. Week: 60% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"codex\"}","focused":false},{"id":"codex2","open":false,"label":"codex2. Week: 40% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"codex2\"}","focused":false},{"id":"codex3","open":false,"label":"codex3. Week: 20% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"codex3\"}","focused":false},{"id":"kimi","open":false,"label":"kimi. Week: 0% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"kimi\"}","focused":false},{"id":"deepseek","open":false,"label":"deepseek. API","refreshPayload":"{\"profile_id\":\"deepseek\"}","focused":false}]}
+=== Antigravity pools remain separate with Claude exhausted (390x844) ===
+Quota
+
+Tap a profile for resets and details.
+
+% left
+Week
+5H
+claude
+83% (17%)
+90% !
+›
+
+claude
+
+Week (Fable 17% left)
+17% used
+
+resets 12:00 Sep 12
+
+5H
+10% used
+
+on course to run out first
+
+Last refreshed 9:04:11 PM
+
+Refresh
+claude2
+80%
+—
+›
+codex
+60%
+90% !
+›
+codex2
+40%
+—
+›
+codex3
+20%
+90% !
+›
+kimi
+0%
+—
+›
+deepseek
+API
+›
+agy (Ge)
+73%
+48%
+›
+agy (Cl)
+0%
+81%
+›
+
+antigravity
+
+Week
+100% used
+5H
+19% used
+Refresh
+layout: {"documentWidth":390,"documentHeight":1180,"rows":[44,44,44,44,44,44,44,44,44],"profiles":[{"id":"claude","open":true,"label":"claude. Week: 83% left; Fable weekly 17% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"claude\"}","focused":false},{"id":"claude2","open":false,"label":"claude2. Week: 80% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"claude2\"}","focused":false},{"id":"codex","open":false,"label":"codex. Week: 60% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"codex\"}","focused":false},{"id":"codex2","open":false,"label":"codex2. Week: 40% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"codex2\"}","focused":false},{"id":"codex3","open":false,"label":"codex3. Week: 20% left. 5H: 90% left, projected to run out before reset","refreshPayload":"{\"profile_id\":\"codex3\"}","focused":false},{"id":"kimi","open":false,"label":"kimi. Week: 0% left. 5H: not reported","refreshPayload":"{\"profile_id\":\"kimi\"}","focused":false},{"id":"deepseek","open":false,"label":"deepseek. API","refreshPayload":"{\"profile_id\":\"deepseek\"}","focused":false},{"id":"agy:Ge","open":false,"label":"agy (Ge). Week: 73% left. 5H: 48% left","refreshPayload":"{\"profile_id\":\"agy\"}","focused":false},{"id":"agy:Cl","open":true,"label":"agy (Cl). Week: 0% left. 5H: 81% left","refreshPayload":"{\"profile_id\":\"agy\"}","focused":true}]}

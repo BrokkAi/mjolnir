@@ -86,10 +86,17 @@ pub(crate) fn minimized_quota_line(
     focused: bool,
 ) -> Line<'static> {
     let readings = dashboard
-        .config
-        .enabled_profiles()
-        .filter_map(|(id, _profile)| {
-            let quota = dashboard.quotas.get(id);
+        .quota_profile_rows()
+        .into_iter()
+        .filter_map(|row| {
+            let id = row.id;
+            let projected = row.pool.and_then(|pool| {
+                dashboard
+                    .quotas
+                    .get(id)
+                    .map(|quota| quota.for_antigravity_pool(pool))
+            });
+            let quota = projected.as_ref().or_else(|| dashboard.quotas.get(id));
             // The report says for itself that it is usage-priced.
             let usage_priced = quota.is_some_and(|quota| quota.is_usage_priced());
             if usage_priced {
@@ -97,14 +104,14 @@ pub(crate) fn minimized_quota_line(
             }
             if quota.is_some_and(ProfileQuota::is_not_reported) {
                 return Some(SummaryReading {
-                    name: id.to_owned(),
+                    name: row.label(),
                     value: NOT_REPORTED_LABEL.into(),
                     color: None,
                 });
             }
             if dashboard.quota_refreshing.contains(id) {
                 return Some(SummaryReading {
-                    name: id.to_owned(),
+                    name: row.label(),
                     value: format!("refreshing{}", theme::glyphs().ellipsis),
                     color: None,
                 });
@@ -115,7 +122,7 @@ pub(crate) fn minimized_quota_line(
                 .as_secs();
             if quota.is_some_and(|quota| quota.rate_limit_label(now).is_some()) {
                 return Some(SummaryReading {
-                    name: id.to_owned(),
+                    name: row.label(),
                     value: "rate limited".into(),
                     color: None,
                 });
@@ -126,7 +133,7 @@ pub(crate) fn minimized_quota_line(
                 .and_then(quota_remaining_percent)
             else {
                 return Some(SummaryReading {
-                    name: id.to_owned(),
+                    name: row.label(),
                     value: "unavailable".into(),
                     color: None,
                 });
@@ -147,7 +154,7 @@ pub(crate) fn minimized_quota_line(
                 None => format!("{primary}%"),
             };
             Some(SummaryReading {
-                name: id.to_owned(),
+                name: row.label(),
                 value,
                 color: Some(headroom_color(
                     five_hour.map_or(primary, |five_hour| primary.min(five_hour)),
@@ -392,15 +399,19 @@ pub(crate) fn quota_column_width(
 
 pub(crate) fn quota_table_rows(dashboard: &DashboardState, now: u64) -> Vec<QuotaTableRow> {
     dashboard
-        .config
-        .enabled_profiles()
-        .map(|(id, profile)| {
-            let (weekly, weekly_reset, five_hour, five_hour_reset, weekly_chart, five_hour_chart) =
-                if let Some(label) = dashboard
+        .quota_profile_rows()
+        .into_iter()
+        .map(|row| {
+            let id = row.id;
+            let projected = row.pool.and_then(|pool| {
+                dashboard
                     .quotas
                     .get(id)
-                    .and_then(ProfileQuota::windowless_label)
-                {
+                    .map(|quota| quota.for_antigravity_pool(pool))
+            });
+            let quota = projected.as_ref().or_else(|| dashboard.quotas.get(id));
+            let (weekly, weekly_reset, five_hour, five_hour_reset, weekly_chart, five_hour_chart) =
+                if let Some(label) = quota.and_then(ProfileQuota::windowless_label) {
                     (
                         windowless_quota_bar(label),
                         String::new(),
@@ -419,7 +430,7 @@ pub(crate) fn quota_table_rows(dashboard: &DashboardState, now: u64) -> Vec<Quot
                         false,
                     )
                 } else {
-                    match dashboard.quotas.get(id) {
+                    match quota {
                         // The provider said to wait. The daemon keeps the last
                         // good reading and its age; the row says when the
                         // next probe is allowed.
@@ -475,8 +486,8 @@ pub(crate) fn quota_table_rows(dashboard: &DashboardState, now: u64) -> Vec<Quot
                     }
                 };
             QuotaTableRow {
-                profile: id.to_owned(),
-                harness: profile.kind.display_name().into(),
+                profile: row.label(),
+                harness: row.harness.display_name().into(),
                 weekly: quota_chart(weekly, weekly_chart),
                 weekly_reset,
                 five_hour: quota_chart(five_hour, five_hour_chart),
@@ -612,6 +623,7 @@ pub(crate) fn render_quotas(
             dashboard.pane_maximize_enabled(SupportPane::Quota),
         ))
     });
+    let row_count = rows.len();
     let table = Table::new(rows.into_iter().map(QuotaTableRow::into_row), widths)
         .column_spacing(0)
         // The pane's own title already says these rows are profiles, so the
@@ -633,7 +645,7 @@ pub(crate) fn render_quotas(
         .highlight_spacing(HighlightSpacing::Always)
         .block(block);
     let viewport = usize::from(area.height.saturating_sub(SESSION_TABLE_CHROME_HEIGHT));
-    let row_heights = vec![1; dashboard.config.enabled_profiles().count()];
+    let row_heights = vec![1; row_count];
     let mut offset = mj_chat::components::clamp_offset_to_last_page(
         dashboard.quota_scroll.get(),
         &row_heights,
@@ -643,16 +655,11 @@ pub(crate) fn render_quotas(
         offset =
             mj_chat::components::centered_offset(dashboard.quota_index, &row_heights, viewport);
     }
-    let mut state = TableState::default().with_offset(offset).with_selected(
-        dashboard
-            .config
-            .enabled_profiles()
-            .next()
-            .is_some()
-            .then_some(dashboard.quota_index),
-    );
+    let mut state = TableState::default()
+        .with_offset(offset)
+        .with_selected((row_count > 0).then_some(dashboard.quota_index));
     frame.render_stateful_widget(table, area, &mut state);
-    if dashboard.config.enabled_profiles().next().is_none() {
+    if row_count == 0 {
         frame.render_widget(
             Paragraph::new("Add an agent profile in Settings.")
                 .style(theme::muted())
@@ -669,7 +676,7 @@ pub(crate) fn render_quotas(
     render_session_scrollbar(
         frame,
         area,
-        dashboard.config.enabled_profiles().count(),
+        row_count,
         state.offset(),
         usize::from(area.height.saturating_sub(SESSION_TABLE_CHROME_HEIGHT)),
     );

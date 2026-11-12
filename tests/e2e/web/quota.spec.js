@@ -105,6 +105,26 @@ test('golden_viewer_quota_overview', async ({ context }) => {
       renderQuota();
     });
     await capture('refreshed quota keeps its details and focus');
+    await page.evaluate(() => {
+      snapshot.profiles.push({
+        id: 'agy', harness_kind: 'antigravity', quota: {
+          windows: [
+            { label: 'Week', pool: 'Ge', percent_used: 27 },
+            { label: '5H', pool: 'Ge', percent_used: 52 },
+            { label: 'Week', pool: 'Cl', percent_used: 100 },
+            { label: '5H', pool: 'Cl', percent_used: 19 },
+          ],
+        },
+      });
+      renderQuota();
+    });
+    await expect(page.locator('[data-profile-id="agy:Ge"] summary')).toContainText('agy (Ge)');
+    await expect(page.locator('[data-profile-id="agy:Ge"] summary')).toContainText('73%');
+    await expect(page.locator('[data-profile-id="agy:Cl"] summary')).toContainText('agy (Cl)');
+    await expect(page.locator('[data-profile-id="agy:Cl"] summary')).toContainText('0%');
+    await page.locator('[data-profile-id="agy:Cl"] summary').click();
+    await expect(page.locator('[data-profile-id="agy:Cl"] .quota-value')).toHaveText(['0%', '81%']);
+    await capture('Antigravity pools remain separate with Claude exhausted');
     await page.close();
   }
   assertGolden('viewer_quota_overview', output.join('\n'));

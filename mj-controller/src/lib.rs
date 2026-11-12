@@ -1,6 +1,7 @@
 //! Hel's daemon-side controller: provisioning, session management, the web
 //! server, and the surrounding host-side services.
 
+mod antigravity_usage;
 mod aws_assume_role;
 mod aws_credentials;
 mod claude_login;

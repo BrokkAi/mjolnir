@@ -629,9 +629,16 @@ pub(super) fn viewer_snapshot_selected(
             windows: quota
                 .windows
                 .iter()
-                .filter(|window| window.model_scope.is_none())
+                .filter(|window| {
+                    window.model_scope.is_none()
+                        || quota.harness == mj_core::config::HarnessKind::Antigravity
+                })
                 .map(|window| crate::server::ViewerQuotaWindow {
                     label: window.label.clone(),
+                    pool: (quota.harness == mj_core::config::HarnessKind::Antigravity)
+                        .then(|| mj_client::quota::AntigravityQuotaPool::of_window(window))
+                        .flatten()
+                        .map(|pool| pool.label().to_owned()),
                     resets_at_epoch_seconds: window.resets_at_epoch_seconds,
                     reset_countdown_style: window.reset_countdown_style(),
                     banked_resets: quota.banked_resets_for_window(window),

@@ -13,6 +13,12 @@ Enable explicit Antigravity profiles using a host-installed agy and isolated cop
 - [x] 2026-11-12: Validate installed discovery, copied-home restart/resume and isolated mj file edit, command, memory MCP and model/effort switches. Original login hash unchanged; test session destroyed and daemon stopped.
 - [x] 2026-11-12: Commit harness separately from the store change without pushing. Fix the combined-review login finding; account-boundary regression passes.
 - [x] Parent verified the completed isolated E2E and clean combined review through dae8ecdde; original Google credentials stayed unchanged, and the test session and daemon were cleaned up.
+- [x] Published the reviewed implementation as 49d62f2d8. Stopped the installer during compilation at the user's request; no installed binaries, live schema or profile changed.
+- [x] Verified agy 1.5.6's structured `-p /usage --output-format json`: Gemini and Claude/GPT each have independent weekly and five-hour buckets. The command uses zero model turns/tokens. A separate minimal Claude Opus 5.5 prompt succeeded.
+- [x] Added daemon-owned quota polling through the installed CLI, model-scoped selection/recovery, and two visible rows named `agy (Ge)` and `agy (Cl)`.
+- [x] Recorded CLI data proves independent exhaustion and reset recovery; TUI/viewer goldens and four browser quota tests pass. The Claude probe decreased only the third-party pool; Gemini was unchanged.
+- [ ] Finish real isolated quota-collector validation, full touched-crate suites, workspace clippy and review before pushing or installing the quota extension.
+- [ ] Install only after quota support is understood and validated; apply the pre-approved migration, add profile `agy` using /home/jonathan/.gemini, and complete the installed-build isolated smoke test.
 
 ## Surprises & Discoveries
 
@@ -20,11 +26,17 @@ agy advertises both suffixed legacy models and base model selectors. Prefer conf
 
 ## Decision Log
 
-Use antigravity identity, ~/.gemini source home, and token copies. No installation, quota, native subagents or automatic reviewer ranking. Configured approvals select default; unconstrained selects auto with skip-permissions. Plan entry and exit passed real ACP probing; exit restores target policy. Native checkpoint export is explicitly unsupported.
+Use antigravity harness identity, ~/.gemini source home, and token copies. The user-facing profile is `agy`. No managed harness installation, native subagents or automatic reviewer ranking. Configured approvals select default; unconstrained selects auto with skip-permissions. Plan entry and exit passed real ACP probing; exit restores target policy. Native checkpoint export is explicitly unsupported.
+
+The user requires quota support before installation. Query the CLI's own documented `/usage` command, not reverse-engineered HTTP endpoints. Its JSON command.data.groups[].buckets[] supplies gemini-weekly, gemini-5h, 3p-weekly and 3p-5h, remaining_fraction and UTC reset_time. Store one copy of each window; scope Gemini to gemini model names and the third-party group to claude/gpt names. Extend the shared scope matcher to allow comma-separated model fragments. The daemon remains the sole quota poller. Run the command with a temporary HOME containing a credential copy; the top-level CLI does not accept ACP's --gemini-dir flag. Reuse process capture and credential-file helpers, and surface malformed or failed CLI output as an error instead of n/a.
+
+Display two rows for this one profile, suffixed (Ge) and (Cl). One shared row list must drive TUI drawing, selection, scrolling and rename lookup so a second quota row does not select another profile. Preserve both pools in the viewer projection and display the same two labels there. Keep the existing persisted quota shape, including its optional string model_scope, and reuse the existing cache and refresh cadence.
 
 ## Outcomes & Retrospective
 
 The isolated session completed edits, commands and mj-memory search, and applied base-model and thought-level changes through mj. Direct ACP restart/resume preserves conversation history. The parent verified these results and accepted the clean combined review. Final validation results are recorded in the report directory. The store plan tracks the remaining CLI historical-fixture correction before the user-authorized installation and profile setup.
+
+Quota support now uses the CLI's own zero-turn JSON export, preserves four scoped windows through the daemon cache and viewer, and renders separate pool rows in both UIs. TUI navigation and rename use the same expanded row list as rendering. Reset-cache recovery matches both the window label and model scope, so same-named Week/5H windows cannot cross pools. The original login stayed unchanged throughout the live probes. Before/after readings were Gemini weekly 99.96924% unchanged, Gemini five-hour 99.87694% unchanged, Claude/GPT weekly 99.86148% to 99.78672%, and Claude/GPT five-hour 99.72296% to 99.57343% after the minimal Opus prompt.
 
 ## Context and Orientation
 
@@ -61,3 +73,5 @@ Reuse generic ACP configOptions and stdio MCP delivery, existing subprocess help
 2026-11-12: Combined review found custom-home CLI login omitted --gemini-dir. Native login now uses agy acp --login with the configured home; regression with a home containing spaces proves the default account remains untouched. Corrected TUI harness-name expectation to include Antigravity.
 
 2026-11-12: Parent resumed from the handoff, verified FINAL-EVIDENCE.md and acceptance-summary.md against the actual logs, and accepted the isolated smoke test and cleanup. Remaining publication work is to merge current master, finish the shared store fixture checks, install through scripts/install.sh, verify the live revision-126 migration, and add profiles.antigravity with home /home/jonathan/.gemini. The installed-build smoke test must also use the isolated agy-test instance.
+
+2026-11-12: User stopped installation until both subscription quota pools are understood. The installer was still compiling and replaced no binaries; live schema remains 125 and no profile was added. The direct quota and Claude probes succeeded using copied credentials under /home/jonathan/.cache/mjolnir/build/agy-quota-probe. User chose two quota rows, (Ge)/(Cl), and shortened the profile name to agy. These later decisions supersede the earlier no-quota cut and profile name above.

@@ -1070,6 +1070,9 @@ pub struct ViewerProfile {
 #[serde(deny_unknown_fields)]
 pub struct ViewerQuotaWindow {
     pub label: String,
+    /// Independent model pool, displayed as a separate row for the profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resets_at_epoch_seconds: Option<i64>,
     #[serde(default)]
