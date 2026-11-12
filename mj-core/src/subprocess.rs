@@ -55,6 +55,171 @@ impl Drop for ProcessGroupGuard {
     }
 }
 
+#[cfg(windows)]
+struct ChildJob(usize);
+
+#[cfg(windows)]
+impl ChildJob {
+    fn attach(child: &tokio::process::Child) -> Result<Self> {
+        use windows_sys::Win32::System::JobObjects::*;
+        // SAFETY: all structures are initialized and handles stay owned here.
+        unsafe {
+            let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            anyhow::ensure!(
+                !handle.is_null(),
+                "create child job: {}",
+                std::io::Error::last_os_error()
+            );
+            let job = Self(handle as usize);
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            anyhow::ensure!(
+                SetInformationJobObject(
+                    handle,
+                    JobObjectExtendedLimitInformation,
+                    &limits as *const _ as *const _,
+                    std::mem::size_of_val(&limits) as u32
+                ) != 0,
+                "configure child job: {}",
+                std::io::Error::last_os_error()
+            );
+            let process = child.raw_handle().context("missing child process handle")?;
+            anyhow::ensure!(
+                AssignProcessToJobObject(handle, process as _) != 0,
+                "assign child job: {}",
+                std::io::Error::last_os_error()
+            );
+            Ok(job)
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ChildJob {
+    fn drop(&mut self) {
+        // SAFETY: this wrapper exclusively owns the job handle.
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0 as _);
+        }
+    }
+}
+
+/// A long-lived child whose supervisor owns termination and reaping. Dropping
+/// this handle requests cleanup; `terminate` also waits for cleanup to finish.
+/// Keep the Tokio runtime alive until cleanup completes.
+pub struct SupervisedChild {
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    done: tokio::sync::watch::Receiver<Option<std::result::Result<ExitStatus, String>>>,
+    stderr: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+}
+
+impl SupervisedChild {
+    /// Spawn with null stdin/stdout and concurrently captured stderr.
+    pub fn spawn(command: &mut tokio::process::Command) -> Result<Self> {
+        use tokio::io::AsyncReadExt;
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        command.process_group(0);
+        #[cfg(windows)]
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
+        let mut child = command.spawn().context("start supervised subprocess")?;
+        #[cfg(windows)]
+        let mut job = Some(ChildJob::attach(&child)?);
+        let group = ProcessGroupGuard::new(child.id());
+        let mut pipe = child.stderr.take().context("missing supervised stderr")?;
+        let stderr = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = stderr.clone();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let (finished, done) = tokio::sync::watch::channel(None);
+        tokio::spawn(async move {
+            let reader = tokio::spawn(async move {
+                let mut bytes = [0; 8192];
+                loop {
+                    let count = pipe.read(&mut bytes).await?;
+                    if count == 0 {
+                        return Ok::<_, std::io::Error>(());
+                    }
+                    captured
+                        .lock()
+                        .expect("stderr mutex poisoned")
+                        .extend_from_slice(&bytes[..count]);
+                }
+            });
+            let outcome = tokio::select! {
+                status = child.wait() => status.context("wait for supervised subprocess"),
+                _ = stopped => {
+                    group.kill();
+                    #[cfg(windows)]
+                    drop(job.take());
+                    if let Err(error) = child.start_kill() {
+                        tracing::debug!(%error, "supervised subprocess already exited during termination");
+                    }
+                    child.wait().await.context("reap supervised subprocess")
+                }
+            };
+            drop(group);
+            #[cfg(windows)]
+            drop(job.take());
+            let outcome = async {
+                reader
+                    .await
+                    .context("join supervised stderr reader")?
+                    .context("read supervised stderr")?;
+                outcome
+            }
+            .await
+            .map_err(|error| format!("{error:#}"));
+            if let Err(error) = &outcome {
+                tracing::warn!(%error, "supervised subprocess failed");
+            }
+            finished.send_replace(Some(outcome));
+        });
+        Ok(Self {
+            stop: Some(stop),
+            done,
+            stderr,
+        })
+    }
+
+    /// Captured diagnostics so far, including output received before exit.
+    pub fn stderr(&self) -> Vec<u8> {
+        self.stderr.lock().expect("stderr mutex poisoned").clone()
+    }
+
+    /// Observe exit without cancelling the child if this wait is cancelled.
+    pub async fn wait(&mut self) -> Result<ExitStatus> {
+        loop {
+            if let Some(outcome) = self.done.borrow().clone() {
+                return outcome.map_err(anyhow::Error::msg);
+            }
+            self.done
+                .changed()
+                .await
+                .context("subprocess supervisor stopped")?;
+        }
+    }
+
+    /// Kill and reap the child before returning.
+    pub async fn terminate(&mut self) -> Result<ExitStatus> {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        self.wait().await
+    }
+}
+
+impl Drop for SupervisedChild {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+    }
+}
+
 /// A process birth identity, shared with remote teardown's POSIX shell.
 /// Linux uses boot identity and kernel start ticks; other Unix hosts use ps's
 /// process start timestamp in UTC and the C locale. Recording and checking
@@ -929,6 +1094,52 @@ fn group_signal_error_is_ignorable(error: &std::io::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn supervised_child_drains_large_stderr_and_reaps_on_cancel() {
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-c", "head -c 131072 /dev/zero >&2; sleep 60 & wait"]);
+        let mut child = super::SupervisedChild::spawn(&mut command).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while child.stderr().len() < 131072 {
+                tokio::task::yield_now().await;
+            }
+            assert!(!child.terminate().await.unwrap().success());
+            assert_eq!(child.stderr().len(), 131072);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn supervised_child_drop_reaps_process_group() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("pid");
+        let mut command = tokio::process::Command::new("sh");
+        command
+            .args(["-c", "echo $$ > \"$1\"; sleep 60 & wait", "fixture"])
+            .arg(&pid_file);
+        let child = super::SupervisedChild::spawn(&mut command).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !pid_file.exists() {
+                tokio::task::yield_now().await;
+            }
+            let pid: i32 = loop {
+                if let Ok(pid) = std::fs::read_to_string(&pid_file).unwrap().trim().parse() {
+                    break pid;
+                }
+                tokio::task::yield_now().await;
+            };
+            drop(child);
+            while unsafe { libc::kill(pid, 0) } == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn bounded_timeout_reaps_the_child_before_returning() {
