@@ -1434,9 +1434,12 @@ async function loadInlineHistory() {
     before: liveHistoryRows.size ? { position: Math.min(...[...liveHistoryRows.values()].map(entry => entry.id)) + 1, stable_id: '' } : null,
     done: false, loading: false,
     entries: new Map(),
+    // Positions of restored clipped rows whose live version changed; the
+    // loader fetches them once any boundary gap is finished.
+    refetch: new Set(),
   };
   const state = inlineHistory;
-  if (state.loading || (state.done && !state.gap)) return;
+  if (state.loading || (state.done && !state.gap && !state.refetch.size)) return;
   state.loading = true;
   state.failed = false;
   earlierMessages.disabled = true;
@@ -1445,6 +1448,12 @@ async function loadInlineHistory() {
     let visibleAdded, gap;
     do {
       visibleAdded = false;
+      if (!state.gap && state.refetch.size) {
+        // One backwards pass from the newest requested row to the oldest.
+        const positions = [...state.refetch];
+        state.refetch.clear();
+        state.gap = { before: { position: Math.max(...positions) + 1, stable_id: '' }, boundary: Math.min(...positions) };
+      }
       const query = new URLSearchParams();
       gap = state.gap;
       const before = gap ? gap.before : state.before;
@@ -1509,7 +1518,7 @@ async function loadInlineHistory() {
       earlierMessages.textContent = 'Earlier messages';
       visibleAdded = rows.some(node => node.getBoundingClientRect().height > 0);
       if (anchor) feedScroll.scrollTop += anchor.getBoundingClientRect().top - top;
-    } while (state.gap || (!visibleAdded && !state.done && !gap));
+    } while (state.gap || state.refetch.size || (!visibleAdded && !state.done && !gap));
   } catch (error) {
     if (inlineHistory === state && !state.controller.signal.aborted) {
       state.failed = true;
@@ -8191,7 +8200,9 @@ function renderEntries(entries, replace) {
     if (inlineHistory && oldest > previousOldest && Number.isFinite(oldest)) {
       // One loader owns both cursors, including resets during an in-flight page.
       const boundary = inlineHistory.gap?.boundary ?? previousOldest;
-      inlineHistory.gap = { before: { position: oldest, stable_id: '' }, boundary };
+      // Include the new oldest live position, as the first page does, so a
+      // clipped oldest row gets its full stored text.
+      inlineHistory.gap = { before: { position: oldest + 1, stable_id: '' }, boundary };
       earlierMessages.classList.remove('hidden');
       void loadInlineHistory();
     }
@@ -8214,11 +8225,11 @@ function renderEntries(entries, replace) {
     if (stored && clippedHistoryRow(entry)) {
       if (stored.restoredFor === entry.updated_seq) {
         entry = { ...entry, lines: stored.lines };
-      } else if (!inlineHistory.gap) {
+      } else {
         // The live row changed after its full text was fetched (it is still
         // growing): show the live lines and fetch the row again through the
-        // one serialized loader.
-        inlineHistory.gap = { before: { position: entry.id + 1, stable_id: '' }, boundary: entry.id };
+        // one serialized loader, after any pending boundary gap.
+        inlineHistory.refetch.add(entry.id);
         void loadInlineHistory();
       }
     }
@@ -8240,7 +8251,8 @@ function renderEntries(entries, replace) {
     paintEntry(node, entry, unansweredPrompt);
   }
   const retainedAnchor = inlineHistory && [...inlineHistory.entries.values()].find(row => row.position === Number(anchorId));
-  const replacementAnchor = anchorId && (entryNodes.get(anchorId) || entryNodes.get(retainedAnchor?.stable_id));
+  // Ordinary live rows are keyed by their numeric id; dataset values are strings.
+  const replacementAnchor = anchorId && (entryNodes.get(anchorId) || entryNodes.get(Number(anchorId)) || entryNodes.get(retainedAnchor?.stable_id));
   if (replacementAnchor) feedScroll.scrollTop += replacementAnchor.getBoundingClientRect().top - anchorTop;
   if (wasAtTail) scrollToTail();
   else if (appended) jumpToLatest.classList.remove('hidden');
