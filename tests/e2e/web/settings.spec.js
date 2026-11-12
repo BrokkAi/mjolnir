@@ -145,6 +145,22 @@ test('golden_viewer_settings', async ({ page }) => {
   await expect(page.locator('#settings-savebar')).toBeVisible();
   await capture('an accepted edit leaves the draft unsaved');
 
+  const draftEnabled = await page.getByLabel('Enabled').isChecked();
+  // Hard-won: 7a50f9da7: notification navigation reloaded away unsaved Settings.
+  await page.evaluate(() => {
+    window.notificationDraftMarker = 'same document';
+    navigator.serviceWorker.dispatchEvent(new MessageEvent('message', {
+      origin: location.origin,
+      data: { type: 'mj-notification-open', url: `${location.origin}/?push-summary=fixture` },
+    }));
+  });
+  await expect(page).toHaveURL(new RegExp(`#workspace/${WORKSPACE_ID}$`));
+  await page.evaluate(() => { location.hash = '#settings/continuation'; });
+  await expect(page.locator('#settings-savebar')).toBeVisible();
+  expect(await page.getByLabel('Enabled').isChecked()).toBe(draftEnabled);
+  expect(await page.evaluate(() => window.notificationDraftMarker)).toBe('same document');
+
+
   await page.locator('#back').click();
   await page.locator('.settings-link', { hasText: 'Sub-agents' }).click();
   const limit = page.getByLabel('Maximum concurrent children');
@@ -219,7 +235,7 @@ test('device notification enrollment starts from a tap and supports test and uns
         },
       },
     };
-    Object.defineProperty(navigator, 'serviceWorker', { value: { register: async () => registration, getRegistration: async () => registration } });
+    Object.defineProperty(navigator, 'serviceWorker', { value: Object.assign(new EventTarget(), { register: async () => registration, getRegistration: async () => registration }) });
   });
   const actions = [];
   await page.route('**/api/push/status?*', route => route.fulfill({ json: { subscribed: true, error: null } }));
@@ -259,6 +275,7 @@ test('device notification enrollment starts from a tap and supports test and uns
 
 });
 
+// Hard-won: 7a50f9da7: notification clicks reloaded existing viewer drafts.
 test('service worker push displays and clicks route an existing window to the conversation', async ({ page }) => {
   await page.goto('about:blank');
   const source = fs.readFileSync(path.join(WEB_ROOT, 'service-worker.js'), 'utf8');
@@ -270,7 +287,7 @@ test('service worker push displays and clicks route an existing window to the co
       addEventListener: (name, callback) => { listeners[name] = callback; },
       registration: { showNotification: async (title, options) => { calls.push(['show', title, options]); } },
       clients: {
-        matchAll: async () => [{ url: 'https://viewer.test/', navigate: async url => { calls.push(['navigate', url]); return { focus: async () => calls.push(['focus']) }; } }],
+        matchAll: async () => [{ url: 'https://viewer.test/', postMessage: message => calls.push(['route', message]), focus: async () => calls.push(['focus']) }],
         openWindow: async url => calls.push(['open', url]),
       },
     };
@@ -284,6 +301,6 @@ test('service worker push displays and clicks route an existing window to the co
   }, source);
   expect(result).toEqual([
     ['show', 'Build', { body: 'Which option?', tag: 'session', data: { url: '/#conversation/session', session_id: 'session' } }],
-    ['close'], ['navigate', 'https://viewer.test/#conversation/session'], ['focus'],
+    ['close'], ['route', { type: 'mj-notification-open', url: 'https://viewer.test/#conversation/session' }], ['focus'],
   ]);
 });

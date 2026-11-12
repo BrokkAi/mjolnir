@@ -10,7 +10,7 @@
 // CACHE_VERSION must change whenever any shell asset changes. Activation
 // deletes every cache that is not the current one, so an upgrade cannot leave
 // a previous version's assets behind.
-const CACHE_VERSION = 'mjolnir-shell-v29';
+const CACHE_VERSION = 'mjolnir-shell-v30';
 const SHELL = [
   '/',
   '/viewer.css',
@@ -82,9 +82,12 @@ self.addEventListener('notificationclick', event => {
     if (target.origin !== self.location.origin) return;
     const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     for (const client of windows) {
-      if (new URL(client.url).origin !== target.origin) continue;
-      const navigated = await client.navigate(target.href);
-      if (navigated) { await navigated.focus(); return; }
+      const current = new URL(client.url);
+      if (current.origin !== target.origin || current.pathname !== '/') continue;
+      // Use the viewer's router: a document navigation would erase drafts.
+      client.postMessage({ type: 'mj-notification-open', url: target.href });
+      await client.focus();
+      return;
     }
     await self.clients.openWindow(target.href);
   })());

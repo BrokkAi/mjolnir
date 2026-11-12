@@ -9831,6 +9831,15 @@ document.addEventListener('visibilitychange', () => {
 // tick.
 window.setInterval(updateSessionClocks, 1000);
 if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', event => {
+    if (event.origin !== location.origin || event.data?.type !== 'mj-notification-open') return;
+    try {
+      const target = new URL(event.data.url, location.href);
+      if (target.origin !== location.origin || target.pathname !== '/') return;
+      // Normal routing saves conversation drafts and retains Settings drafts.
+      navigate(parseRoute(target.hash));
+    } catch (error) { console.warn('Could not open notification route', error); }
+  });
   // A registration that fails means the application is not installable, and
   // nothing more. Left uncaught it is an unhandled rejection, which is exactly
   // the page error the reliability suite refuses to see.

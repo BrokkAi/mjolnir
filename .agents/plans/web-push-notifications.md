@@ -16,6 +16,7 @@ A user installs the viewer on Android Chrome or an iOS 16.4+ Home Screen and ena
 - [x] (2026-11-12) Addressed first-review coverage and withdrawal defects in 4c4eefc4c.
 - [x] (2026-11-12) Addressed second-review device rejection and in-flight ownership defects, including the underlying summary payload growth.
 - [x] (2026-11-12) Addressed third-review enrollment replacement ownership; expiry refresh, key replacement, ABA and endpoint recreation regressions pass.
+- [x] (2026-11-12) Addressed fourth-review draft loss: existing windows receive a router message and focus, with no document reload.
 - [x] (2026-11-12) Final affected checks pass: 2 Rust, 3 Playwright, 38 browser boundary tests, touched-crate clippy and rustfmt.
 - [x] (2026-11-12) Send validated implementation through required review; the final verdict is recorded in the session handback.
 
@@ -45,7 +46,7 @@ Push payloads contain only title, first-line body, session ID, URL and notificat
 
 ## Outcomes & Retrospective
 
-Implementation and affected validation are complete; no real phone delivery has been attempted. Findings from three independent review rounds were accepted and fixed. The latest change makes races unrepresentable by giving the database writer sole ownership of send admission and coverage, rather than narrowing a task-bookkeeping window. It also removes session-list-sized push bodies instead of adding a guessed limit or a fallback.
+Implementation and affected validation are complete; no real phone delivery has been attempted. Findings from four review rounds were accepted and fixed. The latest change makes races unrepresentable by giving the database writer sole ownership of send admission and coverage, rather than narrowing a task-bookkeeping window. It also removes session-list-sized push bodies instead of adding a guessed limit or a fallback.
 
 ## Context and Orientation
 
@@ -55,7 +56,7 @@ Implementation and affected validation are complete; no real phone delivery has 
 
 `server/actions.rs`, `server/validation.rs` and `server_runtime/actions.rs` expose Subscribe, Unsubscribe and Test through the normal cookie-authenticated viewer action path. `server/settings.rs` and `server/routes.rs` serve the public VAPID key, device failure status and summary coverage; private key material never reaches the browser.
 
-`web/viewer.html` and `web/viewer.js` implement device controls and focus cleanup. `web/service-worker.js` displays every push and focuses or opens a same-origin target on click. Its cache version is v29 and must be reassigned upward if another lane also changes it. Conversation URLs are `/#conversation/<session-id>`; summary URLs open the viewer and carry the cleanup reference.
+`web/viewer.html` and `web/viewer.js` implement device controls and focus cleanup. `web/service-worker.js` displays every push and messages/focuses an existing viewer or opens a same-origin target on click. The viewer routes that message through normal hash navigation, preserving conversation and Settings drafts. Its cache version is v30 and must be reassigned upward if another lane also changes it. Conversation URLs are `/#conversation/<session-id>`; summary URLs open the viewer and carry the cleanup reference.
 
 ## Plan of Work
 
@@ -82,7 +83,7 @@ Expected results are 3 Playwright cases and 38 existing browser boundary tests p
 
 The encryption/JWT test checks RFC 8291 Appendix A ciphertext and derivation values, JWT audience/expiry and signature verification. The database regression covers acknowledged and unknown outcomes across reconnect, present suppression, away summaries, form removal/re-entry, worker recovery, coalesced presence revisions, device deadlines, expiry, summary shrinking/retirement, permanent rejection followed by test/new sends, in-flight individual/summary ownership, stale completions, restart admission and enrollment replacement/refresh ownership. A real 1,000-session summary proves the stored coverage exceeds 4096 bytes while its actual push plaintext stays within the documented RFC 8291 section 4 allowance of 3993 bytes; lookup survives endpoint expiry.
 
-The browser regression drives the real Settings UI with mocked routes and browser push APIs. It checks permission only from a tap, test/unsubscribe actions, temporary-unavailability retention, resolved individual/summary cleanup through the coverage API, and service-worker click routing. The existing Settings golden still fits a 390x844 viewport without sideways overflow.
+The browser regression drives the real Settings UI with mocked routes and browser push APIs. It checks permission only from a tap, test/unsubscribe actions, temporary-unavailability retention, resolved individual/summary cleanup through the coverage API, and service-worker click routing without reloading unsaved Settings. The existing Settings golden still fits a 390x844 viewport without sideways overflow.
 
 On a phone, open a trusted HTTPS viewer. On iOS 16.4+, add it to the Home Screen and open that app first. Enable notifications and send a test. With the operator away, trigger a question and an important reply; check session titles, first-line bodies and conversation routing. Turn away with multiple existing questions and verify one summary. Answer elsewhere and refocus the viewer; both individual and resolved summary cards must disappear. Temporarily disconnect/reconnect a worker and verify its open question card survives. Restart the daemon after acknowledged delivery and verify no duplicate. Keep Tailscale connected when opening a tailnet-only viewer URL.
 
@@ -105,3 +106,7 @@ Revision note (2026-11-12): Consolidated the final design and evidence after two
 Revision note (2026-11-12, third review): Enrollment replacement now releases old in-flight reservations atomically. Each new/replaced cryptographic enrollment has an opaque durable ownership identifier captured at send admission and checked on completion. Expiry-only refreshes keep the same owner, so already admitted responses still complete normally. Repeating the same keys preserves ownership; changing keys and later changing them back, or deleting/recreating the endpoint, cannot revive an old response. Extended the persistence regression for changed expiry metadata, identical re-enrollment, ABA and delete/recreate ownership. The identifier reuses the existing opaque ID generator and does not add a daemon-memory flag or a public payload field.
 
 Revision note (2026-11-12): Third-review fixes pass the focused Rust suite, touched-crate clippy and rustfmt. Browser surfaces did not change in this round; their previous affected checks remain valid. The final ownership fix is ready for required review.
+
+Revision note (2026-11-12, draft preservation): Notification clicks now focus an existing viewer and message its normal hash router instead of reloading the document. The viewer validates same-origin root URLs before routing. Extended the existing Settings golden case to route an unsaved draft away and back, preserving both the edited value and a same-document marker; the service-worker case asserts postMessage/focus and has no navigate method. JavaScript-only change: rerun affected browser tests and syntax checks; prior Rust validation remains valid.
+
+Revision note (2026-11-12): Draft-preservation checks pass: 3 affected Playwright cases, 38 existing browser boundary tests, JavaScript syntax checks and diff checks. This round changed only JavaScript and the plan, so the prior Rust tests/clippy/rustfmt remain valid.
