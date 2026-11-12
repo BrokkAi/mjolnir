@@ -59,8 +59,9 @@ mj --instance remote-dev go --path /home/me/Projects/my-project
 ```
 
 Your Windows current directory is not a Linux project path. The terminal
-dashboard and browser are the remote client surfaces; CLI commands that use
-the HTTP API also require the viewer to be reachable.
+dashboard and browser are the remote client surfaces. The dashboard uses SSH
+for daemon control. `mj` CLI commands that use the HTTP API connect to the
+viewer directly, so the viewer must be reachable from the client computer.
 
 ## Reach the web viewer
 
@@ -87,23 +88,31 @@ tls_key = "/home/me/certs/viewer.key"
 See [Web viewer](/web-viewer/) for setup. An advertised loopback address such
 as `127.0.0.1`, or a wildcard such as `0.0.0.0`, produces an error telling you
 to configure the daemon's viewer address. Control connections can work while
-the viewer remains unreachable. Remote container daemons do not publish their
-viewer for this mode yet.
+the viewer remains unreachable. A remote container daemon does not publish its
+viewer for this mode.
 
-## Logins, import and voice
+## Logins, import, voice and images
 
-The dashboard login pane, history upload and remote voice transcription are
-still being implemented. Their behavior is settled as follows:
+**Settings → Login** starts the harness login on the daemon's machine and shows
+its terminal in a dashboard pane. Press **Ctrl+]** to close the pane. Browser
+OAuth callbacks to `localhost` on the Linux computer may not complete from your
+desktop. Paste-code and API-key methods avoid that callback; available methods
+depend on the harness.
 
-- **Settings → Login** runs the harness login on the daemon and shows its
-  terminal in a dashboard pane. Browser OAuth callbacks to `localhost` on the
-  Linux computer may not complete from your desktop. Paste-code and API-key
-  methods work without that callback; available methods depend on the harness.
-- **Import** reads your own harness history on the client and uploads it to the
-  daemon. If its recorded project path differs, choose a project path on the
-  daemon's machine. The web viewer has no import.
-- **Voice** records audio on the client and sends it to the daemon for
-  transcription using the daemon's credentials.
+**Import** reads your harness history on the client computer and uploads it to
+the daemon. Choose the project path on the daemon's machine in the import dialog,
+or pass `--path` to `mj import`. You can cancel while the history is uploading.
+After the daemon starts registering the import, cancellation is no longer
+available. The web viewer does not provide import.
+
+**Voice** records audio on the client and sends it to the daemon for
+transcription with the daemon's credentials. **Image paste** uploads the image
+to the daemon when you paste it into a message.
+
+Dashboard work that reads machine state also runs on the daemon. This includes
+path completion, project and settings discovery, target tests, and installation
+of the `mbx` build cache. The dashboard does not need those paths or tools on the
+client computer.
 
 ## One command for development builds
 
