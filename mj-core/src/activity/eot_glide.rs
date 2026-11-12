@@ -4,8 +4,14 @@ use crate::assessment::Action;
 use serde_json::Value;
 
 pub const QUESTIONS: &str = include_str!("eot_glide_questions.json");
-// FROZEN/rule.json, glide-eot-research-20261112-v4, fresh development fit.
-pub const REQUIRED_INPUT: f64 = 0.80;
+// FROZEN/rule.json, glide-eot-research-20261112-v4, fresh development fit,
+// except the input cut below.
+/// The cut for a 3% false-alert rate (the user's choice, 2026-11-12), fitted
+/// on the input study's 2,209 adjudicated top-level turn ends without
+/// agent-driven sessions (/mnt/optane/tmp/eot-input-study-v2-20261112):
+/// 90.0% recall at 2.9% false alerts; session-cross-fitted 90.0% / 3.0%.
+/// The old .80 cut caught 64.7%.
+pub const REQUIRED_INPUT: f64 = 0.2203035029419128;
 pub const FAILURE_FLOOR: f64 = 0.90;
 pub const FINISHED_CATEGORICAL: f64 = 0.9162209700222781;
 pub const WAITING_WORK_WINNER: f64 = 0.40;
