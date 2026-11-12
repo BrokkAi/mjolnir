@@ -466,7 +466,7 @@ mod tests {
         let done = dashboard.session_details.get_mut("done").unwrap();
         done.unread_agent_messages = 1;
         done.last_agent_message = Some("All tests pass now.\nSecond line".into());
-        dashboard.set_session_attention(BTreeMap::from([
+        dashboard.set_session_attention(mj_core::snapshot_map::SnapshotMap::from([
             (
                 "asks".into(),
                 mj_core::attention::SessionAttention::NeedsInput,

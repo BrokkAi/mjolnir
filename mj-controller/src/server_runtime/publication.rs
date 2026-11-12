@@ -87,21 +87,16 @@ impl ViewerPublication {
             }
             self.dirty.insert(id.clone());
         }
-        for id in self
+        for (id, _) in self
             .runtime
             .metadata
             .session_attention
-            .keys()
-            .chain(next.metadata.session_attention.keys())
+            .changes(&next.metadata.session_attention)
         {
-            if self.runtime.metadata.session_attention.get(id)
-                != next.metadata.session_attention.get(id)
-            {
-                self.dirty.insert(id.clone());
-                for runtime in [&self.runtime, next] {
-                    if let Some(native) = runtime.native_agents.get(id) {
-                        self.dirty.insert(native.agent.owner_session_id.clone());
-                    }
+            self.dirty.insert(id.clone());
+            for runtime in [&self.runtime, next] {
+                if let Some(native) = runtime.native_agents.get(id) {
+                    self.dirty.insert(native.agent.owner_session_id.clone());
                 }
             }
         }

@@ -305,12 +305,20 @@ impl RuntimeState {
         } else {
             history.full.metadata.launch_recency.clone()
         };
-        full.metadata.session_attention = super::attention::project(&full);
-        for (id, attention) in &full.metadata.session_attention {
-            if let Some(view) = full.sessions.get_mut(id) {
-                view.attention = *attention;
+        // Every retained publication holds this map, so it is edited from the
+        // previous one: unchanged entries keep sharing their tree nodes.
+        let attention = super::attention::project(&full);
+        let mut published = history.full.metadata.session_attention.clone();
+        published.retain(|id, _| attention.contains_key(id));
+        for (id, attention) in attention {
+            if let Some(view) = full.sessions.get_mut(&id) {
+                view.attention = attention;
+            }
+            if published.get(&id) != Some(&attention) {
+                published.insert(id, attention);
             }
         }
+        full.metadata.session_attention = published;
         history.publish(full.clone())?;
         history.native_owners = native_owners;
         history.full = full;

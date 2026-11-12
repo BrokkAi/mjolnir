@@ -544,7 +544,7 @@ impl DashboardState {
     }
     pub fn set_session_attention(
         &mut self,
-        attention: BTreeMap<String, mj_core::attention::SessionAttention>,
+        attention: mj_core::snapshot_map::SnapshotMap<String, mj_core::attention::SessionAttention>,
     ) {
         if self.served_attention != attention {
             *self.served_attention = attention;
