@@ -289,6 +289,15 @@ struct DaemonArgs {
 
 #[derive(Debug, Subcommand)]
 enum DaemonCommand {
+    /// Print the local authenticated control endpoint for an SSH client.
+    Endpoint {
+        /// Emit exactly one JSON object containing control credentials.
+        #[arg(long, required = true)]
+        json: bool,
+        /// Fail if no daemon is running; never start one.
+        #[arg(long)]
+        existing: bool,
+    },
     /// Set or show whether the operator is away.
     Afk {
         #[command(subcommand)]
@@ -2215,6 +2224,7 @@ fn suggested_workspace_name(workspaces: &[daemon::WorkspaceListing]) -> Result<S
 
 async fn daemon_command(args: DaemonArgs) -> Result<()> {
     match args.command {
+        DaemonCommand::Endpoint { existing, .. } => daemon::print_endpoint(existing).await?,
         DaemonCommand::Afk { command } => {
             let mut client = daemon::connect_or_start().await?;
             if !matches!(command, AfkCommand::Status) {

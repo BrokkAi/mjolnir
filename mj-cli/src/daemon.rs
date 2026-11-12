@@ -201,6 +201,13 @@ async fn running_daemon_blockers() -> Option<Vec<String>> {
 const LOGGED_PHASE: Duration = Duration::from_millis(250);
 
 pub async fn connect_or_start() -> Result<DaemonClient> {
+    connector::DaemonConnector::shared()
+        .await?
+        .connect_or_start(connect_or_start_local)
+        .await
+}
+
+async fn connect_or_start_local() -> Result<DaemonClient> {
     let lock_path = data_dir().join("daemon-start.lock");
     // Most clients find a daemon they can use. Deciding that needs only a
     // shared hold, so a burst of clients reconnecting after a handoff checks
@@ -1865,6 +1872,9 @@ pub(crate) fn continue_under_upgraded_build(
 }
 
 pub(crate) async fn upgraded_daemon_executable() -> Result<Option<UpgradeTarget>> {
+    if connector::DaemonConnector::shared().await?.is_ssh() {
+        return Ok(None);
+    }
     let Ok(metadata) = read_metadata_any() else {
         return Ok(None);
     };
@@ -2559,4 +2569,30 @@ mod tests {
             .unwrap();
         assert!(development_workers_changed_since(started, resolve).unwrap());
     }
+}
+
+/// Machine endpoint discovery is always local to this launcher. In particular,
+/// an SSH placement here must not recursively launch another SSH client.
+pub async fn print_endpoint(existing: bool) -> Result<()> {
+    tokio::task::spawn_blocking(|| {
+        let path = mj_core::config::config_path();
+        let placement = mj_core::config::DaemonConfig::load_placement(&path)?;
+        anyhow::ensure!(
+            placement.runtime != mj_core::config::DaemonRuntime::Ssh,
+            "{}: daemon endpoint cannot follow SSH placement; choose host, docker or podman on this machine",
+            path.display()
+        );
+        Ok::<_, anyhow::Error>(())
+    }).await.context("load endpoint placement task failed")??;
+    let mut client = if existing {
+        connect_existing()
+            .await
+            .context("no running daemon available for daemon endpoint --existing")?
+    } else {
+        connect_or_start().await?
+    };
+    let mut endpoint = client.endpoint().await?;
+    endpoint.config_path = Some(mj_core::config::config_path());
+    println!("{}", serde_json::to_string(&endpoint)?);
+    Ok(())
 }

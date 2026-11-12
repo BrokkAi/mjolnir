@@ -1,5 +1,7 @@
 //! Authenticated local daemon protocol and client transport.
 mod chunk_bytes;
+pub mod connector;
+pub mod ssh;
 use crate::executable::describe_running_daemon_and_client_builds;
 use crate::session::{ManagedSessionView, ViewError};
 use agent_client_protocol::v1::schema::ContentBlock;
@@ -58,6 +60,19 @@ pub struct DaemonMetadata {
     /// owner, and a container daemon can report it on every platform.
     #[serde(skip)]
     pub placement: DaemonPlacement,
+}
+
+/// Process-private credentials returned by `mj daemon endpoint --json`.
+/// This is not local PID metadata and must never be written to daemon.json.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct DaemonEndpoint {
+    #[serde(default)]
+    pub config_path: Option<std::path::PathBuf>,
+    pub protocol_version: u32,
+    pub build_version: String,
+    pub control_address: SocketAddr,
+    pub token: String,
+    pub instance_id: String,
 }
 
 /// Where the daemon runs, as the daemon itself reports it.
@@ -1731,6 +1746,7 @@ pub async fn read_response(stream: &mut TcpStream) -> Result<ResponseEnvelope> {
 }
 
 pub struct DaemonClient {
+    connector: Option<std::sync::Arc<connector::DaemonConnector>>,
     metadata: DaemonMetadata,
     stream: TcpStream,
     next_request_id: u64,
@@ -1746,6 +1762,26 @@ impl DaemonClient {
             metadata,
             stream,
             next_request_id: 1,
+            connector: None,
+        })
+    }
+
+    /// Connector-owned SSH origin; never inferred from daemon-host placement.
+    pub fn connector(&self) -> Option<&std::sync::Arc<connector::DaemonConnector>> {
+        self.connector.as_ref()
+    }
+
+    /// Describe the authenticated endpoint, retaining the address actually
+    /// dialed (including a container's published loopback port).
+    pub async fn endpoint(&mut self) -> Result<DaemonEndpoint> {
+        let identity = self.identity().await?;
+        Ok(DaemonEndpoint {
+            config_path: None,
+            protocol_version: self.metadata.protocol_version,
+            build_version: identity.build_version,
+            control_address: self.metadata.address,
+            token: self.metadata.token.clone(),
+            instance_id: identity.instance_id,
         })
     }
 
@@ -1753,7 +1789,12 @@ impl DaemonClient {
     /// requests must reach daemons of any protocol version, and the frozen
     /// subset encodes identically across all of them.
     pub async fn request(&mut self, action: DaemonAction) -> Result<DaemonReply> {
+        let connector = self.connector.clone();
+        let previous = self.metadata.clone();
         self.request_with_reconnect(action, || async {
+            if let Some(connector) = &connector {
+                return connector.refresh(&previous).await;
+            }
             loop {
                 if let Ok(client) = connect_existing().await {
                     return Ok(client);
@@ -3074,10 +3115,10 @@ impl DaemonClient {
 }
 
 pub async fn connect_existing() -> Result<DaemonClient> {
-    let metadata = tokio::task::spawn_blocking(read_metadata)
+    connector::DaemonConnector::shared()
+        .await?
+        .connect_existing()
         .await
-        .context("read daemon metadata task failed")??;
-    DaemonClient::connect(metadata).await
 }
 
 /// A handle to whatever daemon the metadata file advertises, regardless of its
