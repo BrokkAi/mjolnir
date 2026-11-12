@@ -400,6 +400,14 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         "one SSH call per host"
     );
 
+    for response in [
+        Ok(failed("sudo: a password is required")),
+        Ok(output("maxsessions 10\nmaxstartups 10:30:100\n")),
+        Ok(output("maxsessions 200\nmaxstartups 100:30:300\n")),
+    ] {
+        checks.push(sshd::check("remote", &ssh, &FakeExecutor::new([response])));
+    }
+
     for check in &mut checks {
         check.detail = check
             .detail
