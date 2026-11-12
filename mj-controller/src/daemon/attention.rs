@@ -113,7 +113,11 @@ pub(super) fn update(previous: &RuntimeProjection, next: &mut RuntimeProjection)
 }
 
 fn unread_frontier(runtime: &RuntimeProjection, id: &str) -> Option<u64> {
-    let frontier = runtime.transcripts.get(id)?.latest_unread_event_ordinal?;
+    let frontier = runtime
+        .transcripts
+        .get(id)?
+        .window
+        .latest_unread_event_ordinal?;
     (frontier > runtime.records.get(id)?.viewed_through_event_ordinal).then_some(frontier)
 }
 
@@ -537,6 +541,7 @@ mod tests {
     }
 
     // Hard-won: 92684ad3b: hidden output and interruptions lost their unread frontier.
+    // Hard-won: 8c2f98de2: unread output outside the transcript window lost its mark.
     #[test]
     fn unread_tracks_content_and_cursor_only_changes_incrementally_without_overriding_attention() {
         use mj_core::attention::NotificationDismissal;
@@ -582,6 +587,49 @@ mod tests {
         assert!(
             next.transcripts["parent"].items.is_empty(),
             "content watermark survives tail trimming"
+        );
+
+        // The actor itself trims history, before the feed applies its own tail limit.
+        let mut actor = materialized.clone();
+        for position in 2..=1024 {
+            actor.transcript.push(std::sync::Arc::new(TranscriptItem {
+                stable_id: format!("later:{position}"),
+                position,
+                latest_content_event_ordinal: None,
+                created_at_ms: 0,
+                last_changed_at_ms: 0,
+                body: if position % 100 == 0 {
+                    TranscriptBody::User {
+                        content: vec![serde_json::json!({"type":"text", "text":"Later turn"})],
+                    }
+                } else {
+                    TranscriptBody::System {
+                        text: "Later activity".into(),
+                    }
+                },
+            }));
+        }
+        let mut actor_window = ProjectionWindow::of(&actor);
+        actor_window.trim(&mut actor, crate::database::PROJECTION_TAIL_ITEMS);
+        assert!(
+            !actor
+                .transcript
+                .iter()
+                .any(|item| item.is_nonempty_agent_message())
+        );
+        previous = next.clone();
+        next.transcripts
+            .get_mut("parent")
+            .unwrap()
+            .publish(&actor, &actor_window, 0);
+        update(&previous, &mut next);
+        assert_eq!(
+            next.metadata.session_attention["parent"],
+            SessionAttention::Unread
+        );
+        assert_eq!(
+            next.metadata.notification_dismissals["parent"],
+            NotificationDismissal::ReadThrough(10)
         );
         previous = next.clone();
         next.records

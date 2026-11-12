@@ -428,7 +428,6 @@ pub type TailKey = (u64, String);
 /// changed rather than the whole tail.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionTail {
-    pub latest_unread_event_ordinal: Option<u64>,
     /// Daemon-local fact retained before trimming items or clearing the header
     /// transcript. Clients consume served attention, not this watermark.
     pub latest_user_position: Option<u64>,
@@ -443,7 +442,6 @@ impl SessionTail {
     /// what `materialized.transcript` already leaves out.
     pub fn of(materialized: &MaterializedSession, window: &ProjectionWindow, limit: usize) -> Self {
         let mut tail = Self {
-            latest_unread_event_ordinal: None,
             latest_user_position: materialized.latest_user_position(),
             header: transcript_header(materialized),
             window: window.clone(),
@@ -464,13 +462,6 @@ impl SessionTail {
         limit: usize,
     ) {
         self.latest_user_position = materialized.latest_user_position();
-        self.latest_unread_event_ordinal = materialized
-            .transcript
-            .iter()
-            .filter(|item| item.is_nonempty_agent_message())
-            .filter_map(|item| item.latest_content_event_ordinal)
-            .chain(materialized.interruption_event_ordinals())
-            .max();
         let start = materialized.transcript.len().saturating_sub(limit);
         // The daemon calls this for every view it publishes, so it walks the
         // held items and the published ones side by side in key order, and
@@ -657,7 +648,6 @@ impl SessionTail {
             header,
             window,
             items: map,
-            latest_unread_event_ordinal: None,
             latest_user_position: None,
         }
     }
@@ -1097,8 +1087,8 @@ mod tests {
         );
         // Daemon-local watermarks are deliberately absent from the transport.
         assert_eq!(
-            SessionTailReply::of(&replica.projection.transcripts["s"]),
-            SessionTailReply::of(&daemon)
+            wire(&SessionTailReply::of(&replica.projection.transcripts["s"])),
+            wire(&SessionTailReply::of(&daemon))
         );
         let mut with_answer = daemon.clone();
         with_answer.header.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
@@ -1184,8 +1174,8 @@ mod tests {
                 .unwrap();
             let held = &replica.projection.transcripts["s"];
             assert_eq!(
-                SessionTailReply::of(held),
-                SessionTailReply::of(&daemon),
+                wire(&SessionTailReply::of(held)),
+                wire(&SessionTailReply::of(&daemon)),
                 "after step {}",
                 sequence - 1
             );

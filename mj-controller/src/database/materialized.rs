@@ -109,6 +109,28 @@ pub(super) fn load_materialized_session_summary_from(
                     .as_ref()
                     .is_none_or(|(user_position, _)| agent_position > user_position)
             });
+    let (agent_message_latest_content_ordinals, interruption_event_ordinals) =
+        read_materialized_unread_ordinals(&connection, session_id)?;
+
+    Ok(Some(MaterializedSessionSummary {
+        session_id: session_id.to_owned(),
+        applied_event_ordinal,
+        last_activity_at_ms,
+        execution: parse_materialized_execution(&execution, running_started_at_ms)?,
+        session_title,
+        last_agent_message: last_agent_message.map(|(_, message)| message),
+        last_user_message: last_user_message.map(|(_, message)| message),
+        last_agent_message_follows_last_user,
+        agent_message_latest_content_ordinals,
+        interruption_event_ordinals,
+    }))
+}
+
+/// Read the summary's ordinal facts without deserializing transcript bodies.
+fn read_materialized_unread_ordinals(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<(Vec<u64>, Vec<u64>)> {
     let mut ordinal_statement = connection.prepare(
         "SELECT latest_content_event_ordinal
          FROM materialized_transcript_items
@@ -161,18 +183,18 @@ pub(super) fn load_materialized_session_summary_from(
     interruption_event_ordinals.sort_unstable();
     interruption_event_ordinals.dedup();
 
-    Ok(Some(MaterializedSessionSummary {
-        session_id: session_id.to_owned(),
-        applied_event_ordinal,
-        last_activity_at_ms,
-        execution: parse_materialized_execution(&execution, running_started_at_ms)?,
-        session_title,
-        last_agent_message: last_agent_message.map(|(_, message)| message),
-        last_user_message: last_user_message.map(|(_, message)| message),
-        last_agent_message_follows_last_user,
+    Ok((
         agent_message_latest_content_ordinals,
         interruption_event_ordinals,
-    }))
+    ))
+}
+
+fn read_latest_unread_event_ordinal(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<Option<u64>> {
+    let (agent, interruptions) = read_materialized_unread_ordinals(connection, session_id)?;
+    Ok(agent.into_iter().chain(interruptions).max())
 }
 
 /// The oldest visible user message, which is where a session's provisional
@@ -998,6 +1020,7 @@ pub(super) fn load_materialized_actor_projection_from(
     )?;
     let omitted_items = total - transcript.len();
     let window = ProjectionWindow {
+        latest_unread_event_ordinal: read_latest_unread_event_ordinal(&connection, session_id)?,
         omitted_items,
         provisional_title: first_materialized_user_message(&connection, session_id)?
             .and_then(|(_, text)| mj_core::state::provisional_session_title(&text)),
@@ -1222,6 +1245,7 @@ pub(super) fn load_materialized_projection_tail_from(
         |row| row.get::<_, usize>(0),
     )?;
     let window = ProjectionWindow {
+        latest_unread_event_ordinal: read_latest_unread_event_ordinal(&connection, session_id)?,
         omitted_items: total_items.saturating_sub(transcript.len()),
         provisional_title: first_materialized_user_message(&connection, session_id)?
             .and_then(|(_, text)| mj_core::state::provisional_session_title(&text)),
