@@ -34,12 +34,19 @@ pub async fn login(
     #[cfg(unix)]
     let mut pinned_fallback = None;
     #[cfg(unix)]
+    let mut device_auth = false;
+    #[cfg(unix)]
     if !options.cli {
         match acp_login::login(profile, options.method.as_deref()).await {
             Ok(acp_login::Outcome::SignedIn { method }) => {
                 println!("Signed in to profile {profile_id} through the ACP method {method}.");
                 report_login_change(profile_id, profile, before, stored)?;
                 return Ok(0);
+            }
+            Ok(acp_login::Outcome::DeviceAuth) => {
+                println!("Using device-code sign-in because this machine has no desktop browser.");
+                pinned_fallback = Some(acp_login::pinned_cli(profile).await?);
+                device_auth = true;
             }
             Ok(acp_login::Outcome::NoLogin(reason)) => bail!("{reason}"),
             Ok(acp_login::Outcome::Unavailable(reason)) => {
@@ -78,6 +85,12 @@ pub async fn login(
 
     let (configured_program, arguments) = mj_core::credentials::login_command(profile)
         .with_context(|| format!("profile {profile_id:?}"))?;
+    #[cfg(unix)]
+    let arguments = if device_auth {
+        vec!["login".to_owned(), "--device-auth".to_owned()]
+    } else {
+        arguments
+    };
     #[cfg(unix)]
     let environment = pinned_fallback
         .as_ref()
