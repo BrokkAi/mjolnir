@@ -14,7 +14,9 @@ pub(crate) async fn query(
 ) -> Result<Vec<QuotaWindow>> {
     // Resolve the runtime from the daemon's environment before HOME is replaced
     // for the disposable login. Profile overrides retain their usual precedence.
-    let mut inherited = std::env::vars().collect::<BTreeMap<_, _>>();
+    let mut inherited = std::env::vars_os()
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+        .collect::<BTreeMap<_, _>>();
     inherited.extend(environment.clone());
     let mut environment = inherited;
     HarnessKind::Antigravity.configure_home_environment(home, &mut environment);
