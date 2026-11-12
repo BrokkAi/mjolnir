@@ -3127,7 +3127,7 @@ fn idle_managed_clone_suspension_requires_publication_confirmation() {
     let mut session = running_session();
     let root = std::path::PathBuf::from("/srv/project/.mj/clones/session-1");
     session.project_directory = Some(root.clone());
-    session.managed_worktree = Some(mj_core::state::ManagedWorktree {
+    session.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
         kind: mj_core::state::ManagedCheckoutKind::Clone,
         source_project_directory: "/srv/project".into(),
         source_repository: "/srv/project".into(),
@@ -3135,7 +3135,7 @@ fn idle_managed_clone_suspension_requires_publication_confirmation() {
         branch: "master".into(),
         target: mj_core::state::ManagedWorktreeTarget::Local,
         base_commit: Some("1".repeat(40)),
-    });
+    }));
     let mut dashboard = dashboard_with_session(session);
     dashboard.focus_sessions();
     assert_eq!(
@@ -3176,9 +3176,9 @@ fn git_status_fixture() -> mj_core::local_git::SessionGitStatus {
 fn a_long_branch_name_is_elided_in_the_middle_so_the_marker_keeps_its_counts() {
     let mut session = running_session();
     session.session_title_override = Some("alpha".into());
-    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: "/work".into(),
-    });
+    }));
     let mut dashboard = dashboard_with_session(session);
     dashboard.focus_sessions();
     // The 35 characters a managed worktree's own branch name costs.
@@ -3210,9 +3210,9 @@ fn a_long_branch_name_is_elided_in_the_middle_so_the_marker_keeps_its_counts() {
 #[test]
 fn git_probes_cover_visible_live_sessions_about_once_a_minute() {
     let mut session = running_session();
-    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: "/work".into(),
-    });
+    }));
     let mut dashboard = dashboard_with_session(session);
     let start = std::time::Instant::now();
     assert_eq!(dashboard.git_probe_candidates(start, 2), ["session-1"]);
@@ -3246,12 +3246,12 @@ fn git_probes_reach_every_session_when_more_are_due_than_one_pass_reads() {
         worker_root: "/work".into(),
     };
     let mut first = running_session();
-    first.target = Some(target.clone());
+    first.target = Some(Box::new(target.clone()));
     let mut dashboard = dashboard_with_session(first);
     for id in ["session-2", "session-3", "session-4"] {
         let mut session = running_session();
         session.id = id.into();
-        session.target = Some(target.clone());
+        session.target = Some(Box::new(target.clone()));
         dashboard.state.sessions.insert(id.into(), session);
     }
     let start = std::time::Instant::now();

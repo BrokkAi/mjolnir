@@ -2999,11 +2999,11 @@ mod tests {
             id: session_id.into(),
             project_directory: None,
             container_workspace: Some(PathBuf::from(format!("/workspace/{session_id}"))),
-            target: Some(mj_core::state::TargetLocator::LocalPodman {
+            target: Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
                 container_id: "test-container".into(),
                 workspace_storage: Default::default(),
                 borrowed_from: None,
-            }),
+            })),
             ..record_template()
         }
     }
@@ -3775,7 +3775,7 @@ mod tests {
             "2026-09-01T00:00:00Z",
         );
         session.project_directory = Some(root.clone());
-        session.managed_worktree = Some(mj_core::state::ManagedWorktree {
+        session.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
             kind: mj_core::state::ManagedCheckoutKind::Clone,
             source_project_directory: "/srv/project".into(),
             source_repository: "/srv/project".into(),
@@ -3783,15 +3783,15 @@ mod tests {
             branch: "feature".into(),
             target: mj_core::state::ManagedWorktreeTarget::Local,
             base_commit: Some("1".repeat(40)),
-        });
-        session.checkpoint = Some(mj_core::state::CheckpointMetadata {
+        }));
+        session.checkpoint = Some(Box::new(mj_core::state::CheckpointMetadata {
             archive_path: "sessions/checkpoint.hel.zip".into(),
             sha256: "a".repeat(64),
             created_at: "2026-09-01T00:00:00Z".into(),
             event_frontier: 0,
-        });
+        }));
         assert!(ready(vec![session.clone()], vec![]).is_empty());
-        session.publication = Some(mj_core::state::PublicationAssessment {
+        session.publication = Some(Box::new(mj_core::state::PublicationAssessment {
             checkpoint_sha256: "a".repeat(64),
             state: mj_core::state::PublicationState::Published,
             dirty: false,
@@ -3800,7 +3800,7 @@ mod tests {
             destinations: vec!["https://example.test/repository.git".into()],
             checked_at: "2026-09-01T01:00:00Z".into(),
             reason: Some("feature branch was pushed but not merged".into()),
-        });
+        }));
         assert_eq!(ready(vec![session.clone()], vec![]), vec![id]);
         session.publication.as_mut().unwrap().stashed = true;
         assert!(ready(vec![session.clone()], vec![]).is_empty());
@@ -3831,12 +3831,12 @@ mod tests {
         }
         SessionRecord {
             project: None,
-            checkpoint: Some(mj_core::state::CheckpointMetadata {
+            checkpoint: Some(Box::new(mj_core::state::CheckpointMetadata {
                 archive_path,
                 sha256: "0".repeat(64),
                 created_at: updated_at.into(),
                 event_frontier: 1,
-            }),
+            })),
             ..record(
                 session_id,
                 mj_core::state::SessionState::Stopped,
@@ -3856,12 +3856,12 @@ mod tests {
             // rather than failing the whole estimate.
             SessionRecord {
                 project: None,
-                checkpoint: Some(mj_core::state::CheckpointMetadata {
+                checkpoint: Some(Box::new(mj_core::state::CheckpointMetadata {
                     archive_path: root.join("missing.hel.zip"),
                     sha256: "0".repeat(64),
                     created_at: "2026-09-01T00:00:00Z".into(),
                     event_frontier: 1,
-                }),
+                })),
                 ..record(
                     "lost-checkpoint",
                     mj_core::state::SessionState::Stopped,

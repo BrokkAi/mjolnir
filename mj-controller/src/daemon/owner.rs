@@ -545,9 +545,9 @@ mod tests {
         std::os::unix::fs::symlink(&original, &profile).unwrap();
         let mut state = mj_core::state::State::default();
         let mut active = runtime_test_session("active", "workspace", SessionState::Running);
-        active.target = Some(mj_core::state::TargetLocator::LocalBare {
+        active.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: root.path().to_owned(),
-        });
+        }));
         state.sessions.insert(active.id.clone(), active);
         let owner = RuntimeStateOwner::new(
             Controller {
@@ -574,9 +574,9 @@ mod tests {
     fn credential_preparation_cannot_install_after_ownership_or_config_changes() {
         let mut state = mj_core::state::State::default();
         let mut active = runtime_test_session("active", "workspace", SessionState::Running);
-        active.target = Some(mj_core::state::TargetLocator::LocalBare {
+        active.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: "/worker".into(),
-        });
+        }));
         state.sessions.insert(active.id.clone(), active);
         let mut owner = RuntimeStateOwner::new(
             Controller {
@@ -642,9 +642,9 @@ mod tests {
                 );
             }
             let mut active = runtime_test_session("active", "workspace", SessionState::Running);
-            active.target = Some(mj_core::state::TargetLocator::LocalBare {
+            active.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
                 worker_root: "/worker".into(),
-            });
+            }));
             state.sessions.insert(active.id.clone(), active.clone());
             let mut owner = RuntimeStateOwner::new(
                 Controller {

@@ -132,11 +132,11 @@ fn podman_controller(state: SessionState) -> Controller {
             resource_allocation: None,
             additional_mounts: Vec::new(),
             state,
-            target: Some(mj_core::state::TargetLocator::LocalPodman {
+            target: Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
                 borrowed_from: None,
                 container_id: "a".repeat(64),
                 workspace_storage: Default::default(),
-            }),
+            })),
             native_session_id: None,
             acp_session_title: None,
             session_title_override: None,
@@ -1521,9 +1521,9 @@ fn credential_sync_covers_every_harness_on_this_machine_as_in_a_container() {
         std::fs::create_dir_all(worker_root.join("profile")).unwrap();
         let session = controller.state.sessions.get_mut(&session_id).unwrap();
         session.target_template_id = "local-bare".into();
-        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: worker_root.clone(),
-        });
+        }));
 
         let on_this_machine = credential_sync_targets(&controller);
         assert_eq!(on_this_machine.len(), 1, "{kind:?}");
@@ -1605,9 +1605,9 @@ fn credential_sync_skips_a_local_login_file_linked_to_the_profile() {
         session.harness_kind = kind;
         session.last_profile = kind.id().into();
         session.target_template_id = "local-bare".into();
-        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: worker_root.clone(),
-        });
+        }));
 
         let staged_login = mj_core::config::harness_authentication_marker(kind, &staged);
         std::fs::write(&staged_login, "{}").unwrap();
@@ -1684,15 +1684,15 @@ fn every_live_session_of_a_profile_is_synced_including_a_child_in_a_remote_conta
     let mut parent = controller.state.sessions.remove(parent_id).unwrap();
     parent.harness_kind = mj_core::config::HarnessKind::Claude;
     parent.target_template_id = "morannon-podman".into();
-    parent.target = Some(on_morannon(None, &parent_container));
+    parent.target = Some(Box::new(on_morannon(None, &parent_container)));
     let mut child = parent.clone();
     child.id = child_id.into();
     child.harness_kind = mj_core::config::HarnessKind::Codex;
     child.last_profile = "codex4".into();
-    child.target = Some(on_morannon(Some(parent_id), &parent_container));
+    child.target = Some(Box::new(on_morannon(Some(parent_id), &parent_container)));
     let mut sibling = child.clone();
     sibling.id = sibling_id.into();
-    sibling.target = Some(on_morannon(None, &"d".repeat(64)));
+    sibling.target = Some(Box::new(on_morannon(None, &"d".repeat(64))));
     for session in [parent, child, sibling] {
         controller
             .state
@@ -2601,11 +2601,11 @@ fn credential_sync_rejects_targets_captured_before_parking_or_replacement() {
         .sessions
         .get_mut(&target.session_id)
         .unwrap()
-        .target = Some(mj_core::state::TargetLocator::LocalPodman {
+        .target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
         borrowed_from: None,
         container_id: "b".repeat(64),
         workspace_storage: Default::default(),
-    });
+    }));
     assert!(!credential_sync_target_is_current(replaced, &target));
 }
 

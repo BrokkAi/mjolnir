@@ -308,7 +308,7 @@ pub(super) fn managed_raw_session(target: ManagedWorktreeTarget) -> SessionRecor
         },
         &worktree_root.to_string_lossy(),
     );
-    session.managed_worktree = Some(ManagedWorktree {
+    session.managed_worktree = Some(Box::new(ManagedWorktree {
         kind: Default::default(),
         source_project_directory: repository.clone(),
         source_repository: repository,
@@ -316,7 +316,7 @@ pub(super) fn managed_raw_session(target: ManagedWorktreeTarget) -> SessionRecor
         branch: format!("mj/{session_id}"),
         target,
         base_commit: None,
-    });
+    }));
     session
 }
 
@@ -525,7 +525,7 @@ fn managed_checkout_session(
     session.bundle_id = "remote-project-abcdef".into();
     session.target_template_id = "local-bare".into();
     session.project_directory = Some(worktree.worktree_root.clone());
-    session.managed_worktree = Some(worktree);
+    session.managed_worktree = Some(Box::new(worktree));
     session
 }
 

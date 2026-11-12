@@ -1096,7 +1096,7 @@ impl Controller {
             oracle_notice = Some(mj_core::state::ORACLE_UNAVAILABLE_NOTICE.to_owned());
         }
         let record = SessionRecord {
-            oracle_choice,
+            oracle_choice: oracle_choice.map(Box::new),
             oracle: oracle_enabled,
             project: project.map(std::sync::Arc::new),
             target_runtime: Some(template.into()),
@@ -1104,7 +1104,7 @@ impl Controller {
             create_managed_worktree,
             launch_base,
             launch_branch,
-            checkout,
+            checkout: checkout.map(Box::new),
             publication: None,
             subagents: Some(subagents),
             archived: false,
@@ -1123,7 +1123,7 @@ impl Controller {
             bundle_id,
             project_directory,
             managed_worktree: None,
-            review,
+            review: review.map(Box::new),
             no_project_memory,
             no_github_events,
             no_github_credentials: no_github_credentials || !self.config.github.session_credentials,

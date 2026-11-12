@@ -521,7 +521,7 @@ pub(super) fn remove_runtime_preserving_workspace(
         return Ok(());
     }
     ensure!(
-        environment.placement.target == session.target,
+        environment.placement.target == session.target.clone().map(|v| *v),
         "runtime placement changed before replacement"
     );
     let authority = Reclamation::acquire(environment, config, executor)?;
@@ -654,14 +654,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut session = checkpoint_test_session("11111111111111111111111111111111");
         session.target_template_id = "local".into();
-        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: directory.path().join("source").join(&session.id),
-        });
+        }));
         database::save_session(&session).unwrap();
         let source = database::session_environment(&session.id).unwrap().unwrap();
-        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: directory.path().join("destination").join(&session.id),
-        });
+        }));
         database::save_session(&session).unwrap();
         let (waiting, _) = mpsc::channel();
         let executor = ControlledExecutor {
@@ -672,7 +672,7 @@ mod tests {
         };
         let intent = database::WorkerRestartIntent {
             operation_id: "replacement".into(),
-            target: session.target.clone().unwrap(),
+            target: *session.target.clone().unwrap(),
             desired_build: "test-build".into(),
         };
         crate::worker_lifecycle::run_blocking(
@@ -718,15 +718,15 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut parent = checkpoint_test_session("11111111111111111111111111111111");
         parent.state = mj_core::state::SessionState::Running;
-        parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+        parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: directory.path().join(&parent.id),
-        });
+        }));
         database::save_session(&parent).unwrap();
         let mut child = parent.clone();
         child.id = "22222222222222222222222222222222".into();
-        child.target = Some(mj_core::state::TargetLocator::LocalBare {
+        child.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: directory.path().join(&child.id),
-        });
+        }));
         let relation = mj_core::subagent::SubagentRecord {
             kind: mj_core::subagent::SubagentKind::Worker,
             reviewer_launch: None,

@@ -1114,11 +1114,11 @@ mod tests {
             crate::controller::test_support::checkpoint_test_session("reserved-session");
         active.state = mj_core::state::SessionState::Running;
         active.target_template_id = "podman".into();
-        active.target = Some(mj_core::state::TargetLocator::LocalPodman {
+        active.target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
             container_id: "container".into(),
             workspace_storage: Default::default(),
             borrowed_from: None,
-        });
+        }));
         active.resource_allocation = Some(mj_core::state::SessionResourceAllocation::Container {
             cpus: 2,
             memory_bytes: 4 << 30,
@@ -1164,11 +1164,11 @@ mod tests {
         let mut source = crate::controller::test_support::checkpoint_test_session("moving-session");
         source.state = mj_core::state::SessionState::Running;
         source.target_template_id = "podman".into();
-        source.target = Some(mj_core::state::TargetLocator::LocalPodman {
+        source.target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
             container_id: "container".into(),
             workspace_storage: Default::default(),
             borrowed_from: None,
-        });
+        }));
         source.resource_allocation = Some(mj_core::state::SessionResourceAllocation::Container {
             cpus: 8,
             memory_bytes: 16 << 30,
@@ -1236,11 +1236,11 @@ mod tests {
         let mut source = crate::controller::test_support::checkpoint_test_session("moving-session");
         source.state = mj_core::state::SessionState::Running;
         source.target_template_id = "podman".into();
-        source.target = Some(mj_core::state::TargetLocator::LocalPodman {
+        source.target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
             container_id: "container".into(),
             workspace_storage: Default::default(),
             borrowed_from: None,
-        });
+        }));
         source.resource_allocation = Some(mj_core::state::SessionResourceAllocation::Container {
             cpus: 8,
             memory_bytes: 16 << 30,
@@ -1291,11 +1291,11 @@ mod tests {
         let mut source = crate::controller::test_support::checkpoint_test_session("moving-session");
         source.state = mj_core::state::SessionState::Running;
         source.target_template_id = "podman".into();
-        source.target = Some(mj_core::state::TargetLocator::LocalPodman {
+        source.target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
             container_id: "container".into(),
             workspace_storage: Default::default(),
             borrowed_from: None,
-        });
+        }));
         source.resource_allocation = Some(mj_core::state::SessionResourceAllocation::Container {
             cpus: 8,
             memory_bytes: 16 << 30,
@@ -1414,11 +1414,11 @@ mod tests {
         let mut source = crate::controller::test_support::checkpoint_test_session("moving-session");
         source.state = mj_core::state::SessionState::Running;
         source.target_template_id = "podman".into();
-        source.target = Some(mj_core::state::TargetLocator::LocalPodman {
+        source.target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
             container_id: "container".into(),
             workspace_storage: Default::default(),
             borrowed_from: None,
-        });
+        }));
         source.resource_allocation = Some(mj_core::state::SessionResourceAllocation::Container {
             cpus: 8,
             memory_bytes: 16 << 30,

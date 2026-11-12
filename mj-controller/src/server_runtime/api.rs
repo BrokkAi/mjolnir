@@ -3953,7 +3953,7 @@ impl SubagentBackend for ApiBackend {
                 .session_record(&session_id)
                 .and_then(|record| record.target);
             if target.as_ref().is_some_and(|target| {
-                !matches!(target, mj_core::state::TargetLocator::LocalBare { .. })
+                !matches!(&**target, mj_core::state::TargetLocator::LocalBare { .. })
             }) && let Some(token) =
                 crate::controller::renew_session_github_app_token(session_id.clone())
                     .await

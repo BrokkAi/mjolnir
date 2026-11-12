@@ -348,12 +348,12 @@ pub(crate) fn stopped_session() -> SessionRecord {
         draft_input: String::new(),
         last_error: None,
         last_checkpoint_error: None,
-        checkpoint: Some(CheckpointMetadata {
+        checkpoint: Some(Box::new(CheckpointMetadata {
             archive_path: PathBuf::from("sessions/session-1.hel.zip"),
             sha256: "a".repeat(64),
             created_at: "2026-08-09T01:00:00Z".into(),
             event_frontier: 2,
-        }),
+        })),
     }
 }
 
@@ -372,7 +372,7 @@ pub(crate) fn running_session() -> SessionRecord {
 pub(crate) fn legacy_managed_session(mut session: SessionRecord) -> SessionRecord {
     let root = PathBuf::from(format!("/srv/project/.mj/worktrees/{}", session.id));
     session.project_directory = Some(root.clone());
-    session.managed_worktree = Some(mj_core::state::ManagedWorktree {
+    session.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
         kind: mj_core::state::ManagedCheckoutKind::Worktree,
         source_project_directory: "/srv/project".into(),
         source_repository: "/srv/project".into(),
@@ -380,7 +380,7 @@ pub(crate) fn legacy_managed_session(mut session: SessionRecord) -> SessionRecor
         branch: format!("mj/{}", session.id),
         target: mj_core::state::ManagedWorktreeTarget::Local,
         base_commit: Some("1".repeat(40)),
-    });
+    }));
     session
 }
 
@@ -602,11 +602,11 @@ pub(crate) fn precision_storage(
 /// `~/Projects`.
 pub(crate) fn precision_session() -> SessionRecord {
     let mut session = running_session();
-    session.target = Some(mj_core::state::TargetLocator::SshBare {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::SshBare {
         host: "precision-3260".into(),
         workspace: format!("/home/jonathan/Projects/app/.mj/clones/{}", session.id).into(),
         worker_id: None,
-    });
+    }));
     session
 }
 

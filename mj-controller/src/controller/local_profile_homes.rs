@@ -55,7 +55,7 @@ pub struct LinkedProfileHome {
 pub fn link_profile_homes_of_earlier_sessions(state: &State) -> Vec<LinkedProfileHome> {
     let mut linked = Vec::new();
     for session in state.sessions.values() {
-        let Some(TargetLocator::LocalBare { worker_root }) = &session.target else {
+        let Some(TargetLocator::LocalBare { worker_root }) = session.target.as_deref() else {
             continue;
         };
         // A harness with a nested home always ran from a per-session root
@@ -127,7 +127,7 @@ fn link_directory(_target: &Path, _link: &Path) -> std::io::Result<()> {
 /// home is a link to a profile home, or missing because an earlier release
 /// started its worker from a profile home that could not be linked.
 pub fn session_has_a_staged_home_of_its_own(session: &mj_core::state::SessionRecord) -> bool {
-    let Some(TargetLocator::LocalBare { worker_root }) = &session.target else {
+    let Some(TargetLocator::LocalBare { worker_root }) = session.target.as_deref() else {
         return true;
     };
     if session.harness_kind.nested_home() {
@@ -147,7 +147,7 @@ pub fn session_shares_profile_login(
     session: &mj_core::state::SessionRecord,
     harness: mj_core::config::HarnessKind,
 ) -> bool {
-    let Some(TargetLocator::LocalBare { worker_root }) = &session.target else {
+    let Some(TargetLocator::LocalBare { worker_root }) = session.target.as_deref() else {
         return false;
     };
     harness.shares_local_login()
@@ -249,9 +249,9 @@ mod tests {
     ) -> mj_core::state::SessionRecord {
         let mut session = crate::controller::test_support::checkpoint_test_session(id);
         session.harness_kind = harness;
-        session.target = Some(TargetLocator::LocalBare {
+        session.target = Some(Box::new(TargetLocator::LocalBare {
             worker_root: worker_root.to_path_buf(),
-        });
+        }));
         session
     }
 
@@ -328,7 +328,7 @@ mod tests {
         );
         for id in ["earlier", "older"] {
             let TargetLocator::LocalBare { worker_root } =
-                state.sessions[id].target.as_ref().unwrap()
+                &**state.sessions[id].target.as_ref().unwrap()
             else {
                 unreachable!()
             };

@@ -745,7 +745,7 @@ impl Controller {
             // the same owner and writer inventory as ordinary teardown.
             let reserved_target = super::backend::locator_after_provision_named(
                 template,&target,session_id,None,executor,&resource_name)?;
-            self.state.sessions.get_mut(session_id).context("session disappeared before target reservation")?.target = Some(reserved_target);
+            self.state.sessions.get_mut(session_id).context("session disappeared before target reservation")?.target = Some(Box::new(reserved_target));
             self.persist_session_state(session_id)?;
             let reserved_environment = crate::database::session_environment(session_id)?.context("target reservation has no environment")?;
 
@@ -1220,7 +1220,7 @@ fn apply_new_session_provisioning_result(
     match result {
         Ok(locator) => {
             let record = state.sessions.get_mut(session_id).unwrap();
-            record.target = Some(locator);
+            record.target = Some(Box::new(locator));
             // Provisioning has completed, but Running is reserved for a
             // successful worker handshake.
             record.state = SessionState::Disconnected;

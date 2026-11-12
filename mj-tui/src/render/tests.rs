@@ -2809,16 +2809,16 @@ fn session_cpu_report_nests_subagents_under_their_parent_with_the_tree_total() {
     let mut state = dashboard.state.clone();
     for (id, borrowed) in [(&parent, None), (&"kid-a".to_owned(), Some(parent.clone()))] {
         state.sessions.get_mut(id).unwrap().target =
-            Some(mj_core::state::TargetLocator::LocalDocker {
+            Some(Box::new(mj_core::state::TargetLocator::LocalDocker {
                 container_id: "shared-container".into(),
                 borrowed_from: borrowed,
-            });
+            }));
     }
     // A separately sampled child, including after moving away from the shared container.
     state.sessions.get_mut("kid-b").unwrap().target =
-        Some(mj_core::state::TargetLocator::LocalBare {
+        Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: "/independent".into(),
-        });
+        }));
     dashboard.set_state(state);
     let mut cpu = dashboard
         .session_cpu
@@ -2870,10 +2870,10 @@ fn session_cpu_report_nests_subagents_under_their_parent_with_the_tree_total() {
     let shared_state = dashboard.state.clone();
     let mut moved = shared_state.clone();
     moved.sessions.get_mut(&parent).unwrap().target =
-        Some(mj_core::state::TargetLocator::LocalDocker {
+        Some(Box::new(mj_core::state::TargetLocator::LocalDocker {
             container_id: "destination-container".into(),
             borrowed_from: None,
-        });
+        }));
     dashboard.set_state(moved);
     golden.push_str(&format!(
         "\n\nOwner moved; source child sampled independently\n{}",

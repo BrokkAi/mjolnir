@@ -3457,11 +3457,11 @@ fn new_container_size_checkbox_is_explicit_and_reaches_the_create_action() {
 #[test]
 fn unknown_live_container_capacity_warns_instead_of_blocking_non_apple_targets() {
     let mut session = running_session();
-    session.target = Some(mj_core::state::TargetLocator::LocalPodman {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
         container_id: "unknown-size".into(),
         workspace_storage: Default::default(),
         borrowed_from: None,
-    });
+    }));
     session.resource_allocation = None;
     let mut state = State::default();
     state.sessions.insert(session.id.clone(), session);

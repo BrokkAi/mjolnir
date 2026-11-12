@@ -3483,12 +3483,12 @@ mod tests {
                 draft_input: String::new(),
                 last_error: None,
                 last_checkpoint_error: None,
-                checkpoint: Some(mj_core::state::CheckpointMetadata {
+                checkpoint: Some(Box::new(mj_core::state::CheckpointMetadata {
                     archive_path,
                     sha256: "a".repeat(64),
                     created_at: "2026-08-12T00:00:00Z".into(),
                     event_frontier: 7,
-                }),
+                })),
             },
         );
         let mut controller = Controller {

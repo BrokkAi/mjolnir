@@ -1140,7 +1140,7 @@ fn load_targets_selected(
 ) -> Result<()> {
     for (session_id, target) in read_targets(connection, id)? {
         if let Some(session) = state.sessions.get_mut(&session_id) {
-            session.target = Some(target);
+            session.target = Some(Box::new(target));
         }
     }
     Ok(())
@@ -1371,7 +1371,7 @@ fn load_checkpoints_selected(
     for row in rows {
         let (session_id, checkpoint) = row?;
         if let Some(session) = state.sessions.get_mut(&session_id) {
-            session.checkpoint = Some(checkpoint);
+            session.checkpoint = Some(Box::new(checkpoint));
         }
     }
     Ok(())
@@ -1503,7 +1503,8 @@ fn decode_session(
                     rusqlite::types::Type::Text,
                     Box::new(error),
                 )
-            })?,
+            })?
+            .map(Box::new),
         // An unreadable choice, such as a mode a newer release wrote, falls
         // back to `[review]` rather than hiding the session.
         review: row

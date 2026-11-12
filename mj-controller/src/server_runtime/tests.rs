@@ -1695,7 +1695,7 @@ async fn phone_projects_resolve_a_sub_agent_from_its_suspended_parent() {
     parent.state = SessionState::Stopped;
     parent.target_template_id = "local".into();
     parent.project_directory = Some(clone.clone());
-    parent.managed_worktree = Some(mj_core::state::ManagedWorktree {
+    parent.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
         kind: mj_core::state::ManagedCheckoutKind::Clone,
         source_project_directory: project.clone(),
         source_repository: project.clone(),
@@ -1703,7 +1703,7 @@ async fn phone_projects_resolve_a_sub_agent_from_its_suspended_parent() {
         branch: "mj/parent".into(),
         target: mj_core::state::ManagedWorktreeTarget::Local,
         base_commit: None,
-    });
+    }));
     let mut child = phone_session("child", 0);
     child.state = SessionState::Stopped;
     child.target_template_id = "local".into();
