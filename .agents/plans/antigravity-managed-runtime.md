@@ -12,9 +12,12 @@ Starting a session with profile gemini must prepare Antigravity's `agy` executab
 - [x] Verify Google's versioned 1.5.7 artifact manifests and documented AGY_CLI_DISABLE_AUTO_UPDATE=true setting.
 - [x] Verified all six published archives against Google's SHA-512, recorded SHA-256 pins, and added the managed resolver, quota/login integration and matching container installer.
 - [x] Both Linux musl architectures have no ELF program interpreter; the x86_64 artifact launches on this glibc host. The container installer passed locally, and the macOS arm64 artifact verified and launched on the Mac.
-- [ ] Extend installer and ACP integration regressions; run focused tests during changes, then touched-crate suites and workspace clippy once.
-- [ ] Complete an isolated remote Podman launch without an ambient agy, verify both quota pools, and clean up the instance.
-- [ ] Commit, obtain clean review, merge any newer upstream changes, and push; verify image publication and dispatch platform CI.
+- [x] Installer policy/archive/image regressions passed. The real concurrent-download/reuse/lease test passed in 11.38 seconds. Container build-context and workflow checks passed (14 tests).
+- [x] Full final suites passed: controller 2602/27 ignored, core 648/4 ignored, integration and documentation cases passed. No test failed.
+- [ ] Complete workspace clippy; it is running on the final implementation.
+- [x] The isolated remote Podman image initially lacked agy. Session 6e8e651ea0f9a56b2314cb13dd599187 installed antigravity-1.5.7 in its target cache and returned AGY_MANAGED_REMOTE_OK from gemini-4-hydrogen/high (1.91 seconds, no tools). Both quota pools appeared in the TUI. Destroyed the session, stopped the daemon/TUI/Git fixture, removed copied credentials and test storage; original OAuth source unchanged.
+- [x] Commits 87048ad5c and 1d488033e passed review. Fixed inherited non-UTF-8 environment handling; the real Rust quota collector then passed with an unrelated invalid environment value (45.96 seconds, including a fresh pin download).
+- [ ] Merge newer upstream changes, publish reviewed work, verify image publication, dispatch platform CI, and complete the authorized follow-up installation without downgrading a newer build.
 
 ## Surprises & Discoveries
 
@@ -24,6 +27,8 @@ Google publishes archive URLs and SHA-512 hashes for Linux x86_64/aarch64 with g
 
 The Linux musl artifacts are static: both ELF program-header tables contain no PT_INTERP, and the x86_64 binary runs on this glibc host. Use those artifacts on Linux by architecture instead of guessing libc from the portable worker or adding runtime libc detection. This concerns Google's prebuilt CLI only; Rust build settings and the ordinary host/dev test target are unchanged.
 
+The remote-container fixture needs a network Git remote, even when its source is a local repository. A Git daemon listening on Morannon's wildcard address was reachable from the test container through host.containers.internal; its own LAN address was refused from that rootless network. Use a private fixture repository served on the target host and destination repo, rather than a dot destination. Teardown must close the test TUI and any test-owned SSH master before removing its storage; rootless image files require podman unshare for deletion.
+
 ## Decision Log
 
 Use the existing resolver, staging, installer lock, atomic publication, receipt, and shared installation lease. Do not add a controller-to-target binary copy mechanism. Keep custom launch commands and the established Managed/Ambient/Image policies. Set AGY_CLI_DISABLE_AUTO_UPDATE=true in all mj-owned launch environments so sessions and quota probes cannot replace the pinned binary.
@@ -32,7 +37,9 @@ Use checked-in per-platform artifact URLs and checksums rather than resolving Go
 
 ## Outcomes & Retrospective
 
-Implementation and acceptance are pending. Preserve the user's gemini profile, disabled GPU scoring, and accepted additional-directory shell-cwd limitation. Install authorization from the earlier Antigravity work persists, but never replace a newer build without first merging it.
+The managed runtime is implemented and the real missing-binary remote launch succeeds. The CLI comes from /root/.cache/mjolnir/harnesses/antigravity/antigravity-1.5.7/bin/agy inside the isolated target, with AGY_CLI_DISABLE_AUTO_UPDATE=true and the staged credential home. The host daemon collected both weekly and five-hour windows for Gemini and Claude/GPT; the TUI displayed gemini (Ge) and gemini (Cl). Native platform checks passed on Linux x86_64 and macOS arm64, and the runtime metadata also pins Linux arm64 and macOS x86_64.
+
+Full touched-crate validation and review are clean; workspace clippy and publication/installation remain. Preserve the user's gemini profile, disabled GPU scoring, and accepted additional-directory shell-cwd limitation. Install authorization from the earlier Antigravity work persists, but never replace a newer build without first merging it. The live daemon was already at d14c6f3d1 during acceptance, so merge current upstream before installing this follow-up.
 
 ## Context and Orientation
 
@@ -61,3 +68,5 @@ Existing install locks serialize publication and leases protect running versions
 Extend existing HarnessPin and Located/ManagedHarness behavior without new persisted state. Artifact verification uses the existing SHA-256 downloader after verifying metadata acquisition against Google's SHA-512. Keep one resolver for mj-owned ACP and CLI execution. The container installer reads the same checked-in runtime metadata.
 
 2026-11-12: Created this plan after the user approved managed-runtime support for #1520; it supersedes the initial ambient-only cut in antigravity-acp.md.
+
+2026-11-12: Recorded verified static Linux artifacts, managed resolver/image integration, clean review, full touched-crate results, real remote-container acceptance, non-UTF-8 quota verification, and completed cleanup. Remaining work is clippy, publication and the authorized installation.

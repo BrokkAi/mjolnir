@@ -2270,7 +2270,7 @@ mod tests {
         // than the shared fake-command dispatcher's symlink.
         std::fs::write(
             &ambient,
-            &format!(
+            format!(
                 "#!/bin/sh\n[ \"$AGY_CLI_DISABLE_AUTO_UPDATE\" = true ] || exit 23\necho {}\n",
                 crate::harness_runtime::ANTIGRAVITY_VERSION
             ),

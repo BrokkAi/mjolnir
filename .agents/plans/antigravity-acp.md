@@ -4,7 +4,7 @@ This living plan follows .agents/PLANS.md.
 
 ## Purpose / Big Picture
 
-Enable explicit Antigravity profiles using a host-installed agy and isolated copies of Google credentials. ACP is the JSON RPC protocol between worker and harness.
+Enable explicit Antigravity profiles using isolated copies of Google credentials. ACP is the JSON RPC protocol between worker and harness. This plan records the initial delivery; `.agents/plans/antigravity-managed-runtime.md` adds pinned installation on session targets and supersedes the original host-installed-only restriction.
 
 ## Progress
 
@@ -32,7 +32,7 @@ agy advertises both suffixed legacy models and base model selectors. Prefer conf
 
 ## Decision Log
 
-Use antigravity harness identity, ~/.gemini source home, and token copies. The user-facing profile is `gemini`, superseding the earlier `agy` choice; the executable remains `agy`. No managed harness installation, native subagents or automatic reviewer ranking. Configured approvals select default; unconstrained selects auto with skip-permissions. Plan entry and exit passed real ACP probing; exit restores target policy. Native checkpoint export is explicitly unsupported.
+Use antigravity harness identity, ~/.gemini source home, and token copies. The user-facing profile is `gemini`, superseding the earlier `agy` choice; the executable remains `agy`. The initial cut omitted managed installation; the managed-runtime follow-up adds it. Native subagents and automatic reviewer ranking remain outside this implementation. Configured approvals select default; unconstrained selects auto with skip-permissions. Plan entry and exit passed real ACP probing; exit restores target policy. Native checkpoint export is explicitly unsupported.
 
 The user requires quota support before installation. Query the CLI's own documented `/usage` command, not reverse-engineered HTTP endpoints. Its JSON command.data.groups[].buckets[] supplies gemini-weekly, gemini-5h, 3p-weekly and 3p-5h, remaining_fraction and UTC reset_time. Store one copy of each window; scope Gemini to gemini model names and the third-party group to claude/gpt names. Extend the shared scope matcher to allow comma-separated model fragments. The daemon remains the sole quota poller. Run the command with a temporary HOME containing a credential copy; the top-level CLI does not accept ACP's --gemini-dir flag. Reuse process capture and credential-file helpers, and surface malformed or failed CLI output as an error instead of n/a.
 
@@ -78,7 +78,7 @@ Input map: .mj/agents/ce76d64142ef2ccbe14a4303db2345de/map.md. Empirical finding
 
 ## Interfaces and Dependencies
 
-Reuse generic ACP configOptions and stdio MCP delivery, existing subprocess helpers and freshness reconciliation. agy must be installed on each target.
+Reuse generic ACP configOptions and stdio MCP delivery, existing subprocess helpers and freshness reconciliation. The initial version required agy on each target; the managed-runtime follow-up installs the pin through the existing target-side resolver.
 
 2026-11-12: Parent revised decision 9: database changes removed from this assignment. Initial isolated startup exposed cross-table trigger rename validation in the old admission helper; removed implementation patch retained only as evidence in report directory. Direct agy resume, instructions, token-only credentials, selectors and stdio MCP validated.
 
@@ -95,3 +95,5 @@ Reuse generic ACP configOptions and stdio MCP delivery, existing subprocess help
 2026-11-12: Final merged suites: client 56 passed/1 ignored plus integration, controller 2584 passed/26 ignored, core 645 passed/3 ignored plus compatibility cases, TUI 581 passed/2 ignored, CLI 254 unit tests and all 21 startup tests passed along with the other isolated integration/PTY cases. Worker 833 passed/11 ignored with one negative-mode fixture failure; after restricting the added default mode to Antigravity, that failure and all four earlier cross-harness ACP regressions pass (five tests, 0.28 seconds). The user accepted the observed extra-directory cwd limitation as won't fix for now.
 
 2026-11-12: Completed the authorized installation, normal daemon handoff, live revision-126 migration, and installed-build Opus smoke after final review. Applied the user's latest profile name, gemini, and disabled GPU scoring before daemon startup. Removed only startup discovery's identical unused profile, preserving unrelated settings. The isolated smoke session was destroyed and its daemon stopped; final evidence is in the finish report directory.
+
+2026-11-12: Added a pointer to the #1520 managed-runtime follow-up so the initial ambient-only scope is not mistaken for the current design. The native-checkpoint and extra-directory cwd limitations are unchanged.
