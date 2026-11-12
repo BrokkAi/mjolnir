@@ -53,16 +53,80 @@ pub(super) const LIFECYCLE_WAIT: std::time::Duration = std::time::Duration::from
 /// The longest pause between attempts while a running review waits.
 const LIFECYCLE_RETRY_PAUSE_MAX: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The step of review preparation in progress.
+///
+/// Each step logs when it starts and ends with its duration, so a slow
+/// preparation names the step it spent its time in, and a cancellation says
+/// which step it interrupted (#1503).
+#[derive(Default)]
+pub(super) struct PreparationStages {
+    current: std::sync::Mutex<Option<(&'static str, std::time::Instant)>>,
+}
+
+impl PreparationStages {
+    /// Starts `stage`; the returned guard logs its end when dropped, which
+    /// includes a cancellation dropping the step.
+    fn enter<'a>(&self, session_id: &'a str, stage: &'static str) -> PreparationStage<'a> {
+        let started = std::time::Instant::now();
+        *self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((stage, started));
+        tracing::info!(session_id, stage, "review preparation stage started");
+        PreparationStage {
+            session_id,
+            stage,
+            started,
+        }
+    }
+
+    /// The refusal for a preparation cancelled now, naming the step it
+    /// stopped.
+    pub(super) fn cancelled(&self) -> String {
+        match *self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            Some((stage, started)) => format!(
+                "review preparation cancelled while {stage} (after {} s)",
+                started.elapsed().as_secs()
+            ),
+            None => "review preparation cancelled".to_owned(),
+        }
+    }
+}
+
+struct PreparationStage<'a> {
+    session_id: &'a str,
+    stage: &'static str,
+    started: std::time::Instant,
+}
+
+impl Drop for PreparationStage<'_> {
+    fn drop(&mut self) {
+        tracing::info!(
+            session_id = self.session_id,
+            stage = self.stage,
+            elapsed_ms = self.started.elapsed().as_millis(),
+            "review preparation stage ended"
+        );
+    }
+}
+
 /// Everything a review needs that only the database and the worker can answer.
+///
+/// The caller cancels preparation by dropping this future.
 pub(super) async fn prepare(
     control: &SessionManagerControl,
     environment: &Arc<dyn ReviewEnvironment>,
     session_id: &str,
     config: ReviewConfig,
-    cancelled: Arc<std::sync::atomic::AtomicBool>,
+    stages: &PreparationStages,
     repositories: Option<Vec<std::path::PathBuf>>,
 ) -> Result<Prepared, StartRefusal> {
     let review_refusal = {
+        let _stage = stages.enter(session_id, "checking the session's project source");
         let environment = environment.clone();
         let session = session_id.to_owned();
         tokio::task::spawn_blocking(move || environment.review_refusal(&session))
@@ -70,14 +134,15 @@ pub(super) async fn prepare(
             .map_err(|error| StartRefusal(format!("preparing review: {error}")))?
     };
     review_refusal.map_err(StartRefusal)?;
-    let handle = control
-        .session(session_id.to_owned())
-        .await
-        .map_err(|error| {
-            StartRefusal(format!(
-                "{error:#}; resume the session before requesting review"
-            ))
-        })?;
+    let handle = {
+        let _stage = stages.enter(session_id, "looking up the session");
+        control.session(session_id.to_owned()).await
+    }
+    .map_err(|error| {
+        StartRefusal(format!(
+            "{error:#}; resume the session before requesting review"
+        ))
+    })?;
     // Capture actions and primary prompt submissions are serialized by the
     // same session actor. Anything accepted before the admission hold is
     // reflected here; anything after it was refused by the actor.
@@ -108,6 +173,7 @@ pub(super) async fn prepare(
         ));
     }
     let state = {
+        let _stage = stages.enter(session_id, "loading the review state");
         let session = session_id.to_owned();
         let environment = environment.clone();
         tokio::task::spawn_blocking(move || environment.load_state(&session))
@@ -120,13 +186,17 @@ pub(super) async fn prepare(
     let deadline = tokio::time::Instant::now() + BACKGROUND_WORK_WAIT;
     // Keep recovery copies and worker upgrades from interrupting reviewers.
     // A copy already running is waited for, not preempted.
-    let background = environment.hold_background_work(session_id, deadline).await;
+    let background = {
+        let _stage = stages.enter(session_id, "waiting for background work on the session");
+        environment.hold_background_work(session_id, deadline).await
+    };
     // Capture committed work before choosing reviewers. Matching trees need
     // no reviewer, and capture refusals go straight back to the caller.
     let scoped_repositories = repositories;
     let captured = {
+        let _stage = stages.enter(session_id, "capturing the change set through the worker");
         let handle = &handle;
-        after_background_work(session_id, deadline, &cancelled, move || {
+        after_background_work(session_id, deadline, move || {
             let repositories = scoped_repositories.clone();
             async move {
                 handle
@@ -154,9 +224,6 @@ pub(super) async fn prepare(
         Ok(ReviewerOutcome::Delta { repositories }) => repositories,
         other => return Err(StartRefusal(unexpected(other))),
     };
-    if cancelled.load(std::sync::atomic::Ordering::Acquire) {
-        return Err(StartRefusal("review preparation cancelled".into()));
-    }
     if mj_review::delta::trees_unchanged(&captured) {
         return Ok(Prepared {
             seed: seed_from_session(&snapshot.materialized),
@@ -167,14 +234,15 @@ pub(super) async fn prepare(
             background,
         });
     }
-    let reviewer = after_background_work(session_id, deadline, &cancelled, || {
-        environment.resolve(handle.clone(), config.clone(), cancelled.clone())
-    })
-    .await
-    .map_err(StartRefusal)?;
-    if cancelled.load(std::sync::atomic::Ordering::Acquire) {
-        return Err(StartRefusal("review preparation cancelled".into()));
+    let reviewer = {
+        let _stage = stages.enter(session_id, "choosing reviewers");
+        after_background_work(session_id, deadline, || {
+            environment.resolve(handle.clone(), config.clone())
+        })
+        .await
     }
+    .map_err(StartRefusal)?;
+    let _stage = stages.enter(session_id, "checking reviewer profiles");
     for selected in &reviewer {
         let profile = selected.profile.clone();
         let session = session_id.to_owned();
@@ -210,11 +278,10 @@ pub(super) use crate::review_selection::preempted_by_lifecycle;
 /// from starting, but a foreground lifecycle operation (a suspend, a move, a
 /// copy still running when the hold's wait ran out) can still refuse or
 /// cancel the capture or the reviewer choice. The step tries again until
-/// `deadline` instead of giving up.
+/// `deadline` instead of giving up. Cancelling the review drops this future.
 async fn after_background_work<T, Step, Attempt>(
     session_id: &str,
     deadline: tokio::time::Instant,
-    cancelled: &std::sync::atomic::AtomicBool,
     mut step: Step,
 ) -> Result<T, String>
 where
@@ -229,9 +296,7 @@ where
         attempt += 1;
         match step().await {
             Err(reason)
-                if preempted_by_lifecycle(&reason)
-                    && tokio::time::Instant::now() < deadline
-                    && !cancelled.load(std::sync::atomic::Ordering::Acquire) =>
+                if preempted_by_lifecycle(&reason) && tokio::time::Instant::now() < deadline =>
             {
                 tracing::info!(
                     %session_id,
