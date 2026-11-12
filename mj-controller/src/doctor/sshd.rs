@@ -36,7 +36,7 @@ pub(super) fn check(
             "sh".into(),
             "-c".into(),
             // SSH supplies the addresses of this connection, including multiplexed channels.
-            r#"set -eu; set -- $SSH_CONNECTION; sudo -n sshd -T -C "user=$(id -un),addr=$1,laddr=$3,lport=$4""#.into(),
+            r#"set -eu; set -- $SSH_CONNECTION; sudo -n sshd -T -C "user=$(id -un),addr=$1,host=$1,laddr=$3,lport=$4""#.into(),
         ],
         "check effective SSH server limits",
     );
@@ -67,11 +67,16 @@ pub(super) fn check(
                 [start, rate, full] => (*start, *rate, *full),
                 _ => return None,
             };
-            Some((sessions, startups.trim().to_owned(), limits))
+            Some((
+                sessions,
+                startups.trim().to_owned(),
+                limits,
+                text.lines().any(|line| line.trim() == "usedns yes"),
+            ))
         });
     let check_id = format!("sshd.{id}");
     let title = format!("SSH server limits for target {id}");
-    let Some((sessions, startups, (start, rate, full))) = values else {
+    let Some((sessions, startups, (start, rate, full), use_dns)) = values else {
         return DoctorCheck::warning(
             check_id,
             title,
@@ -79,25 +84,36 @@ pub(super) fn check(
                 "Effective SSH server limits on {} are unknown; passwordless `sudo -n sshd -T` could not read them.",
                 ssh.destination
             ),
-            r#"In an SSH connection to the host, run `set -- $SSH_CONNECTION; sudo sshd -T -C "user=$(id -un),addr=$1,laddr=$3,lport=$4"` and check MaxSessions and MaxStartups; mj recommends 200 and 100:30:300 respectively."#,
+            r#"In an SSH connection to the host, run `set -- $SSH_CONNECTION; sudo sshd -T -C "user=$(id -un),addr=$1,host=$1,laddr=$3,lport=$4"` and check MaxSessions and MaxStartups; mj recommends 200 and 100:30:300 respectively."#,
         );
     };
-    let detail = format!(
+    let mut detail = format!(
         "MaxSessions {sessions}, MaxStartups {startups}. Mj multiplexes worker relay sessions over shared SSH connections."
     );
-    if sessions >= 200 && start >= 100 && rate <= 30 && full >= 300 {
+    if use_dns {
+        detail.push_str("\nHost-based Match rules were evaluated against the client address and may differ because UseDNS is enabled.");
+    }
+    let low_sessions = sessions < 200;
+    let low_startups = start < 100 || rate > 30 || full < 300;
+    if !low_sessions && !low_startups {
         DoctorCheck::ready(check_id, title, detail)
     } else {
+        let mut content = String::from(
+            "# mj multiplexes worker relay sessions over shared SSH connections.\n# Measured relay-session refusals at ~40 containers on morannon (Series 20/21).\n",
+        );
+        if low_sessions {
+            content.push_str("MaxSessions 200\n");
+        }
+        if low_startups {
+            content.push_str("MaxStartups 100:30:300\n");
+        }
         DoctorCheck::warning(
             check_id,
             title,
             detail,
             format!(
-                r#"On the host, run: `sudo -n mkdir -p /etc/ssh/sshd_config.d && printf '%s\n' '# Measured relay-session refusals at ~40 containers on morannon (Series 20/21).' 'MaxSessions {sessions}' 'MaxStartups {start}:{rate}:{full}' | sudo -n tee /etc/ssh/sshd_config.d/60-mj-mux.conf && sudo -n cp /etc/ssh/sshd_config /etc/ssh/sshd_config.mj-backup && {{ printf '%s\n' 'Include /etc/ssh/sshd_config.d/*.conf'; sudo -n cat /etc/ssh/sshd_config.mj-backup; }} | sudo -n tee /etc/ssh/sshd_config && sudo -n sshd -t`. On Linux with systemd, reload with `sudo -n systemctl reload "$(systemctl show -p Id --value sshd.service)"`. On macOS, launchd starts sshd for each new connection, so reconnect to apply the settings. Then rerun `mj doctor` to verify the effective values; earlier drop-ins and Match blocks may take precedence; adjust those if the limits remain low. Reconnect existing SSH masters to apply the new limits."#,
-                sessions = sessions.max(200),
-                start = start.max(100),
-                rate = rate.min(30),
-                full = full.max(300),
+                r#"On the host, put these lines in /etc/ssh/sshd_config.d/60-mj-mux.conf:
+{content}This works only if sshd_config includes sshd_config.d/*.conf (most Linux distributions do). Otherwise add the settings to sshd_config itself. Run `sudo sshd -t` to validate before reloading. On Linux with systemd, reload with `sudo systemctl reload "$(systemctl show -p Id --value sshd.service)"`. On macOS, launchd starts sshd for each new connection, so reconnect to apply the settings. Reconnect existing SSH masters, then rerun `mj doctor` to verify the effective values."#,
             ),
         )
     }

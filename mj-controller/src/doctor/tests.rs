@@ -406,6 +406,9 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         Ok(output("maxsessions 200\nmaxstartups 100:30:300\n")),
         Ok(output("maxsessions 1000\nmaxstartups 10:30:100\n")),
         Ok(output("maxsessions 10\nmaxstartups 500:10:1000\n")),
+        Ok(output(
+            "maxsessions 200\nmaxstartups 100:30:300\nusedns yes\n",
+        )),
     ] {
         checks.push(sshd::check("remote", &ssh, &FakeExecutor::new([response])));
     }
