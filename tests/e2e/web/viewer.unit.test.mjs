@@ -1529,24 +1529,22 @@ test('conversation receipts require a visible focused caught-up conversation and
 });
 
 
-test('notification snapshot retains cleared positions until refresh or a new visit', () => {
-  const context = vm.createContext({ orderedSessions: rows => [...rows].sort((a, b) => b.time - a.time) });
+test('notification snapshot retains handled entries below the notification band until a new visit', () => {
+  const context = vm.createContext({ sessionMessageMs: row => row.time });
+  vm.runInContext(sourceBetween('function hasNotification(', '/// Whether a session is a sub-agent'), context);
   vm.runInContext(sourceBetween('class NotificationSnapshot {', '\nfunction notificationRows()'), context);
-  const update = rows => JSON.parse(vm.runInContext(`JSON.stringify(notificationSnapshot.update(${JSON.stringify(rows)}))`, context));
-  const a = { id: 'a', time: 1 }, b = { id: 'b', time: 2 }, c = { id: 'c', time: 3 };
+  const update = (rows, allRows = rows) => JSON.parse(vm.runInContext(`JSON.stringify(notificationSnapshot.update(${JSON.stringify(rows)}, ${JSON.stringify(allRows)}))`, context));
+  const a = { id: 'a', time: 1, attention: 'needs_input' }, b = { id: 'b', time: 2, attention: 'important' }, c = { id: 'c', time: 3, attention: 'failed' };
   assert.deepEqual(update([a, b]).map(entry => entry.row.id), ['b', 'a']);
-  assert.equal(update([a])[0].cleared, true);
-  context.running = { ...b, attention: 'working', capabilities: { open: false } };
-  const retained = JSON.parse(vm.runInContext('JSON.stringify(notificationSnapshot.update([], [running]))', context));
-  assert.equal(retained[0].row.attention, 'working');
-  assert.equal(retained[0].row.capabilities.open, false);
-  assert.equal(retained[1].row.lifecycle, 'destroyed');
-  assert.deepEqual(retained[1].row.capabilities, {});
-  assert.deepEqual(update([a, c]).map(entry => [entry.row.id, entry.cleared]), [['c', false], ['b', true], ['a', false]]);
-  assert.deepEqual(update([a, b, c]).map(entry => [entry.row.id, entry.cleared]), [['c', false], ['b', false], ['a', false]]);
-  update([a, c]);
+  const handled = { ...b, attention: 'working', capabilities: { open: false } };
+  let retained = update([a], [a, handled]);
+  assert.deepEqual(retained.map(entry => entry.row.id), ['a', 'b']);
+  assert.equal(retained[1].row.capabilities.open, false);
+  assert.deepEqual(update([a, c], [a, handled, c]).map(entry => entry.row.id), ['c', 'a', 'b']);
+  assert.deepEqual(update([a, b, c]).map(entry => entry.row.id), ['c', 'b', 'a']);
+  retained = update([a, c]);
+  assert.equal(retained[2].row.lifecycle, 'destroyed');
+  assert.deepEqual(retained[2].row.capabilities, {});
   vm.runInContext('notificationSnapshot.reset()', context);
   assert.deepEqual(update([a, c]).map(entry => entry.row.id), ['c', 'a']);
-  vm.runInContext('notificationSnapshot.reset()', context);
-  assert.deepEqual(update([a]).map(entry => entry.row.id), ['a']);
 });

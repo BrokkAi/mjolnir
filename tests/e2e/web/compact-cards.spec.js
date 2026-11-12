@@ -304,7 +304,7 @@ test('golden_viewer_dashboard', async ({ context }) => {
 
   const compactPage = await context.newPage();
   await fixGoldenTime(compactPage);
-  await mount(compactPage, [
+  const compactState = await mount(compactPage, [
     session('beta-turn', 'project-beta', 'Beta', {
       activity: SERVER_TIME_MS - 1_000,
       title: 'A long session title that occupies one ellipsized line on a narrow phone screen',
@@ -346,7 +346,10 @@ test('golden_viewer_dashboard', async ({ context }) => {
       })(),
     })),
   })));
+  compactState.snapshot.launch_failures = [{ id: 'failed-launch', workspace_id: OTHER_WORKSPACE_ID }];
+  await refresh(compactPage, compactState);
   await compactPage.goto('https://viewer.test/');
+  await expect(compactPage.locator('#launch-failures')).toContainText('A session could not be started.');
   await expect(compactPage.locator('#workspace-select')).toHaveValue('notifications');
   await expect(compactPage.locator('.notification-entry')).toHaveCount(4);
   await captureGoldenState(output, compactPage, 'notifications selected by default');
@@ -355,15 +358,17 @@ test('golden_viewer_dashboard', async ({ context }) => {
   const orderedPage = await context.newPage();
   await fixGoldenTime(orderedPage);
   const orderedState = await mount(orderedPage, [
-    session('gamma-message', 'project-gamma', 'Gamma', { message: SERVER_TIME_MS + 3_000, activity: SERVER_TIME_MS + 9_000 }),
-    session('alpha-created', 'project-alpha', 'Alpha', { createdAt: '2030-06-14T00:00:00Z' }),
+    session('gamma-message', 'project-gamma', 'Gamma', { attention: 'important', message: SERVER_TIME_MS + 3_000, activity: SERVER_TIME_MS + 9_000 }),
+    session('alpha-created', 'project-alpha', 'Alpha', { attention: 'needs_input', createdAt: '2030-06-14T00:00:00Z' }),
     session('stopped', 'project-stopped', 'Stopped', { lifecycle: 'suspended', message: SERVER_TIME_MS + 20_000 }),
     session('beta-activity', 'project-beta', 'Beta', { activity: SERVER_TIME_MS + 5_000 }),
+    session('unread-message', 'project-unread', 'Unread', { attention: 'unread', message: SERVER_TIME_MS - 60_000 }),
     session('echo-tie', 'project-echo', 'Echo', { activity: SERVER_TIME_MS + 1_000 }),
     session('delta-tie', 'project-delta', 'Delta', { activity: SERVER_TIME_MS + 1_000 }),
     session('other-workspace', 'project-other', 'Other', { workspaceId: OTHER_WORKSPACE_ID, message: SERVER_TIME_MS + 30_000 }),
   ]);
-  await captureGoldenState(output, orderedPage, 'flat live dashboard sorted by latest message', await orderedPage.evaluate(() => ({
+  await expect(orderedPage.locator('#sessions .session h3')).toHaveText(['gamma-message', 'alpha-created', 'unread-message', 'beta-activity', 'delta-tie', 'echo-tie']);
+  await captureGoldenState(output, orderedPage, 'flat live dashboard sorted by notification band then latest message', await orderedPage.evaluate(() => ({
     cards: [...document.querySelectorAll('#sessions .session')].map(node => ({
       title: node.querySelector('h3')?.textContent,
       meta: node.querySelector('.session-meta')?.innerText,
@@ -1469,13 +1474,15 @@ test('reviewers open their own workspace and stay out of Subagents', async ({ pa
 });
 
 
-test('notifications retain cleared entries until refresh or leaving the workspace', async ({ page }) => {
+test('notifications retain handled entries below the band until leaving or reloading', async ({ page }) => {
   const a = session('notice-a', 'a', 'A', { attention: 'needs_input', activity: SERVER_TIME_MS - 2000 });
   const b = session('notice-b', 'b', 'B', { attention: 'important', workspaceId: OTHER_WORKSPACE_ID, activity: SERVER_TIME_MS - 1000 });
-  const state = await mount(page, [a, b]);
+  const unread = session('unread-notice', 'unread', 'Unread', { attention: 'unread', activity: SERVER_TIME_MS + 1000 });
+  const state = await mount(page, [a, b, unread]);
   await page.locator('#workspace-select').selectOption('notifications');
   const ids = () => page.locator('.notification-entry').evaluateAll(nodes => nodes.map(node => node.dataset.notificationId));
   expect(await ids()).toEqual(['notice-b', 'notice-a']);
+  await expect(page.locator('[data-notification-id="unread-notice"]')).toHaveCount(0);
   const noticeCard = page.locator('[data-notification-id="notice-b"] .session');
   await noticeCard.dispatchEvent('pointerdown', { pointerId: 1, button: 0, isPrimary: true, clientX: 10, clientY: 10 });
   await expect(noticeCard.locator('.session-menu')).toBeVisible();
@@ -1485,7 +1492,10 @@ test('notifications retain cleared entries until refresh or leaving the workspac
   b.lifecycle = 'suspended';
   b.capabilities = { open: false, resume: true };
   await refresh(page, state);
-  await expect(page.locator('[data-notification-id="notice-b"]')).toHaveClass(/notification-cleared/);
+  expect(await ids()).toEqual(['notice-a', 'notice-b']);
+  await expect(noticeCard.locator('.session-attention-item')).toHaveCount(0);
+  await expect(page.locator('[data-notification-id="notice-b"]')).not.toContainText('Cleared');
+  await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toHaveCount(0);
   await expect(noticeCard).not.toHaveAttribute('role', 'link');
   await noticeCard.locator('button[aria-label^="Actions for"]').click();
   await expect(noticeCard.getByRole('menuitem', { name: 'Resume', exact: true })).toBeVisible();
@@ -1494,14 +1504,16 @@ test('notifications retain cleared entries until refresh or leaving the workspac
   const c = session('notice-c', 'c', 'C', { attention: 'failed', activity: SERVER_TIME_MS });
   state.snapshot.sessions.push(c);
   await refresh(page, state);
-  expect(await ids()).toEqual(['notice-c', 'notice-b', 'notice-a']);
+  expect(await ids()).toEqual(['notice-c', 'notice-a', 'notice-b']);
   b.attention = 'important';
   await refresh(page, state);
-  await expect(page.locator('[data-notification-id="notice-b"]')).not.toHaveClass(/notification-cleared/);
+  expect(await ids()).toEqual(['notice-c', 'notice-b', 'notice-a']);
+  await expect(noticeCard.locator('.session-attention-item')).toHaveCount(1);
   b.attention = 'idle';
   await refresh(page, state);
-  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-  expect(await ids()).toEqual(['notice-c', 'notice-a']);
+  expect(await ids()).toEqual(['notice-c', 'notice-a', 'notice-b']);
+  await page.reload();
+  await expect.poll(ids).toEqual(['notice-c', 'notice-a']);
   a.attention = 'idle';
   await refresh(page, state);
   await page.locator('#workspace-select').selectOption(WORKSPACE_ID);

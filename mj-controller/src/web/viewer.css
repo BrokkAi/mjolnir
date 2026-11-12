@@ -2462,5 +2462,4 @@ body[data-connection='reconnecting'] .connection {
   flex: 1 1 12rem;
 }
 
-.notification-cleared { opacity: 0.55; }
 .notification-entry { margin-bottom: 1rem; }

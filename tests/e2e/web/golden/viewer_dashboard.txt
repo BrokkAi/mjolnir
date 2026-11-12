@@ -658,8 +658,11 @@ layout: {"documentWidth":390,"viewportWidth":390,"cards":[{"title":"Important re
 Notifications (4)
 Browser tests
 Other workspace
+
+A session could not be started. Check the project and target, then retry. Details are in the daemon logs.
+
+Dismiss launch error
 Notifications
-Refresh
 Important result
 !
 ⋯
@@ -712,15 +715,38 @@ codex
 Failed
 
 Browser tests · 0m ago
-=== flat live dashboard sorted by latest message (390x844) ===
-Notifications (0)
+=== flat live dashboard sorted by notification band then latest message (390x844) ===
+Notifications (2)
 Browser tests
 Other workspace
 New session
 Resume a session
-beta-activity
+gamma-message
+!
 ⋯
-Beta
+Gamma
+·
+/work/project
+·
+codex
+
+Important
+
+alpha-created
+?
+⋯
+Alpha
+·
+/work/project
+·
+codex
+
+Input needed
+
+unread-message
+✓
+⋯
+Unread
 ·
 /work/project
 ·
@@ -728,9 +754,9 @@ codex
 
 Idle
 
-gamma-message
+beta-activity
 ⋯
-Gamma
+Beta
 ·
 /work/project
 ·
@@ -757,19 +783,9 @@ Echo
 codex
 
 Idle
-
-alpha-created
-⋯
-Alpha
-·
-/work/project
-·
-codex
-
-Idle
-layout: {"cards":[{"title":"beta-activity","meta":"Beta\n·\n/work/project\n·\ncodex"},{"title":"gamma-message","meta":"Gamma\n·\n/work/project\n·\ncodex"},{"title":"delta-tie","meta":"Delta\n·\n/work/project\n·\ncodex"},{"title":"echo-tie","meta":"Echo\n·\n/work/project\n·\ncodex"},{"title":"alpha-created","meta":"Alpha\n·\n/work/project\n·\ncodex"}]}
+layout: {"cards":[{"title":"gamma-message","meta":"Gamma\n·\n/work/project\n·\ncodex"},{"title":"alpha-created","meta":"Alpha\n·\n/work/project\n·\ncodex"},{"title":"unread-message","meta":"Unread\n·\n/work/project\n·\ncodex"},{"title":"beta-activity","meta":"Beta\n·\n/work/project\n·\ncodex"},{"title":"delta-tie","meta":"Delta\n·\n/work/project\n·\ncodex"},{"title":"echo-tie","meta":"Echo\n·\n/work/project\n·\ncodex"}]}
 === target capacity omits a missing default candidate (390x844) ===
-Notifications (0)
+Notifications (2)
 Browser tests
 Other workspace
 Targets

@@ -959,7 +959,9 @@ const dismissedRuntimeNotices = new Set();
 function renderLaunchFailures() {
   const noticeKey = notice => `${viewerState.cursor?.incarnation}:${notice.id}`;
   const notices = (snapshot.launch_failures || []).filter(
-    failure => route.name === 'dashboard' && failure.workspace_id === selectedWorkspaceId() && !dismissedLaunchFailures.has(failure.id),
+    failure => route.name === 'dashboard'
+      && (selectedWorkspaceId() === 'notifications' || failure.workspace_id === selectedWorkspaceId())
+      && !dismissedLaunchFailures.has(failure.id),
   );
   const failureCards = notices.map(failure => {
     const card = el('div', 'card');
@@ -1127,11 +1129,17 @@ function isDashboardSession(session) {
     || isTransitioningSession(session);
 }
 
-/// Most recent top-level message first. Title and id keep rows that have not
-/// said anything yet in a stable order as new messages re-sort the list.
+function hasNotification(session) {
+  return ['needs_input', 'important', 'failed', 'unreachable'].includes(session.attention);
+}
+
+/// Notifications, unread output, then other sessions; newest message first in each band.
+/// Title and id keep ties stable as messages and attention re-sort the list.
 function orderedSessions(live) {
   return [...live].sort((left, right) =>
-    sessionMessageMs(right) - sessionMessageMs(left)
+    Number(hasNotification(right)) - Number(hasNotification(left))
+    || Number(right.attention === 'unread') - Number(left.attention === 'unread')
+    || sessionMessageMs(right) - sessionMessageMs(left)
     || String(left.title || '').localeCompare(String(right.title || ''))
     || left.id.localeCompare(right.id),
   );
@@ -1157,19 +1165,19 @@ class NotificationSnapshot {
   reset() { this.entries = []; }
   update(rows, allRows = rows) {
     const current = new Map(allRows.map(row => [row.id, row]));
-    const attentionIds = new Set(rows.map(row => row.id));
     const retained = new Set(this.entries.map(entry => entry.row.id));
     this.entries = [
-      ...orderedSessions(rows.filter(row => !retained.has(row.id))).map(row => ({ row, cleared: false })),
+      ...rows.filter(row => !retained.has(row.id)).map(row => ({ row })),
       ...this.entries.map(entry => ({
         row: current.get(entry.row.id) || {
           ...entry.row, capabilities: {}, operation: null, transitioning: false,
           lifecycle: 'destroyed', attention: 'inactive', configuration_issue: null, move_recovery: null,
         },
         excerpt: entry.excerpt,
-        cleared: !attentionIds.has(entry.row.id),
       })),
     ];
+    const entriesById = new Map(this.entries.map(entry => [entry.row.id, entry]));
+    this.entries = orderedSessions(this.entries.map(entry => entry.row)).map(row => entriesById.get(row.id));
     return this.entries;
   }
 }
@@ -1178,17 +1186,13 @@ const notificationItems = new Map();
 
 function notificationRows() {
   return [...viewerState.rows.values()].filter(row => !isSubagentSession(row)
-    && ['needs_input', 'important', 'failed', 'unreachable'].includes(row.attention));
+    && hasNotification(row));
 }
 
 function renderNotifications() {
-  const header = el('div', 'row');
-  header.append(el('h2', '', 'Notifications'));
-  const refresh = button('Refresh');
-  refresh.onclick = () => { notificationSnapshot.reset(); renderSessions(); };
-  header.append(refresh);
+  const header = el('h2', '', 'Notifications');
   const items = notificationSnapshot.update(notificationRows(), [...viewerState.rows.values()]).map(entry => {
-    const { row, cleared } = entry;
+    const { row } = entry;
     let item = notificationItems.get(row.id);
     if (!item) {
       item = el('div', 'notification-entry');
@@ -1199,7 +1203,6 @@ function renderNotifications() {
       item._actions.dataset.sessionId = row.id;
       notificationItems.set(row.id, item);
     }
-    item.classList.toggle('notification-cleared', cleared);
     let card = sessionCards.get(row.id);
     if (!card) { card = sessionCard(row); sessionCards.set(row.id, card); }
     else updateSessionCard(card, row);
@@ -1211,7 +1214,7 @@ function renderNotifications() {
     const workspace = snapshot.workspaces?.find(workspace => workspace.id === row.workspace_id);
     const timestamp = sessionMessageMs(row);
     const age = timestamp ? `${Math.max(0, Math.floor((serverClockMs() - timestamp) / 60000))}m ago` : 'Age unknown';
-    item._meta.textContent = `${workspace?.name || row.workspace_id} · ${age}${cleared ? ' · Cleared' : ''}`;
+    item._meta.textContent = `${workspace?.name || row.workspace_id} · ${age}`;
     // item._actions is reserved for the daemon-owned Dismiss notification action.
     return item;
   });
@@ -1687,6 +1690,7 @@ function attentionParts(session) {
   const attention = {
     needs_input: ['?', 'Input needed'],
     important: ['!', 'Important'],
+    unread: ['✓', 'Unread'],
     failed: ['×', 'Failed'],
     unreachable: ['×', 'Unreachable'],
   }[session.attention];
