@@ -708,6 +708,11 @@ pub enum DaemonAction {
         target_id: String,
     },
     ProfileLoginStatuses,
+    CheckAvailability,
+    DiscoverSetup {
+        scope: crate::discovery::DetectScope,
+        machines: Vec<(String, mj_core::config::Machine)>,
+    },
     CompletePath {
         host: mj_core::path_completion::CompletionHost,
         prefix: String,
@@ -1217,6 +1222,11 @@ pub enum DaemonReply {
     BuildCachePreview(Option<mj_core::state::BuildCachePreview>, bool),
     MbxInstalled(String),
     CheckpointArchiveSizes(std::collections::BTreeMap<String, Option<u64>>),
+    SetupDiscovery(Box<crate::discovery::SetupDetection>),
+    Availability(
+        #[serde(deserialize_with = "deserialize_availability")]
+        crate::availability::AvailabilityChecked,
+    ),
     ProfileLoginStatuses(std::collections::BTreeMap<String, mj_core::credentials::LoginStatus>),
     NewSessionPreflight(PreflightNew),
     PathCompletion(mj_core::path_completion::PathCompletion),
@@ -3288,6 +3298,8 @@ impl DaemonAction {
                 | Self::CheckpointArchiveSizes { .. }
                 | Self::TestTarget { .. }
                 | Self::ProfileLoginStatuses
+                | Self::CheckAvailability
+                | Self::DiscoverSetup { .. }
                 | Self::PreflightNewSession { .. }
                 | Self::ValidateProjectDirectory { .. }
                 | Self::CompletePath { .. }
@@ -3351,6 +3363,12 @@ pub struct NewSessionPreflightRequest {
     pub target_id: String,
     #[serde(default)]
     pub project_directory: Option<PathBuf>,
+}
+
+fn deserialize_availability<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<crate::availability::AvailabilityChecked, D::Error> {
+    mj_core::config::with_environment_sources_only(|| serde::Deserialize::deserialize(deserializer))
 }
 
 #[cfg(test)]

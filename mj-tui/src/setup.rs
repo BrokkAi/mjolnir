@@ -35,36 +35,8 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::{Deref, DerefMut};
 
-/// Which section of the configuration a detection run fills in. Each scope
-/// runs only the probes that section needs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DetectScope {
-    Profiles,
-    Runtimes,
-}
-
-/// A container runtime that detection found but cannot use, carrying the
-/// reason so the Settings notice can name it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RejectedRuntime {
-    /// The runtime kind as a runtime stores it (`bare`, `podman`, `docker`,
-    /// `apple-container`).
-    pub kind: String,
-    pub label: String,
-    pub detail: String,
-    pub remediation: Option<String>,
-}
-
-/// What one detection run found: entries for the scope it was asked about,
-/// and the runtimes it turned down. A runtime detection also reports what
-/// each machine in the draft can run.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SetupDetection {
-    pub scope: DetectScope,
-    pub config: Config,
-    pub rejected_runtimes: Vec<RejectedRuntime>,
-    pub machines: Vec<crate::MachineRuntimeProbe>,
-}
+pub use mj_client::discovery::{DetectScope, SetupDetection};
+pub use mj_client::settings::RejectedRuntime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SetupControl {

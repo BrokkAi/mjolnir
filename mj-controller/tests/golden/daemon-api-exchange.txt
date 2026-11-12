@@ -78,7 +78,134 @@
       "Ok": {
         "reply": "profile_login_statuses",
         "value": {
-          "agent": "SignedOut"
+          "agent": "SignedOut",
+          "ready": "SignedOut"
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "action": "check_availability"
+    },
+    "reply": {
+      "Ok": {
+        "reply": "availability",
+        "value": {
+          "profiles": {
+            "agent": [
+              {
+                "kind": "codex",
+                "home": "<server>/profile",
+                "environment": {
+                  "DAEMON_TEST_KEY": {
+                    "from_secret": "missing-test-key"
+                  }
+                }
+              },
+              "profile \"agent\": DAEMON_TEST_KEY = { from_secret = \"missing-test-key\" } needs `missing-test-key = \"...\"` in <daemon-config>/secrets.toml"
+            ],
+            "ready": [
+              {
+                "kind": "codex",
+                "home": "<server>/ready-profile",
+                "environment": {
+                  "DAEMON_TEST_KEY": {
+                    "from_secret": "daemon-only-key"
+                  }
+                }
+              },
+              null
+            ]
+          },
+          "local": {
+            "docker": {
+              "missing": "Docker is not installed on this host. Install Docker (https://mjolnir.brokk.ai/docker/), or use another target.",
+              "installed": false
+            },
+            "podman": {
+              "missing": "Podman preflight failed: could not run `podman --version` to check that Podman 4.0.0 or newer is installed: `podman` is not installed or not on PATH. Install or upgrade Podman: on macOS `brew install podman` then `podman machine init --now`; Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`. See https://mjolnir.brokk.ai/podman/.",
+              "installed": false
+            }
+          },
+          "machines": [],
+          "added_profiles": [],
+          "added_runtimes": {}
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "action": "discover_setup",
+      "arguments": {
+        "scope": "Profiles",
+        "machines": []
+      }
+    },
+    "reply": {
+      "Ok": {
+        "reply": "setup_discovery",
+        "value": {
+          "scope": "Profiles",
+          "config": {
+            "version": 22,
+            "review": {
+              "reviewers": []
+            },
+            "targets": {
+              "localhost": {
+                "kind": "bare"
+              }
+            }
+          },
+          "profile_readiness": {},
+          "rejected_runtimes": [],
+          "machines": []
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "action": "discover_setup",
+      "arguments": {
+        "scope": "Runtimes",
+        "machines": []
+      }
+    },
+    "reply": {
+      "Ok": {
+        "reply": "setup_discovery",
+        "value": {
+          "scope": "Runtimes",
+          "config": {
+            "version": 22,
+            "review": {
+              "reviewers": []
+            },
+            "targets": {
+              "localhost": {
+                "kind": "bare"
+              }
+            }
+          },
+          "profile_readiness": {},
+          "rejected_runtimes": [
+            {
+              "kind": "podman",
+              "label": "Podman",
+              "detail": "Podman preflight failed: could not run `podman --version` to check that Podman 4.0.0 or newer is installed: `podman` is not installed or not on PATH.",
+              "remediation": "Install or upgrade Podman: on macOS `brew install podman` then `podman machine init --now`; Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`. See https://mjolnir.brokk.ai/podman/."
+            },
+            {
+              "kind": "docker",
+              "label": "Docker",
+              "detail": "Docker is not installed on this host.",
+              "remediation": "Install Docker (https://mjolnir.brokk.ai/docker/), or use another target."
+            }
+          ],
+          "machines": []
         }
       }
     }
@@ -147,6 +274,12 @@
         "reply": "project_discovery",
         "value": {
           "entries": [
+            {
+              "name": "ready-profile",
+              "source": "<server>/ready-profile",
+              "description": "Directory",
+              "kind": "directory"
+            },
             {
               "name": "server-only-project",
               "source": "<server>/server-only-project",

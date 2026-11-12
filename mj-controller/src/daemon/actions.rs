@@ -12,6 +12,8 @@ pub(super) async fn handle_action(
         | DaemonAction::InstallMbx { .. }
         | DaemonAction::CheckpointArchiveSizes { .. }
         | DaemonAction::TestTarget { .. }
+        | DaemonAction::DiscoverSetup { .. }
+        | DaemonAction::CheckAvailability
         | DaemonAction::ProfileLoginStatuses
         | DaemonAction::PreflightNewSession { .. }
         | DaemonAction::ValidateProjectDirectory { .. }

@@ -12216,18 +12216,28 @@ async fn suspend_acceptance_survives_client_disconnect_during_checkpoint() {
 /// only in the server fixture, never in client-side interpretation.
 #[tokio::test]
 async fn daemon_api_exchange() {
-    const CHILD: &str = "MJ_MACHINE_EXCHANGE_CHILD";
+    const CHILD: &str = "MJ_TEST_DAEMON_API_EXCHANGE";
     if std::env::var_os(CHILD).is_none() {
-        let root = tempfile::tempdir().unwrap();
-        crate::controller::test_support::IsolatedTest::new(
+        let directory = tempfile::tempdir().unwrap();
+        let mut child = crate::controller::test_support::IsolatedTest::new(
             crate::controller::test_support::test_name(module_path!(), "daemon_api_exchange"),
         )
         .env(CHILD, "1")
         .env("MJ_INSTANCE", "machine-exchange")
-        .isolated_store(root.path())
-        .run();
+        .env("PATH", "")
+        .env("HOME", directory.path().join("home"))
+        .env("USERPROFILE", directory.path().join("home"))
+        .isolated_store(directory.path());
+        for kind in mj_core::config::HarnessKind::ALL {
+            child = child.env(kind.home_env(), directory.path().join("absent-home"));
+            if let Some(key) = kind.api_key_variable() {
+                child = child.env(key, "");
+            }
+        }
+        child.run();
         return;
     }
+
     let root = tempfile::tempdir().unwrap();
     let server_root = root.path().canonicalize().unwrap();
     let project = server_root.join("server-only-project");
@@ -12245,6 +12255,26 @@ async fn daemon_api_exchange() {
             server_root.as_path().join("profile"),
         ),
     );
+    config.profiles.get_mut("agent").unwrap().environment = serde_json::from_value(
+        serde_json::json!({"DAEMON_TEST_KEY": {"from_secret": "missing-test-key"}}),
+    )
+    .unwrap();
+    let ready_home = server_root.join("ready-profile");
+    fs::create_dir(&ready_home).unwrap();
+    let mut ready =
+        mj_core::config::HarnessProfile::new(mj_core::config::HarnessKind::Codex, ready_home);
+    ready.environment = serde_json::from_value(serde_json::json!({
+        "DAEMON_TEST_KEY": {"from_secret": "daemon-only-key"}
+    }))
+    .unwrap();
+    fs::create_dir_all(mj_core::config::config_dir()).unwrap();
+    fs::write(
+        mj_core::config::config_dir().join("secrets.toml"),
+        r#"daemon-only-key = "daemon-secret-value""#,
+    )
+    .unwrap();
+    config.profiles.insert("ready".into(), ready);
+    config.save().unwrap();
     let state = test_runtime_state_with(Controller {
         config,
         state: Default::default(),
@@ -12261,6 +12291,17 @@ async fn daemon_api_exchange() {
         identity_file: None,
         ssh_args: vec![],
     };
+    let client_root = tempfile::tempdir().unwrap();
+    let client_config_path = client_root.path().join("config/config.toml");
+    fs::create_dir_all(client_config_path.parent().unwrap()).unwrap();
+    fs::create_dir(client_root.path().join("data")).unwrap();
+    fs::write(&client_config_path, "").unwrap();
+    assert!(
+        Config::load_from(&client_config_path)
+            .unwrap()
+            .profiles
+            .is_empty()
+    );
     let actions = vec![
         DaemonAction::PreviewBuildCache {
             machine: unsupported_machine.clone(),
@@ -12279,6 +12320,15 @@ async fn daemon_api_exchange() {
             target_id: "missing".into(),
         },
         DaemonAction::ProfileLoginStatuses,
+        DaemonAction::CheckAvailability,
+        DaemonAction::DiscoverSetup {
+            scope: mj_client::discovery::DetectScope::Profiles,
+            machines: Vec::new(),
+        },
+        DaemonAction::DiscoverSetup {
+            scope: mj_client::discovery::DetectScope::Runtimes,
+            machines: Vec::new(),
+        },
         DaemonAction::CheckProjectDirectories {
             paths: vec![project.clone(), server_root.as_path().join("absent")],
         },
@@ -12367,7 +12417,27 @@ async fn daemon_api_exchange() {
         )
         .await
         .unwrap();
-        let response: ResponseEnvelope = read_frame(&mut stream).await.unwrap();
+        let wire: serde_json::Value = read_frame(&mut stream).await.unwrap();
+        let response: ResponseEnvelope = mj_core::config::with_secret_resolver(
+            mj_core::config::SecretResolver::beside(&client_config_path),
+            || serde_json::from_value(wire).unwrap(),
+        );
+        if let Ok(DaemonReply::Availability(report)) = &response.result {
+            assert!(report.profiles["ready"].1.is_none());
+            assert!(report.profiles["agent"].1.is_some());
+            assert_eq!(
+                report.profiles["ready"]
+                    .0
+                    .environment
+                    .get("DAEMON_TEST_KEY"),
+                None
+            );
+            assert!(
+                !serde_json::to_string(report)
+                    .unwrap()
+                    .contains("daemon-secret-value")
+            );
+        }
         exchange.push(serde_json::json!({"request": rendered_action, "reply": response.result}));
         drop(stream);
         server.await.unwrap();
@@ -12376,6 +12446,12 @@ async fn daemon_api_exchange() {
     let rendered = serde_json::to_string_pretty(&exchange)
         .unwrap()
         .replace("\\\\", "/")
+        .replace(
+            &mj_core::config::config_dir()
+                .to_string_lossy()
+                .replace('\\', "/"),
+            "<daemon-config>",
+        )
         .replace(
             &server_root.to_string_lossy().replace('\\', "/"),
             "<server>",
