@@ -19,6 +19,7 @@ include = [
     "src/help_search/question.json",
     "src/continuation/questions.json",
     "src/github_item/questions_v2.json",
+    "src/github_item/ettin-tokenizer.json",
     # Recorded ACP bridge traffic the step-clock tests replay.
     "src/**/testdata/**/*.jsonl",
     # Mjolnir-authored skills embedded with `include_str!`.
