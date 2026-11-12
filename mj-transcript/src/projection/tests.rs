@@ -1025,7 +1025,7 @@ fn mailbox_deliveries_reference_their_external_events_row() {
         ),
     ] {
         let HistoricalReferences { ids, .. } =
-            historical_references(&session, &[event(&session, observation.clone())]).unwrap();
+            historical_references(&[event(&session, observation.clone())]).unwrap();
         assert_eq!(ids.contains(&row_id), expected, "{observation:?}");
         assert!(
             ids.iter().all(|id| id != "system:mailbox:external-events"),

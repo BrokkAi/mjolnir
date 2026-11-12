@@ -105,7 +105,7 @@ fn projection_window_keeps_whole_turns_and_unsettled_content() {
     pending_window.trim(&mut pending, 1024);
     assert_eq!(
         pending.transcript.len(),
-        2500,
+        1200,
         "late streaming data keeps its original turn"
     );
 }

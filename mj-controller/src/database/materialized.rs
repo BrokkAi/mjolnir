@@ -884,18 +884,7 @@ pub(super) fn load_materialized_actor_projection_from(
             |row| row.get(0),
         )
         .optional()?;
-    // Untagged chunks and stream-closing events need open text streams.
-    // Historical tools have stable IDs and rehydrate on their next update.
-    let streaming: Option<u64> = connection.query_row(
-        "SELECT MIN(position) FROM materialized_transcript_items WHERE session_id=?1
-         AND json_extract(body_json, '$.streaming')=1",
-        [session_id],
-        |row| row.get(0),
-    )?;
-    let boundary = desired
-        .unwrap_or(0)
-        .min(latest_turn.unwrap_or(0))
-        .min(streaming.unwrap_or(u64::MAX));
+    let boundary = desired.unwrap_or(0).min(latest_turn.unwrap_or(0));
     let start: u64 = connection.query_row(
         "SELECT COALESCE(MAX(position),0) FROM materialized_transcript_items
          WHERE session_id=?1 AND position<=?2
@@ -903,12 +892,53 @@ pub(super) fn load_materialized_actor_projection_from(
         params![session_id, boundary],
         |row| row.get(0),
     )?;
-    let transcript = read_transcript_range(&connection, session_id, start, None, None)?;
-    let omitted_items = connection.query_row(
-        "SELECT COUNT(*) FROM materialized_transcript_items WHERE session_id=?1 AND position<?2",
-        params![session_id, start],
+    // Find old unsettled turns in one JSON pass, then read only their ranges.
+    let ranges = {
+        let mut statement = connection.prepare(
+            "WITH starts AS (
+                SELECT position FROM materialized_transcript_items WHERE session_id=?1
+                AND (json_extract(body_json, '$.kind')='user' OR stable_id LIKE 'harness-turn:%')
+             ), unsettled AS (
+                SELECT position FROM materialized_transcript_items WHERE session_id=?1 AND position<?2
+                AND ((json_extract(body_json, '$.kind') IN ('agent','thought') AND json_extract(body_json, '$.streaming')=1)
+                  OR (json_extract(body_json, '$.kind')='tool' AND json_extract(body_json, '$.call.status') IN ('pending','in_progress')))
+             )
+             SELECT DISTINCT COALESCE((SELECT MAX(position) FROM starts WHERE position<=u.position),0),
+                 COALESCE((SELECT MIN(position) FROM starts WHERE position>u.position),?2)
+             FROM unsettled u ORDER BY 1")?;
+        statement
+            .query_map(params![session_id, start], |row| {
+                Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let mut transcript = Vec::new();
+    for (begin, end) in ranges {
+        let before = mj_core::storage::TranscriptCursor {
+            position: end,
+            stable_id: String::new(),
+        };
+        transcript.extend(read_transcript_range(
+            &connection,
+            session_id,
+            begin,
+            Some(&before),
+            None,
+        )?);
+    }
+    transcript.extend(read_transcript_range(
+        &connection,
+        session_id,
+        start,
+        None,
+        None,
+    )?);
+    let total: usize = connection.query_row(
+        "SELECT COUNT(*) FROM materialized_transcript_items WHERE session_id=?1",
+        [session_id],
         |row| row.get(0),
     )?;
+    let omitted_items = total - transcript.len();
     let window = ProjectionWindow {
         omitted_items,
         provisional_title: first_materialized_user_message(&connection, session_id)?
@@ -1042,63 +1072,19 @@ pub(super) fn load_projection_references_from(
     projection: &MaterializedSession,
     events: &[mj_core::relay::RelayEvent],
 ) -> Result<Vec<Arc<TranscriptItem>>> {
-    let mj_transcript::projection::HistoricalReferences {
-        mut ids,
-        terminals,
-        mut may_claim_raw_terminal,
-    } = mj_transcript::projection::historical_references(projection, events)?;
+    let mj_transcript::projection::HistoricalReferences { mut ids, terminals } =
+        mj_transcript::projection::historical_references(events)?;
     let retained = projection
         .transcript
         .iter()
         .map(|item| item.stable_id.as_str())
         .collect::<std::collections::HashSet<_>>();
     ids.retain(|id| !retained.contains(id.as_str()));
-    if ids.is_empty() && terminals.is_empty() && !may_claim_raw_terminal {
+    if ids.is_empty() && terminals.is_empty() {
         return Ok(Vec::new());
     }
     let mut reader = open_reader(path)?;
     let connection = reader.transaction()?;
-    if !may_claim_raw_terminal && !ids.is_empty() {
-        // The referenced provider tool may itself be outside the live window.
-        may_claim_raw_terminal = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM materialized_transcript_items
-             WHERE session_id=?1 AND stable_id IN (SELECT value FROM json_each(?2))
-               AND json_type(body_json, '$.call.rawOutput') IS NOT NULL
-               AND json_type(body_json, '$.call.rawOutput') != 'null')",
-            params![projection.session_id, serde_json::to_string(&ids)?],
-            |row| row.get(0),
-        )?;
-    }
-    if may_claim_raw_terminal {
-        // Kimi can claim parked output by its exact raw result, with no terminal
-        // ID. Load all candidates so identical results remain ambiguous. This
-        // reads indexed IDs first; only missing candidates have bodies decoded.
-        let [terminal_prefix, fallback_prefix] =
-            mj_transcript::projection::parked_terminal_item_prefixes();
-        let mut statement = connection.prepare(
-            "SELECT stable_id FROM materialized_transcript_items
-             WHERE session_id=?1 AND stable_id GLOB ?2
-             UNION ALL
-             SELECT stable_id FROM materialized_transcript_items
-             WHERE session_id=?1 AND stable_id GLOB ?3",
-        )?;
-        let candidates = statement.query_map(
-            params![
-                projection.session_id,
-                format!("{terminal_prefix}*"),
-                format!("{fallback_prefix}*")
-            ],
-            |row| row.get::<_, String>(0),
-        )?;
-        for candidate in candidates {
-            let id = candidate?;
-            if !retained.contains(id.as_str()) {
-                ids.push(id);
-            }
-        }
-        ids.sort();
-        ids.dedup();
-    }
     // Ordinary tool updates use the stable-ID index. Only terminal attachment
     // events need the JSON reverse-reference scan.
     let mut parameters = vec![projection.session_id.clone(), serde_json::to_string(&ids)?];

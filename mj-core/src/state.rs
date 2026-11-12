@@ -599,8 +599,7 @@ pub struct ProjectionWindow {
 }
 
 impl ProjectionWindow {
-    /// Keep complete turns around the tail target and open text streams, which
-    /// untagged chunks address implicitly. Historical tools reload by stable ID.
+    /// Keep the tail and complete turns containing unsettled content.
     pub fn trim(&mut self, session: &mut MaterializedSession, target: usize) {
         let observed = Self::of(session);
         if self.provisional_title.is_none() {
@@ -610,20 +609,12 @@ impl ProjectionWindow {
             .latest_turn_start_position
             .or(self.latest_turn_start_position);
         let mut boundary = session.transcript.len().saturating_sub(target.max(1));
-        for (index, item) in session.transcript.iter().enumerate() {
-            let open_stream = matches!(
-                &item.body,
-                TranscriptBody::Agent {
-                    streaming: true,
-                    ..
-                } | TranscriptBody::Thought {
-                    streaming: true,
-                    ..
-                }
-            );
-            if open_stream || Some(item.position) == self.latest_turn_start_position {
-                boundary = boundary.min(index);
-            }
+        if let Some(index) = session
+            .transcript
+            .iter()
+            .position(|item| Some(item.position) == self.latest_turn_start_position)
+        {
+            boundary = boundary.min(index);
         }
         let cut = session
             .transcript
@@ -631,10 +622,39 @@ impl ProjectionWindow {
             .take(boundary + 1)
             .rposition(|item| item.is_turn_start())
             .unwrap_or(0);
-        if cut > 0 {
-            session.transcript.drain(..cut);
-            self.omitted_items += cut;
+        let mut keep = vec![false; cut];
+        let mut start = 0;
+        while start < cut {
+            let end = (start + 1..cut)
+                .find(|&i| session.transcript[i].is_turn_start())
+                .unwrap_or(cut);
+            let unsettled = session.transcript[start..end]
+                .iter()
+                .any(|item| match &item.body {
+                    TranscriptBody::Agent {
+                        streaming: true, ..
+                    }
+                    | TranscriptBody::Thought {
+                        streaming: true, ..
+                    } => true,
+                    TranscriptBody::Tool { call, .. } => matches!(
+                        call.get("status").and_then(serde_json::Value::as_str),
+                        Some("pending" | "in_progress")
+                    ),
+                    _ => false,
+                });
+            keep[start..end].fill(unsettled);
+            start = end;
         }
+        let mut index = 0;
+        session.transcript.retain(|_| {
+            let retain = index >= cut || keep[index];
+            index += 1;
+            if !retain {
+                self.omitted_items += 1;
+            }
+            retain
+        });
     }
 
     /// The window of a projection that omits nothing.

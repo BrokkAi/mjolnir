@@ -64,18 +64,13 @@ pub struct ProjectionIndex {
 pub struct HistoricalReferences {
     pub ids: Vec<String>,
     pub terminals: Vec<String>,
-    pub may_claim_raw_terminal: bool,
 }
 
 /// Explicit references that may address rows older than a live window. Keep
 /// identity interpretation beside the projector that consumes these events.
-pub fn historical_references(
-    current: &MaterializedSession,
-    events: &[RelayEvent],
-) -> Result<HistoricalReferences> {
+pub fn historical_references(events: &[RelayEvent]) -> Result<HistoricalReferences> {
     let mut ids = BTreeSet::new();
     let mut terminals = BTreeSet::new();
-    let mut may_claim_raw_terminal = false;
     for event in events {
         match &event.observation {
             RelayObservation::SessionUpdate { update } => {
@@ -103,8 +98,6 @@ pub fn historical_references(
                     _ => None,
                 };
                 if let Some(value) = value {
-                    may_claim_raw_terminal |=
-                        value.get("rawOutput").is_some_and(|raw| !raw.is_null());
                     terminals.extend(tool_call_terminal_ids(&value));
                 }
             }
@@ -160,23 +153,10 @@ pub fn historical_references(
         ids.insert(terminal_item_id(terminal));
         ids.insert(fallback_terminal_tool_item_id(terminal));
     }
-    // A status-only update can complete a tool whose raw result arrived earlier.
-    may_claim_raw_terminal |= current.transcript.iter().any(|item| {
-        ids.contains(&item.stable_id)
-            && matches!(&item.body, TranscriptBody::Tool { call, .. }
-                if call.get("rawOutput").is_some_and(|raw| !raw.is_null()))
-    });
     Ok(HistoricalReferences {
         ids: ids.into_iter().collect(),
         terminals: terminals.into_iter().collect(),
-        may_claim_raw_terminal,
     })
-}
-
-/// Indexed identity prefixes for the parked records considered by
-/// `uniquely_matching_raw_terminal`. Matching and ambiguity stay with that owner.
-pub fn parked_terminal_item_prefixes() -> [String; 2] {
-    [terminal_item_id(""), fallback_terminal_tool_item_id("")]
 }
 
 impl ProjectionIndex {

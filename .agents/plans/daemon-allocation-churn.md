@@ -19,7 +19,7 @@ The running Mjolnir daemon has returned to several CPU cores and roughly 15 GiB 
 - [x] Added jemalloc for Linux CLI/daemon; workspace Clippy, full CLI/API/startup/PTY regressions, license generation and musl CLI checks passed. Review clean. Merged concurrent upstream fixes and installed optimized symbols build `312cdbd23`; daemon PID 419766 runs it.
 - [x] Live hourly usage HTTP checks succeeded: 1.2038 s for 65 active rows initially and 0.1574 s for 4,663 rows including suspended sessions.
 - [x] Audited application retention owners at the user's request; recorded the ranked candidates in `.agents/docs/daemon-retention-candidates.md`. Read-only production probes confirmed old unfinished tools pin 56,041/83 MB and 36,246/55 MB live windows.
-- [ ] Validate and publish removal of the historical unfinished-tool pin, preserving late-update rehydration and current turns; install and repeat live measurements.
+- [ ] Validate complete-turn retention for unsettled historical content, preserving explicit late-update rehydration; install and repeat live measurements.
 
 ## Surprises & Discoveries
 
@@ -105,3 +105,10 @@ The final-rule read-only probe reduced the two sampled windows to 1,029 items / 
 Independent review found one implicit tool dependency beyond stable-ID references: Kimi claims parked terminal results by exact raw output when it omits a terminal ID. Historical reference planning now flags raw-output tool updates (including status-only completion of a cached tool); the store checks omitted provider tools by stable ID and loads missing parked terminal candidates using their indexed identity prefixes. The existing projector remains the sole owner of exact-result matching and ambiguity. No candidate count, new index or migration is introduced. The late-completion store integration covers large partial output, one unique fallback result, ambiguous identical fallback results, and standalone terminal output, with raw results supplied either earlier or on completion.
 
 The first retention implementation passed all core/client/controller suites and workspace Clippy. The platform validation dispatched for the allocator was cancelled by the workflow concurrency queue; dispatch the final pushed master again rather than treating it as passed.
+
+
+## Turn retention correction, 2026-11-11
+
+The settled design replaces both the oldest-item span pin and 83536df64's parked raw-output candidate lookups. Compute the tail boundary using only the target and latest turn, then round back to a turn start. Retain each complete older turn containing a streaming Agent/Thought or a pending/in-progress Tool; omit settled intervening turns. The prefix before any turn marker is one turn. Count omitted items, preserve position/stable-ID ordering, and use the same selection in the durable loader.
+
+Review found that evicting unfinished Kimi turns separated provider tools from parked terminal output; querying parked candidates on each raw-output update also repeatedly decoded historical data. Completion still gates raw-result matching. Both completion orderings (earlier rawOutput or rawOutput with completion) now claim parked output without store candidate lookups. Turn ownership keeps implicit matches available while explicit stable-ID rehydration handles late updates to settled items. Validation compares live trim and loader, exercises completion claiming parked terminal output in both live and durable projections, and probes production read-only without backup or migration.
