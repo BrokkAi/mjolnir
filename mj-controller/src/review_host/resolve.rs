@@ -190,7 +190,7 @@ pub(super) async fn finish_push_delivery(
         let recorded = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return Err("approval recording cancelled".into()),
-            result = push_action_typed(&control, &owner, ReviewerAction::RecordReviewed { trees }) => result,
+            result = push_action(&control, &owner, ReviewerAction::RecordReviewed { trees }) => result,
         };
         if let Err(reason) = recorded {
             if reason
@@ -254,16 +254,6 @@ pub(super) async fn finish_push_delivery(
 }
 
 pub(super) async fn push_action(
-    control: &SessionManagerControl,
-    session: &str,
-    action: ReviewerAction,
-) -> Result<ReviewerOutcome, String> {
-    push_action_typed(control, session, action)
-        .await
-        .map_err(|error| format!("{error:#}"))
-}
-
-async fn push_action_typed(
     control: &SessionManagerControl,
     session: &str,
     action: ReviewerAction,

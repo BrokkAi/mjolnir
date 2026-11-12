@@ -146,12 +146,10 @@ impl HostState {
         // Never hold daemon handoff for a retry or an unavailable worker.
         self.child_closures.shutdown().await;
         self.child_closure_owners.clear();
-        // A validated override has accepted daemon-owned work. It must finish
-        // while the persistence lane and the worker connection are still live.
+        // Worker requests are repeatable user operations. Stop waiting during
+        // handoff; the persistence lane still drains each accepted local save.
         for operation in self.preparing.values_mut() {
-            if let PreparingOperation::Override { task, admitted, .. } = operation
-                && !*admitted
-            {
+            if let PreparingOperation::Override { task, .. } = operation {
                 task.abort();
             }
         }
@@ -176,7 +174,7 @@ impl HostState {
                 }
                 let response = result.try_recv().unwrap_or_else(|_| {
                     Err(StartRefusal(
-                        "push review override stopped during shutdown".into(),
+                        "push review operation stopped during shutdown; repeat the request after restart. The worker may already have applied it".into(),
                     ))
                 });
                 let _ = reply.send(response);

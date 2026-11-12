@@ -3886,7 +3886,7 @@ async fn push_override_audit_refusal_keeps_findings_and_never_records_a_ref() {
 }
 
 #[tokio::test]
-async fn push_override_keeps_reservation_during_save_and_drains_admitted_work_on_shutdown() {
+async fn push_override_keeps_reservation_and_drains_accepted_saves_on_shutdown() {
     let session = session_id("override-shutdown");
     let mut manager = FakeManager::new(&session).await;
     let environment = FakeEnvironment::new();
@@ -3924,12 +3924,12 @@ async fn push_override_keeps_reservation_during_save_and_drains_admitted_work_on
         }))
         .unwrap();
     let gate = environment.block_saves();
-    let finishing = finish_override_worker_actions(&mut manager, "override requested");
-    tokio::pin!(finishing);
-    tokio::select! {
-        () = gate.entered() => {},
-        () = &mut finishing => panic!("override finished before the blocked save"),
-    }
+    let RemoteSessionRequest::Submit { command, reply, .. } = manager.next().await else {
+        panic!("expected override audit notice");
+    };
+    assert!(matches!(command, RelayCommand::RecordNotice { .. }));
+    reply.send(Ok(1)).unwrap();
+    gate.entered().await;
     assert!(!request.is_finished());
     assert!(
         host.override_push(&session, one_override("again"))
@@ -3945,13 +3945,24 @@ async fn push_override_keeps_reservation_during_save_and_drains_admitted_work_on
     tokio::task::yield_now().await;
     assert!(
         !shutdown.is_finished(),
-        "admitted override finishes before shutdown drains persistence"
+        "shutdown drains accepted local persistence"
     );
+    let error = tokio::time::timeout(Duration::from_secs(5), request)
+        .await
+        .expect("shutdown reports interruption before draining the save")
+        .unwrap()
+        .unwrap_err();
+    assert!(error.0.contains("repeat the request after restart"));
     gate.release();
-    finishing.await;
-    assert_eq!(request.await.unwrap().unwrap()["accepted"], true);
     shutdown.await.unwrap().unwrap();
-    assert!(environment.state().push_findings.is_none());
+    assert!(environment.state().push_findings.is_some());
+    assert_eq!(environment.state().declined_findings.len(), 2);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), manager.requests.recv())
+            .await
+            .is_err(),
+        "shutdown does not continue from persistence into a worker ref update"
+    );
 }
 
 // Hard-won: 9ebd246b2: crashes between state and ref writes lost declined findings.
@@ -4960,4 +4971,106 @@ async fn push_recording_does_not_block_daemon_handoff() {
         Some(ReviewVerdict::Clean)
     );
     assert!(environment.mailbox.lock().unwrap().is_empty());
+}
+
+// Hard-won: #1502: baseline and override requests held daemon admission across worker queues.
+#[tokio::test(start_paused = true)]
+async fn push_state_changes_do_not_block_daemon_handoff() {
+    const PROBE: &str = "MJ_TEST_PUSH_STATE_HANDOFF";
+    let Some(kind) = std::env::var_os(PROBE) else {
+        tokio::task::spawn_blocking(|| {
+            for kind in ["baseline", "override"] {
+                let root = tempfile::tempdir().unwrap();
+                crate::controller::test_support::IsolatedTest::new(
+                    "review_host::tests::push_state_changes_do_not_block_daemon_handoff",
+                )
+                .env(PROBE, kind)
+                .isolated_store(root.path())
+                .run();
+            }
+        })
+        .await
+        .unwrap();
+        return;
+    };
+    let session = session_id("state-handoff");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    pending_push_findings(&environment);
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    let baseline = kind == "baseline";
+    let request = {
+        let host = host.clone();
+        let session = session.clone();
+        tokio::spawn(async move {
+            if baseline {
+                host.set_push_base(&session, "abc1234".into(), None).await
+            } else {
+                host.override_push(&session, one_override("incorrect"))
+                    .await
+            }
+        })
+    };
+    if !baseline {
+        answer_override_capture(&mut manager, vec![push_delta("/workspace/app", "newtree")]).await;
+    }
+    let (_, action, reply) = manager
+        .next_reviewer(|_, action| {
+            matches!(
+                action,
+                ReviewerAction::SetReviewBase { .. } | ReviewerAction::RecordOverridden { .. }
+            )
+        })
+        .await;
+    let mut order = crate::session_manager::SessionRequestOrder::new();
+    let (release, released) = oneshot::channel();
+    let (prior_reply, _prior_result) = oneshot::channel();
+    order.dispatch(
+        RemoteSessionRequest::Reviewer {
+            session_id: session.clone(),
+            role: None,
+            action: ReviewerAction::CaptureDelta { repositories: None },
+            reply: prior_reply,
+        },
+        |_| async move {
+            released.await.unwrap();
+        },
+    );
+    order.dispatch(
+        RemoteSessionRequest::Reviewer {
+            session_id: session.clone(),
+            role: None,
+            action,
+            reply,
+        },
+        |request| async move {
+            let RemoteSessionRequest::Reviewer { mut reply, .. } = request else {
+                unreachable!()
+            };
+            reply.closed().await;
+        },
+    );
+    tokio::time::sleep(Duration::from_secs(11)).await;
+    assert!(
+        !request.is_finished(),
+        "role queue time must not expire the request"
+    );
+    assert!(
+        crate::upgrade::gate().try_close(),
+        "worker queue holds admission: {:?}",
+        crate::upgrade::gate().active_labels()
+    );
+    tokio::time::timeout(Duration::from_secs(5), host.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    let error = request.await.unwrap().unwrap_err().0;
+    assert!(
+        error.contains("repeat the request after restart"),
+        "{error}"
+    );
+    release.send(()).unwrap();
+    order.drain().await.unwrap();
+    assert!(environment.state().push_findings.is_some());
 }

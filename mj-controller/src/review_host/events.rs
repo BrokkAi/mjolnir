@@ -28,10 +28,6 @@ pub(super) enum HostEvent {
         path: Option<String>,
         reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
     },
-    OverrideValidated {
-        session_id: String,
-        permit: oneshot::Sender<Result<crate::upgrade::Work, StartRefusal>>,
-    },
     OverrideFinished {
         session_id: String,
     },
@@ -182,6 +178,7 @@ pub(super) enum PersistenceRequest {
         reply: oneshot::Sender<Result<TurnReviewState, String>>,
     },
     SaveAcknowledged {
+        operation: &'static str,
         session_id: String,
         state: Box<TurnReviewState>,
         reply: oneshot::Sender<Result<(), String>>,
@@ -342,7 +339,6 @@ pub(super) enum PreparingOperation {
     },
     Override {
         task: tokio::task::JoinHandle<()>,
-        admitted: bool,
         result: oneshot::Receiver<Result<serde_json::Value, StartRefusal>>,
         reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
     },
@@ -415,16 +411,31 @@ pub(super) async fn persistence_loop(
                 let _ = reply.send(result);
             }
             PersistenceRequest::SaveAcknowledged {
+                operation,
                 session_id,
                 state,
                 reply,
             } => {
+                // Only local persistence holds admission, never worker queues.
+                let admission = match crate::upgrade::activity_unless_draining(operation) {
+                    Ok(admission) => admission,
+                    Err(error) => {
+                        let _ = reply.send(Err(format!("review state save deferred for daemon handoff: {error}; repeat the request after restart")));
+                        continue;
+                    }
+                };
                 let save = environment.clone();
-                let result =
-                    tokio::task::spawn_blocking(move || save.save_state(&session_id, &state))
-                        .await
-                        .map_err(|error| format!("review state save stopped: {error}"))
-                        .and_then(|result| result);
+                let result = tokio::task::spawn_blocking(move || {
+                    let _admission = admission;
+                    let result = save.save_state(&session_id, &state);
+                    if let Err(error) = &result {
+                        tracing::warn!(session_id, %error, "review state save failed");
+                    }
+                    result
+                })
+                .await
+                .map_err(|error| format!("review state save stopped: {error}"))
+                .and_then(|result| result);
                 let _ = reply.send(result);
             }
             PersistenceRequest::SaveReviewerOutcome {

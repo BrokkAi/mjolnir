@@ -82,9 +82,6 @@ impl HostState {
                 path,
                 reply,
             } => self.set_push_base(session_id, commit, path, reply),
-            HostEvent::OverrideValidated { session_id, permit } => {
-                self.override_validated(&session_id, permit)
-            }
             HostEvent::OverrideFinished { session_id } => self.override_finished(&session_id),
             HostEvent::Prepared {
                 session_id,
