@@ -1886,7 +1886,15 @@ mod tests {
             target,
             mj_core::attention::NotificationDismissal::ReadThrough(12)
         );
+        // A parked session has no worker projection to clear the request.
+        dashboard
+            .session_details
+            .get_mut(&session_id)
+            .unwrap()
+            .materialized_applied_event_ordinal = None;
         dashboard.notification_dismissal_finished(&session_id, target, Ok(12));
+        // Hard-won: 6a0981b02: a read dismissal on a parked session stayed pending forever.
+        assert!(!dashboard.notification_dismissal_pending(&session_id));
         dashboard
             .set_session_attention_for(&session_id, mj_core::attention::SessionAttention::Idle);
         dashboard.set_notification_dismissals(Default::default());

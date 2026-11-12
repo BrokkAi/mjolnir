@@ -1360,11 +1360,18 @@ impl DashboardState {
                         record.viewed_through_event_ordinal =
                             record.viewed_through_event_ordinal.max(ordinal);
                     }
+                    // The daemon persisted the receipt before replying, so a
+                    // read dismissal is complete now. Waiting for a worker
+                    // projection would block a parked session forever.
+                    detail.notification_dismissal = None;
+                } else {
+                    // A question dismissal completes only once the worker's
+                    // command reaches the projection.
+                    detail.notification_dismissal = detail
+                        .materialized_applied_event_ordinal
+                        .is_none_or(|applied| applied < ordinal)
+                        .then_some(NotificationDismissalState::Accepted { target, ordinal });
                 }
-                detail.notification_dismissal = detail
-                    .materialized_applied_event_ordinal
-                    .is_none_or(|applied| applied < ordinal)
-                    .then_some(NotificationDismissalState::Accepted { target, ordinal });
                 self.set_notice("Notification dismissed.");
             }
             Err(error) => {
