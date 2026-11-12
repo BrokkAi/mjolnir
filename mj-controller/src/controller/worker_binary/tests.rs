@@ -2260,6 +2260,19 @@ fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
              {MUSE_ACP_VERSION}; a stale check fails only when the image is published"
     );
     assert!(CONTAINERFILE.contains("OPENCODE_DISABLE_AUTOUPDATE=1"));
+    let antigravity: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../mj-core/assets/antigravity/runtime.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        antigravity["version"],
+        mj_core::harness_runtime::ANTIGRAVITY_VERSION
+    );
+    assert!(CONTAINERFILE.contains(
+        "COPY mj-core/assets/antigravity/runtime.json /opt/mjolnir/antigravity-runtime.json"
+    ));
+    assert!(CONTAINERFILE.contains("RUN python3 /opt/mjolnir/install-antigravity.py /opt/mjolnir/antigravity-runtime.json /usr/local/bin"));
+    assert!(CONTAINERFILE.contains("ENV AGY_CLI_DISABLE_AUTO_UPDATE=true"));
 
     for package in [
         format!("@moonshot-ai/kimi-code@{KIMI_VERSION}"),

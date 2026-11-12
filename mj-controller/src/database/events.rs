@@ -1019,6 +1019,53 @@ mod tests {
         );
     }
 
+    // Hard-won: #1345: a stopped child's forwarded question invited a
+    // send_message answer the child could never receive.
+    #[test]
+    fn a_child_that_cannot_receive_work_gets_no_forwarded_question() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stale-question.sqlite");
+        let mut parent = super::super::tests::session("parent", "project-1");
+        parent.state = SessionState::Running;
+        save_session_to(&path, &parent).unwrap();
+        let mut child = super::super::tests::session("session-1", "project-1");
+        child.state = SessionState::Stopped;
+        save_session_to(&path, &child).unwrap();
+        open(&path).unwrap().execute(
+            "INSERT INTO subagent_sessions(child_session_id,parent_session_id,request_key,record_json) VALUES ('session-1','parent','session-1','{}')",
+            [],
+        ).unwrap();
+        let question = ElicitationRequest::from_acp_params("elicitation-1", serde_json::json!({
+            "mode":"form", "sessionId":"session-1", "message":"Which architecture?",
+            "requestedSchema":{"type":"object", "properties":{"choice":{"type":"string", "enum":["Thin", "Thick"]}}}
+        })).unwrap();
+        page(
+            &path,
+            vec![RelayObservation::ElicitationRequested { request: question }],
+            false,
+        )
+        .unwrap();
+        let count = |connection: &Connection| {
+            connection
+                .query_row("SELECT count(*) FROM mailbox_outbox", [], |r| {
+                    r.get::<_, u64>(0)
+                })
+                .unwrap()
+        };
+        assert_eq!(open(&path).map(|c| count(&c)).unwrap(), 0);
+        // The question stays pending for the stopped child, but reconciliation
+        // must not forward it either.
+        let mut connection = open(&path).unwrap();
+        assert_eq!(
+            super::super::subagent_questions::reconcile_pending_subagent_questions_with(
+                &mut connection
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(count(&connection), 0);
+    }
+
     #[test]
     fn api_events_capture_free_text_questions_resolution_and_errors() {
         let dir = tempfile::tempdir().unwrap();

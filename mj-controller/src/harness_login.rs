@@ -32,7 +32,12 @@ pub async fn login(
     let before = profile_credential_fingerprint(profile)?;
 
     #[cfg(unix)]
-    let mut pinned_fallback = None;
+    let mut pinned_fallback =
+        if options.cli && profile.kind == mj_core::config::HarnessKind::Antigravity {
+            Some(acp_login::pinned_cli(profile).await?)
+        } else {
+            None
+        };
     #[cfg(unix)]
     let mut device_auth = false;
     #[cfg(unix)]

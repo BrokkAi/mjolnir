@@ -131,6 +131,11 @@ test("the image's worker stage receives every workspace member", () => {
     assert.ok(dockerignore.includes(`!${member}/`), `.dockerignore excludes ${member}`);
     assert.ok(stage.includes(`COPY ${member}/ ${member}/`), `the worker stage does not copy ${member}`);
   }
+  for (const installer of ['scripts/install-muse.py', 'scripts/install-antigravity.py']) {
+    assert.ok(dockerignore.includes(`!${installer}`), `.dockerignore excludes ${installer}`);
+    assert.ok(containerfile.includes(`COPY ${installer} `), `the image does not copy ${installer}`);
+    assert.ok(publishImage.includes(`- '${installer}'`), `editing ${installer} does not rebuild the image`);
+  }
 });
 
 for (const { label, publishLatest, extraTags, expectedTags, absentTags } of [

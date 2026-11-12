@@ -126,6 +126,7 @@ pub const MUSE_VERSION: &str = "1.4.14-R7309.1";
 pub const OPENCODE_VERSION: &str = "2.2.6";
 pub const DSH_ACP_VERSION: &str = "0.5.0";
 pub const DSH_ACP_PACKAGE: &str = "@brokkai/dsh-acp";
+pub const ANTIGRAVITY_VERSION: &str = "1.5.7";
 
 /// The shell commands that start OpenCode's ACP server with the executable
 /// named by `$opencode`, for the managed install and the container fallback
@@ -459,12 +460,11 @@ pub struct HarnessPin {
 
 pub const fn pin(kind: HarnessKind) -> HarnessPin {
     match kind {
-        // Ambient-only identity; no managed installation or download pin.
         HarnessKind::Antigravity => HarnessPin {
-            install_id: "antigravity-ambient",
-            display_version: "target-installed agy",
-            entrypoint: "agy",
-            cli_entrypoint: "agy",
+            install_id: "antigravity-1.5.7",
+            display_version: ANTIGRAVITY_VERSION,
+            entrypoint: "bin/agy",
+            cli_entrypoint: "bin/agy",
         },
         HarnessKind::Muse => HarnessPin {
             install_id: "muse-acp-0.21.0_muse-1.4.14-R7309.1",
