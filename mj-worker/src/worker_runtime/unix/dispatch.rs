@@ -116,19 +116,17 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
             verdict_tasks.abort_all();
             verdict_generation = None;
         }
-        let pending = (!held
-            && relay
-                .lock()
-                .expect("relay state lock poisoned")
-                .classifies_turns())
-        .then(|| {
-            relay
-                .lock()
-                .expect("relay state lock poisoned")
-                .pending_replied_verdict()
-        })
-        .flatten();
-        if let Some((generation, evidence, assessment)) = pending {
+        let pending = {
+            let mut state = relay.lock().expect("relay state lock poisoned");
+            if !held && state.classifies_turns() {
+                state
+                    .pending_replied_verdict()
+                    .map(|pending| (pending, state.glide_runtime()))
+            } else {
+                None
+            }
+        };
+        if let Some(((generation, evidence, assessment), (facts, native))) = pending {
             if let Some(client) = verdict.clone() {
                 verdict_tasks.abort_all();
                 verdict_generation = Some(generation);
@@ -139,8 +137,9 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
                     .session_id();
                 verdict_tasks.spawn(
                     async move {
-                        let (attempt, answer) =
-                            client.ask_logged(&session, generation, &evidence).await;
+                        let (attempt, answer) = client
+                            .ask_glide_logged(&session, generation, &evidence, &facts, native)
+                            .await;
                         (generation, assessment, attempt, answer)
                     }
                     .with_current_subscriber(),
@@ -327,7 +326,7 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
                         }
                         match answer {
                             Ok(answer) => {
-                                let reason = relay.apply_turn_assessment(generation, answer.assessment.expect("client validated unified verdict"))?;
+                                let reason = relay.apply_glide_assessment(generation, answer)?;
                                 attempt.finish("applied", reason);
                                 if reason == "user_input_required"
                                     && let Some(request) = relay.question_locator_request(generation)

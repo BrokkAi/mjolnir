@@ -56,7 +56,29 @@ test("the paid route is rate limited per IP and body bounded before any provider
   assert.equal(refused.status, 429);
   assert.deepEqual(limited, ["192.0.2.7"]);
   allowed = true;
-  const oversized = await proxy.fetch(request(JSON.stringify({ ...state, transcript_summary: "x".repeat(70 * 1024) })), environment);
+  const oversized = await proxy.fetch(request(JSON.stringify({ ...state, transcript_summary: "x".repeat(257 * 1024) })), environment);
   assert.equal(oversized.status, 413);
   assert.equal(mock.mock.callCount(), 0);
+  mock.mock.restore();
+  t.mock.method(globalThis, "fetch", async () => Response.json({ answers: { handback: { probabilities: scores } } }));
+  assert.equal((await proxy.fetch(request({ ...state, transcript_summary: "x".repeat(48 * 1024), authorization: { ...state.authorization, messages: [{ id: "u", role: "user", text: "x".repeat(32 * 1024) }, { id: "a", role: "assistant", text: "x".repeat(16 * 1024) }] } }), environment)).status, 200);
+});
+
+// Hard-won: dc4c34617: a client-side byte cap made long turns permanently unclassifiable
+test("GLiDE forwards a 200 KiB authorization reply without legacy field caps", async t => {
+  const large = { ...state, harness: "a".repeat(100), user_prompt_tail: "x".repeat(2048),
+    assistant_text_tail: "x".repeat(4096), authorization: { ...state.authorization,
+    messages: [{ id: "u", role: "user", text: "Complete task" },
+      { id: "a".repeat(512), role: "assistant", text: "synthetic reply ".repeat(14000) }] } };
+  const mock = t.mock.method(globalThis, "fetch", async (url, options) => {
+    assert.equal(url, "https://api.fastino.ai/v1/systemone");
+    assert.deepEqual(JSON.parse(options!.body as string).state, large);
+    return Response.json({ answers: { handback: { probabilities: scores } } });
+  });
+  assert.equal((await proxy.fetch(request(large), environment)).status, 200);
+  assert.equal(mock.mock.callCount(), 1);
+  assert.equal((await proxy.fetch(request({ ...large, authorization: {
+    ...large.authorization, messages: [{ id: "bad", role: "assistant", text: 123 }]
+  } }), environment)).status, 400);
+  assert.equal(mock.mock.callCount(), 1);
 });

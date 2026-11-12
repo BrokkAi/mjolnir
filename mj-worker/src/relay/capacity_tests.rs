@@ -436,8 +436,8 @@ fn uncertain_assessment_is_cached_and_pending_completion_recovers() {
 
 // Hard-won: 295a3f85c: evidence sized without the questions exceeded the request limit on every retry.
 #[test]
-fn stored_evidence_is_refit_to_the_request_limit_before_sending() {
-    use mj_core::activity::verdict::{REQUEST_BYTES, request_bytes, request_fits};
+fn stored_evidence_preserves_history_before_glide_projection() {
+    use mj_core::activity::verdict::{REQUEST_BYTES, request_bytes};
     use mj_core::assessment::ContextHistory;
     use mj_core::continuation::EvidenceMessage;
     let root = tempfile::tempdir().unwrap();
@@ -473,9 +473,16 @@ fn stored_evidence_is_refit_to_the_request_limit_before_sending() {
     assert!(request_bytes(stored) > REQUEST_BYTES);
 
     let (_, sent, _) = relay.pending_replied_verdict().unwrap();
-    assert!(request_fits(&sent));
+    let body = crate::acp::verdict_client::glide_turn::project(
+        &sent,
+        sent.authorization.clone().unwrap(),
+        &relay.activity_facts(),
+        0,
+    )
+    .unwrap();
+    assert!(serde_json::to_vec(&body).unwrap().len() <= 80 * 1024);
     let history = sent.authorization.unwrap();
-    assert!(history.assistant_history_omitted);
+    assert!(!history.assistant_history_omitted);
     assert_eq!(
         history.messages.iter().filter(|m| m.role == "user").count(),
         29
