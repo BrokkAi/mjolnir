@@ -24,11 +24,20 @@ const STAMP_BYTES: usize = 192;
 const READ_BYTES: usize = 128 * 1024;
 
 /// Whether `build` has the shape of a worker compatibility identity: a
-/// package version, `+`, and a 40-digit hexadecimal digest.
+/// package version, `+`, and a 40-digit hexadecimal digest. The version must
+/// look like one (a digit first, then digits, letters, dots and hyphens), so
+/// unrelated text the linker places between the stamp prefix constant and the
+/// build id literal cannot read as a second stamp.
 #[must_use]
 pub fn is_worker_build(build: &str) -> bool {
     build.rsplit_once('+').is_some_and(|(version, revision)| {
-        !version.is_empty()
+        version
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_digit())
+            && version
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-')
             && revision.len() == 40
             && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
     })
@@ -213,6 +222,18 @@ mod tests {
             assert_eq!(worker_build_from_bytes(&bytes).unwrap(), WORKER_BUILD_ID);
             verify_worker_build(&path).unwrap();
         }
+    }
+
+    // Hard-won: 740cb30c5: a layout change put diagnostic text and the bare build id after the prefix constant, read as a conflicting stamp.
+    #[test]
+    fn prefix_constant_followed_by_text_and_build_id_is_not_a_stamp() {
+        let mut bytes = PREFIX.to_vec();
+        bytes.extend_from_slice(
+            b"read worker build stampconflicting worker build stampsmissing worker build stamp (legacy or invalid worker)",
+        );
+        bytes.extend_from_slice(WORKER_BUILD_ID.as_bytes());
+        bytes.extend_from_slice(WORKER_BUILD_STAMP.as_bytes());
+        assert_eq!(worker_build_from_bytes(&bytes).unwrap(), WORKER_BUILD_ID);
     }
 
     #[test]
