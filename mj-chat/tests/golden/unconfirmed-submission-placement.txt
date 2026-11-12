@@ -1,0 +1,14 @@
+● Agent
+│ Previous reply
+
+❯ You
+│ Prompt whose acknowledgement was lost
+│
+│ Delivery unconfirmed: Connection reset by peer (os error 104)
+│ Ctrl-Alt-R resend · Ctrl-Alt-D dismiss
+
+● Agent
+│ A later turn
+
+● Agent
+│ Newest reply
