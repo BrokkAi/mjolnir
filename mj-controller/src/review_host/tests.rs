@@ -128,7 +128,7 @@ impl FakeManager {
     ) -> (
         Option<String>,
         ReviewerAction,
-        oneshot::Sender<Result<ReviewerOutcome, String>>,
+        oneshot::Sender<anyhow::Result<ReviewerOutcome>>,
     ) {
         loop {
             match self.next().await {
@@ -141,7 +141,7 @@ impl FakeManager {
                     if matches!(action, ReviewerAction::CaptureDelta { .. })
                         && let Some(refusal) = self.capture_refusals.pop_front()
                     {
-                        let _ = reply.send(Err(refusal));
+                        let _ = reply.send(Err(anyhow::anyhow!(refusal)));
                         continue;
                     }
                     if wanted(&role, &action) {
@@ -162,7 +162,7 @@ impl FakeManager {
 
 /// A plausible answer to any reviewer action, for the steps a test is not
 /// asserting on.
-fn answer_for(action: &ReviewerAction) -> Result<ReviewerOutcome, String> {
+fn answer_for(action: &ReviewerAction) -> anyhow::Result<ReviewerOutcome> {
     match action {
         ReviewerAction::CaptureDelta { .. } => Ok(ReviewerOutcome::Delta {
             repositories: Vec::new(),
@@ -3040,6 +3040,16 @@ async fn open_commit_review(
     environment: &FakeEnvironment,
     manual: bool,
 ) -> String {
+    open_commit_review_with_delta(manager, host, environment, manual, None).await
+}
+
+async fn open_commit_review_with_delta(
+    manager: &mut FakeManager,
+    host: &TurnReviewHost,
+    environment: &FakeEnvironment,
+    manual: bool,
+    delta: Option<mj_core::relay::RepoDelta>,
+) -> String {
     let mut running = view(
         &manager.session,
         MaterializedExecutionState::Running { started_at_ms: 1 },
@@ -3091,7 +3101,7 @@ async fn open_commit_review(
     assert!(matches!(action, ReviewerAction::CaptureDelta { .. }));
     reply
         .send(Ok(ReviewerOutcome::Delta {
-            repositories: vec![mj_core::relay::RepoDelta {
+            repositories: vec![delta.unwrap_or_else(|| mj_core::relay::RepoDelta {
                 root: "/workspace/app".into(),
                 base_commit: Some("aaaaaaa123".into()),
                 head_commit: Some("bbbbbbb456".into()),
@@ -3105,7 +3115,7 @@ async fn open_commit_review(
                     ..Default::default()
                 }],
                 ..Default::default()
-            }],
+            })],
         }))
         .unwrap();
     let answer = request.await.unwrap().unwrap();
@@ -3980,7 +3990,9 @@ async fn push_override_retries_after_initial_save_or_ref_failure() {
                         })
                         .await;
                     assert!(matches!(action, ReviewerAction::RecordOverridden { .. }));
-                    reply.send(Err("injected ref failure".into())).unwrap();
+                    reply
+                        .send(Err(anyhow::anyhow!("injected ref failure")))
+                        .unwrap();
                 }
                 assert!(request.await.unwrap().is_err());
                 assert!(environment.state().push_findings.is_some());
@@ -4242,9 +4254,9 @@ async fn set_review_baseline_keeps_the_declined_list_when_the_worker_refuses() {
         .next_reviewer(|_, action| matches!(action, ReviewerAction::SetReviewBase { .. }))
         .await;
     reply
-        .send(Err(
-            "commit abc1234 was never reviewed or overridden; call request_review first".into(),
-        ))
+        .send(Err(anyhow::anyhow!(
+            "commit abc1234 was never reviewed or overridden; call request_review first"
+        )))
         .unwrap();
     let error = request.await.unwrap().unwrap_err();
     assert!(error.0.contains("call request_review first"), "{}", error.0);
@@ -4530,7 +4542,7 @@ async fn push_review_refusals_leave_no_prompt_hold_or_reviewer_child() {
             let (_, _, reply) = manager
                 .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
                 .await;
-            reply.send(Err(reason.into())).unwrap();
+            reply.send(Err(anyhow::anyhow!(reason))).unwrap();
             assert_eq!(request.await.unwrap().unwrap_err().0, reason);
         }
     }
@@ -4606,5 +4618,286 @@ async fn repeated_push_reviews_keep_distinct_mailbox_keys_across_host_restart() 
             3
         );
     }
+    host.shutdown().await.unwrap();
+}
+
+// Hard-won: #1502: a completed clean review was discarded while recording waited.
+#[tokio::test(start_paused = true)]
+async fn push_recording_waits_past_ten_seconds_without_losing_clean_verdict() {
+    let session = session_id("recording-queue");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    let child = open_push(&mut manager, &host, &environment).await;
+    finish_child(&host, &environment, &session, &child, Some("No findings.")).await;
+    let (_, action, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::RecordReviewed { .. }))
+        .await;
+    let mut order = crate::session_manager::SessionRequestOrder::new();
+    let (release, released) = oneshot::channel();
+    let (prior_reply, _prior_result) = oneshot::channel();
+    order.dispatch(
+        RemoteSessionRequest::Reviewer {
+            session_id: session.clone(),
+            role: None,
+            action: ReviewerAction::CaptureDelta { repositories: None },
+            reply: prior_reply,
+        },
+        |_| async move {
+            released.await.unwrap();
+        },
+    );
+    let (sent, received) = oneshot::channel();
+    order.dispatch(
+        RemoteSessionRequest::Reviewer {
+            session_id: session.clone(),
+            role: None,
+            action,
+            reply,
+        },
+        |request| async move {
+            let RemoteSessionRequest::Reviewer { action, reply, .. } = request else {
+                unreachable!()
+            };
+            sent.send(reply.send(answer_for(&action)).is_ok()).unwrap();
+        },
+    );
+    tokio::time::sleep(Duration::from_secs(11)).await;
+    assert!(environment.state().active_group.is_some());
+    assert!(environment.mailbox.lock().unwrap().is_empty());
+    release.send(()).unwrap();
+    assert!(
+        received.await.unwrap(),
+        "role queue time must not expire the recording caller"
+    );
+    order.drain().await.unwrap();
+    let notices = recording_notices_until_closed(&mut manager, &host, &session).await;
+    assert!(
+        notices
+            .iter()
+            .any(|text| text == "Review complete: no material findings")
+    );
+    host.shutdown().await.unwrap();
+}
+
+async fn recording_notices_until_closed(
+    manager: &mut FakeManager,
+    host: &TurnReviewHost,
+    session: &str,
+) -> Vec<String> {
+    let mut notices = Vec::new();
+    loop {
+        match manager.next().await {
+            RemoteSessionRequest::Submit {
+                command: RelayCommand::RecordNotice { text },
+                reply,
+                ..
+            } => {
+                let terminal = text.starts_with("Review complete:")
+                    || text.starts_with("Review failed:")
+                    || text == "Review cancelled";
+                notices.push(text);
+                let _ = reply.send(Ok(1));
+                if terminal {
+                    break;
+                }
+            }
+            other => panic!("unexpected request for {}", other.session_id()),
+        }
+    }
+    while host.view(session).is_some() {
+        tokio::task::yield_now().await;
+    }
+    notices
+}
+
+// Hard-won: #1502: recording failure emitted a clean completion and erased its resumable snapshot.
+#[tokio::test]
+async fn push_recording_failure_stays_pending_then_replays_the_same_trees() {
+    for restart in [false, true] {
+        let session = session_id("recording-retry");
+        let mut manager = FakeManager::new(&session).await;
+        let environment = FakeEnvironment::new();
+        let mut host =
+            TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+        let repository = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = mj_core::subprocess::run_capturing_stdout(
+                std::process::Command::new("git")
+                    .current_dir(repository.path())
+                    .args(args),
+            )
+            .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        git(&["init", "-q"]);
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "reviewed",
+        ]);
+        let commit = git(&["rev-parse", "HEAD"]);
+        let tree = git(&["rev-parse", "HEAD^{tree}"]);
+        let mut delta = push_delta(repository.path().to_str().unwrap(), &tree);
+        delta.head_commit = Some(commit.clone());
+        delta.patch = "diff --git a/a b/a\n@@\n+one\n".into();
+        let child =
+            open_commit_review_with_delta(&mut manager, &host, &environment, true, Some(delta))
+                .await;
+        finish_child(&host, &environment, &session, &child, Some("No findings.")).await;
+        let (_, first, reply) = manager
+            .next_reviewer(|_, action| matches!(action, ReviewerAction::RecordReviewed { .. }))
+            .await;
+        let first_trees = match first {
+            ReviewerAction::RecordReviewed { trees } => trees,
+            _ => unreachable!(),
+        };
+        for (root, (tree, commit)) in &first_trees {
+            mj_checkpoint::archive::record_reviewed_tree(
+                &mj_checkpoint::archive::SystemGit,
+                root,
+                tree,
+                commit,
+            )
+            .unwrap();
+        }
+        // The worker has applied these refs: only its acknowledgement was lost.
+        reply
+            .send(Err(anyhow::anyhow!("connection lost after recording")))
+            .unwrap();
+        match manager.next().await {
+            RemoteSessionRequest::Submit {
+                command: RelayCommand::RecordNotice { text },
+                reply,
+                ..
+            } => {
+                assert!(text.contains("approval recording failed"));
+                assert!(!text.contains("Review complete"));
+                reply.send(Ok(1)).unwrap();
+            }
+            _ => panic!("expected recording failure notice"),
+        }
+        assert!(environment.mailbox.lock().unwrap().is_empty());
+        let snapshot = environment.state().active_group.unwrap().driver;
+        assert_eq!(snapshot.last_verdict, Some(ReviewVerdict::Clean));
+        if restart {
+            host.shutdown().await.unwrap();
+            host = TurnReviewHost::spawn_in(
+                manager.control.clone(),
+                push_config(),
+                environment.clone(),
+            );
+        }
+        let (_, second, reply) = manager
+            .next_reviewer(|_, action| matches!(action, ReviewerAction::RecordReviewed { .. }))
+            .await;
+        match &second {
+            ReviewerAction::RecordReviewed { trees } => assert_eq!(trees, &first_trees),
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            environment.children.lock().unwrap().len(),
+            1,
+            "reviewers are not rerun"
+        );
+        for (root, (tree, commit)) in &first_trees {
+            mj_checkpoint::archive::record_reviewed_tree(
+                &mj_checkpoint::archive::SystemGit,
+                root,
+                tree,
+                commit,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            git(&["rev-parse", &format!("refs/mj/reviewed/{tree}")]),
+            commit
+        );
+        reply.send(answer_for(&second)).unwrap();
+        let notices = recording_notices_until_closed(&mut manager, &host, &session).await;
+        assert!(
+            notices
+                .iter()
+                .any(|text| text.starts_with("Review complete:"))
+        );
+        assert!(environment.state().active_group.is_none());
+        assert_eq!(environment.mailbox.lock().unwrap().len(), 1);
+        host.shutdown().await.unwrap();
+    }
+}
+
+// Hard-won: #1502: the completion notice used the stale clean driver verdict on recording refusal.
+#[tokio::test]
+async fn push_recording_permanent_refusal_delivers_failure_without_retrying() {
+    let session = session_id("recording-terminal");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    let child = open_push(&mut manager, &host, &environment).await;
+    finish_child(&host, &environment, &session, &child, Some("No findings.")).await;
+    let (_, _, reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::RecordReviewed { .. }))
+        .await;
+    reply
+        .send(Err(crate::worker_client::RelayRejected(
+            mj_core::relay::RelayProtocolError {
+                code: mj_core::relay::RelayErrorCode::InvalidState,
+                message: "repository is gone".into(),
+                detail: None,
+                retryable: false,
+            },
+        )
+        .into()))
+        .unwrap();
+    let notices = recording_notices_until_closed(&mut manager, &host, &session).await;
+    assert!(
+        notices
+            .iter()
+            .any(|text| text.contains("approval recording failed")
+                && text.contains("repository is gone"))
+    );
+    assert!(
+        !notices
+            .iter()
+            .any(|text| text.starts_with("Review complete:"))
+    );
+    assert!(environment.state().active_group.is_none());
+    let mailbox = environment.mailbox.lock().unwrap().clone();
+    assert!(
+        mj_core::mailbox::render_mailbox_event(&mailbox[0]).contains("approval recording failed")
+    );
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn push_recording_can_be_cancelled_while_awaiting_acknowledgement() {
+    let session = session_id("recording-cancel");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    let child = open_push(&mut manager, &host, &environment).await;
+    finish_child(&host, &environment, &session, &child, Some("No findings.")).await;
+    let (_, _, mut reply) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::RecordReviewed { .. }))
+        .await;
+    host.resolve(&session, Resolution::Cancelled).await.unwrap();
+    reply.closed().await;
+    let notices = recording_notices_until_closed(&mut manager, &host, &session).await;
+    assert!(notices.iter().any(|text| text == "Review cancelled"));
+    assert!(environment.mailbox.lock().unwrap().is_empty());
+    assert!(environment.state().active_group.is_none());
     host.shutdown().await.unwrap();
 }

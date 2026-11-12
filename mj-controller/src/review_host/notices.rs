@@ -199,6 +199,9 @@ impl HostState {
         // No sender may survive the join below or the receiver can never
         // observe EOF.
         for slot in self.reviews.values_mut() {
+            // Recording is recoverable from the saved terminal snapshot.
+            // Stop waiting for the worker during daemon shutdown.
+            slot.delivery.cancel();
             answer(
                 slot.start_reply.take(),
                 Err(StartRefusal("the daemon is shutting down".into())),

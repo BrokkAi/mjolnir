@@ -254,16 +254,14 @@ impl ManagedSessionHandle {
         let (reply, result) = oneshot::channel();
         self.commands
             .send(ActorCommand::Reviewer {
+                queued_at: std::time::Instant::now(),
                 role: None,
                 action,
                 reply,
             })
             .await
             .context("session manager stopped")?;
-        result
-            .await
-            .context("session manager stopped")?
-            .map_err(anyhow::Error::msg)
+        result.await.context("session manager stopped")?
     }
 
     pub async fn enqueue_sync(&self) -> Result<PendingRelaySync> {

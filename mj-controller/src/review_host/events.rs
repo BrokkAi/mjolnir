@@ -210,7 +210,7 @@ pub(super) enum PersistenceRequest {
 /// One asynchronous step's result, belonging to exactly one review.
 pub(super) enum ReviewStep {
     Delta(Result<Vec<mj_core::relay::RepoDelta>, String>),
-    PushDelivered(Result<Box<TurnReviewState>, String>),
+    PushDelivered(Result<(Box<TurnReviewState>, ReviewVerdict), String>),
     /// Delivery failed and the requesting session still exists, or could not
     /// be looked up: the delivery is tried again.
     PushRetry(String),
@@ -268,6 +268,7 @@ pub(super) struct ReviewSlot {
     /// Released when the slot is removed, which is how every review ends.
     pub(super) _background: Option<BackgroundHold>,
     pub(super) finishing: bool,
+    pub(super) delivery: Arc<super::resolve::Delivery>,
     pub(super) retry_delay: std::time::Duration,
     pub(super) start_reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
     pub(super) pending_outcome: Option<PendingOutcome>,
@@ -373,7 +374,11 @@ pub(super) async fn persistence_loop(
     events: mpsc::UnboundedSender<HostEvent>,
     mut requests: mpsc::UnboundedReceiver<PersistenceRequest>,
 ) {
-    type Delivery = (String, u64, Result<Box<TurnReviewState>, String>);
+    type Delivery = (
+        String,
+        u64,
+        Result<(Box<TurnReviewState>, ReviewVerdict), String>,
+    );
     let mut deliveries = tokio::task::JoinSet::<Delivery>::new();
     let mut delivery_owners = std::collections::HashMap::<tokio::task::Id, (String, u64)>::new();
     let mut accepting = true;
@@ -575,4 +580,5 @@ pub(super) struct PushCompletion {
     pub(super) deltas: Vec<mj_core::relay::RepoDelta>,
     pub(super) verdict: ReviewVerdict,
     pub(super) _admission: crate::upgrade::Work,
+    pub(super) delivery: Arc<super::resolve::Delivery>,
 }
