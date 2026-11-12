@@ -18,6 +18,12 @@ pub(crate) async fn run_where_daemon_lives(args: &[String], interactive: bool) -
     let interactive = interactive && !args.iter().any(|arg| arg == "--json");
     let placement = load_daemon_config().await?;
     if placement.runtime != mj_core::config::DaemonRuntime::Ssh {
+        // Lifecycle commands for a host or container daemon run here, through
+        // management discovery and the engine. Running them inside the
+        // container would start a stopped daemon before reporting on it.
+        if args.first().map(String::as_str) == Some("daemon") {
+            return Ok(false);
+        }
         return container::exec_in_container(args, interactive).await;
     }
     let host = placement

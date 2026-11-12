@@ -1774,6 +1774,20 @@ impl DaemonClient {
         })
     }
 
+    /// Connect through an SSH tunnel's local port and require the daemon to
+    /// prove it holds the token on this very connection before any request
+    /// carries the token. The tunnel may have exited since an earlier proof,
+    /// and another process may now hold its port.
+    pub(crate) async fn connect_proven(metadata: DaemonMetadata) -> Result<Self> {
+        let mut client = Self::connect(metadata).await?;
+        ensure!(
+            ssh::prove_stream(&mut client.stream, &client.metadata.token).await?,
+            "the SSH tunnel's local port {} did not prove it reaches the daemon",
+            client.metadata.address
+        );
+        Ok(client)
+    }
+
     /// Connector-owned SSH origin; never inferred from daemon-host placement.
     pub fn connector(&self) -> Option<&std::sync::Arc<connector::DaemonConnector>> {
         self.connector.as_ref()

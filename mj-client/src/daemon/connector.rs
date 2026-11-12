@@ -129,11 +129,7 @@ impl DaemonConnector {
         if let Some(current) = lease.as_ref() {
             let metadata = current.metadata();
             if stale != Some(metadata.address)
-                && let Ok(mut client) = DaemonClient::connect(metadata).await
-                && matches!(
-                    client.request_once(super::DaemonAction::Ping).await,
-                    Ok(super::DaemonReply::Pong)
-                )
+                && let Ok(mut client) = DaemonClient::connect_proven(metadata).await
             {
                 client.connector = Some(self.clone());
                 client.ssh_lease = Some(current.clone());
@@ -151,7 +147,7 @@ impl DaemonConnector {
         let metadata = replacement.metadata();
         let replacement = Arc::new(replacement);
         *lease = Some(replacement.clone());
-        let mut client = DaemonClient::connect(metadata).await?;
+        let mut client = DaemonClient::connect_proven(metadata).await?;
         client.connector = Some(self.clone());
         client.ssh_lease = Some(replacement);
         Ok(client)

@@ -238,13 +238,20 @@ async fn open_with_port(
 }
 
 async fn prove_listener(address: std::net::SocketAddr, token: &str) -> Result<bool> {
+    let mut stream = tokio::net::TcpStream::connect(address).await?;
+    prove_stream(&mut stream, token).await
+}
+
+/// Ask the peer on `stream` to prove it holds `token`, sending only a nonce.
+/// Every SSH-placement connection runs this before its first token-bearing
+/// request: a proof covers only the TCP connection that carried it.
+pub(super) async fn prove_stream(stream: &mut tokio::net::TcpStream, token: &str) -> Result<bool> {
     use hmac::Mac;
     let mut random = [0u8; 32];
     getrandom::fill(&mut random).map_err(|error| anyhow::anyhow!("{error}"))?;
     let nonce = mj_core::hex::lower_hex(random);
-    let mut stream = tokio::net::TcpStream::connect(address).await?;
     super::write_frame(
-        &mut stream,
+        stream,
         &super::RequestEnvelope {
             protocol_version: super::PROTOCOL_VERSION,
             request_id: 0,
@@ -255,7 +262,7 @@ async fn prove_listener(address: std::net::SocketAddr, token: &str) -> Result<bo
         },
     )
     .await?;
-    let response = super::read_response(&mut stream).await?;
+    let response = super::read_response(stream).await?;
     Ok(
         matches!(response.result, Ok(super::DaemonReply::IdentityProof { mac })
         if super::identity_proof(token, &nonce).verify_slice(&mac).is_ok()),
@@ -288,7 +295,19 @@ mod tests {
             stream.read_to_end(&mut remainder).await.unwrap();
             assert!(remainder.is_empty());
         };
-        let (result, ()) = tokio::join!(super::prove_listener(address, token), peer);
+        // Every SSH-placement connection goes through connect_proven, so a
+        // proof made earlier on another connection never vouches for this one.
+        let metadata = super::super::DaemonMetadata {
+            protocol_version: super::super::PROTOCOL_VERSION,
+            pid: 0,
+            address,
+            token: token.into(),
+            started_at: String::new(),
+            build_version: String::new(),
+            instance_id: String::new(),
+            placement: super::super::DaemonPlacement::Host,
+        };
+        let (result, ()) = tokio::join!(super::super::DaemonClient::connect_proven(metadata), peer);
         assert!(result.is_err());
     }
 
