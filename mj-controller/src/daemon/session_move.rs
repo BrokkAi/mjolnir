@@ -952,7 +952,7 @@ mod admission_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl RuntimeState {
     pub(crate) fn move_test_runtime(
         controller: Controller,
