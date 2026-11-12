@@ -134,13 +134,13 @@ fn identifiers(item: &Value) -> Vec<(String, f64)> {
     ))
     .find_iter(&text)
     {
-        let before = chars(&text[..m.start()]);
-        let tail = chars(&text[m.start()..]);
-        let nearby = format!(
-            "{}{}",
-            slice(&before, before.len().saturating_sub(8), before.len()),
-            slice(&tail, 0, 3.min(tail.len()))
-        );
+        let before = text[..m.start()].chars().rev().take(8).collect::<Vec<_>>();
+        let nearby = before
+            .iter()
+            .rev()
+            .copied()
+            .chain(text[m.start()..].chars().take(3))
+            .collect::<String>();
         if nearby.contains("://") || re("[a-f0-9]{16,}").is_match(m.as_str()) {
             continue;
         }
