@@ -776,9 +776,16 @@ impl VerdictClient {
             );
             bytes.extend_from_slice(&chunk);
         }
-        glide_turn::Probabilities::parse(
+        let probabilities = glide_turn::Probabilities::parse(
             &serde_json::from_slice(&bytes).context("decode GLiDE verdict")?,
-        )
+        )?;
+        if probabilities.attention.is_none() {
+            tracing::warn!(
+                operation = "glide_turn_verdict",
+                "the verdict proxy returned no attention answer; Important attention stays off until the proxy is updated"
+            );
+        }
+        Ok(probabilities)
     }
 
     #[cfg(test)]
@@ -965,10 +972,8 @@ mod tests {
                                 serde_json::json!({"probabilities":{"unfinished":0.0,"needs_parent_input":0.0,"blocked":0.0,"permitted_stop":0.0,"finished":1.0,"unclear":0.0}}),
                             )
                         } else {
-                            let samples: serde_json::Value = serde_json::from_str(include_str!(
-                                "../../../mj-core/src/activity/eot_glide_fresh_sample.json"
-                            ))
-                            .unwrap();
+                            let samples: serde_json::Value =
+                                crate::acp::verdict_client::glide_turn::test_samples();
                             ("200 OK", samples[0].clone())
                         };
                         // Hard-won: 8ad2f6a1d: GLiDE inherited Jev's ten-second timeout.

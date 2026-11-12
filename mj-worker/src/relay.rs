@@ -284,6 +284,7 @@ pub struct DurableRelay {
     verdict_harness: Option<mj_core::config::HarnessKind>,
     #[cfg_attr(not(unix), allow(dead_code))] // The worker control runtime is Unix-only.
     pub(crate) authentication_login_path: Option<PathBuf>,
+    #[cfg_attr(not(unix), allow(dead_code))] // Read only by the Unix worker control runtime.
     pub(crate) login_identity: crate::acp::ClaudeLoginIdentity,
     replied_verdict: verdict::RepliedVerdictState,
     /// Adapter-owned tasks, keyed by their owning session and task identity.

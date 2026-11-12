@@ -12,26 +12,18 @@ const SIMPLE_TARGET_ID: &str = "localhost";
 pub(crate) struct SimpleArgs {
     /// Source folder (defaults to the current directory).
     pub folder: Option<PathBuf>,
+    /// Explicit project path on the daemon host.
+    #[arg(long, conflicts_with = "folder")]
+    pub path: Option<PathBuf>,
 }
 
 pub(crate) fn prepare(args: SimpleArgs) -> Result<mj_tui::GoMode> {
+    let directory = crate::go::project_directory(args.path.or(args.folder), "simple")?;
     use std::io::IsTerminal;
     ensure!(
         std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
         "mj simple needs an interactive terminal"
     );
-    let directory = args
-        .folder
-        .unwrap_or(std::env::current_dir().context("read current folder")?);
-    let directory = directory
-        .canonicalize()
-        .with_context(|| format!("open folder {}", directory.display()))?;
-    ensure!(
-        directory.is_dir(),
-        "{} is not a folder",
-        directory.display()
-    );
-
     let config = mj_core::runtime::block_on(async {
         crate::daemon::connect_or_start().await?.config().await
     })??;

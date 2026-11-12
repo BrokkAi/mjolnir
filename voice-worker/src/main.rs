@@ -12,7 +12,6 @@ use std::thread;
 #[serde(tag = "event", rename_all = "snake_case")]
 enum WorkerEvent {
     Status { message: String },
-    Partial { text: String },
     Level { value: f32 },
     Result { text: String },
     Error { message: String },
@@ -47,18 +46,20 @@ fn run_with_args<I>(args: I) -> Result<()>
 where
     I: IntoIterator<Item = OsString>,
 {
-    let auth_path = parse_auth_path(args)?;
+    let output_path = parse_output_path(args)?;
     let (command_tx, command_rx) = mpsc::channel();
     thread::spawn(move || read_commands(command_tx));
 
     match backend::run(
-        |text| emit(&WorkerEvent::Partial { text }),
+        |_| {},
         |value| emit(&WorkerEvent::Level { value }),
         |message| emit(&WorkerEvent::Status { message }),
-        auth_path,
+        output_path,
         command_rx,
     )? {
-        backend::RunOutcome::Transcribed(text) => emit(&WorkerEvent::Result { text }),
+        backend::RunOutcome::Captured => emit(&WorkerEvent::Result {
+            text: String::new(),
+        }),
         // Keep the result event in the protocol on cancellation. The parent
         // supervisor treats an empty result as a clean cancelled run.
         backend::RunOutcome::Cancelled => emit(&WorkerEvent::Result {
@@ -68,29 +69,29 @@ where
     Ok(())
 }
 
-fn parse_auth_path<I>(args: I) -> Result<PathBuf>
+fn parse_output_path<I>(args: I) -> Result<PathBuf>
 where
     I: IntoIterator<Item = OsString>,
 {
     let mut args = args.into_iter();
-    let mut auth_path = None;
+    let mut output_path = None;
     while let Some(arg) = args.next() {
-        if arg == "--codex-auth" {
-            let value = args.next().context("--codex-auth requires a path")?;
-            auth_path = Some(PathBuf::from(value));
+        if arg == "--output" {
+            let value = args.next().context("--output requires a path")?;
+            output_path = Some(PathBuf::from(value));
         } else if let Some(value) = arg
             .to_str()
-            .and_then(|value| value.strip_prefix("--codex-auth="))
+            .and_then(|value| value.strip_prefix("--output="))
         {
             if value.is_empty() {
-                bail!("--codex-auth requires a path");
+                bail!("--output requires a path");
             }
-            auth_path = Some(PathBuf::from(value));
+            output_path = Some(PathBuf::from(value));
         } else {
-            bail!("unknown argument {arg:?}; usage: mj-voice-worker --codex-auth PATH");
+            bail!("unknown argument {arg:?}; usage: mj-voice-worker --output PATH");
         }
     }
-    auth_path.context("missing required --codex-auth PATH argument")
+    output_path.context("missing required --output PATH argument")
 }
 
 fn read_commands(command_tx: mpsc::Sender<backend::StdinCommand>) {

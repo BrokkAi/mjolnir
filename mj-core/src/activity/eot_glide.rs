@@ -12,6 +12,12 @@ pub const QUESTIONS: &str = include_str!("eot_glide_questions.json");
 /// 90.0% recall at 2.9% false alerts; session-cross-fitted 90.0% / 3.0%.
 /// The old .80 cut caught 64.7%.
 pub const REQUIRED_INPUT: f64 = 0.2203035029419128;
+/// The Important cut, fitted on the input study's corrected mask for about 3%
+/// false importants: 93.2% important recall, 2.98% false importants; session
+/// cross-fit 93.4% / 3.3% (/mnt/optane/tmp/important-calibration-20261112).
+/// A live check confirmed that adding the attention question changes no
+/// choices on the other questions.
+pub const IMPORTANT_ATTENTION: f64 = 0.488819272011068;
 pub const FAILURE_FLOOR: f64 = 0.90;
 pub const FINISHED_CATEGORICAL: f64 = 0.9162209700222781;
 pub const WAITING_WORK_WINNER: f64 = 0.40;

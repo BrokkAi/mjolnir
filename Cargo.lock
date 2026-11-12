@@ -669,6 +669,7 @@ dependencies = [
  "brokk-mj-worker",
  "chrono",
  "getrandom 0.3.4",
+ "hmac",
  "image",
  "libc",
  "semver",
@@ -679,6 +680,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -768,6 +770,7 @@ dependencies = [
  "url",
  "windows-sys 0.61.2",
  "yaml-rust2",
+ "zstd",
 ]
 
 [[package]]
@@ -818,15 +821,12 @@ name = "brokk-mj-voice-worker"
 version = "2.71.0"
 dependencies = [
  "anyhow",
- "brokk-anvil-client",
  "brokk-mj-core",
- "bytes",
  "cpal",
  "libloading",
  "serde",
  "serde_json",
  "tempfile",
- "tokio",
  "tokio-util",
 ]
 

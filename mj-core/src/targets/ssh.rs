@@ -427,6 +427,19 @@ pub fn remote_command_line(args: &[String]) -> String {
     join_remote_command(&with_macos_system_path(args.to_vec()))
 }
 
+/// Discover a daemon using the account's login-shell PATH. The outer command
+/// is portable across POSIX shells and fish; only /bin/sh parses parameter
+/// expansion. The login shell receives a quoted argv command, not shell input
+/// supplied by configuration.
+pub fn daemon_login_command(args: &[String]) -> String {
+    let command = join_remote_command(args);
+    join_remote_command(&[
+        "/bin/sh".into(),
+        "-c".into(),
+        format!("exec \"${{SHELL:-/bin/sh}}\" -lc {}", posix_quote(&command)),
+    ])
+}
+
 /// Run `args` with, on a Mac, the directories macOS lists in /etc/paths and
 /// /etc/paths.d and Homebrew's Apple-silicon prefix after the session's own
 /// PATH, so a directory the account already chose still comes first. Another
@@ -3157,6 +3170,45 @@ mod tests {
     /// Against a real `sshd` that allows two sessions per connection, with
     /// another process (a second ledger on the same control sockets: an
     /// overlapping daemon, `mj doctor`, Tab completion) holding the first
+    #[test]
+    #[cfg(unix)]
+    fn daemon_discovery_login_command_survives_real_ssh_shell_parsing() {
+        let socket_dir = sharing_socket_dir();
+        let Some(server) = LocalSshd::start(2, socket_dir.path()) else {
+            return;
+        };
+        let expected = "space ' quote \" double $dollar `backtick` ; separator\nnewline";
+        let line = daemon_login_command(&["printf".into(), "%s".into(), expected.into()]);
+        let mut command = std::process::Command::new("ssh");
+        command
+            .args(&server.ssh.ssh_args)
+            .arg(&server.ssh.destination)
+            .arg(&line);
+        let output = crate::subprocess::run_with_input(&mut command, b"").unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, expected.as_bytes());
+        // Exercise each installed outer shell and login shell separately. In
+        // particular fish must never see the POSIX parameter expansion.
+        for shell in ["/bin/bash", "/bin/zsh", "/usr/bin/fish"] {
+            if !Path::new(shell).exists() {
+                continue;
+            }
+            let mut command = std::process::Command::new(shell);
+            command.env("SHELL", shell).args(["-c", &line]);
+            let output = crate::subprocess::run_with_input(&mut command, b"").unwrap();
+            assert!(
+                output.status.success(),
+                "{shell}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(output.stdout, expected.as_bytes(), "{shell}");
+        }
+    }
+
     /// master full: more concurrent commands than one connection can carry
     /// all succeed, because a command the server refuses never started and
     /// walks to the next master. That includes commands that stream more than

@@ -2594,7 +2594,7 @@ fn terminal_metadata_retains_bounded_unicode_output_across_restore_and_late_exit
     let record = &attached_terminal_outputs(&session.transcript[0])[0];
     assert!(record.truncated);
     assert!(record.output.len() <= 4 * 1024 * 1024);
-    assert!(output.ends_with(&record.output));
+    assert!(output.ends_with(record.output.text().as_ref()));
 
     // A daemon rebuilds projection ownership solely from the serialized session.
     session = serde_json::from_value(serde_json::to_value(&session).unwrap()).unwrap();
@@ -2607,7 +2607,12 @@ fn terminal_metadata_retains_bounded_unicode_output_across_restore_and_late_exit
         json!({"terminal_exit": {"terminal_id": "term-1", "exit_code": 128, "signal": null}}),
     );
     let record = &attached_terminal_outputs(&session.transcript[0])[0];
-    assert!(record.output.ends_with("first failure\nlate failure\n"));
+    assert!(
+        record
+            .output
+            .text()
+            .ends_with("first failure\nlate failure\n")
+    );
     assert_eq!(record.exit_code, Some(128));
     assert!(record.truncated);
 
@@ -2620,7 +2625,7 @@ fn terminal_metadata_retains_bounded_unicode_output_across_restore_and_late_exit
         }),
     );
     let record = &attached_terminal_outputs(&session.transcript[0])[0];
-    assert_eq!(record.output, "complete failure\n");
+    assert_eq!(record.output.text(), "complete failure\n");
     assert_eq!(record.exit_code, None);
     assert_eq!(record.signal.as_deref(), Some("SIGTERM"));
     assert!(!record.truncated);
@@ -2915,7 +2920,7 @@ fn terminal_output_before_the_tool_call_attaches_when_the_call_arrives() {
     assert_eq!(session.transcript[0].stable_id, "tool:call-1");
     let outputs = attached_terminal_outputs(&session.transcript[0]);
     assert_eq!(outputs.len(), 1);
-    assert_eq!(outputs[0].output, "build finished\n");
+    assert_eq!(outputs[0].output.text(), "build finished\n");
 
     // Both orderings converge on the same tool body.
     let mut reversed = MaterializedSession::empty("session-1");
@@ -2967,7 +2972,7 @@ fn mismatched_raw_result_does_not_hide_a_genuine_orphan_failure() {
     assert!(session.transcript.iter().any(|item| matches!(
         &item.body,
         TranscriptBody::TerminalOutput { record }
-            if record.output == "orphan failure\n"
+            if record.output.text() == "orphan failure\n"
     )));
 }
 
@@ -3044,7 +3049,7 @@ fn wholesale_tool_call_update_keeps_the_attached_terminal_output() {
     assert_eq!(session.transcript.len(), 1);
     let outputs = attached_terminal_outputs(&session.transcript[0]);
     assert_eq!(outputs.len(), 1);
-    assert_eq!(outputs[0].output, "build finished\n");
+    assert_eq!(outputs[0].output.text(), "build finished\n");
     let TranscriptBody::Tool { call, .. } = &session.transcript[0].body else {
         panic!("the item stayed a tool item");
     };
@@ -3083,7 +3088,7 @@ fn a_tool_call_that_dropped_its_terminal_reference_still_attaches_the_output() {
     assert_eq!(session.transcript[0].stable_id, "tool:call-1");
     let outputs = attached_terminal_outputs(&session.transcript[0]);
     assert_eq!(outputs.len(), 1);
-    assert_eq!(outputs[0].output, "build finished\n");
+    assert_eq!(outputs[0].output.text(), "build finished\n");
     let TranscriptBody::Tool {
         call,
         terminal_refs,

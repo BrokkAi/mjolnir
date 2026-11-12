@@ -139,9 +139,17 @@ impl ApiClient {
         else {
             unreachable!("wait_for_web_access returns only Ready")
         };
-        let local_address = local_address
-            .context("the daemon did not publish a local web viewer address; restart the daemon")?;
-        let (viewer_url, resolver) = route_viewer_to_local_socket(&viewer_url, local_address)?;
+        let (viewer_url, resolver) = if let Some(connector) = client.connector()
+            && connector.is_ssh()
+        {
+            connector.validate_viewer_url(&viewer_url).await?;
+            (viewer_url, None)
+        } else {
+            let local_address = local_address.context(
+                "the daemon did not publish a local web viewer address; restart the daemon",
+            )?;
+            route_viewer_to_local_socket(&viewer_url, local_address)?
+        };
         let http = http_client(certificate_sha256.as_deref(), resolver)?;
         probe_api(&http, &viewer_url).await?;
         let token = client.api_credential().await?;

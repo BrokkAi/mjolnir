@@ -150,7 +150,9 @@ pub(super) fn project(runtime: &RuntimeProjection) -> BTreeMap<String, SessionAt
                             .is_some_and(|outcome| assessment.applies_to(outcome))
                     }) {
                         Some(assessment)
-                            if assessment.attention == Some(AssessmentAttention::Important) =>
+                            if assessment.attention == Some(AssessmentAttention::Important)
+                                && record.viewed_through_event_ordinal
+                                    < assessment.completed_ordinal =>
                         {
                             Important
                         }
@@ -329,6 +331,23 @@ mod tests {
         relay.assessment = Some(std::sync::Arc::new(assessment));
         publish(&mut runtime, &materialized, &relay);
         assert_eq!(project(&runtime)["parent"], SessionAttention::Important);
+        runtime
+            .records
+            .get_mut("parent")
+            .unwrap()
+            .viewed_through_event_ordinal = 9;
+        assert_eq!(project(&runtime)["parent"], SessionAttention::Important);
+        runtime
+            .records
+            .get_mut("parent")
+            .unwrap()
+            .viewed_through_event_ordinal = 10;
+        assert_eq!(project(&runtime)["parent"], SessionAttention::Idle);
+        let mut assessment = (*relay.assessment.as_ref().unwrap().as_ref()).clone();
+        assessment.action = Some(Action::AwaitInput);
+        relay.assessment = Some(std::sync::Arc::new(assessment));
+        publish(&mut runtime, &materialized, &relay);
+        assert_eq!(project(&runtime)["parent"], SessionAttention::NeedsInput);
     }
 
     // Hard-won: 912798901: configuration repair errors lost their failure state.

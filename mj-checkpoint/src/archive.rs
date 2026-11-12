@@ -389,12 +389,33 @@ pub fn read_archive_verified(path: &Path) -> Result<VerifiedArchive> {
 /// memory long enough to reassemble and parse the tar, because tar safety is
 /// a property of the whole payload rather than of one part.
 pub fn verify_archive_streaming(path: &Path) -> Result<VerifiedArchiveMetadata> {
-    let contents = read_verified_zip(path, PayloadRetention::CanonicalOnly)?;
-    let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    verify_archive_streaming_cancellable(
+        path,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )
+}
+
+/// Cancellation is checked on every physical archive read, including parallel payload readers.
+pub fn verify_archive_streaming_cancellable(
+    path: &Path,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<VerifiedArchiveMetadata> {
+    let contents = read_verified_zip_cancellable(
+        path,
+        PayloadRetention::CanonicalOnly,
+        Some(cancelled.clone()),
+    )?;
+    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut reader = ArchiveFile {
+        len: file.metadata()?.len(),
+        file: std::sync::Arc::new(file),
+        position: 0,
+        cancelled: Some(cancelled),
+    };
     Ok(VerifiedArchiveMetadata {
         manifest: contents.manifest,
         canonical_session: contents.canonical_session,
-        archive_sha256: digest_reader(&mut file)?,
+        archive_sha256: digest_reader(&mut reader)?,
     })
 }
 
@@ -1119,6 +1140,13 @@ type Archive = zip::ZipArchive<ArchiveFile>;
 /// its own read position, not its own parse: clone the opened [`Archive`],
 /// which shares the parsed directory and this file.
 fn open_archive(path: &Path) -> Result<Archive> {
+    open_archive_cancellable(path, None)
+}
+
+fn open_archive_cancellable(
+    path: &Path,
+    cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<Archive> {
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let len = file
         .metadata()
@@ -1128,6 +1156,7 @@ fn open_archive(path: &Path) -> Result<Archive> {
         file: std::sync::Arc::new(file),
         len,
         position: 0,
+        cancelled,
     })
     .context("open Mjolnir archive ZIP")
 }
@@ -1136,6 +1165,7 @@ fn open_archive(path: &Path) -> Result<Archive> {
 /// keeps its own position. A duplicated handle would share the position.
 #[derive(Clone)]
 struct ArchiveFile {
+    cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     file: std::sync::Arc<File>,
     len: u64,
     position: u64,
@@ -1143,6 +1173,13 @@ struct ArchiveFile {
 
 impl Read for ArchiveFile {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self
+            .cancelled
+            .as_ref()
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+        {
+            return Err(std::io::Error::other("archive verification cancelled"));
+        }
         #[cfg(unix)]
         let read = std::os::unix::fs::FileExt::read_at(&*self.file, buf, self.position)?;
         #[cfg(windows)]
@@ -1188,7 +1225,15 @@ fn retains_parts(retention: PayloadRetention, role: &PayloadRole) -> bool {
 }
 
 fn read_verified_zip(path: &Path, retention: PayloadRetention) -> Result<VerifiedZipContents> {
-    let mut archive = open_archive(path)?;
+    read_verified_zip_cancellable(path, retention, None)
+}
+
+fn read_verified_zip_cancellable(
+    path: &Path,
+    retention: PayloadRetention,
+    cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<VerifiedZipContents> {
+    let mut archive = open_archive_cancellable(path, cancelled)?;
     let mut entries = Vec::with_capacity(archive.len());
     let mut actual_paths = BTreeSet::<String>::new();
     let mut manifest_count = 0_usize;

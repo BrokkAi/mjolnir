@@ -1,6 +1,4 @@
-use anvil_client::{codex_client::CodexClient, transcribe::TranscribeRequest};
 use anyhow::{Context, Result, bail};
-use bytes::Bytes;
 use cpal::SampleFormat;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::{
@@ -28,8 +26,7 @@ use libloading::{Library, Symbol};
 use std::os::unix::ffi::OsStrExt;
 
 /// The worker accepts one newline to finish recording. The parent closes
-/// stdin when the dictation is cancelled; that signal is also watched while
-/// the transcription request is in flight.
+/// stdin when dictation is cancelled; encoding also observes that signal.
 #[derive(Debug)]
 pub(super) enum StdinCommand {
     Finish,
@@ -38,7 +35,7 @@ pub(super) enum StdinCommand {
 }
 
 pub(super) enum RunOutcome {
-    Transcribed(String),
+    Captured,
     Cancelled,
 }
 
@@ -46,7 +43,6 @@ pub(super) const DICTATION_TIMEOUT: Duration = Duration::from_secs(600);
 const NO_AUDIO_TIMEOUT: Duration = Duration::from_secs(5);
 const SAMPLE_RATE: u32 = 16_000;
 const LEVEL_EMIT_INTERVAL: Duration = Duration::from_millis(80);
-const TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_CAPTURE_BYTES: usize = 256 * 1024 * 1024;
 
 type AudioMessage = std::result::Result<Vec<f32>, String>;
@@ -615,59 +611,23 @@ fn monitor_cancellation(command_rx: mpsc::Receiver<StdinCommand>, cancellation: 
     });
 }
 
-fn transcribe<F>(
-    auth_path: PathBuf,
-    captured: CapturedAudio,
-    mut on_status: F,
-) -> Result<RunOutcome>
-where
-    F: FnMut(String),
-{
+fn save_capture(output_path: PathBuf, captured: CapturedAudio) -> Result<RunOutcome> {
     let cancellation = CancellationToken::new();
     monitor_cancellation(captured.command_rx, cancellation.clone());
-    if cancellation.is_cancelled() {
-        return Ok(RunOutcome::Cancelled);
-    }
-
     let samples = resample_linear(&captured.samples, captured.sample_rate, SAMPLE_RATE)?;
     let wav = encode_wav(&samples, SAMPLE_RATE)?;
-    eprintln!(
-        "voice transcription: uploading {} bytes of mono PCM16 WAV at {SAMPLE_RATE} Hz",
-        wav.len()
-    );
     if cancellation.is_cancelled() {
         return Ok(RunOutcome::Cancelled);
     }
-
-    on_status("transcribing...".to_string());
-    let mut request = TranscribeRequest::new(Bytes::from(wav), "audio.wav", "audio/wav");
-    request.timeout = TRANSCRIPTION_TIMEOUT;
-    request.cancel = cancellation.clone();
-    let client = CodexClient::with_auth_path(auth_path);
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("create transcription runtime")?;
-    let response = runtime.block_on(client.transcribe(request));
-    match response {
-        Ok(_response) if cancellation.is_cancelled() => Ok(RunOutcome::Cancelled),
-        Ok(response) => {
-            let text = response.text.trim().to_string();
-            if text.is_empty() {
-                bail!("transcription returned no text");
-            }
-            Ok(RunOutcome::Transcribed(text))
-        }
-        Err(_error) if cancellation.is_cancelled() => Ok(RunOutcome::Cancelled),
-        Err(error) => Err(error).context("transcribe captured audio"),
-    }
+    std::fs::write(&output_path, wav).context("write captured WAV")?;
+    Ok(RunOutcome::Captured)
 }
 
 pub(super) fn run<F, G, H>(
     _on_partial: F,
     on_level: G,
     mut on_status: H,
-    auth_path: PathBuf,
+    output_path: PathBuf,
     command_rx: mpsc::Receiver<StdinCommand>,
 ) -> Result<RunOutcome>
 where
@@ -675,14 +635,11 @@ where
     G: FnMut(f32),
     H: FnMut(String),
 {
-    if !auth_path.is_file() {
-        bail!("Codex auth file does not exist: {}", auth_path.display());
-    }
     let captured = match capture_audio(on_level, &mut on_status, command_rx)? {
         CaptureOutcome::Ready(captured) => captured,
         CaptureOutcome::Cancelled => return Ok(RunOutcome::Cancelled),
     };
-    transcribe(auth_path, captured, on_status)
+    save_capture(output_path, captured)
 }
 
 #[cfg(test)]
@@ -692,7 +649,20 @@ mod tests {
     #[test]
     fn golden_encode_mono_pcm16_wav() {
         // The golden is the RIFF/WAVE chunk layout with little-endian PCM16 samples.
-        let wav = encode_wav(&[-2.0, -0.5, 0.0, 0.5, 2.0], 16_000).expect("encode WAV");
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("capture.wav");
+        let (_commands, command_rx) = mpsc::channel();
+        let outcome = save_capture(
+            output.clone(),
+            CapturedAudio {
+                samples: vec![-2.0, -0.5, 0.0, 0.5, 2.0],
+                sample_rate: 16_000,
+                command_rx,
+            },
+        )
+        .expect("save captured audio");
+        assert!(matches!(outcome, RunOutcome::Captured));
+        let wav = std::fs::read(output).unwrap();
         let bytes = wav
             .iter()
             .map(|byte| format!("{byte:02x}"))

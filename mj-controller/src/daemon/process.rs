@@ -79,6 +79,10 @@ pub(super) async fn run_daemon_runtime(
     owner_pid: Option<u32>,
     cancellation: CancellationToken,
 ) -> Result<()> {
+    let uploads = mj_core::config::data_dir().join("uploads");
+    if tokio::fs::try_exists(&uploads).await? {
+        tokio::fs::remove_dir_all(&uploads).await?;
+    }
     let progress = super::diagnostics::DaemonProgressMonitor::start()?;
     let startup_began = Instant::now();
     // Before this daemon can start a checkpoint, so every checkpoint file older
