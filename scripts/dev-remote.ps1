@@ -92,8 +92,10 @@ test "$(git rev-parse HEAD)" = BUILD_SHA || { echo "HEAD changed in $build_tree;
 installed="${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}/bin/mj"
 echo "Linux installed executable: $installed"
 "$installed" --version
+# endpoint owns ordinary startup/handoff; discard its bearer token output.
+"$installed" --instance BUILD_INSTANCE daemon endpoint --json >/dev/null
 '@
-    Invoke-Remote ($remoteBuild.Replace('REMOTE_PATH', $remotePath).Replace('BUILD_SHA', $sha))
+    Invoke-Remote ($remoteBuild.Replace('REMOTE_PATH', $remotePath).Replace('BUILD_SHA', $sha).Replace('BUILD_INSTANCE', (Quote-Sh $Instance)))
     Write-Host "Linux installation completed for $sha; building Windows."
     Push-Location $buildTree
     try {
@@ -106,7 +108,7 @@ echo "Linux installed executable: $installed"
         if ($LASTEXITCODE -ne 0) { throw 'cargo metadata failed' }
         $metadata = ($metadataText -join "`n") | ConvertFrom-Json
         $binary = Get-Item -LiteralPath (Join-Path $metadata.target_directory 'x86_64-pc-windows-msvc/release/mj.exe')
-        . (Join-Path $buildTree 'install.ps1') -FunctionsOnly
+        . (Join-Path (Split-Path $PSScriptRoot -Parent) 'install.ps1') -FunctionsOnly
         $installDir = Get-MjInstallDirectory
         Install-MjBinaries @($binary) $installDir
         Update-MjInstallPath $installDir
