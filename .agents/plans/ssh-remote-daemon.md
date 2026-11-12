@@ -24,7 +24,7 @@ This is private-network operation with working SSH authentication and host trust
 - [ ] Implement and validate milestone 6: matching-build PowerShell go script.
 - [ ] Implement milestone 7: user documentation, final validation, platform dispatch and real Windows acceptance.
 
-- [ ] (2026-11-12, import child) Client native-home selection and atomic record/projection registration implemented; transport checkpoint retained. Targeted source-selection test passes. Dialog path, cancellation and CLI acceptance remain outstanding; final validation in progress.
+- [ ] (2026-11-12, import child) Client native-home selection, atomic record/projection registration and lazy admission-independent upload storage committed (1907bf93a, 8bb394c72). Targeted source test and upload exchange pass; touched suites found fixture/environment failures, all failing cases pass targeted reruns after setting client CODEX_HOME in the isolated import fixture. Workspace Clippy passes. Composer references, upload retry unit, dialog path/cancellation and separate-directory CLI acceptance remain outstanding.
 
 ## Surprises & Discoveries
 

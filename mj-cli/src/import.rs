@@ -1322,6 +1322,8 @@ mod tests {
                 .join("\n"),
         )
         .unwrap();
+        // This test runs alone in an isolated child; native history belongs to the client.
+        unsafe { std::env::set_var("CODEX_HOME", &home) };
         let mut config = Config::default();
         config
             .targets
