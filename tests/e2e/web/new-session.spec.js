@@ -861,22 +861,37 @@ test('whole-row taps and in-progress gestures survive unrelated live updates', a
 });
 
 test('raw projects use host-specific recents and preserve edited paths across Back', async ({ page }) => {
-  const state = await mount(page);
+  const state = await mount(page, {
+    targets: [
+      defaultContainerTarget,
+      { id: 'local', kind: 'local', requires_project_directory: true, recent_project_directories: ['/work/recent', '/work/older', ...Array.from({ length: 10 }, (_, index) => `/work/extra-${index}`)] },
+      { id: 'remote', kind: 'ssh', requires_project_directory: true, recent_project_directories: ['/remote/recent'] },
+    ],
+  });
   await projectStep(page, 'local');
   const directory = page.locator('#new-project-directory');
+  const picker = page.locator('#new-recent-project');
   await expect(directory).toHaveValue('/work/recent');
-  await page.getByRole('button', { name: '/work/older', exact: true }).tap();
+  // The picker offers only the ten most recent directories.
+  const options = picker.locator('option:enabled');
+  await expect(options).toHaveCount(10);
+  await expect(options.first()).toHaveText('/work/recent');
+  await expect(options.last()).toHaveText('/work/extra-7');
+  await expect(picker).toHaveValue('/work/recent');
+  await picker.selectOption('/work/older');
   await expect(directory).toHaveValue('/work/older');
   await directory.fill('/work/custom');
+  await expect(picker).toHaveValue('');
   await page.locator('#new-back').click();
   await page.locator('#new-target').getByRole('radio', { name: /^remote/ }).check();
   await page.locator('#new-next').click();
   await expect(directory).toHaveValue('/remote/recent');
-  await expect(page.getByRole('button', { name: '/work/older', exact: true })).toHaveCount(0);
+  await expect(picker.locator('option:enabled')).toHaveCount(1);
   await page.locator('#new-back').click();
   await page.locator('#new-target').getByRole('radio', { name: /^local/ }).check();
   await page.locator('#new-next').click();
   await expect(directory).toHaveValue('/work/custom');
+  await expect(picker).toHaveValue('');
   await directory.fill('');
   await page.locator('#new-next').click();
   await expect(page.locator('#new-error')).toContainText('Name the project directory');

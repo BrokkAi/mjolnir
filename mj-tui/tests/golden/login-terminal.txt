@@ -1,0 +1,38 @@
+┌ Login · fixture ─────────────────────────────────────────────────────────┐
+│█                                                                         │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│Connecting to the daemon…                                                 │
+│                                                                          │
+│Ctrl+] closes · Ctrl+Q quits                                              │
+└──────────────────────────────────────────────────────────────────────────┘
+
+┌ Login · fixture ─────────────────────────────────────────────────────────┐
+│Open https://example.test/login                                           │
+│Code: ✓                                                                   │
+│Saved credentials.█                                                       │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│Signed in. Enter returns to Settings.                                     │
+│                                                                          │
+│Ctrl+] closes · Ctrl+Q quits                                              │
+└──────────────────────────────────────────────────────────────────────────┘
+
+┌ Login · fixture ─────────────────────────────────────────────────────────┐
+│Open https://example.test/login                                           │
+│Code: ✓                                                                   │
+│Saved credentials.█                                                       │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│The daemon connection ended during login or harness preparation; retry    │
+│Login. Enter returns to Settings.                                         │
+│Ctrl+] closes · Ctrl+Q quits                                              │
+└──────────────────────────────────────────────────────────────────────────┘

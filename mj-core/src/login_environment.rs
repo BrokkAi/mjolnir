@@ -38,9 +38,13 @@ pub fn initialize_from_parent() -> Result<()> {
 pub async fn resolve() -> Result<&'static Environment> {
     ENVIRONMENT
         .get_or_try_init(|| async {
-            tokio::task::spawn_blocking(discover)
-                .await
-                .context("target login environment task failed")?
+            let cancellation = crate::subprocess::scoped_preparation_cancellation();
+            tokio::task::spawn_blocking(move || match cancellation {
+                Some(cancellation) => discover_cancellable(cancellation),
+                None => discover(),
+            })
+            .await
+            .context("target login environment task failed")?
         })
         .await
 }
@@ -153,6 +157,23 @@ pub fn discover() -> Result<Environment> {
         "resolved the account's shell environment"
     );
     Ok(environment)
+}
+
+fn discover_cancellable(cancellation: tokio_util::sync::CancellationToken) -> Result<Environment> {
+    #[cfg(unix)]
+    {
+        let executor = crate::targets::CancellableProcessExecutor::with_timeout(
+            LOGIN_ENVIRONMENT_PROBE_TIMEOUT,
+        )
+        .with_cancellation(cancellation)
+        .with_foreground_terminal();
+        discover_account_with_executor(Account::current()?, &executor)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = cancellation;
+        discover()
+    }
 }
 
 /// The shell the probe starts, for diagnostics that explain where a session's
@@ -271,7 +292,17 @@ impl Account {
 /// is both, so the probe starts the account's shell the same way.
 #[cfg(unix)]
 fn discover_account(account: Account, timeout: std::time::Duration) -> Result<Environment> {
-    use crate::targets::{BoundedProcessExecutor, CommandExecutor};
+    discover_account_with_executor(
+        account,
+        &crate::targets::BoundedProcessExecutor::new(timeout),
+    )
+}
+
+#[cfg(unix)]
+fn discover_account_with_executor(
+    account: Account,
+    executor: &dyn crate::targets::CommandExecutor,
+) -> Result<Environment> {
     let mut nonce = [0u8; 16];
     getrandom::fill(&mut nonce)
         .map_err(|error| anyhow::anyhow!("create login capture marker: {error}"))?;
@@ -287,7 +318,6 @@ fn discover_account(account: Account, timeout: std::time::Duration) -> Result<En
     probe.command.clear_env = true;
     probe.command.cwd = Some(account.home.clone());
     probe.command.env = account.environment()?;
-    let executor = BoundedProcessExecutor::new(timeout);
     let output = if probe.script_on_stdin {
         let mut input = std::io::Cursor::new(script.as_bytes());
         executor.execute_with_stdin(&probe.command, &mut input)?

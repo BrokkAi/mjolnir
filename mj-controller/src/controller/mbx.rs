@@ -440,13 +440,6 @@ fn classify_native_mbx(native: Option<NativeMbx>) -> NativeMbxStatus {
     }
 }
 
-pub(super) fn version_at_least(found: &str, required: &str) -> bool {
-    matches!(
-        (semver::Version::parse(found), semver::Version::parse(required)),
-        (Ok(found), Ok(required)) if found >= required
-    )
-}
-
 fn cache_unavailable_reason(status: &NativeMbxStatus) -> String {
     match status {
         NativeMbxStatus::Absent => {

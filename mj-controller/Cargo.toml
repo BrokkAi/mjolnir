@@ -19,6 +19,7 @@ test-hooks = ["mj-core/test-hooks"]
 workspace = true
 
 [dependencies]
+portable-pty = "0.9"
 half = "2"
 libloading = "0.9"
 ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "api-23", "directml", "coreml", "cuda", "half"] }

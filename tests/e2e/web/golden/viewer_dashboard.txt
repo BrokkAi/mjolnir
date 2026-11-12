@@ -611,8 +611,6 @@ codex
 
 Important
 
-Browser tests · 0m ago
-
 Input needed
 ?
 ⋯
@@ -623,8 +621,6 @@ Attention
 codex
 
 Input needed
-
-Browser tests · 0m ago
 
 Unreachable worker
 ×
@@ -637,8 +633,6 @@ codex
 
 Unreachable
 
-Browser tests · 0m ago
-
 A long session title that occupies one ellipsized line on a narrow phone screen
 ×
 2
@@ -650,8 +644,6 @@ Beta
 codex
 
 Failed
-
-Browser tests · 0m ago
 === flat live dashboard sorted by notification band then latest message (390x844) ===
 Notifications (2)
 Browser tests

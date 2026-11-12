@@ -1176,7 +1176,6 @@ class NotificationSnapshot {
           ...entry.row, capabilities: {}, operation: null, transitioning: false,
           lifecycle: 'destroyed', attention: 'inactive', configuration_issue: null, move_recovery: null,
         },
-        excerpt: entry.excerpt,
       })),
     ];
     const entriesById = new Map(this.entries.map(entry => [entry.row.id, entry]));
@@ -1185,7 +1184,6 @@ class NotificationSnapshot {
   }
 }
 const notificationSnapshot = new NotificationSnapshot();
-const notificationItems = new Map();
 
 function notificationRows() {
   return [...viewerState.rows.values()].filter(row => !isSubagentSession(row)
@@ -1194,29 +1192,11 @@ function notificationRows() {
 
 function renderNotifications() {
   const header = el('h2', '', 'Notifications');
-  const items = notificationSnapshot.update(notificationRows(), [...viewerState.rows.values()]).map(entry => {
-    const { row } = entry;
-    let item = notificationItems.get(row.id);
-    if (!item) {
-      item = el('div', 'notification-entry');
-      item.dataset.notificationId = row.id;
-      item._excerpt = el('p', 'notification-excerpt');
-      item._meta = el('p', 'dim');
-      notificationItems.set(row.id, item);
-    }
+  const items = notificationSnapshot.update(notificationRows(), [...viewerState.rows.values()]).map(({ row }) => {
     let card = sessionCards.get(row.id);
     if (!card) { card = sessionCard(row); sessionCards.set(row.id, card); }
     else updateSessionCard(card, row);
-    reconcileChildren(item, [card, item._excerpt, item._meta]);
-    const excerpt = row.pending_elicitations?.find(request => request.message)?.message || row.preview?.join('\n') || entry.excerpt;
-    entry.excerpt = excerpt;
-    item._excerpt.textContent = excerpt || '';
-    item._excerpt.hidden = !excerpt;
-    const workspace = snapshot.workspaces?.find(workspace => workspace.id === row.workspace_id);
-    const timestamp = sessionMessageMs(row);
-    const age = timestamp ? `${Math.max(0, Math.floor((serverClockMs() - timestamp) / 60000))}m ago` : 'Age unknown';
-    item._meta.textContent = `${workspace?.name || row.workspace_id} · ${age}`;
-    return item;
+    return card;
   });
   reconcileChildren(sessions, [header, ...items, ...(!items.length ? [el('p', 'dim', 'No notifications.')] : [])]);
 }
@@ -1707,6 +1687,7 @@ function sessionMenuActions(session) {
   const actions = [];
   if (session.configuration_issue) actions.push(['Repair configuration…', 'secondary', 'repair-config']);
   if (session.lifecycle === 'live' && !isTransitioningSession(session)) actions.push(['Changed files…', 'secondary', 'changed-files']);
+  if (can.dismiss_notification) actions.push(['Dismiss notification', 'secondary', 'dismiss-notification']);
   if (can.rename) actions.push(['Rename', 'secondary', 'rename']);
   if (can.change_workspace) actions.push(['Change workspace…', 'secondary', 'change-workspace']);
   if (can.container_settings) actions.push(['Container settings…', 'secondary', 'container-settings']);
@@ -1768,7 +1749,6 @@ function updateSessionCard(card, session) {
   card._metaSeparators[0].hidden = !(shown[0] && shown[1]);
   card._metaSeparators[1].hidden = !((shown[0] || shown[1]) && shown[2]);
   updateSessionActivity(card, session);
-  renderNotificationDismissal(card, session, actionError);
   updateSessionMenu(card, session);
 }
 
@@ -1784,12 +1764,20 @@ function renderNotificationDismissal(container, session, errorNode) {
     container.append(control);
   }
   control.disabled = pendingActions.has(`dismiss-notification:${session.id}`);
-  const target = session.notification_dismissal;
+  control.dataset.action = 'dismiss-notification';
+  control.dataset.id = session.id;
+  markNotificationDismissal(control, session);
   control.onclick = event => {
     event.stopPropagation();
-    return runSessionAction({ action: 'dismiss-notification', id: session.id }, errorNode,
-      { target });
+    return runSessionAction(control.dataset, errorNode);
   };
+}
+
+/// A dismissal names the notification its control showed, so a tap clears
+/// what the person saw and not one that arrived after the last render.
+function markNotificationDismissal(control, session) {
+  if (control.dataset.action !== 'dismiss-notification') return;
+  control.dataset.notificationDismissal = JSON.stringify(session.notification_dismissal ?? null);
 }
 
 function updateSessionMenu(card, session) {
@@ -1807,6 +1795,7 @@ function updateSessionMenu(card, session) {
           target: session.target_id,
         });
         control.setAttribute('role', 'menuitem');
+        markNotificationDismissal(control, session);
         return control;
       }),
     );
@@ -1820,6 +1809,7 @@ function updateSessionMenu(card, session) {
     for (const control of card._menu.querySelectorAll?.('button[data-action]') || []) {
       control.dataset.profile = session.profile_id || '';
       control.dataset.target = session.target_id || '';
+      markNotificationDismissal(control, session);
       control.disabled = pendingActions.has(`${control.dataset.action}:${session.id}`);
     }
   }
@@ -2457,7 +2447,7 @@ function renderNewTargetSizingControls(draft, host) {
     } else if (target.container_host_limits) {
       host.append(el('p', 'dim', `Host: ${target.container_host_limits.cpus} CPUs and ${capacityGiBText(target.container_host_limits.memory_bytes)} GiB RAM. RAM left is unavailable until the capacity probe answers.`));
     }
-    const saveDefault = el('label', 'field');
+    const saveDefault = el('label', 'field-inline');
     const saveDefaultInput = el('input');
     saveDefaultInput.type = 'checkbox';
     saveDefaultInput.id = 'new-save-default-size';
@@ -2465,7 +2455,7 @@ function renderNewTargetSizingControls(draft, host) {
     saveDefaultInput.onchange = () => {
       draft.rememberContainerSize = saveDefaultInput.checked;
     };
-    saveDefault.append(saveDefaultInput, document.createTextNode(' Save as default sizing'));
+    saveDefault.append(saveDefaultInput, document.createTextNode('Save as default sizing'));
     host.append(saveDefault);
     const error = el('p', 'error', newResourceAllocationError(draft));
     error.id = 'new-resource-error';
@@ -2801,21 +2791,34 @@ function renderNewForm() {
         if (!newDraft.projectDirectory && !Object.hasOwn(newDraft.projectDirectories, newDraft.targetId)) {
           newDraft.projectDirectory = recents[0] || '';
         }
-        if (recents.length) {
-          const recentList = el('div', 'recent-projects');
-          recentList.append(el('p', 'dim', 'Recent projects on this host'));
-          for (const directory of recents) {
-            const pick = el('button', 'secondary recent-project', directory);
-            pick.type = 'button';
-            pick.onclick = () => {
-              newDraft.projectDirectory = directory;
-              newDraft.projectDirectories[newDraft.targetId] = directory;
-              newDraft.preflighted = false;
-              document.querySelector('#new-project-directory').value = directory;
-            };
-            recentList.append(pick);
+        // Only the ten most recent projects earn a row in the picker; older
+        // entries stay reachable by typing the path or browsing folders.
+        const shownRecents = recents.slice(0, 10);
+        if (shownRecents.length) {
+          const field = el('label', 'field');
+          field.append(el('span', '', 'Recent projects on this host'));
+          const select = el('select');
+          select.id = 'new-recent-project';
+          const placeholder = el('option', '', 'Choose a recent project…');
+          placeholder.value = '';
+          placeholder.disabled = true;
+          placeholder.hidden = true;
+          select.append(placeholder);
+          for (const directory of shownRecents) {
+            const option = el('option', '', directory);
+            option.value = directory;
+            select.append(option);
           }
-          body.append(recentList);
+          select.value = shownRecents.includes(newDraft.projectDirectory) ? newDraft.projectDirectory : '';
+          select.onchange = () => {
+            if (!select.value) return;
+            newDraft.projectDirectory = select.value;
+            newDraft.projectDirectories[newDraft.targetId] = select.value;
+            newDraft.preflighted = false;
+            document.querySelector('#new-project-directory').value = select.value;
+          };
+          field.append(select);
+          body.append(field);
         }
         body.append(
           pathField(
@@ -2826,6 +2829,8 @@ function renderNewForm() {
               newDraft.projectDirectory = value;
               newDraft.projectDirectories[newDraft.targetId] = value;
               newDraft.preflighted = false;
+              const picker = document.querySelector('#new-recent-project');
+              if (picker) picker.value = shownRecents.includes(value) ? value : '';
             },
             {
               host: () => newDraft.targetId,
@@ -9399,6 +9404,9 @@ async function runSessionAction(dataset, errorNode, extra) {
     if (choice === null) return false;
     extra = { ...extra, delete_branch: choice };
   }
+  if (dataset.action === 'dismiss-notification') {
+    extra = { ...extra, target: JSON.parse(dataset.notificationDismissal) };
+  }
   const body = { action: dataset.action, session_id: dataset.id, ...extra };
   if (dataset.action === 'rename') {
     const session = sessionById(dataset.id);
@@ -9674,16 +9682,27 @@ promptText.addEventListener('drop', e => {
   const text = e.dataTransfer?.getData('text/plain') || '';
   if (text) insertComposerText(text);
 });
+// A touch keyboard has no Shift+Enter, so where touch is the primary input
+// its Enter key starts a new line and the Send button sends. This one query
+// decides both the key label the keyboard shows and what Enter does.
+const touchComposer = window.matchMedia('(hover: none) and (pointer: coarse)');
+function syncComposerEnterKey() {
+  promptText.setAttribute('enterkeyhint', touchComposer.matches ? 'enter' : 'send');
+}
+syncComposerEnterKey();
+touchComposer.addEventListener('change', syncComposerEnterKey);
 // An active IME composition steers its candidate with Enter and the arrows,
 // so the composer must not read those keys until the composition ends.
 promptText.addEventListener('keydown', e => {
   if (e.isComposing || e.keyCode === 229) return;
   // The palette owns the arrows, Tab and Enter while it is open, and gives
-  // them back the moment it closes.
+  // them back the moment it closes. On a touch keyboard Enter is the only way
+  // to start a new line, so it stays a return key and a tap picks a row.
   if (paletteMatches.length) {
     if (e.key === 'ArrowDown' && moveCommandSelection(1)) return e.preventDefault();
     if (e.key === 'ArrowUp' && moveCommandSelection(-1)) return e.preventDefault();
-    if ((e.key === 'Tab' || e.key === 'Enter') && !e.shiftKey && acceptCommandSelection()) {
+    const accepts = e.key === 'Tab' || (e.key === 'Enter' && !touchComposer.matches);
+    if (accepts && !e.shiftKey && acceptCommandSelection()) {
       return e.preventDefault();
     }
     if (e.key === 'Escape') {
@@ -9706,7 +9725,8 @@ promptText.addEventListener('keydown', e => {
   }
   if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
     e.preventDefault();
-    submitPrompt();
+    if (touchComposer.matches) insertComposerLineBreak();
+    else submitPrompt();
     return;
   }
   if (e.key === 'Enter' && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {

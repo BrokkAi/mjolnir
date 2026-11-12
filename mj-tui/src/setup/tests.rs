@@ -166,6 +166,7 @@ fn rendered_theme_colors(dashboard: &mut DashboardState, selected: theme::UiThem
 
 fn detection(scope: DetectScope, config: Config) -> crate::setup::SetupDetection {
     crate::setup::SetupDetection {
+        profile_readiness: Default::default(),
         scope,
         config,
         rejected_runtimes: Vec::new(),
