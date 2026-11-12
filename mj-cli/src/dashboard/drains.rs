@@ -443,6 +443,8 @@ impl DashboardContext {
         self.dashboard
             .set_operator_presence(update.operator_presence);
         self.dashboard.set_launch_recency(update.launch_recency);
+        self.dashboard
+            .set_session_attention(update.session_attention);
         self.dashboard.set_recent_launch(update.recent_launch);
         self.dashboard
             .set_container_upgrade_sessions(update.container_upgrade_sessions);

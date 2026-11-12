@@ -937,6 +937,7 @@ fn view_at_ordinal(ordinal: u64) -> ManagedSessionView {
         })
         .collect();
     ManagedSessionView {
+        attention: Default::default(),
         snapshot: Some(ManagedSessionSnapshot {
             subagent_requests: Default::default(),
             subagent_completions: Default::default(),
@@ -3612,6 +3613,7 @@ fn dashboard_updates_keep_only_the_latest_view_per_session() {
             }),
             session_id: "session-1".into(),
             view: ManagedSessionView {
+                attention: Default::default(),
                 error: Some(ViewError::Unreachable(format!("revision-{revision}"))),
                 ..ManagedSessionView::default()
             },
@@ -3621,6 +3623,7 @@ fn dashboard_updates_keep_only_the_latest_view_per_session() {
         raw_observation: None,
         session_id: "session-2".into(),
         view: ManagedSessionView {
+            attention: Default::default(),
             error: Some(ViewError::Unreachable("other".into())),
             ..ManagedSessionView::default()
         },
@@ -4062,6 +4065,7 @@ fn replaced_actors_cannot_publish_or_leave_a_queued_observation() {
         raw_observation: None,
         session_id: "session-1".into(),
         view: ManagedSessionView {
+            attention: Default::default(),
             error: Some(ViewError::Unreachable(detail.into())),
             ..Default::default()
         },

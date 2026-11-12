@@ -270,6 +270,7 @@ impl ViewerSnapshot {
                     .review
                     .for_session(state.effective_review_or_off(&session.id));
                 ViewerSession {
+                    attention: Default::default(),
                     oracle: session.oracle,
                     oracle_choice: session.oracle_choice.clone(),
                     subagents: session.subagents.clone().unwrap_or_default(),
@@ -282,6 +283,7 @@ impl ViewerSnapshot {
                     targeted_turn_control_supported: false,
                     turn_controls: None,
                     native_subagents: Vec::new(),
+                    native_subagent_attention: Default::default(),
                     steering: None,
                     active_prompt_id: None,
                     cancelling_prompt_id: None,
@@ -536,6 +538,8 @@ impl ViewerSession {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerSession {
+    #[serde(default)]
+    pub attention: mj_core::attention::SessionAttention,
     #[serde(default = "oracle_default_enabled")]
     pub oracle: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -575,6 +579,8 @@ pub struct ViewerSession {
     pub turn_controls: Option<Box<mj_core::relay::TurnControls>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub native_subagents: Vec<mj_core::native_agent::NativeAgent>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub native_subagent_attention: BTreeMap<String, mj_core::attention::SessionAttention>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steering: Option<Box<mj_core::relay::SteeringOperation>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

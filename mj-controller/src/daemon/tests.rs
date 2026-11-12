@@ -1591,6 +1591,7 @@ async fn daemon_records_definitive_missing_workspaces_without_an_attached_surfac
     });
     assert!(state.attachments.lock().unwrap().is_empty());
     let mut view = ManagedSessionView {
+        attention: Default::default(),
         snapshot: None,
         connected: false,
         error: Some(ViewError::Unreachable(
@@ -3734,6 +3735,7 @@ pub(super) fn ready_startup_view() -> ManagedSessionView {
         activity: None,
     };
     ManagedSessionView {
+        attention: Default::default(),
         snapshot: Some(mj_core::state::ManagedSessionSnapshot {
             subagent_requests: Default::default(),
             subagent_completions: Default::default(),
@@ -4416,6 +4418,7 @@ async fn recovered_container_replacement_keeps_commit_authority_after_failure() 
     );
 
     let missing = ManagedSessionView {
+        attention: Default::default(),
         snapshot: None,
         connected: false,
         error: Some(ViewError::TargetMissing(

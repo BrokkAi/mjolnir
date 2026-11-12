@@ -44,6 +44,7 @@ fn runtime_view(
     projection_digest: &str,
 ) -> crate::daemon::RuntimeSessionView {
     crate::daemon::RuntimeSessionView {
+        attention: Default::default(),
         policy_config_keys: Vec::new(),
         session_id: session_id.to_owned(),
         projection_ordinal,
@@ -2645,6 +2646,7 @@ async fn a_remote_handle_exists_exactly_while_the_daemon_publishes_its_view() {
     let channels = spawn_remote_session_manager().unwrap();
     let wait = Duration::from_secs(1);
     let view = || ManagedSessionView {
+        attention: Default::default(),
         snapshot: None,
         connected: true,
         error: None,

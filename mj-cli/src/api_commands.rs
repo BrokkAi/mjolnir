@@ -1707,7 +1707,9 @@ fn wait_report_lines(response: &WaitResponse) -> Vec<String> {
 fn session_report_lines(session: &ApiSession, now_ms: i64) -> Vec<String> {
     let mut lines = vec![format!(
         "{}  {}  {}",
-        session.id, session.state, session.title
+        session.id,
+        listed_state(session),
+        session.title
     )];
     // Silence is reported, never acted on. A turn waiting on a long build
     // is quiet and healthy, so this says what is true and leaves the
@@ -1960,7 +1962,7 @@ pub(crate) async fn sessions(
             listed_state(session),
             sanitize_terminal_text(&session.title)
         );
-        if session.has_error {
+        if session.attention == mj_core::attention::SessionAttention::Failed {
             println!(
                 "  error details: run `mj sessions --session {}`",
                 session.id
@@ -1973,10 +1975,22 @@ pub(crate) async fn sessions(
 /// The STATE column: the session's state, and "disk full" when its target
 /// cannot take writes. `--session` prints the whole reason.
 fn listed_state(session: &ApiSession) -> String {
-    match session.storage_problem {
-        Some(_) => format!("{} (disk full)", session.state),
-        None => session.state.clone(),
+    use mj_core::attention::SessionAttention;
+    let attention = match session.attention {
+        SessionAttention::NeedsInput => Some("needs input"),
+        SessionAttention::Important => Some("important"),
+        SessionAttention::Failed => Some("failed"),
+        SessionAttention::Unreachable => Some("unreachable"),
+        _ => None,
+    };
+    let mut state = session.state.clone();
+    if let Some(attention) = attention {
+        state.push_str(&format!(" ({attention})"));
     }
+    if session.storage_problem.is_some() {
+        state.push_str(" (disk full)");
+    }
+    state
 }
 
 /// Report one SessionWiki row for an id that names no Mjolnir session.
@@ -3512,10 +3526,15 @@ mod tests {
         assert_eq!(
             session_report_lines(&session, 0),
             [
-                "s1  running  t",
+                "s1  running (disk full)  t",
                 "disk full: precision-3260 has 0 B free on /"
             ]
         );
+        // Served severity wins even when the older raw fields disagree.
+        session.attention = mj_core::attention::SessionAttention::Important;
+        assert_eq!(listed_state(&session), "running (important) (disk full)");
+        session.attention = mj_core::attention::SessionAttention::Unreachable;
+        assert_eq!(listed_state(&session), "running (unreachable) (disk full)");
     }
 
     /// Launch finding R11-3: `mj sessions --session` printed `last turn

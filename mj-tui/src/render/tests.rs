@@ -85,6 +85,11 @@ fn append_dashboard_golden(
 }
 
 fn clear_session_activity(dashboard: &mut DashboardState, session_id: &str) {
+    crate::test_support::serve_attention(
+        dashboard,
+        &[session_id],
+        mj_core::attention::SessionAttention::Idle,
+    );
     let detail = dashboard
         .session_details
         .get_mut(session_id)
@@ -121,6 +126,12 @@ fn pending_questions_mark_the_session_and_minimized_navigator() {
         .expect("valid test question"),
     ];
     dashboard.apply_materialized_session(&session);
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &["session-1"],
+        mj_core::attention::SessionAttention::NeedsInput,
+    );
+
     let mut foreign = running_session();
     foreign.id = "foreign-session".into();
     foreign.workspace_id = "other-workspace".into();
@@ -147,7 +158,7 @@ fn pending_questions_mark_the_session_and_minimized_navigator() {
     let minimized = drawn(&mut dashboard, 120, 40).join("\n");
     assert!(minimized.contains("Question"), "{minimized}");
     assert!(
-        minimized.contains("Sessions [!1]") || minimized.contains("!1"),
+        minimized.contains("Sessions [?1]") || minimized.contains("?1"),
         "{minimized}"
     );
 }
@@ -427,9 +438,7 @@ fn pane_size_controls_are_styled_registered_and_clickable_without_moving_focus()
 
 /// The band a row draws, derived exactly as the renderer derives it: the
 /// shared attention ladder first, then the live-session colours.
-fn band(detail: Option<&SessionDetail>, unreachable: bool, state: SessionState) -> Color {
-    let level =
-        crate::dashboard_sessions::attention_level(detail, None, state, unreachable, false, false);
+fn band(detail: Option<&SessionDetail>, level: AttentionLevel, state: SessionState) -> Color {
     session_band_color(level, detail, state)
 }
 
@@ -440,7 +449,11 @@ fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
         ..SessionDetail::default()
     };
     assert_eq!(
-        band(Some(&normal), false, SessionState::Running),
+        band(
+            Some(&normal),
+            AttentionLevel::Working,
+            SessionState::Running
+        ),
         theme::palette().session_activity
     );
 
@@ -450,7 +463,11 @@ fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
         ..SessionDetail::default()
     };
     assert_eq!(
-        band(Some(&unread), false, SessionState::Running),
+        band(
+            Some(&unread),
+            AttentionLevel::Working,
+            SessionState::Running
+        ),
         theme::palette().session_activity,
         "a running turn is activity, whatever is still unread"
     );
@@ -460,14 +477,22 @@ fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
         ..SessionDetail::default()
     };
     assert_eq!(
-        band(Some(&unread_idle), false, SessionState::Running),
+        band(
+            Some(&unread_idle),
+            AttentionLevel::Unread,
+            SessionState::Running
+        ),
         theme::palette().session_attention,
         "a finished turn nobody has read wants a person"
     );
 
     let read_idle = SessionDetail::default();
     assert_eq!(
-        band(Some(&read_idle), false, SessionState::Running),
+        band(
+            Some(&read_idle),
+            AttentionLevel::Idle,
+            SessionState::Running
+        ),
         theme::palette().session_idle
     );
 
@@ -480,7 +505,11 @@ fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
         ..SessionDetail::default()
     };
     assert_eq!(
-        band(Some(&foreground), false, SessionState::Running),
+        band(
+            Some(&foreground),
+            AttentionLevel::Working,
+            SessionState::Running
+        ),
         theme::palette().session_activity,
         "foreground work is not idle"
     );
@@ -500,7 +529,11 @@ fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
         ..SessionDetail::default()
     };
     assert_eq!(
-        band(Some(&unread_background), false, SessionState::Running),
+        band(
+            Some(&unread_background),
+            AttentionLevel::Working,
+            SessionState::Running
+        ),
         theme::palette().session_activity,
         "background work is still work, not something waiting on a person"
     );
@@ -509,7 +542,11 @@ fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
         ..SessionDetail::default()
     };
     assert_eq!(
-        band(Some(&read_background), false, SessionState::Running),
+        band(
+            Some(&read_background),
+            AttentionLevel::Working,
+            SessionState::Running
+        ),
         theme::palette().session_activity,
         "background work is not idle after it has been read"
     );
@@ -519,7 +556,11 @@ fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
         ..SessionDetail::default()
     };
     assert_eq!(
-        band(Some(&interrupted_idle), false, SessionState::Running),
+        band(
+            Some(&interrupted_idle),
+            AttentionLevel::Unread,
+            SessionState::Running
+        ),
         theme::palette().session_attention,
         "an unread interruption needs attention"
     );
@@ -530,7 +571,11 @@ fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
         ..SessionDetail::default()
     };
     assert_eq!(
-        band(Some(&interrupted_running), false, SessionState::Running),
+        band(
+            Some(&interrupted_running),
+            AttentionLevel::Working,
+            SessionState::Running
+        ),
         theme::palette().session_activity,
         "a running turn is activity, whatever is still unread"
     );
@@ -554,34 +599,50 @@ fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
         ..SessionDetail::default()
     };
     assert_eq!(
-        band(Some(&needs_input), false, SessionState::Running),
+        band(
+            Some(&needs_input),
+            AttentionLevel::Waiting,
+            SessionState::Running
+        ),
         theme::palette().session_attention,
         "pending input overrides the idle blue"
     );
 
     assert_eq!(
-        band(Some(&read_idle), false, SessionState::Provisioning),
+        band(
+            Some(&read_idle),
+            AttentionLevel::Working,
+            SessionState::Provisioning
+        ),
         theme::palette().session_activity,
         "provisioning is a lifecycle state, not a live idle session"
     );
     assert_eq!(
-        band(Some(&read_idle), false, SessionState::Error),
+        band(
+            Some(&read_idle),
+            AttentionLevel::Failed,
+            SessionState::Error
+        ),
         theme::palette().session_error,
         "error overrides idle"
     );
     assert_eq!(
-        band(None, false, SessionState::Running),
+        band(None, AttentionLevel::Idle, SessionState::Running),
         theme::palette().session_activity,
         "unknown detail stays at the default"
     );
 
     assert_eq!(
-        band(Some(&unread), true, SessionState::Running),
+        band(
+            Some(&unread),
+            AttentionLevel::Unreachable,
+            SessionState::Running
+        ),
         theme::palette().session_error,
         "an unreachable worker is red, overriding every other state"
     );
     assert_eq!(
-        band(None, true, SessionState::Running),
+        band(None, AttentionLevel::Unreachable, SessionState::Running),
         theme::palette().session_error
     );
 }
@@ -1192,7 +1253,13 @@ fn the_minimized_list_colours_a_session_row_by_state() {
         buffer[(cell_column(&lines[row], "ACP pretty"), row as u16)].fg
     };
 
-    let healthy = minimized_sessions_dashboard(1, 1);
+    let mut healthy = minimized_sessions_dashboard(1, 1);
+    crate::test_support::serve_attention(
+        &mut healthy,
+        &["session-00"],
+        mj_core::attention::SessionAttention::Idle,
+    );
+
     assert_eq!(colour_of(healthy), theme::palette().session_idle);
 
     let mut busy = minimized_sessions_dashboard(1, 1);
@@ -1200,6 +1267,11 @@ fn the_minimized_list_colours_a_session_row_by_state() {
         .get_mut("session-00")
         .expect("the session detail")
         .current_turn_started_at = Some(1);
+    crate::test_support::serve_attention(
+        &mut busy,
+        &["session-00"],
+        mj_core::attention::SessionAttention::Working,
+    );
     assert_eq!(colour_of(busy), theme::palette().session_activity);
 
     let mut failed = minimized_sessions_dashboard(1, 1);
@@ -1211,6 +1283,11 @@ fn the_minimized_list_colours_a_session_row_by_state() {
             .expect("the session");
         session.state = SessionState::Error;
     }
+    crate::test_support::serve_attention(
+        &mut failed,
+        &["session-00"],
+        mj_core::attention::SessionAttention::Failed,
+    );
     assert_eq!(colour_of(failed), theme::palette().session_error);
 }
 
@@ -1448,6 +1525,11 @@ fn a_failed_session_draws_a_red_summary_at_both_pane_sizes() {
             dashboard_with_session(session)
         };
         failed.set_pane_size(SupportPane::Sessions, size);
+        crate::test_support::serve_attention(
+            &mut failed,
+            &["session-1"],
+            mj_core::attention::SessionAttention::Failed,
+        );
 
         let row_colour = |dashboard: &mut DashboardState| {
             let mut terminal = Terminal::new(TestBackend::new(120, 44)).expect("terminal");
@@ -4026,6 +4108,16 @@ fn golden_operator_away_dialog() {
                 ),
             );
             classified.push((materialized, assessment));
+            let id = format!("waiting-{index}");
+            crate::test_support::serve_attention(
+                &mut dashboard,
+                &[&id],
+                if index == 3 {
+                    mj_core::attention::SessionAttention::Idle
+                } else {
+                    mj_core::attention::SessionAttention::NeedsInput
+                },
+            );
         }
         dashboard.set_operator_presence(mj_core::state::OperatorPresence {
             away: true,
@@ -4039,6 +4131,11 @@ fn golden_operator_away_dialog() {
                 .unwrap()
                 .pending_elicitations
                 .clear();
+            crate::test_support::serve_attention(
+                &mut dashboard,
+                &["waiting-0"],
+                mj_core::attention::SessionAttention::Idle,
+            );
             append_dashboard_golden(
                 &mut output,
                 "AFK classifier intervention only",
@@ -4047,6 +4144,11 @@ fn golden_operator_away_dialog() {
                 &mut dashboard,
             );
             for (mut materialized, assessment) in classified {
+                crate::test_support::serve_attention(
+                    &mut dashboard,
+                    &[&materialized.session_id],
+                    mj_core::attention::SessionAttention::Idle,
+                );
                 materialized.applied_event_ordinal += 1;
                 materialized.pending_elicitations.clear();
                 let assessment = assessment.map(|mut assessment| {

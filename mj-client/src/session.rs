@@ -34,6 +34,7 @@ impl ViewError {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ManagedSessionView {
+    pub attention: mj_core::attention::SessionAttention,
     pub snapshot: Option<ManagedSessionSnapshot>,
     pub connected: bool,
     pub error: Option<ViewError>,
