@@ -340,14 +340,35 @@ pub(super) fn finish_operation(
                 }
             }
             "session" => {
-                if interns.is_none() {
-                    interns = Some(state_io::SessionInterns::from_state(&state)?);
+                // Most writes (drafts, titles, lifecycle fields) leave the
+                // project and runtime unchanged: reuse this record's values.
+                // Only a changed value consults the pool over all sessions.
+                let previous = state.sessions.get(key);
+                let mut local = state_io::SessionInterns::from_record(previous)?;
+                let mut record =
+                    state_io::load_session_interned_with(&transaction, key, &mut local)?;
+                fn fresh<T>(
+                    value: &Option<std::sync::Arc<T>>,
+                    old: Option<&Option<std::sync::Arc<T>>>,
+                ) -> bool {
+                    value.as_ref().is_some_and(|value| {
+                        old.and_then(Option::as_ref)
+                            .is_none_or(|old| !std::sync::Arc::ptr_eq(old, value))
+                    })
                 }
-                let record = state_io::load_session_interned_with(
-                    &transaction,
-                    key,
-                    interns.as_mut().unwrap(),
-                )?;
+                let new_shared_value = record.as_ref().is_some_and(|record| {
+                    fresh(&record.project, previous.map(|old| &old.project))
+                        || fresh(
+                            &record.target_runtime,
+                            previous.map(|old| &old.target_runtime),
+                        )
+                });
+                if new_shared_value && let Some(record) = record.as_mut() {
+                    if interns.is_none() {
+                        interns = Some(state_io::SessionInterns::from_state(&state)?);
+                    }
+                    interns.as_mut().unwrap().share(record)?;
+                }
                 let membership_changed = state.sessions.contains_key(key) != record.is_some();
                 if state.sessions.get(key) != record.as_ref() {
                     match record {

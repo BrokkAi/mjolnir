@@ -34,6 +34,45 @@ impl SessionInterns {
         }
         Ok(pool)
     }
+
+    /// A pool holding only one record's values. A refresh that leaves a
+    /// session's project and runtime unchanged reuses that record's
+    /// allocations without visiting any other session.
+    pub(super) fn from_record(record: Option<&SessionRecord>) -> Result<Self> {
+        let mut pool = Self::default();
+        if let Some(record) = record {
+            if let Some(value) = &record.project {
+                pool.projects
+                    .insert(serde_json::to_string(value)?, value.clone());
+            }
+            if let Some(value) = &record.target_runtime {
+                pool.runtimes
+                    .insert(serde_json::to_string(value)?, value.clone());
+            }
+        }
+        Ok(pool)
+    }
+
+    /// Replace a record's values with equal ones already in this pool.
+    pub(super) fn share(&mut self, record: &mut SessionRecord) -> Result<()> {
+        if let Some(value) = &record.project {
+            let shared = self
+                .projects
+                .entry(serde_json::to_string(value)?)
+                .or_insert_with(|| value.clone())
+                .clone();
+            record.project = Some(shared);
+        }
+        if let Some(value) = &record.target_runtime {
+            let shared = self
+                .runtimes
+                .entry(serde_json::to_string(value)?)
+                .or_insert_with(|| value.clone())
+                .clone();
+            record.target_runtime = Some(shared);
+        }
+        Ok(())
+    }
 }
 
 fn decode_shared<T: serde::de::DeserializeOwned>(
