@@ -128,9 +128,11 @@ impl Reclamation {
                     scope.spawn(move || {
                         permit.scope_blocking(|| -> Result<()> {
                             let root = targets::worker_root(target, &worker.session_id)?;
-                            if let Err(error) =
-                                super::worker_binary::stop_worker(permit, executor, target, &root)
-                            {
+                            // Retirement removes the root next, so the worker
+                            // gets no TERM grace: nothing in it needs flushing.
+                            if let Err(error) = super::worker_binary::kill_retired_worker(
+                                permit, executor, target, &root,
+                            ) {
                                 if !targets::is_borrowed(target)
                                     && targets::cleanup_target_is_confirmed_absent(
                                         target,
@@ -605,7 +607,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(command.purpose.clone());
-            if command.purpose == "stop Mjolnir worker daemon" {
+            if command.purpose == "kill retired Mjolnir worker daemon" {
                 if let Some(barrier) = &self.stop_barrier {
                     barrier.wait();
                 }
@@ -633,6 +635,10 @@ mod tests {
 
     // Hard-won: old-placement cleanup cleared the replacement worker's restart intent.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+    )]
     fn retiring_a_move_source_preserves_the_destination_restart_intent() {
         const TEST: &str = "retiring_a_move_source_preserves_the_destination_restart_intent";
         const CHILD: &str = "MJ_TEST_MOVE_SOURCE_RETIREMENT";
@@ -692,6 +698,10 @@ mod tests {
 
     // Hard-won: #1506: retirement serialized historical workers and stopped each twice.
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+    )]
     fn retirement_drains_an_admitted_child_and_refuses_later_launch_and_registration() {
         const TEST: &str =
             "retirement_drains_an_admitted_child_and_refuses_later_launch_and_registration";
@@ -794,7 +804,10 @@ mod tests {
             Reclamation::acquire(environment, &Config::default(), executor.as_ref()).unwrap();
         assert_eq!(
             executor.operations.lock().unwrap().as_slice(),
-            ["stop Mjolnir worker daemon", "stop Mjolnir worker daemon"]
+            [
+                "kill retired Mjolnir worker daemon",
+                "kill retired Mjolnir worker daemon"
+            ]
         );
         authority.remove_targets(executor.as_ref()).unwrap();
         authority.finish().unwrap();

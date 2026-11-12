@@ -1097,6 +1097,7 @@ fn bootstrap(zfs_cache: bool) -> String {
     format!(
         r#"#!/bin/bash
 set -euxo pipefail
+{ssh_setup}
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y podman uidmap slirp4netns fuse-overlayfs dbus-user-session git curl ca-certificates mold {packages}
@@ -1105,6 +1106,7 @@ systemctl start user@1000.service
 {zfs}
 sudo -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 podman info --format '{{{{.Host.Security.Rootless}}}}'
 "#,
+        ssh_setup = include_str!("ec2_sshd.sh"),
         packages = if zfs_cache { "zfsutils-linux" } else { "" }
     )
 }
@@ -1128,9 +1130,11 @@ fn nitro_bootstrap(architecture: &str) -> String {
             "1ac8eec866dd5eea14efecf6323e22b23eea24054545338a5b34bc5bca6623cd",
         )
     };
+    let ssh_setup = include_str!("ec2_sshd.sh");
     format!(
         r#"#!/bin/bash
 set -euxo pipefail
+{ssh_setup}
 # AL2023 ships curl-minimal, which provides curl and conflicts with the curl package.
 dnf install -y nftables e2fsprogs dracut git tar
 tmp=$(mktemp -d)
@@ -1221,6 +1225,11 @@ elif op == 'run-instances':
         assert 'Throughput' not in ebs and 'Iops' not in ebs
     import base64
     bootstrap = base64.b64decode(request['UserData']).decode()
+    assert '/etc/ssh/sshd_config.d/60-mj-mux.conf' in bootstrap
+    assert 'MaxSessions 200\nMaxStartups 100:30:300' in bootstrap
+    assert 'sshd -t\nsystemctl reload "$ssh_unit"' in bootstrap
+    assert bootstrap.index('systemctl start "$ssh_unit"') < bootstrap.index('cat > /etc/ssh/sshd_config.d/60-mj-mux.conf')
+    assert 'Include /etc/ssh/sshd_config.d/*.conf' in bootstrap
     if (root/'nitro').exists():
         assert request['EnclaveOptions'] == {'Enabled':True}
         assert 'dnf install -y nftables e2fsprogs dracut git tar\n' in bootstrap

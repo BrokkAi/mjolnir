@@ -18,9 +18,6 @@
     reason = "this module exists to wrap wait_with_output safely"
 )]
 
-#[cfg(unix)]
-pub mod owned_group;
-
 use std::io::{ErrorKind, Write};
 use std::path::Path;
 use std::process::{Command, ExitStatus, Output, Stdio};

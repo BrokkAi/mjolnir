@@ -381,6 +381,7 @@ fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         reviewer_launch: None,
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
+        subagent_kind: None,
         agent_mailboxes_enabled: true,
         subtle_subagents: true,
         initial_model: None,

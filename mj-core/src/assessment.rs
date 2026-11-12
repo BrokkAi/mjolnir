@@ -10,6 +10,13 @@ use crate::continuation::{ASSISTANT_BYTES, EvidenceMessage, USER_BYTES};
 
 pub const PROTOCOL: u32 = 25;
 pub const AUTOMATION_CONFIDENCE: f32 = 0.90;
+/// A handback bounces when unfinished leads finished by at least this share of
+/// the two, and the stop categories together stay at or below
+/// [`HANDBACK_STOP_PROBABILITY`]. Measured 2026-11-11 on 428 labeled handbacks:
+/// the recall of P(unfinished) >= .50 with half its false bounces, which were
+/// mostly permitted stops. Chosen after the holdout was read; unconfirmed.
+pub const HANDBACK_UNFINISHED_SHARE: f64 = 0.30;
+pub const HANDBACK_STOP_PROBABILITY: f64 = 0.30;
 pub const REQUIRED_INPUT_PROBABILITY: f64 = 0.50;
 pub const REQUIRED_INPUT_RATIO: f64 = 2.5;
 pub const FINISHED_WORK_PROBABILITY: f64 = 0.80;
@@ -84,6 +91,81 @@ pub struct Verdict {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply: Option<Judgment<Reply>>,
 }
+/// GLiDE handback distribution; all six categories are required at the boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HandbackProbabilities {
+    pub unfinished: f64,
+    pub needs_parent_input: f64,
+    pub blocked: f64,
+    pub permitted_stop: f64,
+    pub finished: f64,
+    pub unclear: f64,
+}
+impl HandbackProbabilities {
+    pub fn parse(value: &Value) -> Result<Self> {
+        let probabilities: Self = serde_json::from_value(value.clone())?;
+        let values = [
+            probabilities.unfinished,
+            probabilities.needs_parent_input,
+            probabilities.blocked,
+            probabilities.permitted_stop,
+            probabilities.finished,
+            probabilities.unclear,
+        ];
+        ensure!(
+            values
+                .iter()
+                .all(|p| p.is_finite() && (0.0..=1.0).contains(p)),
+            "invalid handback probability"
+        );
+        // GLiDE rounds individual scores; the working client allows 0.03 total drift.
+        ensure!(
+            (values.iter().sum::<f64>() - 1.0).abs() <= 0.03,
+            "invalid handback distribution"
+        );
+        Ok(probabilities)
+    }
+}
+pub fn handback_needs_more_work(p: &HandbackProbabilities) -> bool {
+    let decided = p.unfinished + p.finished;
+    let stops = p.needs_parent_input + p.blocked + p.permitted_stop;
+    decided > 0.0
+        && p.unfinished + PROBABILITY_EPSILON >= HANDBACK_UNFINISHED_SHARE * decided
+        && stops <= HANDBACK_STOP_PROBABILITY + PROBABILITY_EPSILON
+}
+
+#[cfg(test)]
+mod handback_tests {
+    use super::*;
+
+    #[test]
+    fn handback_glide_distribution_boundary_and_malformed_answers() {
+        // Unfinished at exactly 30% of unfinished+finished, stops at exactly .30.
+        let mut value = serde_json::json!({"unfinished":0.18,"needs_parent_input":0.1,
+            "blocked":0.1,"permitted_stop":0.1,"finished":0.42,"unclear":0.1});
+        assert!(handback_needs_more_work(
+            &HandbackProbabilities::parse(&value).unwrap()
+        ));
+        value["permitted_stop"] = serde_json::json!(0.11);
+        value["unclear"] = serde_json::json!(0.09);
+        assert!(
+            !handback_needs_more_work(&HandbackProbabilities::parse(&value).unwrap()),
+            "a stop category above the guard must not bounce"
+        );
+        value["permitted_stop"] = serde_json::json!(0.1);
+        value["unfinished"] = serde_json::json!(0.17);
+        value["finished"] = serde_json::json!(0.43);
+        assert!(!handback_needs_more_work(
+            &HandbackProbabilities::parse(&value).unwrap()
+        ));
+        value["unfinished"] = serde_json::json!(-0.1);
+        assert!(HandbackProbabilities::parse(&value).is_err());
+        value.as_object_mut().unwrap().remove("unfinished");
+        assert!(HandbackProbabilities::parse(&value).is_err());
+    }
+}
+
 impl Verdict {
     pub fn parse(response: &Value) -> Result<Self> {
         fn choice<T: serde::de::DeserializeOwned>(
@@ -474,6 +556,24 @@ impl ContextHistory {
     }
 
     pub fn user(&mut self, id: &str, prompt: &[agent_client_protocol::v1::schema::ContentBlock]) {
+        self.user_with_source(id, prompt, false);
+    }
+
+    /// Include the parent's assignments only in handback-check evidence.
+    pub fn handback_user(
+        &mut self,
+        id: &str,
+        prompt: &[agent_client_protocol::v1::schema::ContentBlock],
+    ) {
+        self.user_with_source(id, prompt, true);
+    }
+
+    fn user_with_source(
+        &mut self,
+        id: &str,
+        prompt: &[agent_client_protocol::v1::schema::ContentBlock],
+        handback: bool,
+    ) {
         use agent_client_protocol::v1::schema::ContentBlock;
         self.open_assistant_id = None;
         let mut text = String::new();
@@ -489,7 +589,9 @@ impl ContextHistory {
             }
         }
         // A prompt Mjolnir submitted is not the person's, whatever it carries.
-        if !crate::continuation::is_user_authored_message(Some(id), &text) {
+        if !(crate::continuation::is_user_authored_message(Some(id), &text)
+            || handback && crate::continuation::GeneratedPrompt::is_subagent_assignment(id))
+        {
             return;
         }
         if non_text {
@@ -907,6 +1009,32 @@ mod tests {
             &typed,
         );
         assert!(context.messages.is_empty());
+        let mut handback = ContextHistory::default();
+        for id in ["subagent-spawn-first", "subagent-input-next"] {
+            context.user(id, &typed);
+            handback.handback_user(id, &typed);
+        }
+        for id in [
+            "subagent-wait-123",
+            "handback-reminder-7",
+            "session-message-turn-peer-1",
+            "mailbox-wake-8",
+            "auto-continue-9",
+        ] {
+            handback.handback_user(id, &typed);
+        }
+        assert!(
+            context.messages.is_empty(),
+            "global authorization must still exclude assignments"
+        );
+        assert_eq!(
+            handback
+                .messages
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            ["user:subagent-spawn-first", "user:subagent-input-next"]
+        );
         // Hard-won: 97731d30a: a history stored before the upgrade kept a peer message as user authorization.
         let written = serde_json::json!({
             "messages": [

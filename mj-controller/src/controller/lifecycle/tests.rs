@@ -276,7 +276,7 @@ fn target_cleanup_persists_destroying_and_rechecks_the_installed_archive() {
     );
     let commands = executor.commands.lock().unwrap().clone();
     assert_eq!(commands.len(), 2);
-    assert_eq!(commands[0].purpose, "kill retired Mjolnir worker forest");
+    assert_eq!(commands[0].purpose, "kill retired Mjolnir worker daemon");
     assert!(commands[1].args.iter().any(|arg| arg.contains("rm -rf")));
     let stopped = &controller.state.sessions[session_id];
     assert_eq!(stopped.state, SessionState::Stopped);
@@ -756,6 +756,10 @@ fn closing_a_wedged_provisioning_session_tears_down_its_target_and_settles() {
 /// The same close refuses a session that still has a workspace worth
 /// archiving, so it can never become a quiet force-destroy.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 fn closing_without_a_checkpoint_refuses_a_session_that_has_one_to_take() {
     if !in_isolated_store("closing_without_a_checkpoint_refuses_a_session_that_has_one_to_take") {
         return;
@@ -1295,6 +1299,10 @@ fn reconciling_an_orphaned_in_flight_state_records_a_readable_cause() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 fn force_stop_without_a_recovery_archive_does_not_touch_the_target() {
     if !in_isolated_store("force_stop_without_a_recovery_archive_does_not_touch_the_target") {
         return;

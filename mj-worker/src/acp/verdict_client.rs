@@ -2,7 +2,9 @@
 use anyhow::{Context, Result, ensure};
 use mj_core::activity::question_locator;
 use mj_core::activity::verdict::{TurnEvidence, TurnVerdict, api_key, questions, request_fits};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 /// The Unix worker is the only production caller of the classifier client;
 /// these items stay compiled on Windows alongside the shared source type.
@@ -85,6 +87,8 @@ impl VerdictAttempt {
         });
         if let Some(diagnostic) = &self.diagnostic {
             let (status, action) = match (outcome, reason) {
+                ("bounced", "handback_unfinished") => ("bounced", "Handback was not delivered; the child was asked to continue unfinished assigned work.".into()),
+                ("delivered", "handback_accepted") => ("delivered", "Handback check allowed delivery to the parent.".into()),
                 (_, "assessment_uncertain") => ("uncertain", "Jev was uncertain; Mj retained the result until relevant evidence changes.".into()),
                 (_, "authorized_continuation_ready") => ("deferred", "Authorized unfinished work remains; continuation awaits atomic worker admission.".into()),
                 (_, "quota_resolution_required") => ("deferred", "Subscription quota reached; the controller will resolve the provider reset deadline.".into()),
@@ -442,9 +446,13 @@ impl VerdictClient {
         self
     }
 
-    fn request_body(&self, evidence: &TurnEvidence) -> serde_json::Value {
+    fn request_body(
+        &self,
+        evidence: &TurnEvidence,
+        question_set: &serde_json::Value,
+    ) -> serde_json::Value {
         let direct_questions = match self.source {
-            VerdictSource::Direct { .. } => Some(questions()),
+            VerdictSource::Direct { .. } => Some(question_set.clone()),
             VerdictSource::Hosted { .. } => None,
         };
         mj_core::jev::request_body(evidence, direct_questions)
@@ -456,8 +464,94 @@ impl VerdictClient {
         generation: u64,
         evidence: &TurnEvidence,
     ) -> (VerdictAttempt, Result<TurnVerdict>) {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
+        self.ask_logged_for(session, generation, evidence, questions())
+            .await
+    }
+
+    pub(crate) async fn ask_handback_logged(
+        &self,
+        session: &str,
+        generation: u64,
+        evidence: &TurnEvidence,
+    ) -> (
+        VerdictAttempt,
+        Result<mj_core::assessment::HandbackProbabilities>,
+    ) {
+        let diagnostic = self.log.as_ref().map(|log| {
+            log.start(
+                session,
+                "activity",
+                "Does this handback leave assigned work unfinished?",
+                "Parent assignment and final report.",
+            )
+        });
+        let body = mj_core::jev::request_body(evidence, None);
+        if let Some(log) = &diagnostic {
+            log.update(
+                None,
+                serde_json::json!({"request":body,"contract":"handback-glide-v1",
+                "model":"fastino/GLiDE","handback":true,
+                "unfinished_share":mj_core::assessment::HANDBACK_UNFINISHED_SHARE,
+                "stop_probability_limit":mj_core::assessment::HANDBACK_STOP_PROBABILITY}),
+            );
+        }
+        let attempt = VerdictAttempt {
+            diagnostic,
+            decision: None,
+            uncertain: false,
+            id: NEXT_REQUEST.fetch_add(1, Ordering::Relaxed),
+            session: session.into(),
+            generation,
+            phase: evidence.phase,
+            started: std::time::Instant::now(),
+            finished: false,
+            dispatch: tracing::dispatcher::get_default(Clone::clone),
+        };
+        let result = async {
+            // Explicit endpoints support isolated proxy fixtures; no provider key leaves the worker.
+            let endpoint = match &self.source {
+                VerdictSource::Direct { endpoint, .. } if cfg!(test) => endpoint.clone(),
+                VerdictSource::Direct { .. } => {
+                    HOSTED_VERDICT_ENDPOINT.replace("/v7/turn-verdict", "/v1/handback-verdict")
+                }
+                VerdictSource::Hosted { endpoint } => {
+                    let mut url = reqwest::Url::parse(endpoint)?;
+                    url.set_path("/v1/handback-verdict");
+                    url.to_string()
+                }
+            };
+            let response = self.client.post(endpoint).json(&body).send().await?;
+            ensure!(
+                response.status().is_success(),
+                "GLiDE proxy HTTP {} (Retry-After: {:?})",
+                response.status(),
+                response.headers().get(reqwest::header::RETRY_AFTER)
+            );
+            let response = response.json::<serde_json::Value>().await?;
+            mj_core::assessment::HandbackProbabilities::parse(&response["probabilities"])
+        }
+        .await;
+        if let Some(log) = &attempt.diagnostic {
+            match &result {
+                Ok(probabilities) => {
+                    log.update(None, serde_json::json!({"probabilities":probabilities}))
+                }
+                Err(error) => log.update(
+                    Some("No usable GLiDE answer; deliver unchecked."),
+                    serde_json::json!({"error":format!("{error:#}")}),
+                ),
+            }
+        }
+        (attempt, result)
+    }
+
+    async fn ask_logged_for(
+        &self,
+        session: &str,
+        generation: u64,
+        evidence: &TurnEvidence,
+        question_set: serde_json::Value,
+    ) -> (VerdictAttempt, Result<TurnVerdict>) {
         // Completed-turn diagnostics belong to the durable relay owner. A
         // request can finish after its turn was superseded or its action admitted.
         let diagnostic = self
@@ -473,7 +567,7 @@ impl VerdictClient {
                 )
             });
         if let Some(diagnostic) = &diagnostic {
-            diagnostic.update(None, serde_json::json!({"request":self.request_body(evidence), "contract":"turn-verdict-v7", "questions":questions(), "model":"jev-latest", "confidence_threshold":mj_core::activity::verdict::ACT_CONFIDENCE, "no_input_threshold":mj_core::activity::verdict::NO_INPUT_CONFIDENCE, "required_input_probability":mj_core::assessment::REQUIRED_INPUT_PROBABILITY, "required_input_ratio":mj_core::assessment::REQUIRED_INPUT_RATIO, "finished_work_probability":mj_core::assessment::FINISHED_WORK_PROBABILITY, "stale_failure_probability":mj_core::activity::verdict::STALE_FAILURE_PROBABILITY, "stale_reply_probability":mj_core::activity::verdict::STALE_REPLY_PROBABILITY, "stale_finished_silence_s":mj_core::activity::verdict::STALE_FINISHED_SILENCE.as_secs(), "server_retry_threshold":mj_core::activity::verdict::SERVER_RETRY_CONFIDENCE, "generation":generation, "source":if matches!(self.source, VerdictSource::Direct { .. }) { "direct" } else { "hosted" }}));
+            diagnostic.update(None, serde_json::json!({"request":self.request_body(evidence, &question_set), "contract":"turn-verdict-v7", "questions":question_set, "model":"jev-latest", "confidence_threshold":mj_core::activity::verdict::ACT_CONFIDENCE, "no_input_threshold":mj_core::activity::verdict::NO_INPUT_CONFIDENCE, "required_input_probability":mj_core::assessment::REQUIRED_INPUT_PROBABILITY, "required_input_ratio":mj_core::assessment::REQUIRED_INPUT_RATIO, "finished_work_probability":mj_core::assessment::FINISHED_WORK_PROBABILITY, "stale_failure_probability":mj_core::activity::verdict::STALE_FAILURE_PROBABILITY, "stale_reply_probability":mj_core::activity::verdict::STALE_REPLY_PROBABILITY, "stale_finished_silence_s":mj_core::activity::verdict::STALE_FINISHED_SILENCE.as_secs(), "server_retry_threshold":mj_core::activity::verdict::SERVER_RETRY_CONFIDENCE, "generation":generation, "source":if matches!(self.source, VerdictSource::Direct { .. }) { "direct" } else { "hosted" }}));
         }
         let mut attempt = VerdictAttempt {
             diagnostic,
@@ -496,7 +590,7 @@ impl VerdictClient {
             summary_bytes = evidence.transcript_summary.len(),
             active_tools = evidence.tools_in_flight.len(),
             "Jev classification requested");
-        let result = self.ask(evidence).await;
+        let result = self.ask(evidence, &question_set).await;
         if let Some(diagnostic) = &attempt.diagnostic {
             match &result {
                 Ok(answer) => {
@@ -526,7 +620,11 @@ impl VerdictClient {
         (attempt, result)
     }
 
-    pub(crate) async fn ask(&self, evidence: &TurnEvidence) -> Result<TurnVerdict> {
+    pub(crate) async fn ask(
+        &self,
+        evidence: &TurnEvidence,
+        question_set: &serde_json::Value,
+    ) -> Result<TurnVerdict> {
         const MAX_RESPONSE_BYTES: usize = 64 * 1024;
         // Both sources are held to the direct shape: the proxy adds the same
         // questions before it calls TypeSafe.
@@ -539,11 +637,11 @@ impl VerdictClient {
                 .client
                 .post(endpoint)
                 .bearer_auth(key)
-                .json(&self.request_body(evidence)),
+                .json(&self.request_body(evidence, question_set)),
             VerdictSource::Hosted { endpoint } => self
                 .client
                 .post(endpoint)
-                .json(&self.request_body(evidence)),
+                .json(&self.request_body(evidence, question_set)),
         };
         let mut response = request
             .send()
@@ -936,7 +1034,7 @@ mod tests {
                 socket.write_all(format!("HTTP/1.1 {status} Result\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
             });
             let client = VerdictClient::new(VerdictSource::Hosted { endpoint }).unwrap();
-            let result = client.ask(&secret_bearing).await;
+            let result = client.ask(&secret_bearing, &questions()).await;
             assert_eq!(result.is_ok(), status == 200);
             if let Ok(verdict) = result {
                 assert_eq!(verdict.work_state, WorkState::BackgroundWork);
@@ -948,7 +1046,7 @@ mod tests {
     #[tokio::test]
     async fn oversized_classifier_body_is_rejected() {
         let (client, server) = server(" ".repeat(128 * 1024)).await;
-        let error = client.ask(&evidence()).await.unwrap_err();
+        let error = client.ask(&evidence(), &questions()).await.unwrap_err();
         assert!(error.to_string().contains("exceeds byte limit"));
         server.await.unwrap();
     }

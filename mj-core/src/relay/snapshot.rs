@@ -1078,6 +1078,9 @@ pub struct MailboxHookSteering {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum RelayObservation {
+    HandbackCheckStarted {
+        assignment_id: String,
+    },
     TurnAssessmentUpdated {
         assessment: Box<crate::assessment::TurnAssessment>,
     },
@@ -1449,9 +1452,21 @@ fn relay_command_digest(command: &RelayCommand) -> anyhow::Result<String> {
     )?)))
 }
 
+/// Worker-owned assignment identity and evidence, replayed from delivery events.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HandbackChecks {
+    pub assignment_id: Option<String>,
+    pub checked: std::collections::BTreeSet<String>,
+    /// Instructions only, allocated on the first delivered parent assignment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<crate::assessment::ContextHistory>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RelaySnapshot {
+    #[serde(default)]
+    pub handback_checks: HandbackChecks,
     /// Survives queue removal and receipt GC, fencing reminders for older turns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_prompt_accepted_ordinal: Option<u64>,
@@ -1620,6 +1635,7 @@ impl RelaySnapshot {
     }
     pub fn new(session_id: String) -> Self {
         Self {
+            handback_checks: Default::default(),
             assessment_questions: Default::default(),
             assessment: None,
             assessment_context: Some(Default::default()),

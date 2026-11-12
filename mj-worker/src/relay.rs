@@ -278,6 +278,7 @@ pub struct DurableRelay {
     /// long build was failed as if the harness had died (#1020).
     foreground_tools: mj_core::activity::ToolsInFlight,
     turn_context: mj_transcript::turn_context::TurnContext,
+    managed_subagent: bool,
     verdict_harness: Option<mj_core::config::HarnessKind>,
     replied_verdict: verdict::RepliedVerdictState,
     /// Adapter-owned tasks, keyed by their owning session and task identity.
@@ -300,6 +301,10 @@ pub struct DurableRelay {
     /// Whether the daemon will act on a `Continue` verdict. Off when the
     /// launch environment says automatic continuation is disabled.
     continuation_enabled: bool,
+    /// The classifier the sub-agent handback check asks. Only the Unix worker
+    /// sets and reads it; the field stays on Windows so the relay type matches.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) handback_verdict_client: Option<crate::acp::verdict_client::VerdictClient>,
     /// When a Claude background task last completed or failed, until the
     /// harness turn that answers it opens. Claude Code always follows such a
     /// settle with a task-notification turn; publishing the settle time lets
@@ -601,6 +606,7 @@ impl DurableRelay {
             background_work: BackgroundWorkPolicy::default(),
             foreground_tools: mj_core::activity::ToolsInFlight::default(),
             turn_context: Default::default(),
+            managed_subagent: false,
             verdict_harness: None,
             replied_verdict: Default::default(),
             air_tasks: BTreeMap::new(),
@@ -611,6 +617,7 @@ impl DurableRelay {
             kimi_observed_tool_ids: BTreeSet::new(),
             background_work_known: None,
             continuation_enabled: true,
+            handback_verdict_client: None,
             task_settled_at_ms: None,
             active_agent_terminals: BTreeMap::new(),
             closed_agent_terminals: BTreeSet::new(),
@@ -1093,6 +1100,13 @@ impl DurableRelay {
     /// Whether a `Continue` verdict may be parked for the daemon to act on.
     pub fn set_continuation_enabled(&mut self, enabled: bool) {
         self.continuation_enabled = enabled;
+    }
+
+    /// Launch metadata owns this fact, including older environment-only launches.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn set_managed_subagent(&mut self, managed: bool) -> Result<()> {
+        self.managed_subagent = managed;
+        self.suppress_child_assessment()
     }
 
     pub fn set_turn_verdict_harness(&mut self, harness: mj_core::config::HarnessKind) {
@@ -1734,3 +1748,6 @@ mod attachment_tests;
 
 #[cfg(test)]
 mod continuation_tests;
+
+#[cfg(test)]
+mod handback_tests;
