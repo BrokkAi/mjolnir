@@ -7,7 +7,7 @@ import os, pathlib, socket, subprocess, tempfile, time, json
 parser = argparse.ArgumentParser()
 parser.add_argument("--mj", required=True)
 parser.add_argument("--instance", required=True)
-parser.add_argument("--scenario", choices=["control"], required=True)
+parser.add_argument("--scenario", choices=["control", "http"], required=True)
 options = parser.parse_args()
 assert options.instance != "default", "a named isolated instance is required"
 binary = str(pathlib.Path(options.mj).resolve())
@@ -27,6 +27,39 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
     )
     (p / "config").mkdir()
     (p / "data").mkdir()
+    # Wildcard advertisement deliberately differs from local_address (127.0.0.1).
+    # strace verifies the destination even though this fixture shares loopback.
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            str(p / "key.pem"),
+            "-out",
+            str(p / "cert.pem"),
+            "-days",
+            "1",
+            "-subj",
+            "/CN=ssh-http-test",
+            "-addext",
+            "subjectAltName=IP:0.0.0.0",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    (p / "config" / "config.toml").write_text(
+        'version = 22\n[phone]\nbind="0.0.0.0:0"\ntailscale_detect=false\n'
+        + "tls_cert="
+        + json.dumps(str(p / "cert.pem"))
+        + "\n"
+        + "tls_key="
+        + json.dumps(str(p / "key.pem"))
+        + "\n"
+    )
     wrapper = p / "remote-mj"
     wrapper.write_text(
         f'#!/bin/sh\nexport MJ_CONFIG_DIR={p}/config\nexport MJ_DATA_DIR={p}/data\nexec {binary} "$@"\n'
@@ -75,6 +108,15 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
                 MJ_DATA_DIR=str(p / "client-data"),
             )
             command = [binary, "--instance", options.instance, "sessions"]
+            if options.scenario == "http":
+                command = [
+                    "strace",
+                    "-f",
+                    "-e",
+                    "trace=connect",
+                    "-o",
+                    str(p / "connect.log"),
+                ] + command
             for phase in range(2):
                 result = subprocess.run(
                     command, env=client_env, text=True, capture_output=True, timeout=120
@@ -82,6 +124,10 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
                 assert result.returncode == 0, result.stderr
                 assert not list((p / "client-data").rglob("daemon.json"))
                 assert not list((p / "client-data").rglob("*.db"))
+                assert not list((p / "client-data").rglob("api-token*"))
+                if options.scenario == "http":
+                    trace = (p / "connect.log").read_text()
+                    assert 'sin_addr=inet_addr("0.0.0.0")' in trace, trace
                 if phase == 0:
                     subprocess.run(
                         [
@@ -94,6 +140,39 @@ with tempfile.TemporaryDirectory(prefix="mj-ssh-discovery-") as d:
                         check=True,
                         timeout=120,
                     )
+            if options.scenario == "http":
+                (p / "config" / "config.toml").write_text(
+                    'version = 22\n[phone]\nbind="127.0.0.1:0"\ntailscale_detect=false\n'
+                )
+                subprocess.run(
+                    [str(wrapper), "--instance", options.instance, "daemon", "restart"],
+                    check=True,
+                    timeout=120,
+                )
+                result = subprocess.run(
+                    [binary, "--instance", options.instance, "sessions"],
+                    env=client_env,
+                    text=True,
+                    capture_output=True,
+                    timeout=120,
+                )
+                assert result.returncode != 0
+                for expected in [
+                    "the viewer is unreachable from this computer",
+                    "tailscale_detect",
+                    "tls_cert",
+                    "tls_key",
+                    str(p / "config" / "config.toml"),
+                ]:
+                    assert expected in result.stderr, result.stderr
+                result = subprocess.run(
+                    [binary, "--instance", options.instance, "api-token"],
+                    env=client_env,
+                    text=True,
+                    capture_output=True,
+                    timeout=120,
+                )
+                assert result.returncode == 0, result.stderr
             print(
                 "PASS: SSH sessions before/after remote restart; no client metadata/store"
             )

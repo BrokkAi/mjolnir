@@ -46,6 +46,36 @@ impl DaemonConnector {
         self.placement.runtime == DaemonRuntime::Ssh
     }
 
+    /// Validate a browser/HTTP destination against the transport's machine origin.
+    pub async fn validate_viewer_url(&self, viewer_url: &str) -> Result<()> {
+        if !self.is_ssh() {
+            return Ok(());
+        }
+        let url = url::Url::parse(viewer_url)?;
+        let loopback = match url.host() {
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            Some(url::Host::Domain(host)) => {
+                host.eq_ignore_ascii_case("localhost")
+                    || host.to_ascii_lowercase().ends_with(".localhost")
+            }
+            None => false,
+        };
+        if loopback {
+            let lease = self.lease.lock().await;
+            let path = lease
+                .as_ref()
+                .and_then(|lease| lease.endpoint.config_path.as_ref())
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "the remote config.toml".into());
+            anyhow::bail!(
+                "the viewer is unreachable from this computer; on {} enable [phone] tailscale_detect with working Tailscale, or set [phone] bind to a reachable address with tls_cert and tls_key; remote config: {path}",
+                self.placement.host.as_deref().unwrap_or("the SSH host")
+            );
+        }
+        Ok(())
+    }
+
     /// The CLI supplies local lifecycle policy without a client dependency on it.
     pub async fn connect_or_start<F, Fut>(self: &Arc<Self>, local: F) -> Result<DaemonClient>
     where

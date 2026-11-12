@@ -2591,6 +2591,8 @@ pub async fn print_endpoint(existing: bool) -> Result<()> {
     } else {
         connect_or_start().await?
     };
-    println!("{}", serde_json::to_string(&client.endpoint().await?)?);
+    let mut endpoint = client.endpoint().await?;
+    endpoint.config_path = Some(mj_core::config::config_path());
+    println!("{}", serde_json::to_string(&endpoint)?);
     Ok(())
 }
