@@ -791,6 +791,7 @@ mod tests {
                     harness: mj_core::config::HarnessKind::Codex,
                     windows: Vec::new(),
                     paid_credits: None,
+                    monthly_price_usd: None,
                     banked_resets: None,
                     extra: None,
                     error: None,
@@ -806,6 +807,7 @@ mod tests {
                 harness: mj_core::config::HarnessKind::Codex,
                 windows: Vec::new(),
                 paid_credits: None,
+                monthly_price_usd: None,
                 banked_resets: None,
                 extra: None,
                 error: Some("old request failed".into()),
@@ -826,6 +828,7 @@ mod tests {
     fn published_quota_snapshot_keeps_claude_fable_and_hides_other_scopes() {
         let report = ProfileQuota {
             paid_credits: None,
+            monthly_price_usd: None,
             banked_resets: None,
             profile_id: "claude".into(),
             harness: mj_core::config::HarnessKind::Claude,

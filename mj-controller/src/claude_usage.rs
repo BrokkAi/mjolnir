@@ -28,6 +28,7 @@ pub(crate) const LOGIN_EXPIRED: &str = "login expired";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaudeUsageReport {
+    pub monthly_price_usd: Option<u32>,
     pub paid_credits: Option<mj_client::quota::PaidCredits>,
     pub banked_resets: Option<u64>,
     pub five_hour: Option<ClaudeUsageWindow>,
@@ -90,7 +91,16 @@ pub async fn query(
     if cfg!(target_os = "macos") {
         let executor = Arc::new(CancellableProcessExecutor::with_timeout(CLI_USAGE_TIMEOUT));
         let _cancel = executor.cancel_on_drop();
-        return query_cli_with(environment, executor).await;
+        let mut report = query_cli_with(environment, executor.clone()).await?;
+        let source = LoginSource::Keychain {
+            lock_marker: home.join(".credentials.json"),
+            security: executor,
+        };
+        match source.read().await {
+            Ok(credentials) => report.monthly_price_usd = monthly_price_usd(&credentials),
+            Err(error) => tracing::warn!(%error, "Claude subscription price unavailable"),
+        }
+        return Ok(report);
     }
     // The login exchange runs under no deadline of mj's and survives this
     // future being dropped: see `run_claude_refresh`.
@@ -318,7 +328,7 @@ async fn query_with_runtime(
         .map_err(|error| ClaudeUsageError::Query(error.to_string()))?;
     let credentials = read_credentials(&home).await?;
     match oauth_access_token(&credentials, mj_core::clock::epoch_millis()) {
-        Ok(token) => match query_api(&client, usage_url, token).await {
+        Ok(token) => match query_api(&client, usage_url, token, &credentials).await {
             Err(ClaudeUsageError::LoginExpired) if oauth_has_refresh_token(&credentials) => {
                 refresh_and_retry(
                     &client,
@@ -366,12 +376,14 @@ async fn query_api(
     client: &reqwest::Client,
     usage_url: &str,
     token: &str,
+    credentials: &Value,
 ) -> Result<ClaudeUsageReport, ClaudeUsageError> {
     let mut url = reqwest::Url::parse(usage_url)
         .map_err(|error| ClaudeUsageError::Query(error.to_string()))?;
     url.query_pairs_mut().append_pair("cedar_ember", "1");
     let payload = query_oauth_json(client, url, token, USAGE_TIMEOUT, None).await?;
     let mut report = parse_api_usage(&payload).ok_or(ClaudeUsageError::Parse)?;
+    report.monthly_price_usd = monthly_price_usd(credentials);
     if let Some(extra) = payload
         .get("extra_usage")
         .filter(|extra| extra.get("is_enabled").and_then(Value::as_bool) == Some(true))
@@ -519,7 +531,7 @@ async fn refresh_and_retry(
         && rejected_token.as_deref() != Some(token)
     {
         drop(locks);
-        return query_api(client, usage_url, token).await;
+        return query_api(client, usage_url, token, &active).await;
     }
     let credentials = renew_locked(
         active,
@@ -536,7 +548,7 @@ async fn refresh_and_retry(
     .await?;
     let token = oauth_access_token(&credentials, mj_core::clock::epoch_millis())
         .map_err(|error| ClaudeUsageError::Refresh(error.to_string()))?;
-    query_api(client, usage_url, token).await
+    query_api(client, usage_url, token, &credentials).await
 }
 
 /// Claude access tokens last 8 hours (observed: `expiresAt` is the issue time
@@ -983,6 +995,20 @@ fn oauth_has_refresh_token(credentials: &Value) -> bool {
         .is_some_and(|token| !token.is_empty())
 }
 
+/// Monthly list prices, deliberately independent of the advertised usage
+/// multipliers: Max's weekly allowance does not scale with its five-hour one.
+fn monthly_price_usd(credentials: &Value) -> Option<u32> {
+    match credentials
+        .pointer("/claudeAiOauth/rateLimitTier")?
+        .as_str()?
+    {
+        "default_claude_max_5x" => Some(100),
+        "default_claude_max_20x" => Some(200),
+        "default_claude_pro" => Some(20),
+        _ => None,
+    }
+}
+
 fn parse_api_usage(payload: &Value) -> Option<ClaudeUsageReport> {
     let mut five_hour = None;
     let mut week = None;
@@ -1045,6 +1071,7 @@ fn parse_api_usage(payload: &Value) -> Option<ClaudeUsageReport> {
             .and_then(Value::as_bool)
             == Some(true))
     .then(|| ClaudeUsageReport {
+        monthly_price_usd: None,
         paid_credits: None,
         banked_resets: parse_banked_resets(payload, mj_core::clock::epoch_millis() / 1000),
         five_hour,
@@ -1154,6 +1181,7 @@ fn parse_cli_usage(output: &str) -> Option<ClaudeUsageReport> {
     (five_hour.is_some() || week.is_some() || !scoped_weeks.is_empty()).then_some(
         ClaudeUsageReport {
             paid_credits: None,
+            monthly_price_usd: None,
             banked_resets: None,
             five_hour,
             week,
@@ -1598,6 +1626,7 @@ Last 7d · 5966 requests · 78 sessions
                 &reqwest::Client::new(),
                 &format!("http://{address}/usage"),
                 "test-token",
+                &serde_json::json!({}),
             )
             .await
             .unwrap();
@@ -1678,13 +1707,15 @@ Last 7d · 5966 requests · 78 sessions
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join(".credentials.json");
         let mut old = credentials("old", Some("refresh"), 1);
+        old["claudeAiOauth"]["rateLimitTier"] = "default_claude_max_5x".into();
         old["claudeAiOauth"]["clientId"] = "custom-client".into();
         std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
-        let fresh = credentials(
+        let mut fresh = credentials(
             "fresh",
             Some("rotated"),
             mj_core::clock::epoch_millis() + 60_000,
         );
+        fresh["claudeAiOauth"]["rateLimitTier"] = "default_claude_max_20x".into();
         let commands = Arc::new(Mutex::new(Vec::new()));
         let executor = RefreshExecutor {
             home: home.path().to_path_buf(),
@@ -1707,6 +1738,7 @@ Last 7d · 5966 requests · 78 sessions
         .await
         .unwrap();
 
+        assert_eq!(report.monthly_price_usd, Some(200));
         assert_eq!(report.banked_resets, Some(1));
         assert_eq!(report.five_hour.unwrap().remaining_percent, 75);
         let commands = commands.lock().unwrap();
@@ -1974,38 +2006,47 @@ Last 7d · 5966 requests · 78 sessions
     #[tokio::test]
     async fn valid_credentials_query_authoritative_usage_without_launching_claude() {
         let home = tempfile::tempdir().unwrap();
-        std::fs::write(
-            home.path().join(".credentials.json"),
-            serde_json::to_vec(&credentials(
-                "current",
-                Some("refresh"),
-                mj_core::clock::epoch_millis() + 60_000,
-            ))
-            .unwrap(),
-        )
-        .unwrap();
         let commands = Arc::new(Mutex::new(Vec::new()));
-        let executor = RefreshExecutor {
+        let executor = Arc::new(RefreshExecutor {
             home: home.path().to_path_buf(),
             replacement: None,
             status: 0,
             commands: commands.clone(),
-        };
+        });
         let (usage_url, server_state, server) = spawn_usage_server(false).await;
-
-        query_with(
-            home.path().to_path_buf(),
-            HashMap::new(),
-            &usage_url,
-            Arc::new(executor),
-        )
-        .await
-        .unwrap();
-
+        // Real OAuth tier metadata must survive the HTTP query, including a
+        // plan change between polls. Unknown plans must not invent a price.
+        for (tier, expected) in [
+            ("default_claude_max_5x", Some(100)),
+            ("default_claude_max_20x", Some(200)),
+            ("default_claude_pro", Some(20)),
+            ("future-plan", None),
+        ] {
+            let mut login = credentials(
+                "current",
+                Some("refresh"),
+                mj_core::clock::epoch_millis() + 60_000,
+            );
+            login["claudeAiOauth"]["rateLimitTier"] = tier.into();
+            std::fs::write(
+                home.path().join(".credentials.json"),
+                serde_json::to_vec(&login).unwrap(),
+            )
+            .unwrap();
+            let report = query_with(
+                home.path().to_path_buf(),
+                HashMap::new(),
+                &usage_url,
+                executor.clone(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(report.monthly_price_usd, expected);
+        }
         assert!(commands.lock().unwrap().is_empty());
         assert_eq!(
             server_state.authorizations.lock().unwrap().as_slice(),
-            ["Bearer current"]
+            ["Bearer current"; 4]
         );
         server.abort();
     }
