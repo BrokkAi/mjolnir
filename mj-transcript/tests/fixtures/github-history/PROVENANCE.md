@@ -15,3 +15,13 @@ expected values. unicode-adversarial.json was generated with the same frozen
 history2.py/jev_shape.py on decimal digits, superscripts, combining marks,
 connectors, asymmetric underscores and filenames adjacent to Unicode words.
 It checks Python identifier insertion order and the complete lexical output.
+
+tool-numbers.json contains the frozen dossier_reference.py render_row output
+for a persisted tool-call shape with arbitrary rawInput/rawOutput numbers:
+notation thresholds, signed zero, subnormal/maximal finite values and 200
+seeded float values. Expected bytes were emitted by Python, including its
+shortest float representation and exponent formatting.
+
+The expected_item_segment and expected_session_segment fields are Python's
+compact UTF-8 serialization of the same final evidence, matching common.py's
+item-session tokenizer inputs. They cover student_segments on all 16 rows.

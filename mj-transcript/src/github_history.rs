@@ -56,9 +56,83 @@ impl std::ops::Index<&str> for Value {
 }
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&serde_json::to_string(self).map_err(|_| std::fmt::Error)?)
+        match self {
+            Self::Object(o) => {
+                f.write_str("{")?;
+                for (i, (key, value)) in o.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(",")?;
+                    }
+                    write!(f, "{}:{value}", json!(key))?;
+                }
+                f.write_str("}")
+            }
+            Self::Array(a) => {
+                f.write_str("[")?;
+                for (i, value) in a.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(",")?;
+                    }
+                    write!(f, "{value}")?;
+                }
+                f.write_str("]")
+            }
+            Self::Number(n) => f.write_str(&python_number(n)),
+            _ => f.write_str(&serde_json::to_string(self).map_err(|_| std::fmt::Error)?),
+        }
     }
 }
+// Python repr uses the same shortest round-trip digits, but a different
+// scientific-notation threshold, explicit exponent signs and two-digit exponents.
+fn python_number(number: &serde_json::Number) -> String {
+    let raw = number.to_string();
+    if !number.is_f64() {
+        return raw;
+    }
+    let (sign, unsigned) = raw
+        .strip_prefix('-')
+        .map_or(("", raw.as_str()), |s| ("-", s));
+    let (mantissa, exponent) = unsigned.split_once('e').map_or((unsigned, 0), |(m, e)| {
+        (m, e.parse::<i32>().expect("JSON exponent"))
+    });
+    let decimal = mantissa.find('.').unwrap_or(mantissa.len()) as i32;
+    let digits = mantissa.replace('.', "");
+    let leading = digits.bytes().take_while(|&c| c == b'0').count();
+    if leading == digits.len() {
+        return format!("{sign}0.0");
+    }
+    let exponent = exponent + decimal - leading as i32 - 1;
+    let digits = digits[leading..].trim_end_matches('0');
+    if !(-4..16).contains(&exponent) {
+        let mantissa = if digits.len() == 1 {
+            digits.to_string()
+        } else {
+            format!("{}.{}", &digits[..1], &digits[1..])
+        };
+        format!(
+            "{sign}{mantissa}e{}{:02}",
+            if exponent < 0 { "-" } else { "+" },
+            exponent.abs()
+        )
+    } else {
+        let position = exponent + 1;
+        if position <= 0 {
+            format!("{sign}0.{}{digits}", "0".repeat((-position) as usize))
+        } else if position as usize >= digits.len() {
+            format!(
+                "{sign}{digits}{}.0",
+                "0".repeat(position as usize - digits.len())
+            )
+        } else {
+            format!(
+                "{sign}{}.{}",
+                &digits[..position as usize],
+                &digits[position as usize..]
+            )
+        }
+    }
+}
+
 impl PartialEq<&str> for Value {
     fn eq(&self, s: &&str) -> bool {
         self.as_str() == Some(*s)
@@ -526,9 +600,39 @@ pub fn build_evidence(
     Ok((typed, result))
 }
 
+/// Training-format segments, item first, with history last in the session.
+/// Evidence is already bounded/redacted; serialization never bounds it again.
+pub fn student_segments(
+    evidence: &mj_core::github_item::GithubItemEvidence,
+) -> Result<(String, String)> {
+    Ok((
+        serde_json::to_string(&evidence.item)?,
+        serde_json::to_string(&evidence.session)?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Hard-won: #1505: JSON float exponents and notation differed from Python tool rendering.
+    #[test]
+    fn github_history_python_tool_numbers() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/github-history/tool-numbers.json"
+        ))
+        .unwrap();
+        let row = HistoryRow {
+            stable_id: "tool".into(),
+            position: 1,
+            created_at_ms: 1000,
+            last_changed_at_ms: 1000,
+            body: fixture["body"].clone(),
+        };
+        assert_eq!(
+            render("floats", &[row], 2000, "owner/repo", 42).unwrap(),
+            fixture["expected"].as_str().unwrap()
+        );
+    }
     // Hard-won: #1505: Rust word/digit categories differ from the training Python interpreter.
     #[test]
     fn github_history_python_unicode_boundaries() {
@@ -560,6 +664,19 @@ mod tests {
                 serde_json::to_string(&raw.iter().map(|s| &s.snippet).collect::<Vec<_>>()).unwrap(),
                 f["expected_retrieved_json"].as_str().unwrap(),
                 "lexical {id}"
+            );
+            let prepared: mj_core::github_item::GithubItemEvidence =
+                serde_json::from_str(f["expected_evidence_json"].as_str().unwrap()).unwrap();
+            let (item_segment, session_segment) = student_segments(&prepared).unwrap();
+            assert_eq!(
+                item_segment,
+                f["expected_item_segment"].as_str().unwrap(),
+                "item segment {id}"
+            );
+            assert_eq!(
+                session_segment,
+                f["expected_session_segment"].as_str().unwrap(),
+                "session segment {id}"
             );
             for (span, expected) in raw.iter().zip(f["expected_raw_spans"].as_array().unwrap()) {
                 assert_eq!(span.start as u64, expected["start"].as_u64().unwrap());
