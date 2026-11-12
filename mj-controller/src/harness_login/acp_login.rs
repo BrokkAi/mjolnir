@@ -10,7 +10,7 @@
 //!
 //! The command runs with inherited standard input and output because it is an
 //! interactive browser or device-code flow. That is why this belongs to the
-//! terminal CLI rather than to the detached worker.
+//! terminal owner rather than to the detached worker.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

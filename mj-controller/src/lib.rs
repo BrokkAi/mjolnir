@@ -17,6 +17,7 @@ pub mod compaction;
 pub mod controller;
 pub mod doctor;
 pub(crate) mod handoff;
+pub mod harness_login;
 pub mod image;
 pub mod import;
 pub mod opencode_logins;

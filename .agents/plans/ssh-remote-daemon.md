@@ -29,7 +29,11 @@ This is private-network operation with working SSH authentication and host trust
 - [ ] Implement and validate milestone 6: matching-build PowerShell go script.
 - [ ] Implement milestone 7: user documentation, final validation, platform dispatch and real Windows acceptance.
 
+- [ ] (2026-11-12, daemon login worker) Extract shared ACP/native/setup-token login driver into mj-controller; 11 focused tests, full controller/CLI suites and workspace clippy pass. Daemon PTY/control transport and dashboard pane remain.
+
 ## Surprises & Discoveries
+
+- (2026-11-12, daemon login worker) `mj-worker/src/user_shell.rs:168` disables stdin and streams stdout/stderr pipes. No PTY owner, bidirectional terminal framing, or emulator dependency was found in this checkout; implementing an interactive login pane needs those facilities.
 
 
 `mj-client/src/build_identity.rs::BuildIdentity::same_source` compares release version and a present Git revision, ignoring executable timestamps. It does not hash dirty source. Two differently edited trees at one HEAD can pass. This does not change the chosen matching rule; the development script must build clean, immutable checkouts and disclose that the rule alone cannot detect dirty builds.
@@ -84,6 +88,12 @@ Decision (parent approval, 2026-11-12): Cancellable machine requests use dedicat
 Decision (user, 2026-11-12): The CLI's HTTP client goes directly to the advertised viewer URL in SSH placement, like the browser; it is not tunneled. The remote client this plan supports is the dashboard (TUI) and the browser, not the `mj` CLI: CLI commands that use the HTTP API may fail from a computer that cannot reach the viewer, and that is acceptable. The dashboard must not run the `mj` CLI for any of its features. Rationale: keeps one HTTP path; the dashboard is the product surface for remote use.
 
 Decision (user, 2026-11-12): Settings → Login no longer runs `mj login` as a subprocess. The daemon starts the harness login in a pseudo-terminal on its own machine and streams it to a dashboard pane, reusing the terminal streaming that session user shells already use; input from the pane goes back to the login process. This works in every placement. Browser OAuth flows that call back to `localhost` on the daemon's machine may not complete from another computer; paste-code and API-key flows work. Rationale: the dashboard must not depend on the CLI, and credentials live with the daemon.
+
+Decision (2026-11-12, daemon login worker): Put the complete harness login driver (ACP, native fallback, setup-token and credential-change reporting) in `mj-controller::harness_login`, with CLI argument/profile selection remaining in mj-cli. Return the child exit code to the terminal-owning caller rather than exiting from the shared driver. This keeps one implementation and allows the daemon terminal owner to use it without terminating the daemon.
+
+Decision (parent approval, 2026-11-12): There is no existing PTY transport or emulator to reuse: RunUserShell is output-only pipes. Use portable-pty for the daemon-owned PTY (including Windows ConPTY), define terminal byte/input/resize framing once in mj-client, and use vt100 plus tui-term on the dashboard side. Check license policy and crate boundaries for these dependencies.
+
+Decision (parent approval, 2026-11-12): The daemon PTY launches its own current executable through an internal login entrypoint that bypasses placement forwarding. The shared driver inherits terminal stdio and restores process-wide SIGINT, so it must run in this child, never in the daemon process. The daemon owns the PTY and process group; the dashboard never launches mj.
 
 ## Outcomes & Retrospective
 
