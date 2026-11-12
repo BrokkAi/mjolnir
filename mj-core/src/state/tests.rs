@@ -6,6 +6,92 @@ use crate::config::{
 use crate::remote_git::Shorthand;
 use crate::targets::MountAccess;
 
+// Hard-won: e569a20c5: unanswered input must follow the latest outcome and user response.
+#[test]
+fn unanswered_input_outcome_tracks_answers_and_current_completion() {
+    use crate::assessment::{Action, Status, TurnAssessment};
+    let mut session = MaterializedSession::empty("input");
+    session.last_turn_outcome = Some(MaterializedTurnOutcome {
+        command_id: "turn".into(),
+        accepted_ordinal: None,
+        turn_start_position: None,
+        completed_ordinal: 10,
+        completed_at_ms: 10,
+        outcome: TurnOutcomeKind::Completed {
+            stop_reason: "AwaitingInput".into(),
+        },
+        answered_through: None,
+        diagnostic: None,
+        usage: None,
+        work_facts: None,
+    });
+    assert!(session.unanswered_input_outcome(None, None).is_some());
+    let mut assessment = TurnAssessment::pending(
+        "turn".into(),
+        10,
+        10,
+        crate::activity::verdict::CompletionEvidence {
+            stop_reason: "EndTurn".into(),
+            diagnostic: None,
+        },
+    );
+    assessment.status = Status::Assessed;
+    assessment.action = Some(Action::AwaitInput);
+    session.last_turn_outcome.as_mut().unwrap().outcome = TurnOutcomeKind::Completed {
+        stop_reason: "EndTurn".into(),
+    };
+    assert!(
+        session
+            .unanswered_input_outcome(Some(&assessment), None)
+            .is_some()
+    );
+    assessment.completed_ordinal = 9;
+    assert!(
+        session
+            .unanswered_input_outcome(Some(&assessment), None)
+            .is_none()
+    );
+    assessment.completed_ordinal = 10;
+    session.transcript.push(user_item(11, ""));
+    assert!(
+        session
+            .unanswered_input_outcome(Some(&assessment), None)
+            .is_none()
+    );
+    let watermark = session.latest_user_position();
+    session.transcript.clear();
+    assert!(
+        session
+            .unanswered_input_outcome(Some(&assessment), watermark)
+            .is_none()
+    );
+    session.queued_prompts.push(MaterializedQueuedPrompt {
+        accepted_ordinal: None,
+        command_id: "queued".into(),
+        kind: QueuedCommandKind::Prompt,
+        content: vec![],
+        queued_at_ms: 11,
+    });
+    assert!(
+        session
+            .unanswered_input_outcome(Some(&assessment), None)
+            .is_none()
+    );
+    session.queued_prompts.clear();
+    session.active_turn = Some(MaterializedTurn {
+        command_id: "active".into(),
+        accepted_ordinal: None,
+        turn_start_position: 11,
+        started_at_ms: 11,
+        steered_into: None,
+    });
+    assert!(
+        session
+            .unanswered_input_outcome(Some(&assessment), None)
+            .is_none()
+    );
+}
+
 #[test]
 fn session_build_cache_defaults_optional_legacy_fields() {
     let cache: SessionBuildCache = serde_json::from_value(serde_json::json!({

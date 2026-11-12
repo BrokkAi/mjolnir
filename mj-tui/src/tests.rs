@@ -1203,7 +1203,7 @@ fn subagent_scope_filters_attention_without_selecting_an_idle_child() {
 
     crate::test_support::serve_attention(
         &mut dashboard,
-        &["a-idle", "b-parked"],
+        &["a-idle", "b-parked", "e-unread"],
         mj_core::attention::SessionAttention::Idle,
     );
     crate::test_support::serve_attention(

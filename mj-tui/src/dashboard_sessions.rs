@@ -89,7 +89,7 @@ pub(crate) fn presentation_attention(
         SessionAttention::Idle => AttentionLevel::Idle,
         SessionAttention::Inactive | SessionAttention::Unknown => AttentionLevel::Inactive,
     };
-    if !level.needs_person()
+    if level == AttentionLevel::Idle
         && dashboard
             .session_details
             .get(session_id)
@@ -1449,6 +1449,7 @@ impl DashboardState {
 mod verdict_tests {
     use super::*;
 
+    // Hard-won: e569a20c5: unread output hid working sessions.
     #[test]
     fn unread_never_masks_served_person_facing_attention() {
         use mj_core::attention::SessionAttention;
@@ -1470,6 +1471,8 @@ mod verdict_tests {
         for (served, expected) in [
             (SessionAttention::NeedsInput, AttentionLevel::Waiting),
             (SessionAttention::Important, AttentionLevel::Important),
+            (SessionAttention::Working, AttentionLevel::Working),
+            (SessionAttention::Inactive, AttentionLevel::Inactive),
             (SessionAttention::Idle, AttentionLevel::Unread),
         ] {
             dashboard.set_session_attention(BTreeMap::from([("session".to_owned(), served)]));

@@ -133,12 +133,19 @@ pub(super) fn project(runtime: &RuntimeProjection) -> BTreeMap<String, SessionAt
             } else if let Some(live) = live {
                 let activity = live.activity_state();
                 if activity.is_idle() {
-                    match live
-                        .assessment
-                        .as_deref()
-                        .filter(|assessment| assessment.current())
-                    {
-                        Some(assessment) if assessment.inferred_question().is_some() => NeedsInput,
+                    let tail = runtime.transcripts.get(id);
+                    let assessment = live.assessment.as_deref();
+                    if tail.is_some_and(|tail| {
+                        tail.header
+                            .unanswered_input_outcome(assessment, tail.latest_user_position)
+                            .is_some()
+                    }) {
+                        return (id.clone(), NeedsInput);
+                    }
+                    match live.assessment.as_deref().filter(|assessment| {
+                        tail.and_then(|tail| tail.header.last_turn_outcome.as_ref())
+                            .is_some_and(|outcome| assessment.applies_to(outcome))
+                    }) {
                         Some(assessment)
                             if assessment.attention == Some(AssessmentAttention::Important) =>
                         {
@@ -230,6 +237,94 @@ mod tests {
             );
         }
         runtime
+    }
+
+    // Hard-won: e569a20c5: unassessed harness questions disappeared and answered questions lingered.
+    #[test]
+    fn attention_uses_the_unanswered_latest_outcome_even_when_the_answer_is_trimmed() {
+        use mj_core::assessment::{Action, Status, TurnAssessment};
+        use mj_core::state::{
+            MaterializedTurnOutcome, TranscriptBody, TranscriptItem, TurnOutcomeKind,
+        };
+        let mut runtime = runtime();
+        let mut relay = mj_core::relay::RelaySnapshot::new("parent".into());
+        relay.execution = mj_core::relay::RelayExecutionState::Idle;
+        let mut materialized = MaterializedSession::empty("parent");
+        materialized.last_turn_outcome = Some(MaterializedTurnOutcome {
+            command_id: "turn".into(),
+            accepted_ordinal: None,
+            turn_start_position: None,
+            completed_ordinal: 10,
+            completed_at_ms: 10,
+            outcome: TurnOutcomeKind::Completed {
+                stop_reason: "AwaitingInput".into(),
+            },
+            answered_through: None,
+            diagnostic: None,
+            usage: None,
+            work_facts: None,
+        });
+        let publish = |runtime: &mut RuntimeProjection,
+                       materialized: &MaterializedSession,
+                       relay: &mj_core::relay::RelaySnapshot| {
+            runtime.sessions.get_mut("parent").unwrap().operational =
+                Some(relay.operational_state().into());
+            let window = ProjectionWindow::of(materialized);
+            if let Some(tail) = runtime.transcripts.get_mut("parent") {
+                tail.publish(materialized, &window, 0);
+            } else {
+                runtime.transcripts.insert(
+                    "parent".into(),
+                    mj_client::runtime_feed::SessionTail::of(materialized, &window, 0),
+                );
+            }
+        };
+        publish(&mut runtime, &materialized, &relay);
+        assert_eq!(project(&runtime)["parent"], SessionAttention::NeedsInput);
+        let mut assessment = TurnAssessment::pending(
+            "turn".into(),
+            10,
+            10,
+            mj_core::activity::verdict::CompletionEvidence {
+                stop_reason: "EndTurn".into(),
+                diagnostic: None,
+            },
+        );
+        assessment.status = Status::Assessed;
+        assessment.action = Some(Action::AwaitInput);
+        materialized.last_turn_outcome.as_mut().unwrap().outcome = TurnOutcomeKind::Completed {
+            stop_reason: "EndTurn".into(),
+        };
+        relay.assessment = Some(std::sync::Arc::new(assessment.clone()));
+        publish(&mut runtime, &materialized, &relay);
+        assert_eq!(project(&runtime)["parent"], SessionAttention::NeedsInput);
+        materialized
+            .transcript
+            .push(std::sync::Arc::new(TranscriptItem {
+                stable_id: "answer".into(),
+                position: 11,
+                latest_content_event_ordinal: None,
+                created_at_ms: 11,
+                last_changed_at_ms: 11,
+                body: TranscriptBody::User { content: vec![] },
+            }));
+        publish(&mut runtime, &materialized, &relay);
+        assert!(runtime.transcripts["parent"].items.is_empty());
+        assert_eq!(project(&runtime)["parent"], SessionAttention::Idle);
+        materialized.transcript.clear();
+        assessment.completed_ordinal = 9;
+        relay.assessment = Some(std::sync::Arc::new(assessment.clone()));
+        publish(&mut runtime, &materialized, &relay);
+        assert_eq!(project(&runtime)["parent"], SessionAttention::Idle);
+        assessment.attention = Some(AssessmentAttention::Important);
+        relay.assessment = Some(std::sync::Arc::new(assessment.clone()));
+        publish(&mut runtime, &materialized, &relay);
+        assert_eq!(project(&runtime)["parent"], SessionAttention::Idle);
+        assessment.completed_ordinal = 10;
+        assessment.action = Some(Action::Finished);
+        relay.assessment = Some(std::sync::Arc::new(assessment));
+        publish(&mut runtime, &materialized, &relay);
+        assert_eq!(project(&runtime)["parent"], SessionAttention::Important);
     }
 
     #[test]

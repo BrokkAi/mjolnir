@@ -407,6 +407,36 @@ pub struct MaterializedSessionSummary {
 }
 
 impl MaterializedSession {
+    /// Latest user item, including empty responses, in this projection.
+    pub fn latest_user_position(&self) -> Option<u64> {
+        self.transcript
+            .iter()
+            .filter_map(|item| {
+                matches!(item.body, TranscriptBody::User { .. }).then_some(item.position)
+            })
+            .max()
+    }
+
+    /// The latest input-requiring outcome, unless work or a later user item
+    /// has already answered it. A transcript-free header supplies the user
+    /// position retained from its original publication; full sessions use None.
+    pub fn unanswered_input_outcome(
+        &self,
+        assessment: Option<&crate::assessment::TurnAssessment>,
+        published_latest_user_position: Option<u64>,
+    ) -> Option<&MaterializedTurnOutcome> {
+        if self.active_turn.is_some() || !self.queued_prompts.is_empty() {
+            return None;
+        }
+        let outcome = self.last_turn_outcome.as_ref()?;
+        let latest_user = self
+            .latest_user_position()
+            .max(published_latest_user_position);
+        (outcome.requires_input(assessment)
+            && latest_user.is_none_or(|position| position <= outcome.completed_ordinal))
+        .then_some(outcome)
+    }
+
     pub fn empty(session_id: impl Into<String>) -> Self {
         Self {
             session_id: session_id.into(),
