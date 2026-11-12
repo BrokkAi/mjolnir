@@ -1427,7 +1427,8 @@ mod tests {
     }
 
     // Hard-won: #1514: interruption after publishing mbx must be repaired by rerunning Install.
-    #[cfg(unix)]
+    // This fixture installs on the local host; pinned mbx installs require Linux.
+    #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread")]
     async fn interrupted_publication_rerun_converges_without_admission() {
         use std::os::unix::fs::PermissionsExt;

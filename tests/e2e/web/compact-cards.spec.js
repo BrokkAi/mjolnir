@@ -109,7 +109,7 @@ function stateWith(sessions) {
   };
 }
 
-async function mount(page, sessions, holdDetail = null) {
+async function mount(page, sessions, holdDetail = null, initialHash = `#workspace/${WORKSPACE_ID}`) {
   const state = stateWith(sessions);
   state.holdDetail = holdDetail;
   await page.addInitScript(() => {
@@ -194,9 +194,13 @@ async function mount(page, sessions, holdDetail = null) {
     return route.fulfill({ status: 404, body: '' });
   });
 
-  await page.goto(`https://viewer.test/#workspace/${WORKSPACE_ID}`);
+  await page.goto(`https://viewer.test/${initialHash}`);
   await expect(page.locator('#app')).toBeVisible();
-  await expect(page.locator('#sessions .session').first()).toBeVisible();
+  if (initialHash.startsWith('#conversation/')) {
+    await expect(page.locator('#conversation')).toBeVisible();
+  } else {
+    await expect(page.locator('#workspace-select')).toBeVisible();
+  }
   return state;
 }
 
@@ -367,6 +371,7 @@ test('golden_viewer_dashboard', async ({ context }) => {
     session('delta-tie', 'project-delta', 'Delta', { activity: SERVER_TIME_MS + 1_000 }),
     session('other-workspace', 'project-other', 'Other', { workspaceId: OTHER_WORKSPACE_ID, message: SERVER_TIME_MS + 30_000 }),
   ]);
+  await orderedPage.locator('#workspace-select').selectOption(WORKSPACE_ID);
   await expect(orderedPage.locator('#sessions .session h3')).toHaveText(['gamma-message', 'alpha-created', 'unread-message', 'beta-activity', 'delta-tie', 'echo-tie']);
   await captureGoldenState(output, orderedPage, 'flat live dashboard sorted by notification band then latest message', await orderedPage.evaluate(() => ({
     cards: [...document.querySelectorAll('#sessions .session')].map(node => ({
@@ -556,6 +561,7 @@ test('child workspace hides idle history while preserving active work and an ope
     unknown,
     reviewing,
   ]);
+  await page.locator('#workspace-select').selectOption(WORKSPACE_ID);
   await expect(card(page, 'parent')).toBeVisible();
   await card(page, 'parent').click();
   await page.locator('#subagents-button').click();
@@ -591,7 +597,11 @@ test('child workspace hides idle history while preserving active work and an ope
   await page.locator('#back').click();
   await expect(page.getByRole('button', { name: 'Hide idle' })).toHaveAttribute('aria-pressed', 'true');
   await expect(card(page, 'idle')).toBeVisible();
+  await page.evaluate(() => { location.hash = '#subagents/parent'; });
+  await expect(page).toHaveURL(/#subagents\/parent$/);
   await page.reload();
+  // A reload with open notifications must not redirect a sub-agent link.
+  await expect(page).toHaveURL(/#subagents\/parent$/);
   await expect(page.getByRole('button', { name: 'Hide idle' })).toHaveAttribute('aria-pressed', 'true');
   await expect(card(page, 'idle')).toBeVisible();
   await page.getByRole('button', { name: 'Hide idle' }).click();
@@ -1566,4 +1576,26 @@ test('notifications retain handled entries below the band until leaving or reloa
   await page.locator('#workspace-select').selectOption(WORKSPACE_ID);
   await page.locator('#workspace-select').selectOption('notifications');
   expect(await ids()).toEqual(['notice-c']);
+});
+
+test('initial workspace selection follows notifications without redirecting conversation links', async ({ page }) => {
+  const openNotice = session('load-notice', 'a', 'Notice', { attention: 'needs_input' });
+  await mount(page, [openNotice]);
+  await expect(page).toHaveURL(/#workspace\/notifications$/);
+  await expect(page.locator('#workspace-select')).toHaveValue('notifications');
+
+  const noNotices = await page.context().newPage();
+  await mount(noNotices, [session('load-plain', 'a', 'Plain')]);
+  await expect(noNotices).toHaveURL(new RegExp(`#workspace/${WORKSPACE_ID}$`));
+
+  const other = await page.context().newPage();
+  await mount(other, [openNotice], null, `#workspace/${OTHER_WORKSPACE_ID}`);
+  await expect(other).toHaveURL(/#workspace\/notifications$/);
+
+  const conversation = await page.context().newPage();
+  await mount(conversation, [session('load-conversation', 'a', 'Conversation', {
+    attention: 'important', capabilities: { prompt: true },
+  })], null, '#conversation/load-conversation');
+  await expect(conversation).toHaveURL(/#conversation\/load-conversation$/);
+  await expect(conversation.locator('#conversation')).toBeVisible();
 });

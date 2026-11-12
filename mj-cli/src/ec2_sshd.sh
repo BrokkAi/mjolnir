@@ -1,5 +1,15 @@
 # Ubuntu's ssh.service creates /run/sshd; ssh.socket alone does not.
-ssh_unit=$(systemctl show -p Id --value sshd.service)
+ssh_unit=
+for candidate in ssh.service sshd.service; do
+    if systemctl cat "$candidate" >/dev/null 2>&1; then
+        ssh_unit=$candidate
+        break
+    fi
+done
+if [ -z "$ssh_unit" ]; then
+    echo "Neither ssh.service nor sshd.service exists; cannot start SSH" >&2
+    exit 1
+fi
 systemctl start "$ssh_unit"
 # Measured relay-session refusals at ~40 containers on morannon (Series 20/21).
 mkdir -p /etc/ssh/sshd_config.d
