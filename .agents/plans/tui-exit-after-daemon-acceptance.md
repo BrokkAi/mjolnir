@@ -21,11 +21,11 @@ The reported suspend of session 5bc0d90883ed581d402cf1eee88b4a2f spent minutes s
 - [x] Completed the scoped backend cut, ten affected tests, final workspace Clippy with zero warnings and format/diff checks. Both worker-stop source files exactly match the pre-task baseline.
 - [x] Committed removal of the unsafe fence as 4b6666729 and completed a second review.
 - [x] Persist accepted Discard failures under daemon ownership after the initiating observer exits. The new regression, two existing Discard cases, independent bounded review and final workspace Clippy/format/diff checks passed.
-- [ ] Commit the Discard correction and complete follow-up review.
+- [x] Committed and pushed the Discard correction (ff756cb97).
 - [x] Fixed the subsequent phone Suspend cancellation finding by carrying the phone action's existing LifecycleControl through admission and execution. Three affected cases passed again on frozen relevant sources in the combined validation run.
 - [x] Claimed #1510 after the user challenged its unilateral deferral. It is included in the current work.
-- [ ] Settle and record an authoritative raw-process ownership design, implement it, and validate process identity and teardown ordering without relying on PID snapshots as ownership.
-- [ ] Push coherent reviewed changes and complete the remaining ownership work. Installation is explicitly excluded.
+- [x] (2026-11-11) Raw-process ownership: the user chose to shelve the per-worker process owner and keep teardown simple. Retirement kills raw workers without a TERM grace, and containers keep the engine stop. See `.agents/plans/raw-worker-process-ownership.md`; #1510 stays open for the remaining gap.
+- [x] (2026-11-11) Fixed the CI and nightly failures the latency checkpoint caused: a stale stop expectation, plus the Windows ignore marker on four local bare fixtures (19bf2efb4). Installation remains excluded.
 
 ## Surprises & Discoveries
 
@@ -65,11 +65,13 @@ Decision: Include #1510 in the current task. Rationale: the user correctly ident
 
 Decision: Use one per-worker process owner for #1510, with actual child ownership outside the worker and file-descriptor handoff of existing streams. Rationale: an in-worker stop request cannot clean terminal and shell groups after that worker hangs or dies; an external owner can serialize launch versus stop and retain the actual child identity. The owner must keep the group leader unreaped until the final group signal, permanently disarm signalling before reaping, and confirm completion separately. Preserve established bounded bridge cleanup for native harness tools. New owner failure retains the affected root with a visible error; legacy workers retain explicitly legacy stop semantics. This is a process belonging to the session, not a host service or a claim to contain arbitrary daemonized host processes. The ownership ExecPlan will specify the startup and root-lock contract before source changes begin.
 
+Decision (2026-11-11, by the user): Shelve the per-worker process owner; this replaces the two #1510 decisions above. A raw session is retired by killing its worker and harness process groups, and a container session by stopping the container. Retirement sends KILL at once, because the root is removed next and a sealed checkpoint (or a discard) leaves nothing that needs an orderly shutdown. Stops that keep the root still send TERM first. Rationale: the owner had grown to about 5,000 lines across every launch path without passing a combined run, to close a gap nobody has observed.
+
 Decision: Validate, commit and push this task only. The user clarified that the earlier installation instruction did not cover this separate suspend/TUI work. Do not replace installed binaries or activate a new live daemon.
 
 ## Outcomes & Retrospective
 
-The current latency checkpoint preserves concurrent one-pass retirement and TUI exit after daemon acceptance. The attempted immediate tree-kill mechanism was removed completely; the old snapshot is not containment-safe. The remaining ownership defect is tracked in https://github.com/BrokkAi/mjolnir/issues/1510 and remains unfinished work within this request. The second review's Discard failure-publication defect is fixed: the lifecycle supervisor now routes ForceStop failures through the existing safe durable close-failure publication before completing the result. A real held child-stop failure persists its public reference after the initiating observer leaves, retaining Destroying, checkpoint and target; the exact-ID observer can still obtain the detailed failure. The new test passed in0.40s, both existing Discard cases passed, and final workspace Clippy/format/diff checks passed. No new result ledger or state was added.
+The current latency checkpoint preserves concurrent one-pass retirement and TUI exit after daemon acceptance. The attempted immediate tree-kill mechanism was removed completely; the old snapshot is not containment-safe. The remaining ownership gap is tracked in https://github.com/BrokkAi/mjolnir/issues/1510. The user shelved the process owner on 2026-11-11, and retirement now kills raw workers without a TERM grace. The second review's Discard failure-publication defect is fixed: the lifecycle supervisor now routes ForceStop failures through the existing safe durable close-failure publication before completing the result. A real held child-stop failure persists its public reference after the initiating observer leaves, retaining Destroying, checkpoint and target; the exact-ID observer can still obtain the detailed failure. The new test passed in0.40s, both existing Discard cases passed, and final workspace Clippy/format/diff checks passed. No new result ledger or state was added.
 
 Follow-up review found that phone Suspend ignored cancellation accepted before daemon admission. The phone action now receives and passes the same LifecycleControl into a controlled Suspend start, which checks it before and after the existing admission wait. The lifecycle owner remains the single commit/cancel decision point. Held real-relay regressions cover pre-admission cancellation without durable changes, cancellation before commitment and refusal after commitment; all three affected filters passed in the stable combined run. Explicit cancellation remains separate from quitting the UI.
 
@@ -147,8 +149,10 @@ Integrated evidence is .mj/agents/b0df254c0e1ea40035ec39f1841037fe/final-validat
 
 SessionLifecycleRequest is the closed daemon input enum with boxed Move and Resume payloads. LifecycleReceipt has public session_id and operation_id. DaemonClient::start_session_lifecycle returns it; wait_session_lifecycle observes Done/MoveOutcome, captured operation failure or typed observation uncertainty. Wire replies include LifecycleAccepted, LifecycleObservationUnavailable and LifecycleFailed; daemon protocol87, relay unchanged.
 
-No new crate, runtime dependency, concurrency cap, timeout, service, generation marker or containment framework remains in the final design. Existing ordinary raw stop bounds and container-engine stop remain unchanged.
+No new crate, runtime dependency, concurrency cap, timeout, service, generation marker or containment framework remains in the final design. Retirement kills raw workers at once through `kill_worker_daemon_script`; stops that keep the root still use `stop_worker_daemon_script` with its TERM grace. Container-engine stop is unchanged.
 
 Revision note: Initial diagnostics and implementation were followed by independent review. Two real races invalidated the added PS-based fencing proof. This revision records the final scope cut, the preserved latency/acceptance fixes, reusable validation and the user's explicit no-install instruction.
 
 Revision note: The scoped cut passed affected tests and workspace lint/format checks. The user challenged deferring #1510, so raw ownership remains in the current work. The latency checkpoint is undergoing a Discard failure-publication review fix while the authoritative ownership design is investigated. No installation is authorized.
+
+Revision note (2026-11-11): The user shelved the process owner. This revision records that decision, the immediate kill at retirement, the removal of the unused OwnedGroup primitive, and the nightly test fixes. No installation is authorized.

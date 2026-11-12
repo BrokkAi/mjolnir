@@ -1,6 +1,8 @@
 # Own raw worker processes through teardown
 
-This ExecPlan follows `.agents/PLANS.md`. Keep its progress, discoveries, decisions and outcomes current. It continues the same user request as `.agents/plans/tui-exit-after-daemon-acceptance.md`; issue #1510 is included in that work, not deferred to another task. Installation is excluded.
+This ExecPlan follows `.agents/PLANS.md`. Keep its progress, discoveries, decisions and outcomes current. It continues the same user request as `.agents/plans/tui-exit-after-daemon-acceptance.md`. Installation is excluded.
+
+Status: shelved on 2026-11-11 by the user's decision; see the Decision Log and Outcomes. The process owner was never integrated, and the OwnedGroup primitive was removed from master. Issue #1510 stays open as the record of the remaining gap. Read this plan as background if that work resumes, not as current instructions.
 
 ## Purpose / Big Picture
 
@@ -17,11 +19,11 @@ The guarantee covers MJ-created groups and descendants remaining in those groups
 - [x] Chose a single per-worker owner, descriptor handoff and non-consuming child-exit observation.
 - [x] Identified explicit lock-delegation and generation-completion requirements before implementation.
 - [x] Implemented the identity-preserving owned-group primitive. Three real Linux process tests passed, and independent source review found no concrete blocker. Native macOS validation remains part of integration acceptance.
-- [ ] Implement the private owner protocol, descriptor handoff and serialized launch/stop registry (draft sources complete and unwired; compilation and tests pending).
-- [ ] Implement bootstrap delegation, generation metadata and controller stop integration.
-- [ ] Adapt bridge, terminal and user-shell callers without changing ACP or output-buffer behavior.
-- [ ] Validate actual hung-worker cleanup, independent process groups, partial failures, streams and isolated upgrades; run final required checks and review.
-- [ ] Commit and push reviewed changes on the current branch. Do not install.
+- [x] (2026-11-11) Shelved by the user's decision. The uncommitted owner protocol, bootstrap and integration were saved outside the repository and removed from the working tree. The unused OwnedGroup primitive was removed from master; it also failed on the macOS CI runner. Retirement now kills raw workers without a TERM grace. The items below will not be done under this plan.
+- [ ] (shelved) Implement the private owner protocol, descriptor handoff and serialized launch/stop registry.
+- [ ] (shelved) Implement bootstrap delegation, generation metadata and controller stop integration.
+- [ ] (shelved) Adapt bridge, terminal and user-shell callers without changing ACP or output-buffer behavior.
+- [ ] (shelved) Validate actual hung-worker cleanup, independent process groups, partial failures, streams and isolated upgrades.
 
 ## Surprises & Discoveries
 
@@ -51,9 +53,13 @@ Decision: Persist only a generation record and terminal cleanup fact, not a gene
 
 Decision: Keep explicit legacy semantics and existing upgrade policy. Rationale: running historical workers cannot be adopted portably. Do not force a busy upgrade to destroy a worker, fabricate an owner certificate for old processes, or add unsafe process-discovery fallback when a new owner fails.
 
+Decision (2026-11-11, by the user): Shelve the process owner and keep teardown simple. A raw session is retired by killing its worker and harness process groups; a container session by stopping the container. Retirement after a sealed checkpoint, or after a discard, sends KILL at once instead of TERM followed by a two-second grace, because the root is removed next and nothing in it needs an orderly shutdown. Stops that keep the root for a continuing session still send TERM first. Rationale: the owner grew to about 2,900 new and 2,100 changed lines across every launch path, and it had not passed a combined test run. The gap it closes is theoretical: no orphaned harness has been observed. The project rules reject guards against unobserved failures.
+
 ## Outcomes & Retrospective
 
 The independent OwnedGroup primitive is implemented. The frozen-source five-package focused run passed three real process tests: an exited leader remains unreaped until group stop, cancellation retains authority and post-reap retry never signals a reused group, and external reaping is an ownership failure. Independent review found no concrete correctness blocker while explicitly retaining the assumptions about sole reaping authority and unknown group completion. The helper is not yet wired into worker launch, so no new end-to-end teardown guarantee has been delivered. The independently reviewable latency checkpoint stops each historical root once in parallel and lets the TUI exit after acceptance; it does not fix this ownership defect by itself. The earlier unsafe census implementation remains removed.
+
+Final outcome (2026-11-11): shelved before integration, and the primitive was removed. What ships is the latency checkpoint plus an immediate kill at retirement. The stop script still snapshots the worker's descendants and process-group members before signalling, then kills the worker's group and every snapshotted process and group. Two gaps remain, recorded in #1510. A process that starts a new session between the snapshot and the kill can survive. A process ID could in principle be reused in that short window. Revisit this plan only if orphaned harnesses are actually observed. The lesson for future work: one mechanism that touches every launch path, built to close an unobserved gap, kept surfacing new integration defects with each round. That is a signal to stop and ask whether the gap is worth closing.
 
 ## Context and Orientation
 
