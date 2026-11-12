@@ -1,14 +1,27 @@
 use super::*;
 
 pub(crate) async fn read_claude_login_fingerprint(path: PathBuf) -> Result<Option<String>> {
-    tokio::task::spawn_blocking(move || {
-        let (_, bytes) = mj_core::credentials::read_credential_file(HarnessKind::Claude, &path)?;
-        Ok(mj_core::credentials::claude_access_token_fingerprint(
-            &bytes,
-        ))
-    })
-    .await
-    .context("read Claude login identity")?
+    let (completed, result) = oneshot::channel();
+    // A cancelled file read cannot be interrupted. Keep this read-only thread
+    // outside Tokio's pool, whose shutdown waits for even cancelled blocking
+    // jobs. Dropping its handle lets the worker exit if the filesystem stalls.
+    let _reader = std::thread::Builder::new()
+        .name("claude-login-read".into())
+        .spawn(move || {
+            let read = std::panic::catch_unwind(|| {
+                let (_, bytes) =
+                    mj_core::credentials::read_credential_file(HarnessKind::Claude, &path)?;
+                Ok(mj_core::credentials::claude_access_token_fingerprint(
+                    &bytes,
+                ))
+            });
+            let read = read.unwrap_or_else(|_| Err(anyhow!("Claude login reader panicked")));
+            if let Err(Err(error)) = completed.send(read) {
+                tracing::warn!(%error, "Claude login read failed after its caller stopped");
+            }
+        })
+        .context("start Claude login reader")?;
+    result.await.context("read Claude login identity")?
 }
 
 /// The worker's sub-agent socket and the `mj-agents` role it backs: a parent

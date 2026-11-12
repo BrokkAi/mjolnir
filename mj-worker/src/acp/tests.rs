@@ -4399,6 +4399,61 @@ async fn returned_steering_leaves_the_prompt_to_mj_without_cancellation() {
     exercise_image_steering(false, "promptRequired").await;
 }
 
+// Hard-won: #1515: a cancelled spawn_blocking read still held Tokio runtime shutdown.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stalled_login_read_does_not_hold_runtime_shutdown() {
+    use std::io::Write as _;
+    use std::os::fd::AsRawFd as _;
+
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join(".credentials.json");
+    let mut gate = crate::test_support::stalled_read_file(&path);
+    gate.write_all(b"{").unwrap();
+    let (stop, stopped) = oneshot::channel();
+    let (exited, exit) = oneshot::channel();
+    let owner = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            tokio::select! {
+                read = read_claude_login_fingerprint(path) => panic!("the gated read returned: {read:?}"),
+                _ = stopped => {}
+            }
+        });
+        drop(runtime);
+        exited
+            .send(())
+            .expect("test still waits for runtime shutdown");
+    });
+    crate::test_support::wait_for("login reader to consume the FIFO header", async {
+        loop {
+            let mut bytes: libc::c_int = 0;
+            // SAFETY: gate is a live descriptor and bytes points to an int.
+            assert_eq!(
+                unsafe { libc::ioctl(gate.as_raw_fd(), libc::FIONREAD as _, &mut bytes) },
+                0
+            );
+            if bytes == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    stop.send(()).unwrap();
+    let shutdown = tokio::time::timeout(crate::test_support::IO_TIMEOUT, exit).await;
+    // Keep the read blocked until the shutdown result is known. Release it on
+    // failure too, so the fixture never strands its runtime owner thread.
+    drop(gate);
+    owner.join().unwrap();
+    shutdown
+        .expect("a stalled credential read held runtime shutdown")
+        .unwrap();
+}
+
 // Hard-won: #1515: a blocked login read prevented pre-prompt cancellation.
 #[cfg(unix)]
 #[tokio::test]
