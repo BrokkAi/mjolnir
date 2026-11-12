@@ -491,7 +491,8 @@ impl VerdictClient {
                 None,
                 serde_json::json!({"request":body,"contract":"handback-glide-v1",
                 "model":"fastino/GLiDE","handback":true,
-                "unfinished_threshold":mj_core::assessment::HANDBACK_UNFINISHED_PROBABILITY}),
+                "unfinished_share":mj_core::assessment::HANDBACK_UNFINISHED_SHARE,
+                "stop_probability_limit":mj_core::assessment::HANDBACK_STOP_PROBABILITY}),
             );
         }
         let attempt = VerdictAttempt {

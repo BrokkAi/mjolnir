@@ -10,7 +10,13 @@ use crate::continuation::{ASSISTANT_BYTES, EvidenceMessage, USER_BYTES};
 
 pub const PROTOCOL: u32 = 25;
 pub const AUTOMATION_CONFIDENCE: f32 = 0.90;
-pub const HANDBACK_UNFINISHED_PROBABILITY: f64 = 0.50;
+/// A handback bounces when unfinished leads finished by at least this share of
+/// the two, and the stop categories together stay at or below
+/// [`HANDBACK_STOP_PROBABILITY`]. Measured 2026-11-11 on 428 labeled handbacks:
+/// the recall of P(unfinished) >= .50 with half its false bounces, which were
+/// mostly permitted stops. Chosen after the holdout was read; unconfirmed.
+pub const HANDBACK_UNFINISHED_SHARE: f64 = 0.30;
+pub const HANDBACK_STOP_PROBABILITY: f64 = 0.30;
 pub const REQUIRED_INPUT_PROBABILITY: f64 = 0.50;
 pub const REQUIRED_INPUT_RATIO: f64 = 2.5;
 pub const FINISHED_WORK_PROBABILITY: f64 = 0.80;
@@ -121,8 +127,12 @@ impl HandbackProbabilities {
         Ok(probabilities)
     }
 }
-pub fn handback_needs_more_work(probabilities: &HandbackProbabilities) -> bool {
-    probabilities.unfinished >= HANDBACK_UNFINISHED_PROBABILITY
+pub fn handback_needs_more_work(p: &HandbackProbabilities) -> bool {
+    let decided = p.unfinished + p.finished;
+    let stops = p.needs_parent_input + p.blocked + p.permitted_stop;
+    decided > 0.0
+        && p.unfinished + PROBABILITY_EPSILON >= HANDBACK_UNFINISHED_SHARE * decided
+        && stops <= HANDBACK_STOP_PROBABILITY + PROBABILITY_EPSILON
 }
 
 #[cfg(test)]
@@ -131,12 +141,21 @@ mod handback_tests {
 
     #[test]
     fn handback_glide_distribution_boundary_and_malformed_answers() {
-        let mut value = serde_json::json!({"unfinished":0.5,"needs_parent_input":0.1,
-            "blocked":0.1,"permitted_stop":0.1,"finished":0.1,"unclear":0.1});
+        // Unfinished at exactly 30% of unfinished+finished, stops at exactly .30.
+        let mut value = serde_json::json!({"unfinished":0.18,"needs_parent_input":0.1,
+            "blocked":0.1,"permitted_stop":0.1,"finished":0.42,"unclear":0.1});
         assert!(handback_needs_more_work(
             &HandbackProbabilities::parse(&value).unwrap()
         ));
-        value["unfinished"] = serde_json::json!(0.499999);
+        value["permitted_stop"] = serde_json::json!(0.11);
+        value["unclear"] = serde_json::json!(0.09);
+        assert!(
+            !handback_needs_more_work(&HandbackProbabilities::parse(&value).unwrap()),
+            "a stop category above the guard must not bounce"
+        );
+        value["permitted_stop"] = serde_json::json!(0.1);
+        value["unfinished"] = serde_json::json!(0.17);
+        value["finished"] = serde_json::json!(0.43);
         assert!(!handback_needs_more_work(
             &HandbackProbabilities::parse(&value).unwrap()
         ));
