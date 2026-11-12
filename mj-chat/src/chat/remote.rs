@@ -12,7 +12,6 @@ use mj_client::session::{
 use mj_core::relay::RelayCommand;
 
 use super::PromptImage;
-use super::attachments;
 use super::{
     ChatState, PlanControl, PlanReviewFollowup, PromptPayload, SubmissionKind, TurnControlIntent,
     queued_prompt_preview,
@@ -507,41 +506,20 @@ async fn enqueue_chat_remote_operation(
             text,
             images,
         } => {
-            let original_images = images.clone();
-            let session_id = session.session_id().to_owned();
-            let normalized = match tokio::task::spawn_blocking(move || {
-                normalize_prompt_images(&session_id, images)
-            })
-            .await
-            {
-                Ok(Ok(images)) => images,
-                Ok(Err(error)) => {
-                    publish_chat_remote_result(
-                        results,
-                        attached,
-                        ChatRemoteResult::Prompt {
-                            command_id,
-                            text,
-                            images: original_images,
-                            result: Err(format!("prepare image attachments: {error:#}")),
-                        },
-                    );
-                    return;
-                }
-                Err(error) => {
-                    publish_chat_remote_result(
-                        results,
-                        attached,
-                        ChatRemoteResult::Prompt {
-                            command_id,
-                            text,
-                            images: original_images,
-                            result: Err(format!("image preparation task failed: {error}")),
-                        },
-                    );
-                    return;
-                }
-            };
+            if images.iter().any(|image| image.image.reference.is_none()) {
+                publish_chat_remote_result(
+                    results,
+                    attached,
+                    ChatRemoteResult::Prompt {
+                        command_id,
+                        text,
+                        images,
+                        result: Err("Image attachment is not ready".into()),
+                    },
+                );
+                return;
+            }
+            let normalized = images;
             let prompt = PromptPayload {
                 text: text.clone(),
                 images: normalized.clone(),
@@ -1022,55 +1000,6 @@ async fn enqueue_chat_remote_operation(
             });
         }
     }
-}
-
-/// Convert legacy inline images to session references before the relay command
-/// is serialized. Every image must be decoded, optimized, and installed; a
-/// stale or unreadable attachment must be reported before the command leaves
-/// the controller.
-fn normalize_prompt_images(
-    session_id: &str,
-    images: Vec<PromptImage>,
-) -> anyhow::Result<Vec<PromptImage>> {
-    images
-        .into_iter()
-        .map(|mut image| {
-            image.image = attachments::install_clipboard_image(session_id, image.image)?;
-            if image.image.reference.is_none() {
-                use base64::Engine as _;
-                let bytes = base64::engine::general_purpose::STANDARD
-                    .decode(image.image.data_base64.as_bytes())?;
-                let optimized = mj_client::image::optimize_image(&bytes)?;
-                let reference = mj_core::attachment::AttachmentRef::new(
-                    &optimized.bytes,
-                    optimized.mime_type,
-                    optimized.width,
-                    optimized.height,
-                )?;
-                let reference = tokio::runtime::Handle::current().block_on(async {
-                    let mut client = mj_client::daemon::connect_existing().await?;
-                    let mut reader = std::io::Cursor::new(&optimized.bytes);
-                    match client
-                        .upload_and_consume(&mut reader, |blob| {
-                            mj_client::daemon::DaemonAction::InstallAttachment {
-                                session_id: session_id.to_owned(),
-                                reference: reference.clone(),
-                                blob,
-                            }
-                        })
-                        .await?
-                    {
-                        mj_client::daemon::DaemonReply::AttachmentInstalled(reference) => {
-                            Ok(reference)
-                        }
-                        reply => anyhow::bail!("unexpected attachment upload reply {reply:?}"),
-                    }
-                })?;
-                image.image = crate::clipboard::ClipboardImage::from_reference(reference)?;
-            }
-            Ok(image)
-        })
-        .collect()
 }
 
 pub(super) fn restore_unsent_input(chat: &mut ChatState, input: &str) {
@@ -1575,6 +1504,7 @@ mod tests {
         false
     }
 
+    // Hard-won: #1514: upload blocked chat actions and oversized persisted drafts.
     #[tokio::test]
     async fn image_bytes_reach_the_session_actor_and_oversized_prompts_are_refused_intact() {
         if !in_isolated_store(
@@ -1602,8 +1532,10 @@ mod tests {
         let metadata_path = mj_client::daemon::metadata_path();
         std::fs::create_dir_all(metadata_path.parent().unwrap()).unwrap();
         std::fs::write(metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        let (upload_started, started) = tokio::sync::oneshot::channel();
+        let mut upload_started = Some(upload_started);
         let uploads = tokio::spawn(async move {
-            for _ in 0..4 {
+            for attempt in 0..2 {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut body = Vec::new();
                 loop {
@@ -1615,6 +1547,16 @@ mod tests {
                     body.extend_from_slice(&bytes);
                     if sha256.is_none() {
                         continue;
+                    }
+                    if attempt == 0 {
+                        upload_started.take().unwrap().send(()).unwrap();
+                        use tokio::io::AsyncReadExt as _;
+                        assert_eq!(
+                            stream.read(&mut [0u8; 1]).await.unwrap(),
+                            0,
+                            "cancel drops the upload connection"
+                        );
+                        break;
                     }
                     write_frame(
                         &mut stream,
@@ -1680,7 +1622,57 @@ mod tests {
                 }),
             });
         let mut remote = ChatRemoteSupervisor::spawn(fixture.stopped, fixture.control);
-        let image = valid_image();
+        use base64::Engine as _;
+        let mut raw = base64::engine::general_purpose::STANDARD
+            .decode(valid_image().data_base64.as_bytes())
+            .unwrap();
+        raw.resize(9 * 1024 * 1024, 0);
+        let pasted = ClipboardImage {
+            data_base64: base64::engine::general_purpose::STANDARD.encode(raw).into(),
+            mime_type: "image/png".into(),
+            reference: None,
+        };
+        let mut composer = crate::chat::test_support::grok_chat();
+        composer.set_prompt_images_supported(true);
+        composer.bind_composer_session(Some("image-session"));
+        assert!(composer.queue_attachment(
+            crate::chat::composer::AttachmentSource::Clipboard(pasted.clone()),
+            crate::chat::input_state::AttachmentFallback::FailedMarker
+        ));
+        assert!(composer.draft_payload().encode_draft().len() < 8 * 1024 * 1024);
+        started.await.unwrap();
+        composer.restore_elicitation(ElicitationRequest {
+            id: "during-upload".into(),
+            message: "Answer now".into(),
+            title: None,
+            description: None,
+            fields: Vec::new(),
+            tool_permission: None,
+        });
+        assert!(composer.elicitation.is_some());
+        composer.elicitation = None;
+        composer.clear_input();
+        composer.drain_composer();
+        assert!(composer.queue_attachment(
+            crate::chat::composer::AttachmentSource::Clipboard(pasted),
+            crate::chat::input_state::AttachmentFallback::FailedMarker
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                composer.drain_composer();
+                if composer.draft_payload().images[0].image.reference.is_some() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let draft = composer.draft_payload().encode_draft();
+        assert!(draft.len() < 8 * 1024 * 1024);
+        let restored = PromptPayload::decode_draft(&draft).unwrap();
+        let image = restored.images[0].image.clone();
+        assert!(image.data_base64.is_empty());
         let mut normalized_image = None;
         for text in ["", "inspect this"] {
             let payload = PromptPayload::with_image(text, image.clone());

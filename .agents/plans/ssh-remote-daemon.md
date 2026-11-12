@@ -11,6 +11,8 @@ This is private-network operation with working SSH authentication and host trust
 
 ## Progress
 
+- [x] (2026-11-12, composer follow-up) Move attachment upload/install into cancellable background preparation; drafts retain pending markers or installed references, and ordinary/startup submission consumes prepared references without uploading. Added large-paste and in-flight cancellation/elicitation regression.
+
 
 - [x] (2026-11-12) Read the complete plan standard, both research reports, container and local HTTP routing plans, installation scripts, and build identity implementation; verify principal references in current source.
 - [x] (2026-11-12) Record settled design, including the user's correction that EC2 CLI commands are forwarded.
@@ -247,3 +249,5 @@ Discovery (2026-11-12, import child): the dashboard applies the prepared Session
 Discovery (2026-11-12, import child): save_materialized_session requires a registered session, so ordering those two public writes cannot provide atomic registration. Import now inserts both inside the database writer transaction after archive installation; failed registration removes the archive with its output handle closed.
 
 Discovery (2026-11-12, retry follow-up): `DaemonClient::upload_and_consume` requires a rewindable reader, preserves its initial offset, and rebuilds connection-scoped blob IDs only after an explicit UpgradePending consumer refusal. Voice lives in another worktree: at merge replace its upload + TranscribeAudio request with this helper (Cursor for in-memory WAV). Never replay on transport errors. Composer already has supervised preparation jobs and pending markers in composer.rs; move remote installation into that owner, then remove submit-time normalization.
+
+Discovery (2026-11-12, composer follow-up): QueueStartupPrompt already validates installed references. Installing in composer preparation fixes startup/move submission without changing its protocol or persistence contract. Dropping the marker cancels the preparation future and closes its upload connection.

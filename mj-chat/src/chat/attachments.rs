@@ -323,6 +323,47 @@ fn install_image_bytes(_session_id: &str, bytes: &[u8]) -> Result<ClipboardImage
     )
 }
 
+/// Upload prepared bytes on the attachment task's cancellable connection.
+pub(super) async fn upload_prepared_image(
+    session_id: &str,
+    image: ClipboardImage,
+) -> Result<ClipboardImage> {
+    if image.reference.is_some() {
+        return Ok(image);
+    }
+    let (bytes, reference) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let bytes =
+            base64::engine::general_purpose::STANDARD.decode(image.data_base64.as_bytes())?;
+        let optimized = mj_client::image::optimize_image(&bytes)?;
+        let reference = mj_core::attachment::AttachmentRef::new(
+            &bytes,
+            image.mime_type.clone(),
+            optimized.width,
+            optimized.height,
+        )?;
+        Ok((bytes, reference))
+    })
+    .await
+    .context("attachment metadata task failed")??;
+    let mut client = mj_client::daemon::connect_existing().await?;
+    let mut reader = std::io::Cursor::new(bytes);
+    match client
+        .upload_and_consume(&mut reader, |blob| {
+            mj_client::daemon::DaemonAction::InstallAttachment {
+                session_id: session_id.to_owned(),
+                reference: reference.clone(),
+                blob,
+            }
+        })
+        .await?
+    {
+        mj_client::daemon::DaemonReply::AttachmentInstalled(reference) => {
+            ClipboardImage::from_reference(reference)
+        }
+        reply => bail!("unexpected attachment upload reply {reply:?}"),
+    }
+}
+
 fn marker(number: u64) -> String {
     format!("[image {number}]")
 }

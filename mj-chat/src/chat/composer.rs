@@ -86,6 +86,7 @@ pub(super) struct ComposerRuntime {
     pub(super) attachment_queue: VecDeque<(u64, AttachmentSource, AttachmentFallback)>,
     pub(super) attachment_tasks_in_flight: usize,
     pub(super) next_attachment_sequence: u64,
+    attachment_cancellations: BTreeMap<u64, tokio::sync::oneshot::Sender<()>>,
     session_id: Option<String>,
     pub(super) accepting_staged: bool,
     pub(super) submit_when_ready: Option<DeferredSubmission>,
@@ -104,6 +105,7 @@ impl Default for ComposerRuntime {
             attachment_queue: VecDeque::new(),
             attachment_tasks_in_flight: 0,
             next_attachment_sequence: 0,
+            attachment_cancellations: BTreeMap::new(),
             session_id: None,
             accepting_staged: false,
             submit_when_ready: None,
@@ -583,6 +585,20 @@ impl ChatState {
     }
 
     pub(crate) fn pump_attachment_queue(&mut self) {
+        self.composer_runtime
+            .attachment_cancellations
+            .retain(|sequence, _| {
+                self.pending_attachment_markers
+                    .get(sequence)
+                    .is_some_and(|number| {
+                        self.input_images
+                            .iter()
+                            .any(|image| image.number == *number && image.image.is_pending())
+                    })
+            });
+        self.composer_runtime
+            .attachment_queue
+            .retain(|(sequence, _, _)| self.pending_attachment_markers.contains_key(sequence));
         while self.composer_runtime.attachment_tasks_in_flight < MAX_ATTACHMENT_TASKS {
             let Some(session_id) = self.composer_runtime.session_id.clone() else {
                 break;
@@ -594,19 +610,33 @@ impl ChatState {
             };
             self.composer_runtime.attachment_tasks_in_flight += 1;
             let updates = self.composer_runtime.tx.clone();
+            let (cancel, cancelled) = tokio::sync::oneshot::channel();
+            self.composer_runtime
+                .attachment_cancellations
+                .insert(sequence, cancel);
             tokio::spawn(async move {
-                let result = match tokio::task::spawn_blocking(move || match source {
-                    AttachmentSource::Clipboard(image) => {
-                        attachments::install_clipboard_image(&session_id, image)
-                    }
-                    AttachmentSource::Path(path) => path
-                        .resolve()
-                        .and_then(|path| attachments::install_path(&session_id, &path)),
-                })
-                .await
-                {
-                    Ok(result) => result.map_err(|error| format!("{error:#}")),
-                    Err(error) => Err(format!("attachment task failed: {error}")),
+                let upload_session = session_id.clone();
+                let preparation = async move {
+                    let image = match tokio::task::spawn_blocking(move || match source {
+                        AttachmentSource::Clipboard(image) => {
+                            attachments::install_clipboard_image(&session_id, image)
+                        }
+                        AttachmentSource::Path(path) => path
+                            .resolve()
+                            .and_then(|path| attachments::install_path(&session_id, &path)),
+                    })
+                    .await
+                    {
+                        Ok(result) => result.map_err(|error| format!("{error:#}")),
+                        Err(error) => Err(format!("attachment task failed: {error}")),
+                    }?;
+                    attachments::upload_prepared_image(&upload_session, image)
+                        .await
+                        .map_err(|error| format!("{error:#}"))
+                };
+                let result = tokio::select! {
+                    result = preparation => result,
+                    _ = cancelled => Err("attachment cancelled".to_owned()),
                 };
                 if let Err(error) =
                     updates.send(ComposerIoUpdate::AttachmentFinished(AttachmentResult {
@@ -626,6 +656,9 @@ impl ChatState {
             .composer_runtime
             .attachment_tasks_in_flight
             .saturating_sub(1);
+        self.composer_runtime
+            .attachment_cancellations
+            .remove(&result.sequence);
         self.finish_attachment(result.sequence, result.result, result.fallback);
     }
 }
