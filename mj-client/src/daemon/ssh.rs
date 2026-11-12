@@ -178,53 +178,50 @@ async fn open_with_port(
             endpoint: endpoint.clone(),
             child,
         };
+        // Readiness sends no token: `prove_listener` sends only a nonce and
+        // checks the daemon's HMAC over it. There is no deadline. A silent
+        // listener that is not ssh ends when ssh exits on its failed bind
+        // (the select below), and a slow link only makes the proof slower.
         let ready = async {
+            // Bounds only the pause between probes, never the work.
+            const MAX_PROBE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+            let mut delay = std::time::Duration::from_millis(100);
             loop {
-                // Bound a silent competing listener, not SSH startup.
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(1),
-                    prove_listener(local_addr, &endpoint.token),
-                )
-                .await
-                {
-                    Ok(Ok(true)) => return true,
-                    Ok(Err(ref error))
+                match prove_listener(local_addr, &endpoint.token).await {
+                    Ok(true) => return Ok::<_, anyhow::Error>(None),
+                    // Nothing listens yet: ssh is still connecting.
+                    Err(ref error)
                         if error
                             .downcast_ref::<std::io::Error>()
-                            .is_some_and(|e| e.kind() == std::io::ErrorKind::ConnectionRefused) =>
-                    {
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            .is_some_and(|e| e.kind() == std::io::ErrorKind::ConnectionRefused) => {
                     }
+                    // A wrong or garbled proof, or a dropped connection: either
+                    // the daemon was replaced after discovery, or the listener
+                    // is another local process. Discovery tells them apart
+                    // without sending the token anywhere.
                     _ => {
-                        // Give SSH's bind failure the connection deadline to
-                        // finish; send no more bytes to the unproven peer.
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                        return false;
+                        let fresh = discover(placement, remote_instance, intent).await?;
+                        if fresh.instance_id != endpoint.instance_id
+                            || fresh.control_address != endpoint.control_address
+                        {
+                            return Ok(Some(fresh));
+                        }
+                        delay = (delay * 2).min(MAX_PROBE_DELAY);
                     }
                 }
+                tokio::time::sleep(delay).await;
             }
         };
         tokio::select! {
-            answered = ready => {
-                if answered {
-                    return Ok(lease);
-                }
-                // The remote daemon stopped or was replaced after discovery.
-                // Discover again; the new endpoint is the state change that
-                // ends this loop, and an unchanged one is an error.
-                lease.terminate().await?;
-                let stale = std::mem::replace(
-                    &mut endpoint,
-                    discover(placement, remote_instance, intent).await?,
-                );
-                if stale.instance_id == endpoint.instance_id
-                    && stale.control_address == endpoint.control_address
-                {
-                    bail!(
-                        "the daemon at {} on {} answers discovery but not through the SSH tunnel",
-                        endpoint.control_address,
-                        placement.host.as_deref().unwrap_or_default()
-                    );
+            outcome = ready => {
+                match outcome? {
+                    None => return Ok(lease),
+                    // The daemon was replaced after discovery: the new endpoint
+                    // is the state change that restarts the tunnel.
+                    Some(fresh) => {
+                        lease.terminate().await?;
+                        endpoint = fresh;
+                    }
                 }
             }
             status = lease.child.wait() => {
