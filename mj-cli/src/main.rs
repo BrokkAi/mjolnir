@@ -1043,25 +1043,25 @@ async fn run_command(
                 .await
                 .map(|()| DashboardExit::Normal)
         }
-        Some(Command::Ec2(args)) => ec2::run(args).await.map(|()| DashboardExit::Normal),
+        Some(Command::Ec2(args)) => {
+            if daemon::run_where_daemon_lives(&daemon_forwarded_args(), false).await? {
+                return Ok(DashboardExit::Normal);
+            }
+            ec2::run(args).await.map(|()| DashboardExit::Normal)
+        }
         Some(Command::Doctor(args)) => {
-            if daemon::container::exec_in_container(&container_forwarded_args()).await? {
+            if daemon::run_where_daemon_lives(&daemon_forwarded_args(), false).await? {
                 return Ok(DashboardExit::Normal);
             }
             doctor(args).await.map(|()| DashboardExit::Normal)
         }
         Some(Command::Setup(args)) => {
-            if args.command.is_none()
-                && daemon::container::exec_in_container(&["setup".to_owned()]).await?
-            {
+            if daemon::run_where_daemon_lives(&daemon_forwarded_args(), true).await? {
                 return Ok(DashboardExit::Normal);
             }
             setup(args).map(|()| DashboardExit::Normal)
         }
         Some(Command::Import(args)) => {
-            if daemon::container::exec_in_container(&container_forwarded_args()).await? {
-                return Ok(DashboardExit::Normal);
-            }
             let workspace_id =
                 resolve_store_workspace(args.workspace().or(requested_workspace).as_deref())
                     .await?;
@@ -1148,7 +1148,7 @@ async fn run_command(
             if args.cli {
                 forwarded.push("--cli".to_owned());
             }
-            if daemon::container::exec_in_container(&forwarded).await? {
+            if daemon::run_where_daemon_lives(&forwarded, true).await? {
                 return Ok(DashboardExit::Normal);
             }
             login(args).await.map(|()| DashboardExit::Normal)
@@ -2223,6 +2223,14 @@ fn suggested_workspace_name(workspaces: &[daemon::WorkspaceListing]) -> Result<S
 }
 
 async fn daemon_command(args: DaemonArgs) -> Result<()> {
+    if matches!(
+        args.command,
+        DaemonCommand::Status | DaemonCommand::Stop(_) | DaemonCommand::Restart
+    ) && daemon::run_where_daemon_lives(&daemon_forwarded_args(), false).await?
+    {
+        return Ok(());
+    }
+
     match args.command {
         DaemonCommand::Endpoint { existing, .. } => daemon::print_endpoint(existing).await?,
         DaemonCommand::Afk { command } => {
@@ -2362,10 +2370,10 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
     Ok(())
 }
 
-/// The command line to replay inside a daemon container. The container is one
-/// instance already, so the host's `--instance` selector is removed; every
+/// The command line to replay where the daemon lives. Placement supplies
+/// the destination instance, so the client instance selector is removed; every
 /// other argument keeps its meaning.
-fn container_forwarded_args() -> Vec<String> {
+fn daemon_forwarded_args() -> Vec<String> {
     let mut args = std::env::args().skip(1);
     let mut forwarded = Vec::new();
     while let Some(argument) = args.next() {
