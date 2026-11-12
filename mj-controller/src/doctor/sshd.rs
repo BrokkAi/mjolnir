@@ -32,7 +32,12 @@ pub(super) fn check(
 ) -> DoctorCheck {
     let command = strict_ssh_validation_command(
         ssh,
-        vec!["sudo".into(), "-n".into(), "sshd".into(), "-T".into()],
+        vec![
+            "sh".into(),
+            "-c".into(),
+            // SSH supplies the addresses of this connection, including multiplexed channels.
+            r#"set -eu; set -- $SSH_CONNECTION; sudo -n sshd -T -C "user=$(id -un),addr=$1,laddr=$3,lport=$4""#.into(),
+        ],
         "check effective SSH server limits",
     );
     let result = executor.execute(&command);
@@ -74,7 +79,7 @@ pub(super) fn check(
                 "Effective SSH server limits on {} are unknown; passwordless `sudo -n sshd -T` could not read them.",
                 ssh.destination
             ),
-            "On the host, run `sudo sshd -T` and check MaxSessions and MaxStartups; mj recommends 200 and 100:30:300 respectively.",
+            r#"In an SSH connection to the host, run `set -- $SSH_CONNECTION; sudo sshd -T -C "user=$(id -un),addr=$1,laddr=$3,lport=$4"` and check MaxSessions and MaxStartups; mj recommends 200 and 100:30:300 respectively."#,
         );
     };
     let detail = format!(
@@ -88,7 +93,7 @@ pub(super) fn check(
             title,
             detail,
             format!(
-                r#"On the host, run: `sudo -n mkdir -p /etc/ssh/sshd_config.d && printf '%s\n' '# Measured relay-session refusals at ~40 containers on morannon (Series 20/21).' 'MaxSessions {sessions}' 'MaxStartups {start}:{rate}:{full}' | sudo -n tee /etc/ssh/sshd_config.d/60-mj-mux.conf && sudo -n cp /etc/ssh/sshd_config /etc/ssh/sshd_config.mj-backup && {{ printf '%s\n' 'Include /etc/ssh/sshd_config.d/*.conf'; sudo -n cat /etc/ssh/sshd_config.mj-backup; }} | sudo -n tee /etc/ssh/sshd_config && sudo -n sshd -t`. On Linux with systemd, reload with `sudo -n systemctl reload "$(systemctl show -p Id --value sshd.service)"`. On macOS, launchd starts sshd for each new connection, so reconnect to apply the settings. Then run `sudo -n sshd -T` to verify the effective values; earlier drop-ins may take precedence. Reconnect existing SSH masters to apply the new limits."#,
+                r#"On the host, run: `sudo -n mkdir -p /etc/ssh/sshd_config.d && printf '%s\n' '# Measured relay-session refusals at ~40 containers on morannon (Series 20/21).' 'MaxSessions {sessions}' 'MaxStartups {start}:{rate}:{full}' | sudo -n tee /etc/ssh/sshd_config.d/60-mj-mux.conf && sudo -n cp /etc/ssh/sshd_config /etc/ssh/sshd_config.mj-backup && {{ printf '%s\n' 'Include /etc/ssh/sshd_config.d/*.conf'; sudo -n cat /etc/ssh/sshd_config.mj-backup; }} | sudo -n tee /etc/ssh/sshd_config && sudo -n sshd -t`. On Linux with systemd, reload with `sudo -n systemctl reload "$(systemctl show -p Id --value sshd.service)"`. On macOS, launchd starts sshd for each new connection, so reconnect to apply the settings. Then rerun `mj doctor` to verify the effective values; earlier drop-ins and Match blocks may take precedence; adjust those if the limits remain low. Reconnect existing SSH masters to apply the new limits."#,
                 sessions = sessions.max(200),
                 start = start.max(100),
                 rate = rate.min(30),
