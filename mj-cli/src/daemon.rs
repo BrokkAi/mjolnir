@@ -13,6 +13,72 @@ pub(crate) use mj_client::daemon::*;
 pub(crate) use mj_client::executable::process_executable_path;
 pub(crate) use mj_controller::daemon::run_daemon_process;
 
+/// Forward machine-owned commands before touching client stores or credentials.
+pub(crate) async fn run_where_daemon_lives(args: &[String], interactive: bool) -> Result<bool> {
+    let interactive = interactive && !args.iter().any(|arg| arg == "--json");
+    let placement = load_daemon_config().await?;
+    if placement.runtime != mj_core::config::DaemonRuntime::Ssh {
+        return container::exec_in_container(args, interactive).await;
+    }
+    let host = placement
+        .host
+        .as_deref()
+        .context("[daemon] host is required for SSH placement")?;
+    ensure!(
+        !host.starts_with('-'),
+        "[daemon] host cannot be an SSH option"
+    );
+    let instance = placement.instance.clone().unwrap_or_else(|| {
+        mj_core::config::instance_name().unwrap_or_else(|| "default".to_owned())
+    });
+    if args == ["daemon", "status"] {
+        let client = this_build();
+        println!("Client build: {}", client.published());
+        match mj_client::daemon::ssh::discover(
+            &placement,
+            &instance,
+            mj_client::daemon::ssh::DiscoveryIntent::Existing,
+        )
+        .await
+        {
+            Ok(endpoint) => {
+                let remote = BuildIdentity::parse(&endpoint.build_version)?;
+                println!("Daemon build: {}", remote.published());
+                println!("same_source: {}", client.same_source(&remote));
+            }
+            Err(error) => eprintln!("Daemon build unavailable: {error:#}"),
+        }
+    }
+    let mut argv = vec![
+        placement.remote_command().to_owned(),
+        "--instance".into(),
+        instance,
+    ];
+    argv.extend_from_slice(args);
+    let mut command = std::process::Command::new("ssh");
+    if interactive {
+        command.arg("-t");
+    }
+    command
+        .args(&placement.ssh_args)
+        .arg(host)
+        .arg(mj_core::targets::daemon_login_command(&argv));
+    let status =
+        tokio::task::spawn_blocking(move || mj_core::subprocess::run_inherited(&mut command))
+            .await
+            .context("SSH command task panicked")??;
+    if status.code() == Some(127) {
+        eprintln!(
+            "[daemon] remote_command {:?} was not found on {host}; install mj remotely with scripts/install.sh (or install the same release)",
+            placement.remote_command()
+        );
+    }
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(true)
+}
+
 pub(crate) mod container;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -471,8 +537,7 @@ async fn resolve_placement(daemon: &mj_core::config::DaemonConfig) -> Result<Con
 
 async fn load_daemon_config() -> Result<mj_core::config::DaemonConfig> {
     tokio::task::spawn_blocking(|| {
-        mj_core::config::Config::load_from(&mj_core::config::config_path())
-            .map(|config| config.daemon)
+        mj_core::config::DaemonConfig::load_placement(&mj_core::config::config_path())
     })
     .await
     .context("read daemon configuration task failed")?
