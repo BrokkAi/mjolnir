@@ -33,59 +33,62 @@ fn auth_failure(relay: &mut DurableRelay, id: &str, login: &str) {
 // Hard-won: #1515: a refreshed login left an auth-failed turn idle forever.
 #[test]
 fn authentication_recovery_survives_restart_and_never_retries_the_same_login() {
-    let root = tempfile::tempdir().unwrap();
-    let mut relay = open(root.path());
-    submit_relay(&mut relay, "user-request", prompt("finish this task"));
-    relay.claim_pending_commands(true).unwrap();
-    auth_failure(&mut relay, "user-request", "old-access-hash");
-    let (ordinal, _) = relay
-        .authentication_retry_identity()
-        .expect("auth failure is recoverable");
-    assert!(
-        !relay
-            .submit_authentication_retry(ordinal, "old-access-hash")
-            .unwrap()
-    );
-    drop(relay);
+    for original in ["user-request", "subagent-spawn-auth-regression"] {
+        let root = tempfile::tempdir().unwrap();
+        let mut relay = open(root.path());
+        submit_relay(&mut relay, original, prompt("finish this task"));
+        relay.claim_pending_commands(true).unwrap();
+        let authorization = relay.snapshot.continuation.user_command_id.clone();
+        auth_failure(&mut relay, original, "old-access-hash");
+        let (ordinal, _) = relay
+            .authentication_retry_identity()
+            .expect("auth failure is recoverable");
+        assert!(
+            !relay
+                .submit_authentication_retry(ordinal, "old-access-hash")
+                .unwrap()
+        );
+        drop(relay);
 
-    let mut relay = open(root.path());
-    assert!(
-        relay
-            .submit_authentication_retry(ordinal, "new-access-hash")
-            .unwrap()
-    );
-    assert!(
-        !relay
-            .submit_authentication_retry(ordinal, "new-access-hash")
-            .unwrap()
-    );
-    assert_eq!(
-        relay.snapshot.continuation.user_command_id.as_deref(),
-        Some("user-request")
-    );
-    let retry = relay.claim_pending_commands(true).unwrap().pop().unwrap();
-    assert_eq!(retry.command_id, format!("auth-retry-{ordinal}"));
-    assert_eq!(
-        retry.command.prompt_blocks().unwrap().as_ref(),
-        mj_core::continuation::prompt_blocks()
-    );
-    auth_failure(&mut relay, &retry.command_id, "new-access-hash");
-    let (second, _) = relay.authentication_retry_identity().unwrap();
-    assert!(
-        !relay
-            .submit_authentication_retry(second, "new-access-hash")
-            .unwrap()
-    );
-    assert!(
-        !relay
-            .submit_authentication_retry(ordinal, "third-access-hash")
-            .unwrap()
-    );
-    assert!(
-        relay
-            .submit_authentication_retry(second, "third-access-hash")
-            .unwrap()
-    );
+        let mut relay = open(root.path());
+        assert!(
+            relay
+                .submit_authentication_retry(ordinal, "new-access-hash")
+                .unwrap()
+        );
+        assert!(
+            !relay
+                .submit_authentication_retry(ordinal, "new-access-hash")
+                .unwrap()
+        );
+        assert_eq!(
+            relay.snapshot.continuation.user_command_id.as_deref(),
+            authorization.as_deref()
+        );
+        let retry = relay.claim_pending_commands(true).unwrap().pop().unwrap();
+        assert_eq!(retry.command_id, format!("auth-retry-{ordinal}"));
+        assert_eq!(
+            retry.command.prompt_blocks().unwrap().as_ref(),
+            mj_core::continuation::prompt_blocks()
+        );
+        auth_failure(&mut relay, &retry.command_id, "new-access-hash");
+        let (second, _) = relay.authentication_retry_identity().unwrap();
+        assert!(
+            !relay
+                .submit_authentication_retry(second, "new-access-hash")
+                .unwrap()
+        );
+        assert!(
+            !relay
+                .submit_authentication_retry(ordinal, "third-access-hash")
+                .unwrap()
+        );
+        assert!(
+            relay
+                .submit_authentication_retry(second, "third-access-hash")
+                .unwrap()
+        );
+    }
 }
 
 #[test]

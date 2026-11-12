@@ -4399,6 +4399,93 @@ async fn returned_steering_leaves_the_prompt_to_mj_without_cancellation() {
     exercise_image_steering(false, "promptRequired").await;
 }
 
+// Hard-won: #1515: a blocked login read prevented pre-prompt cancellation.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stalled_login_read_can_be_cancelled_before_sending_the_prompt() {
+    for targeted in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let gate = crate::test_support::stalled_read_file(&home.path().join(".credentials.json"));
+        let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
+        let bridge = tokio::spawn(scripted_bridge(
+            bridge_stream,
+            home.path().join("unexpected-login"),
+        ));
+        let (read, write) = tokio::io::split(client_stream);
+        let transport = ByteStreams::new(write.compat_write(), read.compat());
+        let (requests, mut request_rx) = mpsc::channel(4);
+        let (events, mut event_rx) = mpsc::channel(64);
+        let mut spec = silent_bridge_spec(mj_core::activity::StallPolicy {
+            silence: None,
+            tool_call: None,
+        });
+        spec.harness = HarnessKind::Claude;
+        spec.environment.insert(
+            "CLAUDE_CONFIG_DIR".into(),
+            home.path().to_string_lossy().into_owned(),
+        );
+        let step_clock = spec.step_clock.clone();
+        let opened = Arc::new(Mutex::new(None));
+        let driver_opened = opened.clone();
+        let driver = tokio::spawn(async move {
+            drive(
+                transport,
+                spec,
+                &mut request_rx,
+                events,
+                driver_opened,
+                false,
+            )
+            .await
+        });
+        requests
+            .send(CommandRequest::Prompt {
+                request_id: "preparing".into(),
+                prompt: vec![ContentBlock::from("work")],
+            })
+            .await
+            .unwrap();
+        requests
+            .send(if targeted {
+                CommandRequest::CancelTurnFor {
+                    request_id: "cancel-preparation".into(),
+                    active_prompt_id: "preparing".into(),
+                }
+            } else {
+                CommandRequest::Cancel {
+                    request_id: "cancel-preparation".into(),
+                    steering_prompt: None,
+                }
+            })
+            .await
+            .unwrap();
+        wait_for_runtime_event(&mut event_rx, |event| matches!(event,
+            RuntimeEvent::PromptFinished { request_id, stop_reason, .. } if request_id == "preparing" && stop_reason == "Cancelled"
+        )).await;
+        assert!(
+            !opened
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .native_session_used
+                .load(Ordering::Acquire)
+        );
+        assert_eq!(step_clock.started_at_ms(), None);
+        drop(requests);
+        crate::test_support::wait_for("runtime shutdown during a login read", driver)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            bridge.await.unwrap(),
+            0,
+            "a cancelled preparation must send no ACP prompt"
+        );
+        drop(gate);
+    }
+}
+
 // Hard-won: 410851f: A Kimi bridge restarted unnecessarily after it acknowledged cancellation.
 #[tokio::test(start_paused = true)]
 async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {

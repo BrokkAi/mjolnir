@@ -1680,7 +1680,7 @@ impl DurableRelay {
         {
             return None;
         }
-        let completed = self.snapshot.continuation.completed_command_id.as_ref()?;
+        let completed = &self.snapshot.turn_completion.as_ref()?.command_id;
         let receipt = self.snapshot.handled_commands.get(completed)?;
         let ordinal = receipt.terminal_ordinal?;
         if self

@@ -10,8 +10,8 @@ Issue #1515 reports Claude turns failing with Authentication required between a 
 
 - [x] (2026-11-12) Claimed #1515 and traced credential synchronization, prompt completion, and durable retry admission.
 - [x] (2026-11-12) Recorded access-token evidence on failed turns and implemented worker-owned durable recovery, with install wakes and startup checks.
-- [ ] Exercise both orderings of login delivery and prompt failure, restart, duplicate wakes, and superseding user input.
-- [ ] Run formatting, affected-crate tests, workspace Clippy; commit and push to master.
+- [x] (2026-11-12) Covered both socket delivery orders, restart, duplicate wakes, unchanged tokens, newer input, cancellations, questions and pending checkpoints.
+- [x] (2026-11-12) Passed formatting, affected-crate validation and workspace Clippy; prepared the validated review follow-up for publication.
 
 ## Surprises & Discoveries
 
@@ -25,7 +25,7 @@ Decision: retain only a hash of the access token, never credential bytes, in the
 
 ## Outcomes & Retrospective
 
-Implementation and validation are in progress. Installation is outside this request.
+The first full validation passed: controller 2569 passed/19 ignored, core 638 passed/3 ignored, worker 831 passed/11 ignored, plus integration suites. Review identified awaited filesystem reads in the coordinator and before prompt dispatch. Both are corrected and covered with real stalled-file fixtures. The final worker run passed 832 tests and all integration suites; its unchanged `work_facts::tests::the_status_and_the_subject_reads_run_together_and_agree_on_the_commit` fixture failed once, then passed immediately in isolation (the initial full run also passed it). Eleven worker tests remain intentionally ignored. Workspace `cargo clippy --all-targets -- -D warnings`, rustfmt and diff checks passed. Implementation and validation are complete; the prepared follow-up follows the repository’s review and push workflow. Installation is outside this request.
 
 ## Context and Orientation
 
@@ -33,7 +33,7 @@ Implementation and validation are in progress. Installation is outside this requ
 
 ## Plan of Work
 
-Capture the staged Claude access-token fingerprint immediately before sending a prompt. Attach it only to an authentication failure. Add a generated authentication retry whose identity includes the failed completion ordinal. In the relay, require that completion to remain current, the access token to differ, and normal submission/activity guards to permit continuing; newer input, cancellation, questions, goals, and barriers must win. Recheck after runtime events and credential-install dispatch wakes, reading files off the relay lock. On restart, recheck persisted failures. Emit an automatic-recovery notice in the transcript. Do not replay the original prompt or synthesize new authorization.
+Capture the staged Claude access-token fingerprint immediately before sending a prompt. Attach it only to an authentication failure. Add a generated authentication retry whose identity includes the failed completion ordinal. In the relay, require that completion to remain current, the access token to differ, and normal submission/activity guards to permit continuing; newer input, cancellation, questions, goals, and barriers must win. Recheck after runtime events, credential-install dispatch wakes and background judgments. A supervised reader handles file I/O independently and coalesces pending checks with a watch channel; returned results are revalidated against relay state. Prompt preparation reads inside the existing cancellable turn loop, before dispatch; cancelling an unsent prompt records no native history. On restart, recheck persisted failures. Emit an automatic-recovery notice in the transcript. Do not replay the original prompt or synthesize new authorization.
 
 ## Concrete Steps
 
@@ -58,3 +58,7 @@ Use the existing credential hash, shared activity predicates, durable relay comm
 Revision 2026-11-12: initial plan after tracing the observed failure and reverse delivery ordering.
 
 Revision 2026-11-12: implemented worker recovery; socket and ACP fixtures pass both event orders and preserve the starting login. Expanded control cases to cover a pending checkpoint and input removed before failure. Final validation remains pending.
+
+Revision 2026-11-12: addressed review responsiveness findings with a supervised reader and cancellable prompt preparation. Real FIFO fixtures prove progress/shutdown while reads are blocked. Recovery uses the canonical completed turn, including delegated assignments, without altering authorization.
+
+Revision 2026-11-12: finalized validation evidence, including the isolated rerun of the unchanged Git rendezvous fixture; formatting and workspace Clippy passed. The implementation is complete and prepared for final review/publication.

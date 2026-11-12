@@ -1985,6 +1985,66 @@ async fn authentication_recovery_handles_both_orders_of_install_and_failure() {
     }
 }
 
+// Hard-won: #1515: awaiting credential I/O parked the coordinator's event loop.
+#[tokio::test]
+async fn a_stalled_login_read_does_not_block_relay_events_or_shutdown() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("login.json");
+    let gate = crate::test_support::stalled_read_file(&path);
+    let mut durable = DurableRelay::open(root.path(), SESSION_ID, "test").unwrap();
+    durable.set_turn_verdict_harness(HarnessKind::Claude);
+    durable.authentication_login_path = Some(path);
+    durable
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+    submit(&mut durable, "user-request", prompt("finish this task"));
+    durable.claim_pending_commands(true).unwrap();
+    let mut diagnostic = mj_core::diagnostic::TurnDiagnostic::from_acp(
+        &agent_client_protocol::Error::auth_required(),
+    );
+    diagnostic.login_fingerprint = Some("old-login".into());
+    durable
+        .record_command_completed(
+            "user-request",
+            mj_core::relay::RelayCommandOutcome::Prompt {
+                work_facts: None,
+                stop_reason: "error".into(),
+                diagnostic: Some(diagnostic),
+                usage: None,
+            },
+        )
+        .unwrap();
+    let relay = Arc::new(RelayCell::new(durable));
+    let (events, event_rx) = mpsc::channel(4);
+    let (_wakes, wake_rx) = mpsc::channel(1);
+    let (commands, _command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(run_relay_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        commands,
+    ));
+    events
+        .send(RuntimeEvent::Warning {
+            message: "read-is-stalled".into(),
+        })
+        .await
+        .unwrap();
+    wait_until(
+        || recorded_warning(&relay, "read-is-stalled"),
+        "login read blocked runtime events",
+    )
+    .await;
+    events.send(RuntimeEvent::Stopped).await.unwrap();
+    crate::test_support::wait_for("coordinator shutdown during a login read", coordinator)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(gate);
+}
+
 /// Wait for a coordinator-side condition. Everything this guards against
 /// wedges permanently, so a generous deadline still fails fast enough.
 async fn wait_until(mut condition: impl FnMut() -> bool, blocked: &str) {

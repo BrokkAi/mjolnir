@@ -1,5 +1,29 @@
 use super::*;
 
+/// Record possible native history only when the prompt is ready to be sent.
+async fn record_prompt_use(
+    opened: &Arc<Mutex<Option<OpenedSession>>>,
+    events: &mpsc::Sender<RuntimeEvent>,
+) -> Result<()> {
+    // Mark before sending: even a failed reply cannot prove the
+    // agent did not receive and persist this prompt.
+    let mut first_use = false;
+    if let Some(opened) = opened
+        .lock()
+        .expect("opened session lock poisoned")
+        .as_mut()
+    {
+        opened.resume_required.store(true, Ordering::Release);
+        first_use = !opened.native_session_used.swap(true, Ordering::AcqRel);
+    }
+    // Persist the same fact durably, once, so a restart after this
+    // prompt never treats the thread as an empty one to replace.
+    if first_use {
+        emit_runtime_event(events, RuntimeEvent::NativeSessionUsed).await?;
+    }
+    Ok(())
+}
+
 /// Marks the boundary between a provider's replay of old history and the live
 /// history of this connection. Loading suppresses conversation replay, while
 /// current session metadata always passes. Every open path marks this boundary
@@ -930,22 +954,6 @@ pub(super) async fn serve_session(
                 // as unanswered would report the compaction that was asked for
                 // as a failure (#970).
                 let mut asked_to_compact = mj_core::acp::prompt_requests_compaction(&prompt);
-                // Mark before sending: even a failed reply cannot prove the
-                // agent did not receive and persist this prompt.
-                let mut first_use = false;
-                if let Some(opened) = opened
-                    .lock()
-                    .expect("opened session lock poisoned")
-                    .as_mut()
-                {
-                    opened.resume_required.store(true, Ordering::Release);
-                    first_use = !opened.native_session_used.swap(true, Ordering::AcqRel);
-                }
-                // Persist the same fact durably, once, so a restart after this
-                // prompt never treats the thread as an empty one to replace.
-                if first_use {
-                    emit_runtime_event(events, RuntimeEvent::NativeSessionUsed).await?;
-                }
                 let prompt_text = prompt
                     .iter()
                     .filter_map(|block| match block {
@@ -967,25 +975,34 @@ pub(super) async fn serve_session(
                 // `session/prompt` reply, so there is no harness that is safe
                 // to exempt and nothing left to special-case.
                 let stall_policy = spec.stall_policy.unwrap_or_else(turn_stall_policy);
-                let login_fingerprint = if spec.harness == HarnessKind::Claude
-                    && let Some(path) =
-                        mj_core::credentials::claude_oauth_login_path(&spec.environment)
+                // Preparation runs inside the active turn's select loop, so
+                // cancellation can finish a prompt that has not been sent yet.
+                let login_path = (spec.harness == HarnessKind::Claude)
+                    .then(|| mj_core::credentials::claude_oauth_login_path(&spec.environment))
+                    .flatten();
+                let request = PromptRequest::new(session_id.clone(), prompt);
+                let (mut preparation, mut prompt): (_, ActivePrompt) = if let Some(path) =
+                    login_path
                 {
-                    match read_claude_login_fingerprint(path).await {
-                        Ok(fingerprint) => fingerprint,
-                        Err(error) => {
-                            tracing::warn!(%error, "could not read the Claude login before prompting");
-                            None
-                        }
-                    }
+                    let prepare = async move {
+                        let fingerprint = match read_claude_login_fingerprint(path).await {
+                            Ok(fingerprint) => fingerprint,
+                            Err(error) => {
+                                tracing::warn!(%error, "could not read the Claude login before prompting");
+                                None
+                            }
+                        };
+                        (fingerprint, request)
+                    };
+                    (Some(Box::pin(prepare)), Box::pin(std::future::pending()))
                 } else {
-                    None
+                    record_prompt_use(&opened, events).await?;
+                    (
+                        None,
+                        Box::pin(connection.send_request(request).block_task()),
+                    )
                 };
-                let mut prompt: ActivePrompt = Box::pin(
-                    connection
-                        .send_request(PromptRequest::new(session_id.clone(), prompt))
-                        .block_task(),
-                );
+                let mut login_fingerprint = None;
                 let (implementation_tx, mut implementation_rx) = mpsc::unbounded_channel();
                 *plan_implementation_slot
                     .lock()
@@ -1014,6 +1031,14 @@ pub(super) async fn serve_session(
                             emit_runtime_event(events, RuntimeEvent::Warning {
                                 message: "Plan approved; waiting for Claude to finish planning before restoring the policy mode.".into(),
                             }).await?;
+                        }
+                        prepared = async { preparation.as_mut().expect("guarded prompt preparation").await }, if preparation.is_some() => {
+                            preparation = None;
+                            let (fingerprint, request) = prepared;
+                            login_fingerprint = fingerprint;
+                            record_prompt_use(&opened, events).await?;
+                            spec.acp_activity.mark();
+                            prompt = Box::pin(connection.send_request(request).block_task());
                         }
                         response = &mut prompt, if prompt_running => {
                             spec.acp_activity.mark();
@@ -1201,7 +1226,7 @@ pub(super) async fn serve_session(
                                     verdict => break verdict,
                                 }
                             }
-                        }, if prompt_running && stall_policy.enabled() => {
+                        }, if prompt_running && preparation.is_none() && stall_policy.enabled() => {
                             tracing::warn!(
                                 session_id = %session_id,
                                 harness = ?spec.harness,
@@ -1298,11 +1323,18 @@ pub(super) async fn serve_session(
                                 } else {
                                     implementation_rx.close(); approved_plan = None; implementation_deadline = None;
                                     apply_cancel(connection, &session_id, cancel_id, events, terminals, pending_elicitations).await?;
+                                    if preparation.is_some() {
+                                        spec.step_clock.end_turn();
+                                        emit_runtime_event(events, RuntimeEvent::PromptFinished {
+                                            request_id, stop_reason: "Cancelled".into(), usage: None, diagnostic: None,
+                                        }).await?;
+                                        break;
+                                    }
                                     cancel_deadline = Some(tokio::time::Instant::now() + CANCEL_ACK_TIMEOUT);
                                 }
                             }
                             Some(CommandRequest::Steer { request_id: steer_id, active_prompt_id, steering_prompt }) => {
-                                if active_prompt_id != request_id || !prompt_running || cancel_deadline.is_some() || pending_steer.is_some() || !steering_supported {
+                                if active_prompt_id != request_id || !prompt_running || preparation.is_some() || cancel_deadline.is_some() || pending_steer.is_some() || !steering_supported {
                                     emit_runtime_event(events, RuntimeEvent::CommandRejected {
                                         request_id: steer_id,
                                         message: if !steering_supported { "This harness does not support steering" } else { "The requested turn is no longer available for steering" }.into(),
@@ -1330,7 +1362,7 @@ pub(super) async fn serve_session(
                                     break;
                                 }
                                 if let Some(steering_prompt) = steering_prompt {
-                                    if !steering_supported || cancel_deadline.is_some() {
+                                    if preparation.is_some() || !steering_supported || cancel_deadline.is_some() {
                                         emit_runtime_event(events, RuntimeEvent::CommandRejected {
                                             request_id: cancel_id,
                                             message: "Steering is not available. The prompt remains queued; cancel the turn explicitly to apply it next.".into(),
@@ -1340,6 +1372,13 @@ pub(super) async fn serve_session(
                                     }
                                 } else {
                                     apply_cancel(connection, &session_id, cancel_id, events, terminals, pending_elicitations).await?;
+                                    if preparation.is_some() {
+                                        spec.step_clock.end_turn();
+                                        emit_runtime_event(events, RuntimeEvent::PromptFinished {
+                                            request_id, stop_reason: "Cancelled".into(), usage: None, diagnostic: None,
+                                        }).await?;
+                                        break;
+                                    }
                                     if cancel_deadline.is_none() {
                                         cancel_deadline = Some(tokio::time::Instant::now() + CANCEL_ACK_TIMEOUT);
                                     }
