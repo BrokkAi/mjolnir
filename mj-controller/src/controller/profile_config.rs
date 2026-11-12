@@ -350,7 +350,7 @@ pub(crate) fn observation_check(
 pub(crate) async fn observe(
     profile_id: String,
     worker_build: String,
-    state: mj_core::relay::RelayOperationalState,
+    state: mj_core::snapshot_map::SharedSnapshot<mj_core::relay::RelayOperationalState>,
     check: ObservationCheck,
 ) -> Result<bool> {
     let stored = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1546,7 +1546,7 @@ mod tests {
             !observe(
                 "muse".into(),
                 String::new(),
-                observed(),
+                observed().into(),
                 ObservationCheck::NoProbe,
             )
             .await
@@ -1569,7 +1569,7 @@ mod tests {
             observe(
                 "codex".into(),
                 String::new(),
-                observed(),
+                observed().into(),
                 ObservationCheck::NoProbe,
             )
             .await

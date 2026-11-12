@@ -3,7 +3,7 @@ use super::*;
 #[derive(Debug, Clone)]
 pub struct SessionManagerUpdate {
     /// Daemon-only cache input captured before model-policy projection. Never sent on the wire.
-    pub raw_observation: Option<RelayOperationalState>,
+    pub raw_observation: Option<mj_core::snapshot_map::SharedSnapshot<RelayOperationalState>>,
     pub session_id: String,
     pub view: ManagedSessionView,
 }
@@ -325,7 +325,8 @@ impl Drop for SessionManagerShutdown {
 #[derive(Clone)]
 pub(crate) struct CoalescedUpdateSender {
     // Continuation checks can hold a view; keep its newest raw cache input until publication.
-    pub(crate) pending_observations: Arc<Mutex<BTreeMap<String, RelayOperationalState>>>,
+    pub(crate) pending_observations:
+        Arc<Mutex<BTreeMap<String, mj_core::snapshot_map::SharedSnapshot<RelayOperationalState>>>>,
     pub(super) last_raw_options:
         Arc<Mutex<Option<Vec<agent_client_protocol::v1::schema::SessionConfigOption>>>>,
     pub(super) model_policies: watch::Sender<BTreeMap<String, SessionModelPolicy>>,

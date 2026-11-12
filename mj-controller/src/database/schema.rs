@@ -2387,6 +2387,24 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
         migrate_nitro_target_kind(connection)?;
     }
 
+    // Compatible: only expression indexes; previous readers and writers
+    // keep the same turn bodies, and SQLite maintains them for their writes.
+    if version < 125 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE INDEX IF NOT EXISTS session_turn_usage_completed_time
+                 ON session_turn_usage(json_extract(body, '$.completed_at_ms'), session_id);
+             CREATE INDEX IF NOT EXISTS materialized_sessions_active_usage
+                 ON materialized_sessions(json_extract(active_turn_json, '$.started_at_ms'),
+                     session_id, json_extract(active_turn_json, '$.command_id'))
+                 WHERE active_turn_json IS NOT NULL;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (125, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             PRAGMA user_version = 125;
+             COMMIT;",
+        )?;
+    }
+
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -3237,7 +3255,7 @@ mod reader_tests {
                 .is_err()
         );
         let state = read_schema_state(&connection).unwrap();
-        assert_eq!(state.revision, 124);
+        assert_eq!(state.revision, SCHEMA_VERSION);
         assert_eq!(state.minimum_compatible, Some(124));
         assert!(state.ensure_supported_by(123).is_err());
     }

@@ -732,6 +732,15 @@ impl ActiveChat {
         chat
     }
 
+    /// Reconcile transferred local state with this attachment's authoritative view.
+    pub fn adopt_live_composer(&mut self, composer: super::LiveComposer) {
+        self.state.adopt_live_composer(composer);
+        // The view may have advanced while the composer was parked. Applying
+        // it restores the authoritative queue and uses the same submission
+        // reconciliation as every feed update, without retaining another copy.
+        self.apply_session_view(Ok(self.session.view()));
+    }
+
     /// Transfer native result ownership together with its pending submission rows.
     pub fn take_live_composer(&mut self) -> Option<super::LiveComposer> {
         let mut composer = self.state.take_live_composer()?;

@@ -221,7 +221,7 @@ impl RuntimeState {
                     let view = owner.sessions.get(&record.id);
                     ReadinessObservation {
                         harness_ready: view.is_some_and(|view| {
-                            view.operational.as_ref().is_some_and(
+                            view.operational.as_deref().is_some_and(
                                 mj_core::relay::RelayOperationalState::native_session_is_ready,
                             )
                         }),

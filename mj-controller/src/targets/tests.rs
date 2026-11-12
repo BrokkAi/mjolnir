@@ -5401,3 +5401,41 @@ pub(crate) fn unwrapped_remote_line(remote: &str) -> &str {
         .strip_prefix(prefix.as_str())
         .unwrap_or_else(|| panic!("{remote:?} does not run under the macOS system PATH"))
 }
+
+// Hard-won: #1508: a failed ps was reported as worker death, allowing duplicate boots.
+#[cfg(unix)]
+#[test]
+fn worker_liveness_does_not_report_death_when_ps_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let ps = bin.join("ps");
+    std::fs::write(
+        &ps,
+        "#!/bin/sh\nprintf 'process listing unavailable\\n' >&2\nexit 71\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&ps, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let worker_root = root.path().join("worker");
+    std::fs::create_dir(&worker_root).unwrap();
+    for pid in [None, Some("999999\n")] {
+        if let Some(pid) = pid {
+            std::fs::write(worker_root.join(mj_core::relay::WORKER_PID_FILE), pid).unwrap();
+        }
+        let output = std::process::Command::new("sh")
+            .args([
+                "-c",
+                &worker_daemon_liveness_script(worker_root.to_str().unwrap()),
+            ])
+            .env("PATH", &path)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(71));
+        assert!(output.stdout.is_empty(), "{output:?}");
+    }
+}
