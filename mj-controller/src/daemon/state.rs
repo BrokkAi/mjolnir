@@ -93,6 +93,7 @@ impl RuntimeState {
             attachments: Mutex::new(BTreeMap::new()),
             phone_status: Mutex::new(WebViewerStatus::Starting),
             web_viewer: crate::web_viewer::ViewerControl::new(),
+            api_credential: std::sync::OnceLock::new(),
             ever_attached: AtomicBool::new(false),
             revisions,
             workspaces_tx,
@@ -476,7 +477,7 @@ impl RuntimeState {
                     .sessions
                     .get(session_id)
                     .is_some_and(|record| {
-                        record.target == operation.destination_target
+                        record.target.as_deref() == operation.destination_target.as_ref()
                             && record.native_session_id == operation.destination_native_session_id
                     })
         });

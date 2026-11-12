@@ -588,6 +588,14 @@ fn enqueue_materialized_projection(
 /// The top level of the Git worktree `mj` was started in, or `None` outside
 /// one. The new-session wizard offers it as the local project.
 fn launch_repository_top_level() -> Option<std::path::PathBuf> {
+    if mj_core::config::DaemonConfig::load_placement(&mj_core::config::config_path())
+        .ok()?
+        .runtime
+        == mj_core::config::DaemonRuntime::Ssh
+    {
+        return None;
+    }
+
     let directory = std::env::current_dir().ok()?;
     let output = std::process::Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
@@ -1885,6 +1893,7 @@ impl DashboardContext {
         );
         dashboard.set_workspace_names(workspace_names);
         dashboard.set_launch_recency(launch_recency);
+        dashboard.set_session_attention(bootstrap.projection.metadata.session_attention.clone());
         // Sessions inherit this host's Git author identity; the first new
         // session of the run makes sure there is one.
         dashboard.require_git_identity_check();

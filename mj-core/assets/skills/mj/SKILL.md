@@ -76,7 +76,7 @@ command -v mj
 mj api-info
 ```
 
-`mj api-info` prints the API base URL and the file holding the bearer token.
+`mj api-info` prints the API base URL; `mj api-token` prints the bearer token.
 Both commands must succeed for CLI orchestration.
 
 When `mj` is unusable, use the `mj-agents` MCP tools if your harness lists

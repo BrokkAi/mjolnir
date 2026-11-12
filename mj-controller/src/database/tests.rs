@@ -570,11 +570,11 @@ pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
             access: crate::targets::MountAccess::Cow,
         }],
         state: SessionState::Stopped,
-        target: Some(TargetLocator::LocalPodman {
+        target: Some(Box::new(TargetLocator::LocalPodman {
             borrowed_from: None,
             container_id: "container-1".into(),
             workspace_storage: Default::default(),
-        }),
+        })),
         native_session_id: Some("native-1".into()),
         acp_session_title: Some("Agent title".into()),
         session_title_override: None,
@@ -584,12 +584,12 @@ pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
         draft_input: String::new(),
         last_error: None,
         last_checkpoint_error: Some("temporary recovery failure".into()),
-        checkpoint: Some(CheckpointMetadata {
+        checkpoint: Some(Box::new(CheckpointMetadata {
             archive_path: PathBuf::from("sessions/test.hel.zip"),
             sha256: "a".repeat(64),
             created_at: "2026-08-12T01:00:00Z".into(),
             event_frontier: 6,
-        }),
+        })),
     }
 }
 
@@ -648,7 +648,7 @@ fn materialized_session(session_id: &str) -> MaterializedSession {
                 created_at_ms: 1_200,
                 last_changed_at_ms: 1_400,
                 body: TranscriptBody::Tool {
-                    call: serde_json::json!({
+                    call: (serde_json::json!({
                         "toolCallId": "call-1",
                         "title": "Edit files",
                         "kind": "edit",
@@ -661,7 +661,8 @@ fn materialized_session(session_id: &str) -> MaterializedSession {
                         "rawInput": {"path": "src/main.rs"},
                         "rawOutput": {"changed": true},
                         "_meta": {"provider": "test"}
-                    }),
+                    }))
+                    .into(),
                     terminal_outputs: Vec::new(),
                     terminal_refs: Vec::new(),
                     presentation: None,
@@ -711,7 +712,7 @@ fn normalized_state_round_trip_preserves_children_and_order() {
     let mut state = State::default();
     let mut record = session("session-1", "project-1");
     record.project_directory = Some(PathBuf::from("/srv/project-1/.mj/worktrees/session-1"));
-    record.managed_worktree = Some(ManagedWorktree {
+    record.managed_worktree = Some(Box::new(ManagedWorktree {
         kind: Default::default(),
         source_project_directory: PathBuf::from("/srv/project-1"),
         source_repository: PathBuf::from("/srv/project-1"),
@@ -722,18 +723,18 @@ fn normalized_state_round_trip_preserves_children_and_order() {
             ssh_args: vec!["-o".into(), "BatchMode=yes".into()],
         },
         base_commit: None,
-    });
+    }));
     record.resource_allocation = None;
     record.launch_base = Some("origin/main".into());
-    record.checkout = Some(mj_core::remote_git::ExactCheckout {
+    record.checkout = Some(Box::new(mj_core::remote_git::ExactCheckout {
         repository_id: "project".into(),
         commit: "a".repeat(40),
         branch: Some("town/run-123".into()),
         no_later_history: false,
-    });
-    record.target = Some(TargetLocator::LocalBare {
+    }));
+    record.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: PathBuf::from("/var/lib/hel/workers/session-1"),
-    });
+    }));
     state.sessions.insert(record.id.clone(), record);
     state.mount_history.insert(
         "local".into(),
@@ -929,12 +930,12 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
         load_state_from(&path).unwrap().sessions["old-session"],
         record
     );
-    record.checkout = Some(mj_core::remote_git::ExactCheckout {
+    record.checkout = Some(Box::new(mj_core::remote_git::ExactCheckout {
         repository_id: "project".into(),
         commit: "a".repeat(40),
         branch: Some("town/run-123".into()),
         no_later_history: false,
-    });
+    }));
     save_session_to(&path, &record).unwrap();
     let mut connection = open(&path).unwrap();
     let tx = connection.transaction().unwrap();
@@ -981,7 +982,7 @@ fn clone_publication_evidence_round_trips_and_migration_preserves_old_rows() {
     let root = PathBuf::from("/srv/project/.mj/clones/clone-session");
     clone.project_directory = Some(root.clone());
     clone.target = None;
-    clone.managed_worktree = Some(ManagedWorktree {
+    clone.managed_worktree = Some(Box::new(ManagedWorktree {
         kind: ManagedCheckoutKind::Clone,
         source_project_directory: PathBuf::from("/srv/project"),
         source_repository: PathBuf::from("/srv/project"),
@@ -989,8 +990,8 @@ fn clone_publication_evidence_round_trips_and_migration_preserves_old_rows() {
         branch: "main".into(),
         target: ManagedWorktreeTarget::Local,
         base_commit: Some("1".repeat(40)),
-    });
-    clone.publication = Some(PublicationAssessment {
+    }));
+    clone.publication = Some(Box::new(PublicationAssessment {
         checkpoint_sha256: "a".repeat(64),
         state: PublicationState::Published,
         dirty: false,
@@ -999,7 +1000,7 @@ fn clone_publication_evidence_round_trips_and_migration_preserves_old_rows() {
         destinations: vec!["https://example.test/repository.git".into()],
         checked_at: "2026-08-12T01:00:00Z".into(),
         reason: None,
-    });
+    }));
     save_session_to(&database, &clone).unwrap();
     let loaded = load_state_from(&database).unwrap();
     assert_eq!(
@@ -1018,10 +1019,10 @@ fn local_docker_locator_round_trips_through_the_normalized_target_table() {
     let database = directory.path().join("hel.sqlite3");
     let mut record = session("session-1", "project-1");
     record.target_template_id = "docker".into();
-    record.target = Some(TargetLocator::LocalDocker {
+    record.target = Some(Box::new(TargetLocator::LocalDocker {
         borrowed_from: None,
         container_id: "hel-session-1".into(),
-    });
+    }));
 
     save_session_to(&database, &record).unwrap();
 
@@ -1047,11 +1048,11 @@ fn local_docker_locator_round_trips_through_the_normalized_target_table() {
     ] {
         let mut record = session(id, "project-1");
         record.target_template_id = "nitro".into();
-        record.target = Some(TargetLocator::SshNitro {
+        record.target = Some(Box::new(TargetLocator::SshNitro {
             borrowed_from,
             host: "ec2.example.test".into(),
             container_id: "mj-sandbox".into(),
-        });
+        }));
         save_session_to(&database, &record).unwrap();
         assert_eq!(load_state_from(&database).unwrap().sessions[id], record);
     }
@@ -1073,11 +1074,11 @@ fn a_borrowed_container_target_round_trips_and_a_null_column_means_owned() {
     let database = directory.path().join("hel.sqlite3");
     let mut record = session("session-1", "project-1");
     record.target_template_id = "podman".into();
-    record.target = Some(TargetLocator::LocalPodman {
+    record.target = Some(Box::new(TargetLocator::LocalPodman {
         borrowed_from: Some("parent-session".into()),
         container_id: "hel-parent-session".into(),
         workspace_storage: Default::default(),
-    });
+    }));
 
     save_session_to(&database, &record).unwrap();
     assert_eq!(
@@ -1099,6 +1100,7 @@ fn a_borrowed_container_target_round_trips_and_a_null_column_means_owned() {
         load_state_from(&database).unwrap().sessions["session-1"]
             .target
             .clone()
+            .map(|v| *v)
     else {
         panic!("Podman locator changed kind")
     };
@@ -1110,13 +1112,13 @@ fn podman_workspace_locator_round_trips_and_legacy_null_defaults_to_container_la
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     let mut record = session("session-1", "project-1");
-    record.target = Some(TargetLocator::LocalPodman {
+    record.target = Some(Box::new(TargetLocator::LocalPodman {
         borrowed_from: None,
         container_id: "hel-session-1".into(),
         workspace_storage: mj_core::state::PodmanWorkspaceLocator::Volume {
             name: "hel-session-1-workspace".into(),
         },
-    });
+    }));
 
     save_session_to(&database, &record).unwrap();
     assert_eq!(
@@ -1135,7 +1137,7 @@ fn podman_workspace_locator_round_trips_and_legacy_null_defaults_to_container_la
     let loaded = load_state_from(&database).unwrap();
     let Some(TargetLocator::LocalPodman {
         workspace_storage, ..
-    }) = loaded.sessions["session-1"].target.as_ref()
+    }) = loaded.sessions["session-1"].target.as_deref()
     else {
         panic!("Podman locator changed kind")
     };
@@ -1380,12 +1382,12 @@ fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     let mut record = session("session-1", "project-1");
-    record.review = Some(mj_core::config::SessionReview::Push {
+    record.review = Some(Box::new(mj_core::config::SessionReview::Push {
         reviewers: Some(vec![mj_core::config::SubagentChoice {
             model: "gpt-6-astra".into(),
             effort: Some("high".into()),
         }]),
-    });
+    }));
     save_session_to(&database, &record).unwrap();
     record.state = SessionState::Running;
     save_lifecycle_session_to(&database, &record).unwrap();
@@ -1393,12 +1395,12 @@ fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
     let loaded = load_state_from(&database).unwrap();
     assert_eq!(
         loaded.sessions["session-1"].review,
-        Some(mj_core::config::SessionReview::Push {
+        Some(Box::new(mj_core::config::SessionReview::Push {
             reviewers: Some(vec![mj_core::config::SubagentChoice {
                 model: "gpt-6-astra".into(),
                 effort: Some("high".into())
             }]),
-        }),
+        })),
         "writes omit the legacy tier while preserving the review choice"
     );
 }
@@ -1423,7 +1425,7 @@ fn a_session_stored_with_turn_review_loads_as_push_and_is_rewritten_as_push() {
     };
     for json in stored {
         let mut record = session("session-1", "project-1");
-        record.review = Some(expected.clone());
+        record.review = Some(Box::new(expected.clone()));
         save_session_to(&database, &record).unwrap();
         Connection::open(&database)
             .unwrap()
@@ -1434,7 +1436,7 @@ fn a_session_stored_with_turn_review_loads_as_push_and_is_rewritten_as_push() {
             .unwrap();
         let loaded = load_state_from(&database).unwrap();
         assert_eq!(
-            loaded.sessions["session-1"].review.as_ref(),
+            loaded.sessions["session-1"].review.as_deref(),
             Some(&expected)
         );
         save_session_to(&database, &loaded.sessions["session-1"]).unwrap();
@@ -1456,7 +1458,7 @@ fn inherited_session_review_survives_lifecycle_writes_and_keeps_trigger_inherita
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     let mut record = session("session-1", "project-1");
-    record.review = Some(mj_core::config::SessionReview::Inherit {
+    record.review = Some(Box::new(mj_core::config::SessionReview::Inherit {
         reviewers: Some(vec![
             mj_core::config::SubagentChoice {
                 model: "gpt-6-astra".into(),
@@ -1464,13 +1466,13 @@ fn inherited_session_review_survives_lifecycle_writes_and_keeps_trigger_inherita
             };
             3
         ]),
-    });
+    }));
     save_session_to(&database, &record).unwrap();
     record.state = SessionState::Running;
     save_lifecycle_session_to(&database, &record).unwrap();
 
     let loaded = load_state_from(&database).unwrap();
-    let review = loaded.sessions["session-1"].review.as_ref().unwrap();
+    let review = loaded.sessions["session-1"].review.as_deref().unwrap();
     assert_eq!(
         review,
         &mj_core::config::SessionReview::Inherit {
@@ -1728,12 +1730,12 @@ fn checkpointed_save_preserves_container_settings_and_mounts() {
     stale.state = SessionState::Running;
     stale.updated_at = "2026-08-15T00:02:00Z".into();
     stale.native_session_id = Some("native-checkpointed".into());
-    stale.checkpoint = Some(verified.clone());
+    stale.checkpoint = Some(Box::new(verified.clone()));
     save_checkpointed_session_to(&database, &stale).unwrap();
 
     let loaded = load_state_from(&database).unwrap();
     let session = &loaded.sessions["session-1"];
-    assert_eq!(session.checkpoint.as_ref(), Some(&verified));
+    assert_eq!(session.checkpoint.as_deref(), Some(&verified));
     assert_eq!(
         session.native_session_id.as_deref(),
         Some("native-checkpointed")
@@ -1844,7 +1846,7 @@ fn display_updates_cannot_restore_a_stale_checkpoint() {
 
     let loaded = load_state_from(&database).unwrap();
     let session = &loaded.sessions["session-1"];
-    assert_eq!(session.checkpoint.as_ref(), Some(&recovered));
+    assert_eq!(session.checkpoint.as_deref(), Some(&recovered));
     assert_eq!(
         session.native_session_id.as_deref(),
         Some("native-recovered")
@@ -1899,12 +1901,12 @@ fn lifecycle_write_preserves_independently_owned_session_fields() {
     stale.native_session_id = Some("native-old".into());
     stale.acp_session_title = Some("Old harness title".into());
     stale.session_title_override = Some("Old user title".into());
-    stale.checkpoint = Some(CheckpointMetadata {
+    stale.checkpoint = Some(Box::new(CheckpointMetadata {
         archive_path: PathBuf::from("sessions/old.hel.zip"),
         sha256: "a".repeat(64),
         created_at: "2026-08-14T11:00:00Z".into(),
         event_frontier: 10,
-    });
+    }));
     save_session_to(&database, &stale).unwrap();
     let recovered = CheckpointMetadata {
         archive_path: PathBuf::from("sessions/recovered.hel.zip"),
@@ -1932,7 +1934,7 @@ fn lifecycle_write_preserves_independently_owned_session_fields() {
         session.native_session_id.as_deref(),
         Some("native-recovered")
     );
-    assert_eq!(session.checkpoint.as_ref(), Some(&recovered));
+    assert_eq!(session.checkpoint.as_deref(), Some(&recovered));
     assert_eq!(
         session.session_title_override.as_deref(),
         Some("Current user title")
@@ -2220,11 +2222,68 @@ fn materialized_session_round_trip_preserves_typed_projection() {
         }));
     }
 
+    let large = "terminal output supports Unicode λ\n".repeat(4096);
+    for item in &mut materialized.transcript {
+        if let TranscriptBody::Tool {
+            call,
+            terminal_outputs,
+            presentation,
+            ..
+        } = &mut Arc::make_mut(item).body
+        {
+            call.edit(|value| value["rawInput"] = serde_json::json!({"command": large}));
+            terminal_outputs.push(mj_core::transcript::TerminalOutputRecord {
+                terminal_id: "large-terminal".into(),
+                output: large.clone().into(),
+                truncated: false,
+                exit_code: Some(0),
+                signal: None,
+            });
+            *presentation = Some(Box::new(mj_core::transcript::ToolCallPresentation {
+                summary: "large command".into(),
+                source: large.clone().into(),
+                source_kind: mj_core::transcript::ToolSummarySourceKind::RawInput,
+                tool_kind: agent_client_protocol::v1::schema::ToolKind::Execute,
+                summary_version: 0,
+            }));
+        }
+    }
+
     save_materialized_session_to(&database, &materialized).unwrap();
 
     let loaded = load_materialized_session_from(&database, "session-1")
         .unwrap()
         .unwrap();
+    // Both durable rows and buffered wire envelopes must keep ACP JSON bytes.
+    for (before, after) in materialized.transcript.iter().zip(&loaded.transcript) {
+        if let TranscriptBody::Tool { call, .. } = &before.body {
+            let expected = serde_json::to_string(&call.value()).unwrap();
+            let TranscriptBody::Tool {
+                call: loaded_call, ..
+            } = &after.body
+            else {
+                panic!("tool body changed during store round trip");
+            };
+            assert_eq!(serde_json::to_string(loaded_call).unwrap(), expected);
+            assert_eq!(
+                serde_json::to_string(&before.body).unwrap(),
+                serde_json::to_string(&after.body).unwrap()
+            );
+            let wire = mj_client::runtime_feed::TranscriptChange::Items(
+                mj_client::runtime_feed::TranscriptItems {
+                    header: None,
+                    window: None,
+                    upserts: vec![Arc::clone(after)],
+                    removes: vec![],
+                },
+            );
+            let bytes = serde_json::to_string(&wire).unwrap();
+            let decoded: mj_client::runtime_feed::TranscriptChange =
+                serde_json::from_str(&bytes).unwrap();
+            assert_eq!(serde_json::to_string(&decoded).unwrap(), bytes);
+            assert!(bytes.contains(&format!("\"call\":{expected}")));
+        }
+    }
     assert_eq!(loaded, materialized);
     assert_eq!(loaded.last_activity_at_ms(), Some(1_500));
 }
@@ -2382,7 +2441,7 @@ fn tool_item(position: u64, path: &str, old_text: &str, new_text: &str) -> Arc<T
         created_at_ms: 1_000,
         last_changed_at_ms: 1_000,
         body: TranscriptBody::Tool {
-            call: serde_json::json!({
+            call: (serde_json::json!({
                 "toolCallId": format!("call-{position}"),
                 "title": "Edit files",
                 "kind": "edit",
@@ -2400,7 +2459,8 @@ fn tool_item(position: u64, path: &str, old_text: &str, new_text: &str) -> Arc<T
                 ],
                 "rawInput": {"file_text": "y".repeat(64 * 1024)},
                 "rawOutput": {"formatted_output": "z".repeat(64 * 1024)},
-            }),
+            }))
+            .into(),
             terminal_outputs: Vec::new(),
             terminal_refs: Vec::new(),
             presentation: None,
@@ -2430,7 +2490,7 @@ fn releasing_a_diff_written_before_patches_keeps_its_stat() {
         created_at_ms: 1_000,
         last_changed_at_ms: 1_000,
         body: TranscriptBody::Tool {
-            call: serde_json::json!({
+            call: (serde_json::json!({
                 "toolCallId": "call-10",
                 "title": "Edit files",
                 "kind": "edit",
@@ -2442,7 +2502,8 @@ fn releasing_a_diff_written_before_patches_keeps_its_stat() {
                     "oldText": old_text,
                     "newText": new_text,
                 }],
-            }),
+            }))
+            .into(),
             terminal_outputs: Vec::new(),
             terminal_refs: Vec::new(),
             presentation: None,
@@ -2543,6 +2604,7 @@ fn a_checkpoint_releases_the_tool_output_it_covers_and_keeps_the_diffstat() {
     let TranscriptBody::Tool { call, .. } = &after.transcript[1].body else {
         panic!("expected a tool call");
     };
+    let call = call.value();
     assert!(call.get("rawInput").is_none());
     assert!(call.get("rawOutput").is_none());
     assert_eq!(
@@ -5449,7 +5511,9 @@ fn a_turn_summary_counts_the_tool_calls_the_turn_made() {
         item(
             position,
             TranscriptBody::Tool {
-                call: serde_json::json!({"toolCallId": format!("call-{position}"), "title": "Read"}),
+                call:
+                    (serde_json::json!({"toolCallId": format!("call-{position}"), "title": "Read"}))
+                        .into(),
                 terminal_outputs: Vec::new(),
                 terminal_refs: Vec::new(),
                 presentation: None,
@@ -5820,7 +5884,7 @@ fn filtered_transcript_pages_include_ties_and_advance_across_gaps() {
     item.stable_id = "tool:call-7".into();
     item.latest_content_event_ordinal = None;
     item.body = TranscriptBody::Tool {
-        call: serde_json::json!({"toolCallId": "call-7", "status": "completed"}),
+        call: serde_json::json!({"toolCallId": "call-7", "status": "completed"}).into(),
         terminal_outputs: Vec::new(),
         terminal_refs: Vec::new(),
         presentation: None,
@@ -6644,7 +6708,7 @@ fn actor_history_window_keeps_open_streams_and_rehydrates_old_tools() {
         if pending == "tool" {
             let mut tool = materialized_session(&full.session_id).transcript[2].clone();
             if let TranscriptBody::Tool { call, .. } = &mut Arc::make_mut(&mut tool).body {
-                call["status"] = "in_progress".into();
+                call.edit(|value| value["status"] = "in_progress".into());
             }
             full.transcript[2] = tool;
         }
@@ -6659,11 +6723,11 @@ fn actor_history_window_keeps_open_streams_and_rehydrates_old_tools() {
         assert_eq!(window, expected);
         assert_eq!(
             loaded.transcript.len(),
-            if pending == "none" { 1100 } else { 1200 }
+            if pending == "none" { 600 } else { 700 }
         );
         if pending != "none" {
             assert_eq!(&loaded.transcript[..100], &full.transcript[..100]);
-            assert_eq!(loaded.transcript[100], full.transcript[1400]);
+            assert_eq!(loaded.transcript[100], full.transcript[1900]);
         }
         assert_eq!(window.provisional_title.as_deref(), Some("request 1"));
         assert_eq!(window.latest_turn_start_position, Some(2401));
@@ -6906,8 +6970,10 @@ fn history_window_rehydrates_late_tool_updates_before_durable_projection() {
         let output = "old output ".repeat(10_000);
         let raw_output = serde_json::json!({"partial": output});
         if let TranscriptBody::Tool { call, .. } = &mut Arc::make_mut(&mut old_tool).body {
-            call["status"] = "completed".into();
-            call["rawOutput"] = raw_output.clone();
+            call.edit(|value| {
+                value["status"] = "completed".into();
+                value["rawOutput"] = raw_output.clone();
+            });
         }
         full.transcript[2] = old_tool.clone();
         save_session_to(&path, &session(&full.session_id, "project-1")).unwrap();
@@ -6985,6 +7051,7 @@ fn history_window_rehydrates_late_tool_updates_before_durable_projection() {
         else {
             panic!("tool remains a tool")
         };
+        let call = call.value();
         assert_eq!(call["title"], "Late result");
         assert_eq!(call["rawOutput"], raw_output);
         assert!(terminal_refs.is_empty());
@@ -7023,18 +7090,20 @@ fn history_window_keeps_pending_turn_for_late_completion() {
                 ..
             } = &mut Arc::make_mut(&mut tool).body
             {
-                call["status"] = "pending".into();
-                call["rawOutput"] = if raw_earlier {
-                    raw.clone()
-                } else {
-                    serde_json::Value::Null
-                };
+                call.edit(|value| {
+                    value["status"] = "pending".into();
+                    value["rawOutput"] = if raw_earlier {
+                        raw.clone()
+                    } else {
+                        serde_json::Value::Null
+                    };
+                });
                 assert!(terminal_refs.is_empty());
             }
             full.transcript[2] = tool.clone();
             let record = mj_core::state::TerminalOutputRecord {
                 terminal_id: "late-terminal".into(),
-                output: output.clone(),
+                output: output.clone().into(),
                 truncated: false,
                 exit_code: Some(0),
                 signal: None,
@@ -7051,7 +7120,7 @@ fn history_window_keeps_pending_turn_for_late_completion() {
                 (
                     format!("tool:{}", fallback.tool_call_id),
                     TranscriptBody::Tool {
-                        call: serde_json::to_value(fallback).unwrap(),
+                        call: serde_json::to_value(fallback).unwrap().into(),
                         terminal_outputs: vec![record],
                         terminal_refs: vec!["late-terminal".into()],
                         presentation: None,
@@ -7135,7 +7204,7 @@ fn history_window_keeps_pending_turn_for_late_completion() {
                     panic!("owner remains tool")
                 };
                 assert_eq!(terminal_refs, &["late-terminal"]);
-                assert_eq!(terminal_outputs[0].output, output);
+                assert_eq!(terminal_outputs[0].output.text(), output);
                 assert!(
                     !projection
                         .transcript
@@ -7173,12 +7242,12 @@ fn target_access_survives_lifecycle_updates_and_changes_with_the_target() {
             directory: "/fast/shared native caches".into(),
             nx_home: "/home/hel/.nx".into(),
         });
-    record.target = Some(TargetLocator::SshPodman {
+    record.target = Some(Box::new(TargetLocator::SshPodman {
         host: "original.test".into(),
         container_id: "original-container".into(),
         workspace_storage: Default::default(),
         borrowed_from: None,
-    });
+    }));
     record.project = Some(std::sync::Arc::new(
         mj_core::repository::ProjectBundleSnapshot {
             bundle: mj_core::config::ProjectBundle {
@@ -7245,9 +7314,9 @@ fn target_access_survives_lifecycle_updates_and_changes_with_the_target() {
         record
     );
     record.target_runtime = Some((&mj_core::config::TargetTemplate::LocalBare).into());
-    record.target = Some(TargetLocator::LocalBare {
+    record.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: PathBuf::from("/new").join(&record.id),
-    });
+    }));
     save_lifecycle_session_to(&database, &record).unwrap();
     assert_eq!(
         load_state_from(&database).unwrap().sessions[&record.id],
@@ -7524,10 +7593,10 @@ fn oracle_choice_and_profile_preference_survive_reopen_and_rename() {
     let path = directory.path().join("oracle-choice.sqlite3");
     let mut record = session("advisor-parent", "project");
     record.oracle = false;
-    record.oracle_choice = Some(mj_core::config::SubagentChoice {
+    record.oracle_choice = Some(Box::new(mj_core::config::SubagentChoice {
         model: "advisor".into(),
         effort: Some("high".into()),
-    });
+    }));
     save_new_session_to(&path, &record, None, true, false).unwrap();
     let state = load_state_from(&path).unwrap();
     assert_eq!(

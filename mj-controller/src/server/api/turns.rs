@@ -88,11 +88,8 @@ pub(super) async fn submit_prompt(
         text: text.clone(),
         images: Vec::new(),
     };
-    // A session that is still coming up takes its prompt once its worker
-    // attaches, rather than refusing it. A caller that just created the
-    // session has nothing better to do than retry, and every caller would
-    // otherwise need its own retry loop around a refusal it cannot tell apart
-    // from a session that will never take a prompt.
+    // Wait for startup or lifecycle work to release the session instead of
+    // making every caller retry while it cannot take a prompt.
     let mut snapshot_rx = state.snapshot_rx.clone();
     let deadline = tokio::time::Instant::now() + PROMPT_READINESS_WAIT;
     let mut waiting = false;
@@ -107,15 +104,18 @@ pub(super) async fn submit_prompt(
             if session.capabilities.prompt {
                 break;
             }
-            // Between the worker's handshake and its first report the record
-            // already says running while the session still has nothing to
-            // take a prompt with, so once a start has been seen only a
-            // failure or a stop ends the wait early.
-            waiting = if waiting {
-                still_live(session)
-            } else {
-                is_coming_up(session)
-            };
+            // The lifecycle owner decides the result: Move and Restart can
+            // pass through stopped or failed records before restoring them.
+            // A transition can also precede the operation's publication.
+            // After it finishes, keep waiting for the worker's first report
+            // unless the session stopped or failed.
+            waiting = session.operation.is_some()
+                || (session.transitioning && !session.has_error)
+                || if waiting {
+                    still_live(session)
+                } else {
+                    is_coming_up(session)
+                };
             if !waiting {
                 return Err(ApiFailure::conflict(prompt_refusal(session)));
             }
@@ -129,7 +129,7 @@ pub(super) async fn submit_prompt(
                 }
                 Err(_) => {
                     return Err(ApiFailure::conflict(format!(
-                        "this session is still starting after {} seconds; try the prompt again once `mj sessions` shows it running",
+                        "this session is not ready to take a prompt after {} seconds; check `mj sessions` for its startup or lifecycle operation before trying again",
                         PROMPT_READINESS_WAIT.as_secs()
                     )));
                 }
@@ -169,7 +169,7 @@ fn withdrawn_prompt() -> ApiFailure {
     )
 }
 
-/// Prompts the API is holding for sessions that are still starting.
+/// Prompts the API is holding until startup or lifecycle work finishes.
 ///
 /// A held prompt has no turn yet, so interrupting its session withdraws it
 /// rather than letting it become a turn nobody wants once the worker
@@ -241,7 +241,7 @@ impl HeldPrompts {
     }
 }
 
-/// One prompt held for a starting session. Dropping it without releasing it,
+/// One prompt held until its session is ready. Dropping it without releasing it,
 /// as every refusal does, gives the hold up.
 struct HeldPrompt<'a> {
     prompts: &'a HeldPrompts,
@@ -277,7 +277,7 @@ impl Drop for HeldPrompt<'_> {
     }
 }
 
-/// How long a prompt waits for a session that is still starting. Bounded, so
+/// How long a prompt waits for startup or lifecycle work. Bounded, so
 /// the request finishes with its own response, and shorter than the CLI's
 /// request timeout so the caller reads this answer rather than a timeout.
 const PROMPT_READINESS_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -601,7 +601,7 @@ pub(super) async fn interrupt_turn(
     State(state): State<ServerState>,
     Path(session_id): Path<String>,
 ) -> Result<StatusCode, ApiFailure> {
-    // A prompt still held for a starting session has no turn to stop, so
+    // A prompt held until its session is ready has no turn to stop, so
     // interrupting the session withdraws it. Only a session that also has a
     // turn of its own goes on to the daemon.
     if state.held_prompts.withdraw(&session_id) > 0 {

@@ -300,6 +300,7 @@ pub struct RuntimeContainerCapacity {
 /// Configuration and bounded active-operation views are separate from history.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeMetadata {
+    pub session_attention: SnapshotMap<String, mj_core::attention::SessionAttention>,
     #[serde(default)]
     pub operator_presence: mj_core::state::OperatorPresence,
     #[serde(default)]
@@ -423,6 +424,9 @@ pub type TailKey = (u64, String);
 /// changed rather than the whole tail.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionTail {
+    /// Daemon-local fact retained before trimming items or clearing the header
+    /// transcript. Clients consume served attention, not this watermark.
+    pub latest_user_position: Option<u64>,
     /// The session's projection without its transcript.
     pub header: MaterializedSession,
     pub window: ProjectionWindow,
@@ -434,6 +438,7 @@ impl SessionTail {
     /// what `materialized.transcript` already leaves out.
     pub fn of(materialized: &MaterializedSession, window: &ProjectionWindow, limit: usize) -> Self {
         let mut tail = Self {
+            latest_user_position: materialized.latest_user_position(),
             header: transcript_header(materialized),
             window: window.clone(),
             items: SnapshotMap::new(),
@@ -452,6 +457,7 @@ impl SessionTail {
         window: &ProjectionWindow,
         limit: usize,
     ) {
+        self.latest_user_position = materialized.latest_user_position();
         let start = materialized.transcript.len().saturating_sub(limit);
         // The daemon calls this for every view it publishes, so it walks the
         // held items and the published ones side by side in key order, and
@@ -638,6 +644,7 @@ impl SessionTail {
             header,
             window,
             items: map,
+            latest_user_position: None,
         }
     }
 }
@@ -880,6 +887,7 @@ mod tests {
 
     fn session(id: &str) -> RuntimeSessionView {
         RuntimeSessionView {
+            attention: Default::default(),
             policy_config_keys: Vec::new(),
             session_id: id.into(),
             projection_ordinal: 0,

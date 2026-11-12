@@ -38,7 +38,6 @@ COPY mj-controller/ mj-controller/
 COPY mj-chat/ mj-chat/
 COPY mj-tui/ mj-tui/
 COPY mj-cli/ mj-cli/
-COPY mj-desktop/ mj-desktop/
 COPY voice-worker/ voice-worker/
 ARG MJ_BUILD_REVISION
 ARG MJ_WORKER_INPUTS_ID

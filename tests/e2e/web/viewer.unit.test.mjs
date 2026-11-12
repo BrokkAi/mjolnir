@@ -49,9 +49,7 @@ test('conversation deltas carry the last presentation key and accept older respo
   const renders = [];
   const responses = [
     { entries: [{ id: 1 }], latest_seq: 5, presentation_key: 'key one', reset: false },
-    {},
     { entries: [{ id: 2 }], latest_seq: 6, reset: false },
-    {},
   ];
   const context = vm.createContext({
     currentSession: 'session/1',
@@ -63,6 +61,7 @@ test('conversation deltas carry the last presentation key and accept older respo
     cursor: 0,
     presentationKey: null,
     acknowledged: 0,
+    scheduleConversationRead: () => {},
     URLSearchParams,
     encodeURIComponent,
     JSON,
@@ -90,7 +89,7 @@ test('conversation deltas carry the last presentation key and accept older respo
 
   await vm.runInContext('loadConversation(true)', context);
   assert.equal(
-    requests[2].url,
+    requests[1].url,
     '/api/conversations/session%2F1?after_seq=5&presentation_key=key+one',
   );
   assert.equal(context.presentationKey, null, 'missing keys remain compatible with an older server');
@@ -317,7 +316,7 @@ test('session titles stay blue while truly idle and clear blue when activity res
     textContent: '',
     classList: { toggle: (name, enabled) => enabled ? classes.add(name) : classes.delete(name) },
   };
-  const context = vm.createContext({ node, session: { title: 'Test session', is_idle: true } });
+  const context = vm.createContext({ node, session: { title: 'Test session', attention: 'idle' } });
   vm.runInContext(sourceBetween('function renderSessionTitle(', '\nfunction renderConversationHeader('), context);
   vm.runInContext('renderSessionTitle(node, session)', context);
   assert.equal(node.textContent, 'Test session');
@@ -326,10 +325,10 @@ test('session titles stay blue while truly idle and clear blue when activity res
   context.session.latest_event_ordinal = 20;
   vm.runInContext('renderSessionTitle(node, session)', context);
   assert.ok(classes.has('idle-title'));
-  context.session.is_idle = false;
+  context.session.attention = 'working';
   vm.runInContext('renderSessionTitle(node, session)', context);
   assert.ok(!classes.has('idle-title'));
-  delete context.session.is_idle;
+  delete context.session.attention;
   vm.runInContext('renderSessionTitle(node, session)', context);
   assert.ok(!classes.has('idle-title'), 'unknown activity is not confirmed idle');
 });
@@ -1473,4 +1472,58 @@ test('review settings action renders a button that sends its action id', () => {
   assert.equal(control.textContent, 'Autoconfigure');
   control.onclick();
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{page: ['review'], edit: {kind: 'action', id: 'review.autoconfigure'}}]);
+});
+
+
+test('conversation receipts require a visible focused caught-up conversation and coalesce monotonic cursors', async () => {
+  const frames = [];
+  const sent = [];
+  let finish;
+  let focused = true;
+  const context = vm.createContext({
+    currentSession: 's', route: { name: 'conversation', sessionId: 's' },
+    cursor: 42, acknowledged: 0,
+    document: { visibilityState: 'hidden', hasFocus: () => focused, querySelector: () => ({ textContent: '' }) },
+    window: { innerHeight: 800 },
+    feedScroll: { getBoundingClientRect: () => ({ top: 100, bottom: 700 }) },
+    feed: { lastElementChild: { getBoundingClientRect: () => ({ top: 500, bottom: 650 }) } },
+    sessionById: () => ({ capabilities: { open: true } }),
+    isTransitioningSession: () => false,
+    requestAnimationFrame: fn => { frames.push(fn); return frames.length; },
+    request: (url, options) => { sent.push([url, JSON.parse(options.body).through]); return new Promise(resolve => { finish = resolve; }); },
+    showLogin: () => assert.fail('unexpected login'),
+  });
+  vm.runInContext(sourceBetween('const conversationReads = new Map();', '\nasync function loadConversation('), context);
+  await vm.runInContext('persistVisibleConversationRead()', context);
+  assert.equal(sent.length, 0, 'hidden pages do not read');
+  context.document.visibilityState = 'visible';
+  focused = false;
+  await vm.runInContext('persistVisibleConversationRead()', context);
+  // Hard-won: 8edb31e9f: a visible but unfocused window cleared Important alerts.
+  assert.equal(sent.length, 0, 'a visible window without focus does not read');
+  focused = true;
+  context.feed.lastElementChild.getBoundingClientRect = () => ({ top: 900, bottom: 1000 });
+  await vm.runInContext('persistVisibleConversationRead()', context);
+  assert.equal(sent.length, 0, 'scrolling away from latest does not read');
+  context.feed.lastElementChild.getBoundingClientRect = () => ({ top: 500, bottom: 650 });
+  vm.runInContext('scheduleConversationRead(); scheduleConversationRead(); scheduleConversationRead()', context);
+  assert.equal(frames.length, 1);
+  frames.shift()();
+  assert.deepEqual(sent, [['/api/conversations/s/read', 42]]);
+  context.cursor = 43;
+  await vm.runInContext('persistVisibleConversationRead()', context);
+  assert.equal(sent.length, 1, 'only one receipt is in flight');
+  finish();
+  await new Promise(resolve => setImmediate(resolve));
+  frames.shift()();
+  assert.equal(sent[1][1], 43);
+  finish();
+  await new Promise(resolve => setImmediate(resolve));
+  context.cursor = 41;
+  await vm.runInContext('persistVisibleConversationRead()', context);
+  assert.equal(sent.length, 2, 'older loaded cursors never move the frontier back');
+  context.cursor = 44;
+  context.route.name = 'sessions';
+  await vm.runInContext('persistVisibleConversationRead()', context);
+  assert.equal(sent.length, 2, 'closed conversations do not read');
 });

@@ -429,7 +429,7 @@ class SteerLab:
         self.cli("workspaces", "create", self.workspace, "--json", case="setup")
         info = json.loads(self.cli("api-info", "--json", case="setup"))
         self.api_url = info["base_url"]
-        self.api_token = Path(info["token_path"]).read_text().strip()
+        self.api_token = self.cli("api-token", case="setup").strip()
         access = self.daemon_request({"action": "web_viewer_access"}, request_id=2)
         if not isinstance(access, dict) or "Ready" not in access:
             raise ScenarioFailure(f"isolated viewer did not become ready: {access!r}")

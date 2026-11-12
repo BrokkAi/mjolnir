@@ -401,27 +401,27 @@ pub(crate) fn spawn_first_run_setup(
             // The daemon owns its configuration and its environment. In
             // container placement this discovery runs inside the container,
             // not against the client's host home.
-            let (summary, errors) = mj_core::runtime::block_on(async {
+            mj_core::runtime::block_on(async {
                 let mut daemon = crate::daemon::connect_or_start().await?;
-                let summary = daemon.run_first_run_setup().await?;
-                let errors = if summary.is_some() {
-                    daemon.run_doctor().await?
-                } else {
-                    Vec::new()
+                // An existing installation picks up agents installed since its
+                // last launch through the startup availability check.
+                let Some(summary) = daemon.run_first_run_setup().await? else {
+                    return Ok(None);
                 };
-                Ok::<_, anyhow::Error>((summary, errors))
-            })??;
-            // An existing installation picks up agents installed since its
-            // last launch through the startup availability check.
-            let Some(summary) = summary else {
-                return Ok(None);
-            };
-            report(
-                "first-run setup",
-                &progress,
-                DashboardIoUpdate::FirstRunConfigured(summary),
-            );
-            Ok(Some(errors))
+                report(
+                    "first-run setup",
+                    &progress,
+                    DashboardIoUpdate::FirstRunConfigured(summary),
+                );
+                // Setup is saved by now. A daemon handoff abandons the check,
+                // so its failure is reported as a check, not as failed setup.
+                let errors = daemon.run_doctor().await.unwrap_or_else(|error| {
+                    vec![format!(
+                        "Could not check prerequisites: {error:#}. Run `mj doctor` to check them."
+                    )]
+                });
+                Ok::<_, anyhow::Error>(Some(errors))
+            })?
         },
         DashboardIoUpdate::FirstRunChecked,
     )
@@ -1204,6 +1204,8 @@ pub(crate) fn spawn_imported_session_apply(
         "saving imported session",
         updates,
         move || {
+            // Move the staging guard too: disjoint captures otherwise drop it before upload.
+            let _archive_directory = imported._archive_directory;
             let session = imported
                 .controller
                 .state
@@ -1217,13 +1219,6 @@ pub(crate) fn spawn_imported_session_apply(
                 .get(&session.bundle_id)
                 .cloned()
                 .context("import worker did not return its session bundle")?;
-            persist_imported_session(
-                &session,
-                Some(crate::daemon::ImportedBundle {
-                    bundle_id: session.bundle_id.clone(),
-                    bundle: bundle.clone(),
-                }),
-            )?;
             Ok(ImportedDashboardSessionApply {
                 harness: imported.harness,
                 native_session_id: pending.native_session_id,
@@ -1760,6 +1755,31 @@ pub(crate) fn spawn_dashboard_restore_session(
             cancelled,
         );
     });
+}
+
+/// Each disposable read owns a connection. Superseding the input closes that
+/// connection, allowing the daemon to stop its executor and reap its children.
+pub(crate) fn machine_request(
+    action: mj_client::daemon::DaemonAction,
+    cancelled: Arc<AtomicBool>,
+) -> Result<mj_client::daemon::DaemonReply> {
+    mj_core::runtime::block_on(async move {
+        let request = async move {
+            let mut client = daemon::connect_or_start().await?;
+            client.request(action).await
+        };
+        tokio::pin!(request);
+        loop {
+            tokio::select! {
+                result = &mut request => return result,
+                _ = tokio::time::sleep(Duration::from_millis(10)) => {
+                    if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                        anyhow::bail!("machine request cancelled");
+                    }
+                }
+            }
+        }
+    })?
 }
 
 #[cfg(test)]

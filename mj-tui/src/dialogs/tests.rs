@@ -548,6 +548,7 @@ fn import_safety_keeps_managed_checkout_choice_without_file_inclusion_toggle() {
             available: true,
             default_create: false,
         },
+        "/work/repo".into(),
     );
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
     terminal
@@ -568,6 +569,7 @@ fn import_safety_keeps_managed_checkout_choice_without_file_inclusion_toggle() {
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::ConfirmImportBundle {
+            project_root: "/work/repo".into(),
             create_managed_worktree: Some(false),
             accepted: true,
         }
@@ -581,6 +583,7 @@ fn import_safety_keeps_managed_checkout_choice_without_file_inclusion_toggle() {
             available: true,
             default_create: false,
         },
+        "/work/repo".into(),
     );
     terminal
         .draw(|frame| render(frame, &mut dashboard))
@@ -613,6 +616,7 @@ fn import_safety_keeps_managed_checkout_choice_without_file_inclusion_toggle() {
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::ConfirmImportBundle {
+            project_root: "/work/repo".into(),
             create_managed_worktree: Some(true),
             accepted: true,
         }
@@ -741,14 +745,14 @@ fn failed_suspension_requires_a_separate_checkpoint_discard_confirmation() {
         DashboardAction::None
     );
     assert!(
-        matches!(&dashboard.mode, Mode::Confirm(dialog) if matches!(&dialog.confirmation, Confirmation::DiscardSinceCheckpoint { checkpoint: selected, .. } if selected == &checkpoint))
+        matches!(&dashboard.mode, Mode::Confirm(dialog) if matches!(&dialog.confirmation, Confirmation::DiscardSinceCheckpoint { checkpoint: selected, .. } if *selected == *checkpoint))
     );
     dashboard.handle_key(key(KeyCode::Right));
     assert_eq!(
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::DiscardSinceCheckpoint {
             session_id: "session-1".into(),
-            checkpoint
+            checkpoint: *checkpoint
         }
     );
 }
@@ -1717,6 +1721,7 @@ fn golden_tui_import_confirmation() {
             available: true,
             default_create: true,
         },
+        "/work/repo".into(),
     );
     let lines = drawn(&mut dashboard, 120, 30);
     let mut output = String::new();
@@ -1727,6 +1732,32 @@ fn golden_tui_import_confirmation() {
         30,
         &lines,
     );
+    dashboard.show_import_progress("Imported session".into());
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(matches!(dashboard.mode, Mode::Confirm(_)));
+    dashboard.show_import_registration();
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Esc)),
+        DashboardAction::None
+    );
+    assert!(matches!(dashboard.mode, Mode::Importing(_)));
+    append_dialog_render(
+        &mut output,
+        "daemon registration cannot be cancelled",
+        120,
+        30,
+        &drawn(&mut dashboard, 120, 30),
+    );
+    dashboard.show_import_upload();
+    assert!(matches!(&dashboard.mode, Mode::Importing(progress) if progress.cancellable));
+    dashboard.handle_key(key(KeyCode::Esc));
+    assert!(matches!(dashboard.mode, Mode::Confirm(_)));
+    dashboard.show_import_registration();
+    assert_eq!(
+        dashboard.handle_key(key(KeyCode::Esc)),
+        DashboardAction::None
+    );
+    assert!(matches!(&dashboard.mode, Mode::Importing(progress) if !progress.cancellable));
     mj_core::golden::assert_golden(
         env!("CARGO_MANIFEST_DIR"),
         "tui-import-confirmation",

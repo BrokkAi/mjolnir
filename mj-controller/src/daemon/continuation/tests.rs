@@ -70,6 +70,7 @@ fn view(id: &str, completed: bool) -> ManagedSessionView {
         ..Default::default()
     };
     ManagedSessionView {
+        attention: Default::default(),
         connected: true,
         error: None,
         snapshot: Some(ManagedSessionSnapshot {
@@ -589,6 +590,7 @@ async fn quota_classification_survives_exhausted_allowance_and_unusable_authoriz
         code: None,
         http_status: None,
         reset_at: None,
+        login_fingerprint: None,
     });
     // Authorization that depends on non-text content is unusable, so only
     // the quota message is classified.

@@ -280,7 +280,7 @@ impl TranscriptSummary {
                         outputs.for_tool(&item.stable_id).iter().map(|t| {
                             (
                                 &t.terminal_id,
-                                &t.output,
+                                t.output.as_str().into(),
                                 t.exit_code,
                                 t.signal.as_deref(),
                                 t.truncated,
@@ -366,14 +366,17 @@ impl TranscriptSummary {
                 TranscriptBody::Tool {
                     call, presentation, ..
                 } => {
-                    let mut value =
-                        tool_value(call, presentation.as_deref(), item.position >= cutoff);
+                    let mut value = tool_value(
+                        &call.value(),
+                        presentation.as_deref(),
+                        item.position >= cutoff,
+                    );
                     attach_terminals(
                         &mut value,
                         outputs.for_tool(&item.stable_id).iter().map(|t| {
                             (
                                 &t.terminal_id,
-                                &t.output,
+                                t.output.text(),
                                 t.exit_code,
                                 t.signal.as_deref(),
                                 t.truncated,
@@ -598,7 +601,7 @@ impl TranscriptSummary {
                     value,
                     std::iter::once((
                         &terminal.terminal_id,
-                        &terminal.output,
+                        terminal.output.text(),
                         terminal.exit_code,
                         terminal.signal.as_deref(),
                         terminal.truncated,
@@ -779,7 +782,15 @@ impl TranscriptSummary {
 
 fn attach_terminals<'a>(
     value: &mut Value,
-    terminals: impl Iterator<Item = (&'a String, &'a String, Option<u32>, Option<&'a str>, bool)>,
+    terminals: impl Iterator<
+        Item = (
+            &'a String,
+            std::borrow::Cow<'a, str>,
+            Option<u32>,
+            Option<&'a str>,
+            bool,
+        ),
+    >,
 ) {
     for (id, output, code, signal, truncated) in terminals {
         if let Some(code) = code {

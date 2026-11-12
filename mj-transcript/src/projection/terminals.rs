@@ -64,7 +64,7 @@ pub(super) fn apply_terminal_metadata(
             None => {
                 terminal_outputs.push(TerminalOutputRecord {
                     terminal_id: id.clone(),
-                    output: String::new(),
+                    output: Default::default(),
                     truncated: false,
                     exit_code: None,
                     signal: None,
@@ -83,16 +83,21 @@ pub(super) fn apply_terminal_metadata(
                     .as_ref()
                     .is_some_and(|exit| exit.terminal_id == record.terminal_id)
             {
-                record.output = output.data;
+                record.output = mj_core::packed_text::PackedText::plain(output.data);
                 record.truncated = false;
             } else {
-                record.output.push_str(&output.data);
+                let mut text = std::mem::take(&mut record.output).into_text();
+                text.push_str(&output.data);
+                record.output = mj_core::packed_text::PackedText::plain(text);
             }
+            let mut text = std::mem::take(&mut record.output).into_text();
             record.truncated |=
-                mj_core::transcript::truncate_string_start(&mut record.output, 4 * 1024 * 1024);
+                mj_core::transcript::truncate_string_start(&mut text, 4 * 1024 * 1024);
+            record.output = mj_core::packed_text::PackedText::plain(text);
         } else if let Some(exit) = &exit {
             record.exit_code = exit.exit_code;
             record.signal = exit.signal.clone();
+            record.output = std::mem::take(&mut record.output).into_text().into();
         }
     }
 }
@@ -109,25 +114,7 @@ pub(super) fn terminal_item_id(terminal_id: &str) -> String {
 ///
 /// Content hel cannot read as an ACP block names no terminal; the renderer
 /// already reports such a call as invalid, so this hides no failure.
-pub(crate) fn tool_call_terminal_ids(call: &Value) -> Vec<String> {
-    let Some(Value::Array(content)) = call.get("content") else {
-        return Vec::new();
-    };
-    content
-        .iter()
-        .filter_map(|value| match ToolCallContent::deserialize(value) {
-            Ok(ToolCallContent::Terminal(terminal)) => Some(terminal.terminal_id.0.to_string()),
-            Ok(_) => None,
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    "ignoring malformed tool-call content while locating terminal output"
-                );
-                None
-            }
-        })
-        .collect()
-}
+pub(crate) use mj_core::transcript::tool_call_terminal_ids;
 
 /// The output already recorded for `terminal_id`, wherever it is parked.
 pub(super) fn find_terminal_record(
@@ -168,8 +155,10 @@ pub(super) fn fallback_tool_item(item: &TranscriptItem) -> Result<bool> {
     let TranscriptBody::Tool { call, .. } = &item.body else {
         return Ok(false);
     };
-    let call = serde_json::from_value(call.clone()).context("parse fallback terminal tool call")?;
-    Ok(mj_core::acp::is_fallback_terminal_tool_call(&call))
+    if !call.typed_valid() {
+        bail!("invalid ACP fallback terminal tool call");
+    }
+    Ok(call.is_fallback())
 }
 
 /// The one provider tool demonstrably owning a result through its raw value.
@@ -178,6 +167,7 @@ pub(super) fn uniquely_matching_raw_tool(
     index: &ProjectionIndex,
     record: &TerminalOutputRecord,
 ) -> Option<Arc<TranscriptItem>> {
+    let digest = record.raw_result_digest();
     let mut matching = index.transcript.values().filter_map(|item| {
         let TranscriptBody::Tool { call, .. } = &item.body else {
             return None;
@@ -185,8 +175,7 @@ pub(super) fn uniquely_matching_raw_tool(
         if fallback_tool_item(item).ok()? {
             return None;
         }
-        record
-            .matches_tool_raw_result(call)
+        call.matches_raw_result(record, &digest)
             .then(|| Arc::clone(item))
     });
     let item = matching.next()?;
@@ -211,8 +200,7 @@ pub(super) fn fallback_terminal_already_claimed(
                 let TranscriptBody::Tool { call, .. } = &item.body else {
                     return false;
                 };
-                serde_json::from_value::<ToolCall>(call.clone())
-                    .is_ok_and(|call| !mj_core::acp::is_fallback_terminal_tool_call(&call))
+                call.typed_valid() && !call.is_fallback()
             })
         }))
 }
@@ -236,13 +224,14 @@ pub(super) fn consume_fallback_terminal_tools(
     else {
         return Ok(());
     };
-    let materialized: ToolCall = serde_json::from_value(call.clone())
+    let materialized: ToolCall = call
+        .decode()
         .context("parse ACP tool call while claiming fallback terminal tools")?;
     if mj_core::acp::is_fallback_terminal_tool_call(&materialized) {
         return Ok(());
     }
 
-    let mut terminal_ids = tool_call_terminal_ids(call);
+    let mut terminal_ids = call.terminal_ids().to_vec();
     terminal_ids.extend(terminal_refs.iter().cloned());
     for terminal_id in terminal_ids {
         let stable_id = fallback_terminal_tool_item_id(&terminal_id);
@@ -261,7 +250,8 @@ pub(super) fn consume_fallback_terminal_tools(
         else {
             continue;
         };
-        let fallback_call: ToolCall = serde_json::from_value(fallback_call.clone())
+        let fallback_call: ToolCall = fallback_call
+            .decode()
             .context("parse fallback terminal tool call")?;
         if !mj_core::acp::is_fallback_terminal_tool_call(&fallback_call) {
             continue;
@@ -303,7 +293,8 @@ pub(super) fn finalize_fallback_terminal_tool(item: &mut TranscriptItem) -> Resu
     if terminal_outputs.is_empty() {
         return Ok(());
     }
-    let mut materialized: ToolCall = serde_json::from_value(call.clone())
+    let mut materialized: ToolCall = call
+        .decode()
         .context("parse ACP tool call while finalizing fallback terminal tool")?;
     if !mj_core::acp::is_fallback_terminal_tool_call(&materialized) {
         return Ok(());
@@ -316,7 +307,7 @@ pub(super) fn finalize_fallback_terminal_tool(item: &mut TranscriptItem) -> Resu
     } else {
         ToolCallStatus::Failed
     };
-    *call = serde_json::to_value(materialized)?;
+    *call = serde_json::to_value(materialized)?.into();
     Ok(())
 }
 
@@ -325,7 +316,7 @@ pub(super) fn finalize_fallback_terminal_tool(item: &mut TranscriptItem) -> Resu
 /// assigned to an arbitrary concurrent tool.
 pub(super) fn uniquely_matching_raw_terminal(
     current: &MaterializedSession,
-    call: &Value,
+    call: &mj_core::transcript::OpaqueToolCall,
 ) -> Option<String> {
     let mut matching = current.transcript.iter().filter_map(|item| {
         let record = match &item.body {
@@ -335,8 +326,7 @@ pub(super) fn uniquely_matching_raw_terminal(
             } if fallback_tool_item(item).ok()? => terminal_outputs.first()?,
             _ => return None,
         };
-        record
-            .matches_tool_raw_result(call)
+        call.matches_raw_result(record, &record.raw_result_digest())
             .then(|| record.terminal_id.clone())
     });
     let terminal_id = matching.next()?;
@@ -366,7 +356,7 @@ pub(super) fn attach_terminal_outputs(
     else {
         return;
     };
-    for terminal_id in tool_call_terminal_ids(call) {
+    for terminal_id in call.terminal_ids().iter().cloned() {
         if !terminal_refs.contains(&terminal_id) {
             terminal_refs.push(terminal_id);
         }
@@ -395,7 +385,7 @@ pub(super) fn attach_terminal_outputs(
 pub(super) fn canonical_terminal_output(record: &TerminalOutputRecord) -> CanonicalTerminalOutput {
     CanonicalTerminalOutput {
         terminal_id: record.terminal_id.clone(),
-        output: record.output.clone(),
+        output: record.output.text().into_owned(),
         truncated: record.truncated,
         exit_code: record.exit_code,
         signal: record.signal.clone(),
@@ -407,7 +397,7 @@ pub(super) fn materialized_terminal_output(
 ) -> TerminalOutputRecord {
     TerminalOutputRecord {
         terminal_id: record.terminal_id.clone(),
-        output: record.output.clone(),
+        output: record.output.clone().into(),
         truncated: record.truncated,
         exit_code: record.exit_code,
         signal: record.signal.clone(),

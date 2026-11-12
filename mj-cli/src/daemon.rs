@@ -13,6 +13,84 @@ pub(crate) use mj_client::daemon::*;
 pub(crate) use mj_client::executable::process_executable_path;
 pub(crate) use mj_controller::daemon::run_daemon_process;
 
+/// Forward machine-owned commands before touching client stores or credentials.
+pub(crate) async fn run_where_daemon_lives(args: &[String], interactive: bool) -> Result<bool> {
+    let interactive = interactive && !args.iter().any(|arg| arg == "--json");
+    let placement = load_daemon_config().await?;
+    if placement.runtime != mj_core::config::DaemonRuntime::Ssh {
+        // Lifecycle commands for a host or container daemon run here, through
+        // management discovery and the engine. Running them inside the
+        // container would start a stopped daemon before reporting on it.
+        if args.first().map(String::as_str) == Some("daemon") {
+            return Ok(false);
+        }
+        return container::exec_in_container(args, interactive).await;
+    }
+    let host = placement
+        .host
+        .as_deref()
+        .context("[daemon] host is required for SSH placement")?;
+    ensure!(
+        !host.starts_with('-'),
+        "[daemon] host cannot be an SSH option"
+    );
+    let instance = placement.instance.clone().unwrap_or_else(|| {
+        mj_core::config::instance_name().unwrap_or_else(|| "default".to_owned())
+    });
+    if args == ["daemon", "status"] {
+        println!("Daemon host: {host}");
+        println!("Daemon instance: {instance}");
+        println!(
+            "Client config: {}",
+            mj_core::config::config_path().display()
+        );
+        let client = this_build();
+        println!("Client build: {}", client.published());
+        match mj_client::daemon::ssh::discover(
+            &placement,
+            &instance,
+            mj_client::daemon::ssh::DiscoveryIntent::Existing,
+        )
+        .await
+        {
+            Ok(endpoint) => {
+                let remote = BuildIdentity::parse(&endpoint.build_version)?;
+                println!("Daemon build: {}", remote.published());
+                println!("same_source: {}", client.same_source(&remote));
+            }
+            Err(error) => eprintln!("Daemon build unavailable: {error:#}"),
+        }
+    }
+    let mut argv = vec![
+        placement.remote_command().to_owned(),
+        "--instance".into(),
+        instance,
+    ];
+    argv.extend_from_slice(args);
+    let mut command = std::process::Command::new("ssh");
+    if interactive {
+        command.arg("-t");
+    }
+    command
+        .args(&placement.ssh_args)
+        .arg(host)
+        .arg(mj_core::targets::daemon_login_command(&argv));
+    let status =
+        tokio::task::spawn_blocking(move || mj_core::subprocess::run_inherited(&mut command))
+            .await
+            .context("SSH command task panicked")??;
+    if status.code() == Some(127) {
+        eprintln!(
+            "[daemon] remote_command {:?} was not found on {host}; install mj remotely with scripts/install.sh (or install the same release)",
+            placement.remote_command()
+        );
+    }
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(true)
+}
+
 pub(crate) mod container;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -201,6 +279,13 @@ async fn running_daemon_blockers() -> Option<Vec<String>> {
 const LOGGED_PHASE: Duration = Duration::from_millis(250);
 
 pub async fn connect_or_start() -> Result<DaemonClient> {
+    connector::DaemonConnector::shared()
+        .await?
+        .connect_or_start(connect_or_start_local)
+        .await
+}
+
+async fn connect_or_start_local() -> Result<DaemonClient> {
     let lock_path = data_dir().join("daemon-start.lock");
     // Most clients find a daemon they can use. Deciding that needs only a
     // shared hold, so a burst of clients reconnecting after a handoff checks
@@ -464,8 +549,7 @@ async fn resolve_placement(daemon: &mj_core::config::DaemonConfig) -> Result<Con
 
 async fn load_daemon_config() -> Result<mj_core::config::DaemonConfig> {
     tokio::task::spawn_blocking(|| {
-        mj_core::config::Config::load_from(&mj_core::config::config_path())
-            .map(|config| config.daemon)
+        mj_core::config::DaemonConfig::load_placement(&mj_core::config::config_path())
     })
     .await
     .context("read daemon configuration task failed")?
@@ -628,12 +712,6 @@ async fn ping_daemon(client: &mut DaemonClient) -> Result<()> {
     Ok(())
 }
 
-/// Local protocol readiness precedes the asynchronously started HTTP server.
-/// API and desktop callers share this wait instead of asking users to retry.
-pub async fn wait_for_web_viewer(client: &mut DaemonClient) -> Result<String> {
-    wait_for_web_viewer_with_timeout(client, START_TIMEOUT).await
-}
-
 /// Wait for the web access publication that owns all local API connection
 /// details: advertised URL, listener address, and certificate pin.
 pub async fn wait_for_web_access(
@@ -662,16 +740,6 @@ async fn wait_for_web_access_with_timeout(
     })
     .await
     .context("timed out waiting for the web viewer to become ready")?
-}
-
-async fn wait_for_web_viewer_with_timeout(
-    client: &mut DaemonClient,
-    timeout: Duration,
-) -> Result<String> {
-    match wait_for_web_access_with_timeout(client, timeout).await? {
-        mj_client::web::WebViewerAccess::Ready { viewer_url, .. } => Ok(viewer_url),
-        _ => unreachable!("wait_for_web_access_with_timeout returns only Ready"),
-    }
 }
 
 /// How the running daemon's build stands against this client's.
@@ -1881,6 +1949,9 @@ pub(crate) fn continue_under_upgraded_build(
 }
 
 pub(crate) async fn upgraded_daemon_executable() -> Result<Option<UpgradeTarget>> {
+    if connector::DaemonConnector::shared().await?.is_ssh() {
+        return Ok(None);
+    }
     let Ok(metadata) = read_metadata_any() else {
         return Ok(None);
     };
@@ -2057,7 +2128,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn api_and_desktop_wait_for_the_viewer_without_a_retry_command() {
+    async fn api_waits_for_the_viewer_without_a_retry_command() {
         let (mut client, task) = viewer_fixture(vec![
             mj_client::web::WebViewerAccess::Starting,
             mj_client::web::WebViewerAccess::Starting,
@@ -2071,10 +2142,11 @@ mod tests {
             },
         ])
         .await;
-        assert_eq!(
-            wait_for_web_viewer(&mut client).await.unwrap(),
-            "http://127.0.0.1:1234"
-        );
+        assert!(matches!(
+            wait_for_web_access(&mut client).await.unwrap(),
+            mj_client::web::WebViewerAccess::Ready { viewer_url, .. }
+                if viewer_url == "http://127.0.0.1:1234"
+        ));
         drop(client);
         task.await.unwrap();
     }
@@ -2091,7 +2163,7 @@ mod tests {
         ])
         .await;
         assert!(
-            wait_for_web_viewer(&mut client)
+            wait_for_web_access(&mut client)
                 .await
                 .unwrap_err()
                 .to_string()
@@ -2103,7 +2175,7 @@ mod tests {
         let start = tokio::time::Instant::now();
         let timeout = Duration::from_millis(100);
         assert!(
-            wait_for_web_viewer_with_timeout(&mut client, timeout)
+            wait_for_web_access_with_timeout(&mut client, timeout)
                 .await
                 .unwrap_err()
                 .to_string()
@@ -2574,4 +2646,30 @@ mod tests {
             .unwrap();
         assert!(development_workers_changed_since(started, resolve).unwrap());
     }
+}
+
+/// Machine endpoint discovery is always local to this launcher. In particular,
+/// an SSH placement here must not recursively launch another SSH client.
+pub async fn print_endpoint(existing: bool) -> Result<()> {
+    tokio::task::spawn_blocking(|| {
+        let path = mj_core::config::config_path();
+        let placement = mj_core::config::DaemonConfig::load_placement(&path)?;
+        anyhow::ensure!(
+            placement.runtime != mj_core::config::DaemonRuntime::Ssh,
+            "{}: daemon endpoint cannot follow SSH placement; choose host, docker or podman on this machine",
+            path.display()
+        );
+        Ok::<_, anyhow::Error>(())
+    }).await.context("load endpoint placement task failed")??;
+    let mut client = if existing {
+        connect_existing()
+            .await
+            .context("no running daemon available for daemon endpoint --existing")?
+    } else {
+        connect_or_start().await?
+    };
+    let mut endpoint = client.endpoint().await?;
+    endpoint.config_path = Some(mj_core::config::config_path());
+    println!("{}", serde_json::to_string(&endpoint)?);
+    Ok(())
 }

@@ -650,7 +650,7 @@ impl ProjectMemoryIdentity {
         let project = checkout
             .project_directory()
             .context("raw session project directory is missing")?;
-        let repository = match session.target.as_ref() {
+        let repository = match session.target.as_deref() {
             Some(crate::state::TargetLocator::LocalBare { .. }) => {
                 RepositoryMemoryIdentity::Local {
                     canonical_root: std::fs::canonicalize(project)

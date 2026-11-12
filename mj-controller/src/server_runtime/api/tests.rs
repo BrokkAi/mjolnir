@@ -897,6 +897,7 @@ fn ready_view(model: &str) -> ManagedSessionView {
         background_work_known: None,
     };
     ManagedSessionView {
+        attention: Default::default(),
         snapshot: Some(mj_core::state::ManagedSessionSnapshot {
             subagent_requests: Default::default(),
             subagent_completions: Default::default(),
@@ -2143,6 +2144,7 @@ fn a_child_whose_login_was_refused_fails_naming_its_profile_and_the_fix() {
         code: Some("service".into()),
         http_status: Some(503),
         reset_at: None,
+        login_fingerprint: None,
     });
     assert!(provider_failure(&old_provider_failure).is_some());
     for old_failure in [&old_login_failure, &old_provider_failure] {
@@ -5890,6 +5892,7 @@ async fn child_provider_retry_keeps_listings_notifications_and_parking_pending()
         code: Some("service".into()),
         http_status: None,
         reset_at: None,
+        login_fingerprint: None,
     });
     snapshot.materialized.applied_event_ordinal = turn.completed_ordinal;
     snapshot.materialized.applied_event_digest = format!("{:064x}", turn.completed_ordinal);
@@ -6040,6 +6043,7 @@ async fn provider_failed_child_report_names_its_turn_profile_and_backoff() {
         code: Some("limit".into()),
         http_status: None,
         reset_at: None,
+        login_fingerprint: None,
     };
     let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
     conversation.applied_event_ordinal = 9;
@@ -6146,10 +6150,10 @@ struct OracleExports {
 impl OracleExports {
     fn new() -> Arc<Self> {
         let mut primary = parent_record("parent-1", "parent");
-        primary.oracle_choice = Some(mj_core::config::SubagentChoice {
+        primary.oracle_choice = Some(Box::new(mj_core::config::SubagentChoice {
             model: "luna".into(),
             effort: Some("low".into()),
-        });
+        }));
         Arc::new(Self {
             records: std::sync::Mutex::new(BTreeMap::from([("parent-1".to_owned(), primary)])),
             requests: Default::default(),
@@ -6498,10 +6502,12 @@ async fn ask_oracle_refuses_a_child_and_a_session_without_an_oracle() {
     for (oracle, choice) in [(false, true), (true, false)] {
         let mut primary = parent_record("parent-1", "parent");
         primary.oracle = oracle;
-        primary.oracle_choice = choice.then(|| mj_core::config::SubagentChoice {
-            model: "luna".into(),
-            effort: None,
-        });
+        primary.oracle_choice = choice
+            .then(|| mj_core::config::SubagentChoice {
+                model: "luna".into(),
+                effort: None,
+            })
+            .map(Box::new);
         exports
             .records
             .lock()

@@ -20,7 +20,6 @@
 !mj-chat/
 !mj-tui/
 !mj-cli/
-!mj-desktop/
 !voice-worker/
 **/target/
 **/node_modules/

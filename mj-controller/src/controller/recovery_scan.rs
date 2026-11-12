@@ -555,7 +555,7 @@ fn adopted_session_record(
         resource_allocation: None,
         additional_mounts: Vec::new(),
         state: SessionState::Disconnected,
-        target: Some(locator),
+        target: Some(Box::new(locator)),
         native_session_id: None,
         acp_session_title: None,
         session_title_override: None,
@@ -1711,11 +1711,11 @@ mod tests {
         let mut record = errored_podman_session(session_id);
         // The same failure, except the record kept its locator: the session's
         // own forced destroy still reaches the container, so recovery stays out.
-        record.target = Some(TargetLocator::LocalPodman {
+        record.target = Some(Box::new(TargetLocator::LocalPodman {
             container_id: targets::resource_name(session_id).unwrap(),
             workspace_storage: PodmanWorkspaceLocator::ContainerLayer,
             borrowed_from: None,
-        });
+        }));
         let (controller, executor) = podman_scan_controller(record);
 
         let scan = controller.scan_orphan_workers(&executor, true);

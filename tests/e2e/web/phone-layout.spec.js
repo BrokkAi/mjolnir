@@ -139,6 +139,7 @@ function fixture(taskCount = 1, options = {}) {
       auto_afk_minutes: options.autoAfkMinutes ?? 0,
     },
     actions: [],
+    receipts: [],
     snapshots: 0,
     conversation: transcript(),
   };
@@ -187,6 +188,7 @@ async function mount(page, taskCount = 1, options = {}) {
       return route.fulfill({ status: 202, body: '' });
     }
     if (pathname.startsWith('/api/conversations/')) {
+      if (pathname.endsWith('/read')) state.receipts.push(route.request().postDataJSON().through);
       if (route.request().method() === 'GET') return json(state.conversation);
       return route.fulfill({ status: 204, body: '' });
     }
@@ -388,18 +390,43 @@ test('delivered messages in one batch keep separate prose rows after reload', as
   await page.route('**/api/v1/sessions/parent/history*', route => route.fulfill({
     contentType: 'application/json',
     body: JSON.stringify({ frontier: 17, before: null, items: messages.map(message => ({
-      role: message.role, label: message.label, text: message.lines.join('\n'), recorded_at_ms: message.recorded_at_ms,
+      position: message.id, stable_id: message.stable_id, role: message.role, label: message.label, text: message.lines.join('\n'), recorded_at_ms: message.recorded_at_ms,
     })) }),
   }));
   await page.locator('#earlier-messages').click();
-  const history = page.getByRole('dialog', { name: 'Earlier messages' });
+  const history = page.locator('#conversation-feed');
   await expect(history).toContainText('Message from Review helper');
   await expect(history).toContainText('The second message arrived in the same delivery.');
-  await expect(history.locator('time')).toHaveCount(2);
-  await history.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(history.locator('[data-entry-id="message:review"] time, [data-entry-id="message:build"] time')).toHaveCount(2);
+
   await page.reload();
   await expect(page.locator('.entry.tone-message')).toHaveCount(2);
   await expect(page.locator('.entry[data-entry-id="message:build"]')).toContainText('The second message arrived in the same delivery.');
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
   expect(overflow).toBe(false);
+});
+
+
+test('conversation reads wait for a visible page at the latest message', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.testVisibility = 'hidden';
+    Object.defineProperty(document, 'visibilityState', { get: () => window.testVisibility });
+  });
+  const state = await mount(page);
+  const settle = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await settle();
+  expect(state.receipts).toEqual([]);
+  await page.locator('#conversation-feed').evaluate(feed => {
+    const scroller = feed.closest('#conversation-scroll') || feed.parentElement;
+    scroller.scrollTop = 0;
+    window.testVisibility = 'visible';
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await settle();
+  expect(state.receipts).toEqual([]);
+  await page.locator('#conversation-scroll').evaluate(scroller => { scroller.scrollTop = scroller.scrollHeight; });
+  await expect.poll(() => state.receipts).toEqual([16]);
+  await page.locator('#conversation-scroll').evaluate(scroller => { scroller.dispatchEvent(new Event('scroll')); scroller.dispatchEvent(new Event('scroll')); });
+  await settle();
+  expect(state.receipts).toEqual([16]);
 });

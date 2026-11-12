@@ -27,7 +27,6 @@ mod api_client;
 mod api_commands;
 mod daemon;
 mod dashboard;
-mod desktop;
 mod ec2;
 mod go;
 mod hints;
@@ -108,11 +107,6 @@ enum Command {
     /// Open the workspace selector even when Mjolnir could auto-attach, or
     /// list and create workspaces without a terminal.
     Workspaces(WorkspacesArgs),
-    /// Open the web viewer in a native desktop window.
-    App,
-    /// Mint the private launch document consumed by `mj-desktop`.
-    #[command(hide = true)]
-    DesktopBootstrap,
     /// Inspect or control the persistent per-user daemon.
     Daemon(DaemonArgs),
     /// Internal persistent controller process.
@@ -210,8 +204,10 @@ enum Command {
     Review(api_commands::ReviewArgs),
     /// Stop a session's background task, or all tasks the worker can stop.
     StopTask(api_commands::StopTaskArgs),
-    /// Print the API base URL and where its bearer token lives.
+    /// Print the API base URL.
     ApiInfo(api_commands::ApiInfoArgs),
+    /// Print only the API bearer token for external HTTP clients.
+    ApiToken,
     /// Print a valid GitHub App token for an owner or repository.
     GithubToken(api_commands::GithubTokenArgs),
     /// Change what the person's dashboard shows: pane sizes, which session
@@ -293,6 +289,15 @@ struct DaemonArgs {
 
 #[derive(Debug, Subcommand)]
 enum DaemonCommand {
+    /// Print the local authenticated control endpoint for an SSH client.
+    Endpoint {
+        /// Emit exactly one JSON object containing control credentials.
+        #[arg(long, required = true)]
+        json: bool,
+        /// Fail if no daemon is running; never start one.
+        #[arg(long)]
+        existing: bool,
+    },
     /// Set or show whether the operator is away.
     Afk {
         #[command(subcommand)]
@@ -843,8 +848,7 @@ fn process_kind(command: Option<&Command>) -> logging::ProcessKind {
         None
         | Some(Command::Go(_))
         | Some(Command::Simple(_))
-        | Some(Command::Workspaces(WorkspacesArgs { command: None }))
-        | Some(Command::App) => logging::ProcessKind::Tui,
+        | Some(Command::Workspaces(WorkspacesArgs { command: None })) => logging::ProcessKind::Tui,
         _ => logging::ProcessKind::Cli,
     }
 }
@@ -855,8 +859,6 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Go(_)) => "go",
         Some(Command::Simple(_)) => "simple",
         Some(Command::Workspaces(_)) => "workspaces",
-        Some(Command::App) => "app",
-        Some(Command::DesktopBootstrap) => "desktop-bootstrap",
         Some(Command::Daemon(_)) => "daemon",
         Some(Command::DaemonRun) => "daemon-run",
         Some(Command::Acp(_)) => "acp",
@@ -894,6 +896,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Review(_)) => "review",
         Some(Command::StopTask(_)) => "stop-task",
         Some(Command::ApiInfo(_)) => "api-info",
+        Some(Command::ApiToken) => "api-token",
         Some(Command::GithubToken(_)) => "github-token",
         Some(Command::Ui(_)) => "ui",
         Some(Command::Models(_)) => "models",
@@ -1023,12 +1026,6 @@ async fn run_command(
                 .await
                 .map(|()| DashboardExit::Normal),
         },
-        Some(Command::App) => desktop::run_desktop_app()
-            .await
-            .map(|()| DashboardExit::Normal),
-        Some(Command::DesktopBootstrap) => desktop::desktop_bootstrap()
-            .await
-            .map(|()| DashboardExit::Normal),
         Some(Command::Daemon(args)) => daemon_command(args).await.map(|()| DashboardExit::Normal),
         Some(Command::DaemonRun) => daemon::run_daemon_process()
             .await
@@ -1046,25 +1043,25 @@ async fn run_command(
                 .await
                 .map(|()| DashboardExit::Normal)
         }
-        Some(Command::Ec2(args)) => ec2::run(args).await.map(|()| DashboardExit::Normal),
+        Some(Command::Ec2(args)) => {
+            if daemon::run_where_daemon_lives(&daemon_forwarded_args(), false).await? {
+                return Ok(DashboardExit::Normal);
+            }
+            ec2::run(args).await.map(|()| DashboardExit::Normal)
+        }
         Some(Command::Doctor(args)) => {
-            if daemon::container::exec_in_container(&container_forwarded_args()).await? {
+            if daemon::run_where_daemon_lives(&daemon_forwarded_args(), false).await? {
                 return Ok(DashboardExit::Normal);
             }
             doctor(args).await.map(|()| DashboardExit::Normal)
         }
         Some(Command::Setup(args)) => {
-            if args.command.is_none()
-                && daemon::container::exec_in_container(&["setup".to_owned()]).await?
-            {
+            if daemon::run_where_daemon_lives(&daemon_forwarded_args(), true).await? {
                 return Ok(DashboardExit::Normal);
             }
             setup(args).map(|()| DashboardExit::Normal)
         }
         Some(Command::Import(args)) => {
-            if daemon::container::exec_in_container(&container_forwarded_args()).await? {
-                return Ok(DashboardExit::Normal);
-            }
             let workspace_id =
                 resolve_store_workspace(args.workspace().or(requested_workspace).as_deref())
                     .await?;
@@ -1151,7 +1148,7 @@ async fn run_command(
             if args.cli {
                 forwarded.push("--cli".to_owned());
             }
-            if daemon::container::exec_in_container(&forwarded).await? {
+            if daemon::run_where_daemon_lives(&forwarded, true).await? {
                 return Ok(DashboardExit::Normal);
             }
             login(args).await.map(|()| DashboardExit::Normal)
@@ -1242,6 +1239,9 @@ async fn run_command(
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::SetConfig(args)) => api_commands::set_config(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::ApiToken) => api_commands::api_token()
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::ApiInfo(args)) => api_commands::api_info(args)
@@ -2090,10 +2090,10 @@ async fn listed_workspaces_without_starting() -> Option<Vec<mj_core::workspace::
 /// store that does not exist yet has none; one that cannot be read answers
 /// `None`.
 fn stored_workspaces_on_this_computer() -> Option<Vec<mj_core::workspace::WorkspaceRecord>> {
-    let placement = mj_core::config::Config::load_from(&mj_core::config::config_path())
-        .map(|config| config.daemon.runtime)
-        .unwrap_or_default();
-    if placement.engine().is_some() {
+    let placement = mj_core::config::DaemonConfig::load_placement(&mj_core::config::config_path())
+        .ok()?
+        .runtime;
+    if placement != mj_core::config::DaemonRuntime::Host {
         return None;
     }
     if !mj_controller::database::database_path().exists() {
@@ -2194,9 +2194,16 @@ fn workspace_name_for_directory(directory: &std::path::Path) -> String {
 }
 
 fn suggested_workspace_name(workspaces: &[daemon::WorkspaceListing]) -> Result<String> {
-    let base = workspace_name_for_directory(
-        &std::env::current_dir().context("read current directory for workspace name")?,
-    );
+    let base = if mj_core::config::DaemonConfig::load_placement(&mj_core::config::config_path())?
+        .runtime
+        == mj_core::config::DaemonRuntime::Ssh
+    {
+        "workspace".to_owned()
+    } else {
+        workspace_name_for_directory(
+            &std::env::current_dir().context("read current directory for workspace name")?,
+        )
+    };
     // The store keeps the name `default` for sessions made before a
     // workspace was required, even while that workspace is not listed.
     let names = workspaces
@@ -2223,7 +2230,16 @@ fn suggested_workspace_name(workspaces: &[daemon::WorkspaceListing]) -> Result<S
 }
 
 async fn daemon_command(args: DaemonArgs) -> Result<()> {
+    if matches!(
+        args.command,
+        DaemonCommand::Status | DaemonCommand::Stop(_) | DaemonCommand::Restart
+    ) && daemon::run_where_daemon_lives(&daemon_forwarded_args(), false).await?
+    {
+        return Ok(());
+    }
+
     match args.command {
+        DaemonCommand::Endpoint { existing, .. } => daemon::print_endpoint(existing).await?,
         DaemonCommand::Afk { command } => {
             let mut client = daemon::connect_or_start().await?;
             if !matches!(command, AfkCommand::Status) {
@@ -2361,10 +2377,10 @@ async fn daemon_command(args: DaemonArgs) -> Result<()> {
     Ok(())
 }
 
-/// The command line to replay inside a daemon container. The container is one
-/// instance already, so the host's `--instance` selector is removed; every
+/// The command line to replay where the daemon lives. Placement supplies
+/// the destination instance, so the client instance selector is removed; every
 /// other argument keeps its meaning.
-fn container_forwarded_args() -> Vec<String> {
+fn daemon_forwarded_args() -> Vec<String> {
     let mut args = std::env::args().skip(1);
     let mut forwarded = Vec::new();
     while let Some(argument) = args.next() {
@@ -3483,12 +3499,12 @@ mod tests {
                 draft_input: String::new(),
                 last_error: None,
                 last_checkpoint_error: None,
-                checkpoint: Some(mj_core::state::CheckpointMetadata {
+                checkpoint: Some(Box::new(mj_core::state::CheckpointMetadata {
                     archive_path,
                     sha256: "a".repeat(64),
                     created_at: "2026-08-12T00:00:00Z".into(),
                     event_frontier: 7,
-                }),
+                })),
             },
         );
         let mut controller = Controller {

@@ -537,7 +537,7 @@ fn a_thread_from_a_mjolnir_sessions_own_checkout_is_not_offered_for_import() {
         session.state = state;
         session.native_session_id = Some(stored.into());
         session.project_directory = Some(clone.clone());
-        session.managed_worktree = Some(mj_core::state::ManagedWorktree {
+        session.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
             kind: mj_core::state::ManagedCheckoutKind::Clone,
             source_project_directory: "/home/dev/reverify-10/project".into(),
             source_repository: "/home/dev/reverify-10/project".into(),
@@ -545,7 +545,7 @@ fn a_thread_from_a_mjolnir_sessions_own_checkout_is_not_offered_for_import() {
             branch: "main".into(),
             target: mj_core::state::ManagedWorktreeTarget::Local,
             base_commit: None,
-        });
+        }));
         let mut before = native(pre_clear, "Remember PINEAPPLE and reply OK", 10);
         before.cwd = clone.clone();
         let mut after = native(post_clear, "What word did I ask you to remember?", 20);

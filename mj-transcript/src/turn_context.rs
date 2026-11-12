@@ -144,7 +144,7 @@ impl TurnContext {
             } => {
                 self.observe_terminal(&mj_core::transcript::TerminalOutputRecord {
                     terminal_id: terminal_id.clone(),
-                    output: output.clone(),
+                    output: output.clone().into(),
                     truncated: *truncated,
                     exit_code: *exit_code,
                     signal: signal.clone(),

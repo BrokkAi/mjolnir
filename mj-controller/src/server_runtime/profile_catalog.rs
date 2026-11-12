@@ -563,9 +563,8 @@ impl ProfileCatalog {
                 let catalog = Arc::clone(self);
                 async move { catalog.model_capabilities(profile, model).await }
             },
-            None,
         )
-        .await?;
+        .await;
         if !known {
             anyhow::bail!("reviewer efforts remain unknown");
         }

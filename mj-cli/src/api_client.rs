@@ -9,7 +9,6 @@ pub(crate) mod events;
 mod pinned_tls;
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -20,7 +19,6 @@ use mj_controller::server::api::{
     SessionMessageRequest, SessionMessageResponse, StartSessionRequest, StartSessionResponse,
     SuspendSessionResponse, TranscriptResponse, WaitRequest, WaitResponse, WorkspaceListResponse,
 };
-use mj_controller::server::api_token_path;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -141,27 +139,20 @@ impl ApiClient {
         else {
             unreachable!("wait_for_web_access returns only Ready")
         };
-        let local_address = local_address
-            .context("the daemon did not publish a local web viewer address; restart the daemon")?;
-        let (viewer_url, resolver) = route_viewer_to_local_socket(&viewer_url, local_address)?;
+        let (viewer_url, resolver) = if let Some(connector) = client.connector()
+            && connector.is_ssh()
+        {
+            connector.validate_viewer_url(&viewer_url).await?;
+            (viewer_url, None)
+        } else {
+            let local_address = local_address.context(
+                "the daemon did not publish a local web viewer address; restart the daemon",
+            )?;
+            route_viewer_to_local_socket(&viewer_url, local_address)?
+        };
         let http = http_client(certificate_sha256.as_deref(), resolver)?;
         probe_api(&http, &viewer_url).await?;
-        let token_path = api_token_path();
-        let token = std::fs::read_to_string(&token_path)
-            .with_context(|| {
-                format!(
-                    "read the API token {}; this daemon supports the API, but its token is missing or unreadable; check permissions or run `mj daemon restart`",
-                    token_path.display()
-                )
-            })?
-            .trim()
-            .to_owned();
-        if token.is_empty() {
-            bail!(
-                "the API token file {} is empty; delete it and run `mj daemon restart` to mint a new one",
-                token_path.display()
-            );
-        }
+        let token = client.api_credential().await?;
         Ok(Self::with_http(viewer_url, token, http))
     }
 
@@ -182,10 +173,6 @@ impl ApiClient {
 
     pub(crate) fn base_url(&self) -> &str {
         &self.base_url
-    }
-
-    pub(crate) fn token_path() -> PathBuf {
-        api_token_path()
     }
 
     fn url(&self, path: &str) -> String {

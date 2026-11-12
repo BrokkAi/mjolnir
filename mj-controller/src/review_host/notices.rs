@@ -253,8 +253,8 @@ impl HostState {
             }
         }
         for operation in self.preparing.values() {
-            if let PreparingOperation::Review { cancelled, .. } = operation {
-                cancelled.store(true, std::sync::atomic::Ordering::Release);
+            if let PreparingOperation::Review { cancel } = operation {
+                cancel.cancel();
             }
         }
         self.preparing.clear();

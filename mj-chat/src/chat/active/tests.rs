@@ -172,6 +172,7 @@ fn a_disconnected_view_without_a_snapshot_stops_stale_animation() {
     apply_session_view(
         &mut chat,
         Ok(ManagedSessionView {
+            attention: Default::default(),
             snapshot: None,
             connected: false,
             error: None,
@@ -320,6 +321,7 @@ fn managed_view(session: MaterializedSession) -> ManagedSessionView {
     let latest_ordinal = session.applied_event_ordinal;
     let latest_digest = session.applied_event_digest.clone();
     ManagedSessionView {
+        attention: Default::default(),
         snapshot: Some(mj_core::state::ManagedSessionSnapshot {
             window: mj_core::state::ProjectionWindow::of(&session),
             materialized: session,
@@ -580,6 +582,7 @@ fn a_transient_error_before_the_first_snapshot_keeps_the_loading_row() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.set_transcript_loading(true);
     let view = ManagedSessionView {
+        attention: Default::default(),
         snapshot: None,
         connected: false,
         error: Some(ViewError::Unreachable("database is busy".into())),
@@ -665,10 +668,9 @@ async fn the_dictation_chord_says_why_dictation_is_unavailable() {
     assert_eq!(chat.draft(), "");
 
     // Once the probe has answered, the chord gives its reason.
-    chat.apply_voice_update(VoiceUpdate::Availability(
-        Vec::new(),
-        Ok(Err(io::DICTATION_NEEDS_A_CODEX_PROFILE.to_owned())),
-    ));
+    chat.apply_voice_update(VoiceUpdate::Availability(Ok(Err(
+        io::DICTATION_NEEDS_A_CODEX_PROFILE.to_owned(),
+    ))));
     chat.state.clear_notice();
     assert_eq!(
         chat.toggle_dictation().as_deref(),
@@ -3224,7 +3226,9 @@ async fn clipboard_and_attachment_results_follow_the_live_composer_across_regist
         generation: launch.input_generation(),
         target: launch.clipboard_target(),
         staging: true,
-        result: Ok(ClipboardContent::Image(super::super::tests::test_image())),
+        result: Ok(ClipboardContent::Image(
+            super::super::tests::test_reference_image(),
+        )),
     };
     launch.begin_submission(
         "accepted-before-parking".into(),
@@ -3255,7 +3259,7 @@ async fn clipboard_and_attachment_results_follow_the_live_composer_across_regist
         .attachment_queue
         .pop_front()
         .unwrap();
-    let image = super::super::tests::test_image();
+    let image = super::super::tests::test_reference_image();
     destination
         .send(ComposerIoUpdate::AttachmentFinished(AttachmentResult {
             sequence,
@@ -3304,7 +3308,7 @@ async fn pending_image_submission_and_deleted_markers_survive_a_live_composer_tr
         .send(ComposerIoUpdate::AttachmentFinished(AttachmentResult {
             sequence: 17,
             fallback: AttachmentFallback::FailedMarker,
-            result: Ok(super::super::tests::test_image()),
+            result: Ok(super::super::tests::test_reference_image()),
         }))
         .unwrap();
     assert_eq!(
@@ -3328,7 +3332,7 @@ async fn pending_image_submission_and_deleted_markers_survive_a_live_composer_tr
         .send(ComposerIoUpdate::AttachmentFinished(AttachmentResult {
             sequence: 18,
             fallback: AttachmentFallback::FailedMarker,
-            result: Ok(super::super::tests::test_image()),
+            result: Ok(super::super::tests::test_reference_image()),
         }))
         .unwrap();
     attached.state.drain_composer();
@@ -3704,7 +3708,7 @@ async fn deferred_move_prompts_keep_their_original_operation_through_attach_and_
     attached.apply_attachment_result(AttachmentResult {
         sequence: 1,
         fallback: AttachmentFallback::FailedMarker,
-        result: Ok(super::super::tests::test_image()),
+        result: Ok(super::super::tests::test_reference_image()),
     });
     attached.drain().await;
     let prompt = attached.take_prepared_startup_prompts().pop().unwrap();

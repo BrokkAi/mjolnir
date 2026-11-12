@@ -34,7 +34,7 @@ use tokio::task::{JoinError, JoinHandle};
 
 use crate::daemon;
 use crate::dashboard::{CriticalOperationTracker, DashboardContext};
-use crate::import::{DashboardImportSuccess, PendingDashboardImport, persist_imported_session};
+use crate::import::{DashboardImportSuccess, PendingDashboardImport};
 use crate::pollers::{DashboardLifecycleFailure, DashboardLifecycleUpdate, LifecycleSuccess};
 
 /// Everything the dashboard learns from a background job.
@@ -505,8 +505,8 @@ pub(crate) struct LifecycleReloaded {
     result: std::result::Result<DashboardMetadata, String>,
 }
 
-impl From<mj_controller::controller::NewSessionPreflight> for RemotePreflightOutcome {
-    fn from(result: mj_controller::controller::NewSessionPreflight) -> Self {
+impl From<mj_client::daemon::PreflightNew> for RemotePreflightOutcome {
+    fn from(result: mj_client::daemon::PreflightNew) -> Self {
         if !result.remote_repairs.is_empty() {
             return Self::Repair(result.remote_repairs);
         }

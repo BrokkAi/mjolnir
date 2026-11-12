@@ -112,6 +112,7 @@ fn import_fixture(fixture: &NativeFixture, root: &Path) -> ImportedClaudeSession
         &config,
         &mut state,
         NativeImportRequest {
+            daemon_project_root: None,
             harness: fixture.kind,
             harness_home: &fixture.home,
             native_session_id: &fixture.native_session_id,
@@ -167,6 +168,7 @@ fn native_dispatch_and_import_preserve_identity_and_source_for_muse() {
         &config,
         &mut state,
         NativeImportRequest {
+            daemon_project_root: None,
             harness: kind,
             harness_home: &fixture.home,
             native_session_id: &fixture.native_session_id,
@@ -263,6 +265,7 @@ fn native_import_rejects_changed_preview_and_cancellation_without_publishing() {
         &config,
         &mut state,
         NativeImportRequest {
+            daemon_project_root: None,
             harness: kind,
             harness_home: &source_fixture.home,
             native_session_id: &source_fixture.native_session_id,
@@ -293,6 +296,7 @@ fn native_import_rejects_changed_preview_and_cancellation_without_publishing() {
         &config,
         &mut state,
         NativeImportRequest {
+            daemon_project_root: None,
             harness: kind,
             harness_home: &cancelled_fixture.home,
             native_session_id: &cancelled_fixture.native_session_id,

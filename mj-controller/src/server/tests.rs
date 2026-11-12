@@ -903,12 +903,12 @@ fn session_review_count_overrides_phone_status_projection() {
         2
     ];
     state.sessions.get_mut("session-1").unwrap().review =
-        Some(mj_core::config::SessionReview::Push {
+        Some(Box::new(mj_core::config::SessionReview::Push {
             reviewers: Some(vec![mj_core::config::SubagentChoice {
                 model: "model-b".into(),
                 effort: None,
             }]),
-        });
+        }));
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 9);
     assert_eq!(snapshot.review_config.reviewers.len(), 2);
     let session = snapshot.sessions.get("session-1").unwrap();
@@ -4469,7 +4469,8 @@ async fn logout_blocks_delayed_renewal_and_rejects_previously_renewed_cookies() 
 async fn desktop_and_legacy_cookies_keep_their_original_expiry() {
     let options = detached_options();
     let key = options.cookie_key.clone();
-    let desktop = mint_desktop_session_cookie(&key).unwrap();
+    // Cookies from the retired desktop shell remain valid until expiry.
+    let desktop = signed_cookie_value(&key, "retired-desktop-viewer", now_unix() + 3600);
     let legacy = signed_cookie_value(&key, "legacy-viewer", now_unix() + 3600);
     let app = router(options);
     for value in [desktop, legacy] {

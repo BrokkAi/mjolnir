@@ -126,8 +126,7 @@ from rebuilding the other.
 
 `brokk-mj-tui` (`mj-tui/`) builds on the client and chat branches;
 `brokk-mjolnir` (`mj-cli/`, which builds the `mj` binary) joins the controller,
-chat, and TUI branches; and `brokk-mj-desktop` (`mj-desktop/`) uses the
-controller branch. Put new code in the lowest crate that can hold it.
+chat, and TUI branches. Put new code in the lowest crate that can hold it.
 
 ## Understand the Runtime Boundaries
 
@@ -230,12 +229,10 @@ include narrow and resized terminals. Also exercise the viewer when shared
 rendering, session, review, or permission code affects those paths.
 Include a screenshot or terminal recording for visible rendering changes.
 
-CI runs workspace lint/tests, portable Linux musl worker checks, and desktop
-checks in independent jobs. Check-ins run on Linux only. The macOS lane (`.github/workflows/macos.yml`) runs the workspace
-tests, the desktop application, and the voice worker on macOS. The Windows
+CI runs workspace lint/tests and portable Linux musl worker checks in independent jobs. Check-ins run on Linux only. The macOS lane (`.github/workflows/macos.yml`) runs the workspace
+tests and the voice worker on macOS. The Windows
 lane (`.github/workflows/windows.yml`) compiles the workspace tests, runs the
-controller-side suites and the installer test, and builds the desktop
-application on Windows. Both lanes run nightly and on manual dispatch
+controller-side suites and the installer test on Windows. Both lanes run nightly and on manual dispatch
 (`.github/workflows/nightly.yml`) and for every release tag; check-ins do not
 run them. A failing nightly lane opens or reopens its
 own tracking issue, and that lane's next passing run closes it. Separate jobs check formatting, older GNU/Linux

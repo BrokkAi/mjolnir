@@ -218,6 +218,7 @@ fn view_of(
         });
     }
     ManagedSessionView {
+        attention: Default::default(),
         snapshot: Some(ManagedSessionSnapshot {
             subagent_requests: Default::default(),
             subagent_completions: Default::default(),
@@ -552,7 +553,6 @@ impl ReviewEnvironment for FakeEnvironment {
         &'a self,
         _handle: ManagedSessionHandle,
         config: ReviewConfig,
-        _cancelled: Arc<std::sync::atomic::AtomicBool>,
     ) -> mj_client::session::BoxFuture<
         'a,
         Result<Vec<mj_core::review::settings::ResolvedReviewSettings>, String>,
@@ -4692,6 +4692,81 @@ async fn push_recording_waits_past_ten_seconds_without_losing_clean_verdict() {
         notices
             .iter()
             .any(|text| text == "Review complete: no material findings")
+    );
+    host.shutdown().await.unwrap();
+}
+
+// Hard-won: #1503: a 90-second deadline over all of review preparation cut off slow worker waits and reported them as "review preparation cancelled".
+#[tokio::test(start_paused = true)]
+async fn slow_review_preparation_waits_until_cancelled_and_names_the_stopped_step() {
+    let session = session_id("slow-preparation");
+    let mut manager = FakeManager::new(&session).await;
+    let environment = FakeEnvironment::new();
+    environment
+        .resolve_hangs
+        .store(true, std::sync::atomic::Ordering::Release);
+    let mut running = view(
+        &session,
+        MaterializedExecutionState::Running { started_at_ms: 1 },
+    );
+    running
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .operational
+        .relay_protocol_version = Some(43);
+    manager
+        .publisher
+        .publish(session.clone(), running)
+        .await
+        .unwrap();
+    let host =
+        TurnReviewHost::spawn_in(manager.control.clone(), push_config(), environment.clone());
+    let request = {
+        let host = host.clone();
+        let session = session.clone();
+        tokio::spawn(async move { host.begin_push(&session, None).await })
+    };
+    let (_, _, capture) = manager
+        .next_reviewer(|_, action| matches!(action, ReviewerAction::CaptureDelta { .. }))
+        .await;
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    assert!(
+        !request.is_finished(),
+        "a slow worker capture is waited for"
+    );
+    capture
+        .send(Ok(ReviewerOutcome::Delta {
+            repositories: vec![push_delta("/workspace/app", "newtree")],
+        }))
+        .unwrap();
+    // Reviewer choice now waits forever, as an Auto choice can on a real host.
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    assert!(
+        !request.is_finished(),
+        "a slow reviewer choice is waited for"
+    );
+    assert_eq!(environment.live_holds(), 1);
+
+    host.resolve(&session, Resolution::Cancelled).await.unwrap();
+    let refusal = tokio::time::timeout(Duration::from_secs(1), request)
+        .await
+        .expect("cancelling stops the running step at once")
+        .unwrap()
+        .unwrap_err()
+        .0;
+    assert!(
+        refusal.starts_with("review preparation cancelled while choosing reviewers"),
+        "{refusal}"
+    );
+    assert_eq!(
+        environment.live_holds(),
+        0,
+        "the background hold is released"
+    );
+    assert!(
+        host.view(&session).is_none(),
+        "the session can request review again"
     );
     host.shutdown().await.unwrap();
 }

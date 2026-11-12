@@ -273,7 +273,15 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         (None, None)
     };
 
-    let (acp_activity, step_clock, tools_in_flight, turn_context, accepted_config) = {
+    let (
+        acp_activity,
+        step_clock,
+        tools_in_flight,
+        turn_context,
+        accepted_config,
+        login_identity,
+        operator_away,
+    ) = {
         let relay = relay.lock().expect("relay lock poisoned");
         (
             relay.acp_activity_clock(),
@@ -281,6 +289,8 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
             relay.tools_in_flight(),
             relay.turn_context(),
             Arc::new(Mutex::new(accepted_config)),
+            relay.login_identity.clone(),
+            relay.operator_away.clone(),
         )
     };
     let shell_cleanup = user_shells.completion_tracker();
@@ -318,12 +328,9 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         &mut additional_directories,
     );
     let acp_spec = LaunchSpec {
-        operator_away: relay
-            .lock()
-            .expect("relay state lock poisoned")
-            .operator_away
-            .clone(),
+        operator_away,
         imported_logins: None,
+        login_identity,
         clear_context_request: None,
         context_restore: None,
         goal_recovery,
@@ -900,6 +907,10 @@ pub async fn run_daemon_owned(
     // Running. See `.agents/docs/claude-autonomous-turns.md`.
     durable_relay.set_managed_subagent(config.is_managed_subagent())?;
     durable_relay.set_turn_verdict_harness(config.harness);
+    if config.harness == HarnessKind::Claude {
+        durable_relay.authentication_login_path =
+            mj_core::credentials::claude_oauth_login_path(&config.environment);
+    }
     // Worker admission opens before profile preparation finishes. Claude must
     // already be protected from ACP steering during that window.
     durable_relay.set_steering_delivery_mode(config.harness, false);
@@ -2344,7 +2355,12 @@ pub(super) async fn serve_client_with_memory(
                 // They never reach DurableRelay, its journal, or its
                 // command ledger.
                 let operation = envelope.request.method_name();
-                let response = credential_response(envelope, &credentials, &relay_root).await;
+                let login_installed = matches!(&envelope.request, RelayRequest::InstallCredentials { .. });
+                let login_identity = relay.lock().expect("relay state lock poisoned").login_identity.clone();
+                let response = credential_response(envelope, &credentials, &relay_root, &login_identity).await;
+                if login_installed && matches!(response.body, RelayResponseBody::Ok { .. }) {
+                    wake_dispatch(&relay, &dispatch_wake)?;
+                }
                 write_logged_response(&mut writer, &response, &session_id, operation).await?;
                 continue;
             }

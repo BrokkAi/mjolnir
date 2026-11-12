@@ -2216,6 +2216,7 @@ mod tests {
             code: None,
             http_status: None,
             reset_at: None,
+            login_fingerprint: None,
         });
         assert_eq!(
             failed_turn(&error, Some("You've hit your usage limit.")),
@@ -2238,6 +2239,7 @@ mod tests {
             code: code.map(str::to_owned),
             http_status: None,
             reset_at: None,
+            login_fingerprint: None,
         };
         let failed_with = |message: &str, code: Option<&str>| {
             let mut turn = finished("t", "error");

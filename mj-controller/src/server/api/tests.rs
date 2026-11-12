@@ -588,6 +588,7 @@ async fn wait_reports_background_knowledge_without_claiming_checkpoint_readiness
     let relay = mj_worker::relay::DurableRelay::open(root.path(), "session-1", "1.0.0").unwrap();
     let materialized = mj_core::state::MaterializedSession::empty("session-1");
     let mut live = mj_client::session::ManagedSessionView {
+        attention: Default::default(),
         connected: true,
         error: None,
         snapshot: Some(mj_core::state::ManagedSessionSnapshot {
@@ -1523,6 +1524,7 @@ fn live_view(model: &str, efforts: &[&str]) -> ManagedSessionView {
     ]))
     .expect("the fixture describes selects the schema accepts");
     ManagedSessionView {
+        attention: Default::default(),
         snapshot: Some(mj_core::state::ManagedSessionSnapshot {
             subagent_requests: Default::default(),
             subagent_completions: Default::default(),
@@ -1924,6 +1926,203 @@ fn waiting_for_its_worker(snapshot: &mut ViewerSnapshot) {
     session.capabilities.prompt = false;
 }
 
+fn lifecycle_owns_session(
+    snapshot: &mut ViewerSnapshot,
+    kind: ViewerOperationKind,
+    state: mj_core::state::SessionState,
+) {
+    let session = &mut snapshot.sessions[0];
+    session.state = state.as_str().into();
+    session.lifecycle = ViewerLifecycleCategory::of(state);
+    session.has_error = false;
+    session.transitioning = kind.transition_kind().is_some();
+    session.capabilities.prompt = false;
+    session.operation = Some(Box::new(ViewerOperation {
+        id: "lifecycle-1".into(),
+        session_id: session.id.clone(),
+        kind,
+        started_at_epoch_seconds: 0,
+        stages: Vec::new(),
+        notice: None,
+        cancellable: true,
+    }));
+}
+
+// Hard-won: #1468: HTTP prompts were refused while lifecycle work owned the session.
+#[tokio::test(start_paused = true)]
+async fn prompts_and_user_messages_wait_for_lifecycle_work_to_finish() {
+    use mj_core::state::SessionState;
+
+    for (kind, state) in [
+        (ViewerOperationKind::Move, SessionState::Running),
+        (ViewerOperationKind::Resume, SessionState::Stopped),
+        (ViewerOperationKind::Create, SessionState::Provisioning),
+        (ViewerOperationKind::Checkpoint, SessionState::Checkpointing),
+    ] {
+        for endpoint in ["prompt", "message"] {
+            let backend = Arc::new(FakeBackend {
+                live_view: Some(live_view("flash", &["high"])),
+                ..Default::default()
+            });
+            let (app, _actions, snapshots, _bundles) = api_app(backend.clone(), |snapshot| {
+                lifecycle_owns_session(snapshot, kind, state);
+            });
+            let mut body = serde_json::json!({"text": "keep this input"});
+            body[if endpoint == "prompt" {
+                "command_id"
+            } else {
+                "request_id"
+            }] = "lifecycle-prompt".into();
+            let mut response = Box::pin(
+                app.oneshot(
+                    bearer(Request::post(format!(
+                        "/api/v1/sessions/session-1/{endpoint}"
+                    )))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+                ),
+            );
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_secs(1), &mut response)
+                    .await
+                    .is_err(),
+                "{endpoint} must wait for {kind:?} even when its record says {state:?}"
+            );
+            assert!(backend.submissions.lock().unwrap().is_empty());
+
+            // Restoring a session can leave it temporarily stopped or failed.
+            // The operation still owns the result until it finishes.
+            snapshots.send_modify(|snapshot| {
+                let session = &mut snapshot.sessions[0];
+                session.state = "error".into();
+                session.lifecycle = ViewerLifecycleCategory::Failed;
+                session.has_error = true;
+            });
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_secs(1), &mut response)
+                    .await
+                    .is_err()
+            );
+
+            // The operation can finish before the worker's first report.
+            snapshots.send_modify(|snapshot| {
+                let session = &mut snapshot.sessions[0];
+                session.operation = None;
+                session.transitioning = false;
+                session.state = "running".into();
+                session.lifecycle = ViewerLifecycleCategory::Live;
+                session.has_error = false;
+            });
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_secs(1), &mut response)
+                    .await
+                    .is_err()
+            );
+            snapshots.send_modify(|snapshot| snapshot.sessions[0].capabilities.prompt = true);
+            let response = response.await.unwrap();
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            assert_eq!(json_body(response).await["turn_id"], 1);
+            assert_eq!(
+                *backend.submissions.lock().unwrap(),
+                vec![(
+                    "lifecycle-prompt".into(),
+                    mj_core::relay::RelayCommand::Prompt {
+                        prompt: vec![agent_client_protocol::v1::schema::ContentBlock::Text(
+                            agent_client_protocol::v1::schema::TextContent::new("keep this input"),
+                        )],
+                    },
+                )]
+            );
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_prompt_waiting_for_lifecycle_work_reports_its_terminal_result() {
+    use mj_core::state::SessionState;
+
+    for (kind, final_state, expected_status) in [
+        (
+            ViewerOperationKind::Suspend,
+            Some(SessionState::Stopped),
+            StatusCode::CONFLICT,
+        ),
+        (
+            ViewerOperationKind::Resume,
+            Some(SessionState::Error),
+            StatusCode::CONFLICT,
+        ),
+        (ViewerOperationKind::Destroy, None, StatusCode::NOT_FOUND),
+    ] {
+        let backend = Arc::new(FakeBackend::default());
+        let (app, _actions, snapshots, _bundles) = api_app(backend.clone(), |snapshot| {
+            lifecycle_owns_session(snapshot, kind, SessionState::Running);
+        });
+        let mut response = Box::pin(
+            app.oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/prompt"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"text":"keep this input"}"#))
+                    .unwrap(),
+            ),
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), &mut response)
+                .await
+                .is_err()
+        );
+        snapshots.send_modify(|snapshot| {
+            if let Some(state) = final_state {
+                let session = &mut snapshot.sessions[0];
+                session.operation = None;
+                session.transitioning = false;
+                session.state = state.as_str().into();
+                session.lifecycle = ViewerLifecycleCategory::of(state);
+                session.has_error = state == SessionState::Error;
+            } else {
+                snapshot.sessions = Default::default();
+            }
+        });
+        assert_eq!(response.await.unwrap().status(), expected_status);
+        assert!(backend.prompts.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_prompt_waiting_on_a_transition_keeps_the_existing_readiness_deadline() {
+    let backend = Arc::new(FakeBackend::default());
+    let (app, _actions, _snapshots, _bundles) = api_app(backend.clone(), |snapshot| {
+        lifecycle_owns_session(
+            snapshot,
+            ViewerOperationKind::Move,
+            mj_core::state::SessionState::Running,
+        );
+        // A transition can be published before the operation is registered.
+        snapshot.sessions[0].operation = None;
+    });
+    let mut response = Box::pin(
+        app.oneshot(
+            bearer(Request::post("/api/v1/sessions/session-1/prompt"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"text":"keep this input"}"#))
+                .unwrap(),
+        ),
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(59), &mut response)
+            .await
+            .is_err()
+    );
+    let response = tokio::time::timeout(std::time::Duration::from_secs(2), response)
+        .await
+        .expect("the existing readiness deadline still bounds the request")
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(json_body(response).await.to_string().contains("60 seconds"));
+    assert!(backend.prompts.lock().unwrap().is_empty());
+}
+
 // Hard-won: a583fa10: new sessions returned prompt conflicts until their worker attached.
 #[tokio::test]
 async fn a_prompt_to_a_session_still_starting_is_taken_once_its_worker_attaches() {
@@ -2012,55 +2211,67 @@ async fn an_interrupt_during_the_history_write_withdraws_a_ready_sessions_prompt
     );
 }
 
-#[tokio::test]
-async fn an_interrupt_withdraws_a_prompt_held_for_a_starting_session() {
-    // R2-1: an ACP cancel sent while the prompt was held reached
-    // interrupt-turn, which refused it because there was no turn yet. The
-    // held prompt then became a turn that ran to completion.
-    let backend = Arc::new(FakeBackend {
-        prompt_ordinal: 3,
-        ..FakeBackend::default()
-    });
-    let (app, _actions, snapshot_tx, _bundles) = api_app(backend.clone(), waiting_for_its_worker);
-    let held = tokio::spawn(
-        app.clone().oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/prompt"))
-                .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(r#"{"text":"first words"}"#))
-                .unwrap(),
-        ),
-    );
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+#[tokio::test(start_paused = true)]
+async fn an_interrupt_withdraws_a_prompt_held_until_its_session_is_ready() {
+    for lifecycle_busy in [false, true] {
+        // R2-1: an ACP cancel sent while the prompt was held reached
+        // interrupt-turn, which refused it because there was no turn yet. The
+        // held prompt then became a turn that ran to completion.
+        let backend = Arc::new(FakeBackend {
+            prompt_ordinal: 3,
+            ..FakeBackend::default()
+        });
+        let (app, _actions, snapshot_tx, _bundles) = api_app(backend.clone(), |snapshot| {
+            if lifecycle_busy {
+                lifecycle_owns_session(
+                    snapshot,
+                    ViewerOperationKind::Move,
+                    mj_core::state::SessionState::Running,
+                );
+            } else {
+                waiting_for_its_worker(snapshot);
+            }
+        });
+        let held = tokio::spawn(
+            app.clone().oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/prompt"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"text":"first words"}"#))
+                    .unwrap(),
+            ),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    let interrupted = app
-        .oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/interrupt-turn"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        interrupted.status(),
-        StatusCode::ACCEPTED,
-        "withdrawing a held prompt is what interrupting a starting session does"
-    );
-    let response = tokio::time::timeout(std::time::Duration::from_secs(5), held)
-        .await
-        .expect("the held prompt answers once it is withdrawn")
-        .unwrap()
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let body = json_body(response).await;
-    assert!(
-        body.to_string().contains("interrupted"),
-        "the refusal says why: {body}"
-    );
+        let interrupted = app
+            .oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/interrupt-turn"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            interrupted.status(),
+            StatusCode::ACCEPTED,
+            "interrupting a session withdraws the prompt it cannot take yet"
+        );
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), held)
+            .await
+            .expect("the held prompt answers once it is withdrawn")
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = json_body(response).await;
+        assert!(
+            body.to_string().contains("interrupted"),
+            "the refusal says why: {body}"
+        );
 
-    // The session coming up later must not revive the withdrawn prompt.
-    snapshot_tx.send_modify(|snapshot| snapshot.sessions[0].capabilities.prompt = true);
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert!(backend.prompts.lock().unwrap().is_empty());
+        // The session coming up later must not revive the withdrawn prompt.
+        snapshot_tx.send_modify(|snapshot| snapshot.sessions[0].capabilities.prompt = true);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(backend.prompts.lock().unwrap().is_empty());
+    }
 }
 
 /// Launch finding R5-8: a prompt to a session in the `error` state was
@@ -3620,6 +3831,7 @@ fn an_unanswered_turn_reaches_wait_as_a_named_error() {
         code: Some("prompt_unanswered".into()),
         http_status: None,
         reset_at: None,
+        login_fingerprint: None,
     });
     let decision = WaitDecision::from_outcome(&outcome);
     assert_eq!(decision.outcome, WaitOutcome::Error);
@@ -3898,6 +4110,7 @@ fn live_observation(
     let mut session = snapshot.sessions[0].clone();
     session.capabilities.prompt = true;
     let live = ManagedSessionView {
+        attention: Default::default(),
         connected: true,
         error: None,
         snapshot: Some(mj_core::state::ManagedSessionSnapshot {
@@ -4539,6 +4752,7 @@ fn relay_health_names_each_way_the_live_view_can_be_unusable() {
     use mj_client::session::{ManagedSessionView, ViewError};
 
     let connected = ManagedSessionView {
+        attention: Default::default(),
         connected: true,
         ..ManagedSessionView::default()
     };
@@ -4573,6 +4787,7 @@ fn relay_health_names_each_way_the_live_view_can_be_unusable() {
         // Connected plus an error is what a relay that dropped mid-turn
         // looks like; the error is the thing the caller needs.
         let view = ManagedSessionView {
+            attention: Default::default(),
             connected: true,
             error: Some(error),
             ..ManagedSessionView::default()
@@ -5118,12 +5333,12 @@ fn a_published_session_says_whether_it_has_a_checkpoint() {
     assert!(!snapshot.sessions[0].has_checkpoint);
 
     state.sessions.get_mut("session-1").unwrap().checkpoint =
-        Some(mj_core::state::CheckpointMetadata {
+        Some(Box::new(mj_core::state::CheckpointMetadata {
             archive_path: "/private/archive.hel.zip".into(),
             sha256: "a".repeat(64),
             created_at: "now".into(),
             event_frontier: 3,
-        });
+        }));
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     assert!(snapshot.sessions[0].has_checkpoint);
     let published = serde_json::to_string(&snapshot.sessions[0]).unwrap();
@@ -5307,6 +5522,7 @@ fn session_wait_uses_the_workers_published_jev_activity() {
     let mut materialized = mj_core::state::MaterializedSession::empty("session-1");
     materialized.last_turn_outcome = Some(completed(7, "end_turn"));
     let mut live = ManagedSessionView {
+        attention: Default::default(),
         connected: true,
         error: None,
         snapshot: Some(mj_core::state::ManagedSessionSnapshot {
@@ -6101,6 +6317,7 @@ async fn a_session_wait_on_a_child_answers_with_its_handback() {
 /// the session's turn state from the store on every decision.
 fn actor_without_projection() -> ManagedSessionView {
     ManagedSessionView {
+        attention: Default::default(),
         snapshot: None,
         connected: true,
         error: None,

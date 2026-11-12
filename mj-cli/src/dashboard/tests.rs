@@ -842,6 +842,7 @@ async fn a_title_from_the_harness_reaches_the_conversation_header_with_the_row()
         raw_observation: None,
         session_id: session_id.to_owned(),
         view: mj_controller::session_manager::ManagedSessionView {
+            attention: Default::default(),
             snapshot: Some(mj_core::state::ManagedSessionSnapshot {
                 window: mj_core::state::ProjectionWindow::of(&materialized),
                 materialized,
@@ -900,6 +901,7 @@ fn missing_target_poll_preserves_the_daemon_notice() {
         raw_observation: None,
         session_id: "missing-target".into(),
         view: mj_controller::session_manager::ManagedSessionView {
+            attention: Default::default(),
             snapshot: None,
             connected: false,
             error: Some(mj_controller::session_manager::ViewError::TargetMissing(
@@ -1206,6 +1208,7 @@ async fn a_prose_question_survives_worker_polling_and_background_projection() {
             raw_observation: None,
             session_id: "session-1".into(),
             view: mj_controller::session_manager::ManagedSessionView {
+                attention: Default::default(),
                 snapshot: Some(snapshot),
                 connected: true,
                 error: None,
@@ -1247,6 +1250,10 @@ async fn a_prose_question_survives_worker_polling_and_background_projection() {
     };
     let prepared = result.unwrap();
     assert!(dashboard.apply_prepared_materialized_session(*prepared));
+    dashboard.set_session_attention_for(
+        "session-1",
+        mj_core::attention::SessionAttention::NeedsInput,
+    );
     assert_eq!(
         dashboard.attention_level("session-1"),
         mj_tui::AttentionLevel::Waiting
@@ -1276,6 +1283,8 @@ async fn a_prose_question_survives_worker_polling_and_background_projection() {
     // A verdict for a different completion or one already superseded cannot
     // revive a question, even if its old action was AwaitInput.
     for status in [Status::Consumed, Status::Superseded] {
+        dashboard
+            .set_session_attention_for("session-1", mj_core::attention::SessionAttention::Idle);
         let mut stale = assessment.clone();
         stale.status = status;
         let prepared = PreparedMaterializedSessionDetail::from_assessed_materialized(

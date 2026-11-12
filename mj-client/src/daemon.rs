@@ -1,5 +1,7 @@
 //! Authenticated local daemon protocol and client transport.
 mod chunk_bytes;
+pub mod connector;
+pub mod ssh;
 use crate::executable::describe_running_daemon_and_client_builds;
 use crate::session::{ManagedSessionView, ViewError};
 use agent_client_protocol::v1::schema::ContentBlock;
@@ -58,6 +60,19 @@ pub struct DaemonMetadata {
     /// owner, and a container daemon can report it on every platform.
     #[serde(skip)]
     pub placement: DaemonPlacement,
+}
+
+/// Process-private credentials returned by `mj daemon endpoint --json`.
+/// This is not local PID metadata and must never be written to daemon.json.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct DaemonEndpoint {
+    #[serde(default)]
+    pub config_path: Option<std::path::PathBuf>,
+    pub protocol_version: u32,
+    pub build_version: String,
+    pub control_address: SocketAddr,
+    pub token: String,
+    pub instance_id: String,
 }
 
 /// Where the daemon runs, as the daemon itself reports it.
@@ -389,6 +404,7 @@ pub struct WorkspaceSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeSessionView {
+    pub attention: mj_core::attention::SessionAttention,
     /// Config selectors owned by the target permission policy.
     #[serde(default)]
     pub policy_config_keys: Vec<String>,
@@ -415,6 +431,7 @@ impl RuntimeSessionView {
                 });
         Self {
             session_id,
+            attention: view.attention,
             policy_config_keys: Vec::new(),
             projection_ordinal,
             projection_digest,
@@ -685,6 +702,61 @@ pub struct DraftPreview {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "action", content = "arguments")]
 pub enum DaemonAction {
+    ProveIdentity {
+        nonce: String,
+    },
+    PreflightNewSession {
+        request: NewSessionPreflightRequest,
+    },
+    ValidateProjectDirectory {
+        target_id: String,
+        directory: PathBuf,
+    },
+    CompletePath {
+        host: mj_core::path_completion::CompletionHost,
+        prefix: String,
+        kind: mj_core::path_completion::CompletionKind,
+    },
+    CheckProjectDirectories {
+        paths: Vec<std::path::PathBuf>,
+    },
+    DiscoverProjects {
+        request: mj_core::project_picker::ProjectDiscoveryRequest,
+    },
+    ResolveContainerPath {
+        target_id: String,
+        source: std::path::PathBuf,
+    },
+    ResolveSetupPath {
+        machine: mj_core::config::Machine,
+        source: std::path::PathBuf,
+    },
+    ValidateMountSource {
+        target_id: String,
+        source: std::path::PathBuf,
+    },
+    ValidateSessionMounts {
+        target_id: String,
+        mounts: Vec<mj_core::targets::AdditionalMount>,
+    },
+    /// Raw file fragments. Completion supplies the SHA-256 of all bytes.
+    UploadChunk {
+        #[serde(with = "chunk_bytes")]
+        bytes: Vec<u8>,
+        sha256: Option<String>,
+    },
+    InstallAttachment {
+        session_id: String,
+        reference: mj_core::attachment::AttachmentRef,
+        blob: String,
+    },
+    TranscriptionAvailable {
+        preferred_profile: String,
+    },
+    TranscribeAudio {
+        preferred_profile: String,
+        blob: String,
+    },
     RecordOperatorActivity,
     SetOperatorAway {
         away: bool,
@@ -740,6 +812,7 @@ pub enum DaemonAction {
     },
     Status,
     WebViewerAccess,
+    ApiCredential,
     /// The daemon host's Git commit author, which its sessions inherit.
     GitIdentity,
     /// Write the daemon host's global Git commit author.
@@ -806,7 +879,8 @@ pub enum DaemonAction {
         workspace_id: String,
         layout: mj_core::workspace::ConversationLayout,
     },
-    PersistImportedSession {
+    ImportSession {
+        blob: String,
         session: Box<SessionRecord>,
         /// A project the import synthesized. The daemon writes it with the
         /// session, so a client never edits the daemon's configuration.
@@ -1164,6 +1238,20 @@ pub struct ResponseEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "reply", content = "value")]
 pub enum DaemonReply {
+    IdentityProof {
+        mac: Vec<u8>,
+    },
+    NewSessionPreflight(PreflightNew),
+    PathCompletion(mj_core::path_completion::PathCompletion),
+    ProjectDirectories(Vec<(std::path::PathBuf, bool)>),
+    ProjectDiscovery(mj_core::project_picker::ProjectDiscovery),
+    ResolvedPath(std::path::PathBuf),
+    MountValidation(std::path::PathBuf, Option<String>),
+    SessionMountValidation(Option<(String, String)>),
+    TranscriptionAvailable(bool),
+    Transcription(String),
+    BlobUploaded(String),
+    AttachmentInstalled(mj_core::attachment::AttachmentRef),
     LifecycleAccepted(LifecycleReceipt),
     /// Only a captured operation result may report this failure.
     LifecycleFailed(String),
@@ -1182,6 +1270,7 @@ pub enum DaemonReply {
     ProjectSource(mj_core::state::ProjectSourceIdentity),
     Status(DaemonStatus),
     WebViewerAccess(crate::web::WebViewerAccess),
+    ApiCredential(String),
     GitIdentity(GitIdentity),
     WebListeners(Vec<crate::web::WebListenerProcess>),
     SubagentOptions(mj_core::subagent::SubagentOptions),
@@ -1686,6 +1775,8 @@ pub async fn read_response(stream: &mut TcpStream) -> Result<ResponseEnvelope> {
 }
 
 pub struct DaemonClient {
+    ssh_lease: Option<std::sync::Arc<ssh::SshLease>>,
+    connector: Option<std::sync::Arc<connector::DaemonConnector>>,
     metadata: DaemonMetadata,
     stream: TcpStream,
     next_request_id: u64,
@@ -1701,6 +1792,41 @@ impl DaemonClient {
             metadata,
             stream,
             next_request_id: 1,
+            connector: None,
+            ssh_lease: None,
+        })
+    }
+
+    /// Connect through an SSH tunnel's local port and require the daemon to
+    /// prove it holds the token on this very connection before any request
+    /// carries the token. The tunnel may have exited since an earlier proof,
+    /// and another process may now hold its port.
+    pub(crate) async fn connect_proven(metadata: DaemonMetadata) -> Result<Self> {
+        let mut client = Self::connect(metadata).await?;
+        ensure!(
+            ssh::prove_stream(&mut client.stream, &client.metadata.token).await?,
+            "the SSH tunnel's local port {} did not prove it reaches the daemon",
+            client.metadata.address
+        );
+        Ok(client)
+    }
+
+    /// Connector-owned SSH origin; never inferred from daemon-host placement.
+    pub fn connector(&self) -> Option<&std::sync::Arc<connector::DaemonConnector>> {
+        self.connector.as_ref()
+    }
+
+    /// Describe the authenticated endpoint, retaining the address actually
+    /// dialed (including a container's published loopback port).
+    pub async fn endpoint(&mut self) -> Result<DaemonEndpoint> {
+        let identity = self.identity().await?;
+        Ok(DaemonEndpoint {
+            config_path: None,
+            protocol_version: self.metadata.protocol_version,
+            build_version: identity.build_version,
+            control_address: self.metadata.address,
+            token: self.metadata.token.clone(),
+            instance_id: identity.instance_id,
         })
     }
 
@@ -1708,7 +1834,12 @@ impl DaemonClient {
     /// requests must reach daemons of any protocol version, and the frozen
     /// subset encodes identically across all of them.
     pub async fn request(&mut self, action: DaemonAction) -> Result<DaemonReply> {
+        let connector = self.connector.clone();
+        let previous = self.metadata.clone();
         self.request_with_reconnect(action, || async {
+            if let Some(connector) = &connector {
+                return connector.refresh(&previous).await;
+            }
             loop {
                 if let Ok(client) = connect_existing().await {
                     return Ok(client);
@@ -1740,6 +1871,163 @@ impl DaemonClient {
             } else {
                 return Ok(response);
             }
+        }
+    }
+
+    /// Streams raw bytes on this connection. The returned blob is connection-scoped;
+    /// consume it before disconnecting. Delivery failures are never replayed.
+    pub async fn upload(
+        &mut self,
+        reader: &mut (impl tokio::io::AsyncRead + Unpin),
+    ) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        let mut digest = Sha256::new();
+        let request_id = self.next_request_id;
+        self.next_request_id += 1;
+        let mut buffer = vec![0; 64 * 1024];
+        loop {
+            let n = reader.read(&mut buffer).await?;
+            digest.update(&buffer[..n]);
+            write_frame(
+                &mut self.stream,
+                &RequestEnvelope {
+                    protocol_version: self.metadata.protocol_version,
+                    request_id,
+                    token: self.metadata.token.clone(),
+                    action: DaemonAction::UploadChunk {
+                        bytes: buffer[..n].to_vec(),
+                        sha256: (n == 0).then(|| {
+                            digest
+                                .clone()
+                                .finalize()
+                                .iter()
+                                .map(|byte| format!("{byte:02x}"))
+                                .collect::<String>()
+                        }),
+                    },
+                },
+            )
+            .await?;
+            if n == 0 {
+                break;
+            }
+        }
+        let response = read_response(&mut self.stream).await?;
+        ensure!(
+            response.request_id == request_id
+                && response.protocol_version == self.metadata.protocol_version,
+            "daemon crossed upload response"
+        );
+        match response.result.map_err(anyhow::Error::msg)? {
+            DaemonReply::BlobUploaded(blob) => Ok(blob),
+            reply => bail!("unexpected blob upload reply {reply:?}"),
+        }
+    }
+
+    /// Upload and consume on one connection. Only explicit non-admission permits
+    /// replay; a transport error may hide acceptance and is returned to the caller.
+    pub async fn upload_and_consume<R, A>(
+        &mut self,
+        reader: &mut R,
+        action: A,
+    ) -> Result<DaemonReply>
+    where
+        R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin,
+        A: Fn(String) -> DaemonAction,
+    {
+        self.upload_and_consume_with_reconnect(reader, action, reconnect_after_upload_refusal)
+            .await
+    }
+
+    async fn upload_and_consume_with_reconnect<R, A, F, Fut>(
+        &mut self,
+        reader: &mut R,
+        action: A,
+        mut reconnect: F,
+    ) -> Result<DaemonReply>
+    where
+        R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin,
+        A: Fn(String) -> DaemonAction,
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<Self>>,
+    {
+        self.upload_and_consume_observed_with_reconnect(
+            reader,
+            action,
+            &mut reconnect,
+            |_| std::future::ready(Ok(())),
+            std::future::pending(),
+        )
+        .await
+    }
+
+    /// Report each phase; cancellation is observed only during byte upload.
+    pub async fn upload_and_consume_observed<R, A, P, PF, C>(
+        &mut self,
+        reader: &mut R,
+        action: A,
+        phase: P,
+        cancel: C,
+    ) -> Result<DaemonReply>
+    where
+        R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin,
+        A: Fn(String) -> DaemonAction,
+        P: FnMut(bool) -> PF,
+        PF: Future<Output = Result<()>>,
+        C: Future<Output = ()>,
+    {
+        self.upload_and_consume_observed_with_reconnect(
+            reader,
+            action,
+            reconnect_after_upload_refusal,
+            phase,
+            cancel,
+        )
+        .await
+    }
+
+    async fn upload_and_consume_observed_with_reconnect<R, A, F, Fut, P, PF, C>(
+        &mut self,
+        reader: &mut R,
+        action: A,
+        mut reconnect: F,
+        mut phase: P,
+        cancel: C,
+    ) -> Result<DaemonReply>
+    where
+        R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin,
+        A: Fn(String) -> DaemonAction,
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<Self>>,
+        P: FnMut(bool) -> PF,
+        PF: Future<Output = Result<()>>,
+        C: Future<Output = ()>,
+    {
+        tokio::pin!(cancel);
+        use tokio::io::AsyncSeekExt;
+        let start = reader.stream_position().await?;
+        phase(true).await?;
+        loop {
+            let blob = tokio::select! {
+                biased;
+                _ = &mut cancel => bail!("upload cancelled"),
+                result = self.upload(reader) => result?,
+            };
+            phase(false).await?;
+            let reply = self.request_once(action(blob)).await?;
+            if !matches!(reply, DaemonReply::UpgradePending) {
+                return Ok(reply);
+            }
+            phase(true).await?;
+            *self = tokio::select! {
+                biased;
+                _ = &mut cancel => bail!("upload cancelled"),
+                result = async {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    reconnect().await
+                } => result?,
+            };
+            reader.seek(std::io::SeekFrom::Start(start)).await?;
         }
     }
 
@@ -1849,6 +2137,14 @@ impl DaemonClient {
         match self.request(DaemonAction::Status).await? {
             DaemonReply::Status(status) => Ok(status),
             reply => bail!("unexpected daemon status reply {reply:?}"),
+        }
+    }
+
+    /// Obtain the HTTP bearer credential from its daemon owner.
+    pub async fn api_credential(&mut self) -> Result<String> {
+        match self.request(DaemonAction::ApiCredential).await? {
+            DaemonReply::ApiCredential(token) => Ok(token),
+            reply => bail!("unexpected API credential reply: {reply:?}"),
         }
     }
 
@@ -2136,15 +2432,17 @@ impl DaemonClient {
         }
     }
 
-    pub async fn persist_imported_session(
+    pub async fn import_session(
         &mut self,
         session: SessionRecord,
         bundle: Option<ImportedBundle>,
+        reader: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin),
     ) -> Result<()> {
         match self
-            .request(DaemonAction::PersistImportedSession {
-                session: Box::new(session),
-                bundle,
+            .upload_and_consume(reader, |blob| DaemonAction::ImportSession {
+                blob,
+                session: Box::new(session.clone()),
+                bundle: bundle.clone(),
             })
             .await?
         {
@@ -3021,10 +3319,10 @@ impl DaemonClient {
 }
 
 pub async fn connect_existing() -> Result<DaemonClient> {
-    let metadata = tokio::task::spawn_blocking(read_metadata)
+    connector::DaemonConnector::shared()
+        .await?
+        .connect_existing()
         .await
-        .context("read daemon metadata task failed")??;
-    DaemonClient::connect(metadata).await
 }
 
 /// A handle to whatever daemon the metadata file advertises, regardless of its
@@ -3131,7 +3429,14 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Terminal draft persistence carries per-client revisions and clear tombstones.
 // The host node is gone: NodeConnect is no longer an action.
 // Lifecycle submission acknowledges ownership separately from completion.
-pub const PROTOCOL_VERSION: u32 = 87;
+// Clients obtain the HTTP API credential over control with ApiCredential.
+// The dashboard's path, project and preflight work are daemon actions, and
+// closing a cancellable action's connection cancels it.
+// Version 91: unauthenticated nonce proof before SSH tunnel credentials.
+// Authenticated chunked client uploads and daemon-owned attachment installation.
+// Daemon-owned voice credential discovery and uploaded-audio transcription.
+// Version 92: streamed uploads, client imports and daemon voice actions.
+pub const PROTOCOL_VERSION: u32 = 92;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
@@ -3209,6 +3514,101 @@ impl DaemonClient {
             DaemonReply::MoveOutcome(outcome) => Ok(outcome),
             _ => bail!("daemon returned an unexpected move reply"),
         }
+    }
+}
+
+impl DaemonAction {
+    /// These disposable machine reads use a dedicated connection. Closing it
+    /// cancels subprocesses; daemon handoff may abandon the read as well.
+    pub fn is_cancellable_machine_action(&self) -> bool {
+        if let Self::PreflightNewSession { request } = self
+            && !request.remote_repairs.is_empty()
+        {
+            return false;
+        }
+        matches!(
+            self,
+            Self::PreflightNewSession { .. }
+                | Self::ValidateProjectDirectory { .. }
+                | Self::CompletePath { .. }
+                | Self::CheckProjectDirectories { .. }
+                | Self::DiscoverProjects { .. }
+                | Self::ResolveContainerPath { .. }
+                | Self::ResolveSetupPath { .. }
+                | Self::ValidateMountSource { .. }
+                | Self::ValidateSessionMounts { .. }
+        )
+    }
+}
+
+/// One configured repository's network clone and publication destinations.
+/// URLs have already been passed through the shared display sanitizer before
+/// they reach a phone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreflightRepository {
+    pub id: String,
+    pub fetch_url: String,
+    pub default_branch: String,
+    pub push_urls: Vec<String>,
+}
+
+/// What a preflight found. Isolated sessions expose their complete network
+/// source plan so the person can review it before creation. Raw-local targets
+/// leave the plan empty because they use the selected checkout directly;
+/// isolated targets set `local_changes_excluded` to make the copy boundary
+/// explicit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreflightNew {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_directory: Option<PathBuf>,
+    #[serde(default)]
+    pub managed_worktree: mj_core::state::ManagedWorktreeOptions,
+    #[serde(default)]
+    pub remote_repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
+    #[serde(default)]
+    pub dirty_repositories: Vec<String>,
+    #[serde(default)]
+    pub remote_repositories: Vec<PreflightRepository>,
+    pub local_changes_excluded: bool,
+    /// Why creating this session turns its review off, when it will.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_notice: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NewSessionPreflightRequest {
+    #[serde(default)]
+    pub additional_mounts: Vec<mj_core::targets::AdditionalMount>,
+    #[serde(default)]
+    pub remote_repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
+    #[serde(default)]
+    pub workspace_id: String,
+    pub profile_id: String,
+    pub bundle_id: String,
+    pub target_id: String,
+    #[serde(default)]
+    pub project_directory: Option<PathBuf>,
+}
+
+/// Domain-separated proof shared by the daemon and SSH transport.
+pub fn identity_proof(token: &str, nonce: &str) -> hmac::Hmac<sha2::Sha256> {
+    use hmac::Mac;
+    let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::KeyInit>::new_from_slice(token.as_bytes())
+        .expect("HMAC accepts arbitrary key lengths");
+    mac.update(b"mj-daemon-identity-v1");
+    mac.update(nonce.as_bytes());
+    mac
+}
+
+async fn reconnect_after_upload_refusal() -> Result<DaemonClient> {
+    loop {
+        if let Ok(client) = connect_existing().await {
+            return Ok(client);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
@@ -3510,6 +3910,130 @@ mod tests {
                 .await
                 .is_err()
         );
+        server.await.unwrap();
+    }
+
+    // Hard-won: #1514: a refused consumer reused a blob from the old connection.
+    #[tokio::test]
+    async fn refused_blob_consumer_reuploads_before_single_acceptance() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address: listener.local_addr().unwrap(),
+            token: "test".into(),
+            started_at: "test".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: String::new(),
+            placement: DaemonPlacement::Host,
+        };
+        let bytes = vec![42; 192 * 1024];
+        let expected = bytes.clone();
+        let server = tokio::spawn(async move {
+            let mut accepted = 0;
+            for attempt in 0..4 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut received: Vec<u8> = Vec::new();
+                let upload = loop {
+                    let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                    let DaemonAction::UploadChunk { bytes, sha256 } = &request.action else {
+                        panic!("expected upload before consuming action");
+                    };
+                    received.extend(bytes);
+                    if sha256.is_some() {
+                        break request;
+                    }
+                };
+                assert_eq!(received, expected);
+                let blob = format!("connection-{attempt}");
+                write_frame(
+                    &mut stream,
+                    &ResponseEnvelope {
+                        protocol_version: upload.protocol_version,
+                        request_id: upload.request_id,
+                        result: Ok(DaemonReply::BlobUploaded(blob.clone())),
+                    },
+                )
+                .await
+                .unwrap();
+                let consume: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                let DaemonAction::InstallAttachment { blob: actual, .. } = consume.action else {
+                    panic!("expected consumer");
+                };
+                assert_eq!(actual, blob);
+                if attempt == 2 {
+                    continue;
+                } // Lost ACK must not reconnect or replay.
+                let reply = if attempt == 0 || attempt == 3 {
+                    DaemonReply::UpgradePending
+                } else {
+                    accepted += 1;
+                    DaemonReply::Done
+                };
+                write_frame(
+                    &mut stream,
+                    &ResponseEnvelope {
+                        protocol_version: consume.protocol_version,
+                        request_id: consume.request_id,
+                        result: Ok(reply),
+                    },
+                )
+                .await
+                .unwrap();
+            }
+            assert_eq!(accepted, 1);
+        });
+        let reference = mj_core::attachment::AttachmentRef {
+            sha256: "a".repeat(64),
+            mime_type: "image/png".into(),
+            size: bytes.len(),
+            width: 1,
+            height: 1,
+        };
+        let action = |blob| DaemonAction::InstallAttachment {
+            session_id: "session".into(),
+            reference: reference.clone(),
+            blob,
+        };
+        let mut reader = std::io::Cursor::new(bytes);
+        let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
+        let reply = client
+            .upload_and_consume_with_reconnect(&mut reader, action, || {
+                DaemonClient::connect(metadata.clone())
+            })
+            .await
+            .unwrap();
+        assert!(matches!(reply, DaemonReply::Done));
+        reader.set_position(0);
+        let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
+        assert!(
+            client
+                .upload_and_consume_with_reconnect(&mut reader, action, || async {
+                    panic!("lost acknowledgement cannot authorize replay");
+                })
+                .await
+                .is_err()
+        );
+        // Hard-won: af709d6e2: cancellation was ignored during refused-upload reconnection.
+        reader.set_position(0);
+        let mut client = DaemonClient::connect(metadata).await.unwrap();
+        let reconnecting = tokio::sync::Notify::new();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.upload_and_consume_observed_with_reconnect(
+                &mut reader,
+                action,
+                || async {
+                    reconnecting.notify_one();
+                    std::future::pending::<Result<DaemonClient>>().await
+                },
+                |_| std::future::ready(Ok(())),
+                reconnecting.notified(),
+            ),
+        )
+        .await
+        .expect("cancellation must interrupt reconnection");
+        assert!(result.unwrap_err().to_string().contains("upload cancelled"));
         server.await.unwrap();
     }
 

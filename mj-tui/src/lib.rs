@@ -596,6 +596,7 @@ pub enum DashboardAction {
     },
     CancelImport,
     ConfirmImportBundle {
+        project_root: std::path::PathBuf,
         create_managed_worktree: Option<bool>,
         accepted: bool,
     },
@@ -892,6 +893,8 @@ pub struct DashboardPasteTarget {
 }
 
 pub struct DashboardState {
+    pub(crate) served_attention:
+        Tracked<mj_core::snapshot_map::SnapshotMap<String, mj_core::attention::SessionAttention>>,
     paste_revision: u64,
     pending_welcome: Option<welcome::WelcomeDialog>,
     operator_presence: operator_away::OperatorPresence,
@@ -1280,6 +1283,7 @@ impl DashboardState {
             session_order: RefCell::default(),
             checkpoint_archive_sizes: BTreeMap::new(),
             stopped_records: Default::default(),
+            served_attention: Tracked::new(Default::default()),
             launch_recency,
             recent_launch: None,
             container_upgrade_sessions: BTreeSet::new(),

@@ -1114,7 +1114,7 @@ function isLoadingConversationSession(session) {
     && !isTransitioningSession(session)
     && session.operation?.kind !== 'checkpoint'
     && session.lifecycle === 'live'
-    && !session.has_error
+    && session.attention !== 'failed'
     && (conversationMode === 'loading' || conversationMode?.startsWith('transition:')
       || conversationMode?.startsWith('move-failure:')),
   );
@@ -1198,7 +1198,7 @@ function renderSessions() {
     nativeGroups = reviewerView ? [] : renderNativeSubagents(parent, showIdleSubagents);
   }
   const hiddenNativeCount = subagentView && !reviewerView && !showIdleSubagents
-    ? (parent?.native_subagents || []).filter(isIdleNativeSubagent).length
+    ? (parent?.native_subagents || []).filter(agent => isIdleNativeSubagent(parent, agent)).length
     : 0;
   const controls = [];
   if (subagentView) {
@@ -1281,23 +1281,11 @@ function renderSessions() {
 }
 
 function isIdleSubagentSession(session) {
-  if (!session
-    || session.operation
-    || session.has_error
-    || session.launch_error
-    || session.storage_problem
-    || session.configuration_issue
-    || session.quota_recovery
-    || session.capacity_retry
-    || session.retry_assessment_pending
-    || session.turn_review
-    || ['starting', 'suspending', 'failed'].includes(session.lifecycle)
-    || attentionParts(session).length) return false;
-  return session.state === 'parked' || session.is_idle === true;
+  return ['idle', 'inactive'].includes(session?.attention);
 }
 
-function isIdleNativeSubagent(agent) {
-  return ['completed', 'cancelled'].includes(agent.state) && agent.availability === 'available';
+function isIdleNativeSubagent(parent, agent) {
+  return parent.native_subagent_attention?.[agent.session_id] === 'idle' && agent.availability === 'available';
 }
 
 function renderNativeSubagents(parent, includeIdle) {
@@ -1308,13 +1296,19 @@ function renderNativeSubagents(parent, includeIdle) {
     ['Idle and reusable', a => a.state !== 'running' && a.availability === 'available'],
     ['History and availability unknown', a => a.state !== 'running' && a.availability !== 'available'],
   ].flatMap(([label, matches]) => {
-    const entries = agents.filter(agent => matches(agent) && (includeIdle || !isIdleNativeSubagent(agent)));
+    const entries = agents.filter(agent => matches(agent) && (includeIdle || !isIdleNativeSubagent(parent, agent)));
     if (!entries.length) return [];
     const section = el('section', 'project'); section.append(el('h2', '', label));
     for (const agent of entries) {
       const row = el('div', 'session-card');
       const availability = agent.availability === 'available' ? 'reusable' : agent.availability === 'unavailable' ? 'unavailable' : 'availability unknown';
       row.append(el('strong', '', agent.name), el('p', '', `${agent.state} · ${availability}`));
+      for (const [glyph, label] of attentionParts({ attention: parent.native_subagent_attention?.[agent.session_id] })) {
+        const badge = el('span', 'session-attention-item alert', glyph);
+        badge.setAttribute('aria-label', label);
+        badge.setAttribute('role', 'img');
+        row.append(badge);
+      }
       if (agent.availability_reason) row.append(el('p', 'dim', agent.availability_reason));
       const history = button('View history');
       history.onclick = () => openNativeHistory(parent.id, agent);
@@ -1410,7 +1404,98 @@ async function openNativeHistory(owner, agent) {
   await load();
 }
 
-document.querySelector('#earlier-messages').onclick = () => openConversationHistory(currentSession);
+// The control doubles as a visible retry affordance when automatic paging fails.
+const earlierMessages = document.querySelector('#earlier-messages');
+let inlineHistory = null;
+const liveHistoryRows = new Map();
+function resetInlineHistory() {
+  inlineHistory?.controller.abort();
+  inlineHistory = null;
+  liveHistoryRows.clear();
+  earlierMessages.classList.remove('hidden');
+  earlierMessages.disabled = false;
+  earlierMessages.textContent = 'Earlier messages';
+}
+async function loadInlineHistory() {
+  if (!currentSession || conversationMode !== 'conversation') return;
+  if (!inlineHistory) inlineHistory = {
+    session: currentSession, generation: conversationGeneration,
+    controller: new AbortController(),
+    before: liveHistoryRows.size ? { position: Math.min(...[...liveHistoryRows.values()].map(entry => entry.id)), stable_id: '' } : null,
+    done: false, loading: false,
+    entries: new Map(),
+  };
+  const state = inlineHistory;
+  if (state.loading || (state.done && !state.gap)) return;
+  state.loading = true;
+  state.failed = false;
+  earlierMessages.disabled = true;
+  earlierMessages.textContent = 'Loading earlier messages…';
+  try {
+    let visibleAdded, gap;
+    do {
+      visibleAdded = false;
+      const query = new URLSearchParams();
+      gap = state.gap;
+      const before = gap ? gap.before : state.before;
+      if (before) {
+        query.set('before_position', String(before.position));
+        query.set('before_id', before.stable_id);
+      }
+      const page = await request(`/api/v1/sessions/${encodeURIComponent(state.session)}/history${query.size ? `?${query}` : ''}`, { signal: state.controller.signal });
+      if (inlineHistory !== state || state.generation !== conversationGeneration) return;
+      const anchor = [...feed.children].find(node => node.getBoundingClientRect().bottom > feedScroll.getBoundingClientRect().top);
+      const top = anchor?.getBoundingClientRect().top;
+      const rows = [];
+      const oldest = liveHistoryRows.size ? Math.min(...[...liveHistoryRows.values()].map(entry => entry.id)) : Infinity;
+      for (const item of page.items) {
+        if (item.position >= oldest || state.entries.has(item.stable_id)) continue;
+        const entry = { ...item, id: item.position, lines: item.text.split('\n'), label: item.label || item.role, tone: item.role };
+        state.entries.set(item.stable_id, entry);
+        const node = el('article');
+        node.dataset.entryId = item.stable_id;
+        node.dataset.history = '1';
+        paintEntry(node, entry, null);
+        entryNodes.set(item.stable_id, node);
+        rows.push(node);
+      }
+      state.entries = new Map([...state.entries].sort((a, b) => a[1].position - b[1].position || a[0].localeCompare(b[0])));
+      for (const node of rows) {
+        const position = state.entries.get(node.dataset.entryId).position;
+        const next = [...feed.children].find(child => {
+          const stored = state.entries.get(child.dataset.entryId);
+          const live = liveHistoryRows.get(child.dataset.entryId) || liveHistoryRows.get(Number(child.dataset.entryId));
+          const nextPosition = stored?.position ?? live?.id;
+          return nextPosition > position || (nextPosition === position && stored && stored.stable_id.localeCompare(node.dataset.entryId) > 0);
+        });
+        feed.insertBefore(node, next || null);
+      }
+      if (gap) {
+        gap.before = page.before;
+        if (state.gap === gap && (!page.before || page.items.some(item => item.position <= gap.boundary))) state.gap = null;
+      } else {
+        state.before = page.before;
+        state.done = !page.before;
+      }
+      earlierMessages.classList.toggle('hidden', state.done && !state.gap);
+      earlierMessages.textContent = 'Earlier messages';
+      visibleAdded = rows.some(node => node.getBoundingClientRect().height > 0);
+      if (anchor) feedScroll.scrollTop += anchor.getBoundingClientRect().top - top;
+    } while (state.gap || (!visibleAdded && !state.done && !gap));
+  } catch (error) {
+    if (inlineHistory === state && !state.controller.signal.aborted) {
+      state.failed = true;
+      earlierMessages.classList.remove('hidden');
+      earlierMessages.textContent = `Retry earlier messages: ${error.message}`;
+    }
+  } finally {
+    if (inlineHistory === state) {
+      state.loading = false;
+      earlierMessages.disabled = false;
+    }
+  }
+}
+earlierMessages.onclick = () => void loadInlineHistory();
 
 /// Page through a session's stored messages, newest page first. Opened for
 /// the current conversation it shows the pages before the feed and closes if
@@ -1523,20 +1608,17 @@ function sessionCard(session) {
   return card;
 }
 
-function pendingFormCount(session) {
-  return session.detail === false
-    ? session.pending_elicitation_count || 0
-    : (session.pending_elicitations || []).length;
-}
-
-/// A child's open form is an approval only a person can give, and the child
-/// has no card in the main list, so its parent's card says so.
+/// Severity is served by the daemon. This viewer has no output read receipts.
 function attentionParts(session) {
   const parts = [];
   if (session.operation?.kind === 'move') parts.push(['→', 'Moving']);
-  if (session.has_error) parts.push(['!', 'Error']);
-  if (pendingFormCount(session)) parts.push(['?', 'Input needed']);
-  else if (waitingChildCount(session)) parts.push(['?', 'Sub-agent input needed']);
+  const attention = {
+    needs_input: ['?', 'Input needed'],
+    important: ['!', 'Important'],
+    failed: ['×', 'Failed'],
+    unreachable: ['×', 'Unreachable'],
+  }[session.attention];
+  if (attention) parts.push(attention);
   const queued = session.detail === false
     ? session.queued_prompt_count || 0
     : (session.queued_prompts || []).length;
@@ -1589,7 +1671,7 @@ function updateSessionCard(card, session) {
   renderSessionTitle(card._heading, session);
   card._attention.replaceChildren(
     ...attention.map(([glyph, label]) => {
-      const node = el('span', `session-attention-item ${['Error', 'Input needed', 'Sub-agent input needed'].includes(label) ? 'alert' : ''}`, glyph);
+      const node = el('span', `session-attention-item ${['Failed', 'Unreachable', 'Input needed', 'Important'].includes(label) ? 'alert' : ''}`, glyph);
       node.setAttribute('aria-label', label);
       node.setAttribute('role', 'img');
       node.title = label;
@@ -1724,10 +1806,12 @@ function sessionActivityLabel(session, now = serverClockMs()) {
   // A sub-agent whose turn ended: idle, with its processes stopped until its
   // parent sends it more input.
   if (session.state === 'parked') return 'Parked';
-  if (session.has_error && isTransitioningSession(session)) return 'Needs recovery';
+  if (session.attention === 'failed' && isTransitioningSession(session)) return 'Needs recovery';
   if (['starting', 'suspending', 'failed'].includes(session.lifecycle)) {
     return sessionLifecycleLabel(session);
   }
+  const attentionLabel = { needs_input: 'Input needed', important: 'Important', failed: 'Failed', unreachable: 'Unreachable' }[session.attention];
+  if (attentionLabel) return attentionLabel;
   if (session.quota_recovery) {
     const deadline = session.quota_recovery.retry_at_ms;
     return deadline == null ? 'Quota limit · reset time unknown' : `Quota limit · resumes ${new Date(deadline).toLocaleString()}`;
@@ -1773,7 +1857,7 @@ function sessionActivityLabel(session, now = serverClockMs()) {
   if (kind === 'lifecycle') return details.label || sessionLifecycleLabel(session);
   if (kind) return details.label || kind;
   if (session.activity) return session.activity;
-  if (session.is_idle && idleStarted != null) return idleSinceLabel(idleStarted, now);
+  if (session.attention === 'idle' && idleStarted != null) return idleSinceLabel(idleStarted, now);
   return sessionLifecycleLabel(session);
 }
 
@@ -4231,7 +4315,7 @@ function resumeCardSignature(session) {
     session.lifecycle,
     session.operation?.kind,
     session.state,
-    session.has_error,
+    session.attention,
     session.configuration_issue,
     session.title,
     session.display_location,
@@ -4301,7 +4385,7 @@ function updateResumeCard(card, session, rebuild = false) {
   if (session.state === 'lost' && !recovery?.checkpoint_retained) body.append(el('p', 'resume-status error', 'The session is lost. No verified recovery checkpoint is available.'));
   else if (session.state === 'destroyed-with-data-loss') body.append(el('p', 'resume-status error', 'The session was destroyed with data loss. No session data remains to resume.'));
   else if (session.configuration_issue) body.append(el('p', 'resume-status error', session.configuration_issue));
-  else if (session.has_error) body.append(el('p', 'resume-status error', 'The previous operation reported an error. Review the available choices before trying again.'));
+  else if (session.attention === 'failed') body.append(el('p', 'resume-status error', 'The previous operation reported an error. Review the available choices before trying again.'));
   const move = resumeMoveRecovery(session);
   if (move.status) {
     body.append(el('p', '', move.status));
@@ -5432,15 +5516,11 @@ function workingChildCount(session) {
     .length;
 }
 
-/// Children with an open form, which only a person can answer, counting a
-/// child whose own reviewer holds one. Validation rejects ownership cycles;
-/// `seen` keeps a malformed snapshot finite anyway.
-function waitingChildCount(session, seen = new Set()) {
-  if (!session || seen.has(session.id)) return 0;
-  seen.add(session.id);
-  return (session.subagent_session_ids || [])
+/// Served child attention already includes their descendants' open forms.
+function waitingChildCount(session) {
+  return (session?.subagent_session_ids || [])
     .map(id => sessionById(id))
-    .filter(child => child && (pendingFormCount(child) || waitingChildCount(child, seen)))
+    .filter(child => child?.attention === 'needs_input')
     .length;
 }
 
@@ -7946,6 +8026,7 @@ function atTail() {
 function scrollToTail() {
   feedScroll.scrollTop = feedScroll.scrollHeight;
   jumpToLatest.classList.add('hidden');
+  scheduleConversationRead();
 }
 
 function entryBody(entry) {
@@ -8067,9 +8148,33 @@ function turnPromptText(entry, previous) {
 function renderEntries(entries, replace) {
   if (typeof reconcileSubmissions === 'function') reconcileSubmissions(currentSession, entries.map(entry => entry.command_id).filter(Boolean));
   const wasAtTail = atTail();
+  const previousOldest = liveHistoryRows.size ? Math.min(...[...liveHistoryRows.values()].map(entry => entry.id)) : Infinity;
+  const anchor = replace && !wasAtTail ? [...feed.children].find(node => node.getBoundingClientRect().bottom > feedScroll.getBoundingClientRect().top) : null;
+  const anchorId = anchor?.dataset.entryId;
+  const anchorTop = anchor?.getBoundingClientRect().top;
+  if (replace) liveHistoryRows.clear();
+  for (const entry of entries) liveHistoryRows.set(entry.stable_id || entry.id, entry);
   if (replace) {
+    const retained = inlineHistory ? [...inlineHistory.entries.values()] : [];
+    const oldest = entries.length ? Math.min(...entries.map(entry => entry.id)) : Infinity;
+    if (inlineHistory && oldest > previousOldest && Number.isFinite(oldest)) {
+      // One loader owns both cursors, including resets during an in-flight page.
+      const boundary = inlineHistory.gap?.boundary ?? previousOldest;
+      inlineHistory.gap = { before: { position: oldest, stable_id: '' }, boundary };
+      earlierMessages.classList.remove('hidden');
+      void loadInlineHistory();
+    }
     feed.replaceChildren();
     entryNodes.clear();
+    for (const entry of retained) {
+      if (entry.position >= oldest) continue;
+      const node = el('article');
+      node.dataset.entryId = entry.stable_id;
+      node.dataset.history = '1';
+      paintEntry(node, entry, null);
+      entryNodes.set(entry.stable_id, node);
+      feed.append(node);
+    }
   }
   let appended = false;
   let lastUserText = null;
@@ -8091,6 +8196,10 @@ function renderEntries(entries, replace) {
     node.dataset.updatedSeq = entry.updated_seq;
     paintEntry(node, entry, unansweredPrompt);
   }
+  const retainedAnchor = inlineHistory && [...inlineHistory.entries.values()].find(row => row.position === Number(anchorId));
+  // Ordinary live rows are keyed by their numeric id; dataset values are strings.
+  const replacementAnchor = anchorId && (entryNodes.get(anchorId) || entryNodes.get(Number(anchorId)) || entryNodes.get(retainedAnchor?.stable_id));
+  if (replacementAnchor) feedScroll.scrollTop += replacementAnchor.getBoundingClientRect().top - anchorTop;
   if (wasAtTail) scrollToTail();
   else if (appended) jumpToLatest.classList.remove('hidden');
   if (typeof renderPendingSubmissions === 'function') renderPendingSubmissions();
@@ -8106,6 +8215,7 @@ let conversationGeneration = 0;
 let conversationRequest = null;
 
 function retireConversationRequest() {
+  resetInlineHistory();
   conversationRequest?.controller.abort();
   conversationRequest = null;
   historyRequest?.controller.abort();
@@ -8185,7 +8295,7 @@ function renderConversationTransition(session) {
     ? ''
     : session.operation?.notice
       || session.configuration_issue
-      || (session.has_error ? 'The operation needs recovery. Use the available action to try again.' : '');
+      || (session.attention === 'failed' ? 'The operation needs recovery. Use the available action to try again.' : '');
   conversationTransitionNotice.textContent = transitionNotice;
   conversationTransitionNotice.hidden = !transitionNotice;
   conversationTransitionCancel.dataset.id = session.id;
@@ -8195,6 +8305,61 @@ function renderConversationTransition(session) {
     'hidden',
     !session.capabilities?.cancel_operation,
   );
+}
+
+// Receipts share the daemon's read cursor with the TUI. Keep one request per
+// session in flight and coalesce scroll/layout events into the next paint.
+const conversationReads = new Map();
+let conversationReadFrame = null;
+function scheduleConversationRead() {
+  if (conversationReadFrame !== null) return;
+  conversationReadFrame = requestAnimationFrame(() => {
+    conversationReadFrame = null;
+    void persistVisibleConversationRead();
+  });
+}
+
+async function persistVisibleConversationRead() {
+  const sessionId = currentSession;
+  // A window on another monitor or behind the active one still reports
+  // `visible`; only a focused window means the person is looking at it.
+  if (document.visibilityState !== 'visible' || !document.hasFocus()
+    || route.name !== 'conversation'
+    || route.sessionId !== sessionId || !sessionId) return;
+  const session = sessionById(sessionId);
+  if (!session?.capabilities?.open || isTransitioningSession(session)) return;
+  const latest = feed.lastElementChild;
+  if (!latest) return;
+  const viewport = feedScroll.getBoundingClientRect();
+  const message = latest.getBoundingClientRect();
+  const bottom = Math.min(viewport.bottom, window.innerHeight);
+  if (message.bottom > bottom || message.bottom <= Math.max(viewport.top, 0)
+    || message.top >= bottom) return;
+  let receipt = conversationReads.get(sessionId);
+  if (!receipt) {
+    receipt = { through: 0, inFlight: false };
+    conversationReads.set(sessionId, receipt);
+  }
+  const through = cursor;
+  if (!Number.isSafeInteger(through) || through <= Math.max(receipt.through, acknowledged)
+    || receipt.inFlight) return;
+  receipt.inFlight = true;
+  try {
+    await request(`/api/conversations/${encodeURIComponent(sessionId)}/read`, {
+      method: 'POST', body: JSON.stringify({ through }),
+    });
+    receipt.through = Math.max(receipt.through, through);
+    if (currentSession === sessionId) acknowledged = Math.max(acknowledged, through);
+    // A newer loaded cursor may have arrived while this request was pending.
+    if (currentSession === sessionId && cursor > through) scheduleConversationRead();
+  } catch (err) {
+    if (currentSession === sessionId) {
+      if (err.message === 'unauthorized') showLogin();
+      else document.querySelector('#conversation-error').textContent = err.message;
+    }
+  } finally {
+    receipt.inFlight = false;
+  }
 }
 
 async function loadConversation(delta = false) {
@@ -8243,21 +8408,7 @@ async function loadConversation(delta = false) {
       ? result.presentation_key
       : null;
     cursor = result.latest_seq;
-    if (cursor > acknowledged) {
-      const through = cursor;
-      await request(`/api/conversations/${encodeURIComponent(sessionId)}/read`, {
-        method: 'POST',
-        signal: operation.controller.signal,
-        body: JSON.stringify({ through }),
-      });
-      const latest = sessionById(sessionId);
-      if (
-        generation !== conversationGeneration
-        || !latest?.capabilities?.open
-        || isTransitioningSession(latest)
-      ) return;
-      acknowledged = through;
-    }
+    scheduleConversationRead();
   } catch (err) {
     const latest = sessionById(sessionId);
     if (
@@ -8344,7 +8495,7 @@ async function openConversation(id) {
 /// pressing it deserves to know which of those is about to happen.
 function renderSessionTitle(node, session) {
   node.textContent = session.title;
-  node.classList.toggle('idle-title', session.is_idle === true);
+  node.classList.toggle('idle-title', session.attention === 'idle');
 }
 
 /// Show the live session's advertised settings, using the harness's
@@ -9318,6 +9469,8 @@ feed.onclick = event => {
 
 jumpToLatest.onclick = scrollToTail;
 feedScroll.addEventListener('scroll', () => {
+  scheduleConversationRead();
+  if (!inlineHistory?.failed && feedScroll.scrollTop <= earlierMessages.offsetHeight) void loadInlineHistory();
   if (atTail()) jumpToLatest.classList.add('hidden');
 });
 
@@ -9615,6 +9768,7 @@ if (window.visualViewport) {
   window.visualViewport.addEventListener('scroll', () => syncElicitationFocus());
 }
 window.addEventListener('resize', () => {
+  scheduleConversationRead();
   syncKeyboardInset();
   syncElicitationFocus();
 });
@@ -9665,7 +9819,9 @@ window.addEventListener('offline', () => setConnection('offline'));
 
 // A backgrounded progressive web app gets no `online` event, so the first
 // signal that it is back is somebody unlocking the screen.
+window.addEventListener('focus', scheduleConversationRead);
 document.addEventListener('visibilitychange', () => {
+  scheduleConversationRead();
   if (document.visibilityState === 'visible' && navigator.onLine) reconnect();
 });
 // Clocks are presentation-only updates.  The keyed card nodes remain mounted

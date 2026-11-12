@@ -12,7 +12,6 @@ use mj_client::session::{
 use mj_core::relay::RelayCommand;
 
 use super::PromptImage;
-use super::attachments;
 use super::{
     ChatState, PlanControl, PlanReviewFollowup, PromptPayload, SubmissionKind, TurnControlIntent,
     queued_prompt_preview,
@@ -507,41 +506,20 @@ async fn enqueue_chat_remote_operation(
             text,
             images,
         } => {
-            let original_images = images.clone();
-            let session_id = session.session_id().to_owned();
-            let normalized = match tokio::task::spawn_blocking(move || {
-                normalize_prompt_images(&session_id, images)
-            })
-            .await
-            {
-                Ok(Ok(images)) => images,
-                Ok(Err(error)) => {
-                    publish_chat_remote_result(
-                        results,
-                        attached,
-                        ChatRemoteResult::Prompt {
-                            command_id,
-                            text,
-                            images: original_images,
-                            result: Err(format!("prepare image attachments: {error:#}")),
-                        },
-                    );
-                    return;
-                }
-                Err(error) => {
-                    publish_chat_remote_result(
-                        results,
-                        attached,
-                        ChatRemoteResult::Prompt {
-                            command_id,
-                            text,
-                            images: original_images,
-                            result: Err(format!("image preparation task failed: {error}")),
-                        },
-                    );
-                    return;
-                }
-            };
+            if images.iter().any(|image| image.image.reference.is_none()) {
+                publish_chat_remote_result(
+                    results,
+                    attached,
+                    ChatRemoteResult::Prompt {
+                        command_id,
+                        text,
+                        images,
+                        result: Err("Image attachment is not ready".into()),
+                    },
+                );
+                return;
+            }
+            let normalized = images;
             let prompt = PromptPayload {
                 text: text.clone(),
                 images: normalized.clone(),
@@ -1022,23 +1000,6 @@ async fn enqueue_chat_remote_operation(
             });
         }
     }
-}
-
-/// Convert legacy inline images to session references before the relay command
-/// is serialized. Every image must be decoded, optimized, and installed; a
-/// stale or unreadable attachment must be reported before the command leaves
-/// the controller.
-fn normalize_prompt_images(
-    session_id: &str,
-    images: Vec<PromptImage>,
-) -> anyhow::Result<Vec<PromptImage>> {
-    images
-        .into_iter()
-        .map(|mut image| {
-            image.image = attachments::install_clipboard_image(session_id, image.image)?;
-            Ok(image)
-        })
-        .collect()
 }
 
 pub(super) fn restore_unsent_input(chat: &mut ChatState, input: &str) {
@@ -1543,6 +1504,7 @@ mod tests {
         false
     }
 
+    // Hard-won: #1514: upload blocked chat actions and oversized persisted drafts.
     #[tokio::test]
     async fn image_bytes_reach_the_session_actor_and_oversized_prompts_are_refused_intact() {
         if !in_isolated_store(
@@ -1550,6 +1512,101 @@ mod tests {
         ) {
             return;
         }
+        // The session actor fixture and the control endpoint change independently:
+        // require upload acknowledgement before the actor receives a reference.
+        use mj_client::daemon::{
+            DaemonAction, DaemonMetadata, DaemonPlacement, DaemonReply, PROTOCOL_VERSION,
+            RequestEnvelope, ResponseEnvelope, read_frame, write_frame,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = DaemonMetadata {
+            protocol_version: PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address: listener.local_addr().unwrap(),
+            token: "test-upload-token".into(),
+            started_at: "now".into(),
+            build_version: "test".into(),
+            instance_id: "chat-upload".into(),
+            placement: DaemonPlacement::Host,
+        };
+        let metadata_path = mj_client::daemon::metadata_path();
+        std::fs::create_dir_all(metadata_path.parent().unwrap()).unwrap();
+        std::fs::write(metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        let (upload_started, started) = tokio::sync::oneshot::channel();
+        let mut upload_started = Some(upload_started);
+        let (legacy_upload_started, legacy_started) = tokio::sync::oneshot::channel();
+        let mut legacy_upload_started = Some(legacy_upload_started);
+        let (receipt_upload_started, receipt_started) = tokio::sync::oneshot::channel();
+        let mut receipt_upload_started = Some(receipt_upload_started);
+        let uploads = tokio::spawn(async move {
+            for attempt in 0..6 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut body = Vec::new();
+                loop {
+                    let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                    assert_eq!(request.token, metadata.token);
+                    let DaemonAction::UploadChunk { bytes, sha256 } = request.action else {
+                        panic!("expected upload fragment");
+                    };
+                    body.extend_from_slice(&bytes);
+                    if sha256.is_none() {
+                        continue;
+                    }
+                    if attempt < 2 || attempt == 4 {
+                        if attempt == 0 {
+                            upload_started.take().unwrap().send(()).unwrap();
+                        } else if attempt == 1 {
+                            legacy_upload_started.take().unwrap().send(()).unwrap();
+                        } else {
+                            receipt_upload_started.take().unwrap().send(()).unwrap();
+                        }
+                        use tokio::io::AsyncReadExt as _;
+                        assert_eq!(
+                            stream.read(&mut [0u8; 1]).await.unwrap(),
+                            0,
+                            "cancel drops the upload connection"
+                        );
+                        break;
+                    }
+                    write_frame(
+                        &mut stream,
+                        &ResponseEnvelope {
+                            protocol_version: PROTOCOL_VERSION,
+                            request_id: request.request_id,
+                            result: Ok(DaemonReply::BlobUploaded("fixture-blob".into())),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    let request: RequestEnvelope = read_frame(&mut stream).await.unwrap();
+                    let DaemonAction::InstallAttachment {
+                        session_id,
+                        reference,
+                        blob,
+                    } = request.action
+                    else {
+                        panic!("expected attachment installation");
+                    };
+                    assert_eq!(blob, "fixture-blob");
+                    let bytes = body;
+                    mj_core::attachment::AttachmentStore::controller(&session_id)
+                        .unwrap()
+                        .install(&reference, &bytes)
+                        .unwrap();
+                    write_frame(
+                        &mut stream,
+                        &ResponseEnvelope {
+                            protocol_version: PROTOCOL_VERSION,
+                            request_id: request.request_id,
+                            result: Ok(DaemonReply::AttachmentInstalled(reference)),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    break;
+                }
+            }
+        });
         let mut fixture = mj_client::session::replacement_session_test_fixture("image-session", 19);
         let materialized = mj_core::state::MaterializedSession::empty("image-session");
         let mut operational =
@@ -1561,6 +1618,7 @@ mod tests {
         fixture
             .replacement_view
             .send_replace(mj_client::session::ManagedSessionView {
+                attention: Default::default(),
                 connected: true,
                 error: None,
                 snapshot: Some(mj_core::state::ManagedSessionSnapshot {
@@ -1575,7 +1633,100 @@ mod tests {
                 }),
             });
         let mut remote = ChatRemoteSupervisor::spawn(fixture.stopped, fixture.control);
-        let image = valid_image();
+        use base64::Engine as _;
+        let mut raw = base64::engine::general_purpose::STANDARD
+            .decode(valid_image().data_base64.as_bytes())
+            .unwrap();
+        raw.resize(9 * 1024 * 1024, 0);
+        let pasted = ClipboardImage {
+            data_base64: base64::engine::general_purpose::STANDARD.encode(raw).into(),
+            mime_type: "image/png".into(),
+            reference: None,
+        };
+        let mut composer = crate::chat::test_support::grok_chat();
+        composer.set_prompt_images_supported(true);
+        composer.bind_composer_session(Some("image-session"));
+        assert!(composer.queue_attachment(
+            crate::chat::composer::AttachmentSource::Clipboard(pasted.clone()),
+            crate::chat::input_state::AttachmentFallback::FailedMarker
+        ));
+        assert!(composer.draft_payload().encode_draft().len() < 8 * 1024 * 1024);
+        started.await.unwrap();
+        composer.restore_elicitation(ElicitationRequest {
+            id: "during-upload".into(),
+            message: "Answer now".into(),
+            title: None,
+            description: None,
+            fields: Vec::new(),
+            tool_permission: None,
+        });
+        assert!(composer.elicitation.is_some());
+        composer.elicitation = None;
+        composer.clear_input();
+        composer.drain_composer();
+        // Legacy drafts carry inline bytes and must re-enter preparation.
+        composer.restore_draft(PromptPayload::with_image("legacy", valid_image()).encode_draft());
+        composer.drain_composer();
+        legacy_started.await.unwrap();
+        assert!(composer.draft_payload().images[0].image.is_pending());
+        let saved = composer.encoded_draft();
+        assert_eq!(
+            PromptPayload::decode_draft(&saved).unwrap().images[0].image,
+            valid_image()
+        );
+        drop(composer); // Exit with an unacknowledged legacy upload.
+        let mut composer = crate::chat::test_support::grok_chat();
+        composer.set_prompt_images_supported(true);
+        composer.restore_draft(saved);
+        assert_eq!(composer.draft_payload().images[0].image, valid_image());
+        composer.bind_composer_session(Some("image-session"));
+        assert!(composer.draft_payload().encode_draft().len() < 8 * 1024 * 1024);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                composer.drain_composer();
+                if composer.draft_payload().images[0].image.reference.is_some() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            composer.draft_payload().images[0]
+                .image
+                .data_base64
+                .is_empty()
+        );
+        assert!(
+            PromptPayload::decode_draft(&composer.encoded_draft())
+                .unwrap()
+                .images[0]
+                .image
+                .reference
+                .is_some()
+        );
+        composer.clear_input();
+        assert!(composer.queue_attachment(
+            crate::chat::composer::AttachmentSource::Clipboard(pasted),
+            crate::chat::input_state::AttachmentFallback::FailedMarker,
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                composer.drain_composer();
+                if composer.draft_payload().images[0].image.reference.is_some() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let draft = composer.encoded_draft();
+        assert!(draft.len() < 8 * 1024 * 1024);
+        let restored = PromptPayload::decode_draft(&draft).unwrap();
+        let image = restored.images[0].image.clone();
+        assert!(image.data_base64.is_empty());
         let mut normalized_image = None;
         for text in ["", "inspect this"] {
             let payload = PromptPayload::with_image(text, image.clone());
@@ -1682,6 +1833,75 @@ mod tests {
             fixture.submitted.try_recv().is_err(),
             "oversized input must not reach the actor"
         );
+        // Old receipt bytes stay durable during preparation; retry identity and
+        // the different visible draft both survive closing the first composer.
+        composer.set_input("different visible draft".into());
+        composer.begin_submission(
+            "old-receipt".into(),
+            SubmissionKind::Prompt,
+            PromptPayload::with_image("old image", valid_image()),
+            "Sending…",
+        );
+        composer.unconfirm_submission("old-receipt", "lost acknowledgement");
+        let saved = composer.encoded_draft();
+        composer.restore_draft(saved);
+        assert!(composer.prepare_receipt_retry("old-receipt", "image-session"));
+        assert!(composer.prepare_receipt_retry("old-receipt", "image-session")); // one job per ID
+        receipt_started.await.unwrap();
+        let saved = composer.encoded_draft();
+        assert!(saved.contains(valid_image().data_base64.as_ref()));
+        drop(composer);
+        let mut composer = crate::chat::test_support::grok_chat();
+        composer.restore_draft(saved);
+        assert_eq!(composer.input, "different visible draft");
+        assert!(composer.prepare_receipt_retry("old-receipt", "image-session"));
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                composer.drain_composer();
+                if composer
+                    .composer_runtime
+                    .prepared_receipt_retries
+                    .pop_front()
+                    .is_some()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(composer.input, "different visible draft");
+        assert!(
+            !composer
+                .encoded_draft()
+                .contains(valid_image().data_base64.as_ref())
+        );
+        let operation = composer.resend_submission("old-receipt").unwrap();
+        assert!(
+            matches!(&operation, ChatRemoteOperation::Prompt { command_id, images, .. }
+            if command_id == "old-receipt" && images[0].image.reference.is_some())
+        );
+        fixture.replacement_view.send_modify(|view| {
+            view.snapshot
+                .as_mut()
+                .unwrap()
+                .operational
+                .agent_capabilities = Some(Box::new(
+                serde_json::from_value(serde_json::json!({"promptCapabilities": {"image": true}}))
+                    .unwrap(),
+            ));
+        });
+        remote.operations().send(operation).await.unwrap();
+        assert!(matches!(
+            fixture.submitted.recv().await.unwrap(),
+            RelayCommand::Prompt { .. }
+        ));
+        assert!(
+            matches!(remote.recv().await.unwrap(), ChatRemoteResult::Prompt { command_id, result: Ok(19), .. } if command_id == "old-receipt")
+        );
+        assert!(fixture.submitted.try_recv().is_err());
+        uploads.await.unwrap();
     }
 
     #[tokio::test]

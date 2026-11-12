@@ -1,5 +1,81 @@
 use super::*;
 
+/// One observed identity shared by credential installation and prompt dispatch.
+/// Sampling supplemental recovery evidence never performs filesystem I/O.
+#[derive(Debug, Clone, Default)]
+pub struct ClaudeLoginIdentity(Arc<ClaudeLoginState>);
+
+#[derive(Debug, Default)]
+struct ClaudeLoginState {
+    #[cfg_attr(not(unix), allow(dead_code))]
+    installation: tokio::sync::Mutex<()>,
+    observed: Mutex<(u64, Option<String>)>,
+}
+
+#[cfg_attr(not(unix), allow(dead_code))]
+impl ClaudeLoginIdentity {
+    pub(crate) fn snapshot(&self) -> (u64, Option<String>) {
+        self.0
+            .observed
+            .lock()
+            .expect("Claude login identity lock poisoned")
+            .clone()
+    }
+
+    pub(crate) fn observe(&self, expected: u64, fingerprint: Option<String>) {
+        let mut observed = self
+            .0
+            .observed
+            .lock()
+            .expect("Claude login identity lock poisoned");
+        if observed.0 == expected {
+            observed.1 = fingerprint;
+        }
+    }
+
+    pub(crate) fn installed(&self, fingerprint: Option<String>) {
+        let mut observed = self
+            .0
+            .observed
+            .lock()
+            .expect("Claude login identity lock poisoned");
+        observed.0 = observed
+            .0
+            .checked_add(1)
+            .expect("Claude login revision exhausted");
+        observed.1 = fingerprint;
+    }
+
+    pub(crate) async fn installation(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.0.installation.lock().await
+    }
+}
+
+#[cfg(unix)]
+pub(crate) async fn read_claude_login_fingerprint(path: PathBuf) -> Result<Option<String>> {
+    let (completed, result) = oneshot::channel();
+    // A cancelled file read cannot be interrupted. Keep this read-only thread
+    // outside Tokio's pool, whose shutdown waits for even cancelled blocking
+    // jobs. Dropping its handle lets the worker exit if the filesystem stalls.
+    let _reader = std::thread::Builder::new()
+        .name("claude-login-read".into())
+        .spawn(move || {
+            let read = std::panic::catch_unwind(|| {
+                let (_, bytes) =
+                    mj_core::credentials::read_credential_file(HarnessKind::Claude, &path)?;
+                Ok(mj_core::credentials::claude_access_token_fingerprint(
+                    &bytes,
+                ))
+            });
+            let read = read.unwrap_or_else(|_| Err(anyhow!("Claude login reader panicked")));
+            if let Err(Err(error)) = completed.send(read) {
+                tracing::warn!(%error, "Claude login read failed after its caller stopped");
+            }
+        })
+        .context("start Claude login reader")?;
+    result.await.context("read Claude login identity")?
+}
+
 /// The worker's sub-agent socket and the `mj-agents` role it backs: a parent
 /// delegates through it, a child only hands its report back.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +105,7 @@ impl ReviewerMcpServer {
 
 #[derive(Debug, Clone)]
 pub struct LaunchSpec {
+    pub login_identity: ClaudeLoginIdentity,
     /// Live availability shared with the worker control connection.
     pub operator_away: OperatorAway,
     pub clear_context_request: Option<ContextReset>,

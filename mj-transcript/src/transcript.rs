@@ -35,32 +35,34 @@ pub fn compact_tool_call_for_retention(body: &mut TranscriptBody) -> bool {
     else {
         return false;
     };
-    let Some(object) = call.as_object_mut() else {
-        return false;
-    };
-    let mut changed = !terminal_outputs.is_empty() || !terminal_refs.is_empty();
-    terminal_outputs.clear();
-    terminal_refs.clear();
-    for field in ["rawInput", "rawOutput", "_meta"] {
-        changed |= object.remove(field).is_some();
-    }
-    let Some(content) = object
-        .get_mut("content")
-        .and_then(|value| value.as_array_mut())
-    else {
-        return changed;
-    };
-    let before = content.len();
-    // Diffs stay, because the transcript still shows their stat. Their patch
-    // text does not, and neither do the two file copies an older record holds
-    // instead of a patch: `diff::drop_patch_text` turns those into the
-    // counts `format_diffstat` reads before dropping them.
-    content.retain(|item| item.get("type").and_then(|kind| kind.as_str()) == Some("diff"));
-    changed |= content.len() != before;
-    for item in content.iter_mut() {
-        changed |= drop_diff_body(item);
-    }
-    changed
+    call.edit(|value| {
+        let Some(object) = value.as_object_mut() else {
+            return false;
+        };
+        let mut changed = !terminal_outputs.is_empty() || !terminal_refs.is_empty();
+        terminal_outputs.clear();
+        terminal_refs.clear();
+        for field in ["rawInput", "rawOutput", "_meta"] {
+            changed |= object.remove(field).is_some();
+        }
+        let Some(content) = object
+            .get_mut("content")
+            .and_then(|value| value.as_array_mut())
+        else {
+            return changed;
+        };
+        let before = content.len();
+        // Diffs stay, because the transcript still shows their stat. Their patch
+        // text does not, and neither do the two file copies an older record holds
+        // instead of a patch: `diff::drop_patch_text` turns those into the
+        // counts `format_diffstat` reads before dropping them.
+        content.retain(|item| item.get("type").and_then(|kind| kind.as_str()) == Some("diff"));
+        changed |= content.len() != before;
+        for item in content.iter_mut() {
+            changed |= drop_diff_body(item);
+        }
+        changed
+    })
 }
 
 fn drop_diff_body(item: &mut serde_json::Value) -> bool {
@@ -426,7 +428,7 @@ fn presentation_from_source(
     };
     ToolCallPresentation {
         summary,
-        source,
+        source: source.into(),
         source_kind,
         tool_kind,
         summary_version: TOOL_SUMMARY_VERSION,
@@ -449,7 +451,7 @@ fn presentation_from_title(title: &str, tool_kind: ToolKind) -> ToolCallPresenta
     };
     ToolCallPresentation {
         summary,
-        source: bounded,
+        source: bounded.into(),
         source_kind: ToolSummarySourceKind::Title,
         tool_kind,
         summary_version: TOOL_SUMMARY_VERSION,
@@ -1309,9 +1311,9 @@ pub fn tool_content_details(
     let terminal_detail = |record: &TerminalOutputRecord| {
         if !terminal_finished(record) {
             if record.truncated {
-                format!("{}\noutput truncated", record.output)
+                format!("{}\noutput truncated", record.output.text())
             } else {
-                record.output.clone()
+                record.output.text().into_owned()
             }
         } else {
             terminal_output_detail(record)
@@ -1351,7 +1353,7 @@ pub fn tool_content_details(
         if referenced.contains(&record.terminal_id.as_str()) {
             continue;
         }
-        let output = sanitize_terminal_text(&record.output);
+        let output = sanitize_terminal_text(&record.output.text());
         if !output.is_empty() && details.iter().any(|detail| detail == &output) {
             // Kimi sends the captured stdout as ordinary tool content and in
             // its raw result. Keep the exit summary without printing those
@@ -1407,7 +1409,7 @@ pub fn terminal_output_detail(record: &TerminalOutputRecord) -> String {
     if record.output.is_empty() {
         return summary;
     }
-    format!("{}\n{summary}", record.output)
+    format!("{}\n{summary}", record.output.text())
 }
 
 /// How a terminal ended, in one line.
@@ -1722,7 +1724,7 @@ pub fn transcript_item_text_with_outputs(
         TranscriptBody::Tool {
             call, presentation, ..
         } => {
-            let Ok(call) = ToolCall::deserialize(call) else {
+            let Ok(call) = call.decode() else {
                 return "[invalid tool call]".to_owned();
             };
             let mut text = materialized_tool_call_presentation(presentation.as_deref(), &call)
@@ -1779,7 +1781,7 @@ pub fn materialized_tool_diffstats(item: &TranscriptItem) -> Option<Vec<String>>
     let TranscriptBody::Tool { call, .. } = &item.body else {
         return None;
     };
-    let call = match ToolCall::deserialize(call) {
+    let call = match call.decode() {
         Ok(call) => call,
         Err(error) => {
             tracing::warn!(
@@ -1856,7 +1858,7 @@ mod tests {
         assert_eq!(tool_call_presentation(&read).summary, "Read");
         let stale = ToolCallPresentation {
             summary: "Which".into(),
-            source: call.title.clone(),
+            source: call.title.clone().into(),
             source_kind: ToolSummarySourceKind::Title,
             tool_kind: ToolKind::Other,
             summary_version: 1,
@@ -1997,7 +1999,7 @@ mod tests {
         };
         assert_eq!(presentation(script).summary, "python3");
         assert_eq!(presentation(&wrapped).summary, "python3");
-        assert_eq!(presentation(&wrapped).source, script);
+        assert_eq!(presentation(&wrapped).source.text(), script);
 
         let cases = [
             ("bash -c 'python x.py'", "python"),
@@ -2302,7 +2304,9 @@ mod tests {
             created_at_ms: 1,
             last_changed_at_ms: 1,
             body: TranscriptBody::Tool {
-                call: serde_json::to_value(call).expect("serialize tool call"),
+                call: serde_json::to_value(call)
+                    .expect("serialize tool call")
+                    .into(),
                 terminal_outputs: Vec::new(),
                 terminal_refs: Vec::new(),
                 presentation: Some(Box::new(presentation)),
@@ -2757,7 +2761,9 @@ mod tests {
                 created_at_ms: 1,
                 last_changed_at_ms: 1,
                 body: TranscriptBody::Tool {
-                    call: serde_json::to_value(&cached).expect("serialize tool call"),
+                    call: serde_json::to_value(&cached)
+                        .expect("serialize tool call")
+                        .into(),
                     terminal_outputs: Vec::new(),
                     terminal_refs: Vec::new(),
                     presentation: Some(Box::new(ToolCallPresentation {

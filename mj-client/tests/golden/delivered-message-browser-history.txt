@@ -37,12 +37,16 @@
   },
   "earlier": [
     {
+      "stable_id": "message:first",
+      "position": 10,
       "role": "message",
       "text": "One finding.\nThe complete **second line**.",
       "label": "Message from Reviewer",
       "recorded_at_ms": 1000
     },
     {
+      "stable_id": "message:second",
+      "position": 10,
       "role": "message",
       "text": "Build passed.\n支持 Unicode.",
       "label": "Message from Builder",

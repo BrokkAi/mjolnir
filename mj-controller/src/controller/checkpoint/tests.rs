@@ -75,9 +75,9 @@ fn managed_worktree_export_capture(
     let worktree_head =
         crate::controller::test_support::test_git(&worktree_root, &["rev-parse", "HEAD"]);
 
-    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: PathBuf::from("/home/dev/.local/share/hel/workers/session"),
-    });
+    }));
     let mut state = State::default();
     state.sessions.insert(session_id.into(), session);
     let controller = Controller {
@@ -125,9 +125,9 @@ fn a_plain_project_directory_is_captured_without_git() {
     let session_id = plain.id.clone();
     plain.state = SessionState::Stopped;
     plain.target_template_id = "local-bare".into();
-    plain.target = Some(mj_core::state::TargetLocator::LocalBare {
+    plain.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: PathBuf::from("/home/dev/.local/share/hel/workers/session"),
-    });
+    }));
     plain.project_directory = Some(directory.path().to_path_buf());
     let mut recorded = project.clone();
     recorded
@@ -207,12 +207,12 @@ fn startup_reconciliation_only_removes_unreferenced_controller_checkpoints() {
     }
     let mut state = State::default();
     let mut session = checkpoint_test_session(session_id);
-    session.checkpoint = Some(CheckpointMetadata {
+    session.checkpoint = Some(Box::new(CheckpointMetadata {
         archive_path: directory.path().join(&referenced_name),
         sha256: "c".repeat(64),
         created_at: "2026-08-12T00:00:00Z".into(),
         event_frontier: 7,
-    });
+    }));
     state.sessions.insert(session_id.into(), session);
 
     assert_eq!(
@@ -1839,7 +1839,7 @@ async fn a_ready_unchanged_worker_settles_an_abandoned_boot_on_the_next_sync() {
         worker_root: root.clone(),
     };
     let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
-    session.target = Some(durable_target.clone());
+    session.target = Some(Box::new(durable_target.clone()));
     crate::database::save_session(&session).unwrap();
     let mut target = latch_relay_target(&root, None, ReleaseSupport::Supported, false);
     let restarted = root.join("unexpected-restart");
@@ -2667,10 +2667,10 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
     let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
     session.target_template_id = "removed-local".into();
     session.target_runtime = Some((&TargetTemplate::LocalBare).into());
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: data_directory.join("workers").join(LATCH_RELAY_SESSION),
-    });
-    session.checkpoint = Some(checkpoint.clone());
+    }));
+    session.checkpoint = Some(Box::new(checkpoint.clone()));
     crate::database::save_session(&session).unwrap();
 
     let mut config = Config::default();
@@ -2996,9 +2996,9 @@ async fn a_deferred_routine_checkpoint_leaves_no_stage_on_its_target() {
     let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
     session.target_template_id = "removed-local".into();
     session.target_runtime = Some((&TargetTemplate::LocalBare).into());
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: worker_root.clone(),
-    });
+    }));
     crate::database::save_session(&session).unwrap();
     let mut config = Config::default();
     config.profiles.insert(
@@ -3429,10 +3429,10 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
     let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
     session.target_template_id = "local".into();
     session.project_directory = Some(repository.path().to_owned());
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: data_directory.join("workers").join(LATCH_RELAY_SESSION),
-    });
-    session.checkpoint = Some(checkpoint.clone());
+    }));
+    session.checkpoint = Some(Box::new(checkpoint.clone()));
     crate::database::save_session(&session).unwrap();
 
     // `validate_move_checkpoint` re-reads the configuration from disk and
@@ -3504,7 +3504,7 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
         selection: selection.clone(),
         source_profile_id: "codex".into(),
         source_target_template_id: "local".into(),
-        source_target: session.target.clone(),
+        source_target: session.target.clone().map(|v| *v),
         source_native_session_id: session.native_session_id.clone(),
         source_additional_mounts: Vec::new(),
         source_resource_allocation: None,
@@ -3586,7 +3586,7 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
     );
     let sealed = &controller.state.sessions[LATCH_RELAY_SESSION];
     assert_eq!(sealed.state, SessionState::Closing);
-    assert_eq!(sealed.checkpoint.as_ref(), Some(&checkpoint));
+    assert_eq!(sealed.checkpoint.as_deref(), Some(&checkpoint));
     assert_eq!(sealed.target, session.target);
     assert_eq!(operation.checkpoint.as_ref(), Some(&checkpoint));
     // The durable record has to agree: recovery reads it, not this process.
@@ -3786,10 +3786,10 @@ async fn close_cut_controller_with(
     session.state = state;
     session.target_template_id = "removed-local".into();
     session.target_runtime = Some((&TargetTemplate::LocalBare).into());
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: data_directory.join("workers").join(LATCH_RELAY_SESSION),
-    });
-    session.checkpoint = Some(checkpoint);
+    }));
+    session.checkpoint = Some(Box::new(checkpoint));
     crate::database::save_session(&session).unwrap();
 
     let mut config = Config::default();
@@ -4027,13 +4027,13 @@ async fn a_queued_container_upgrade_yields_handoff_and_cancels_without_interrupt
         .sessions
         .get_mut(LATCH_RELAY_SESSION)
         .unwrap();
-    record.target = Some(TargetLocator::LocalPodman {
+    record.target = Some(Box::new(TargetLocator::LocalPodman {
         container_id: name.clone(),
         workspace_storage: mj_core::state::PodmanWorkspaceLocator::Volume {
             name: format!("{name}-workspace"),
         },
         borrowed_from: None,
-    });
+    }));
     record.target_runtime = Some(
         (&TargetTemplate::LocalPodman {
             container: serde_json::from_value(serde_json::json!({})).unwrap(),
@@ -4183,7 +4183,7 @@ async fn restart_recaptures_an_error_session_after_its_worker_is_gone() {
         false,
     )
     .unwrap();
-    let worker_root = match &target {
+    let worker_root = match &*target {
         TargetLocator::LocalBare { worker_root } => worker_root.clone(),
         other => panic!("expected the retained local target, got {other:?}"),
     };
@@ -4250,7 +4250,7 @@ async fn restart_recaptures_an_error_session_after_its_worker_is_gone() {
     assert_eq!(sealed.target, Some(target));
     assert_eq!(sealed.last_error, None);
     assert!(sealed.last_checkpoint_error.is_none());
-    assert_eq!(sealed.checkpoint.as_ref(), Some(&old_checkpoint));
+    assert_eq!(sealed.checkpoint.as_deref(), Some(old_checkpoint.as_ref()));
     let intent = crate::database::load_session_restart(LATCH_RELAY_SESSION)
         .unwrap()
         .unwrap();

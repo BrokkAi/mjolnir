@@ -3,6 +3,27 @@ use super::*;
 /// Persist one operational session without rewriting unrelated controller
 /// state. Dashboard lifecycle jobs use this path so independent jobs can
 /// commit concurrently without restoring stale copies of other sessions.
+pub(crate) fn save_imported_session(
+    session: &SessionRecord,
+    materialized: &MaterializedSession,
+) -> Result<()> {
+    let session = session.clone();
+    let materialized = materialized.clone();
+    submit_database_write("save_imported_session", move |connection| {
+        validate_session_record(&session)?;
+        materialized.validate()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        ensure!(
+            !session_exists(&tx, &session.id)?,
+            "imported session already exists"
+        );
+        insert_session(&tx, &session)?;
+        write_materialized_session(&tx, &materialized)?;
+        tx.commit()?;
+        Ok(())
+    })
+}
+
 pub fn save_session(session: &SessionRecord) -> Result<()> {
     let session = session.clone();
     submit_database_write("save_session", move |_| {
@@ -1602,8 +1623,8 @@ fn record_recovery_success_if_current_with(
     let Some(mut current) = load_session_with(&tx, session_id)? else {
         return Ok(false);
     };
-    if current.target.as_ref() != Some(expected_target)
-        || current.checkpoint.as_ref() != expected_checkpoint
+    if current.target.as_deref() != Some(expected_target)
+        || current.checkpoint.as_deref() != expected_checkpoint
     {
         return Ok(false);
     }
@@ -1612,7 +1633,7 @@ fn record_recovery_success_if_current_with(
          WHERE session_id = ?1",
         params![session_id, native_session_id],
     )?;
-    current.checkpoint = Some(checkpoint.clone());
+    current.checkpoint = Some(Box::new(checkpoint.clone()));
     replace_checkpoint(&tx, &current)?;
     tx.commit()?;
     Ok(true)
@@ -1660,8 +1681,8 @@ fn record_recovery_failure_if_current_with(
     let Some(current) = load_session_with(&tx, session_id)? else {
         return Ok(false);
     };
-    if current.target.as_ref() != Some(expected_target)
-        || current.checkpoint.as_ref() != expected_checkpoint
+    if current.target.as_deref() != Some(expected_target)
+        || current.checkpoint.as_deref() != expected_checkpoint
     {
         return Ok(false);
     }
@@ -1838,7 +1859,7 @@ mod ownership_tests {
         let current = load_session_with(&connection, &original.id)
             .unwrap()
             .unwrap();
-        assert_eq!(current.checkpoint.as_ref(), Some(&next));
+        assert_eq!(current.checkpoint.as_deref(), Some(&next).map(|v| &**v));
         assert_eq!(current.native_session_id.as_deref(), Some("new-native"));
         assert_eq!(current.last_checkpoint_error, None);
 
@@ -1881,7 +1902,7 @@ mod ownership_tests {
                 &mut connection,
                 &original.id,
                 original.target.as_ref().unwrap(),
-                original.checkpoint.as_ref(),
+                original.checkpoint.as_deref(),
                 "current failure",
             )
             .unwrap()
@@ -1902,7 +1923,7 @@ mod ownership_tests {
                 &mut connection,
                 &original.id,
                 original.target.as_ref().unwrap(),
-                original.checkpoint.as_ref(),
+                original.checkpoint.as_deref(),
                 "late failure",
             )
             .unwrap()

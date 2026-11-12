@@ -1,11 +1,11 @@
 === question, unread, idle, and absent levels (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ Default !1  Other !1                     ≡ ││                                                                                            │
+│ Default ?1  Other ?1                     ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │[1] asks ───────────────────────────────────││                                                                                            │
-│  ! ACP pretty name                     ◇ ⋯ ││                                                                                            │
+│  ? ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Question  podman  codex-1                 ││                                                                                            │
 │  │ Choose a path                           ││                                                                                            │
 │  │                                         ││                                                                                            │
@@ -38,18 +38,18 @@
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!2) · b panes · q detach · : / ? palette
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (?2) · b panes · q detach · : / ? palette
 attention levels: asks=Waiting, remote=Waiting, done=Unread, quiet=Idle, missing=Inactive; queue: [asks:Waiting, remote:Waiting, done:Unread]
 
 === failure, unreachable worker, and question (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ Default ×1  Other ?1                     ≡ ││                                                                                            │
+│ Default ×1  Other ×1                     ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │[1] asks ───────────────────────────────────││                                                                                            │
 │  × ACP pretty name                     ◇ ⋯ ││                                                                                            │
-│  Question  podman  codex-1                 ││                                                                                            │
+│  Review failed  podman  codex-1            ││                                                                                            │
 │  │ Choose a path                           ││                                                                                            │
 │  │                                         ││                                                                                            │
 │                                            ││                                      ✦  M J O L N I R                                      │
@@ -87,12 +87,12 @@ rank relation: Failed>Unreachable=true, Unreachable>Waiting=true
 
 === waiting badge counts only its level (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ Default !1  Other !1               ≡ ││                                                                              │
+│ Default ?1  Other ?1               ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │[1] asks ─────────────────────────────││                                                                              │
-│  ! ACP pretty name               ◇ ⋯ ││                                                                              │
+│  ? ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Question  podman  codex-1           ││                                                                              │
 │  │ Choose a path                     ││                                                                              │
 │  │                                   ││                                                                              │
@@ -125,24 +125,24 @@ rank relation: Failed>Unreachable=true, Unreachable>Waiting=true
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!2) · : / ? palette
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (?2) · : / ? palette
 workspace summary: Some((Waiting, 1))
-workspace badge cells: !1; marker fg=Rgb(240, 205, 145); failure color=false
+workspace badge cells: ?1; marker fg=Rgb(240, 205, 145); failure color=false
 
 === unreachable badge replaces unread (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ Default ?1  Other !1               ≡ ││                                                                              │
+│ Default ×1  Other ?1               ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │[1] asks ─────────────────────────────││                                                                              │
-│  ! ACP pretty name               ◇ ⋯ ││                                                                              │
+│  ? ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Question  podman  codex-1           ││                                                                              │
 │  │ Choose a path                     ││                                                                              │
 │  │                                   ││                                                                              │
 │                                      ││                               ✦  M J O L N I R                               │
 │[2] done ─────────────────────────────││                                                                              │
-│  ? ACP pretty name               ◇ ⋯ ││                  Select a session to open its conversation.                  │
+│  × ACP pretty name               ◇ ⋯ ││                  Select a session to open its conversation.                  │
 │  Unreachable  podman  codex-1        ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
@@ -169,24 +169,24 @@ workspace badge cells: !1; marker fg=Rgb(240, 205, 145); failure color=false
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (?1) · : / ? palette
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (×1) · : / ? palette
 workspace summary: Some((Unreachable, 1))
-workspace badge cells: ?1; marker fg=Rgb(244, 154, 165); failure color=true
+workspace badge cells: ×1; marker fg=Rgb(244, 154, 165); failure color=true
 
 === failure badge replaces lower levels (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ Default ×1  Other !1               ≡ ││                                                                              │
+│ Default ×1  Other ?1               ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │[1] asks ─────────────────────────────││                                                                              │
-│  ! ACP pretty name               ◇ ⋯ ││                                                                              │
+│  ? ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Question  podman  codex-1           ││                                                                              │
 │  │ Choose a path                     ││                                                                              │
 │  │                                   ││                                                                              │
 │                                      ││                               ✦  M J O L N I R                               │
 │[2] done ─────────────────────────────││                                                                              │
-│  ? ACP pretty name               ◇ ⋯ ││                  Select a session to open its conversation.                  │
+│  × ACP pretty name               ◇ ⋯ ││                  Select a session to open its conversation.                  │
 │  Unreachable  podman  codex-1        ││                                                                              │
 │  │ No messages yet                   ││                                                                              │
 │  │                                   ││                                                                              │
@@ -262,12 +262,12 @@ workspace summary: None; badge: absent
 
 === next attention opens the first waiting session (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ Default !1  Other !1                     ≡ ││                                                                                            │
+│ Default ?1  Other ?1                     ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │[1] asks ───────────────────────────────────││                                                                                            │
-│› ! ACP pretty name                     ◇ ⋯ ││                                                                                            │
+│› ? ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Question  podman  codex-1                 ││                                                                                            │
 │  │ Choose a path                           ││                                                                                            │
 │  │                                         ││                                                                                            │
@@ -300,17 +300,17 @@ workspace summary: None; badge: absent
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · o next (!2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
+Tab pane │ ctrl+b then g sessions · o next (?2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 action: Open { session_id: "asks" }; selected: Some("asks"); prompt focused: true
 
 === next attention reaches another workspace (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ Default !1  Other !1                     ≡ ││                                                                                            │
+│ Default ?1  Other ?1                     ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │[1] asks ───────────────────────────────────││                                                                                            │
-│› ! ACP pretty name                     ◇ ⋯ ││                                                                                            │
+│› ? ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Question  podman  codex-1                 ││                                                                                            │
 │  │ Choose a path                           ││                                                                                            │
 │  │                                         ││                                                                                            │
@@ -343,17 +343,17 @@ action: Open { session_id: "asks" }; selected: Some("asks"); prompt focused: tru
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · o next (!2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
+Tab pane │ ctrl+b then g sessions · o next (?2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 action: SelectWorkspace { workspace_id: "other" }
 
 === other workspace selection is applied (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ Default !1  Other !1                     ≡ ││                                                                                            │
+│ Default ?1  Other ?1                     ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │remote ─────────────────────────────────────││                                                                                            │
-│› ! ACP pretty name                     ◇ ⋯ ││                                                                                            │
+│› ? ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Question  podman  codex-1                 ││                                                                                            │
 │  │ Choose a path                           ││                                                                                            │
 │  │                                         ││                                                                                            │
@@ -386,17 +386,17 @@ action: SelectWorkspace { workspace_id: "other" }
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · o next (!2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
+Tab pane │ ctrl+b then g sessions · o next (?2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 selected: Some("remote")
 
 === previous attention returns to the default workspace (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ Default !1  Other !1                     ≡ ││                                                                                            │
+│ Default ?1  Other ?1                     ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │remote ─────────────────────────────────────││                                                                                            │
-│› ! ACP pretty name                     ◇ ⋯ ││                                                                                            │
+│› ? ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Question  podman  codex-1                 ││                                                                                            │
 │  │ Choose a path                           ││                                                                                            │
 │  │                                         ││                                                                                            │
@@ -429,17 +429,17 @@ selected: Some("remote")
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · o next (!2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
+Tab pane │ ctrl+b then g sessions · o next (?2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 action: SelectWorkspace { workspace_id: "default" }
 
 === default workspace selection is restored (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ Default !1  Other !1                     ≡ ││                                                                                            │
+│ Default ?1  Other ?1                     ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │[1] asks ───────────────────────────────────││                                                                                            │
-│› ! ACP pretty name                     ◇ ⋯ ││                                                                                            │
+│› ? ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Question  podman  codex-1                 ││                                                                                            │
 │  │ Choose a path                           ││                                                                                            │
 │  │                                         ││                                                                                            │
@@ -472,17 +472,17 @@ action: SelectWorkspace { workspace_id: "default" }
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · o next (!2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
+Tab pane │ ctrl+b then g sessions · o next (?2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 selected: Some("asks")
 
 === next attention wraps to the first waiting session (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ Default !1  Other !1                     ≡ ││                                                                                            │
+│ Default ?1  Other ?1                     ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │[1] asks ───────────────────────────────────││                                                                                            │
-│› ! ACP pretty name                     ◇ ⋯ ││                                                                                            │
+│› ? ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Question  podman  codex-1                 ││                                                                                            │
 │  │ Choose a path                           ││                                                                                            │
 │  │                                         ││                                                                                            │
@@ -515,23 +515,23 @@ selected: Some("asks")
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · o next (!2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
+Tab pane │ ctrl+b then g sessions · o next (?2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 action: Open { session_id: "asks" }; selected: Some("asks")
 
 === equal urgency prefers the current workspace then newest activity (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ Default !2  Other !1                     ≡ ││                                                                                            │
+│ Default ?2  Other ?1                     ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │[1] asks ───────────────────────────────────││                                                                                            │
-│  ! ACP pretty name                     ◇ ⋯ ││                                                                                            │
+│  ? ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Question  podman  codex-1                 ││                                                                                            │
 │  │ Choose a path                           ││                                                                                            │
 │  │                                         ││                                                                                            │
 │                                            ││                                      ✦  M J O L N I R                                      │
 │[2] done ───────────────────────────────────││                                                                                            │
-│› ! ACP pretty name                     ◇ ⋯ ││                         Select a session to open its conversation.                         │
+│› ? ACP pretty name                     ◇ ⋯ ││                         Select a session to open its conversation.                         │
 │  Question  podman  codex-1                 ││                                                                                            │
 │  │ Choose a path                           ││                                                                                            │
 │  │                                         ││                                                                                            │
@@ -558,7 +558,7 @@ action: Open { session_id: "asks" }; selected: Some("asks")
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · o next (!3) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
+Tab pane │ ctrl+b then g sessions · o next (?3) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 attention levels: asks=Waiting, remote=Waiting, done=Waiting, quiet=Idle, missing=Inactive; queue: [done:Waiting, asks:Waiting, remote:Waiting]
 action: Open { session_id: "done" }; selected: Some("done")
 after switching workspace: attention levels: asks=Waiting, remote=Waiting, done=Waiting, quiet=Idle, missing=Inactive; queue: [remote:Waiting, done:Waiting, asks:Waiting]
@@ -572,12 +572,12 @@ workspace preference after resolved notification: Open { session_id: "quiet" }
 
 === project rows before folding (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ Default !1  Other !1                     ≡ ││                                                                                            │
+│ Default ?1  Other ?1                     ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │[1] asks ───────────────────────────────────││                                                                                            │
-│  ! ACP pretty name                     ◇ ⋯ ││                                                                                            │
+│  ? ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Question  podman  codex-1                 ││                                                                                            │
 │  │ Choose a path                           ││                                                                                            │
 │  │                                         ││                                                                                            │
@@ -610,16 +610,16 @@ workspace preference after resolved notification: Open { session_id: "quiet" }
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!2) · b panes · q detach · : / ? palette
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (?2) · b panes · q detach · : / ? palette
 
 === waiting project folded (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ Default !1  Other !1                     ≡ ││                                                                                            │
+│ Default ?1  Other ?1                     ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
-│[1] asks !1 ────────────────────────────────││                                                                                            │
-│  ! ACP pretty name                     ◇ ⋯ ││                                                                                            │
+│[1] asks ?1 ────────────────────────────────││                                                                                            │
+│  ? ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Question  podman  codex-1                 ││                                                                                            │
 │                                            ││                                                                                            │
 │[2] done ───────────────────────────────────││                                                                                            │
@@ -652,16 +652,16 @@ workspace preference after resolved notification: Open { session_id: "quiet" }
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!2) · b panes · q detach · : / ? palette
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (?2) · b panes · q detach · : / ? palette
 
 === next attention unfolds and opens the waiting project (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ Default !1  Other !1                     ≡ ││                                                                                            │
+│ Default ?1  Other ?1                     ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
 │[1] asks ───────────────────────────────────││                                                                                            │
-│› ! ACP pretty name                     ◇ ⋯ ││                                                                                            │
+│› ? ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Question  podman  codex-1                 ││                                                                                            │
 │  │ Choose a path                           ││                                                                                            │
 │  │                                         ││                                                                                            │
@@ -694,7 +694,7 @@ workspace preference after resolved notification: Open { session_id: "quiet" }
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · o next (!2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
+Tab pane │ ctrl+b then g sessions · o next (?2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 action: Open { session_id: "asks" }; folded projects: {}
 
 === empty attention queue reports its notice (140x40) ===
@@ -742,12 +742,12 @@ action: None; notice: Some("Nothing is waiting for you.")
 
 === footer advertises next attention while waiting (200x40) ===
 ╭ Workspaces ────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ Default !1  Other !1                                         ≡ ││                                                                                                                                    │
+│ Default ?1  Other ?1                                         ≡ ││                                                                                                                                    │
 ╰────────────────────────────────────────────────────────────────╯│                                                                                                                                    │
 ╭ Sessions ─────────────────────────────────────────── ▁   ▄   □ ╮│                                                                                                                                    │
 │ Create   Open   Filter: ________________________               ││                                                                                                                                    │
 │[1] asks ───────────────────────────────────────────────────────││                                                                                                                                    │
-│  ! ACP pretty name                                         ◇ ⋯ ││                                                                                                                                    │
+│  ? ACP pretty name                                         ◇ ⋯ ││                                                                                                                                    │
 │  Question  podman  codex-1                                     ││                                                                                                                                    │
 │  │ Choose a path                                               ││                                                                                                                                    │
 │  │                                                             ││                                                                                                                                    │
@@ -780,8 +780,8 @@ action: None; notice: Some("Nothing is waiting for you.")
 │                                                                ││  codex-1   Codex        refreshing…                                                                                                │
 │                                                                ││  codex-2   Codex        refreshing…                                                                                                │
 ╰────────────────────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
-footer: / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (?2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
+footer: / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (?2) · b panes · q detach · u web · shift+r refresh · s settings · t rendering · : / ? palette
 
 === footer omits next attention while quiet (200x40) ===
 ╭ Workspaces ────────────────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
@@ -828,12 +828,12 @@ footer: Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ c
 
 === workspace tabs show their urgent badges (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ Default !1  Other !1               ≡ ││                                                                              │
+│ Default ?1  Other ?1               ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │[1] asks ─────────────────────────────││                                                                              │
-│  ! ACP pretty name               ◇ ⋯ ││                                                                              │
+│  ? ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Question  podman  codex-1           ││                                                                              │
 │  │ Choose a path                     ││                                                                              │
 │  │                                   ││                                                                              │
@@ -866,17 +866,17 @@ footer: Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ c
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!2) · : / ? palette
-workspace tabs: │ Default !1  Other !1               ≡ ││                                                                              │
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (?2) · : / ? palette
+workspace tabs: │ Default ?1  Other ?1               ≡ ││                                                                              │
 
 === folded project heading carries unread badge (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ Default !1  Other !1               ≡ ││                                                                              │
+│ Default ?1  Other ?1               ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │[1] asks ─────────────────────────────││                                                                              │
-│  ! ACP pretty name               ◇ ⋯ ││                                                                              │
+│  ? ACP pretty name               ◇ ⋯ ││                                                                              │
 │  Question  podman  codex-1           ││                                                                              │
 │  │ Choose a path                     ││                                                                              │
 │  │                                   ││                                                                              │
@@ -909,17 +909,17 @@ workspace tabs: │ Default !1  Other !1               ≡ ││               
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!2) · : / ? palette
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (?2) · : / ? palette
 folded heading: │[2] done ✓1 ──────────────────────────││                                                                              │
 
 === tiny workspace dropdown shows current and inactive attention (120x40) ===
 ╭ Workspaces ──────╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ Default !1  ▾  ≡ ││                                                                                                  │
+│ Default ?1  ▾  ≡ ││                                                                                                  │
 ╰╭Workspaces─────────────╮                                                                                             │
-╭│ !1 Default (current)  │                                                                                             │
-││ !1 Other              │                                                                                             │
+╭│ ?1 Default (current)  │                                                                                             │
+││ ?1 Other              │                                                                                             │
 │╰───────────────────────╯                                                                                             │
-│  ! ACP pretty…◇  ││                                                                                                  │
+│  ? ACP pretty…◇  ││                                                                                                  │
 │  Question        ││                                                                                                  │
 │                  ││                                                                                                  │
 │[2] done ─────────││                                                                                                  │
@@ -952,16 +952,16 @@ folded heading: │[2] done ✓1 ───────────────�
 │                  ││  codex-1   Codex        refreshing…                                                              │
 │                  ││  codex-2   Codex        refreshing…                                                              │
 ╰──────────────────╯╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-Tab pane │ ctrl+b then g sessions · o next (!2) · b panes · q detach · u web · shift+r refresh · : / ? palette
+Tab pane │ ctrl+b then g sessions · o next (?2) · b panes · q detach · u web · shift+r refresh · : / ? palette
 
 === open workspace dropdown updates an inactive failure badge (120x40) ===
 ╭ Workspaces ──────╮╭ Browse | Conversation ────────────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ Default !1  ▾  ≡ ││                                                                                                  │
+│ Default ?1  ▾  ≡ ││                                                                                                  │
 ╰╭Workspaces─────────────╮                                                                                             │
-╭│ !1 Default (current)  │                                                                                             │
+╭│ ?1 Default (current)  │                                                                                             │
 ││ ×1 Other              │                                                                                             │
 │╰───────────────────────╯                                                                                             │
-│  ! ACP pretty…◇  ││                                                                                                  │
+│  ? ACP pretty…◇  ││                                                                                                  │
 │  Question        ││                                                                                                  │
 │                  ││                                                                                                  │
 │[2] done ─────────││                                                                                                  │
@@ -999,11 +999,11 @@ attention dropdown action: SelectWorkspace { workspace_id: "other" }
 
 === priority order lists attention before idle (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ Default !1  Other !1                     ≡ ││                                                                                            │
+│ Default ?1  Other ?1                     ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
-│  ! ACP pretty name                     ◇ ⋯ ││                                                                                            │
+│  ? ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Question  podman  codex-1                 ││                                                                                            │
 │  │ Choose a path                           ││                                                                                            │
 │  │                                         ││                                                                                            │
@@ -1037,16 +1037,16 @@ attention dropdown action: SelectWorkspace { workspace_id: "other" }
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
-/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!2) · b panes · q detach · : / ? palette
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (?2) · b panes · q detach · : / ? palette
 priority session ids: ["asks", "done", "quiet"]; project headings: false
 
 === priority order reveals all rows (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ Default !1  Other !1                     ≡ ││                                                                                            │
+│ Default ?1  Other ?1                     ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
-│  ! ACP pretty name                     ◇ ⋯ ││                                                                                            │
+│  ? ACP pretty name                     ◇ ⋯ ││                                                                                            │
 │  Question  podman  codex-1                 ││                                                                                            │
 │  │ Choose a path                           ││                                                                                            │
 │  │                                         ││                                                                                            │
@@ -1085,7 +1085,7 @@ notice: Some("Projects are not grouped in priority order; see Settings → Advan
 
 === answering the question lowers it below unread (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
-│ Default ✓1  Other !1                     ≡ ││                                                                                            │
+│ Default ✓1  Other ?1                     ≡ ││                                                                                            │
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
@@ -1125,3 +1125,47 @@ notice: Some("Projects are not grouped in priority order; see Settings → Advan
 ╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
 Projects are not grouped in priority order; see Settings → Advanced.
 priority session ids after answer: ["done", "quiet", "asks"]
+Important notices: [Notification { session_id: "done", session_title: "ACP pretty name", level: Important, body: "Review the deployment result" }]; title: Some("mj · 1 important")
+
+=== Important retains its own glyph, footer and queue level (140x40) ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ Default !1  Other                        ≡ ││                                                                                            │
+╰────────────────────────────────────────────╯│                                                                                            │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
+│ Create   Open   Filter: ___________________││                                                                                            │
+│[1] asks ───────────────────────────────────││                                                                                            │
+│  · ACP pretty name                     ◇ ⋯ ││                                                                                            │
+│  Idle  podman  codex-1                     ││                                                                                            │
+│  │ No messages yet                         ││                                                                                            │
+│  │                                         ││                                                                                            │
+│                                            ││                                      ✦  M J O L N I R                                      │
+│[2] done ───────────────────────────────────││                                                                                            │
+│  ! ACP pretty name                     ◇ ⋯ ││                         Select a session to open its conversation.                         │
+│  Idle  podman  codex-1                     ││                                                                                            │
+│  │ No messages yet                         ││                                                                                            │
+│  │                                         ││                                                                                            │
+│                                            ││                                                                                            │
+│[3] quiet ──────────────────────────────────││                                                                                            │
+│  · ACP pretty name                     ◇ ⋯ ││                                                                                            │
+│  Idle  podman  codex-1                     ││                                                                                            │
+│  │ No messages yet                         ││                                                                                            │
+│  │                                         ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ No conversation open ──────────────────────────────────────────────────────────────────────╮
+│                                            ││No conversation open.                                                                       │
+│                                            ││Press Tab for Sessions, then Enter on the one to open.                                      │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
+│                                            ││  claude-1  Claude Code  refreshing…                                                        │
+│                                            ││  codex-1   Codex        refreshing…                                                        │
+│                                            ││  codex-2   Codex        refreshing…                                                        │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+/ search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (!1) · b panes · q detach · : / ? palette
+next Important action: Open { session_id: "done" }

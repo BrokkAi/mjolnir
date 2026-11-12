@@ -355,7 +355,7 @@ cookie; protected snapshot, transcript, draft, and action APIs all require a
 valid cookie. Cookies are HTTP-only and same-site, are marked secure under
 HTTPS, and expire after 30 days without authenticated requests by default.
 Authenticated requests renew new phone-login cookies while preserving the viewer
-identity. Desktop bootstrap cookies and cookies issued by older builds retain
+identity. Cookies issued by older builds retain
 their original expiry; sign in again to opt an older phone cookie into renewal.
 
 The six-digit code is intentionally convenient rather than high entropy. Five
@@ -393,5 +393,5 @@ detection, Mjolnir exposes the viewer on the tailnet only after it obtains a
 trusted `ts.net` certificate. Explicit non-loopback service requires both a TLS
 certificate and key. Mjolnir refuses a non-loopback plaintext listener.
 
-See [Web viewer and desktop app](/web-viewer/) for setup and
+See [Web viewer](/web-viewer/) for setup and
 [Troubleshooting](/troubleshooting/) for connection and login failures.

@@ -587,8 +587,7 @@ fn load_github_session_creation_output_from(
         let mj_core::transcript::TranscriptBody::Tool { call, .. } = &item.body else {
             continue;
         };
-        let call: agent_client_protocol::v1::schema::ToolCall =
-            serde_json::from_value(call.clone())?;
+        let call: agent_client_protocol::v1::schema::ToolCall = call.decode()?;
         output.extend(mj_transcript::transcript::tool_content_details(
             &call.content,
             &outputs.for_tool(&item.stable_id),

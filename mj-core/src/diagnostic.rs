@@ -6,6 +6,10 @@ pub const QUOTA_STOP_REASON: &str = "QuotaLimit";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnDiagnostic {
     pub message: String,
+    /// Hash of the Claude access token present before the failed prompt.
+    /// Credential bytes never enter the journal. Older turns have no evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_fingerprint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -22,6 +26,7 @@ impl TurnDiagnostic {
             code: Some(error.code.to_string()),
             http_status: None,
             reset_at: None,
+            login_fingerprint: None,
         };
         if let Some(data) = &error.data {
             diagnostic.enrich(data);
@@ -36,6 +41,7 @@ impl TurnDiagnostic {
             code: None,
             http_status: None,
             reset_at: None,
+            login_fingerprint: None,
         };
         diagnostic.enrich(error);
         Some(diagnostic)
@@ -170,6 +176,7 @@ impl TurnDiagnostic {
             code: Some(code.to_owned()),
             http_status: None,
             reset_at: None,
+            login_fingerprint: None,
         };
         if let Ok(body) = serde_json::from_str::<serde_json::Value>(&failure.title)
             && let Some(message) = body

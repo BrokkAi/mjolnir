@@ -16,6 +16,8 @@ include = [
     # Turn-classifier questions shared with the hosted proxy.
     "src/activity/verdict_questions.json",
     "src/activity/question_locator.json",
+    "src/activity/eot_glide_questions.json",
+    "src/activity/eot_glide_fresh_sample.json",
     "src/help_search/question.json",
     "src/continuation/questions.json",
     "src/github_item/questions_v2.json",
@@ -55,6 +57,7 @@ test-hooks = []
 workspace = true
 
 [dependencies]
+zstd = { version = "0.13", default-features = false }
 agent-client-protocol.workspace = true
 anyhow.workspace = true
 base64.workspace = true
@@ -92,6 +95,8 @@ windows-sys = { workspace = true, features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
     "Win32_System_Threading",
+    "Win32_System_JobObjects",
+    "Win32_Security",
 ] }
 
 [build-dependencies]

@@ -181,6 +181,12 @@ pub(super) async fn serve_client(
     state: Arc<RuntimeState>,
     cancellation: CancellationToken,
 ) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncWriteExt;
+    let mut directory: Option<Arc<tempfile::TempDir>> = None;
+    let mut blobs = std::collections::HashMap::new();
+    let mut upload = None;
+
     loop {
         let request: RequestEnvelope = match read_frame(&mut stream).await {
             Ok(request) => request,
@@ -198,6 +204,79 @@ pub(super) async fn serve_client(
             }
             Err(error) => return Err(error),
         };
+        if let DaemonAction::UploadChunk { bytes, sha256 } = &request.action {
+            ensure!(
+                request.token == metadata.token,
+                "daemon authentication failed"
+            );
+            ensure!(
+                request.protocol_version == PROTOCOL_VERSION,
+                "incompatible upload protocol"
+            );
+            if upload.is_none() {
+                if directory.is_none() {
+                    let root = mj_core::config::data_dir().join("uploads");
+                    tokio::fs::create_dir_all(&root).await?;
+                    directory = Some(Arc::new(
+                        tokio::task::spawn_blocking(move || tempfile::tempdir_in(root))
+                            .await
+                            .context("upload directory task failed")??,
+                    ));
+                }
+                let root = directory
+                    .as_ref()
+                    .context("upload directory missing")?
+                    .path()
+                    .to_owned();
+                // Connection storage must remain available while admission drains.
+                let (file, path) = tokio::task::spawn_blocking(move || {
+                    Ok::<_, std::io::Error>(tempfile::NamedTempFile::new_in(root)?.into_parts())
+                })
+                .await
+                .context("upload file task failed")??;
+                let id = path
+                    .file_name()
+                    .context("blob filename missing")?
+                    .to_string_lossy()
+                    .into_owned();
+                let file = tokio::fs::File::from_std(file);
+                upload = Some((request.request_id, id, path, file, Sha256::new()));
+            }
+            let (request_id, _, _, file, digest) = upload.as_mut().expect("upload exists");
+            ensure!(
+                *request_id == request.request_id,
+                "interleaved upload request"
+            );
+            file.write_all(bytes).await?;
+            digest.update(bytes);
+            if let Some(expected) = sha256 {
+                let (_, id, path, mut file, digest) = upload.take().expect("upload exists");
+                file.flush().await?;
+                drop(file);
+                ensure!(
+                    digest
+                        .finalize()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+                        == *expected,
+                    "upload SHA-256 mismatch"
+                );
+                blobs.insert(id.clone(), path);
+                write_response(
+                    &mut stream,
+                    ResponseEnvelope {
+                        protocol_version: request.protocol_version,
+                        request_id: request.request_id,
+                        result: Ok(DaemonReply::BlobUploaded(id)),
+                    },
+                )
+                .await?;
+            }
+            continue;
+        } else {
+            ensure!(upload.is_none(), "interrupted upload request");
+        }
         let request_id = request.request_id;
         // The frozen management subset is served for every protocol version so
         // any Mjolnir build can inspect, stop, or replace this daemon; everything
@@ -212,7 +291,16 @@ pub(super) async fn serve_client(
         );
         // Hold through the acknowledgement, not merely the action's result.
         let activity = upgrade_request_activity(&request.action);
-        let result = if request.token != metadata.token {
+        let mut import_registration = None;
+        let result = if let DaemonAction::ProveIdentity { ref nonce } = request.action {
+            use hmac::Mac;
+            Ok(DaemonReply::IdentityProof {
+                mac: mj_client::daemon::identity_proof(&metadata.token, nonce)
+                    .finalize()
+                    .into_bytes()
+                    .to_vec(),
+            })
+        } else if request.token != metadata.token {
             Err("daemon authentication failed".to_owned())
         } else if activity.is_err() {
             // No work was accepted. The client can wait and retry this exact
@@ -233,15 +321,238 @@ pub(super) async fn serve_client(
             // stop should not be refused.
             Err("daemon is shutting down; retry to reach a fresh daemon".to_owned())
         } else {
+            if request.action.is_cancellable_machine_action() {
+                let cancelled = Arc::new(AtomicBool::new(false));
+                let guard =
+                    crate::server_runtime::preflight::ProcessCancellationGuard(cancelled.clone());
+                let mut work = Box::pin(super::machine::execute(request.action, &state, cancelled));
+                let mut byte = [0u8; 1];
+                use tokio::io::AsyncReadExt;
+                let result = tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => None,
+                    closed = stream.read(&mut byte) => {
+                        if let Err(error) = closed { tracing::debug!(%error, "machine request connection closed"); }
+                        None
+                    },
+                    result = &mut work => Some(result),
+                };
+                let Some(result) = result else {
+                    drop(guard);
+                    if let Err(error) = work.await {
+                        tracing::debug!(%error, "cancelled machine request finished");
+                    }
+                    return Ok(());
+                };
+                write_response(
+                    &mut stream,
+                    ResponseEnvelope {
+                        protocol_version: request.protocol_version,
+                        request_id,
+                        result: result.map_err(|error| format!("{error:#}")),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
             // Lifecycle actions contain large checkpoint/restore futures. Keep
             // them off the connection task's stack, including in debug builds.
-            let action = Box::pin(handle_action(
-                request.action,
-                &metadata,
-                &state,
-                &cancellation,
-            ));
-            action.await.map_err(|error| format!("{error:#}"))
+            if let DaemonAction::InstallAttachment {
+                session_id,
+                reference,
+                blob,
+            } = request.action
+            {
+                match blobs.remove(&blob) {
+                    Some(path) => blocking(move || {
+                        let bytes = std::fs::read(&path)?;
+                        let result = mj_core::attachment::AttachmentStore::controller(&session_id)?
+                            .install(&reference, &bytes);
+                        drop(path);
+                        result?;
+                        Ok(DaemonReply::AttachmentInstalled(reference))
+                    })
+                    .await
+                    .map_err(|error| format!("{error:#}")),
+                    None => Err("unknown upload blob".into()),
+                }
+            } else if let DaemonAction::ImportSession {
+                blob,
+                mut session,
+                bundle,
+            } = request.action
+            {
+                match blobs.remove(&blob) {
+                    Some(path) => {
+                        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                        let _cancel = CancelImportPreparation(stopped.clone());
+                        let storage = directory.clone();
+                        let mut prepare = tokio::task::spawn_blocking(move || {
+                            let outcome = (|| -> Result<_> {
+                                // Keep connection storage alive until every reader has stopped.
+                                let _storage = storage;
+                                anyhow::ensure!(
+                                    session
+                                        .id
+                                        .chars()
+                                        .all(|c| c.is_ascii_alphanumeric() || c == '-'),
+                                    "invalid imported session id"
+                                );
+                                let verified =
+                                    mj_checkpoint::archive::verify_archive_streaming_cancellable(
+                                        &path,
+                                        stopped.clone(),
+                                    )?;
+                                let checkpoint = session
+                                    .checkpoint
+                                    .as_mut()
+                                    .context("imported session has no checkpoint")?;
+                                anyhow::ensure!(
+                                    verified.archive_sha256 == checkpoint.sha256,
+                                    "import archive digest mismatch"
+                                );
+                                let materialized =
+                                    mj_transcript::projection::materialized_session_from_canonical(
+                                        session.id.clone(),
+                                        &verified.canonical_session,
+                                    )?;
+                                let root = mj_core::config::sessions_dir();
+                                std::fs::create_dir_all(&root)?;
+                                let mut staged = tempfile::NamedTempFile::new_in(&root)?;
+                                let mut input = std::fs::File::open(&path)?;
+                                let mut buffer = [0u8; 64 * 1024];
+                                loop {
+                                    anyhow::ensure!(
+                                        !stopped.load(std::sync::atomic::Ordering::Acquire),
+                                        "import preparation cancelled"
+                                    );
+                                    let count = std::io::Read::read(&mut input, &mut buffer)?;
+                                    if count == 0 {
+                                        break;
+                                    }
+                                    std::io::Write::write_all(&mut staged, &buffer[..count])?;
+                                }
+                                staged
+                                    .as_file()
+                                    .sync_all()
+                                    .context("sync imported archive")?;
+                                Ok((session, bundle, materialized, staged))
+                            })();
+                            if let Err(error) = &outcome {
+                                tracing::debug!(error = %format!("{error:#}"), "import preparation stopped");
+                            }
+                            outcome
+                        });
+                        let prepared = tokio::select! {
+                            result = &mut prepare => result.context("import preparation task panicked")?,
+                            _ = cancellation.cancelled() => {
+                                // The task owns its files and removes the partial only after stopping.
+                                return Err(anyhow::anyhow!("daemon stopped during import preparation; retry the import"));
+                            }
+                        };
+                        let result = match prepared {
+                            Err(error) => Err(error),
+                            Ok((mut session, bundle, materialized, staged)) => {
+                                match crate::upgrade::activity_unless_draining(
+                                    "import registration",
+                                ) {
+                                    Err(_) => {
+                                        drop(staged);
+                                        Ok(DaemonReply::UpgradePending)
+                                    }
+                                    Ok(registration) => {
+                                        // The transaction and its acknowledgement own admission.
+                                        let held = registration.clone();
+                                        let registered = tokio::task::spawn_blocking(move || -> Result<_> {
+                                            let _registration = held;
+                                            let destination = mj_core::config::sessions_dir().join(format!("{}.hel.zip", session.id));
+                                            session.checkpoint.as_mut().context("imported session has no checkpoint")?.archive_path = destination.clone();
+                                            let installed = staged.persist_noclobber(&destination).map_err(|error| error.error)?;
+                                            let registered = (|| -> Result<()> {
+                                                if let Some(ImportedBundle { bundle_id, bundle }) = bundle {
+                                                    Config::update(|config| {
+                                                        if let Some(existing) = config.bundles.get(&bundle_id) {
+                                                            anyhow::ensure!(existing == &bundle, "bundle {bundle_id:?} changed during import; retry the import");
+                                                        } else { config.bundles.insert(bundle_id.clone(), bundle); }
+                                                        Ok(())
+                                                    })?;
+                                                }
+                                                crate::database::save_imported_session(&session, &materialized)
+                                            })();
+                                            drop(installed);
+                                            if registered.is_err() { std::fs::remove_file(&destination).context("remove failed import archive")?; }
+                                            registered?;
+                                            Ok(DaemonReply::Done)
+                                        }).await.context("import registration task panicked")?;
+                                        // Retain admission through write_response below.
+                                        import_registration = Some(registration);
+                                        registered
+                                    }
+                                }
+                            }
+                        };
+                        if result.is_ok() {
+                            refresh_runtime_controller(&state).await;
+                        }
+                        result.map_err(|error| format!("{error:#}"))
+                    }
+                    None => Err("unknown upload blob".into()),
+                }
+            } else if let DaemonAction::TranscribeAudio {
+                preferred_profile,
+                blob,
+            } = request.action
+            {
+                match blobs.remove(&blob) {
+                    Some(path) => {
+                        let config = state.with_config(Clone::clone);
+                        // This disposable request owns no admission. Dropping its future
+                        // on disconnect or handoff cancels the network operation.
+                        let transcription = async move {
+                            let (auth, bytes) = blocking(move || {
+                                let bytes = std::fs::read(&path)?;
+                                let auth = super::actions::transcription_auth(&config, &preferred_profile).context("voice transcription requires a signed-in ChatGPT Codex profile on the daemon")?;
+                                Ok((auth, bytes))
+                            }).await?;
+                            let client =
+                                anvil_client::codex_client::CodexClient::with_auth_path(auth);
+                            let response = client
+                                .transcribe(anvil_client::transcribe::TranscribeRequest::new(
+                                    bytes.into(),
+                                    "audio.wav",
+                                    "audio/wav",
+                                ))
+                                .await
+                                .context("daemon transcribe captured audio")?;
+                            let text = response.text.trim().to_owned();
+                            ensure!(!text.is_empty(), "daemon transcription returned no text");
+                            Ok::<_, anyhow::Error>(DaemonReply::Transcription(text))
+                        };
+                        let mut byte = [0];
+                        tokio::select! {
+                            result = transcription => result.map_err(|error| format!("{error:#}")),
+                            _ = cancellation.cancelled() => Err("daemon transcription cancelled by handoff".into()),
+                            closed = stream.peek(&mut byte) => {
+                                match closed {
+                                    Ok(0) => return Ok(()),
+                                    Ok(_) => Err("unexpected input during transcription".into()),
+                                    Err(error) => return Err(error.into()),
+                                }
+                            }
+                        }
+                    }
+                    None => Err("unknown upload blob".into()),
+                }
+            } else {
+                Box::pin(handle_action(
+                    request.action,
+                    &metadata,
+                    &state,
+                    &cancellation,
+                ))
+                .await
+                .map_err(|error| format!("{error:#}"))
+            }
         };
         // Echo the caller's protocol version: replies must stay readable in the
         // client's own dialect, and the shapes it can receive here are frozen.
@@ -254,6 +565,7 @@ pub(super) async fn serve_client(
             },
         )
         .await?;
+        drop(import_registration);
     }
 }
 
@@ -340,6 +652,14 @@ pub(super) async fn reach_test_hook(name: &'static str) -> Result<()> {
     #[cfg(not(feature = "test-hooks"))]
     let _ = name;
     Ok(())
+}
+
+/// Dropping an aborted connection asks its file-owning preparation task to stop.
+struct CancelImportPreparation(Arc<std::sync::atomic::AtomicBool>);
+impl Drop for CancelImportPreparation {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
 }
 
 #[cfg(test)]

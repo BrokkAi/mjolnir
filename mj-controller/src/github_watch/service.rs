@@ -3370,13 +3370,14 @@ mod tests {
                 created_at_ms: created_ms - 3000,
                 last_changed_at_ms: created_ms + 2000,
                 body: TranscriptBody::Tool {
-                    call: json!({
+                    call: (json!({
                         "toolCallId": "call-1",
                         "title": "Open the pull request",
                         "kind": "execute",
                         "status": "completed",
                         "rawInput": {"command": "python open_item.py"}
-                    }),
+                    }))
+                    .into(),
                     terminal_outputs: vec![mj_core::transcript::TerminalOutputRecord {
                         terminal_id: "call-1".into(),
                         output: "https://github.com/acme/repo/pull/1\n".into(),
