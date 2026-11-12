@@ -12333,6 +12333,24 @@ async fn daemon_upload_exchange() {
         .await
         .unwrap_err();
     output.push_str(&format!("corrupt payload: {error}\n"));
+    let reply = client
+        .request(DaemonAction::TranscriptionAvailable {
+            preferred_profile: "missing".into(),
+        })
+        .await
+        .unwrap();
+    output.push_str(&format!(
+        "transcription availability: {}\n",
+        serde_json::to_string(&reply).unwrap()
+    ));
+    let error = client
+        .request(DaemonAction::TranscribeAudio {
+            preferred_profile: "missing".into(),
+            bytes: vec![0; 196608],
+        })
+        .await
+        .unwrap_err();
+    output.push_str(&format!("transcription without credential: {error}\n"));
     let reply = client.request(DaemonAction::Ping).await.unwrap();
     output.push_str(&format!(
         "connection after refusal: {}\n",

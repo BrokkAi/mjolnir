@@ -697,6 +697,14 @@ pub enum DaemonAction {
         #[serde(with = "chunk_bytes")]
         bytes: Vec<u8>,
     },
+    TranscriptionAvailable {
+        preferred_profile: String,
+    },
+    TranscribeAudio {
+        preferred_profile: String,
+        #[serde(with = "chunk_bytes")]
+        bytes: Vec<u8>,
+    },
     RecordOperatorActivity,
     SetOperatorAway {
         away: bool,
@@ -1169,7 +1177,10 @@ impl DaemonAction {
     /// Upload actions travel in authenticated request fragments, using the same
     /// chunk size and base64 convention as chunked replies.
     pub fn is_upload(&self) -> bool {
-        matches!(self, Self::InstallAttachment { .. })
+        matches!(
+            self,
+            Self::InstallAttachment { .. } | Self::TranscribeAudio { .. }
+        )
     }
 }
 
@@ -1184,6 +1195,8 @@ pub struct ResponseEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "reply", content = "value")]
 pub enum DaemonReply {
+    TranscriptionAvailable(bool),
+    Transcription(String),
     AttachmentInstalled(mj_core::attachment::AttachmentRef),
     LifecycleAccepted(LifecycleReceipt),
     /// Only a captured operation result may report this failure.
@@ -3176,7 +3189,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // The host node is gone: NodeConnect is no longer an action.
 // Lifecycle submission acknowledges ownership separately from completion.
 // Authenticated chunked client uploads and daemon-owned attachment installation.
-pub const PROTOCOL_VERSION: u32 = 88;
+// Daemon-owned voice credential discovery and uploaded-audio transcription.
+pub const PROTOCOL_VERSION: u32 = 89;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
