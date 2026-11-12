@@ -264,9 +264,11 @@ test('device notification enrollment starts from a tap and supports test and uns
   await page.locator('#device-notification-disable').click();
   await expect(page.locator('#device-notification-state')).toContainText('Not enabled');
   expect(actions.map(action => action.action)).toEqual(['push-subscribe', 'push-test', 'push-unsubscribe', 'push-unsubscribe']);
+  let attentionRevision = 100;
   const states = { unknown: 'unknown', unreachable: 'unreachable', failed: 'failed', idle: 'idle', working: 'working' };
   await page.route('**/api/snapshot', route => {
     const next = snapshot();
+    next.revision = attentionRevision;
     next.sessions = Object.entries(states).map(([id, attention]) => ({ id, title: id, workspace_id: WORKSPACE_ID, attention, active: true, is_idle: true, capabilities: {}, detail: false }));
     return route.fulfill({ json: viewerWireSnapshot(next) });
   });
@@ -276,10 +278,17 @@ test('device notification enrollment starts from a tap and supports test and uns
       { label: 'unknown', session_id: 'unknown' }, { label: 'unreachable', session_id: 'unreachable' },
       { label: 'failed', session_id: 'failed' }, { label: 'idle', session_id: 'idle' },
       { label: 'working', session_id: 'working' },
+      { label: 'newer-card', session_id: 'idle', episode: 'idle:2', observed_revision: 200 },
     ];
+    window.pushShownNotifications = window.pushShownNotifications.map(data => ({ episode: 'existing:1', observed_revision: 50, ...data }));
     window.dispatchEvent(new Event('focus'));
   });
   await expect.poll(() => page.evaluate(() => [...new Set(window.pushClosedNotifications)].sort())).toEqual(['idle', 'working']);
+  // Hard-won: 6eb0ad808: a stale Idle response withdrew a newer episode's card.
+  expect(await page.evaluate(() => window.pushClosedNotifications.includes('newer-card'))).toBe(false);
+  attentionRevision = 201;
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await expect.poll(() => page.evaluate(() => window.pushClosedNotifications.includes('newer-card'))).toBe(true);
 
 });
 
@@ -306,14 +315,14 @@ test('service worker push displays and clicks route an existing window to the co
     const fetch = async (url, options) => { calls.push(['subscription', url, options.credentials, JSON.parse(options.body)]); return { ok: true }; };
     new Function('self', 'fetch', 'MjPush', source)(self, fetch, { reconcile: async () => {} });
     let pending;
-    listeners.push({ data: { json: () => ({ title: 'Build', body: 'Which option?', tag: 'session', session_id: 'session', url: '/#conversation/session' }) }, waitUntil: promise => { pending = promise; } });
+    listeners.push({ data: { json: () => ({ title: 'Build', body: 'Which option?', tag: 'session', session_id: 'session', episode: 'session:2', observed_revision: 200, url: '/#conversation/session' }) }, waitUntil: promise => { pending = promise; } });
     await pending;
     listeners.notificationclick({ notification: { data: { url: '/#conversation/session' }, close: () => calls.push(['close']) }, waitUntil: promise => { pending = promise; } });
     await pending;
     return calls;
   }, source);
   expect(result).toEqual([
-    ['show', 'Build', { body: 'Which option?', renotify: true, tag: 'session', data: { url: '/#conversation/session', session_id: 'session' } }],
+    ['show', 'Build', { body: 'Which option?', renotify: true, tag: 'session', data: { url: '/#conversation/session', session_id: 'session', episode: 'session:2', observed_revision: 200 } }],
     ['close'], ['route', { type: 'mj-notification-open', url: 'https://viewer.test/#conversation/session' }], ['focus'],
   ]);
 });
@@ -396,6 +405,7 @@ test('notification offer dismissal persists and iOS tabs show the install hint',
   await page.goto('https://viewer.test/');
   await expect(page.locator('#notification-offer')).toBeVisible();
   await page.locator('#notification-offer-dismiss').click();
+  await expect(page.locator('#notification-offer')).toBeHidden();
   await page.reload();
   await expect(page.locator('#notification-offer')).toBeHidden();
   await page.evaluate(() => new Promise(resolve => { const request = indexedDB.deleteDatabase('mj-notifications'); request.onsuccess = resolve; }));

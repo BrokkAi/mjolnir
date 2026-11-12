@@ -11,7 +11,7 @@
 // deletes every cache that is not the current one, so an upgrade cannot leave
 // a previous version's assets behind.
 importScripts('/push-sync.js');
-const CACHE_VERSION = 'mjolnir-shell-v33';
+const CACHE_VERSION = 'mjolnir-shell-v34';
 const SHELL = [
   '/',
   '/viewer.css',
@@ -73,7 +73,7 @@ self.addEventListener('push', event => {
       body: notice.body || 'Needs your input',
       renotify: true,
       tag: notice.tag || notice.session_id || 'mjolnir',
-      data: { url: notice.url || '/', session_id: notice.session_id || null },
+      data: { url: notice.url || '/', session_id: notice.session_id || null, episode: notice.episode || null, observed_revision: notice.observed_revision || 0 },
     });
   })());
 });

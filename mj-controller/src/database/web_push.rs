@@ -121,7 +121,7 @@ fn push_observe_at_with(
         }
     }
     let mut reserved_episodes = Vec::new();
-    for (session, signature, payload) in episodes {
+    for (session, signature, mut payload) in episodes {
         let identity = match previous_episodes.get(&session) {
             Some((identity, previous, _)) if same_episode(previous, &signature)? => {
                 identity.clone()
@@ -131,6 +131,7 @@ fn push_observe_at_with(
                 format!("{session}:{sequence}")
             }
         };
+        payload.episode = Some(identity.clone());
         tx.execute(
             "INSERT INTO push_episodes VALUES(?1,?2,?3,?4,1)",
             params![
@@ -198,6 +199,8 @@ fn push_test_with(db: &mut Connection, endpoint: String) -> Result<()> {
             session_id: None,
             url: "/".into(),
             tag: "test".into(),
+            episode: None,
+            observed_revision: 0,
         },
     )?;
     tx.commit()?;
@@ -390,6 +393,8 @@ mod tests {
                 session_id: Some(id.into()),
                 url: format!("/#conversation/{id}"),
                 tag: id.into(),
+                episode: None,
+                observed_revision: 40,
             },
         )
     }
@@ -437,6 +442,11 @@ mod tests {
         assert!(push_claim_with(&db, 0).unwrap().is_empty());
         observe(&mut db, true, &["a", "b"]);
         let due = push_claim_with(&db, 0).unwrap();
+        for delivery in &due {
+            let notice: Notice = serde_json::from_str(&delivery.payload).unwrap();
+            assert_eq!(notice.episode.as_deref(), Some(delivery.episode.as_str()));
+            assert_eq!(notice.observed_revision, 40);
+        }
         assert_eq!(due.len(), 2); // Turning away sends individual open episodes.
         assert!(due.iter().all(|q| {
             serde_json::from_str::<Notice>(&q.payload)

@@ -10065,7 +10065,11 @@ async function withdrawResolvedNotifications() {
     for (const notification of notifications) {
       const id = notification.data?.session_id;
       const session = id && sessionById(id);
-      // Unavailable attention does not establish that a request was answered.
+      // Sender and viewer revisions share the daemon's monotonic allocator.
+      // An older/equal snapshot cannot resolve this episode, even if it says Idle.
+      // A different actionable or unavailable attention kind is not resolution.
+      const data = notification.data;
+      if (!data?.episode || !data.observed_revision || snapshot.revision <= data.observed_revision) continue;
       if (id && (!session || ['idle', 'working', 'inactive', 'unread'].includes(session.attention))) notification.close();
     }
   } catch (error) { console.warn('Could not refresh shown notifications', error); }

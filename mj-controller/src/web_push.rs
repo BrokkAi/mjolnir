@@ -67,6 +67,10 @@ pub(crate) struct Notice {
     pub session_id: Option<String>,
     pub url: String,
     pub tag: String,
+    #[serde(default)]
+    pub episode: Option<String>,
+    #[serde(default)]
+    pub observed_revision: u64,
 }
 
 pub(crate) struct Vapid(signature::EcdsaKeyPair);
@@ -323,6 +327,8 @@ fn episodes(runtime: &mj_client::runtime_feed::RuntimeProjection) -> Vec<(String
                     session_id: Some(id.clone()),
                     url: format!("/#conversation/{id}"),
                     tag: id.clone(),
+                    episode: None,
+                    observed_revision: runtime.revision,
                 },
             ))
         })
