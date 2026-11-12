@@ -356,6 +356,9 @@ pub struct TurnAssessment {
     pub completion: CompletionEvidence,
     pub evidence: Option<TurnEvidence>,
     pub verdict: Option<Verdict>,
+    /// Validated completed-turn GLiDE distributions; action remains authoritative on replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glide: Option<crate::activity::eot_glide::types::Probabilities>,
     pub action: Option<Action>,
     pub status: Status,
     pub reason: String,
@@ -377,6 +380,7 @@ impl TurnAssessment {
             completion,
             evidence: None,
             verdict: None,
+            glide: None,
             action: None,
             status: Status::Pending,
             reason: "awaiting_classification".into(),
@@ -393,6 +397,7 @@ impl TurnAssessment {
         self.status = Status::Pending;
         self.evidence = None;
         self.verdict = None;
+        self.glide = None;
         self.action = None;
         self.question_message = None;
     }

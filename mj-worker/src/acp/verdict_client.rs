@@ -1,7 +1,9 @@
 //! Optional, bounded TypeSafe turn classification. Failures leave activity alone.
 use anyhow::{Context, Result, ensure};
 use mj_core::activity::question_locator;
-use mj_core::activity::verdict::{TurnEvidence, TurnVerdict, api_key, questions, request_fits};
+use mj_core::activity::verdict::{TurnEvidence, api_key, request_fits};
+#[cfg(test)]
+use mj_core::activity::verdict::{TurnVerdict, questions};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
@@ -446,6 +448,7 @@ impl VerdictClient {
         self
     }
 
+    #[cfg(test)]
     fn request_body(
         &self,
         evidence: &TurnEvidence,
@@ -458,6 +461,7 @@ impl VerdictClient {
         mj_core::jev::request_body(evidence, direct_questions)
     }
 
+    #[cfg(test)]
     pub(crate) async fn ask_logged(
         &self,
         session: &str,
@@ -545,6 +549,7 @@ impl VerdictClient {
         (attempt, result)
     }
 
+    #[cfg(test)]
     async fn ask_logged_for(
         &self,
         session: &str,
@@ -620,6 +625,95 @@ impl VerdictClient {
         (attempt, result)
     }
 
+    pub(crate) async fn ask_glide_logged(
+        &self,
+        session: &str,
+        generation: u64,
+        evidence: &TurnEvidence,
+        facts: &mj_core::activity::ActivityFacts,
+        native: usize,
+    ) -> (VerdictAttempt, Result<glide_turn::Probabilities>) {
+        let diagnostic = self.log.as_ref().map(|log| {
+            log.start(
+                session,
+                "activity",
+                "Assess the completed turn",
+                "Authorization and runtime observations.",
+            )
+        });
+        let attempt = VerdictAttempt {
+            diagnostic,
+            decision: None,
+            uncertain: false,
+            id: NEXT_REQUEST.fetch_add(1, Ordering::Relaxed),
+            session: session.into(),
+            generation,
+            phase: evidence.phase,
+            started: std::time::Instant::now(),
+            finished: false,
+            dispatch: tracing::dispatcher::get_default(Clone::clone),
+        };
+        tracing::info!(target: "mj_jev", session, generation, summary_bytes = evidence.transcript_summary.len(), "GLiDE classification requested");
+        let result = async {
+            let history = evidence.authorization.clone().context("missing completed-turn authorization")?;
+            let body = glide_turn::project(evidence, history.clone(), facts, native)?;
+            if let Some(log) = &attempt.diagnostic { log.update(None, serde_json::json!({"request":body,"contract":"glide-turn-v1"})); }
+            let answer = self.ask_glide_turn(evidence, history, facts, native).await?;
+            if let Some(log) = &attempt.diagnostic { log.update(None, serde_json::json!({"probabilities":answer,"action":mj_core::activity::eot_glide::action(&serde_json::to_value(&answer)?, evidence.authorization.as_ref().is_some_and(|h| h.authorization_complete && !h.final_reply_omitted))})); }
+            Ok(answer)
+        }.await;
+        match &result {
+            Ok(answer) => {
+                tracing::info!(target: "mj_jev", session, generation, probabilities = ?answer, "GLiDE classification received")
+            }
+            Err(error) => {
+                tracing::warn!(target: "mj_jev", session, generation, %error, "GLiDE classification failed")
+            }
+        }
+        (attempt, result)
+    }
+
+    /// Completed-turn transport only; callers retain ownership of action and logging.
+    pub(crate) async fn ask_glide_turn(
+        &self,
+        evidence: &TurnEvidence,
+        authorization: mj_core::assessment::ContextHistory,
+        facts: &mj_core::activity::ActivityFacts,
+        native_agent_count: usize,
+    ) -> Result<glide_turn::Probabilities> {
+        let body = glide_turn::project(evidence, authorization, facts, native_agent_count)?;
+        // GLiDE is hosted even when the unrelated locator uses a Direct source.
+        let endpoint = match &self.source {
+            VerdictSource::Hosted { endpoint } => {
+                reqwest::Url::parse(endpoint)?.join("/v1/glide-turn-verdict")?
+            }
+            VerdictSource::Direct { .. } => reqwest::Url::parse(
+                "https://mj-jev-proxy.eng-admin-a63.workers.dev/v1/glide-turn-verdict",
+            )?,
+        };
+        let mut response = self
+            .client
+            .post(endpoint)
+            .json(&body)
+            .send()
+            .await
+            .context("request GLiDE turn verdict")?
+            .error_for_status()
+            .context("GLiDE turn verdict HTTP status")?;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.context("read GLiDE verdict")? {
+            ensure!(
+                bytes.len().saturating_add(chunk.len()) <= 64 * 1024,
+                "GLiDE response exceeds proxy response bound"
+            );
+            bytes.extend_from_slice(&chunk);
+        }
+        glide_turn::Probabilities::parse(
+            &serde_json::from_slice(&bytes).context("decode GLiDE verdict")?,
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) async fn ask(
         &self,
         evidence: &TurnEvidence,
@@ -1066,3 +1160,5 @@ mod tests {
         .to_string()
     }
 }
+
+pub(crate) mod glide_turn;

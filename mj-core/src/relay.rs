@@ -142,7 +142,9 @@ pub const RELAY_PROJECT_MEMORY_TRANSFER_PROTOCOL: u32 = 59;
 pub const RELAY_IDLE_GOAL_INTENT_PROTOCOL: u32 = 60;
 /// 61 journals single-attempt handback checks and parent assignment evidence.
 pub const RELAY_HANDBACK_CHECK_PROTOCOL: u32 = 61;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_HANDBACK_CHECK_PROTOCOL;
+/// Additive typed GLiDE completed-turn assessment; old readers retain stored action.
+pub const RELAY_GLIDE_TURN_PROTOCOL: u32 = 62;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_GLIDE_TURN_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

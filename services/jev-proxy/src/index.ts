@@ -1,3 +1,4 @@
+import eotQuestions from "../../../mj-core/src/activity/eot_glide_questions.json" with { type: "json" };
 import { glide } from "./glide.ts";
 import handbackQuestions from "../../../mj-core/src/activity/handback_questions.json" with { type: "json" };
 import { continuationRequestV2, continuationAnswersV2, continuationQuestionsV2, continuationRequest, continuationAnswers, continuationQuestions, type ContinuationEvidence } from "./continuation.ts";
@@ -26,6 +27,9 @@ export interface Env {
 
 const UPSTREAM = "https://api.typesafe.ai/v1/systemone";
 const MAX_BODY_BYTES = 64 * 1024;
+// Frozen EOT evaluation (2026-11-12) measured ~79 KB evidence bodies.
+// Allow 80 KiB for that measured projection; other routes retain 64 KiB.
+const EOT_BODY_BYTES = 80 * 1024;
 const UPSTREAM_TIMEOUT_MS = 8_000;
 const encoder = new TextEncoder();
 
@@ -251,9 +255,9 @@ function error(code: string, status: number, headers: Record<string, string> = {
   return json({ error: code }, status, headers);
 }
 
-async function readBounded(message: Request | Response): Promise<unknown> {
+async function readBounded(message: Request | Response, limit = MAX_BODY_BYTES): Promise<unknown> {
   const length = message.headers.get("Content-Length");
-  if (length !== null && Number(length) > MAX_BODY_BYTES) {
+  if (length !== null && Number(length) > limit) {
     await message.body?.cancel();
     throw new BodyTooLarge();
   }
@@ -266,7 +270,7 @@ async function readBounded(message: Request | Response): Promise<unknown> {
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > MAX_BODY_BYTES) {
+      if (size > limit) {
         await reader.cancel();
         throw new BodyTooLarge();
       }
@@ -366,9 +370,39 @@ async function handbackVerdict(state: unknown, key: string): Promise<Response> {
   } catch { return error("invalid_upstream_response", 502); }
 }
 
+// Evidence projection adds only worker-observed facts and recent message text.
+function eotEvidence(value: unknown): boolean {
+  if (!object(value)) return false;
+  const { latest_user_message, current_assistant_replies, runtime_observations, ...base } = value;
+  return evidenceV6(base) && base.phase === "replied"
+    && typeof latest_user_message === "string"
+    && Array.isArray(current_assistant_replies) && current_assistant_replies.every(v => typeof v === "string")
+    && Array.isArray(runtime_observations) && runtime_observations.every(v => typeof v === "string");
+}
+
+async function eotVerdict(state: unknown, key: string): Promise<Response> {
+  const response = await glide(state, eotQuestions, key);
+  if (!response.ok) return response;
+  try {
+    const value = await readBounded(response);
+    const answers = object(value) && object(value.answers) ? value.answers : {};
+    for (const [axis, question] of Object.entries(eotQuestions)) {
+      const answer = answers[axis];
+      const scores = object(answer) ? answer.probabilities : undefined;
+      const allowed = Object.keys(question.criteria);
+      if (!object(scores) || Object.keys(scores).length !== allowed.length
+        || !allowed.every(k => probability(scores[k]))
+        || Math.abs((Object.values(scores) as number[]).reduce((a, b) => a + b, 0) - 1) > 0.03)
+        return error("invalid_upstream_response", 502);
+    }
+    return json({ answers });
+  } catch { return error("invalid_upstream_response", 502); }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    const eot = url.pathname === "/v1/glide-turn-verdict";
     const handback = url.pathname === "/v1/handback-verdict";
     const search = url.pathname === "/v1/help-search";
     const questionLocator = url.pathname === "/v1/question-locator";
@@ -378,13 +412,13 @@ export default {
     const effort = url.pathname === "/v1/effort-verdict";
     const continuationV2 = url.pathname === "/v2/continuation-verdict";
     const continuation = continuationV2 || url.pathname === "/v1/continuation-verdict";
-    if ((!handback && !afkQuestion && !search && !questionLocator && !githubItem && !githubItemV2 && !effort && !continuation && url.pathname !== "/v1/turn-verdict" && url.pathname !== "/v2/turn-verdict" && url.pathname !== "/v3/turn-verdict" && url.pathname !== "/v4/turn-verdict" && url.pathname !== "/v5/turn-verdict" && url.pathname !== "/v6/turn-verdict" && url.pathname !== "/v7/turn-verdict") || url.search) return error("not_found", 404);
+    if ((!eot && !handback && !afkQuestion && !search && !questionLocator && !githubItem && !githubItemV2 && !effort && !continuation && url.pathname !== "/v1/turn-verdict" && url.pathname !== "/v2/turn-verdict" && url.pathname !== "/v3/turn-verdict" && url.pathname !== "/v4/turn-verdict" && url.pathname !== "/v5/turn-verdict" && url.pathname !== "/v6/turn-verdict" && url.pathname !== "/v7/turn-verdict") || url.search) return error("not_found", 404);
     if (request.method !== "POST") return error("method_not_allowed", 405, { Allow: "POST" });
     if (request.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
       return error("unsupported_media_type", 415);
     }
-    // Handback checks call Fastino; every other route calls TypeSafe.
-    const key = (handback ? env.FASTINO_API_KEY : env.TYPESAFE_API_KEY)?.trim();
+    // Handback and completed-turn GLiDE checks use Fastino.
+    const key = ((handback || eot) ? env.FASTINO_API_KEY : env.TYPESAFE_API_KEY)?.trim();
     const ip = request.headers.get("CF-Connecting-IP");
     const limiter = effort ? env.EFFORT_RATE_LIMITER : (githubItem || githubItemV2) ? env.GITHUB_ITEM_RATE_LIMITER : continuation ? env.CONTINUATION_RATE_LIMITER : search ? env.HELP_RATE_LIMITER : env.TURN_RATE_LIMITER;
     if (!key || !ip || !limiter) return error("service_unavailable", 503);
@@ -396,10 +430,11 @@ export default {
     }
     let state: unknown;
     try {
-      state = await readBounded(request);
+      state = await readBounded(request, eot ? EOT_BODY_BYTES : MAX_BODY_BYTES);
     } catch (cause) {
       return cause instanceof BodyTooLarge ? error("body_too_large", 413) : error("invalid_json", 400);
     }
+    if (eot) return eotEvidence(state) ? eotVerdict(state, key) : error("invalid_evidence", 400);
     if (handback) return evidenceV6(state) ? handbackVerdict(state, key) : error("invalid_evidence", 400);
     if (githubItem) return githubItemRequest(state) ? classify(state, key) : error("invalid_github_item_request", 400);
     if (githubItemV2) return githubItemRequestV2(state) ? classify(state, key, 1, false, true) : error("invalid_github_item_request", 400);
