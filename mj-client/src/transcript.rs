@@ -1473,6 +1473,10 @@ impl BrowserTranscriptProjector {
                 }
             }
             self.entries.drain(..keep.saturating_sub(start));
+        } else {
+            // No row survives in Rich mode (for example only successful
+            // standalone terminal output): retain no converted content.
+            self.entries.clear();
         }
         let first = self.published.is_empty();
         for entry in &mut transcript.entries {
@@ -1578,6 +1582,36 @@ mod tests {
                 .map(|entry| (entry.identity(), entry.clone()))
                 .collect();
             transcript
+        }
+    }
+
+    // Hard-won: 27bd415fa: a window whose rows are all hidden kept every converted entry.
+    #[test]
+    fn browser_projector_retains_nothing_when_no_row_survives() {
+        let mut session = MaterializedSession::empty("all-hidden");
+        for position in 1..=2_000 {
+            session.transcript.push(item(
+                position,
+                TranscriptBody::TerminalOutput {
+                    record: TerminalOutputRecord {
+                        terminal_id: format!("clean-{position}"),
+                        output: "raw only\n".repeat(20),
+                        truncated: false,
+                        exit_code: Some(0),
+                        signal: None,
+                    },
+                },
+            ));
+        }
+        session.applied_event_ordinal = 2_001;
+        let mut reference = FullWindowProjector::default();
+        let mut projector = BrowserTranscriptProjector::default();
+        for _ in 0..2 {
+            assert_eq!(
+                serde_json::to_value(projector.project(&session)).unwrap(),
+                serde_json::to_value(reference.project(&session)).unwrap()
+            );
+            assert!(projector.entries.is_empty());
         }
     }
 
