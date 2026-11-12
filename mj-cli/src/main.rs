@@ -10,6 +10,17 @@
 #[global_allocator]
 static GLOBAL_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+// jemalloc defaults to four arenas per CPU: 480 on a 120-vCPU host. The daemon
+// runs hundreds of mostly idle blocking-pool threads, each bound to its own
+// arena, so freed memory sat in partly used slabs across ~260 arenas (measured
+// 2026-11-12: 380 MB of slab fragmentation and 198 MB of metadata against
+// 1.6 GB live). The daemon averages under one core, so a few arenas do not
+// contend. `_RJEM_MALLOC_CONF` still overrides this per process.
+#[cfg(target_os = "linux")]
+#[unsafe(export_name = "_rjem_malloc_conf")]
+static JEMALLOC_CONF: Option<&'static std::ffi::c_char> =
+    Some(unsafe { &*c"narenas:8".as_ptr() });
+
 mod acp;
 #[cfg(unix)]
 mod acp_login;
