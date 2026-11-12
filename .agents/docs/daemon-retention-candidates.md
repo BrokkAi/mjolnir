@@ -1,5 +1,7 @@
 # Daemon retention audit, 2026-11-12
 
+How to measure the daemon, and pitfalls in reading heap and CPU profiles, are in `daemon-profiling.md`.
+
 This is a code-backed ownership audit from the daemon CPU/RSS investigation. Raw evidence is in the private directory `/tmp/mj-daemon-regression-20261111`. The Linux daemon now uses jemalloc; application owners can still retain obsolete values. Per-owner live heap bytes have not been measured.
 
 ## 1. Old unfinished tools pin the live actor's whole history — confirmed
