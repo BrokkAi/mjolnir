@@ -35,6 +35,7 @@ const bootStatus = document.querySelector('#boot-status'),
   workspaceStrip = document.querySelector('#workspaces'),
   workspaceSelect = document.querySelector('#workspace-select'),
   subagentWorkspace = document.querySelector('#subagent-workspace'),
+  notificationsBadge = document.querySelector('#notifications-badge'),
   sessions = document.querySelector('#sessions'),
   resumable = document.querySelector('#resumable'),
   resumeListView = document.querySelector('#resume-list-view'),
@@ -998,6 +999,11 @@ function renderWorkspaces() {
   const workspaces = [{ id: 'notifications', name: 'Notifications' }, ...(snapshot.workspaces || [])];
   workspaceSelect.classList.toggle('hidden', Boolean(parentId) || !workspaces.length);
   subagentWorkspace.classList.toggle('hidden', !parentId);
+  const notificationCount = notificationRows().length;
+  notificationsBadge.classList.toggle('hidden', Boolean(parentId) || !notificationCount);
+  notificationsBadge.textContent = String(notificationCount);
+  notificationsBadge.setAttribute('aria-label',
+    `${notificationCount} notification${notificationCount === 1 ? '' : 's'}; open Notifications`);
   if (parentId) {
     const parent = sessionById(parentId);
     const reviewers = route.childKind === 'reviewer';
@@ -1009,8 +1015,11 @@ function renderWorkspaces() {
     subagentWorkspace.replaceChildren(el('span', '', reviewers ? `Reviewers · ${title}` : title), close);
     return;
   }
-  // Every snapshot re-renders the route. Rebuilding the options only when the
-  // list itself changes keeps a refresh from closing the picker mid-choice.
+  // Every snapshot re-renders the route, and Firefox for Android stacks a
+  // new native picker on each change to an open select until the page stops
+  // responding. So nothing that changes with attention lives in the select:
+  // the notification count is the badge beside it, and the options are
+  // rebuilt only when the workspace list itself changes.
   const options = JSON.stringify(workspaces.map(workspace => [workspace.id, workspace.name]));
   if (workspaceSelect.dataset.options !== options) {
     workspaceSelect.dataset.options = options;
@@ -1022,9 +1031,8 @@ function renderWorkspaces() {
       }),
     );
   }
-  // Attention changes update the existing option rather than rebuilding an open picker.
-  workspaceSelect.options[0].textContent = `Notifications (${notificationRows().length})`;
-  workspaceSelect.value = selectedWorkspaceId() || '';
+  const selected = selectedWorkspaceId() || '';
+  if (workspaceSelect.value !== selected) workspaceSelect.value = selected;
 }
 
 // ---------------------------------------------------------------------------
@@ -1678,7 +1686,9 @@ function attentionParts(session) {
   const queued = session.detail === false
     ? session.queued_prompt_count || 0
     : (session.queued_prompts || []).length;
-  if (queued) parts.push([String(queued), `${queued} queued prompt${queued === 1 ? '' : 's'}`]);
+  // Q marks the count as queued prompts, as the TUI does, so it does not
+  // read as a notification count.
+  if (queued) parts.push([`Q${queued}`, `${queued} queued prompt${queued === 1 ? '' : 's'}`, 'queue']);
   return parts;
 }
 
@@ -1727,8 +1737,8 @@ function updateSessionCard(card, session) {
   );
   renderSessionTitle(card._heading, session);
   card._attention.replaceChildren(
-    ...attention.map(([glyph, label]) => {
-      const node = el('span', `session-attention-item ${['Failed', 'Unreachable', 'Input needed', 'Important'].includes(label) ? 'alert' : ''}`, glyph);
+    ...attention.map(([glyph, label, kind]) => {
+      const node = el('span', `session-attention-item ${kind || (['Failed', 'Unreachable', 'Input needed', 'Important'].includes(label) ? 'alert' : '')}`, glyph);
       node.setAttribute('aria-label', label);
       node.setAttribute('role', 'img');
       node.title = label;
@@ -9238,6 +9248,7 @@ resumeSearch.oninput = () => {
   renderResumable();
 };
 
+notificationsBadge.onclick = () => navigate({ name: 'dashboard', workspaceId: 'notifications' });
 workspaceSelect.onchange = () => {
   navigate({ name: 'dashboard', workspaceId: workspaceSelect.value });
 };

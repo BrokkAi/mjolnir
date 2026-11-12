@@ -175,6 +175,16 @@ async fn reconcile_durable_state(state: &RuntimeState, stop: &CancellationToken)
             "removed pending mailbox messages for stopped children"
         );
     }
+    let pruned_stale_questions =
+        tokio::task::spawn_blocking(crate::database::prune_stale_subagent_questions)
+            .await
+            .context("stale child question cleanup task failed")??;
+    if pruned_stale_questions > 0 {
+        tracing::info!(
+            count = pruned_stale_questions,
+            "removed pending questions whose child can no longer receive an answer"
+        );
+    }
     // Lifecycle recovery can settle a finish after startup reconciliation.
     // Rebuild missing events from durable state on the same bounded sweep
     // that retries their delivery, including after a missed completion update.

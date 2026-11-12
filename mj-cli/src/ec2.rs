@@ -1634,6 +1634,66 @@ else:
 
     // Hard-won: 0703826: an optional image-pull failure stranded a ready, billable VM.
     #[test]
+    fn ssh_setup_selects_existing_service_unit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let setup = include_str!("ec2_sshd.sh")
+            .split("# Measured relay-session refusals")
+            .next()
+            .unwrap();
+        for (available, succeeds) in [("ssh.service", true), ("sshd.service", true), ("", false)] {
+            let directory = tempfile::tempdir().unwrap();
+            let systemctl = directory.path().join("systemctl");
+            fs::write(
+                &systemctl,
+                "#!/bin/sh\nif [ \"$1\" = cat ]; then [ \"$2\" = \"$MJ_SSH_UNIT\" ]; else echo \"$*\" >> \"$MJ_SYSTEMCTL_LOG\"; fi\n",
+            )
+            .unwrap();
+            fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o700)).unwrap();
+            let output = Command::new("/bin/sh")
+                .arg("-c")
+                .arg(setup)
+                .env("PATH", directory.path())
+                .env("MJ_SSH_UNIT", available)
+                .env("MJ_SYSTEMCTL_LOG", directory.path().join("calls"))
+                .output()
+                .unwrap();
+            assert_eq!(output.status.success(), succeeds);
+            if succeeds {
+                assert_eq!(
+                    fs::read_to_string(directory.path().join("calls")).unwrap(),
+                    format!("start {available}\n")
+                );
+            } else {
+                assert!(
+                    String::from_utf8_lossy(&output.stderr)
+                        .contains("Neither ssh.service nor sshd.service exists")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zfs_setup_gives_ubuntu_its_config_directory_before_subdirectories() {
+        // `install -d -o ubuntu .../.config/x` makes a missing ~/.config root-owned; the
+        // user-owned ~/.config must be created first or mbx setup cannot write beside it.
+        let lines: Vec<&str> = include_str!("ec2_zfs.sh").lines().map(str::trim).collect();
+        let first_child = lines
+            .iter()
+            .position(|line| line.contains("/home/ubuntu/.config/"))
+            .expect("the setup writes under /home/ubuntu/.config");
+        let parent = lines
+            .iter()
+            .position(|line| *line == "install -d -o ubuntu -g ubuntu /home/ubuntu/.config")
+            .expect("the setup creates /home/ubuntu/.config owned by ubuntu");
+        assert!(
+            parent < first_child,
+            "~/.config must be created before {:?}",
+            lines[first_child]
+        );
+    }
+
+    #[test]
     fn image_download_failure_warns_and_registers_the_usable_host() {
         if fixture_child(
             "ec2::tests::image_download_failure_warns_and_registers_the_usable_host",

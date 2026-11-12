@@ -329,6 +329,47 @@ pub(crate) fn prune_pending_messages_for_stopped_children() -> Result<usize> {
     )
 }
 
+/// A question forwarded to a parent invites a `send_message` answer. When the
+/// asking child can no longer receive one, the pending invitation can only
+/// fail; remove it. Accepted history stays.
+pub(crate) fn prune_stale_subagent_questions() -> Result<usize> {
+    submit_database_write("prune stale subagent questions", |connection| {
+        prune_stale_subagent_questions_with(connection)
+    })
+}
+
+pub(super) fn prune_stale_subagent_questions_with(connection: &Connection) -> Result<usize> {
+    let rows = connection
+            .prepare(
+                "SELECT mailbox_outbox.event_key, sessions.state
+                 FROM mailbox_outbox
+                 LEFT JOIN sessions
+                   ON sessions.session_id = json_extract(mailbox_outbox.event_json, '$.body.from.id')
+                 WHERE mailbox_outbox.accepted_at IS NULL
+                   AND mailbox_outbox.event_key LIKE 'subagent-question-%'",
+            )?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut removed = 0;
+    for (key, state) in rows {
+        // A child row that is gone entirely can receive nothing either.
+        let receivable = state
+            .as_deref()
+            .and_then(mj_core::state::SessionState::from_stored)
+            .is_some_and(mj_core::state::SessionState::can_receive_child_work);
+        if receivable {
+            continue;
+        }
+        removed += connection.execute(
+            "DELETE FROM mailbox_outbox WHERE event_key=?1 AND accepted_at IS NULL",
+            [key],
+        )?;
+    }
+    Ok(removed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,6 +394,105 @@ mod tests {
             false,
         )
         .unwrap();
+    }
+
+    fn enqueue_question(connection: &Connection, parent: &str, child: &str, key: &str) {
+        let event = mj_core::mailbox::MailboxEvent {
+            key: key.into(),
+            source: "session_message".into(),
+            wake: true,
+            created_at_ms: 1,
+            body: mj_core::mailbox::MailboxEventBody::SessionMessage {
+                from: mj_core::mailbox::Sender::Session {
+                    id: child.into(),
+                    title: child.into(),
+                },
+                text: format!(
+                    "Your sub-agent asked this question: pick one. Answer with send_message to session_id {child}."
+                ),
+            },
+        };
+        enqueue_mailbox_event_with(
+            connection,
+            key,
+            parent,
+            &serde_json::to_string(&event).unwrap(),
+            true,
+            true,
+        )
+        .unwrap();
+    }
+
+    // Hard-won: #1345: a forwarded question outlived the child that could
+    // receive its answer; delivery then invited a send_message that failed.
+    /// Pending questions from children that stopped, closed, or vanished are
+    /// pruned; a live child's question and accepted delivery history stay.
+    #[test]
+    fn stale_child_questions_are_pruned_but_live_and_accepted_ones_stay() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("mj.sqlite3");
+        let mut parent = super::super::tests::session("parent", "project");
+        parent.state = SessionState::Running;
+        save_session_to(&path, &parent).unwrap();
+        for (child, state) in [
+            ("running-child", SessionState::Running),
+            ("stopped-child", SessionState::Stopped),
+            ("gone-child", SessionState::Running),
+        ] {
+            let mut record = super::super::tests::session(child, "project");
+            record.state = state;
+            save_session_to(&path, &record).unwrap();
+        }
+        let connection = open(&path).unwrap();
+        enqueue_question(
+            &connection,
+            "parent",
+            "running-child",
+            "subagent-question-running-child-1",
+        );
+        enqueue_question(
+            &connection,
+            "parent",
+            "stopped-child",
+            "subagent-question-stopped-child-1",
+        );
+        enqueue_question(
+            &connection,
+            "parent",
+            "gone-child",
+            "subagent-question-gone-child-1",
+        );
+        enqueue_question(
+            &connection,
+            "parent",
+            "stopped-child",
+            "subagent-question-stopped-child-2",
+        );
+        // Accepted delivery history is not pruned.
+        connection
+            .execute(
+                "UPDATE mailbox_outbox SET accepted_at='now' WHERE event_key='subagent-question-stopped-child-2'",
+                [],
+            )
+            .unwrap();
+        // The child row disappearing entirely is terminal too. The deletion
+        // trigger removes rows addressed TO it; questions FROM it remain.
+        connection
+            .execute("DELETE FROM sessions WHERE session_id='gone-child'", [])
+            .unwrap();
+        assert_eq!(prune_stale_subagent_questions_with(&connection).unwrap(), 2);
+        let remaining = |pattern: &str| {
+            connection
+                .query_row(
+                    "SELECT count(*) FROM mailbox_outbox WHERE event_key LIKE ?1",
+                    [pattern],
+                    |row| row.get::<_, u64>(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(remaining("subagent-question-running-child-%"), 1);
+        assert_eq!(remaining("subagent-question-stopped-child-%"), 1);
+        assert_eq!(remaining("subagent-question-gone-child-%"), 0);
     }
 
     fn complete_clear(path: &Path, fail: bool) -> Result<()> {
