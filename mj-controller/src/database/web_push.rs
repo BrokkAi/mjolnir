@@ -159,6 +159,10 @@ fn push_observe_at_with(
     tx.commit()?;
     Ok(())
 }
+#[cfg(test)]
+pub(crate) fn same_episode_for_tests(previous: &str, next: &str) -> Result<bool> {
+    same_episode(previous, next)
+}
 fn same_episode(previous: &str, next: &str) -> Result<bool> {
     let (old_kind, old): (String, Vec<String>) =
         serde_json::from_str(previous).context("read persisted push episode sources")?;

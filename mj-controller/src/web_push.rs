@@ -277,6 +277,23 @@ fn episodes(runtime: &mj_client::runtime_feed::RuntimeProjection) -> Vec<(String
                     identities.push(format!("{source}:native:{}", native.generation_ordinal));
                 }
             }
+            // Reviewer questions raise NeedsInput in the attention projection
+            // too, so a new one must start a new episode.
+            for review in &runtime.metadata.reviews {
+                if !belongs_to_session(&review.session_id) {
+                    continue;
+                }
+                for asked in &review.questions {
+                    let text = asked.request.question_text();
+                    identities.push(format!(
+                        "{}:review:{}:{}:{text}",
+                        review.session_id, asked.role, asked.request.id
+                    ));
+                    if question.is_empty() {
+                        question = text;
+                    }
+                }
+            }
             identities.sort();
             // The database owner assigns a persistent sequence on entry or a
             // newly added source. Removing an answered form is not a new episode.
@@ -476,6 +493,55 @@ mod tests {
     fn decode(value: &str) -> Vec<u8> {
         B64.decode(value).unwrap()
     }
+    // Hard-won: e91f61f8e: a second reviewer question reused the delivered episode.
+    #[test]
+    fn a_new_review_question_starts_a_new_push_episode() {
+        use mj_core::attention::SessionAttention;
+        let question = |id: &str| mj_client::review::ReviewerQuestion {
+            role: "reviewer".into(),
+            request: mj_core::elicitation::ElicitationRequest {
+                id: id.into(),
+                message: format!("question {id}"),
+                title: None,
+                description: None,
+                fields: Vec::new(),
+                tool_permission: None,
+            },
+        };
+        let mut runtime = mj_client::runtime_feed::RuntimeProjection::default();
+        runtime.records.insert(
+            "s".into(),
+            crate::daemon::tests::runtime_test_session(
+                "s",
+                "workspace",
+                mj_core::state::SessionState::Running,
+            ),
+        );
+        runtime
+            .metadata
+            .session_attention
+            .insert("s".into(), SessionAttention::NeedsInput);
+        let review = |questions| mj_client::review::RuntimeReviewView {
+            child_session_id: None,
+            session_id: "s".into(),
+            phase: mj_core::review::driver::TurnReviewPhase::Running { roles: Vec::new() },
+            roles: Vec::new(),
+            status: String::new(),
+            verdict: None,
+            questions,
+        };
+        runtime.metadata.reviews = vec![review(vec![question("review.a")])];
+        let first = episodes(&runtime);
+        runtime.metadata.reviews = vec![review(vec![question("review.a"), question("review.b")])];
+        let second = episodes(&runtime);
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert!(
+            !crate::database::web_push::same_episode_for_tests(&first[0].1, &second[0].1).unwrap(),
+            "a newly added reviewer question must be a new episode"
+        );
+    }
+
     #[test]
     fn rfc8291_published_encryption_vector_and_vapid_signature_verify() {
         // RFC 8291 Appendix A: independent, published interoperability fixture.

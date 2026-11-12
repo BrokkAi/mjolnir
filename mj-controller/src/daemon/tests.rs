@@ -1504,7 +1504,7 @@ pub(super) fn runtime_test_config() -> Config {
     config
 }
 
-pub(super) fn runtime_test_session(
+pub(crate) fn runtime_test_session(
     id: &str,
     workspace_id: &str,
     state: SessionState,

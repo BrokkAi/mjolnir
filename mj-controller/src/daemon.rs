@@ -847,7 +847,7 @@ pub(crate) use guards::*;
 mod dashboard_reads;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub(crate) mod continuation;
 
