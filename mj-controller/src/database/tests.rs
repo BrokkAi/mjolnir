@@ -8094,3 +8094,126 @@ fn history_pages_join_parked_terminal_output_without_changing_page_boundaries() 
         );
     }
 }
+
+#[test]
+fn terminal_output_for_evicted_owner_parks_and_joins_history_pages() {
+    use mj_core::relay::{RELAY_EVENT_FORMAT_V1, RelayEvent, RelayObservation};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("history.sqlite3");
+    let mut full = long_conversation();
+    let mut owner = materialized_session(&full.session_id).transcript[2].clone();
+    if let TranscriptBody::Tool { terminal_refs, .. } = &mut Arc::make_mut(&mut owner).body {
+        terminal_refs.push("evicted-terminal".into());
+    }
+    full.transcript[2] = owner.clone();
+    save_session_to(&path, &session(&full.session_id, "project-1")).unwrap();
+    save_materialized_session_to(&path, &full).unwrap();
+    let (mut live, _) = load_materialized_actor_projection_from(&path, &full.session_id)
+        .unwrap()
+        .unwrap();
+    assert!(
+        !live
+            .transcript
+            .iter()
+            .any(|item| item.stable_id == owner.stable_id)
+    );
+    let output = "output from an evicted terminal owner";
+    let mut event = RelayEvent {
+        format: RELAY_EVENT_FORMAT_V1,
+        ordinal: 2501,
+        previous_digest: full.applied_event_digest.clone(),
+        digest: String::new(),
+        recorded_at_ms: 5000,
+        command_id: None,
+        observation: RelayObservation::TerminalOutput {
+            terminal_id: "evicted-terminal".into(),
+            output: output.into(),
+            truncated: false,
+            exit_code: Some(0),
+            signal: None,
+        },
+    };
+    event.digest = mj_core::relay::relay_event_digest(&event).unwrap();
+    let references =
+        load_projection_references_from(&path, &live, std::slice::from_ref(&event)).unwrap();
+    assert!(
+        references.is_empty(),
+        "terminal output must not scan history for its owner"
+    );
+    let mutation = mj_transcript::projection::project_relay_event(&live, &event)
+        .unwrap()
+        .mutation;
+    apply_projection_page_to(&path, &full.session_id, |page| {
+        page.apply(
+            event.ordinal,
+            &event.previous_digest,
+            &event.digest,
+            &mutation,
+        )
+    })
+    .unwrap();
+    mj_transcript::projection::apply_committed_projection_event(&mut live, &event, mutation)
+        .unwrap();
+    let stored = load_materialized_session_from(&path, &full.session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        &**stored
+            .transcript
+            .iter()
+            .find(|item| item.stable_id == owner.stable_id)
+            .unwrap(),
+        &*owner
+    );
+    assert!(
+        stored
+            .transcript
+            .iter()
+            .any(|item| item.stable_id == "terminal:evicted-terminal")
+    );
+    for roles in [vec![], vec![mj_core::transcript::TranscriptRole::Tool]] {
+        let page =
+            load_materialized_transcript_filtered_from(&path, &full.session_id, 2, 1, roles, false)
+                .unwrap()
+                .unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].stable_id, owner.stable_id);
+        let outputs =
+            mj_core::transcript::TerminalOutputs::of(page.items.iter().map(AsRef::as_ref));
+        let text =
+            mj_transcript::transcript::transcript_item_text_with_outputs(&page.items[0], &outputs);
+        assert_eq!(text.matches(output).count(), 1);
+    }
+    let before = mj_core::storage::TranscriptCursor::of(&full.transcript[3]);
+    let page = load_transcript_history_from(&path, &full.session_id, Some(&before), 1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        mj_client::transcript::history_entries(&page)[0]
+            .text
+            .matches(output)
+            .count(),
+        1
+    );
+    let all = mj_core::storage::TranscriptHistoryPage {
+        items: stored.transcript.clone(),
+        before: None,
+        frontier: stored.applied_event_ordinal,
+    };
+    assert_eq!(
+        mj_client::transcript::history_entries(&all)
+            .iter()
+            .map(|entry| entry.text.matches(output).count())
+            .sum::<usize>(),
+        1
+    );
+    let entries = mj_client::transcript::materialized_chat_entries(&stored);
+    assert_eq!(
+        entries
+            .iter()
+            .flat_map(|entry| &entry.tool_content)
+            .map(|text| text.matches(output).count())
+            .sum::<usize>(),
+        1
+    );
+}

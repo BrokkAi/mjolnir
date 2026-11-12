@@ -1131,7 +1131,7 @@ pub(super) fn load_projection_references_from(
     projection: &MaterializedSession,
     events: &[mj_core::relay::RelayEvent],
 ) -> Result<Vec<Arc<TranscriptItem>>> {
-    let mj_transcript::projection::HistoricalReferences { mut ids, terminals } =
+    let mj_transcript::projection::HistoricalReferences { mut ids } =
         mj_transcript::projection::historical_references(events)?;
     let retained = projection
         .transcript
@@ -1139,30 +1139,20 @@ pub(super) fn load_projection_references_from(
         .map(|item| item.stable_id.as_str())
         .collect::<std::collections::HashSet<_>>();
     ids.retain(|id| !retained.contains(id.as_str()));
-    if ids.is_empty() && terminals.is_empty() {
+    if ids.is_empty() {
         return Ok(Vec::new());
     }
     let mut reader = open_reader(path)?;
     let connection = reader.transaction()?;
-    // Ordinary tool updates use the stable-ID index. Only terminal attachment
-    // events need the JSON reverse-reference scan.
-    let mut parameters = vec![projection.session_id.clone(), serde_json::to_string(&ids)?];
-    let mut statement = connection.prepare(if terminals.is_empty() {
+    // Reconcile only explicit keys. Terminal owners are indexed in the live
+    // projection; output for evicted owners stays parked until read or claimed.
+    let parameters = vec![projection.session_id.clone(), serde_json::to_string(&ids)?];
+    let mut statement = connection.prepare(
         "SELECT stable_id, position, latest_content_event_ordinal, created_at_ms,
                 last_changed_at_ms, body_json FROM materialized_transcript_items
          WHERE session_id=?1 AND stable_id IN (SELECT value FROM json_each(?2))
-         ORDER BY position,stable_id"
-    } else {
-        parameters.push(serde_json::to_string(&retained)?);
-        parameters.push(serde_json::to_string(&terminals)?);
-        "SELECT stable_id, position, latest_content_event_ordinal, created_at_ms,
-                last_changed_at_ms, body_json FROM materialized_transcript_items
-         WHERE session_id=?1 AND stable_id NOT IN (SELECT value FROM json_each(?3))
-           AND (stable_id IN (SELECT value FROM json_each(?2))
-             OR EXISTS(SELECT 1 FROM json_each(body_json, '$.terminal_refs')
-                       WHERE value IN (SELECT value FROM json_each(?4))))
-         ORDER BY position,stable_id"
-    })?;
+         ORDER BY position,stable_id",
+    )?;
     let rows = statement
         .query_map(rusqlite::params_from_iter(parameters), |row| {
             Ok((

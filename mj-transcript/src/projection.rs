@@ -63,7 +63,6 @@ pub struct ProjectionIndex {
 
 pub struct HistoricalReferences {
     pub ids: Vec<String>,
-    pub terminals: Vec<String>,
 }
 
 /// Explicit references that may address rows older than a live window. Keep
@@ -155,7 +154,6 @@ pub fn historical_references(events: &[RelayEvent]) -> Result<HistoricalReferenc
     }
     Ok(HistoricalReferences {
         ids: ids.into_iter().collect(),
-        terminals: terminals.into_iter().collect(),
     })
 }
 
