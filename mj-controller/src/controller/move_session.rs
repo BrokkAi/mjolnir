@@ -1064,7 +1064,6 @@ impl Controller {
             !self.state.subagents.contains_key(&source.id),
             "sub-agent sessions cannot move independently of their parent"
         );
-        super::resume::ensure_full_history_allowed(source)?;
         let previous = crate::database::load_move_operation(&source.id)?;
         // The sealed selection owns retry defaults. Reconstructing them from
         // the source can change the destination or lose an explicit policy.
@@ -1360,6 +1359,25 @@ impl Controller {
         executor: &(impl CommandExecutor + Sync),
         manager: &SessionManagerControl,
     ) -> Result<MoveOutcome> {
+        self.move_session_managed_controlled_with_admission(
+            request,
+            quota_move,
+            executor,
+            manager,
+            || {},
+        )
+        .await
+    }
+
+    /// Publish acceptance only after the existing Move intent is committed.
+    pub(crate) async fn move_session_managed_controlled_with_admission(
+        &mut self,
+        request: MoveSessionRequest,
+        quota_move: Option<(String, mj_core::state::QuotaMoveContinuation)>,
+        executor: &(impl CommandExecutor + Sync),
+        manager: &SessionManagerControl,
+        on_accepted: impl FnOnce() + Send,
+    ) -> Result<MoveOutcome> {
         crate::worker_lifecycle::run(&request.preparation.selection.session_id.clone(), "move session managed controlled", executor, async {
         let prepared = &request.preparation;
         let id = prepared.selection.session_id.clone();
@@ -1446,6 +1464,7 @@ impl Controller {
             op.selection == prepared.selection && op.checkpoint_retained()
         });
         if retry.is_none() && move_changes_nothing(&source, &checked.selection) {
+            on_accepted();
             return Ok(outcome(
                 &prepared.operation_id,
                 &prepared.selection,
@@ -1533,6 +1552,7 @@ impl Controller {
         operation.accepted_preparation = Some(Box::new(checked.clone()));
         operation.acknowledge_interruption = request.acknowledge_interruption;
         crate::database::save_move_operation(&operation)?;
+        on_accepted();
         tracing::info!(
             session_id = id,
             in_place = operation.in_place,
@@ -1587,7 +1607,7 @@ impl Controller {
         &mut self,
         operation: &mut MoveOperation,
         result: Result<()>,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
     ) -> Result<MoveOutcome> {
         if result.is_err()
             && operation.workspace_transfer.is_some()
@@ -2355,7 +2375,7 @@ impl Controller {
             );
             let spec = self.reconnect_command(id)?;
             let relay = Box::pin(StandaloneSession::connect_command(&spec, id)).await?;
-            let store_id = relay.snapshot().operational.store_id.context("destination worker does not expose its durable store identity; upgrade the worker before admitting queued work")?;
+            let store_id = relay.snapshot().operational.store_id.clone().context("destination worker does not expose its durable store identity; upgrade the worker before admitting queued work")?;
             if let Some(expected) = &operation.destination_store_id {
                 ensure!(
                     *expected == store_id,

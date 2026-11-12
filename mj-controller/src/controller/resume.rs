@@ -927,6 +927,9 @@ impl Controller {
                 }
                 None => {}
             }
+            // Restore imports only the archived delta; its origin configuration
+            // is removed and the cutoff checked before any worker can run.
+            self.verify_history_cutoff_workspace(session_id, &backend, executor)?;
             let readiness_stage = bridge_readiness_stage(profile);
             let spec = self.reconnect_command(session_id)?;
             let readiness = async {
@@ -1151,21 +1154,6 @@ fn load_in_place_subagent_prompt_data(
 /// Canonicalizing first keeps one exact absolute path for the restore. The
 /// digest and session id must both match the record, and a legacy host-bridge
 /// archive is refused here rather than part way through a restore.
-/// Resume and Move clone the repository again from its origin, which would
-/// bring back every later commit, so a session that started without later
-/// history refuses them.
-pub(super) fn ensure_full_history_allowed(session: &SessionRecord) -> Result<()> {
-    ensure!(
-        !session
-            .checkout
-            .as_ref()
-            .is_some_and(|checkout| checkout.no_later_history),
-        "session {} was started without later history, and resuming or moving it would clone the full history; start a new session instead",
-        session.id
-    );
-    Ok(())
-}
-
 pub(super) fn verify_resume_checkpoint(
     session_id: &str,
     checkpoint: &mj_core::state::CheckpointMetadata,
@@ -1508,6 +1496,30 @@ impl Controller {
         repository_preflight: Option<ResumeRepositorySourceReceipt>,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<MaterializedSession> {
+        self.resume_session_controlled_with_repository_preflight_and_admission(
+            session_id,
+            profile_id,
+            target_id,
+            options,
+            repository_preflight,
+            executor,
+            || {},
+        )
+        .await
+    }
+
+    // Keep the established resume arguments together with its admission hook.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn resume_session_controlled_with_repository_preflight_and_admission(
+        &mut self,
+        session_id: &str,
+        profile_id: &str,
+        target_id: &str,
+        options: SessionResumeOptions,
+        repository_preflight: Option<ResumeRepositorySourceReceipt>,
+        executor: &(impl CommandExecutor + Sync),
+        on_accepted: impl FnOnce() + Send,
+    ) -> Result<MaterializedSession> {
         self.resume_session_with_origin(
             session_id,
             profile_id,
@@ -1516,6 +1528,7 @@ impl Controller {
             repository_preflight,
             None,
             executor,
+            on_accepted,
         )
         .await
     }
@@ -1545,6 +1558,7 @@ impl Controller {
             None,
             Some(operation),
             executor,
+            || {},
         )
         .await
     }
@@ -1559,6 +1573,7 @@ impl Controller {
         repository_preflight: Option<ResumeRepositorySourceReceipt>,
         move_operation: Option<&mj_core::state::MoveOperation>,
         executor: &(impl CommandExecutor + Sync),
+        on_accepted: impl FnOnce() + Send,
     ) -> Result<MaterializedSession> {
         crate::worker_lifecycle::run(session_id, "resume session with origin", executor, async {
             crate::worker_lifecycle::require(session_id)?.verify_cached_target(&self.state)?;
@@ -1596,7 +1611,6 @@ impl Controller {
         {
             bail!("session {session_id} is not stopped, lost, or retryable");
         }
-        ensure_full_history_allowed(&previous)?;
         let checkpoint = move_operation
             .and_then(|op| op.handoff.as_ref())
             .or(previous.checkpoint.as_ref())
@@ -1910,6 +1924,7 @@ impl Controller {
                 .as_ref()
                 .map(|(host, size)| (host.as_str(), *size)),
         )?;
+        on_accepted();
         if let Some((host, size)) = selected_container_size.as_ref() {
             self.state.remember_container_size(host, *size);
         }

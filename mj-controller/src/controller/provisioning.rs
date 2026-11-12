@@ -328,7 +328,7 @@ impl Controller {
     pub(crate) fn cleanup_failed_startup_controlled(
         &mut self,
         session_id: &str,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
         self.finish_failed_startup_controlled(session_id, executor, false)
     }
@@ -336,7 +336,7 @@ impl Controller {
     fn finish_failed_startup_controlled(
         &mut self,
         session_id: &str,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
         retry_after_stop: bool,
     ) -> Result<()> {
         crate::worker_lifecycle::run_blocking(
@@ -490,7 +490,7 @@ impl Controller {
         &mut self,
         session_id: &str,
         error: anyhow::Error,
-        target_cleanup_executor: &impl CommandExecutor,
+        target_cleanup_executor: &(impl CommandExecutor + Sync),
     ) -> Result<anyhow::Error> {
         let session = self
             .state
@@ -712,6 +712,13 @@ impl Controller {
             } else {
                 Some(backend_session_bundle(&session, &self.config, executor)?)
             };
+            if let Some(bundle) = bundle.as_mut() {
+                super::backend::apply_session_history_cutoff(
+                    &session,
+                    &self.config,
+                    bundle,
+                )?;
+            }
             let container_github_token =
                 github_token.filter(|_| {
                     !session.no_github_credentials && configure_github_token_environment(&mut target)
@@ -788,6 +795,10 @@ impl Controller {
                     .as_ref()
                     .context("project bundle disappeared during provisioning")
                     .and_then(|bundle| {
+                        if matches!(target, targets::TargetTemplate::LocalBare) {
+                            let (_, worker_root) = self.worker_placement(session_id)?;
+                            return targets::provision_local_bundle_plan(bundle, &worker_root, github_token);
+                        }
                         targets::provision_plan_named(
                             &target,
                             session_id,
@@ -1352,7 +1363,7 @@ fn execute_repository_setup(
 fn failed_environment_creation_cleanup(
     environment: &crate::database::EnvironmentRecord,
     config: &Config,
-    executor: &impl CommandExecutor,
+    executor: &(impl CommandExecutor + Sync),
 ) -> String {
     match super::environment::retire_owned_environment(
         environment.clone(),

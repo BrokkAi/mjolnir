@@ -167,6 +167,7 @@ impl RelayClient {
                 state_digest,
             } => {
                 state.relay_protocol_version = Some(self.protocol_version);
+                let state = mj_core::snapshot_map::SharedSnapshot::from(state);
                 self.known_state = state_digest.map(|digest| (digest, state.clone()));
                 (state, events, through_ordinal, through_digest)
             }

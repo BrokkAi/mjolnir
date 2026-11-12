@@ -117,6 +117,18 @@ impl ActiveChat {
             ChatAction::None => return ChatEventOutcome::None,
             ChatAction::OpenSubagents => return ChatEventOutcome::OpenSubagents,
             ChatAction::OpenReviewers => return ChatEventOutcome::OpenReviewers,
+            ChatAction::DismissSubmission { command_id } => {
+                self.state.dismiss_submission(&command_id);
+            }
+            ChatAction::ResendSubmission { command_id } => {
+                if let Some(operation) = self.state.resend_submission(&command_id) {
+                    queue_chat_remote_operation(
+                        self.remote.operations(),
+                        operation,
+                        &mut self.state,
+                    );
+                }
+            }
             ChatAction::Prompt(text) => {
                 let images = self.state.take_submitting_images();
                 if !images.is_empty() && !self.state.prompt_images_supported {

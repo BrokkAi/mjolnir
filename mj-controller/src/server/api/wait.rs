@@ -379,7 +379,7 @@ pub(super) fn build_observation(
         && view.connected
         && let Some(snapshot) = &view.snapshot
     {
-        observation.background_work = Some(ApiBackgroundWork::from(&snapshot.operational));
+        observation.background_work = Some(ApiBackgroundWork::from(&*snapshot.operational));
         observation.assessment = snapshot.operational.assessment.as_deref().map(Into::into);
     }
     if let Some(snapshot) = live.and_then(|view| view.snapshot.as_ref()) {

@@ -39,6 +39,15 @@ impl RuntimeState {
     /// several-hundred-megabyte buffer and then refused to send it. The
     /// projection is already durable; a viewer reads it from the store.
     pub async fn resume_session(self: &Arc<Self>, request: ResumeSessionRequest) -> Result<()> {
+        let started = self.start_resume_session(request).await?;
+        Self::wait_lifecycle_result(started.result).await?;
+        Ok(())
+    }
+
+    pub(super) async fn start_resume_session(
+        self: &Arc<Self>,
+        request: ResumeSessionRequest,
+    ) -> Result<StartedLifecycle> {
         let _admission = self
             .workspace_resume_gate(&request.workspace_id)
             .read_owned()
@@ -59,20 +68,30 @@ impl RuntimeState {
             }
         })
         .await?;
-        if already_running {
-            return Ok(());
-        }
-        let _capacity_reservation = self.reserve_resume_container_capacity(&request).await?;
+        let _capacity_reservation = if already_running {
+            None
+        } else {
+            self.reserve_resume_container_capacity(&request).await?
+        };
         let profile_id = request.profile_id.clone();
         let target_template_id = request.target_template_id.clone();
         let workspace_id = request.workspace_id.clone();
         let rebind_workspace_id = workspace_id.clone();
         let operation_session_id = session_id.clone();
-        let result = self.start_or_join_lifecycle_for_workspace(
+        let key = serde_json::to_string(&request)?;
+        let (accepted, acceptance) = tokio::sync::watch::channel(None);
+        let result = self.admit_prepared_lifecycle(
             session_id,
             LifecycleKind::Resume,
-            Some(workspace_id),
+            super::lifecycle::LifecycleStart::request(key, Some(workspace_id), None),
+            Some(acceptance),
             move |state, session_id, cancelled| async move {
+                let _admission = _admission;
+                let _capacity_reservation = _capacity_reservation;
+                if already_running {
+                    accepted.send_replace(Some(Ok(())));
+                    return Ok(DaemonLifecycleResult::Done);
+                }
                 let _recovery_reservation = tokio::task::spawn_blocking({
                     let observer = state.recovery_observer.clone();
                     let session_id = session_id.clone();
@@ -103,7 +122,7 @@ impl RuntimeState {
                     session_id.clone(),
                 );
                 let materialized = controller
-                    .resume_session_controlled_with_repository_preflight(
+                    .resume_session_controlled_with_repository_preflight_and_admission(
                         &session_id,
                         &request.profile_id,
                         &request.target_template_id,
@@ -114,12 +133,29 @@ impl RuntimeState {
                         },
                         request.repository_preflight,
                         &executor,
+                        move || {
+                            accepted.send_replace(Some(Ok(())));
+                        },
                     )
                     .await?;
                 // The projection stays where it was written. A viewer reads
                 // it from the store; shipping it back through the daemon
                 // reply put a whole transcript in one IPC frame.
                 let _ = materialized;
+                blocking(move || {
+                    if let Some(mut operation) = crate::database::load_move_operation(&session_id)?
+                        && !operation.queue_admission_started
+                    {
+                        operation.phase = mj_core::state::MovePhase::Cancelled;
+                        operation.queue_admission_finished = true;
+                        operation.updated_at = chrono::Utc::now().to_rfc3339();
+                        operation.error =
+                            Some("Recovered through an explicit Resume operation".into());
+                        crate::database::save_move_operation(&operation)?;
+                    }
+                    Ok(())
+                })
+                .await?;
                 Ok(DaemonLifecycleResult::Done)
             },
         )?;
@@ -128,33 +164,7 @@ impl RuntimeState {
             profile_id,
             target_template_id,
         );
-        let channel = result.clone();
-        let result = Self::wait_lifecycle_result(result).await;
-        self.remove_completed_lifecycle(&channel);
-        match result? {
-            DaemonLifecycleResult::Done => {}
-            DaemonLifecycleResult::Move(_) | DaemonLifecycleResult::Park(_) => {
-                unreachable!("resume cannot return a move outcome")
-            }
-            DaemonLifecycleResult::DeferredCleanup => {
-                unreachable!("session resume cannot schedule target cleanup")
-            }
-        }
-        blocking(move || {
-            if let Some(mut operation) =
-                crate::database::load_move_operation(&operation_session_id)?
-                && !operation.queue_admission_started
-            {
-                operation.phase = mj_core::state::MovePhase::Cancelled;
-                operation.queue_admission_finished = true;
-                operation.updated_at = chrono::Utc::now().to_rfc3339();
-                operation.error = Some("Recovered through an explicit Resume operation".into());
-                crate::database::save_move_operation(&operation)?;
-            }
-            Ok(())
-        })
-        .await?;
-        Ok(())
+        Ok(result)
     }
 
     pub(super) async fn discard_since_checkpoint(
@@ -162,30 +172,48 @@ impl RuntimeState {
         session_id: String,
         checkpoint: mj_core::state::CheckpointMetadata,
     ) -> Result<()> {
+        let started = self.start_discard_session(session_id, checkpoint).await?;
+        Self::wait_lifecycle_result(started.result).await?;
+        Ok(())
+    }
+
+    pub(super) async fn start_discard_session(
+        self: &Arc<Self>,
+        session_id: String,
+        checkpoint: mj_core::state::CheckpointMetadata,
+    ) -> Result<StartedLifecycle> {
         let operation_session_id = session_id.clone();
-        let result = self
-            .run_lifecycle(
-                operation_session_id,
-                LifecycleKind::ForceStop,
-                move |state, session_id, cancelled| async move {
-                    // Refuse before anything stops when the copy changed.
+        let key = serde_json::to_string(&checkpoint)?;
+        let control = LifecycleControl::default();
+        let (accepted, acceptance) = tokio::sync::watch::channel(None);
+        let result = self.admit_prepared_lifecycle(
+            operation_session_id,
+            LifecycleKind::ForceStop,
+            super::lifecycle::LifecycleStart::request(key, None, Some(control.clone())),
+            Some(acceptance),
+            move |state, session_id, cancelled| async move {
+                let failure_state = state.clone();
+                let failure_session = session_id.clone();
+                let result = async {
                     blocking({
                         let session_id = session_id.clone();
                         let checkpoint = checkpoint.clone();
+                        let cancelled = cancelled.clone();
+                        let state = state.clone();
                         move || {
-                            ensure!(
-                                Controller::load()?
-                                    .state
-                                    .sessions
-                                    .get(&session_id)
-                                    .and_then(|s| s.checkpoint.as_ref())
-                                    == Some(&checkpoint),
-                                "the recovery copy changed; review it before discarding changes"
+                            let mut controller = Controller::load()?;
+                            let executor = DaemonStageReportingExecutor::new(
+                                CancellableProcessExecutor::new(cancelled),
+                                state,
+                                session_id.clone(),
                             );
-                            Ok(())
+                            controller.prepare_discard(&session_id, &checkpoint, &executor, || {
+                                Self::commit_close(&control)
+                            })
                         }
                     })
                     .await?;
+                    accepted.send_replace(Some(Ok(())));
                     // The parent is about to go back to an older recovery
                     // copy, and its sub-agents stop exactly as they do when
                     // it is suspended.
@@ -214,15 +242,17 @@ impl RuntimeState {
                         })
                     })
                     .await
-                },
-            )
-            .await;
-        if result.is_err() {
-            self.tell_live_parent_about_stopped_subagents(&session_id)
+                }
                 .await;
-        }
-        let _ = result?; // The lifecycle supervisor owns the cleanup handoff.
-        Ok(())
+                if result.is_err() {
+                    failure_state
+                        .tell_live_parent_about_stopped_subagents(&failure_session)
+                        .await;
+                }
+                result
+            },
+        )?;
+        Ok(result)
     }
 
     pub(super) async fn destroy_stopped_session(
@@ -681,11 +711,22 @@ impl RuntimeState {
         session_id: String,
         branch: BranchDisposition,
     ) -> Result<()> {
-        // The destroy holds this from the acknowledgement to its last step, so
-        // a graceful stop or handoff waits for it, sub-agents first (#1191).
-        let _upgrade_work = crate::upgrade::destroy_activity(&session_id)?;
-        self.index_before_destroy(&session_id).await;
-        self.force_destroy_indexed_session(session_id, branch, LifecycleKind::ForceDestroy)
+        let started = self
+            .start_destroy_session(session_id, branch, LifecycleKind::ForceDestroy, true)
+            .await?;
+        Self::wait_lifecycle_result(started.result).await?;
+        Ok(())
+    }
+
+    pub(super) async fn start_destroy_session(
+        self: &Arc<Self>,
+        session_id: String,
+        branch: BranchDisposition,
+        kind: LifecycleKind,
+        index: bool,
+    ) -> Result<StartedLifecycle> {
+        let requested_session_id = session_id.clone();
+        self.start_destroy_indexed_tree(session_id, branch, kind, requested_session_id, index)
             .await
     }
 
@@ -704,42 +745,73 @@ impl RuntimeState {
             .await
     }
 
-    async fn destroy_indexed_tree(
+    fn destroy_indexed_tree(
         self: &Arc<Self>,
         session_id: String,
         branch: BranchDisposition,
         kind: LifecycleKind,
         requested_session_id: String,
-    ) -> Result<()> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+        Box::pin(async move {
+            let started = self
+                .start_destroy_indexed_tree(session_id, branch, kind, requested_session_id, false)
+                .await?;
+            Self::wait_lifecycle_result(started.result).await?;
+            Ok(())
+        })
+    }
+
+    async fn start_destroy_indexed_tree(
+        self: &Arc<Self>,
+        session_id: String,
+        branch: BranchDisposition,
+        kind: LifecycleKind,
+        requested_session_id: String,
+        index: bool,
+    ) -> Result<StartedLifecycle> {
+        let key =
+            serde_json::to_string(&(kind.label(), matches!(branch, BranchDisposition::Delete)))?;
+        if let Some(started) = self.join_lifecycle(&session_id, kind, &key)? {
+            return Ok(started);
+        }
+        let _upgrade_work = crate::upgrade::destroy_activity(&requested_session_id)?;
         self.preempt_active_lifecycle(&session_id).await?;
-        let children = blocking({
-            let session_id = session_id.clone();
-            move || crate::database::begin_session_destroy(&session_id)
-        })
-        .await?;
-        for child_id in children {
-            // Sub-agents borrow their parent's worker and own no branch.
-            Box::pin(self.destroy_indexed_tree(
-                child_id.clone(),
-                BranchDisposition::Keep,
-                kind,
-                requested_session_id.clone(),
-            ))
-            .await
-            .with_context(|| format!("destroy sub-agent {child_id} before its parent"))?;
-        }
-        let exists = blocking({
-            let session_id = session_id.clone();
-            move || Ok(Controller::load()?.state.sessions.contains_key(&session_id))
-        })
-        .await?;
-        if !exists {
-            return Ok(());
-        }
-        self.run_lifecycle(
+        let (accepted, acceptance) = tokio::sync::watch::channel(None);
+        let started = self.admit_prepared_lifecycle(
             session_id,
             kind,
+            super::lifecycle::LifecycleStart::request(key, None, None),
+            Some(acceptance),
             move |state, session_id, cancelled| async move {
+                let _upgrade_work = _upgrade_work;
+                let children = blocking({
+                    let session_id = session_id.clone();
+                    move || crate::database::begin_session_destroy(&session_id)
+                })
+                .await?;
+                accepted.send_replace(Some(Ok(())));
+                if index {
+                    state.index_before_destroy(&session_id).await;
+                }
+                for child_id in children {
+                    Box::pin(state.destroy_indexed_tree(
+                        child_id,
+                        BranchDisposition::Keep,
+                        kind,
+                        requested_session_id.clone(),
+                    ))
+                    .await?;
+                }
+
+                let exists = blocking({
+                    let session_id = session_id.clone();
+                    move || Ok(Controller::load()?.state.sessions.contains_key(&session_id))
+                })
+                .await?;
+                if !exists {
+                    return Ok(DaemonLifecycleResult::Done);
+                }
+
                 let _recovery_reservation = tokio::task::spawn_blocking({
                     let observer = state.recovery_observer.clone();
                     let session_id = session_id.clone();
@@ -774,9 +846,8 @@ impl RuntimeState {
                 })
                 .await
             },
-        )
-        .await?;
-        Ok(())
+        )?;
+        Ok(started)
     }
 }
 

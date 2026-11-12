@@ -21,6 +21,7 @@ pub enum WorkerBinaryAvailability {
 /// the network fetch still happens when a target is provisioned.
 #[derive(Debug)]
 pub(super) struct WorkerBinarySourceSnapshot {
+    cache_root: PathBuf,
     pub(super) entries: HashMap<
         (String, WorkerBinaryRequirement),
         std::result::Result<WorkerBinaryAvailability, String>,
@@ -323,7 +324,10 @@ impl WorkerBinarySourceSnapshot {
             entries.insert((arch.to_owned(), requirement), pinned);
         }
 
-        Self { entries }
+        Self {
+            cache_root: cache_root.to_path_buf(),
+            entries,
+        }
     }
 
     pub(super) fn resolve(
@@ -339,7 +343,7 @@ impl WorkerBinarySourceSnapshot {
         match source {
             Ok(availability) => {
                 if let WorkerBinaryAvailability::Local { path, .. } = availability {
-                    verify_worker_build(path).inspect_err(|error| {
+                    verify_worker_build_indexed(&self.cache_root, path).inspect_err(|error| {
                         tracing::warn!(path = %path.display(), error = %error, "rejecting pinned worker source");
                     })?;
                 }
@@ -516,6 +520,10 @@ pub(super) fn copy_worker_source_to_cache(source: &Path, cache_root: &Path) -> R
     let digest = lower_hex(digest.finalize());
     let pinned = publish_cached_worker(temporary, cache_root, &digest)?;
     record_indexed_pin(cache_root, source, &digest);
+    // The daemon resolves this verified copy repeatedly. Index its own file
+    // identity too, so an unchanged pin needs no executable scan while a
+    // removed or modified copy still misses and is verified again.
+    record_indexed_pin(cache_root, &pinned, &digest);
     Ok(pinned)
 }
 

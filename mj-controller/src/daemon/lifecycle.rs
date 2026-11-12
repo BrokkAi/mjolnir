@@ -14,6 +14,31 @@ pub(super) struct LifecycleStart {
     pub(super) deferrable_admission: Option<&'static str>,
 }
 
+impl LifecycleStart {
+    pub(super) fn request(
+        key: String,
+        workspace: Option<String>,
+        control: Option<LifecycleControl>,
+    ) -> Self {
+        Self {
+            resume_workspace_id: workspace,
+            request_key: Some(key),
+            control,
+            phase: LifecyclePhase::Executing,
+            move_operation_id: None,
+            deferrable_admission: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AdmissionMode {
+    /// Identical selections join running work; a completed attempt may retry.
+    FreshRequest,
+    /// Durable caller keys also identify a previously completed request.
+    Replay,
+}
+
 impl RuntimeState {
     pub(super) fn start_or_join_lifecycle<F, Fut>(
         self: &Arc<Self>,
@@ -103,6 +128,45 @@ impl RuntimeState {
         F: FnOnce(Arc<Self>, String, Arc<AtomicBool>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
     {
+        self.admit_lifecycle_mode(session_id, kind, start, None, AdmissionMode::Replay, work)
+            .map(|started| started.result)
+    }
+
+    pub(super) fn admit_prepared_lifecycle<F, Fut>(
+        self: &Arc<Self>,
+        session_id: String,
+        kind: LifecycleKind,
+        start: LifecycleStart,
+        acceptance: Option<LifecycleAcceptance>,
+        work: F,
+    ) -> Result<StartedLifecycle>
+    where
+        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
+    {
+        self.admit_lifecycle_mode(
+            session_id,
+            kind,
+            start,
+            acceptance,
+            AdmissionMode::FreshRequest,
+            work,
+        )
+    }
+
+    fn admit_lifecycle_mode<F, Fut>(
+        self: &Arc<Self>,
+        session_id: String,
+        kind: LifecycleKind,
+        start: LifecycleStart,
+        acceptance: Option<LifecycleAcceptance>,
+        mode: AdmissionMode,
+        work: F,
+    ) -> Result<StartedLifecycle>
+    where
+        F: FnOnce(Arc<Self>, String, Arc<AtomicBool>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<DaemonLifecycleResult>> + Send + 'static,
+    {
         let LifecycleStart {
             resume_workspace_id,
             request_key,
@@ -113,7 +177,7 @@ impl RuntimeState {
         } = start;
         let mut work = Some(work);
         let mut superseded_restart_intent = None;
-        let result = {
+        let (result, receipt, acceptance) = {
             let mut lifecycle_owner = self.owner();
             lifecycle_owner.ensure_available()?;
             ensure!(
@@ -152,7 +216,8 @@ impl RuntimeState {
             // request just because its original waiter disappeared.
             let completed_other_request = lifecycle.get(&session_id).is_some_and(|active| {
                 !active.is_running()
-                    && (active.kind != kind
+                    && (mode == AdmissionMode::FreshRequest
+                        || active.kind != kind
                         || active.request_key != request_key
                         || kind == LifecycleKind::UpgradeContainer)
             });
@@ -178,20 +243,21 @@ impl RuntimeState {
                 });
             }
             if let Some(active) = lifecycle.get(&session_id) {
-                ensure!(
-                    child_close || active.request_key == request_key,
-                    "another lifecycle request with different selections is already running for session {session_id}"
-                );
-                ensure!(
-                    active.kind == kind,
-                    "another lifecycle operation is already running for session {session_id}"
-                );
-                ensure!(
-                    resume_workspace_id.is_none()
-                        || active.resume_workspace_id == resume_workspace_id,
-                    "session {session_id} is already resuming into another workspace"
-                );
-                active.result.clone()
+                active.check_request(
+                    &session_id,
+                    kind,
+                    request_key.as_deref(),
+                    resume_workspace_id.as_deref(),
+                    child_close,
+                )?;
+                (
+                    active.result.clone(),
+                    LifecycleReceipt {
+                        session_id: session_id.clone(),
+                        operation_id: active.operation_id.clone(),
+                    },
+                    active.acceptance.clone(),
+                )
             } else {
                 // A destroy is waited for by a stop or handoff, up to a bound;
                 // other lifecycles hold the handoff until they finish.
@@ -238,6 +304,8 @@ impl RuntimeState {
                 }
                 let cancelled = control.cancelled.clone();
                 let (result_tx, result_rx) = tokio::sync::watch::channel(None);
+                let acceptance =
+                    acceptance.unwrap_or_else(|| tokio::sync::watch::channel(Some(Ok(()))).1);
                 lifecycle.insert(
                     session_id.clone(),
                     ActiveLifecycle {
@@ -259,11 +327,21 @@ impl RuntimeState {
                             .then(|| MoveMutationGuard::reserve(&session_id))
                             .transpose()?,
                         result: result_rx.clone(),
+                        acceptance: acceptance.clone(),
                     },
                 );
+                if mode == AdmissionMode::FreshRequest
+                    && matches!(kind, LifecycleKind::Suspend | LifecycleKind::ForceStop)
+                {
+                    lifecycle_owner.close_requested.insert(session_id.clone());
+                }
                 self.publish_revision();
                 let state = Arc::clone(self);
                 let operation_session_id = session_id.clone();
+                let receipt = LifecycleReceipt {
+                    session_id: session_id.clone(),
+                    operation_id: operation_reference.clone(),
+                };
                 let operation = work.take().expect("new lifecycle operation has work");
                 let completed_channel = result_rx.clone();
                 tokio::spawn(async move {
@@ -425,22 +503,33 @@ impl RuntimeState {
                         && matches!(
                             kind,
                             LifecycleKind::Suspend
+                                | LifecycleKind::ForceStop
                                 | LifecycleKind::Restart
                                 | LifecycleKind::UpgradeContainer
                         )
                     {
-                        state
-                            .record_lifecycle_failure(
-                                &operation_session_id,
-                                &operation_reference,
-                                failure,
-                                if kind == LifecycleKind::UpgradeContainer {
-                                    mj_core::state::CONTAINER_UPGRADE_FAILURE_PREFIX
-                                } else {
-                                    mj_core::state::CLOSE_FAILURE_PREFIX
-                                },
-                            )
-                            .await;
+                        if matches!(kind, LifecycleKind::Suspend | LifecycleKind::ForceStop) {
+                            state
+                                .record_failed_close(
+                                    &operation_session_id,
+                                    &operation_reference,
+                                    failure,
+                                )
+                                .await;
+                        } else {
+                            state
+                                .record_lifecycle_failure(
+                                    &operation_session_id,
+                                    &operation_reference,
+                                    failure,
+                                    if kind == LifecycleKind::UpgradeContainer {
+                                        mj_core::state::CONTAINER_UPGRADE_FAILURE_PREFIX
+                                    } else {
+                                        mj_core::state::CLOSE_FAILURE_PREFIX
+                                    },
+                                )
+                                .await;
+                        }
                     }
                     if let Err(failure) = &result
                         && matches!(
@@ -546,10 +635,14 @@ impl RuntimeState {
                     }
                     state.publish_revision();
                 });
-                result_rx
+                (result_rx, receipt, acceptance)
             }
         };
-        Ok(result)
+        Ok(StartedLifecycle {
+            receipt,
+            result,
+            acceptance,
+        })
     }
 
     pub(super) async fn wait_lifecycle_result(

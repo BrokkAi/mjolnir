@@ -35,7 +35,7 @@ use tokio::task::{JoinError, JoinHandle};
 use crate::daemon;
 use crate::dashboard::{CriticalOperationTracker, DashboardContext};
 use crate::import::{DashboardImportSuccess, PendingDashboardImport, persist_imported_session};
-use crate::pollers::{DashboardLifecycleUpdate, LifecycleSuccess};
+use crate::pollers::{DashboardLifecycleFailure, DashboardLifecycleUpdate, LifecycleSuccess};
 
 /// Everything the dashboard learns from a background job.
 pub(crate) enum DashboardIoUpdate {
@@ -1752,6 +1752,28 @@ impl DashboardContext {
                 .as_ref()
                 .map(|operation| operation.notice_name.as_str()),
         );
+        if matches!(
+            update.result,
+            Err(DashboardLifecycleFailure::ObservationUnavailable
+                | DashboardLifecycleFailure::AdmissionUnconfirmed)
+        ) {
+            match reloaded.result {
+                Ok(loaded) => {
+                    self.apply_controller_metadata(loaded);
+                    self.dashboard.set_state(self.controller.state.clone());
+                    self.resolve_project_sources();
+                }
+                Err(error) => {
+                    tracing::warn!(%session_id, %error, "could not reload lifecycle observation");
+                }
+            }
+            self.dashboard.set_notice(if matches!(update.result, Err(DashboardLifecycleFailure::AdmissionUnconfirmed)) {
+                format!("Could not confirm daemon acceptance for {name}; check session status before retrying")
+            } else {
+                format!("The daemon accepted the operation for {name}; check session status for its result")
+            });
+            return;
+        }
         if operation
             .as_ref()
             .is_some_and(|operation| operation.kind == SessionOperationKind::Moving)
@@ -1845,6 +1867,7 @@ impl DashboardContext {
                 .dashboard
                 .set_notice(format!("Permanently destroyed session {}", name)),
             Err(error) => {
+                let error = error.to_string();
                 if operation
                     .as_ref()
                     .is_some_and(|operation| operation.kind == SessionOperationKind::Suspending)
@@ -1948,6 +1971,132 @@ mod tests {
     use super::*;
     use mj_controller::controller::create_quick_bundle_in_config as create_quick_bundle;
     use mj_core::config::{HarnessKind, ProjectRepository};
+
+    // Hard-won: #1507: quit waited for checkpoint completion and cancelled accepted lifecycle work.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lifecycle_quit_protects_submission_but_not_daemon_completion() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = daemon::DaemonMetadata {
+            protocol_version: daemon::PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address: listener.local_addr().unwrap(),
+            token: "lifecycle-acceptance-test".into(),
+            started_at: "test".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: "lifecycle-acceptance-test".into(),
+            placement: daemon::DaemonPlacement::Host,
+        };
+        let session_id = "0123456789abcdef0123456789abcdef".to_owned();
+        let receipt = daemon::LifecycleReceipt {
+            session_id: session_id.clone(),
+            operation_id: "accepted-suspension".into(),
+        };
+        let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
+        let (accept_tx, accept_rx) = tokio::sync::oneshot::channel();
+        let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
+        let (complete_tx, complete_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request: daemon::RequestEnvelope = daemon::read_frame(&mut stream).await.unwrap();
+            assert!(matches!(
+                request.action,
+                daemon::DaemonAction::StartSessionLifecycle(
+                    daemon::SessionLifecycleRequest::Suspend { .. }
+                )
+            ));
+            submitted_tx.send(()).unwrap();
+            accept_rx.await.unwrap();
+            daemon::write_frame(
+                &mut stream,
+                &daemon::ResponseEnvelope {
+                    protocol_version: request.protocol_version,
+                    request_id: request.request_id,
+                    result: Ok(daemon::DaemonReply::LifecycleAccepted(receipt.clone())),
+                },
+            )
+            .await
+            .unwrap();
+            let request: daemon::RequestEnvelope = daemon::read_frame(&mut stream).await.unwrap();
+            assert!(
+                matches!(request.action, daemon::DaemonAction::WaitSessionLifecycle(ref actual) if actual == &receipt)
+            );
+            waiting_tx.send(()).unwrap();
+            complete_rx.await.unwrap();
+            daemon::write_frame(
+                &mut stream,
+                &daemon::ResponseEnvelope {
+                    protocol_version: request.protocol_version,
+                    request_id: request.request_id,
+                    result: Ok(daemon::DaemonReply::Done),
+                },
+            )
+            .await
+            .unwrap();
+        });
+        let (tracker, _) = CriticalOperationTracker::new();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (updates, mut results) = tokio::sync::mpsc::unbounded_channel();
+        spawn_lifecycle_operation(
+            LifecycleOperationRequest {
+                session_id: session_id.clone(),
+                session_name: "held suspend".into(),
+                kind: SessionOperationKind::Suspending,
+                cancelled: cancelled.clone(),
+                updates,
+            },
+            tracker.clone(),
+            move |_cancelled, admission| {
+                mj_core::runtime::block_on(async move {
+                    let mut client = daemon::DaemonClient::connect(metadata).await?;
+                    let receipt = admission
+                        .submit(
+                            &mut client,
+                            daemon::SessionLifecycleRequest::Suspend {
+                                session_id,
+                                acknowledge_unpublished_work: true,
+                                ignore_nested_repositories: false,
+                            },
+                        )
+                        .await?;
+                    client.wait_session_lifecycle(receipt).await?;
+                    Ok(LifecycleSuccess::Closed)
+                })?
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(30), submitted_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !tracker.blockers().is_empty(),
+            "quit must retain an unaccepted request"
+        );
+        tracker.cancel_all();
+        assert!(
+            !cancelled.load(Ordering::Acquire),
+            "quitting must not cancel the lifecycle"
+        );
+        accept_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(30), waiting_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            tracker.blockers().is_empty(),
+            "daemon completion must not hold quit"
+        );
+        assert!(
+            results.try_recv().is_err(),
+            "the operation is still executing"
+        );
+        complete_tx.send(()).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(30), results.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result.result, Ok(LifecycleSuccess::Closed)));
+        server.await.unwrap();
+    }
 
     #[test]
     fn saved_bundle_waits_for_runtime_identity_without_installing_old_config() {

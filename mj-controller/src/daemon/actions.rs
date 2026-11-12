@@ -929,6 +929,10 @@ pub(super) async fn handle_action(
                 .await?;
             Ok(DaemonReply::Done)
         }
+        DaemonAction::StartSessionLifecycle(request) => Ok(DaemonReply::LifecycleAccepted(
+            state.start_session_lifecycle(request).await?,
+        )),
+        DaemonAction::WaitSessionLifecycle(receipt) => state.wait_session_lifecycle(receipt).await,
         DaemonAction::SuspendSession {
             session_id,
             acknowledge_unpublished_work,
@@ -1080,6 +1084,7 @@ pub(super) fn upgrade_request_activity(
             | DaemonAction::Ping
             | DaemonAction::Identity
             | DaemonAction::Configuration
+            | DaemonAction::WaitSessionLifecycle(_)
             | DaemonAction::MoveSession(_)
             | DaemonAction::Status
             | DaemonAction::PrepareUpgrade

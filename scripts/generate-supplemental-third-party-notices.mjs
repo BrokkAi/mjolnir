@@ -34,6 +34,8 @@ const auditedLinksPackages = new Set([
   "webkit2gtk-sys",
   "alsa-sys",
   "libmimalloc-sys",
+  // The jemalloc C allocator has a separate BSD license, included below.
+  "tikv-jemalloc-sys",
   "libsqlite3-sys",
   "prettyplease",
   // rayon-core uses `links` only to prevent multiple versions; its build
@@ -275,7 +277,15 @@ async function main() {
       "0.1.49",
       "c_src/mimalloc/v3/LICENSE",
       "mimalloc native allocator",
-      "statically linked into the musl Linux Mjolnir controller and worker",
+      "statically linked into the musl Linux Mjolnir worker",
+    ),
+    await legalFile(
+      metadata,
+      "tikv-jemalloc-sys",
+      "0.7.1+5.3.1-0-g81034ce1f1373e37dc865038e1bc8eeecf559ce8",
+      "jemalloc/COPYING",
+      "jemalloc native allocator",
+      "statically linked into the Linux Mjolnir CLI and daemon",
     ),
     await legalFile(
       metadata,

@@ -846,11 +846,12 @@ async fn a_title_from_the_harness_reaches_the_conversation_header_with_the_row()
                 window: mj_core::state::ProjectionWindow::of(&materialized),
                 materialized,
                 operational: mj_core::relay::RelaySnapshot::new(session_id.to_owned())
-                    .operational_state(),
+                    .operational_state()
+                    .into(),
                 latest_credential_sync_signal: None,
                 worker_build: None,
-                subagent_requests: Vec::new(),
-                subagent_completions: Vec::new(),
+                subagent_requests: Default::default(),
+                subagent_completions: Default::default(),
                 subagent_queue_error: None,
             }),
             connected: true,
@@ -1192,11 +1193,11 @@ async fn a_prose_question_survives_worker_polling_and_background_projection() {
     let snapshot = mj_core::state::ManagedSessionSnapshot {
         window: mj_core::state::ProjectionWindow::of(&materialized),
         materialized: materialized.clone(),
-        operational: relay.operational_state(),
+        operational: relay.operational_state().into(),
         latest_credential_sync_signal: None,
         worker_build: None,
-        subagent_requests: Vec::new(),
-        subagent_completions: Vec::new(),
+        subagent_requests: Default::default(),
+        subagent_completions: Default::default(),
         subagent_queue_error: None,
     };
     let projection = crate::pollers::apply_worker_poll_update(

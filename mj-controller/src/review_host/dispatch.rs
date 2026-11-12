@@ -82,9 +82,6 @@ impl HostState {
                 path,
                 reply,
             } => self.set_push_base(session_id, commit, path, reply),
-            HostEvent::OverrideValidated { session_id, permit } => {
-                self.override_validated(&session_id, permit)
-            }
             HostEvent::OverrideFinished { session_id } => self.override_finished(&session_id),
             HostEvent::Prepared {
                 session_id,
@@ -327,9 +324,12 @@ impl HostState {
         }
         match step {
             ReviewStep::PushDelivered(result) => match result {
-                Ok(state) => {
+                Ok((state, verdict)) => {
                     if let Some(slot) = self.reviews.get_mut(&session_id) {
                         slot.state = *state;
+                        if let ReviewVerdict::Failed { reason } = verdict {
+                            slot.driver.request_failed(reason);
+                        }
                         slot.driver.complete();
                     }
                     self.close_reviewer_child(&session_id);
@@ -457,6 +457,17 @@ impl HostState {
     /// transcript) does not linger. The in-flight review state in `reviews`/
     /// `closing` is separate and keeps its own lifetime.
     pub(super) fn retain_sessions(&mut self, live: &std::collections::BTreeSet<String>) {
+        let removed: Vec<_> = self
+            .reviews
+            .keys()
+            .filter(|id| !live.contains(*id))
+            .cloned()
+            .collect();
+        for session_id in removed {
+            if let Err(error) = self.resolve(&session_id, Resolution::Cancelled) {
+                tracing::debug!(session_id, %error, "review was already committing when its session was removed");
+            }
+        }
         self.sessions
             .retain(|session_id, _| live.contains(session_id));
     }

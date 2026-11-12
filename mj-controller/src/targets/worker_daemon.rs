@@ -75,6 +75,8 @@ if hel_recorded_worker >/dev/null; then
     hel_report_worker_state
     exit 0
 fi
+# A failed process listing cannot establish that the worker is absent.
+hel_processes=$(hel_ps -eo pid=,args=) || exit $?
 while read -r hel_pid hel_args; do
     case "$hel_pid" in
         '' | *[!0-9]*) continue ;;
@@ -84,7 +86,7 @@ while read -r hel_pid hel_args; do
         *"$hel_match"*|*"$hel_match_home"*) hel_report_worker_state; exit 0 ;;
     esac
 done <<MJ_PS
-$(hel_ps -eo pid=,args=)
+$hel_processes
 MJ_PS
 printf 'dead\n'
 "#,

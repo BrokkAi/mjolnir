@@ -23,9 +23,12 @@ impl HostState {
             .reviews
             .get_mut(session_id)
             .ok_or("no review is open for that session")?;
-        if slot.finishing {
-            return Err("the review verdict is being delivered".into());
+        if !slot.delivery.cancel() {
+            return Err("approval recording has finished; the verdict is being saved".into());
         }
+        self.next_epoch = self.next_epoch.saturating_add(1);
+        slot.epoch = self.next_epoch;
+        slot.finishing = false;
         let requests = slot.driver.cancel();
         slot.sync_group();
         self.run(session_id, requests);
@@ -76,6 +79,9 @@ impl HostState {
         let Some(slot) = self.reviews.get_mut(session_id) else {
             return false;
         };
+        if slot.driver.finished() {
+            return false;
+        }
         if slot.finishing {
             return true;
         }
@@ -86,26 +92,25 @@ impl HostState {
         let deltas = slot.driver.deltas().to_vec();
         let epoch = slot.epoch;
         let review_id = slot.driver.snapshot().review_id;
-        let completion =
-            crate::upgrade::activity_unless_draining("push review verdict").map(|admission| {
-                PushCompletion {
-                    session_id: session_id.to_owned(),
-                    epoch,
-                    review_id,
-                    control: self.control.clone(),
-                    state: slot.state.clone(),
-                    deltas,
-                    verdict,
-                    _admission: admission,
-                }
+        let completion = PushCompletion {
+            session_id: session_id.to_owned(),
+            epoch,
+            review_id,
+            control: self.control.clone(),
+            state: slot.state.clone(),
+            deltas,
+            verdict,
+            delivery: slot.delivery.clone(),
+        };
+        let queued = self
+            .persistence
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("review persistence stopped"))
+            .and_then(|persistence| {
+                persistence
+                    .send(PersistenceRequest::FinishPush(Box::new(completion)))
+                    .map_err(|_| anyhow::anyhow!("review persistence stopped"))
             });
-        let queued = completion.and_then(|completion| {
-            self.persistence
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("review persistence stopped"))?
-                .send(PersistenceRequest::FinishPush(Box::new(completion)))
-                .map_err(|_| anyhow::anyhow!("review persistence stopped"))
-        });
         if let Err(error) = queued {
             self.retry_push_delivery(session_id, format!("Before-push review failed: {error}"));
         }
@@ -136,7 +141,7 @@ impl HostState {
 pub(super) async fn finish_push_delivery(
     environment: Arc<dyn ReviewEnvironment>,
     completion: PushCompletion,
-) -> Result<Box<TurnReviewState>, String> {
+) -> Result<(Box<TurnReviewState>, ReviewVerdict), String> {
     let PushCompletion {
         session_id: owner,
         review_id,
@@ -144,9 +149,10 @@ pub(super) async fn finish_push_delivery(
         mut state,
         deltas,
         mut verdict,
-        _admission,
+        delivery,
         ..
     } = completion;
+    let cancellation = delivery.cancellation();
     state.push_findings = None;
     if verdict.is_complete()
         && let ReviewVerdict::Findings { synthesis, .. } = &verdict
@@ -181,10 +187,22 @@ pub(super) async fn finish_push_delivery(
                 )
             })
             .collect();
-        let recorded =
-            push_action(&control, &owner, ReviewerAction::RecordReviewed { trees }).await;
+        let recorded = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err("approval recording cancelled".into()),
+            result = push_action(&control, &owner, ReviewerAction::RecordReviewed { trees }) => result,
+        };
         if let Err(reason) = recorded {
-            verdict = ReviewVerdict::Failed { reason };
+            if reason
+                .downcast_ref::<crate::worker_client::RelayRejected>()
+                .is_some_and(|rejected| !rejected.is_retryable())
+            {
+                verdict = ReviewVerdict::Failed {
+                    reason: format!("approval recording failed: {reason:#}"),
+                };
+            } else {
+                return Err(format!("approval recording failed: {reason:#}"));
+            }
         } else {
             state.advance_review_bases(
                 &deltas
@@ -195,10 +213,17 @@ pub(super) async fn finish_push_delivery(
             state.push_findings = None;
         }
     }
+    // Worker waits are resumable from the terminal snapshot and must not
+    // delay handoff. Only the final durable delivery owns daemon admission.
+    let admission = crate::upgrade::activity_unless_draining("push review verdict")
+        .map_err(|error| format!("push review delivery deferred for daemon handoff: {error}"))?;
+    if !delivery.begin_commit() {
+        return Err("approval recording cancelled".into());
+    }
     state.active = None;
     state.active_group = None;
-    tokio::task::spawn_blocking(move || {
-        let _admission = _admission;
+    let result = tokio::task::spawn_blocking(move || {
+        let _admission = admission;
         for delta in deltas {
             let event = mj_core::mailbox::MailboxEvent {
                 key: format!("push-review:{owner}:{review_id}:{}", delta.root.display()),
@@ -217,29 +242,83 @@ pub(super) async fn finish_push_delivery(
             environment.enqueue_verdict(&owner, &event)?;
         }
         environment.save_state(&owner, &state)?;
-        Ok(Box::new(state))
+        Ok((Box::new(state), verdict))
     })
     .await
-    .map_err(|error| format!("push verdict task stopped: {error}"))?
+    .map_err(|error| format!("push verdict task stopped: {error}"))
+    .and_then(|result| result);
+    if result.is_err() {
+        delivery.retry();
+    }
+    result
 }
 
 pub(super) async fn push_action(
     control: &SessionManagerControl,
     session: &str,
     action: ReviewerAction,
-) -> Result<ReviewerOutcome, String> {
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        let handle = control
-            .session(session.to_owned())
-            .await
-            .map_err(|error| format!("{error:#}"))?;
-        handle
-            .reviewer(action)
-            .await
-            .map_err(|error| format!("{error:#}"))
-    })
-    .await
-    .map_err(|_| {
-        "the worker did not finish recording the push review within 10 seconds".to_owned()
-    })?
+) -> anyhow::Result<ReviewerOutcome> {
+    let started = std::time::Instant::now();
+    let handle = control.session(session.to_owned()).await?;
+    tracing::info!(
+        session_id = session,
+        elapsed_ms = started.elapsed().as_millis(),
+        "review session lookup completed"
+    );
+    handle.reviewer(action).await
+}
+
+// The transition to committing and user cancellation share one decision point.
+// Once committing starts there is no worker wait left to cancel.
+#[derive(Default)]
+pub(super) struct Delivery(std::sync::Mutex<DeliveryPhase>);
+
+#[derive(Default)]
+enum DeliveryPhase {
+    #[default]
+    Pending,
+    Recording(tokio_util::sync::CancellationToken),
+    Committing,
+    Cancelled,
+}
+
+impl Delivery {
+    fn cancellation(&self) -> tokio_util::sync::CancellationToken {
+        let mut phase = self.0.lock().expect("review delivery poisoned");
+        let token = tokio_util::sync::CancellationToken::new();
+        if matches!(*phase, DeliveryPhase::Cancelled) {
+            token.cancel();
+        } else {
+            *phase = DeliveryPhase::Recording(token.clone());
+        }
+        token
+    }
+
+    fn begin_commit(&self) -> bool {
+        let mut phase = self.0.lock().expect("review delivery poisoned");
+        if matches!(*phase, DeliveryPhase::Cancelled) {
+            return false;
+        }
+        *phase = DeliveryPhase::Committing;
+        true
+    }
+
+    fn retry(&self) {
+        let mut phase = self.0.lock().expect("review delivery poisoned");
+        if matches!(*phase, DeliveryPhase::Committing) {
+            *phase = DeliveryPhase::Pending;
+        }
+    }
+
+    pub(super) fn cancel(&self) -> bool {
+        let mut phase = self.0.lock().expect("review delivery poisoned");
+        if matches!(*phase, DeliveryPhase::Committing) {
+            return false;
+        }
+        if let DeliveryPhase::Recording(token) = &*phase {
+            token.cancel();
+        }
+        *phase = DeliveryPhase::Cancelled;
+        true
+    }
 }

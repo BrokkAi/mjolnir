@@ -17,6 +17,19 @@ impl RuntimeState {
         acknowledge_container_recreation: bool,
         control: Option<LifecycleControl>,
     ) -> Result<()> {
+        let started = self
+            .start_restart_session(session_id, acknowledge_container_recreation, control)
+            .await?;
+        Self::wait_lifecycle_result(started.result).await?;
+        Ok(())
+    }
+
+    pub(super) async fn start_restart_session(
+        self: &Arc<Self>,
+        session_id: String,
+        acknowledge_container_recreation: bool,
+        control: Option<LifecycleControl>,
+    ) -> Result<StartedLifecycle> {
         let joining_restart = self
             .owner()
             .lifecycle
@@ -53,28 +66,27 @@ impl RuntimeState {
         .await?;
         let _workspace_admission = self.workspace_resume_gate(&workspace_id).read_owned().await;
 
-        let operation = self.start_or_join_lifecycle_controlled(
+        let key = serde_json::to_string(&acknowledge_container_recreation)?;
+        let (accepted, acceptance) = tokio::sync::watch::channel(None);
+        let operation = self.admit_prepared_lifecycle(
             session_id.clone(),
             LifecycleKind::Restart,
-            Some(workspace_id),
-            None,
-            control,
+            super::lifecycle::LifecycleStart::request(key, Some(workspace_id), control),
+            Some(acceptance),
             move |state, session_id, cancelled| async move {
+                let _workspace_admission = _workspace_admission;
                 state
-                    .restart_admitted(
+                    .restart_admitted_with_acceptance(
                         session_id,
                         cancelled,
                         None,
                         acknowledge_container_recreation,
+                        Some(accepted),
                     )
                     .await
             },
         )?;
-        let completed = operation.clone();
-        let outcome = Self::wait_lifecycle_result(operation).await;
-        self.remove_completed_lifecycle(&completed);
-        outcome?;
-        Ok(())
+        Ok(operation)
     }
 
     async fn wait_for_active_suspend(self: &Arc<Self>, session_id: &str) -> Result<()> {
@@ -200,6 +212,24 @@ impl RuntimeState {
         recovered: Option<crate::database::SessionRestartIntent>,
         acknowledge_container_recreation: bool,
     ) -> Result<DaemonLifecycleResult> {
+        self.restart_admitted_with_acceptance(
+            session_id,
+            cancelled,
+            recovered,
+            acknowledge_container_recreation,
+            None,
+        )
+        .await
+    }
+
+    async fn restart_admitted_with_acceptance(
+        self: &Arc<Self>,
+        session_id: String,
+        cancelled: Arc<AtomicBool>,
+        recovered: Option<crate::database::SessionRestartIntent>,
+        acknowledge_container_recreation: bool,
+        acceptance: Option<LifecycleAcceptanceSender>,
+    ) -> Result<DaemonLifecycleResult> {
         if recovered
             .as_ref()
             .is_none_or(|intent| intent.container_upgrade.is_none())
@@ -211,6 +241,7 @@ impl RuntimeState {
             cancelled,
             recovered,
             acknowledge_container_recreation,
+            acceptance,
         ))
         .await;
         self.clear_close_request(&session_id);
@@ -223,6 +254,7 @@ impl RuntimeState {
         cancelled: Arc<AtomicBool>,
         recovered: Option<crate::database::SessionRestartIntent>,
         acknowledge_container_recreation: bool,
+        acceptance: Option<LifecycleAcceptanceSender>,
     ) -> Result<DaemonLifecycleResult> {
         let _recovery_reservation = tokio::task::spawn_blocking({
             let observer = self.recovery_observer.clone();
@@ -264,6 +296,9 @@ impl RuntimeState {
             "Restart intent belongs to another session"
         );
         self.bind_restart_intent(session_id, &intent.operation_id)?;
+        if let Some(acceptance) = acceptance {
+            acceptance.send_replace(Some(Ok(())));
+        }
         // Admission and settings edits serialize in the database writer. Read
         // only after admission, so no accepted edit can be missed or race this plan.
         let mut controller = tokio::task::spawn_blocking(Controller::load)

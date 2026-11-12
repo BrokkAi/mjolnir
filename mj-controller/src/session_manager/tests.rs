@@ -938,8 +938,8 @@ fn view_at_ordinal(ordinal: u64) -> ManagedSessionView {
         .collect();
     ManagedSessionView {
         snapshot: Some(ManagedSessionSnapshot {
-            subagent_requests: Vec::new(),
-            subagent_completions: Vec::new(),
+            subagent_requests: Default::default(),
+            subagent_completions: Default::default(),
             subagent_queue_error: None,
             window: mj_core::state::ProjectionWindow::of(&materialized),
             materialized,
@@ -1004,7 +1004,8 @@ fn view_at_ordinal(ordinal: u64) -> ManagedSessionView {
                 last_harness_turn_started_ordinal: None,
                 background_commands: Vec::new(),
                 background_work_known: None,
-            },
+            }
+            .into(),
             latest_credential_sync_signal: None,
             worker_build: None,
         }),
@@ -2089,6 +2090,7 @@ async fn installed_prompt_handoff_is_journaled_and_persisted_without_a_user_turn
 #[cfg(unix)]
 // Hard-won: 0db1a867: Relay acceptance must not wait on catch-up and invite retrying an accepted command.
 // Hard-won: 1d746fab4: every empty catch-up deeply copied unchanged operational JSON.
+// Hard-won: daemon heap profile: publishing snapshots undid the relay's shared-state cache.
 #[tokio::test]
 async fn submitting_does_not_catch_the_projection_up_until_asked() {
     if std::env::var_os(SUBMIT_WITHOUT_SYNC_TEST_CHILD).is_none() {
@@ -2128,6 +2130,32 @@ async fn submitting_does_not_catch_the_projection_up_until_asked() {
         "the catch-up is what advances the projection"
     );
     let held = connection.operational.clone();
+    let published = connection.snapshot();
+    assert!(held.ptr_eq(&published.operational));
+    assert!(
+        connection
+            .subagent_requests
+            .ptr_eq(&published.subagent_requests)
+    );
+    assert!(
+        connection
+            .subagent_completions
+            .ptr_eq(&published.subagent_completions)
+    );
+    let encoded = serde_json::to_value(&*held).unwrap();
+    assert_eq!(
+        serde_json::to_value(&published.operational).unwrap(),
+        encoded
+    );
+    let attachment: mj_client::session::RelayAttachment = serde_json::from_value(serde_json::json!({"state": encoded, "events": [], "through_ordinal": 0, "through_digest": ""})).unwrap();
+    assert_eq!(*attachment.state, *held);
+    let mut changed = published.clone();
+    changed.operational.native_session_id = Some("changed-copy".into());
+    assert_eq!(
+        serde_json::to_value(&published.operational).unwrap(),
+        encoded
+    );
+    assert!(!changed.operational.ptr_eq(&held));
     for _ in 0..3 {
         connection.sync_in_place().await.unwrap();
         assert!(
@@ -3578,7 +3606,9 @@ fn dashboard_updates_keep_only_the_latest_view_per_session() {
     for revision in 0..1_000 {
         sender.send(SessionManagerUpdate {
             raw_observation: (revision == 0).then(|| {
-                mj_core::relay::RelaySnapshot::new("session-1".into()).operational_state()
+                mj_core::relay::RelaySnapshot::new("session-1".into())
+                    .operational_state()
+                    .into()
             }),
             session_id: "session-1".into(),
             view: ManagedSessionView {

@@ -54,6 +54,10 @@ tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Purge freed daemon pages asynchronously, using jemalloc's normal decay policy.
+tikv-jemallocator = { version = "0.7", features = ["background_threads"] }
+
 [target.'cfg(windows)'.dependencies]
 # Stops an unresponsive daemon through a handle that pins its identity.
 windows-sys = { workspace = true, features = ["Win32_System_Threading"] }

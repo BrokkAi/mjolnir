@@ -3074,8 +3074,9 @@ fn quota_move_preserves_idle_active_goal_at_both_admission_gates() {
             .await
             .unwrap();
         let executor = RecordingProcessExecutor::default();
+        let admitted = std::sync::atomic::AtomicBool::new(false);
         let outcome = controller
-            .move_session_managed_controlled(
+            .move_session_managed_controlled_with_admission(
                 request,
                 Some((
                     "quota stopped".into(),
@@ -3083,8 +3084,33 @@ fn quota_move_preserves_idle_active_goal_at_both_admission_gates() {
                 )),
                 &executor,
                 &channels.control,
+                || {
+                    let durable = crate::database::load_move_operation(LATCH_RELAY_SESSION)
+                        .unwrap()
+                        .unwrap();
+                    assert!(
+                        durable.accepted_preparation.is_some(),
+                        "acceptance preceded the committed intent"
+                    );
+                    assert_eq!(
+                        durable.selection.profile_id.as_deref(),
+                        Some(IN_PLACE_DESTINATION_PROFILE)
+                    );
+                    assert_eq!(
+                        executor.move_stop_calls(),
+                        0,
+                        "source interruption preceded acceptance"
+                    );
+                    assert!(!admitted.swap(true, std::sync::atomic::Ordering::SeqCst));
+                },
             )
             .await;
+        if race == "idle" {
+            assert!(admitted.load(std::sync::atomic::Ordering::SeqCst));
+        }
+        if matches!(race.as_str(), "running" | "completed") {
+            assert!(!admitted.load(std::sync::atomic::Ordering::SeqCst));
+        }
         channels.shutdown.shutdown().await.unwrap();
         if race != "idle" {
             let error = match outcome {
@@ -4171,6 +4197,110 @@ fn in_place_move_with_pre_v32_worker_stops_children_and_reports_fallback() {
             && notice.contains("protocol 32 is required")
             && notice.contains("stopping sub-agents")
     }));
+}
+
+#[cfg(unix)]
+// Hard-won: ea0608d4d: cutoff verification rejected superseded session commits.
+#[test]
+fn profile_move_preserves_a_workspace_without_later_history() {
+    let name = test_name("profile_move_preserves_a_workspace_without_later_history");
+    if std::env::var_os("MJ_CUTOFF_MOVE_CHILD").is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new(name)
+            .env("MJ_CUTOFF_MOVE_CHILD", "1")
+            .env(LATCH_CHECKPOINT_ONLY, "1")
+            .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
+            .isolated_store(directory.path())
+            .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+    let git = crate::controller::test_support::test_git;
+    let base = git(&fixture.checkout, &["rev-parse", "HEAD"]);
+    git(&fixture.checkout, &["remote", "remove", "origin"]);
+    fs::write(fixture.checkout.join("session.txt"), "session work").unwrap();
+    git(&fixture.checkout, &["add", "session.txt"]);
+    git(
+        &fixture.checkout,
+        &["commit", "--allow-empty", "-m", "session work"],
+    );
+    let superseded = git(&fixture.checkout, &["rev-parse", "HEAD"]);
+    git(
+        &fixture.checkout,
+        &["commit", "--amend", "-m", "amended session work"],
+    );
+    fs::write(fixture.checkout.join("session.txt"), "discarded work").unwrap();
+    git(
+        &fixture.checkout,
+        &["stash", "push", "-m", "discarded session stash"],
+    );
+    let dropped_stash = git(&fixture.checkout, &["rev-parse", "refs/stash"]);
+    git(&fixture.checkout, &["stash", "drop"]);
+    let head = git(&fixture.checkout, &["rev-parse", "HEAD"]);
+    let bundle = crate::controller::test_support::local_bundle(&fixture.checkout);
+    fixture
+        .controller
+        .config
+        .bundles
+        .insert("project".into(), bundle);
+    let record = fixture
+        .controller
+        .state
+        .sessions
+        .get_mut(LATCH_RELAY_SESSION)
+        .unwrap();
+    record.bundle_id = "project".into();
+    record.checkout = Some(mj_core::remote_git::ExactCheckout {
+        repository_id: "project".into(),
+        commit: base.clone(),
+        branch: Some("main".into()),
+        no_later_history: true,
+    });
+    record.launch_base = Some(base);
+    record.state = SessionState::Closing;
+    crate::database::save_session(record).unwrap();
+    let mut operation = in_place_operation(&fixture.controller, IN_PLACE_DESTINATION_PROFILE);
+    operation.phase = MovePhase::ResumingDestination;
+    operation.checkpoint = Some(fixture.checkpoint.clone());
+    operation.recovery_session =
+        Some(fixture.controller.state.sessions[LATCH_RELAY_SESSION].clone());
+    crate::database::save_move_operation(&operation).unwrap();
+    let executor = RecordingProcessExecutor::default();
+    run_in_place_move(
+        &mut fixture.controller,
+        &mut operation,
+        &fixture.worker_root,
+        &executor,
+    )
+    .unwrap();
+    for commit in [&superseded, &dropped_stash] {
+        git(&fixture.checkout, &["cat-file", "-e", commit]);
+    }
+    assert_eq!(git(&fixture.checkout, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git(&fixture.checkout, &["remote"]), "");
+    assert_eq!(
+        git(
+            &fixture.checkout,
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/remotes",
+                "refs/tags"
+            ]
+        ),
+        ""
+    );
+    assert!(
+        executor
+            .purposes()
+            .iter()
+            .any(|purpose| purpose == "verify workspace history cutoff")
+    );
+    assert_eq!(
+        std::fs::read(fixture.checkout.join("untracked.txt")).unwrap(),
+        b"agent work"
+    );
 }
 
 #[cfg(unix)]

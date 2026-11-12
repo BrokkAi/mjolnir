@@ -1,5 +1,6 @@
 //! Daemon and worker compatibility identities shared by the workspace.
 
+use std::io::Read;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -18,6 +19,9 @@ pub const BUILD_COMMIT_TIME: &str = env!("MJ_BUILD_COMMIT_TIME");
 pub const WORKER_BUILD_STAMP: &str =
     concat!("\0MJ-WORKER-BUILD:", env!("MJ_WORKER_BUILD_ID"), "\0");
 const PREFIX: &[u8] = b"\0MJ-WORKER-BUILD:";
+// Preserve the existing stamp parser's search window, including its terminator.
+const STAMP_BYTES: usize = 192;
+const READ_BYTES: usize = 128 * 1024;
 
 /// Whether `build` has the shape of a worker compatibility identity: a
 /// package version, `+`, and a 40-digit hexadecimal digest.
@@ -30,19 +34,18 @@ pub fn is_worker_build(build: &str) -> bool {
     })
 }
 
+fn worker_build_stamps(bytes: &[u8]) -> impl Iterator<Item = &str> {
+    memchr::memmem::find_iter(bytes, PREFIX).filter_map(|offset| {
+        let tail = &bytes[offset + PREFIX.len()..];
+        let end = tail.iter().take(STAMP_BYTES).position(|byte| *byte == 0)?;
+        let build = std::str::from_utf8(&tail[..end]).ok()?;
+        is_worker_build(build).then_some(build)
+    })
+}
+
 pub fn worker_build_from_bytes(bytes: &[u8]) -> Result<&str> {
     let mut found = None;
-    for offset in memchr::memmem::find_iter(bytes, PREFIX) {
-        let tail = &bytes[offset + PREFIX.len()..];
-        let Some(end) = tail.iter().take(192).position(|byte| *byte == 0) else {
-            continue;
-        };
-        let Ok(build) = std::str::from_utf8(&tail[..end]) else {
-            continue;
-        };
-        if !is_worker_build(build) {
-            continue;
-        }
+    for build in worker_build_stamps(bytes) {
         ensure!(
             found.is_none_or(|previous| previous == build),
             "conflicting worker build stamps"
@@ -52,10 +55,40 @@ pub fn worker_build_from_bytes(bytes: &[u8]) -> Result<&str> {
     found.context("missing worker build stamp (legacy or invalid worker)")
 }
 
+fn worker_build_from_reader(input: &mut impl Read) -> Result<String> {
+    // Keep only one I/O chunk and enough overlap to recognize a stamp split
+    // across reads. Worker executables can be hundreds of megabytes.
+    let overlap = PREFIX.len() + STAMP_BYTES;
+    let mut bytes = Vec::with_capacity(READ_BYTES + overlap);
+    let mut found: Option<String> = None;
+    loop {
+        let read = input
+            .by_ref()
+            .take(READ_BYTES as u64)
+            .read_to_end(&mut bytes)
+            .context("read worker build stamp")?;
+        if read == 0 {
+            break;
+        }
+        for build in worker_build_stamps(&bytes) {
+            ensure!(
+                found.as_deref().is_none_or(|previous| previous == build),
+                "conflicting worker build stamps"
+            );
+            if found.is_none() {
+                found = Some(build.to_owned());
+            }
+        }
+        let keep_from = bytes.len().saturating_sub(overlap);
+        bytes.drain(..keep_from);
+    }
+    found.context("missing worker build stamp (legacy or invalid worker)")
+}
+
 pub fn verify_worker_build(path: &Path) -> Result<()> {
-    let bytes = std::fs::read(path)
+    let mut input = std::fs::File::open(path)
         .with_context(|| format!("read worker build from {}", path.display()))?;
-    let found = worker_build_from_bytes(&bytes).with_context(|| {
+    let found = worker_build_from_reader(&mut input).with_context(|| {
         format!(
             "worker {}; expected build {WORKER_BUILD_ID}",
             path.display()
@@ -159,16 +192,27 @@ mod tests {
         String::from_utf8(output.stdout).unwrap().trim().to_owned()
     }
 
+    // Hard-won: daemon heap profile: verification must handle stamps across bounded reads.
     #[test]
     fn reads_a_foreign_binary_without_executing_it() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("linux-worker");
-        let mut bytes = vec![0xff; 150_000];
-        bytes.extend_from_slice(WORKER_BUILD_STAMP.as_bytes());
-        bytes.extend_from_slice(&[0xff; 1000]);
-        std::fs::write(&path, &bytes).unwrap();
-        assert_eq!(worker_build_from_bytes(&bytes).unwrap(), WORKER_BUILD_ID);
-        verify_worker_build(&path).unwrap();
+        for offset in [
+            READ_BYTES - PREFIX.len() - 10,
+            READ_BYTES - PREFIX.len(),
+            READ_BYTES - 2,
+            READ_BYTES + 3,
+            150_000,
+        ] {
+            let mut bytes = vec![0xff; offset];
+            bytes.extend_from_slice(WORKER_BUILD_STAMP.as_bytes());
+            bytes.extend_from_slice(&vec![0xff; READ_BYTES]);
+            // Matching stamps in separate chunks are valid, too.
+            bytes.extend_from_slice(WORKER_BUILD_STAMP.as_bytes());
+            std::fs::write(&path, &bytes).unwrap();
+            assert_eq!(worker_build_from_bytes(&bytes).unwrap(), WORKER_BUILD_ID);
+            verify_worker_build(&path).unwrap();
+        }
     }
 
     #[test]
@@ -194,6 +238,17 @@ mod tests {
                 .to_string()
                 .contains("conflicting")
         );
+        let mut bytes = WORKER_BUILD_STAMP.as_bytes().to_vec();
+        bytes.resize(2 * READ_BYTES - PREFIX.len(), 0xff);
+        bytes.extend_from_slice(stale.as_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        let error = format!("{:#}", verify_worker_build(&path).unwrap_err());
+        assert!(error.contains("conflicting") && error.contains("stale-worker"));
+        bytes.truncate(READ_BYTES - 2);
+        bytes[..WORKER_BUILD_STAMP.len()].fill(0xff);
+        bytes.extend_from_slice(WORKER_BUILD_STAMP.trim_end_matches('\0').as_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(format!("{:#}", verify_worker_build(&path).unwrap_err()).contains("missing"));
     }
 
     #[test]

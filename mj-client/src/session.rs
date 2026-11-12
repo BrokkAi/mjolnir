@@ -41,7 +41,7 @@ pub struct ManagedSessionView {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RelayAttachment {
-    pub state: RelayOperationalState,
+    pub state: mj_core::snapshot_map::SharedSnapshot<RelayOperationalState>,
     pub events: Vec<RelayEvent>,
     pub through_ordinal: u64,
     pub through_digest: String,

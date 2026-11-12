@@ -320,8 +320,8 @@ impl RuntimeState {
             self.admit_move_session(request, capacity, None, Some((reason, continuation)))?;
         let state = self.clone();
         tokio::spawn(async move {
-            let channel = result.clone();
-            match Self::wait_lifecycle_result(result).await {
+            let channel = result.result.clone();
+            match Self::wait_lifecycle_result(result.result).await {
                 Ok(DaemonLifecycleResult::Move(_)) => {}
                 Ok(_) => tracing::error!(%session_id, %operation_id,
                     "quota Move returned an unrelated lifecycle result"),
@@ -340,10 +340,9 @@ impl RuntimeState {
         self: &Arc<Self>,
         request: MoveSessionRequest,
         control: LifecycleControl,
-    ) -> Result<()> {
+    ) -> Result<StartedLifecycle> {
         let capacity = self.reserve_container_capacity_for_move(&request).await?;
         self.admit_move_session(request, capacity, Some(control), None)
-            .map(|_| ())
     }
 
     fn admit_move_session(
@@ -352,7 +351,7 @@ impl RuntimeState {
         capacity_lease: Option<capacity::ContainerCapacityLease>,
         control: Option<LifecycleControl>,
         quota_move: Option<(String, mj_core::state::QuotaMoveContinuation)>,
-    ) -> Result<LifecycleWatch> {
+    ) -> Result<StartedLifecycle> {
         let selection = request.preparation.selection.clone();
         let operation_id = request.preparation.operation_id.clone();
         // Preparation resolves inherited settings. Compare those settings,
@@ -370,7 +369,8 @@ impl RuntimeState {
                 selection.profile_id.clone().unwrap_or_default(),
             )
         });
-        let result = self.admit_lifecycle(
+        let (accepted, acceptance) = tokio::sync::watch::channel(None);
+        let result = self.admit_prepared_lifecycle(
             session_id.clone(),
             LifecycleKind::Move,
             super::lifecycle::LifecycleStart {
@@ -381,6 +381,7 @@ impl RuntimeState {
                 move_operation_id: Some(operation_id.clone()),
                 deferrable_admission: None,
             },
+            Some(acceptance),
             move |state, session_id, cancelled| async move {
                 let _capacity_lease = capacity_lease;
                 let result = state
@@ -390,8 +391,9 @@ impl RuntimeState {
                         cancelled,
                         |mut controller, executor, manager| async move {
                             controller
-                                .move_session_managed_controlled(
+                                .move_session_managed_controlled_with_admission(
                                     request, quota_move, &executor, &manager,
+                                    move || { accepted.send_replace(Some(Ok(()))); },
                                 )
                                 .await
                         },
@@ -435,8 +437,8 @@ impl RuntimeState {
         let session_id = selection.session_id.clone();
         let capacity = self.reserve_container_capacity_for_move(&request).await?;
         let result = self.admit_move_session(request, capacity, None, None)?;
-        let channel = result.clone();
-        let result = Self::wait_lifecycle_result(result).await;
+        let channel = result.result.clone();
+        let result = Self::wait_lifecycle_result(result.result).await;
         self.remove_completed_lifecycle(&channel);
         match result {
             Ok(DaemonLifecycleResult::Move(outcome)) => Ok(outcome),
@@ -950,7 +952,7 @@ mod admission_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl RuntimeState {
     pub(crate) fn move_test_runtime(
         controller: Controller,

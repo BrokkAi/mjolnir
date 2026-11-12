@@ -89,18 +89,21 @@ fn start_suspension(
     spawn_lifecycle_operation(
         request,
         context.critical_operations.clone(),
-        move |_cancelled| {
+        move |_cancelled, admission| {
             mj_core::runtime::block_on(async {
                 let mut client = daemon::connect_or_start().await?;
-                if ignore_nested_repositories {
-                    client
-                        .ignore_nested_repositories_and_suspend(session_id)
-                        .await
-                } else {
-                    client
-                        .suspend_session_with_ack(session_id, acknowledge_unpublished_work)
-                        .await
-                }
+                let receipt = admission
+                    .submit(
+                        &mut client,
+                        daemon::SessionLifecycleRequest::Suspend {
+                            session_id,
+                            acknowledge_unpublished_work,
+                            ignore_nested_repositories,
+                        },
+                    )
+                    .await?;
+                client.wait_session_lifecycle(receipt).await?;
+                Ok::<_, anyhow::Error>(())
             })??;
             Ok(LifecycleSuccess::Closed)
         },
@@ -612,11 +615,10 @@ pub(crate) async fn apply_dashboard_action(
         } => {
             // Walks the sessions directory, so it belongs in the blocking
             // pool; a stale answer is dropped by its days value.
-            spawn_cancellable_io_with_token(
-                context.critical_operations.clone(),
+            super::io::spawn_io(
                 "estimating archive space",
                 context.dashboard_io_tx.clone(),
-                move |_cancelled| {
+                move || {
                     mj_core::runtime::block_on(async {
                         daemon::connect_or_start()
                             .await?
@@ -1312,6 +1314,9 @@ pub(crate) async fn apply_dashboard_action(
         }
         DashboardAction::UpgradeContainer(request) => {
             let updates = context.dashboard_io_tx.clone();
+            let guard = context
+                .critical_operations
+                .begin("submitting container upgrade");
             tokio::spawn(async move {
                 let result = async {
                     daemon::connect_or_start()
@@ -1321,6 +1326,7 @@ pub(crate) async fn apply_dashboard_action(
                 }
                 .await
                 .map_err(|e: anyhow::Error| format!("{e:#}"));
+                drop(guard);
                 report(
                     "queueing container upgrade",
                     &updates,
@@ -1341,11 +1347,19 @@ pub(crate) async fn apply_dashboard_action(
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
-                move |_cancelled| {
+                move |_cancelled, admission| {
                     mj_core::runtime::block_on(async {
                         let mut daemon = daemon::connect_or_start().await?;
-                        dispatch_restart(&mut daemon, session_id, acknowledge_container_recreation)
-                            .await
+                        let receipt = admission
+                            .submit(
+                                &mut daemon,
+                                daemon::SessionLifecycleRequest::Restart {
+                                    session_id,
+                                    acknowledge_container_recreation,
+                                },
+                            )
+                            .await?;
+                        daemon.wait_session_lifecycle(receipt).await
                     })??;
                     Ok(LifecycleSuccess::Resumed {
                         profile_id: session.last_profile,
@@ -1420,14 +1434,22 @@ pub(crate) async fn apply_dashboard_action(
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
-                move |cancelled| {
+                move |cancelled, admission| {
                     mj_core::runtime::block_on(async {
                         let mut daemon = daemon::connect_or_start().await?;
-                        let operation = daemon.move_session(MoveSessionRequest {
-                            preparation,
-                            queue,
-                            acknowledge_interruption: true,
-                        });
+                        let receipt = admission
+                            .submit(
+                                &mut daemon,
+                                daemon::SessionLifecycleRequest::Move(Box::new(
+                                    MoveSessionRequest {
+                                        preparation,
+                                        queue,
+                                        acknowledge_interruption: true,
+                                    },
+                                )),
+                            )
+                            .await?;
+                        let operation = daemon.wait_session_lifecycle(receipt);
                         let mut operation = Box::pin(operation);
                         let wait_for_cancel = async {
                             loop {
@@ -1451,6 +1473,7 @@ pub(crate) async fn apply_dashboard_action(
                                 bail!("move cancellation requested for {session_id}");
                             }
                         };
+                        let outcome = lifecycle_move_outcome(outcome)?;
                         if matches!(outcome.outcome.as_str(), "failed" | "cancelled") {
                             bail!(
                                 "move {}: {}",
@@ -1492,7 +1515,7 @@ pub(crate) async fn apply_dashboard_action(
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
-                move |cancelled| {
+                move |cancelled, admission| {
                     let selection = operation.selection.clone();
                     let queue = Some(operation.queue);
                     let operation_id = operation.operation_id.clone();
@@ -1514,7 +1537,13 @@ pub(crate) async fn apply_dashboard_action(
                             queue,
                             acknowledge_interruption: true,
                         };
-                        let mut move_future = Box::pin(daemon.move_session(request));
+                        let receipt = admission
+                            .submit(
+                                &mut daemon,
+                                daemon::SessionLifecycleRequest::Move(Box::new(request)),
+                            )
+                            .await?;
+                        let mut move_future = Box::pin(daemon.wait_session_lifecycle(receipt));
                         let wait_for_cancel = async {
                             loop {
                                 if cancelled.load(Ordering::Acquire) {
@@ -1537,6 +1566,7 @@ pub(crate) async fn apply_dashboard_action(
                                 bail!("move cancellation requested for {session_id}");
                             }
                         };
+                        let outcome = lifecycle_move_outcome(outcome)?;
                         if matches!(outcome.outcome.as_str(), "failed" | "cancelled") {
                             bail!(
                                 "move retry {} (operation {}): {}",
@@ -1601,12 +1631,19 @@ pub(crate) async fn apply_dashboard_action(
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
-                move |_cancelled| {
+                move |_cancelled, admission| {
                     mj_core::runtime::block_on(async {
-                        daemon::connect_or_start()
-                            .await?
-                            .discard_since_checkpoint(session_id, checkpoint)
-                            .await
+                        let mut daemon = daemon::connect_or_start().await?;
+                        let receipt = admission
+                            .submit(
+                                &mut daemon,
+                                daemon::SessionLifecycleRequest::Discard {
+                                    session_id,
+                                    checkpoint,
+                                },
+                            )
+                            .await?;
+                        daemon.wait_session_lifecycle(receipt).await
                     })??;
                     Ok(LifecycleSuccess::ForceStopped)
                 },
@@ -1622,12 +1659,19 @@ pub(crate) async fn apply_dashboard_action(
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
-                move |_cancelled| {
+                move |_cancelled, admission| {
                     mj_core::runtime::block_on(async {
-                        daemon::connect_or_start()
-                            .await?
-                            .destroy_stopped_session(session_id, delete_branch)
-                            .await
+                        let mut daemon = daemon::connect_or_start().await?;
+                        let receipt = admission
+                            .submit(
+                                &mut daemon,
+                                daemon::SessionLifecycleRequest::DestroyStopped {
+                                    session_id,
+                                    delete_branch,
+                                },
+                            )
+                            .await?;
+                        daemon.wait_session_lifecycle(receipt).await
                     })??;
                     Ok(LifecycleSuccess::DestroyedStopped)
                 },
@@ -1643,12 +1687,19 @@ pub(crate) async fn apply_dashboard_action(
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
-                move |_cancelled| {
+                move |_cancelled, admission| {
                     mj_core::runtime::block_on(async {
-                        daemon::connect_or_start()
-                            .await?
-                            .force_destroy_session(session_id, delete_branch)
-                            .await
+                        let mut daemon = daemon::connect_or_start().await?;
+                        let receipt = admission
+                            .submit(
+                                &mut daemon,
+                                daemon::SessionLifecycleRequest::ForceDestroy {
+                                    session_id,
+                                    delete_branch,
+                                },
+                            )
+                            .await?;
+                        daemon.wait_session_lifecycle(receipt).await
                     })??;
                     Ok(LifecycleSuccess::ForceDestroyed)
                 },
@@ -1762,14 +1813,10 @@ pub(crate) fn start_resume_repository_preflight(
     context
         .dashboard
         .set_notice("Checking checkpoint repository history…");
-    spawn_cancellable_io(
-        context.critical_operations.clone(),
-        format!(
-            "checking repositories for {}",
-            context.session_notice_name(&session_id)
-        ),
+    super::io::spawn_io(
+        "checking checkpoint repositories",
         context.dashboard_io_tx.clone(),
-        move |_cancelled| {
+        move || {
             let preflight = mj_core::runtime::block_on(async {
                 daemon::connect_or_start()
                     .await?
@@ -1921,21 +1968,27 @@ fn start_session_launch_with_repository_preflight(
             spawn_lifecycle_operation(
                 request,
                 context.critical_operations.clone(),
-                move |_cancelled| {
+                move |_cancelled, admission| {
                     mj_core::runtime::block_on(async {
-                        daemon::connect_or_start()
-                            .await?
-                            .resume_session(daemon::ResumeSessionRequest {
-                                session_id: session_id.clone(),
-                                workspace_id,
-                                profile_id: profile_id.clone(),
-                                target_template_id: target_template_id.clone(),
-                                additional_mounts: Some(additional_mounts),
-                                resource_allocation,
-                                discard_queue,
-                                repository_preflight,
-                            })
-                            .await
+                        let mut daemon = daemon::connect_or_start().await?;
+                        let receipt = admission
+                            .submit(
+                                &mut daemon,
+                                daemon::SessionLifecycleRequest::Resume(Box::new(
+                                    daemon::ResumeSessionRequest {
+                                        session_id: session_id.clone(),
+                                        workspace_id,
+                                        profile_id: profile_id.clone(),
+                                        target_template_id: target_template_id.clone(),
+                                        additional_mounts: Some(additional_mounts),
+                                        resource_allocation,
+                                        discard_queue,
+                                        repository_preflight,
+                                    },
+                                )),
+                            )
+                            .await?;
+                        daemon.wait_session_lifecycle(receipt).await
                     })??;
                     Ok(LifecycleSuccess::Resumed {
                         profile_id,
@@ -2206,6 +2259,14 @@ async fn interrupt_all(targets: &mj_tui::InterruptAllTargets) -> Vec<(String, St
     failures
 }
 
+fn lifecycle_move_outcome(reply: daemon::DaemonReply) -> Result<mj_core::state::MoveOutcome> {
+    match reply {
+        daemon::DaemonReply::MoveOutcome(outcome) => Ok(outcome),
+        _ => bail!("daemon returned an unexpected move reply"),
+    }
+}
+
+#[cfg(test)]
 async fn dispatch_restart(
     daemon: &mut daemon::DaemonClient,
     session_id: String,

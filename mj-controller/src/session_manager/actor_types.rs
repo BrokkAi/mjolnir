@@ -34,9 +34,10 @@ pub(super) enum ActorCommand {
         reply: oneshot::Sender<std::result::Result<(), String>>,
     },
     Reviewer {
+        queued_at: std::time::Instant,
         role: Option<String>,
         action: ReviewerAction,
-        reply: oneshot::Sender<std::result::Result<ReviewerOutcome, String>>,
+        reply: oneshot::Sender<anyhow::Result<ReviewerOutcome>>,
     },
     /// The connection is handed over whole, and so is the failure: a caller
     /// that must decide whether to restart the worker needs the typed cause,
@@ -140,7 +141,7 @@ impl ActorCommand {
                 }
             }
             Self::Reviewer { reply, .. } => {
-                if reply.send(Err(message.to_owned())).is_err() {
+                if reply.send(Err(anyhow::anyhow!("{message}"))).is_err() {
                     tracing::debug!(
                         %session_id,
                         operation = "reviewer",

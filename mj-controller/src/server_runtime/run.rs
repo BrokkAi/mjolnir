@@ -1321,18 +1321,19 @@ pub(crate) async fn run_server(
                                 // Move admission can probe an uncached host and load the
                                 // store. Keep that preparation off the control loop,
                                 // but refuse it before acknowledging the request.
-                                if let ControllerAction::Move { request } = &action {
-                                    anyhow::ensure!(!control.cancelled.load(Ordering::Acquire), "phone action cancelled");
-                                    mj_core::runtime::block_on(daemon_runtime.start_move_session((**request).clone(), control.lifecycle.clone().expect("Move has a lifecycle control")))??;
-                                    if let Some(reply) = admission_reply.take() {
-                                        let _ = reply.send(ActionOutcome::accepted());
+                                let lifecycle = match &action {
+                                    ControllerAction::Move { request } => {
+                                        anyhow::ensure!(!control.cancelled.load(Ordering::Acquire), "phone action cancelled");
+                                        Some(mj_core::runtime::block_on(daemon_runtime.start_move_session((**request).clone(), control.lifecycle.clone().expect("Move has a lifecycle control")))??)
                                     }
-                                }
-                                if let ControllerAction::Suspend { session_id, .. } = &action {
-                                    mj_core::runtime::block_on(daemon_runtime.prepare_suspension(session_id))??;
-                                    if let Some(reply) = admission_reply.take() {
-                                        let _ = reply.send(ActionOutcome::accepted());
-                                    }
+                                    ControllerAction::Suspend { session_id, acknowledge_unpublished_work } => Some(mj_core::runtime::block_on(daemon_runtime.start_suspend_session_controlled(session_id.clone(), *acknowledge_unpublished_work, false, control.lifecycle.clone().expect("Suspend has a lifecycle control")))??),
+                                    _ => None,
+                                };
+                                if let Some(mut started) = lifecycle {
+                                    mj_core::runtime::block_on(started.confirm_acceptance())??;
+                                    if let Some(reply) = admission_reply.take() { let _ = reply.send(ActionOutcome::accepted()); }
+                                    let outcome = mj_core::runtime::block_on(started.wait())??;
+                                    return super::actions::finish_phone_lifecycle(outcome);
                                 }
                                 if control.cancelled.load(Ordering::Acquire) {
                                     bail!("phone action cancelled");

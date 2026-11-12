@@ -142,7 +142,7 @@ fn runtime_view(
         session_id: session_id.into(),
         projection_ordinal,
         projection_digest: projection_digest.into(),
-        operational: Some(operational(session_id)),
+        operational: Some(operational(session_id).into()),
         latest_credential_sync_signal: None,
         connected: true,
         error: None,

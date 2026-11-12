@@ -68,12 +68,12 @@ fn a_close_whose_checkpoint_failed_with_a_live_worker_returns_to_its_previous_st
 }
 
 struct DeferredCleanupExecutor {
-    statuses: RefCell<Vec<i32>>,
+    statuses: std::sync::Mutex<Vec<i32>>,
 }
 
 impl CommandExecutor for DeferredCleanupExecutor {
     fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
-        let status = self.statuses.borrow_mut().pop().unwrap_or(0);
+        let status = self.statuses.lock().unwrap().pop().unwrap_or(0);
         Ok(CommandOutput {
             status,
             stdout: Vec::new(),
@@ -140,7 +140,7 @@ fn deferred_cleanup_failure_is_visible_and_successful_retry_clears_it() {
             &DeferredCleanupExecutor {
                 // The cleanup command fails, then the exact-absence probe
                 // confirms that the owned target is still present.
-                statuses: RefCell::new(vec![1, 1]),
+                statuses: std::sync::Mutex::new(vec![1, 1]),
             },
             |record| {
                 persisted
@@ -168,7 +168,7 @@ fn deferred_cleanup_failure_is_visible_and_successful_retry_clears_it() {
         .cleanup_stopped_target_with(
             session_id,
             &DeferredCleanupExecutor {
-                statuses: RefCell::new(Vec::new()),
+                statuses: std::sync::Mutex::new(Vec::new()),
             },
             |record| {
                 retry_persisted
@@ -198,7 +198,7 @@ fn deferred_cleanup_persistence_failure_restores_the_stopped_record() {
         .cleanup_stopped_target_with(
             session_id,
             &DeferredCleanupExecutor {
-                statuses: RefCell::new(vec![1, 1]),
+                statuses: std::sync::Mutex::new(vec![1, 1]),
             },
             |_| Err(anyhow::anyhow!("database unavailable")),
         )
@@ -222,12 +222,12 @@ fn target_cleanup_persists_destroying_and_rechecks_the_installed_archive() {
     crate::database::load_state().unwrap();
 
     struct RecordingExecutor {
-        commands: RefCell<Vec<CommandSpec>>,
+        commands: std::sync::Mutex<Vec<CommandSpec>>,
     }
 
     impl CommandExecutor for RecordingExecutor {
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            self.commands.borrow_mut().push(command.clone());
+            self.commands.lock().unwrap().push(command.clone());
             Ok(CommandOutput {
                 status: 0,
                 stdout: Vec::new(),
@@ -258,7 +258,7 @@ fn target_cleanup_persists_destroying_and_rechecks_the_installed_archive() {
         },
     };
     let executor = RecordingExecutor {
-        commands: RefCell::new(Vec::new()),
+        commands: std::sync::Mutex::new(Vec::new()),
     };
     let persisted = RefCell::new(Vec::new());
 
@@ -274,9 +274,9 @@ fn target_cleanup_persists_destroying_and_rechecks_the_installed_archive() {
         persisted.into_inner(),
         vec![SessionState::Destroying, SessionState::Stopped]
     );
-    let commands = executor.commands.borrow();
+    let commands = executor.commands.lock().unwrap().clone();
     assert_eq!(commands.len(), 2);
-    assert_eq!(commands[0].purpose, "stop Mjolnir worker daemon");
+    assert_eq!(commands[0].purpose, "kill retired Mjolnir worker forest");
     assert!(commands[1].args.iter().any(|arg| arg.contains("rm -rf")));
     let stopped = &controller.state.sessions[session_id];
     assert_eq!(stopped.state, SessionState::Stopped);
@@ -374,7 +374,7 @@ fn destruction_waits_for_recovery_and_failed_cleanup_never_restarts_the_target()
                 session_id,
                 &checkpoint,
                 &DeferredCleanupExecutor {
-                    statuses: RefCell::new(vec![125]),
+                    statuses: std::sync::Mutex::new(vec![125]),
                 },
                 |record| {
                     assert!(*recovery.restarted.lock().unwrap());
@@ -417,7 +417,7 @@ fn destruction_waits_for_recovery_and_failed_cleanup_never_restarts_the_target()
                 true,
                 Some(session_id),
                 &DeferredCleanupExecutor {
-                    statuses: RefCell::new(Vec::new())
+                    statuses: std::sync::Mutex::new(Vec::new())
                 }
             )
             .unwrap(),
@@ -431,7 +431,7 @@ fn destruction_waits_for_recovery_and_failed_cleanup_never_restarts_the_target()
                 session_id,
                 &checkpoint,
                 &DeferredCleanupExecutor {
-                    statuses: RefCell::new(vec![0])
+                    statuses: std::sync::Mutex::new(vec![0])
                 },
                 crate::database::save_lifecycle_session
             )
@@ -456,12 +456,12 @@ fn podman_close_persists_stopped_before_deferred_storage_cleanup() {
     crate::database::load_state().unwrap();
 
     struct RecordingExecutor {
-        commands: RefCell<Vec<CommandSpec>>,
+        commands: std::sync::Mutex<Vec<CommandSpec>>,
     }
 
     impl CommandExecutor for RecordingExecutor {
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            self.commands.borrow_mut().push(command.clone());
+            self.commands.lock().unwrap().push(command.clone());
             Ok(CommandOutput {
                 status: 0,
                 stdout: Vec::new(),
@@ -510,7 +510,7 @@ fn podman_close_persists_stopped_before_deferred_storage_cleanup() {
         },
     };
     let executor = RecordingExecutor {
-        commands: RefCell::new(Vec::new()),
+        commands: std::sync::Mutex::new(Vec::new()),
     };
     let persisted = RefCell::new(Vec::new());
 
@@ -532,7 +532,7 @@ fn podman_close_persists_stopped_before_deferred_storage_cleanup() {
             (SessionState::Stopped, true)
         ]
     );
-    let commands = executor.commands.borrow();
+    let commands = executor.commands.lock().unwrap().clone();
     assert_eq!(commands.len(), 1);
     assert!(commands[0].args[1].contains("podman stop --time 0"));
     assert!(!commands[0].args[1].contains("podman rm"));
@@ -547,7 +547,7 @@ fn podman_close_persists_stopped_before_deferred_storage_cleanup() {
         })
         .unwrap();
 
-    let commands = executor.commands.borrow();
+    let commands = executor.commands.lock().unwrap().clone();
     assert_eq!(
         commands[1].stage,
         Some(targets::ProvisionStage::StoppingTarget)
@@ -1302,12 +1302,12 @@ fn force_stop_without_a_recovery_archive_does_not_touch_the_target() {
     let _writer = crate::database::install_isolated_test_writer();
 
     struct RecordingExecutor {
-        calls: RefCell<usize>,
+        calls: std::sync::Mutex<usize>,
     }
 
     impl CommandExecutor for RecordingExecutor {
         fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
-            *self.calls.borrow_mut() += 1;
+            *self.calls.lock().unwrap() += 1;
             Ok(CommandOutput {
                 status: 0,
                 stdout: Vec::new(),
@@ -1337,7 +1337,7 @@ fn force_stop_without_a_recovery_archive_does_not_touch_the_target() {
         },
     };
     let executor = RecordingExecutor {
-        calls: RefCell::new(0),
+        calls: std::sync::Mutex::new(0),
     };
 
     persist_controller_fixture(&controller);
@@ -1346,7 +1346,7 @@ fn force_stop_without_a_recovery_archive_does_not_touch_the_target() {
         .unwrap_err();
 
     assert!(error.to_string().contains("existing recovery archive"));
-    assert_eq!(*executor.calls.borrow(), 0);
+    assert_eq!(*executor.calls.lock().unwrap(), 0);
     assert_eq!(
         controller.state.sessions[session_id].state,
         SessionState::Running
@@ -1365,12 +1365,12 @@ fn destroying_retry_blocks_cleanup_when_the_archive_gate_changed() {
     let _writer = crate::database::install_isolated_test_writer();
 
     struct RecordingExecutor {
-        calls: RefCell<usize>,
+        calls: std::sync::Mutex<usize>,
     }
 
     impl CommandExecutor for RecordingExecutor {
         fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
-            *self.calls.borrow_mut() += 1;
+            *self.calls.lock().unwrap() += 1;
             Ok(CommandOutput {
                 status: 0,
                 stdout: Vec::new(),
@@ -1403,7 +1403,7 @@ fn destroying_retry_blocks_cleanup_when_the_archive_gate_changed() {
         },
     };
     let executor = RecordingExecutor {
-        calls: RefCell::new(0),
+        calls: std::sync::Mutex::new(0),
     };
     let persisted = RefCell::new(Vec::new());
     std::fs::write(&checkpoint.archive_path, b"changed after checkpoint").unwrap();
@@ -1417,7 +1417,7 @@ fn destroying_retry_blocks_cleanup_when_the_archive_gate_changed() {
         .unwrap_err();
 
     assert!(error.to_string().contains("checkpoint SHA changed"));
-    assert_eq!(*executor.calls.borrow(), 0);
+    assert_eq!(*executor.calls.lock().unwrap(), 0);
     assert!(persisted.into_inner().is_empty());
     assert!(worktree.worktree_root.is_dir());
     assert_eq!(
@@ -1434,12 +1434,12 @@ fn destroying_retry_finalizes_when_apple_container_is_confirmed_absent() {
     crate::database::load_state().unwrap();
 
     struct AlreadyRemovedExecutor {
-        commands: RefCell<Vec<CommandSpec>>,
+        commands: std::sync::Mutex<Vec<CommandSpec>>,
     }
 
     impl CommandExecutor for AlreadyRemovedExecutor {
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            self.commands.borrow_mut().push(command.clone());
+            self.commands.lock().unwrap().push(command.clone());
             if command.program == "sh"
                 && command
                     .args
@@ -1496,7 +1496,7 @@ fn destroying_retry_finalizes_when_apple_container_is_confirmed_absent() {
         },
     };
     let executor = AlreadyRemovedExecutor {
-        commands: RefCell::new(Vec::new()),
+        commands: std::sync::Mutex::new(Vec::new()),
     };
     let persisted = RefCell::new(Vec::new());
 
@@ -1508,7 +1508,7 @@ fn destroying_retry_finalizes_when_apple_container_is_confirmed_absent() {
         })
         .unwrap();
 
-    let commands = executor.commands.borrow();
+    let commands = executor.commands.lock().unwrap().clone();
     assert_eq!(commands.len(), 3);
     assert_eq!(
         commands[0].purpose,
@@ -1950,7 +1950,7 @@ fn is_release(command: &CommandSpec) -> bool {
 struct RealTargetsRecordedRelease {
     release_status: i32,
     checkout: std::path::PathBuf,
-    releases: RefCell<Vec<(CommandSpec, bool)>>,
+    releases: std::sync::Mutex<Vec<(CommandSpec, bool)>>,
 }
 
 #[cfg(unix)]
@@ -1960,7 +1960,8 @@ impl CommandExecutor for RealTargetsRecordedRelease {
             return ProcessExecutor.execute(command);
         }
         self.releases
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .push((command.clone(), self.checkout.exists()));
         Ok(CommandOutput {
             status: self.release_status,
@@ -1977,13 +1978,15 @@ impl CommandExecutor for RealTargetsRecordedRelease {
 /// Answers every command with success and records them in order.
 #[derive(Default)]
 struct RecordingTargets {
-    commands: RefCell<Vec<CommandSpec>>,
+    commands: std::sync::Mutex<Vec<CommandSpec>>,
 }
 
 impl RecordingTargets {
     fn releases(&self) -> Vec<CommandSpec> {
         self.commands
-            .borrow()
+            .lock()
+            .unwrap()
+            .clone()
             .iter()
             .filter(|command| is_release(command))
             .cloned()
@@ -1992,18 +1995,23 @@ impl RecordingTargets {
 
     /// The position of the first command whose arguments mention `needle`.
     fn position(&self, needle: &str) -> Option<usize> {
-        self.commands.borrow().iter().position(|command| {
-            command
-                .args
-                .iter()
-                .any(|argument| argument.contains(needle))
-        })
+        self.commands
+            .lock()
+            .unwrap()
+            .clone()
+            .iter()
+            .position(|command| {
+                command
+                    .args
+                    .iter()
+                    .any(|argument| argument.contains(needle))
+            })
     }
 }
 
 impl CommandExecutor for RecordingTargets {
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-        self.commands.borrow_mut().push(command.clone());
+        self.commands.lock().unwrap().push(command.clone());
         Ok(CommandOutput {
             status: 0,
             stdout: Vec::new(),
@@ -2087,7 +2095,7 @@ fn destroying_a_managed_clone_releases_its_mbx_build_state_once_the_checkout_is_
     let executor = RealTargetsRecordedRelease {
         release_status: 0,
         checkout: checkout.clone(),
-        releases: RefCell::new(Vec::new()),
+        releases: std::sync::Mutex::new(Vec::new()),
     };
 
     persist_controller_fixture(&controller);
@@ -2095,7 +2103,7 @@ fn destroying_a_managed_clone_releases_its_mbx_build_state_once_the_checkout_is_
         .force_destroy_session_with(session_id, &executor, BranchDisposition::Keep, |_| Ok(()))
         .unwrap();
 
-    let releases = executor.releases.into_inner();
+    let releases = executor.releases.into_inner().unwrap();
     assert_eq!(releases.len(), 1, "{releases:?}");
     let (release, checkout_present) = &releases[0];
     assert!(
@@ -2137,7 +2145,7 @@ fn a_failed_mbx_release_still_destroys_the_session_and_is_reported_by_doctor() {
     let executor = RealTargetsRecordedRelease {
         release_status: 1,
         checkout: checkout.clone(),
-        releases: RefCell::new(Vec::new()),
+        releases: std::sync::Mutex::new(Vec::new()),
     };
 
     persist_controller_fixture(&controller);
@@ -2145,7 +2153,7 @@ fn a_failed_mbx_release_still_destroys_the_session_and_is_reported_by_doctor() {
         .force_destroy_session_with(session_id, &executor, BranchDisposition::Keep, |_| Ok(()))
         .unwrap();
 
-    assert_eq!(executor.releases.borrow().len(), 1);
+    assert_eq!(executor.releases.lock().unwrap().clone().len(), 1);
     assert!(!checkout.exists());
     assert!(!worker_root.exists());
     assert!(!controller.state.sessions.contains_key(session_id));
@@ -2206,7 +2214,12 @@ fn destroying_an_ssh_bare_session_releases_each_repository_on_its_host() {
         .unwrap();
 
     let releases = executor.releases();
-    assert_eq!(releases.len(), 1, "{:?}", executor.commands.borrow());
+    assert_eq!(
+        releases.len(),
+        1,
+        "{:?}",
+        executor.commands.lock().unwrap().clone()
+    );
     let release = &releases[0];
     assert_eq!(release.program, "ssh");
     let remote = release.args.last().unwrap();
@@ -2270,7 +2283,12 @@ fn removing_a_cached_container_releases_its_workspaces_from_the_shared_cache() {
         .unwrap();
 
     let releases = executor.releases();
-    assert_eq!(releases.len(), 1, "{:?}", executor.commands.borrow());
+    assert_eq!(
+        releases.len(),
+        1,
+        "{:?}",
+        executor.commands.lock().unwrap().clone()
+    );
     let arguments = release_arguments(&releases[0]);
     assert_eq!(
         &arguments[..4],
@@ -2347,7 +2365,9 @@ fn destroying_a_subagent_never_releases_the_workspace_it_borrows() {
     assert!(
         executor
             .commands
-            .borrow()
+            .lock()
+            .unwrap()
+            .clone()
             .iter()
             .any(|command| command.purpose == "stop Mjolnir worker daemon")
     );

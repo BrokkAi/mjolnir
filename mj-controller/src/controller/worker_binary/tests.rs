@@ -6247,6 +6247,7 @@ fn fixed_delegation_guidance_is_private_exact_and_idempotent() {
 /// 30 s for one debug build on a busy disk. An unchanged source is now
 /// recognised from its path, size, mtime, inode and ctime.
 // Hard-won: 8b62e1b: rehashing unchanged worker sources delayed daemon startup by tens of seconds
+// Hard-won: daemon heap profile: resolving an unchanged pinned copy still rescanned the executable.
 #[test]
 fn an_unchanged_worker_source_is_not_read_again_when_pinning() {
     let directory = tempfile::tempdir().unwrap();
@@ -6256,6 +6257,8 @@ fn an_unchanged_worker_source_is_not_read_again_when_pinning() {
 
     let first = copy_worker_source_to_cache(&source, &cache).unwrap();
     verify_worker_build_indexed(&cache, &source).unwrap();
+    assert_eq!(indexed_pinned_worker(&cache, &first), Some(first.clone()));
+    verify_worker_build_indexed(&cache, &first).unwrap();
 
     // Damage the pinned copy without changing its length. A pin that read
     // the source or re-hashed the copy would notice; the indexed one does not.
@@ -6264,6 +6267,8 @@ fn an_unchanged_worker_source_is_not_read_again_when_pinning() {
         vec![0_u8; std::fs::metadata(&source).unwrap().len() as usize],
     )
     .unwrap();
+    assert!(indexed_pinned_worker(&cache, &first).is_none());
+    assert!(verify_worker_build_indexed(&cache, &first).is_err());
     assert_eq!(copy_worker_source_to_cache(&source, &cache).unwrap(), first);
     verify_worker_build_indexed(&cache, &source).unwrap();
 

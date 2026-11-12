@@ -161,3 +161,32 @@ fn finish_worker_restart_with(
     )?;
     Ok(())
 }
+
+/// A proved dead wake releases its boot and becomes retryable atomically.
+pub(crate) fn fail_subagent_unpark(
+    session_id: &str,
+    operation_id: &str,
+    failure: &str,
+) -> Result<()> {
+    let owner = crate::worker_lifecycle::require(session_id)?;
+    ensure!(
+        owner.operation_id() == operation_id,
+        "unpark ownership changed"
+    );
+    let session_id = session_id.to_owned();
+    let operation_id = operation_id.to_owned();
+    let failure = failure.to_owned();
+    submit_database_write("fail_subagent_unpark", move |connection| {
+        let tx = connection.transaction()?;
+        ensure!(tx.execute(
+            "UPDATE sessions SET state='parked', last_error=?3, updated_at=?4
+             WHERE session_id=?1 AND state='running'
+             AND EXISTS (SELECT 1 FROM worker_restart_intents WHERE session_id=?1 AND operation_id=?2)
+             AND EXISTS (SELECT 1 FROM subagent_sessions WHERE child_session_id=?1)",
+            params![session_id, operation_id, failure, chrono::Utc::now().to_rfc3339()],
+        )? == 1, "failed wake no longer owns the running child");
+        finish_worker_restart_with(&tx, &session_id, &operation_id)?;
+        tx.commit()?;
+        Ok(())
+    })
+}
