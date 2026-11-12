@@ -2289,7 +2289,7 @@ fn subagent_status(
         );
     }
     // A failed wake owns the output even when an earlier turn delivered a report.
-    if let Some((failure, _)) = parked_wake_failure(record) {
+    if let Some(ChildFailureSource::Wake(failure)) = child_failure_source(record, None) {
         return ("failed".into(), Some(failure.to_owned()), true);
     }
     let start_pending = matches!(start, Some(StartStatus::Pending));
@@ -2490,6 +2490,11 @@ fn child_progress(committed: &crate::database::CommittedState, child_id: &str) -
         .into_iter()
         .map(|turn| turn.command_id.as_str())
         .collect::<Vec<_>>();
+    let failure = project_child_failure(
+        child_failure_source(committed.state.sessions.get(child_id), last),
+        subagent.map(|record| record.profile_id.as_str()),
+        turn.and_then(|turn| turn.failed_message.as_deref()),
+    );
     ChildProgress {
         turn_pending: false,
         finished_span: last.and_then(|turn| {
@@ -2506,46 +2511,62 @@ fn child_progress(committed: &crate::database::CommittedState, child_id: &str) -
         ),
         awaited_ordinal: recorded.awaited_ordinal,
         answer: last.cloned(),
-        failed_turn: last.and_then(|last| {
-            mj_core::subagent::failed_turn(
-                last,
-                turn.and_then(|turn| turn.failed_message.as_deref()),
-            )
-        }),
-        login_failure: child_login_failure(
-            committed.state.sessions.get(child_id),
-            last,
-            subagent.map(|record| record.profile_id.as_str()),
-        ),
-        provider_failure: last.and_then(provider_failure),
+        failed_turn: failure.failed_turn,
+        login_failure: failure.login_failure,
+        provider_failure: failure.provider_failure,
         report_dir: recorded.report_dir.clone(),
     }
 }
 
-/// The current parked wake failure and its login classification take precedence
-/// over historical turns and reports.
-fn parked_wake_failure(record: Option<&mj_core::state::SessionRecord>) -> Option<(&str, bool)> {
-    let failure = record
-        .filter(|record| record.state == SessionState::Parked)?
-        .last_error
-        .as_deref()?;
-    Some((
-        failure,
-        mj_core::credentials::text_reports_auth_failure(failure),
-    ))
+/// Select the source before deriving any failure metadata. A wake failure
+/// cannot carry a previous turn's diagnostic, command, or login classification.
+enum ChildFailureSource<'a> {
+    Wake(&'a str),
+    Turn(&'a mj_core::state::MaterializedTurnOutcome),
 }
 
-/// One projection for provider refusals before a turn and during a turn.
-fn child_login_failure(
-    record: Option<&mj_core::state::SessionRecord>,
-    last: Option<&mj_core::state::MaterializedTurnOutcome>,
+fn child_failure_source<'a>(
+    record: Option<&'a mj_core::state::SessionRecord>,
+    last: Option<&'a mj_core::state::MaterializedTurnOutcome>,
+) -> Option<ChildFailureSource<'a>> {
+    if let Some(message) = record
+        .filter(|record| record.state == SessionState::Parked)
+        .and_then(|record| record.last_error.as_deref())
+    {
+        return Some(ChildFailureSource::Wake(message));
+    }
+    last.filter(|turn| mj_core::subagent::failed_turn(turn, None).is_some())
+        .map(ChildFailureSource::Turn)
+}
+
+#[derive(Default)]
+struct ChildFailureProjection {
+    failed_turn: Option<(&'static str, String)>,
+    login_failure: Option<String>,
+    provider_failure: Option<(String, mj_core::diagnostic::TurnDiagnostic)>,
+}
+
+fn project_child_failure(
+    source: Option<ChildFailureSource<'_>>,
     profile: Option<&str>,
-) -> Option<String> {
-    let refused = match parked_wake_failure(record) {
-        Some((_, refused)) => refused,
-        None => last.is_some_and(mj_core::subagent::turn_failed_on_login),
-    };
-    profile.filter(|_| refused).map(str::to_owned)
+    finished_message: Option<&str>,
+) -> ChildFailureProjection {
+    match source {
+        Some(ChildFailureSource::Wake(message)) => ChildFailureProjection {
+            login_failure: profile
+                .filter(|_| mj_core::credentials::text_reports_auth_failure(message))
+                .map(str::to_owned),
+            ..Default::default()
+        },
+        Some(ChildFailureSource::Turn(turn)) => ChildFailureProjection {
+            failed_turn: mj_core::subagent::failed_turn(turn, finished_message),
+            login_failure: profile
+                .filter(|_| mj_core::subagent::turn_failed_on_login(turn))
+                .map(str::to_owned),
+            provider_failure: provider_failure(turn),
+        },
+        None => ChildFailureProjection::default(),
+    }
 }
 
 fn provider_failure(
@@ -2581,18 +2602,18 @@ pub(crate) fn load_child_progress(child_id: &str) -> Result<ChildProgress> {
         &in_flight,
         mj_core::clock::epoch_millis(),
     );
-    let failed_turn = match last.as_ref() {
-        // Only a failed turn pays for reading its last message.
-        Some(turn) if mj_core::subagent::failed_turn(turn, None).is_some() => {
-            let message = crate::database::load_materialized_finished_turn_message(child_id)?;
-            mj_core::subagent::failed_turn(turn, message.as_deref())
-        }
-        _ => None,
+    let record = crate::database::load_session_record(child_id)?;
+    let source = child_failure_source(record.as_ref(), last.as_ref());
+    // Only the selected turn failure pays for reading its last message.
+    let message = if matches!(source, Some(ChildFailureSource::Turn(_))) {
+        crate::database::load_materialized_finished_turn_message(child_id)?
+    } else {
+        None
     };
-    let login_failure = child_login_failure(
-        crate::database::load_session_record(child_id)?.as_ref(),
-        last.as_ref(),
+    let failure = project_child_failure(
+        source,
         subagent.as_ref().map(|record| record.profile_id.as_str()),
+        message.as_deref(),
     );
     Ok(ChildProgress {
         turn_pending: false,
@@ -2604,9 +2625,9 @@ pub(crate) fn load_child_progress(child_id: &str) -> Result<ChildProgress> {
         report,
         awaited_ordinal: recorded.awaited_ordinal,
         answer: last.clone(),
-        failed_turn,
-        login_failure,
-        provider_failure: last.as_ref().and_then(provider_failure),
+        failed_turn: failure.failed_turn,
+        login_failure: failure.login_failure,
+        provider_failure: failure.provider_failure,
         report_dir: recorded.report_dir,
     })
 }
