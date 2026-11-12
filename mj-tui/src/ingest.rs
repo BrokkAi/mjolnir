@@ -453,24 +453,12 @@ impl PreparedMaterializedSessionDetail {
                 created_at_ms: prompt.queued_at_ms,
             })
             .collect();
-        let awaiting_input = session.active_turn.is_none()
-            && session.queued_prompts.is_empty()
-            && session.last_turn_outcome.as_ref().is_some_and(|outcome| {
-                outcome.requires_input(assessment)
-                    && !session.transcript.iter().any(|item| {
-                        matches!(item.body, TranscriptBody::User { .. })
-                            && item.position > outcome.completed_ordinal
-                    })
-            });
+        let unanswered_input = session.unanswered_input_outcome(assessment, None);
+        let awaiting_input = unanswered_input.is_some();
         let dismissible_question = awaiting_input
             .then(|| {
                 assessment
-                    .filter(|a| {
-                        session
-                            .last_turn_outcome
-                            .as_ref()
-                            .is_some_and(|o| a.applies_to(o))
-                    })
+                    .filter(|a| unanswered_input.is_some_and(|outcome| a.applies_to(outcome)))
                     .and_then(|a| a.inferred_question())
             })
             .flatten();
@@ -544,6 +532,24 @@ pub(crate) struct CapacityDetail {
 }
 
 impl DashboardState {
+    pub fn set_session_attention_for(
+        &mut self,
+        session_id: &str,
+        attention: mj_core::attention::SessionAttention,
+    ) {
+        if self.served_attention.get(session_id) != Some(&attention) {
+            self.served_attention
+                .insert(session_id.to_owned(), attention);
+        }
+    }
+    pub fn set_session_attention(
+        &mut self,
+        attention: BTreeMap<String, mj_core::attention::SessionAttention>,
+    ) {
+        if self.served_attention != attention {
+            *self.served_attention = attention;
+        }
+    }
     pub fn set_workspace_names(&mut self, names: BTreeMap<String, String>) {
         self.workspace_names = names;
         let workspace_name = self

@@ -481,6 +481,11 @@ pub(crate) fn dashboard_with_session(mut session: SessionRecord) -> DashboardSta
         BTreeMap::new(),
     );
     // This fixture represents a conversation already opened by the host.
+    serve_attention(
+        &mut dashboard,
+        &[&session_id],
+        mj_core::attention::SessionAttention::Idle,
+    );
     dashboard
         .navigation
         .assign(dashboard.focused_pane(), Some(&session_id));
@@ -489,11 +494,38 @@ pub(crate) fn dashboard_with_session(mut session: SessionRecord) -> DashboardSta
 
 /// Marks a session's turn as running, so it reads as working.
 pub(crate) fn set_working(dashboard: &mut DashboardState, session_id: &str) {
+    serve_attention(
+        dashboard,
+        &[session_id],
+        mj_core::attention::SessionAttention::Working,
+    );
     dashboard
         .session_details
         .get_mut(session_id)
         .expect("the session has details")
         .current_turn_started_at = Some(1);
+    dashboard
+        .session_details
+        .get_mut(session_id)
+        .unwrap()
+        .activity
+        .state = Some(mj_core::activity::ActivityState::Turn {
+        started_at_ms: Some(1),
+        last_activity_at_ms: None,
+    });
+}
+
+/// Supply the daemon publication independently of the raw transcript fixture.
+pub(crate) fn serve_attention(
+    dashboard: &mut DashboardState,
+    ids: &[&str],
+    attention: mj_core::attention::SessionAttention,
+) {
+    for id in ids {
+        dashboard
+            .served_attention
+            .insert((*id).to_owned(), attention);
+    }
 }
 
 /// A dashboard showing one running parent session with one running

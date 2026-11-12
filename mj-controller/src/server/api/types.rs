@@ -104,6 +104,8 @@ impl From<&mj_core::relay::RelayOperationalState> for ApiBackgroundWork {
 /// needs something new.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApiSession {
+    #[serde(default)]
+    pub attention: mj_core::attention::SessionAttention,
     /// Tasks currently observed by the daemon, including their stop capability.
     #[serde(default)]
     pub background_tasks: Vec<crate::server::ViewerBackgroundTask>,
@@ -175,6 +177,7 @@ pub struct ApiSession {
 impl From<&ViewerSession> for ApiSession {
     fn from(session: &ViewerSession) -> Self {
         Self {
+            attention: session.attention,
             background_tasks: session.background_tasks.clone(),
             assessment: None,
             subagents: session.subagents.clone(),

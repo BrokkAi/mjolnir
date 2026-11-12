@@ -897,6 +897,7 @@ fn ready_view(model: &str) -> ManagedSessionView {
         background_work_known: None,
     };
     ManagedSessionView {
+        attention: Default::default(),
         snapshot: Some(mj_core::state::ManagedSessionSnapshot {
             subagent_requests: Default::default(),
             subagent_completions: Default::default(),

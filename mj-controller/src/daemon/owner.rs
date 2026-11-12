@@ -595,6 +595,7 @@ mod tests {
             owner.publish_view(
                 "active".into(),
                 ManagedSessionView {
+                    attention: Default::default(),
                     connected,
                     ..Default::default()
                 },

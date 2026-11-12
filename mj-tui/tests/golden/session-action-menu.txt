@@ -333,12 +333,12 @@ selection after disabled click: Some(ContainerSettings)
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === active prose question (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default !1                         ≡ ││                                                                              │
+│ default ?1                         ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
-│› ! ACP pretty                                                                                                        │
+│› ? ACP pretty                                                                                                        │
 │  Question  po                                                                                                        │
 │  │ Waiting on  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
 │  │             │  Sub-agents Native                                                                 │                │
@@ -375,12 +375,12 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 dismiss exact question: DismissQuestion { session_id: "session-1", question: InferredQuestion { turn_id: "prompt-1", completed_ordinal: 3 } }
 === dismissal in flight (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
-│ default !1                         ≡ ││                                                                              │
+│ default ?1                         ≡ ││                                                                              │
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────────────────────────────││                                                                              │
-│› ! ACP pretty                                                                                                        │
+│› ? ACP pretty                                                                                                        │
 │  Question  po                                                                                                        │
 │  │ Waiting on  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
 │  │             │  Sub-agents Native                                                                 │                │

@@ -1816,7 +1816,7 @@ impl Controller {
         crate::worker_lifecycle::run(&operation.selection.session_id.clone(), "recover move managed controlled", executor, async {
         let id = operation.selection.session_id.clone();
         let result = async {
-            let session = self.state.sessions.get(&id).context("move session is missing")?.clone();
+            let mut session = self.state.sessions.get(&id).context("move session is missing")?.clone();
             if operation.queue_admission_started {
                 ensure!(!operation.cancellation_requested, "Move was cancelled; destination retained without further queue admission");
                 self.finish_workspace_transfer(&mut operation, executor)?;
@@ -1849,16 +1849,32 @@ impl Controller {
                 if operation.retains_source_environment() && self.state.sessions[&id].state == SessionState::Closing {
                     let previous = self.state.sessions[&id].clone();
                     operation.recovery_session = Some(previous.clone());
+                    // Startup also recovers a Move that already ended (failed
+                    // or cancelled) when its source is still `Closing`; only
+                    // an active Move restores again.
+                    if operation.in_place && operation.is_active() && !operation.cancellation_requested {
+                        return self.retry_interrupted_in_place_move(&mut operation, &previous, executor, manager).await;
+                    }
                     let cause = anyhow::anyhow!("Move source sealed; environment retained for explicit retry");
                     return Err(self.retain_failed_in_place_move(&id, &previous, cause)?);
                 }
                 if !operation.retains_source_environment() && self.state.sessions[&id].state == SessionState::Stopped && self.state.sessions[&id].target.is_some() {
                     self.cleanup_stopped_target(&id, &cleanup)?;
                 }
-                bail!("{}", interrupted_source_stop_message(
-                    "Move source stop recovered; no destination work was started. Retry Move or Resume with previous settings",
-                    operation.in_place,
-                ));
+                let reopened = matches!(
+                    self.state.sessions[&id].state,
+                    SessionState::Running | SessionState::Disconnected
+                );
+                if !(reopened && operation.in_place && operation.phase == MovePhase::ClosingSource && !operation.cancellation_requested) {
+                    bail!("{}", interrupted_source_stop_message(
+                        "Move source stop recovered; no destination work was started. Retry Move or Resume with previous settings",
+                        operation.in_place,
+                    ));
+                }
+                // The stop was interrupted before the seal and the source is
+                // running again: resume the Move as the arm below does when
+                // startup first finds the source running.
+                session = self.state.sessions[&id].clone();
             }
             match operation.phase {
                 MovePhase::ClosingSource
@@ -1919,6 +1935,10 @@ impl Controller {
                 }
                 MovePhase::ResumingDestination => {
                     let previous = operation.recovery_session.as_ref().context("move lacks its stopped recovery identity; retain resources for inspection")?;
+                    if operation.in_place && !operation.cancellation_requested {
+                        let previous = previous.clone();
+                        return self.retry_interrupted_in_place_move(&mut operation, &previous, executor, manager).await;
+                    }
                     // The retained environment belongs to this Move, even
                     // when only part of its worker installation completed.
                     let cause = anyhow::anyhow!("destination restoration was interrupted; checkpoint retained for an explicit retry");
@@ -1956,6 +1976,50 @@ impl Controller {
         .await
 
         }).await
+    }
+
+    /// Finish an in-place Move whose daemon stopped after the source was
+    /// sealed: right after the seal, before the swap, or during it. First give
+    /// the record the shape a failed attempt leaves (`Error`, source identity,
+    /// worker stopped, environment retained), then run the same restore the
+    /// manual retry runs from that shape. A failure of this attempt ends the
+    /// Move as `Failed`, where Destroy and a manual retry still work, and a
+    /// `Failed` Move is not recovered again, so each interruption gets one
+    /// automatic attempt.
+    async fn retry_interrupted_in_place_move(
+        &mut self,
+        operation: &mut MoveOperation,
+        previous: &mj_core::state::SessionRecord,
+        executor: &(impl CommandExecutor + Sync),
+        manager: &SessionManagerControl,
+    ) -> Result<()> {
+        let id = operation.selection.session_id.clone();
+        // Record the destination phase before the record leaves `Closing`, so
+        // a daemon that stops during this retry leaves a state that startup
+        // retries again: `ClosingSource` with an `Error` record does not.
+        operation.phase = MovePhase::ResumingDestination;
+        operation.recovery_session = Some(previous.clone());
+        operation.updated_at = now();
+        crate::database::save_move_operation(operation)?;
+        self.retain_failed_in_place_move(
+            &id,
+            previous,
+            anyhow::anyhow!("the daemon stopped during this in-place Move; retrying it"),
+        )?;
+        tracing::info!(
+            session_id = %id,
+            reference = %operation.operation_id,
+            phase = ?operation.phase,
+            "retrying an in-place Move the daemon stopped after sealing its source"
+        );
+        Box::pin(self.execute_move(
+            operation,
+            None,
+            executor,
+            manager,
+            MoveSourceRelay::default(),
+        ))
+        .await
     }
 
     async fn recover_move_source_stop(

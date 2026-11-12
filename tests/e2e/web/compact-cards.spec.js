@@ -51,6 +51,7 @@ function session(id, projectKey, projectLabel, options = {}) {
     last_activity_at_ms: options.activity || SERVER_TIME_MS,
     last_message_at_ms: options.message,
     has_error: Boolean(options.hasError),
+    attention: options.attention || 'idle',
     preview: [],
     queued_prompts: Array.from({ length: options.queued || 0 }, (_, index) => ({ id: `queued-${id}-${index}`, text: 'queued' })),
     active_user_shells: [],
@@ -310,18 +311,22 @@ test('golden_viewer_dashboard', async ({ context }) => {
       displayLocation: '/work/attention',
       profileId: 'codex',
       hasError: true,
+      attention: 'failed',
       pendingElicitations: [{ id: 'input-1' }],
       queued: 2,
       activityDetails: activity('turn', { turn_started_at_ms: SERVER_TIME_MS - 65_000, step_started_at_ms: SERVER_TIME_MS - 65_000 }),
       isIdle: false,
     }),
-    session('beta-step', 'project-beta', 'Beta', { activity: SERVER_TIME_MS - 2_000, activityDetails: activity('step', { step_started_at_ms: SERVER_TIME_MS - 3_600_000 }), isIdle: false }),
-    session('alpha-background', 'project-alpha', 'Alpha', { activity: SERVER_TIME_MS - 3_000, activityDetails: activity('background', { background_started_at_ms: SERVER_TIME_MS - 65_000, label: 'Indexing' }), isIdle: false }),
+    session('beta-step', 'project-beta', 'Beta', { attention: 'working', activity: SERVER_TIME_MS - 2_000, activityDetails: activity('step', { step_started_at_ms: SERVER_TIME_MS - 3_600_000 }), isIdle: false }),
+    session('alpha-background', 'project-alpha', 'Alpha', { attention: 'working', activity: SERVER_TIME_MS - 3_000, activityDetails: activity('background', { background_started_at_ms: SERVER_TIME_MS - 65_000, label: 'Indexing' }), isIdle: false }),
     session('alpha-idle', 'project-alpha', 'Alpha', { activity: SERVER_TIME_MS - 4_000, activityDetails: activity('idle', { idle_since_ms: SERVER_TIME_MS - 65_000 }) }),
     session('alpha-yesterday', 'project-alpha', 'Alpha', { activity: SERVER_TIME_MS - 4_500, activityDetails: activity('idle', { idle_since_ms: SERVER_TIME_MS - 86_465_000 }) }),
-    session('lifecycle', 'project-lifecycle', 'Lifecycle', { activity: SERVER_TIME_MS - 5_000, activityDetails: activity('lifecycle', { label: 'Starting target' }), isIdle: false }),
-    session('checking-response', 'project-checking', 'Checking', { activity: SERVER_TIME_MS - 5_500, activityDetails: activity('idle', { idle_since_ms: SERVER_TIME_MS - 65_000 }), retryAssessmentPending: true }),
+    session('lifecycle', 'project-lifecycle', 'Lifecycle', { attention: 'working', activity: SERVER_TIME_MS - 5_000, activityDetails: activity('lifecycle', { label: 'Starting target' }), isIdle: false }),
+    session('checking-response', 'project-checking', 'Checking', { attention: 'working', activity: SERVER_TIME_MS - 5_500, activityDetails: activity('idle', { idle_since_ms: SERVER_TIME_MS - 65_000 }), retryAssessmentPending: true }),
     session('unknown-idle', 'project-unknown', 'Unknown', { activity: SERVER_TIME_MS - 6_000, activityDetails: activity('idle') }),
+    session('attention-important', 'project-attention', 'Attention', { attention: 'important', title: 'Important result', pendingElicitations: [{ id: 'stale-form' }] }),
+    session('attention-unreachable', 'project-attention', 'Attention', { attention: 'unreachable', title: 'Unreachable worker' }),
+    session('attention-input', 'project-attention', 'Attention', { attention: 'needs_input', title: 'Input needed' }),
   ]);
   await captureGoldenState(output, compactPage, 'compact cards with attention and activity clocks', await compactPage.evaluate(() => ({
     documentWidth: document.documentElement.scrollWidth,
@@ -516,6 +521,7 @@ test('golden_viewer_dashboard', async ({ context }) => {
 test('child workspace hides idle history while preserving active work and an opened conversation', async ({ page }) => {
   const parent = session('parent', 'project', 'Project', {
     title: 'Parent session',
+    attention: 'needs_input',
     subagentSessionIds: ['idle', 'working', 'blocked', 'failed', 'unknown', 'reviewing'],
   });
   parent.native_subagents = [
@@ -526,17 +532,18 @@ test('child workspace hides idle history while preserving active work and an ope
     { session_id: 'native-disconnected', name: 'Disconnected helper', state: 'disconnected', availability: 'available' },
     { session_id: 'native-unknown', name: 'Unknown helper', state: 'completed', availability: 'unknown' },
   ];
+  parent.native_subagent_attention = { 'native-completed': 'idle', 'native-cancelled': 'idle', 'native-running': 'working', 'native-failed': 'failed', 'native-disconnected': 'unreachable', 'native-unknown': 'idle' };
   const child = (id, options = {}) => session(id, 'project', 'Project', { subagentParentId: 'parent', ...options });
-  const unknown = child('unknown', { activityDetails: { kind: 'unknown' } });
+  const unknown = child('unknown', { attention: 'unknown', activityDetails: { kind: 'unknown' } });
   delete unknown.is_idle;
-  const reviewing = child('reviewing');
+  const reviewing = child('reviewing', { attention: 'working' });
   reviewing.turn_review = { status: 'Preparing reviewer' };
   const state = await mount(page, [
     parent,
     child('idle'),
-    child('working', { isIdle: false, activityDetails: { kind: 'turn' } }),
-    child('blocked', { pendingElicitations: [{ id: 'question', question: 'Need input' }] }),
-    child('failed', { hasError: true }),
+    child('working', { attention: 'working', isIdle: false, activityDetails: { kind: 'turn' } }),
+    child('blocked', { attention: 'needs_input', pendingElicitations: [{ id: 'question', question: 'Need input' }] }),
+    child('failed', { attention: 'failed', hasError: true }),
     unknown,
     reviewing,
   ]);
@@ -563,6 +570,7 @@ test('child workspace hides idle history while preserving active work and an ope
   await refresh(page, state);
   await expect(card(page, 'reviewing')).toBeVisible();
   reviewing.turn_review = null;
+  reviewing.attention = 'idle';
   await refresh(page, state);
   await expect(card(page, 'reviewing')).toHaveCount(0);
 
@@ -1351,9 +1359,9 @@ test('reviewers open their own workspace and stay out of Subagents', async ({ pa
     reviewerSessionIds: ['review-open', 'review-done'],
   });
   const child = (id, options = {}) => session(id, 'project', 'Project', { subagentParentId: 'parent', ...options });
-  const worker = child('worker', { title: 'Worker', isIdle: false });
+  const worker = child('worker', { title: 'Worker', attention: 'working', isIdle: false });
   worker.chat_phase = 'running';
-  const reviewOpen = child('review-open', { title: 'Open reviewer', lifecycle: 'failed', active: true, isIdle: false });
+  const reviewOpen = child('review-open', { title: 'Open reviewer', attention: 'failed', lifecycle: 'failed', active: true, isIdle: false });
   reviewOpen.chat_phase = 'running';
   const reviewDone = child('review-done', { title: 'Done reviewer', lifecycle: 'suspended', active: false, capabilities: { open: false, read_history: true, resume: true } });
   const state = await mount(page, [parent, worker, reviewOpen, reviewDone]);

@@ -13,6 +13,11 @@ fn an_unchanged_session_is_recognised_without_reading_its_transcript() {
         "an identical snapshot was treated as a change, so it would be re-read"
     );
 
+    // Config can change attention without changing any worker projection fact.
+    let mut repair = runtime.clone();
+    repair.attention = mj_core::attention::SessionAttention::Failed;
+    assert!(!published.matches(&repair));
+
     // Anything a viewer would notice has to defeat the skip.
     let advanced = runtime_view("session-1", 43, "digest-43");
     assert!(
@@ -44,6 +49,7 @@ fn runtime_view(
     projection_digest: &str,
 ) -> crate::daemon::RuntimeSessionView {
     crate::daemon::RuntimeSessionView {
+        attention: Default::default(),
         policy_config_keys: Vec::new(),
         session_id: session_id.to_owned(),
         projection_ordinal,
@@ -2645,6 +2651,7 @@ async fn a_remote_handle_exists_exactly_while_the_daemon_publishes_its_view() {
     let channels = spawn_remote_session_manager().unwrap();
     let wait = Duration::from_secs(1);
     let view = || ManagedSessionView {
+        attention: Default::default(),
         snapshot: None,
         connected: true,
         error: None,

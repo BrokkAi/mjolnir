@@ -1114,7 +1114,7 @@ function isLoadingConversationSession(session) {
     && !isTransitioningSession(session)
     && session.operation?.kind !== 'checkpoint'
     && session.lifecycle === 'live'
-    && !session.has_error
+    && session.attention !== 'failed'
     && (conversationMode === 'loading' || conversationMode?.startsWith('transition:')
       || conversationMode?.startsWith('move-failure:')),
   );
@@ -1198,7 +1198,7 @@ function renderSessions() {
     nativeGroups = reviewerView ? [] : renderNativeSubagents(parent, showIdleSubagents);
   }
   const hiddenNativeCount = subagentView && !reviewerView && !showIdleSubagents
-    ? (parent?.native_subagents || []).filter(isIdleNativeSubagent).length
+    ? (parent?.native_subagents || []).filter(agent => isIdleNativeSubagent(parent, agent)).length
     : 0;
   const controls = [];
   if (subagentView) {
@@ -1281,23 +1281,11 @@ function renderSessions() {
 }
 
 function isIdleSubagentSession(session) {
-  if (!session
-    || session.operation
-    || session.has_error
-    || session.launch_error
-    || session.storage_problem
-    || session.configuration_issue
-    || session.quota_recovery
-    || session.capacity_retry
-    || session.retry_assessment_pending
-    || session.turn_review
-    || ['starting', 'suspending', 'failed'].includes(session.lifecycle)
-    || attentionParts(session).length) return false;
-  return session.state === 'parked' || session.is_idle === true;
+  return ['idle', 'inactive'].includes(session?.attention);
 }
 
-function isIdleNativeSubagent(agent) {
-  return ['completed', 'cancelled'].includes(agent.state) && agent.availability === 'available';
+function isIdleNativeSubagent(parent, agent) {
+  return parent.native_subagent_attention?.[agent.session_id] === 'idle' && agent.availability === 'available';
 }
 
 function renderNativeSubagents(parent, includeIdle) {
@@ -1308,13 +1296,19 @@ function renderNativeSubagents(parent, includeIdle) {
     ['Idle and reusable', a => a.state !== 'running' && a.availability === 'available'],
     ['History and availability unknown', a => a.state !== 'running' && a.availability !== 'available'],
   ].flatMap(([label, matches]) => {
-    const entries = agents.filter(agent => matches(agent) && (includeIdle || !isIdleNativeSubagent(agent)));
+    const entries = agents.filter(agent => matches(agent) && (includeIdle || !isIdleNativeSubagent(parent, agent)));
     if (!entries.length) return [];
     const section = el('section', 'project'); section.append(el('h2', '', label));
     for (const agent of entries) {
       const row = el('div', 'session-card');
       const availability = agent.availability === 'available' ? 'reusable' : agent.availability === 'unavailable' ? 'unavailable' : 'availability unknown';
       row.append(el('strong', '', agent.name), el('p', '', `${agent.state} · ${availability}`));
+      for (const [glyph, label] of attentionParts({ attention: parent.native_subagent_attention?.[agent.session_id] })) {
+        const badge = el('span', 'session-attention-item alert', glyph);
+        badge.setAttribute('aria-label', label);
+        badge.setAttribute('role', 'img');
+        row.append(badge);
+      }
       if (agent.availability_reason) row.append(el('p', 'dim', agent.availability_reason));
       const history = button('View history');
       history.onclick = () => openNativeHistory(parent.id, agent);
@@ -1614,20 +1608,17 @@ function sessionCard(session) {
   return card;
 }
 
-function pendingFormCount(session) {
-  return session.detail === false
-    ? session.pending_elicitation_count || 0
-    : (session.pending_elicitations || []).length;
-}
-
-/// A child's open form is an approval only a person can give, and the child
-/// has no card in the main list, so its parent's card says so.
+/// Severity is served by the daemon. This viewer has no output read receipts.
 function attentionParts(session) {
   const parts = [];
   if (session.operation?.kind === 'move') parts.push(['→', 'Moving']);
-  if (session.has_error) parts.push(['!', 'Error']);
-  if (pendingFormCount(session)) parts.push(['?', 'Input needed']);
-  else if (waitingChildCount(session)) parts.push(['?', 'Sub-agent input needed']);
+  const attention = {
+    needs_input: ['?', 'Input needed'],
+    important: ['!', 'Important'],
+    failed: ['×', 'Failed'],
+    unreachable: ['×', 'Unreachable'],
+  }[session.attention];
+  if (attention) parts.push(attention);
   const queued = session.detail === false
     ? session.queued_prompt_count || 0
     : (session.queued_prompts || []).length;
@@ -1680,7 +1671,7 @@ function updateSessionCard(card, session) {
   renderSessionTitle(card._heading, session);
   card._attention.replaceChildren(
     ...attention.map(([glyph, label]) => {
-      const node = el('span', `session-attention-item ${['Error', 'Input needed', 'Sub-agent input needed'].includes(label) ? 'alert' : ''}`, glyph);
+      const node = el('span', `session-attention-item ${['Failed', 'Unreachable', 'Input needed', 'Important'].includes(label) ? 'alert' : ''}`, glyph);
       node.setAttribute('aria-label', label);
       node.setAttribute('role', 'img');
       node.title = label;
@@ -1815,10 +1806,12 @@ function sessionActivityLabel(session, now = serverClockMs()) {
   // A sub-agent whose turn ended: idle, with its processes stopped until its
   // parent sends it more input.
   if (session.state === 'parked') return 'Parked';
-  if (session.has_error && isTransitioningSession(session)) return 'Needs recovery';
+  if (session.attention === 'failed' && isTransitioningSession(session)) return 'Needs recovery';
   if (['starting', 'suspending', 'failed'].includes(session.lifecycle)) {
     return sessionLifecycleLabel(session);
   }
+  const attentionLabel = { needs_input: 'Input needed', important: 'Important', failed: 'Failed', unreachable: 'Unreachable' }[session.attention];
+  if (attentionLabel) return attentionLabel;
   if (session.quota_recovery) {
     const deadline = session.quota_recovery.retry_at_ms;
     return deadline == null ? 'Quota limit · reset time unknown' : `Quota limit · resumes ${new Date(deadline).toLocaleString()}`;
@@ -1864,7 +1857,7 @@ function sessionActivityLabel(session, now = serverClockMs()) {
   if (kind === 'lifecycle') return details.label || sessionLifecycleLabel(session);
   if (kind) return details.label || kind;
   if (session.activity) return session.activity;
-  if (session.is_idle && idleStarted != null) return idleSinceLabel(idleStarted, now);
+  if (session.attention === 'idle' && idleStarted != null) return idleSinceLabel(idleStarted, now);
   return sessionLifecycleLabel(session);
 }
 
@@ -4322,7 +4315,7 @@ function resumeCardSignature(session) {
     session.lifecycle,
     session.operation?.kind,
     session.state,
-    session.has_error,
+    session.attention,
     session.configuration_issue,
     session.title,
     session.display_location,
@@ -4392,7 +4385,7 @@ function updateResumeCard(card, session, rebuild = false) {
   if (session.state === 'lost' && !recovery?.checkpoint_retained) body.append(el('p', 'resume-status error', 'The session is lost. No verified recovery checkpoint is available.'));
   else if (session.state === 'destroyed-with-data-loss') body.append(el('p', 'resume-status error', 'The session was destroyed with data loss. No session data remains to resume.'));
   else if (session.configuration_issue) body.append(el('p', 'resume-status error', session.configuration_issue));
-  else if (session.has_error) body.append(el('p', 'resume-status error', 'The previous operation reported an error. Review the available choices before trying again.'));
+  else if (session.attention === 'failed') body.append(el('p', 'resume-status error', 'The previous operation reported an error. Review the available choices before trying again.'));
   const move = resumeMoveRecovery(session);
   if (move.status) {
     body.append(el('p', '', move.status));
@@ -5523,15 +5516,11 @@ function workingChildCount(session) {
     .length;
 }
 
-/// Children with an open form, which only a person can answer, counting a
-/// child whose own reviewer holds one. Validation rejects ownership cycles;
-/// `seen` keeps a malformed snapshot finite anyway.
-function waitingChildCount(session, seen = new Set()) {
-  if (!session || seen.has(session.id)) return 0;
-  seen.add(session.id);
-  return (session.subagent_session_ids || [])
+/// Served child attention already includes their descendants' open forms.
+function waitingChildCount(session) {
+  return (session?.subagent_session_ids || [])
     .map(id => sessionById(id))
-    .filter(child => child && (pendingFormCount(child) || waitingChildCount(child, seen)))
+    .filter(child => child?.attention === 'needs_input')
     .length;
 }
 
@@ -8305,7 +8294,7 @@ function renderConversationTransition(session) {
     ? ''
     : session.operation?.notice
       || session.configuration_issue
-      || (session.has_error ? 'The operation needs recovery. Use the available action to try again.' : '');
+      || (session.attention === 'failed' ? 'The operation needs recovery. Use the available action to try again.' : '');
   conversationTransitionNotice.textContent = transitionNotice;
   conversationTransitionNotice.hidden = !transitionNotice;
   conversationTransitionCancel.dataset.id = session.id;
@@ -8464,7 +8453,7 @@ async function openConversation(id) {
 /// pressing it deserves to know which of those is about to happen.
 function renderSessionTitle(node, session) {
   node.textContent = session.title;
-  node.classList.toggle('idle-title', session.is_idle === true);
+  node.classList.toggle('idle-title', session.attention === 'idle');
 }
 
 /// Show the live session's advertised settings, using the harness's
