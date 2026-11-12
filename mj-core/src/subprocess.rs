@@ -262,6 +262,40 @@ pub fn process_birth_identity(pid: u32) -> Result<String> {
 /// Codex's `IO_DRAIN_TIMEOUT_MS`. The owned process group is terminated after.
 const IO_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Capture a finite command without an application-imposed deadline or size
+/// limit. Cancellation kills its process group; output pipes drain concurrently.
+pub async fn capture(command: &mut tokio::process::Command) -> Result<Output> {
+    use tokio::io::AsyncReadExt;
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    #[cfg(windows)]
+    command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
+    let mut child = command.spawn().context("start captured subprocess")?;
+    #[cfg(windows)]
+    let _job = ChildJob::attach(&child)?;
+    let _group = ProcessGroupGuard::new(child.id());
+    let mut stdout = child.stdout.take().context("missing captured stdout")?;
+    let mut stderr = child.stderr.take().context("missing captured stderr")?;
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let (status, _, _) = tokio::try_join!(
+        child.wait(),
+        stdout.read_to_end(&mut out),
+        stderr.read_to_end(&mut err)
+    )
+    .context("capture subprocess output")?;
+    Ok(Output {
+        status,
+        stdout: out,
+        stderr: err,
+    })
+}
+
 /// Capture a process with byte/time bounds, draining both pipes concurrently.
 /// Kill its process group before returning on overflow, timeout, or cancellation.
 pub async fn run_bounded(
@@ -1094,6 +1128,20 @@ fn group_signal_error_is_ignorable(error: &std::io::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn capture_drains_both_pipes_beyond_pipe_capacity() {
+        let mut command = tokio::process::Command::new("python3");
+        command.args([
+            "-c",
+            "import os; os.write(1, b'o'*262144); os.write(2, b'e'*262144)",
+        ]);
+        let output = super::capture(&mut command).await.unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, vec![b'o'; 262144]);
+        assert_eq!(output.stderr, vec![b'e'; 262144]);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn supervised_child_drains_large_stderr_and_reaps_on_cancel() {

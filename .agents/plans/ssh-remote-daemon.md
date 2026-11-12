@@ -17,6 +17,7 @@ This is private-network operation with working SSH authentication and host trust
 - [ ] Implement and validate milestone 1: endpoint, connector, supervised tunnel and command forwarding.
 - [x] (2026-11-12, foundation worker) Add supervised subprocess ownership with concurrent stderr capture, exit observation and cancellation cleanup; add SSH placement fields and placement-only loader. Remaining foundation work: connector, endpoint and tunnel; no remote acceptance claim yet.
 - [x] (2026-11-12, endpoint worker) Add shared DaemonEndpoint and `daemon endpoint --json [--existing]`, recursion refusal and isolated CLI/control Ping acceptance. SSH discovery and tunnel (B1–3) remain for the next slice; no transport acceptance claim.
+- [x] (2026-11-12, SSH discovery worker) Add daemon-only login-shell wrapping, cancellable shared subprocess capture, and client SSH endpoint discovery with missing-command diagnostics and same-source enforcement. Tunnel/lease and login-profile-only PATH acceptance remain for continuation.
 - [ ] Implement and validate milestone 2: direct HTTP credentials and browser opening.
 - [ ] Implement and validate milestone 3: dashboard paths, discovery and preflight.
 - [ ] Implement and validate milestone 4: dashboard setup, probes, settings and cache work.
@@ -41,6 +42,8 @@ No existing checked-in control-daemon exchange golden was located by searching d
 Foundation discovery (2026-11-12): existing Windows subprocess helpers create process groups but have no job-object ownership. The new supervised helper adds a kill-on-close job; real Windows validation remains necessary. Placement-only deserialization ignores daemon-owned tables, including structurally invalid profiles, without credential resolution.
 
 Endpoint discovery (2026-11-12): `remote_command_line` currently provides macOS PATH augmentation only, not a login shell. SSH discovery must extend that shared rule to obtain the agreed login-shell PATH. `/usr/sbin/sshd` is available locally. The endpoint keeps the dialed metadata address, preserving published container loopback ports. Host endpoint acceptance passes with separate config/data directories and `--instance endpoint-e2e`; container endpoint acceptance remains unmeasured.
+
+SSH discovery checkpoint (2026-11-12): the shared SSH module is private and exposes helpers through `mj_core::targets` re-exports. `daemon_login_command` enters `/bin/sh -c` before expanding `${SHELL:-/bin/sh}`, so the outer SSH shell (including fish) only parses quoted arguments; the configured login shell parses the quoted executable argv. Worker target wrapping is unchanged. A real localhost sshd verifies quoting; this host has bash but no zsh/fish. The discovery integration fixture uses an absolute remote wrapper with separate config/data and a named instance; PATH available only from a login profile is still unmeasured. The existing debug mj was stamped ac4ac6ff while the test client was b7798c87, and discovery rejected it with both identities and repair advice as designed. No tunnel implementation or acceptance is claimed by this checkpoint.
 
 ## Decision Log
 

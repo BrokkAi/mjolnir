@@ -1,5 +1,6 @@
 //! Authenticated local daemon protocol and client transport.
 mod chunk_bytes;
+pub mod ssh;
 use crate::executable::describe_running_daemon_and_client_builds;
 use crate::session::{ManagedSessionView, ViewError};
 use agent_client_protocol::v1::schema::ContentBlock;
