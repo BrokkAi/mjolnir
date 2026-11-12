@@ -146,7 +146,7 @@ impl DurableRelay {
         }) {
             let facts = self.activity_facts();
             if a.evidence.as_ref().is_some_and(|e| {
-                e.background_commands != facts.background_commands
+                (a.glide.is_none() && e.background_commands != facts.background_commands)
                     || e.queued_commands != facts.queued_commands
             }) {
                 a.classify_again(self.snapshot.latest_ordinal + 1);
@@ -206,11 +206,9 @@ impl DurableRelay {
         self.store_assessment(a)
     }
 
-    /// Jev's judgment of leftover processes lives only in this process
-    /// (#1202). After a worker restart, an assessed turn whose processes are
-    /// reported again has none, and the session would stay busy for good.
-    /// Ask again, once per process per turn: `asked_turn` records the ask, so
-    /// an answer without a confident judgment is not asked a second time.
+    /// Restore a stored GLiDE judgment only for the inventory it assessed.
+    /// Changed inventories refresh through the same durable request admission.
+    /// Legacy Jev judgments remain process-local and are reasked after restart.
     #[cfg_attr(not(unix), allow(dead_code))]
     fn reask_background_after_restart(&mut self) -> Result<()> {
         if self.verdict_harness.is_none() || self.background_commands().is_empty() {
@@ -219,12 +217,41 @@ impl DurableRelay {
         let Some(mut a) = self.snapshot.assessment.as_deref().cloned().filter(|a| {
             a.current()
                 && a.status == mj_core::assessment::Status::Assessed
-                && self.replied_verdict.asked_turn.as_ref()
-                    != Some(&(a.turn_id.clone(), a.completed_ordinal))
+                && (a.glide.is_some()
+                    || self.replied_verdict.asked_turn.as_ref()
+                        != Some(&(a.turn_id.clone(), a.completed_ordinal)))
         }) else {
             return Ok(());
         };
         if let Some(glide) = &a.glide {
+            let inventory = self.background_commands();
+            let same_inventory = a.evidence.as_ref().is_some_and(|e| {
+                e.background_commands == self.activity_facts().background_commands
+                    && e.background.len()
+                        == inventory
+                            .len()
+                            .min(mj_core::activity::verdict::IN_FLIGHT_TOOLS)
+                    && inventory
+                        .iter()
+                        .take(mj_core::activity::verdict::IN_FLIGHT_TOOLS)
+                        .all(|command| {
+                            e.background.iter().any(|seen| {
+                                seen.id == command.id
+                                    && seen.command
+                                        == mj_core::activity::verdict::tool_title(&command.command)
+                            })
+                        })
+            });
+            if !same_inventory {
+                if blocked(&self.activity_facts()).is_some() {
+                    return Ok(());
+                }
+                // Keep the completed action authoritative; only refresh runtime judgment.
+                a.revision = self.snapshot.latest_ordinal + 1;
+                a.status = mj_core::assessment::Status::Pending;
+                a.evidence = None;
+                return self.store_assessment(a);
+            }
             let answers = serde_json::to_value(glide)?;
             self.replied_verdict.judge_background(
                 self.turn_context.generation(),
@@ -405,6 +432,13 @@ impl DurableRelay {
         });
         self.replied_verdict
             .judge_background(self.turn_context.generation(), needed);
+        if a.glide.is_some() && a.action.is_some() && glide.is_some() {
+            a.glide = glide;
+            a.status = Status::Assessed;
+            a.retry_at_ms = None;
+            self.store_assessment(a)?;
+            return Ok("background_judgment_refreshed");
+        }
         a.verdict = verdict;
         a.glide = glide;
         a.action = Some(action);
@@ -700,6 +734,78 @@ mod tests {
         }
     }
 
+    // Hard-won: 2e95f7097: late background inventory reused probabilities for absent processes.
+    #[test]
+    fn glide_late_background_inventory_refreshes_once_after_restart() {
+        use crate::relay::test_support::{finish_prompt, prompt, submit_relay};
+        let samples: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../mj-core/src/activity/eot_glide_fresh_sample.json"
+        ))
+        .unwrap();
+        let mut answer = samples
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|sample| sample["expected"] == "finished")
+            .unwrap()
+            .clone();
+        answer["answers"]["background"]["probabilities"] =
+            serde_json::json!({"needed":0.0,"unneeded":0.0,"unclear":1.0});
+        for restart in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut relay = DurableRelay::open(temp.path(), "late-background", "test").unwrap();
+            relay.set_acp_ready(true);
+            relay.set_turn_verdict_harness(HarnessKind::Claude);
+            submit_relay(&mut relay, "user-turn", prompt("Complete the task"));
+            relay.claim_pending_commands(true).unwrap();
+            finish_prompt(&mut relay, "user-turn");
+            relay.prepare_pending_assessment().unwrap();
+            let (revision, _, _) = relay.pending_replied_verdict().unwrap();
+            relay
+                .apply_glide_assessment(
+                    revision,
+                    crate::acp::verdict_client::glide_turn::Probabilities::parse(&answer).unwrap(),
+                )
+                .unwrap();
+            let action = relay.snapshot.assessment.as_ref().unwrap().action;
+            if restart {
+                drop(relay);
+                relay = DurableRelay::open(temp.path(), "late-background", "test").unwrap();
+                relay.set_acp_ready(true);
+                relay.set_turn_verdict_harness(HarnessKind::Claude);
+            }
+            relay
+                .agent_terminal_started(ActiveAgentTerminal {
+                    terminal_id: "late".into(),
+                    command: "server".into(),
+                    started_at_ms: 100,
+                })
+                .unwrap();
+            assert!(!relay.operational_state().is_quiet());
+            relay.prepare_pending_assessment().unwrap();
+            let (revision, evidence, _) = relay.pending_replied_verdict().unwrap();
+            assert_eq!(evidence.background.len(), 1);
+            relay.prepare_pending_assessment().unwrap();
+            assert!(relay.pending_replied_verdict().is_none());
+            let mut refreshed = answer.clone();
+            refreshed["answers"]["background"]["probabilities"] =
+                serde_json::json!({"needed":0.0,"unneeded":1.0,"unclear":0.0});
+            relay
+                .apply_glide_assessment(
+                    revision,
+                    crate::acp::verdict_client::glide_turn::Probabilities::parse(&refreshed)
+                        .unwrap(),
+                )
+                .unwrap();
+            assert_eq!(relay.activity_facts().background_needed, Some(false));
+            assert!(relay.operational_state().is_quiet());
+            assert_eq!(relay.snapshot.assessment.as_ref().unwrap().action, action);
+            relay.prepare_pending_assessment().unwrap();
+            assert!(relay.pending_replied_verdict().is_none());
+        }
+    }
+
+    // Hard-won: 2e95f7097: a large current exchange could never fit the GLiDE request.
     #[test]
     fn glide_worker_projection_capture_and_large_history_bound() {
         use crate::acp::verdict_client::glide_turn::project;
@@ -747,6 +853,31 @@ mod tests {
         let captured: serde_json::Value =
             serde_json::from_slice(&std::fs::read(fixture).unwrap()).unwrap();
         assert_eq!(body, captured);
+        let mut current = history.clone();
+        for i in 0..100 {
+            current.messages.insert(
+                1,
+                mj_core::continuation::EvidenceMessage {
+                    id: format!("current:{i}"),
+                    role: "assistant".into(),
+                    text: "progress ".repeat(500),
+                },
+            );
+        }
+        let bounded_current =
+            project(&evidence, current, &facts, relay.native_agent_count()).unwrap();
+        assert!(serde_json::to_vec(&bounded_current).unwrap().len() <= 80 * 1024);
+        assert_eq!(
+            bounded_current["latest_user_message"],
+            body["latest_user_message"]
+        );
+        assert_eq!(
+            bounded_current["current_assistant_replies"]
+                .as_array()
+                .unwrap()
+                .last(),
+            body["current_assistant_replies"].as_array().unwrap().last()
+        );
         let mut large = history;
         for i in 0..500 {
             large.messages.insert(

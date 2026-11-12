@@ -74,10 +74,20 @@ pub(crate) fn project(
             } else {
                 history.assistant_history_omitted = true;
             }
+        } else if let Some(oldest) = history
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(i, m)| *i >= latest.map_or(0, |i| i + 1) && m.role == "assistant")
+            .map(|(i, _)| i)
+            .collect::<Vec<_>>()
+            .split_last()
+            .and_then(|(_, older)| older.first().copied())
+        {
+            history.messages.remove(oldest);
+            history.assistant_history_omitted = true;
         } else {
-            anyhow::bail!(
-                "current GLiDE evidence exceeds 80 KiB; refusing partial current replies"
-            );
+            anyhow::bail!("current GLiDE user message and final reply exceed 80 KiB");
         }
     }
 }
