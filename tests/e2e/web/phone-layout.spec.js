@@ -388,7 +388,7 @@ test('delivered messages in one batch keep separate prose rows after reload', as
   await page.route('**/api/v1/sessions/parent/history*', route => route.fulfill({
     contentType: 'application/json',
     body: JSON.stringify({ frontier: 17, before: null, items: messages.map(message => ({
-      stable_id: message.stable_id, role: message.role, label: message.label, text: message.lines.join('\n'), recorded_at_ms: message.recorded_at_ms,
+      position: message.id, stable_id: message.stable_id, role: message.role, label: message.label, text: message.lines.join('\n'), recorded_at_ms: message.recorded_at_ms,
     })) }),
   }));
   await page.locator('#earlier-messages').click();

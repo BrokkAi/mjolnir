@@ -1413,9 +1413,13 @@ async function openNativeHistory(owner, agent) {
 // The control doubles as a visible retry affordance when automatic paging fails.
 const earlierMessages = document.querySelector('#earlier-messages');
 let inlineHistory = null;
+const liveHistoryRows = new Map();
+const clippedHistoryRow = entry => /^\[… \d+ earlier lines omitted …\]/.test(entry.lines?.[0] || '');
+const historyMatches = (live, stored) => live.id === stored.position && (!live.stable_id || live.stable_id === stored.stable_id);
 function resetInlineHistory() {
   inlineHistory?.controller.abort();
   inlineHistory = null;
+  liveHistoryRows.clear();
   earlierMessages.classList.remove('hidden');
   earlierMessages.disabled = false;
   earlierMessages.textContent = 'Earlier messages';
@@ -1424,7 +1428,11 @@ async function loadInlineHistory() {
   if (!currentSession || conversationMode !== 'conversation') return;
   if (!inlineHistory) inlineHistory = {
     session: currentSession, generation: conversationGeneration,
-    controller: new AbortController(), before: null, done: false, loading: false,
+    controller: new AbortController(),
+    // Positions are integral; the next position includes every stored member
+    // of the oldest row, including a clipped row or a collapsed group.
+    before: liveHistoryRows.size ? { position: Math.min(...[...liveHistoryRows.values()].map(entry => entry.id)) + 1, stable_id: '' } : null,
+    done: false, loading: false,
     entries: new Map(),
   };
   const state = inlineHistory;
@@ -1434,34 +1442,48 @@ async function loadInlineHistory() {
   earlierMessages.disabled = true;
   earlierMessages.textContent = 'Loading earlier messages…';
   try {
-    const query = new URLSearchParams();
-    if (state.before) {
-      query.set('before_position', String(state.before.position));
-      query.set('before_id', state.before.stable_id);
-    }
-    const page = await request(`/api/v1/sessions/${encodeURIComponent(state.session)}/history${query.size ? `?${query}` : ''}`, { signal: state.controller.signal });
-    if (inlineHistory !== state || state.generation !== conversationGeneration) return;
-    const anchor = [...feed.children].find(node => node.getBoundingClientRect().bottom > feedScroll.getBoundingClientRect().top);
-    const top = anchor?.getBoundingClientRect().top;
-    const rows = [];
-    for (const item of page.items) {
-      if (state.entries.has(item.stable_id)) continue;
-      const entry = { ...item, lines: item.text.split('\n'), label: item.label || item.role, tone: item.role };
-      state.entries.set(item.stable_id, entry);
-      if (entryNodes.has(item.stable_id)) continue;
-      const node = el('article');
-      node.dataset.entryId = item.stable_id;
-      paintEntry(node, entry, null);
-      entryNodes.set(item.stable_id, node);
-      rows.push(node);
-    }
-    state.entries = new Map([...page.items.map(item => [item.stable_id, state.entries.get(item.stable_id)]), ...state.entries]);
-    feed.prepend(...rows);
-    state.before = page.before;
-    state.done = !page.before;
-    earlierMessages.classList.toggle('hidden', state.done);
-    earlierMessages.textContent = 'Earlier messages';
-    if (anchor) feedScroll.scrollTop += anchor.getBoundingClientRect().top - top;
+    let visibleAdded;
+    do {
+      visibleAdded = false;
+      const query = new URLSearchParams();
+      if (state.before) {
+        query.set('before_position', String(state.before.position));
+        query.set('before_id', state.before.stable_id);
+      }
+      const page = await request(`/api/v1/sessions/${encodeURIComponent(state.session)}/history${query.size ? `?${query}` : ''}`, { signal: state.controller.signal });
+      if (inlineHistory !== state || state.generation !== conversationGeneration) return;
+      const anchor = [...feed.children].find(node => node.getBoundingClientRect().bottom > feedScroll.getBoundingClientRect().top);
+      const top = anchor?.getBoundingClientRect().top;
+      const rows = [];
+      const oldest = liveHistoryRows.size ? Math.min(...[...liveHistoryRows.values()].map(entry => entry.id)) : Infinity;
+      for (const item of page.items) {
+        if (state.entries.has(item.stable_id)) continue;
+        const live = [...liveHistoryRows.values()].find(row => historyMatches(row, item));
+        const entry = { ...item, id: item.position, lines: item.text.split('\n'), label: item.label || item.role, tone: item.role };
+        if (item.position >= oldest) {
+          // All members of a collapsed live group belong to that live row.
+          if (!live || !historyMatches(live, item) || !clippedHistoryRow(live)) continue;
+          state.entries.set(item.stable_id, entry);
+          const node = entryNodes.get(live.stable_id || live.id);
+          if (node) paintEntry(node, { ...live, lines: entry.lines }, null);
+          continue;
+        }
+        state.entries.set(item.stable_id, entry);
+        const node = el('article');
+        node.dataset.entryId = item.stable_id;
+        paintEntry(node, entry, null);
+        entryNodes.set(item.stable_id, node);
+        rows.push(node);
+      }
+      state.entries = new Map([...state.entries].sort((a, b) => a[1].position - b[1].position || a[0].localeCompare(b[0])));
+      feed.prepend(...rows);
+      state.before = page.before;
+      state.done = !page.before;
+      earlierMessages.classList.toggle('hidden', state.done);
+      earlierMessages.textContent = 'Earlier messages';
+      visibleAdded = rows.some(node => node.getBoundingClientRect().height > 0);
+      if (anchor) feedScroll.scrollTop += anchor.getBoundingClientRect().top - top;
+    } while (!visibleAdded && !state.done);
   } catch (error) {
     if (inlineHistory === state && !state.controller.signal.aborted) {
       state.failed = true;
@@ -8131,13 +8153,15 @@ function turnPromptText(entry, previous) {
 function renderEntries(entries, replace) {
   if (typeof reconcileSubmissions === 'function') reconcileSubmissions(currentSession, entries.map(entry => entry.command_id).filter(Boolean));
   const wasAtTail = atTail();
+  if (replace) liveHistoryRows.clear();
+  for (const entry of entries) liveHistoryRows.set(entry.stable_id || entry.id, entry);
   if (replace) {
     const retained = inlineHistory ? [...inlineHistory.entries.values()] : [];
-    const liveIds = new Set(entries.map(entry => entry.stable_id || entry.id));
+    const oldest = entries.length ? Math.min(...entries.map(entry => entry.id)) : Infinity;
     feed.replaceChildren();
     entryNodes.clear();
     for (const entry of retained) {
-      if (liveIds.has(entry.stable_id)) continue;
+      if (entry.position >= oldest) continue;
       const node = el('article');
       node.dataset.entryId = entry.stable_id;
       paintEntry(node, entry, null);
@@ -8147,11 +8171,12 @@ function renderEntries(entries, replace) {
   }
   let appended = false;
   let lastUserText = null;
-  for (const entry of entries) {
+  for (let entry of entries) {
+    const stored = inlineHistory && [...inlineHistory.entries.values()].find(row => historyMatches(entry, row));
+    if (stored && historyMatches(entry, stored) && clippedHistoryRow(entry)) entry = { ...entry, lines: stored.lines };
     lastUserText = turnPromptText(entry, lastUserText);
     const unansweredPrompt = unansweredPromptFor(entry, lastUserText);
     const identity = entry.stable_id || entry.id;
-    if (inlineHistory?.entries.has(identity)) inlineHistory.entries.set(identity, entry);
     let node = entryNodes.get(identity);
     if (!node) {
       node = el('article');

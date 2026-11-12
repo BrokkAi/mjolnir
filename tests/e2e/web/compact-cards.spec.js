@@ -1124,8 +1124,8 @@ test('earlier messages page backwards, retry errors, and preserve the live draft
     queries.push(query);
     if (queries.length === 2) return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'History temporarily unavailable' }) });
     return route.fulfill({ contentType: 'application/json', body: JSON.stringify(queries.length === 1 ? {
-      items: [{ stable_id: 'user:101', role: 'user', text: 'Recent stored request' }], before: { position: 101, stable_id: 'user:101' }, frontier: 200,
-    } : { items: [{ stable_id: 'agent:1', role: 'agent', text: 'First stored answer' }], before: null, frontier: 201 }) });
+      items: [{ position: 0, stable_id: 'user:101', role: 'user', text: 'Recent stored request' }], before: { position: 101, stable_id: 'user:101' }, frontier: 200,
+    } : { items: [{ position: -1, stable_id: 'agent:1', role: 'agent', text: 'First stored answer' }], before: null, frontier: 201 }) });
   });
   await page.route('**/api/conversations/history*', route => route.fulfill({
     contentType: 'application/json', body: JSON.stringify(transcript('Live answer\n\n'.repeat(100))),
@@ -1149,8 +1149,44 @@ test('earlier messages page backwards, retry errors, and preserve the live draft
   await expect(reader).toContainText('First stored answer');
   await expect(reader).toContainText('Recent stored request');
   await expect(page.locator('#earlier-messages')).toBeHidden();
-  expect(queries).toEqual(['', '?before_position=101&before_id=user%3A101', '?before_position=101&before_id=user%3A101']);
+  expect(queries).toEqual(['?before_position=2&before_id=', '?before_position=101&before_id=user%3A101', '?before_position=101&before_id=user%3A101']);
   await expect(page.locator('#prompt-text')).toHaveText('Keep my draft');
+});
+
+// Hard-won: inline history used stable IDs to match live numeric positions.
+test('inline history reconciles clipped and grouped live rows and continues overlap pages', async ({ page }) => {
+  const state = await mount(page, [session('history', 'alpha', 'Alpha')]);
+  await page.addStyleTag({ content: '.entry.tone-thought { display: none; }' });
+  const live = transcript('Newest live answer');
+  live.entries[0].id = 30;
+  live.entries.unshift({ ...live.entries[0], id: 20, lines: ['[… 12 earlier lines omitted …]', 'Clipped tail'] });
+  await page.route('**/api/conversations/history*', route => route.fulfill({ json: live }));
+  const queries = [];
+  await page.route('**/api/v1/sessions/history/history*', route => {
+    queries.push(new URL(route.request().url()).search);
+    const pages = [
+      { items: [{ position: 20, stable_id: 'agent:20', role: 'agent', text: 'Restored beginning\nClipped tail' }, { position: 21, stable_id: 'tool:21', role: 'tool', text: 'Collapsed group member' }, { position: 30, stable_id: 'agent:30', role: 'agent', text: 'Newest live answer' }], before: { position: 20, stable_id: 'agent:20' } },
+      { items: [{ position: 10, stable_id: 'thought:10', role: 'thought', text: 'Hidden thinking' }], before: { position: 10, stable_id: 'thought:10' } },
+      { items: [{ position: 1, stable_id: 'user:1', role: 'user', text: 'Oldest stored request' }], before: null },
+    ];
+    return route.fulfill({ json: pages[queries.length - 1] });
+  });
+  await card(page, 'history').click();
+  await expect(page.locator('#conversation-feed')).toContainText('Clipped tail');
+  await page.locator('#earlier-messages').click();
+  const reader = page.locator('#conversation-feed');
+  await expect(reader).toContainText('Oldest stored request');
+  await expect(reader).toContainText('Restored beginning');
+  await expect(reader.locator('article:visible')).toHaveCount(3);
+  expect(await reader.locator('article:visible').allTextContents()).toEqual([
+    expect.stringContaining('Oldest stored request'), expect.stringContaining('Restored beginning'), expect.stringContaining('Newest live answer'),
+  ]);
+  state.snapshot.sessions[0].latest_event_ordinal = 31;
+  await refresh(page, state);
+  await expect(reader).toContainText('Restored beginning');
+  await expect(reader.locator('article:visible')).toHaveCount(3);
+  expect(queries).toEqual(['?before_position=21&before_id=', '?before_position=20&before_id=agent%3A20', '?before_position=10&before_id=thought%3A10']);
+  await expect(page.locator('#earlier-messages')).toBeHidden();
 });
 
 test('inline history ignores a response after navigation', async ({ page }) => {

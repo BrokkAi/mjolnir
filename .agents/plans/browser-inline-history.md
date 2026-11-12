@@ -21,6 +21,8 @@ Scrolling to the top of a conversation loads stored older rows above the live fe
 
 Use one conversation-owned paging state, retired with the existing request generation. Keep fetched rows across live refreshes, deduplicate by stored stable identity, and reuse `paintEntry`. Preserve an existing visible row's screen offset when prepending. Show errors with a retry button. Keep BROWSER_TRANSCRIPT_LINES at 1,000 because rendered lines and stored items are different units.
 
+2026-11-12 review corrections: use stored position against live id (the first member position for collapsed groups), checking stable identity only when live supplies it. Start at oldest position + 1 with an empty tie-breaker to include the oldest row for clipped-text reconciliation. Keep full historical text when a refreshed live projection remains clipped. Treat newer stored members as owned by the live window. Continue requests within the same cancellable generation until a rendered row has positive height or the cursor is exhausted; errors retain the retry affordance.
+
 ## Surprises & Discoveries
 
 HistoryEntry initially omits stable identities although stored items already have them; identity must cross the API for reliable deduplication. Existing CSS overrides the button hidden attribute, requiring the established hidden class. One store regression pinned complete-turn counts for 1,024 items; the corresponding 512-item counts are 600/700.
@@ -38,3 +40,5 @@ Failed history requests retain their cursor for retry. Session changes abort req
 Inline loading, retry, scroll anchoring, exhaustion and late-response rejection pass deterministic browser tests. Overlapping mailbox rows retain one identity each. Web unit tests pass; workspace clippy and formatting pass. Controller suites passed 674 tests with one stale numeric fixture, whose corrected focused rerun passed. Client transcript tests passed 11 cases with one expected identity golden update, whose focused rerun passed. BROWSER_TRANSCRIPT_LINES stays unchanged. The complete audit is included in the parent report directory.
 
 Updated 2026-11-12 after browser validation and tail audit; documented CSS and fixture findings.
+
+Review correction validation (2026-11-12): web unit files pass (project discovery requires elevated subprocess access); deterministic Playwright: 120 passed, 3 skipped. Final focused paging/mailbox checks: three passed, with the fourth passing after replacing a test-only call to a module-private function with the real snapshot refresh surface. Controller `server::`: 261 passed. No Rust changes; clippy/fmt not required. Mailbox history fixtures now carry their real stored positions. No push or review requested, per delegated scope.
