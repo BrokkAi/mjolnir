@@ -4084,7 +4084,12 @@ fn in_place_move_reopens_the_queue_of_a_native_source_after_a_failure() {
     assert_eq!(queue["mutating_admission_open"], true, "{queue}");
 }
 
+/// A daemon that stopped while an in-place Move was stopping its source,
+/// before the seal, leaves the source `Closing` with an open relay. Recovery
+/// returns it to `Running`; an uncancelled Move then resumes and finishes,
+/// and a cancelled one reopens the sub-agent gate it closed.
 #[cfg(unix)]
+// Hard-won: 555274842: recovery left an in-place Move whose source stop was interrupted for a manual retry
 #[test]
 fn in_place_closing_source_recovery_reopens_gate_after_restoring_running_session() {
     let name =
@@ -4107,53 +4112,66 @@ fn in_place_closing_source_recovery_reopens_gate_after_restoring_running_session
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
-    let InPlaceFixture {
-        _directory,
-        worker_root,
-        mut controller,
-        ..
-    } = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
-    let parent = controller
-        .state
-        .sessions
-        .get_mut(LATCH_RELAY_SESSION)
+    // The store keeps a recorded cancellation for the same operation, so the
+    // uncancelled case runs first.
+    for cancelled in [false, true] {
+        let InPlaceFixture {
+            _directory,
+            worker_root,
+            mut controller,
+            ..
+        } = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+        let parent = controller
+            .state
+            .sessions
+            .get_mut(LATCH_RELAY_SESSION)
+            .unwrap();
+        parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None,
+        });
+        parent.state = SessionState::Closing;
+        crate::database::save_session(parent).unwrap();
+        fs::write(
+            worker_root.join("subagents.json"),
+            br#"{"requests":{},"results":{},"mutating_admission_open":false}"#,
+        )
         .unwrap();
-    parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
-        straightforward: None,
-        subtle: None,
-    });
-    parent.state = SessionState::Closing;
-    crate::database::save_session(parent).unwrap();
-    fs::write(
-        worker_root.join("subagents.json"),
-        br#"{"requests":{},"results":{},"mutating_admission_open":false}"#,
-    )
-    .unwrap();
-    let mut operation = in_place_operation(&controller, IN_PLACE_DESTINATION_PROFILE);
-    operation.phase = MovePhase::ClosingSource;
-    operation.cancellation_requested = true;
-    crate::database::save_move_operation(&operation).unwrap();
-    let source_relay = seed_source_relay(&worker_root);
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let outcome = runtime.block_on(async {
-        let channels = start_source_relay_manager(&source_relay);
-        let outcome = controller
-            .recover_move_managed_controlled(operation, &ProcessExecutor, &channels.control)
-            .await;
-        channels.shutdown.shutdown().await.unwrap();
-        outcome.unwrap()
-    });
-    assert_eq!(outcome.outcome, "cancelled", "{outcome:?}");
-    assert_eq!(
-        controller.state.sessions[LATCH_RELAY_SESSION].state,
-        SessionState::Running
-    );
-    let queue: serde_json::Value =
-        serde_json::from_slice(&fs::read(worker_root.join("subagents.json")).unwrap()).unwrap();
-    assert_eq!(queue["mutating_admission_open"], true, "{queue}");
+        let mut operation = in_place_operation(&controller, IN_PLACE_DESTINATION_PROFILE);
+        operation.phase = MovePhase::ClosingSource;
+        operation.cancellation_requested = cancelled;
+        crate::database::save_move_operation(&operation).unwrap();
+        let source_relay = seed_source_relay(&worker_root);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let outcome = runtime.block_on(async {
+            let channels = start_source_relay_manager(&source_relay);
+            let outcome = controller
+                .recover_move_managed_controlled(
+                    operation,
+                    &RecordingProcessExecutor::default(),
+                    &channels.control,
+                )
+                .await;
+            channels.shutdown.shutdown().await.unwrap();
+            outcome.unwrap()
+        });
+        let recovered = &controller.state.sessions[LATCH_RELAY_SESSION];
+        assert_eq!(recovered.state, SessionState::Running);
+        if !cancelled {
+            // The source is running again, so recovery resumes the Move as it
+            // does when startup first finds the source running.
+            assert_eq!(outcome.outcome, "completed", "{outcome:?}");
+            assert_eq!(recovered.last_profile, IN_PLACE_DESTINATION_PROFILE);
+            continue;
+        }
+        assert_eq!(outcome.outcome, "cancelled", "{outcome:?}");
+        let queue: serde_json::Value =
+            serde_json::from_slice(&fs::read(worker_root.join("subagents.json")).unwrap()).unwrap();
+        assert_eq!(queue["mutating_admission_open"], true, "{queue}");
+    }
 }
 
 #[cfg(unix)]

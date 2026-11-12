@@ -1816,7 +1816,7 @@ impl Controller {
         crate::worker_lifecycle::run(&operation.selection.session_id.clone(), "recover move managed controlled", executor, async {
         let id = operation.selection.session_id.clone();
         let result = async {
-            let session = self.state.sessions.get(&id).context("move session is missing")?.clone();
+            let mut session = self.state.sessions.get(&id).context("move session is missing")?.clone();
             if operation.queue_admission_started {
                 ensure!(!operation.cancellation_requested, "Move was cancelled; destination retained without further queue admission");
                 self.finish_workspace_transfer(&mut operation, executor)?;
@@ -1861,10 +1861,20 @@ impl Controller {
                 if !operation.retains_source_environment() && self.state.sessions[&id].state == SessionState::Stopped && self.state.sessions[&id].target.is_some() {
                     self.cleanup_stopped_target(&id, &cleanup)?;
                 }
-                bail!("{}", interrupted_source_stop_message(
-                    "Move source stop recovered; no destination work was started. Retry Move or Resume with previous settings",
-                    operation.in_place,
-                ));
+                let reopened = matches!(
+                    self.state.sessions[&id].state,
+                    SessionState::Running | SessionState::Disconnected
+                );
+                if !(reopened && operation.in_place && operation.phase == MovePhase::ClosingSource && !operation.cancellation_requested) {
+                    bail!("{}", interrupted_source_stop_message(
+                        "Move source stop recovered; no destination work was started. Retry Move or Resume with previous settings",
+                        operation.in_place,
+                    ));
+                }
+                // The stop was interrupted before the seal and the source is
+                // running again: resume the Move as the arm below does when
+                // startup first finds the source running.
+                session = self.state.sessions[&id].clone();
             }
             match operation.phase {
                 MovePhase::ClosingSource
