@@ -439,7 +439,7 @@ function applyRoute() {
       quota: 'Quota',
       settings: 'Settings',
       conversation: 'Conversation',
-    }[name] || 'MJ';
+    }[name] || 'Mjolnir';
 
   if (name === 'conversation') {
     openConversation(route.sessionId);
@@ -1201,14 +1201,12 @@ function renderNotifications() {
       item.dataset.notificationId = row.id;
       item._excerpt = el('p', 'notification-excerpt');
       item._meta = el('p', 'dim');
-      item._actions = el('div', 'notification-actions');
-      item._actions.dataset.sessionId = row.id;
       notificationItems.set(row.id, item);
     }
     let card = sessionCards.get(row.id);
     if (!card) { card = sessionCard(row); sessionCards.set(row.id, card); }
     else updateSessionCard(card, row);
-    reconcileChildren(item, [card, item._excerpt, item._meta, item._actions]);
+    reconcileChildren(item, [card, item._excerpt, item._meta]);
     const excerpt = row.pending_elicitations?.find(request => request.message)?.message || row.preview?.join('\n') || entry.excerpt;
     entry.excerpt = excerpt;
     item._excerpt.textContent = excerpt || '';
@@ -1217,7 +1215,6 @@ function renderNotifications() {
     const timestamp = sessionMessageMs(row);
     const age = timestamp ? `${Math.max(0, Math.floor((serverClockMs() - timestamp) / 60000))}m ago` : 'Age unknown';
     item._meta.textContent = `${workspace?.name || row.workspace_id} · ${age}`;
-    // item._actions is reserved for the daemon-owned Dismiss notification action.
     return item;
   });
   reconcileChildren(sessions, [header, ...items, ...(!items.length ? [el('p', 'dim', 'No notifications.')] : [])]);
@@ -1685,7 +1682,7 @@ function sessionCard(session) {
   return card;
 }
 
-/// Severity is served by the daemon. This viewer has no output read receipts.
+/// Severity, including unread, is served by the daemon.
 function attentionParts(session) {
   const parts = [];
   if (session.operation?.kind === 'move') parts.push(['→', 'Moving']);
