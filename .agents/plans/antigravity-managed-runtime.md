@@ -14,10 +14,13 @@ Starting a session with profile gemini must prepare Antigravity's `agy` executab
 - [x] Both Linux musl architectures have no ELF program interpreter; the x86_64 artifact launches on this glibc host. The container installer passed locally, and the macOS arm64 artifact verified and launched on the Mac.
 - [x] Installer policy/archive/image regressions passed. The real concurrent-download/reuse/lease test passed in 11.38 seconds. Container build-context and workflow checks passed (14 tests).
 - [x] Full final suites passed: controller 2602/27 ignored, core 648/4 ignored, integration and documentation cases passed. No test failed.
-- [ ] Complete workspace clippy; it is running on the final implementation.
+- [x] Workspace clippy passed after removing one needless borrow in the test fixture (3m48s). The later manifest-only corrections also passed workspace clippy (3m41s).
 - [x] The isolated remote Podman image initially lacked agy. Session 6e8e651ea0f9a56b2314cb13dd599187 installed antigravity-1.5.7 in its target cache and returned AGY_MANAGED_REMOTE_OK from gemini-4-hydrogen/high (1.91 seconds, no tools). Both quota pools appeared in the TUI. Destroyed the session, stopped the daemon/TUI/Git fixture, removed copied credentials and test storage; original OAuth source unchanged.
 - [x] Commits 87048ad5c and 1d488033e passed review. Fixed inherited non-UTF-8 environment handling; the real Rust quota collector then passed with an unrelated invalid environment value (45.96 seconds, including a fresh pin download).
-- [ ] Merge newer upstream changes, publish reviewed work, verify image publication, dispatch platform CI, and complete the authorized follow-up installation without downgrading a newer build.
+- [x] Merged current upstream and pushed runtime support as 9d4c95126. Its amd64 and arm64 agent-dev image builds and manifest publication succeeded (run 43318472642).
+- [x] Installed 9d4c95126 and verified normal handoff of both default and s50 daemons at protocol 95. The s50 handoff waited for an accepted benchmark clone/sync; no accepted work was cancelled. Gemini's live catalogue has eight models and both quota pools read successfully. GPU scoring remains off in both configurations.
+- [x] CI found that the core package include list omitted the new runtime JSON, plus an upstream unused direct Anvil client dependency. Corrected the manifests and lock entry, verified the extracted core package build, passed cargo-machete and all 56 client tests plus integration, obtained clean review, merged upstream 14ffacd3e and pushed as 71da5987a. These follow-ups change packaging/dependency metadata, not the installed runtime behavior.
+- [x] Refreshed platform CI against the corrected source. The newer CI/image runs were still running at acceptance; the original runtime image publication is verified successful.
 
 ## Surprises & Discoveries
 
@@ -29,6 +32,8 @@ The Linux musl artifacts are static: both ELF program-header tables contain no P
 
 The remote-container fixture needs a network Git remote, even when its source is a local repository. A Git daemon listening on Morannon's wildcard address was reachable from the test container through host.containers.internal; its own LAN address was refused from that rootless network. Use a private fixture repository served on the target host and destination repo, rather than a dot destination. Teardown must close the test TUI and any test-owned SSH master before removing its storage; rootless image files require podman unshare for deletion.
 
+Core Cargo packaging has an explicit asset include list. Adding an include_str runtime manifest requires updating that list as well as the Docker build context; compiling from a checkout alone does not check the published archive. The existing CI extracted-package verification caught this omission, and the local cargo package verification now passes. There is no need for a duplicate unit test of the include list.
+
 ## Decision Log
 
 Use the existing resolver, staging, installer lock, atomic publication, receipt, and shared installation lease. Do not add a controller-to-target binary copy mechanism. Keep custom launch commands and the established Managed/Ambient/Image policies. Set AGY_CLI_DISABLE_AUTO_UPDATE=true in all mj-owned launch environments so sessions and quota probes cannot replace the pinned binary.
@@ -39,7 +44,9 @@ Use checked-in per-platform artifact URLs and checksums rather than resolving Go
 
 The managed runtime is implemented and the real missing-binary remote launch succeeds. The CLI comes from /root/.cache/mjolnir/harnesses/antigravity/antigravity-1.5.7/bin/agy inside the isolated target, with AGY_CLI_DISABLE_AUTO_UPDATE=true and the staged credential home. The host daemon collected both weekly and five-hour windows for Gemini and Claude/GPT; the TUI displayed gemini (Ge) and gemini (Cl). Native platform checks passed on Linux x86_64 and macOS arm64, and the runtime metadata also pins Linux arm64 and macOS x86_64.
 
-Full touched-crate validation and review are clean; workspace clippy and publication/installation remain. Preserve the user's gemini profile, disabled GPU scoring, and accepted additional-directory shell-cwd limitation. Install authorization from the earlier Antigravity work persists, but never replace a newer build without first merging it. The live daemon was already at d14c6f3d1 during acceptance, so merge current upstream before installing this follow-up.
+Delivery is complete. The runtime change was reviewed, pushed, published in the multi-platform image, installed, and activated for default and s50. All functional checks, full touched-crate suites, final workspace clippy, native archive checks, extracted-package verification and dependency checks passed. The original OAuth source stayed unchanged during isolated tests; the user's gemini profile, disabled GPU scoring and accepted additional-directory shell-cwd limitation are preserved. Installation included the newer upstream fixes, and subsequent source merges include the parallel compatible web-push migration 127; #1520 itself adds no migration or protocol change.
+
+The installed runtime commit is 9d4c95126. Later reviewed source commits repair the crate include list and remove an unused direct dependency; the runtime implementation and pin are unchanged. At acceptance, CI run 43321571751 and image run 43321571607 for the metadata corrections were in progress. The earlier runtime image run 43318472642 completed successfully for both architectures and publication. Platform CI was refreshed after the packaging correction; it is asynchronous and its result is not claimed here.
 
 ## Context and Orientation
 
@@ -70,3 +77,5 @@ Extend existing HarnessPin and Located/ManagedHarness behavior without new persi
 2026-11-12: Created this plan after the user approved managed-runtime support for #1520; it supersedes the initial ambient-only cut in antigravity-acp.md.
 
 2026-11-12: Recorded verified static Linux artifacts, managed resolver/image integration, clean review, full touched-crate results, real remote-container acceptance, non-UTF-8 quota verification, and completed cleanup. Remaining work is clippy, publication and the authorized installation.
+
+2026-11-12: Completed clippy, publication, installation, default/s50 handoffs, live quota/catalogue verification, and image publication checks. Recorded and corrected the CI packaging omission and upstream unused dependency, with package verification, client tests, dependency checks, clean review and final clippy. Refreshed platform CI against corrected source. Newer asynchronous CI runs remain observable in GitHub.
