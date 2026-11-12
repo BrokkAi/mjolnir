@@ -60,6 +60,17 @@ pub struct DaemonMetadata {
     pub placement: DaemonPlacement,
 }
 
+/// Process-private credentials returned by `mj daemon endpoint --json`.
+/// This is not local PID metadata and must never be written to daemon.json.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct DaemonEndpoint {
+    pub protocol_version: u32,
+    pub build_version: String,
+    pub control_address: SocketAddr,
+    pub token: String,
+    pub instance_id: String,
+}
+
 /// Where the daemon runs, as the daemon itself reports it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "placement")]
@@ -1701,6 +1712,19 @@ impl DaemonClient {
             metadata,
             stream,
             next_request_id: 1,
+        })
+    }
+
+    /// Describe the authenticated endpoint, retaining the address actually
+    /// dialed (including a container's published loopback port).
+    pub async fn endpoint(&mut self) -> Result<DaemonEndpoint> {
+        let identity = self.identity().await?;
+        Ok(DaemonEndpoint {
+            protocol_version: self.metadata.protocol_version,
+            build_version: identity.build_version,
+            control_address: self.metadata.address,
+            token: self.metadata.token.clone(),
+            instance_id: identity.instance_id,
         })
     }
 

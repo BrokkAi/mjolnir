@@ -2575,3 +2575,27 @@ mod tests {
         assert!(development_workers_changed_since(started, resolve).unwrap());
     }
 }
+
+/// Machine endpoint discovery is always local to this launcher. In particular,
+/// an SSH placement here must not recursively launch another SSH client.
+pub async fn print_endpoint(existing: bool) -> Result<()> {
+    tokio::task::spawn_blocking(|| {
+        let path = mj_core::config::config_path();
+        let placement = mj_core::config::DaemonConfig::load_placement(&path)?;
+        anyhow::ensure!(
+            placement.runtime != mj_core::config::DaemonRuntime::Ssh,
+            "{}: daemon endpoint cannot follow SSH placement; choose host, docker or podman on this machine",
+            path.display()
+        );
+        Ok::<_, anyhow::Error>(())
+    }).await.context("load endpoint placement task failed")??;
+    let mut client = if existing {
+        connect_existing()
+            .await
+            .context("no running daemon available for daemon endpoint --existing")?
+    } else {
+        connect_or_start().await?
+    };
+    println!("{}", serde_json::to_string(&client.endpoint().await?)?);
+    Ok(())
+}
