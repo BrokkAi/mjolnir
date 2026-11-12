@@ -201,6 +201,13 @@ async fn running_daemon_blockers() -> Option<Vec<String>> {
 const LOGGED_PHASE: Duration = Duration::from_millis(250);
 
 pub async fn connect_or_start() -> Result<DaemonClient> {
+    connector::DaemonConnector::shared()
+        .await?
+        .connect_or_start(connect_or_start_local)
+        .await
+}
+
+async fn connect_or_start_local() -> Result<DaemonClient> {
     let lock_path = data_dir().join("daemon-start.lock");
     // Most clients find a daemon they can use. Deciding that needs only a
     // shared hold, so a burst of clients reconnecting after a handoff checks
@@ -1881,6 +1888,9 @@ pub(crate) fn continue_under_upgraded_build(
 }
 
 pub(crate) async fn upgraded_daemon_executable() -> Result<Option<UpgradeTarget>> {
+    if connector::DaemonConnector::shared().await?.is_ssh() {
+        return Ok(None);
+    }
     let Ok(metadata) = read_metadata_any() else {
         return Ok(None);
     };

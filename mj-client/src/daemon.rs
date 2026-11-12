@@ -1,5 +1,6 @@
 //! Authenticated local daemon protocol and client transport.
 mod chunk_bytes;
+pub mod connector;
 pub mod ssh;
 use crate::executable::describe_running_daemon_and_client_builds;
 use crate::session::{ManagedSessionView, ViewError};
@@ -1698,6 +1699,7 @@ pub async fn read_response(stream: &mut TcpStream) -> Result<ResponseEnvelope> {
 }
 
 pub struct DaemonClient {
+    connector: Option<std::sync::Arc<connector::DaemonConnector>>,
     metadata: DaemonMetadata,
     stream: TcpStream,
     next_request_id: u64,
@@ -1713,6 +1715,7 @@ impl DaemonClient {
             metadata,
             stream,
             next_request_id: 1,
+            connector: None,
         })
     }
 
@@ -1733,7 +1736,12 @@ impl DaemonClient {
     /// requests must reach daemons of any protocol version, and the frozen
     /// subset encodes identically across all of them.
     pub async fn request(&mut self, action: DaemonAction) -> Result<DaemonReply> {
+        let connector = self.connector.clone();
+        let previous = self.metadata.clone();
         self.request_with_reconnect(action, || async {
+            if let Some(connector) = &connector {
+                return connector.refresh(&previous).await;
+            }
             loop {
                 if let Ok(client) = connect_existing().await {
                     return Ok(client);
@@ -3046,10 +3054,10 @@ impl DaemonClient {
 }
 
 pub async fn connect_existing() -> Result<DaemonClient> {
-    let metadata = tokio::task::spawn_blocking(read_metadata)
+    connector::DaemonConnector::shared()
+        .await?
+        .connect_existing()
         .await
-        .context("read daemon metadata task failed")??;
-    DaemonClient::connect(metadata).await
 }
 
 /// A handle to whatever daemon the metadata file advertises, regardless of its

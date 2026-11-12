@@ -194,6 +194,50 @@ mod tests {
         let path = std::env::var_os("MJ_SSH_DISCOVERY_PLACEMENT").unwrap();
         let placement =
             mj_core::config::DaemonConfig::load_placement(std::path::Path::new(&path)).unwrap();
+        let mut connector_placement = placement.clone();
+        connector_placement.instance = Some("ssh-discovery-e2e".into());
+        let connector =
+            super::super::connector::DaemonConnector::for_placement(connector_placement);
+        let mut connected = connector
+            .connect_or_start(|| async { panic!("SSH must not run local startup") })
+            .await
+            .unwrap();
+        let first_identity = connected.identity().await.unwrap();
+        let mut second_client = connector.connect_existing().await.unwrap();
+        assert_eq!(
+            second_client.identity().await.unwrap().instance_id,
+            first_identity.instance_id
+        );
+        let argv = vec![
+            placement.remote_command().to_owned(),
+            "--instance".into(),
+            "ssh-discovery-e2e".into(),
+            "daemon".into(),
+            "restart".into(),
+        ];
+        let mut restart = tokio::process::Command::new("ssh");
+        restart
+            .args(["-o", "BatchMode=yes"])
+            .args(&placement.ssh_args)
+            .arg(placement.host.as_ref().unwrap())
+            .arg(mj_core::targets::daemon_login_command(&argv));
+        let restarted = mj_core::subprocess::capture(&mut restart).await.unwrap();
+        assert!(
+            restarted.status.success(),
+            "{}",
+            String::from_utf8_lossy(&restarted.stderr)
+        );
+        let (left, right) =
+            tokio::join!(connector.connect_existing(), connector.connect_existing());
+        let new_identity = left.unwrap().identity().await.unwrap();
+        assert_ne!(new_identity.instance_id, first_identity.instance_id);
+        assert_eq!(
+            right.unwrap().identity().await.unwrap().instance_id,
+            new_identity.instance_id
+        );
+        drop(connected);
+        drop(second_client);
+        drop(connector);
         let endpoint = super::discover(
             &placement,
             "ssh-discovery-e2e",
