@@ -10,7 +10,7 @@
 // CACHE_VERSION must change whenever any shell asset changes. Activation
 // deletes every cache that is not the current one, so an upgrade cannot leave
 // a previous version's assets behind.
-const CACHE_VERSION = 'mjolnir-shell-v26';
+const CACHE_VERSION = 'mjolnir-shell-v27';
 const SHELL = [
   '/',
   '/viewer.css',
@@ -61,4 +61,31 @@ self.addEventListener('fetch', event => {
   // Live state and authentication never come from a cache.
   if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/auth/')) return;
   event.respondWith(networkFirst(event.request));
+});
+
+// Every push displays a notification, including on iOS; no silent withdrawals.
+self.addEventListener('push', event => {
+  event.waitUntil((async () => {
+    const notice = event.data ? event.data.json() : {};
+    await self.registration.showNotification(notice.title || 'Mjolnir', {
+      body: notice.body || 'Needs your input',
+      tag: notice.tag || notice.session_id || 'summary',
+      data: { url: notice.url || '/', session_id: notice.session_id || null },
+    });
+  })());
+});
+
+self.addEventListener('notificationclick', event => {
+  event.notification.close();
+  event.waitUntil((async () => {
+    const target = new URL(event.notification.data?.url || '/', self.location.origin);
+    if (target.origin !== self.location.origin) return;
+    const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const client of windows) {
+      if (new URL(client.url).origin !== target.origin) continue;
+      const navigated = await client.navigate(target.href);
+      if (navigated) { await navigated.focus(); return; }
+    }
+    await self.clients.openWindow(target.href);
+  })());
 });

@@ -891,6 +891,7 @@ function renderSettingsSavebar() {
 }
 
 function renderSettings() {
+  refreshDeviceNotifications();
   renderSettingsSavebar();
   settingsError.replaceChildren();
   if (settingsState.error) {
@@ -6188,6 +6189,7 @@ function refreshOpenSubagentContext(id) {
 
 function presentSnapshot(detailChangedIds = []) {
   snapshot = viewerState.metadata;
+  withdrawResolvedNotifications();
   discardQueuedOperatorActivityIfDisabled();
   activitySignalFailed = false;
   signedOut = false;
@@ -9835,3 +9837,84 @@ if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/service-worker.js').catch(() => {});
 }
 restoreRoute();
+
+// Permission must be requested synchronously from the person's tap (iOS).
+const notificationState = document.querySelector('#device-notification-state');
+const notificationEnable = document.querySelector('#device-notification-enable');
+const notificationDisable = document.querySelector('#device-notification-disable');
+const notificationTest = document.querySelector('#device-notification-test');
+function pushSupported() {
+  return window.isSecureContext && 'Notification' in window && 'serviceWorker' in navigator && 'PushManager' in window;
+}
+async function pushRegistration() {
+  const registration = await navigator.serviceWorker.getRegistration();
+  if (!registration?.active) throw new Error('The app is preparing notifications. Reload and try again.');
+  return registration;
+}
+async function refreshDeviceNotifications() {
+  if (!pushSupported()) {
+    notificationState.textContent = 'Notifications need a supported browser and HTTPS. On iOS, open the Home Screen app.';
+    notificationEnable.disabled = notificationDisable.disabled = notificationTest.disabled = true;
+    return;
+  }
+  try {
+    const subscription = await (await pushRegistration()).pushManager.getSubscription();
+    const status = subscription ? await request(`/api/push/status?endpoint=${encodeURIComponent(subscription.endpoint)}`) : null;
+    notificationState.textContent = status?.error ? `Notification delivery: ${status.error}` : status?.subscribed ? 'Enabled on this device' : `Not enabled (permission: ${Notification.permission})`;
+    notificationEnable.disabled = !!status?.subscribed && !status?.error;
+    notificationDisable.disabled = notificationTest.disabled = !subscription;
+  } catch (error) { notificationState.textContent = error.message; }
+}
+notificationEnable.onclick = async () => {
+  try {
+    const permission = await Notification.requestPermission();
+    if (permission !== 'granted') throw new Error('Notification permission was not granted. Allow it in this browser’s site settings to enable notifications.');
+    const registration = await pushRegistration();
+    const { public_key: publicKey } = await request('/api/push/key');
+    const decoded = atob(publicKey.replace(/-/g, '+').replace(/_/g, '/'));
+    const key = Uint8Array.from(decoded, character => character.charCodeAt(0));
+    const subscription = await registration.pushManager.getSubscription() || await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+    await request('/api/actions', { method: 'POST', body: JSON.stringify({ action: 'push-subscribe', subscription: subscription.toJSON() }) });
+    await refreshDeviceNotifications();
+  } catch (error) { notificationState.textContent = error.message; }
+};
+notificationDisable.onclick = async () => {
+  try {
+    const subscription = await (await pushRegistration()).pushManager.getSubscription();
+    if (subscription) {
+      await request('/api/actions', { method: 'POST', body: JSON.stringify({ action: 'push-unsubscribe', endpoint: subscription.endpoint }) });
+      await subscription.unsubscribe();
+    }
+    await refreshDeviceNotifications();
+  } catch (error) { notificationState.textContent = error.message; }
+};
+notificationTest.onclick = async () => {
+  try {
+    const subscription = await (await pushRegistration()).pushManager.getSubscription();
+    if (!subscription) throw new Error('Enable notifications first.');
+    await request('/api/actions', { method: 'POST', body: JSON.stringify({ action: 'push-test', endpoint: subscription.endpoint }) });
+    notificationState.textContent = 'Test notification requested';
+  } catch (error) { notificationState.textContent = error.message; }
+};
+async function withdrawResolvedNotifications() {
+  if (!pushSupported() || !snapshot) return;
+  try {
+    const registration = await pushRegistration();
+    const notifications = await registration.getNotifications();
+    for (const notification of notifications) {
+      const id = notification.data?.session_id;
+      if (id && !['needs_input', 'important'].includes(sessionById(id)?.attention)) notification.close();
+    }
+  } catch (error) { console.warn('Could not refresh shown notifications', error); }
+}
+let notificationAttentionRefresh;
+function refreshNotificationAttention() {
+  // A suspended phone may have an old row saying Idle when a new push arrives.
+  // Fetch current owner state before deciding which shown cards to withdraw.
+  if (!notificationAttentionRefresh) {
+    notificationAttentionRefresh = refresh().finally(() => { notificationAttentionRefresh = undefined; });
+  }
+}
+window.addEventListener('focus', () => { refreshDeviceNotifications(); refreshNotificationAttention(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshNotificationAttention(); });
+refreshDeviceNotifications();

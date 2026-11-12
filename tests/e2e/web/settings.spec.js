@@ -191,3 +191,76 @@ test('golden_viewer_settings', async ({ page }) => {
   expect(state.requests).toEqual(EXCHANGE.map(({ uri, request }) => ({ uri, request })));
   assertGolden('viewer_settings', output.join('\n'));
 });
+
+test('device notification enrollment starts from a tap and supports test and unsubscribe', async ({ page }) => {
+  await mount(page);
+  await page.addInitScript(() => {
+    let subscription = null;
+    window.pushPermissionTaps = 0;
+    window.Notification = class {
+      static permission = 'default';
+      static requestPermission() { window.pushPermissionTaps += 1; this.permission = 'granted'; return Promise.resolve('granted'); }
+    };
+    window.PushManager = class {};
+    const registration = {
+      active: {},
+      getNotifications: async () => [],
+      pushManager: {
+        getSubscription: async () => subscription,
+        subscribe: async () => {
+          subscription = {
+            endpoint: 'https://push.example/device',
+            toJSON: () => ({ endpoint: 'https://push.example/device', keys: { p256dh: 'public', auth: 'secret' } }),
+            unsubscribe: async () => { subscription = null; return true; },
+          };
+          return subscription;
+        },
+      },
+    };
+    Object.defineProperty(navigator, 'serviceWorker', { value: { register: async () => registration, getRegistration: async () => registration } });
+  });
+  const actions = [];
+  await page.route('**/api/push/status?*', route => route.fulfill({ json: { subscribed: true, error: null } }));
+  await page.route('**/api/push/key', route => route.fulfill({ json: { public_key: 'BA' } }));
+  await page.route('**/api/actions', route => { actions.push(route.request().postDataJSON()); return route.fulfill({ json: { accepted: true } }); });
+  await page.goto('https://viewer.test/#settings');
+  await expect(page.locator('#device-notification-state')).toContainText('Not enabled');
+  expect(await page.evaluate(() => window.pushPermissionTaps)).toBe(0);
+  await page.locator('#device-notification-enable').click();
+  await expect(page.locator('#device-notification-state')).toHaveText('Enabled on this device');
+  expect(await page.evaluate(() => window.pushPermissionTaps)).toBe(1);
+  await page.locator('#device-notification-test').click();
+  await expect(page.locator('#device-notification-state')).toHaveText('Test notification requested');
+  await page.locator('#device-notification-disable').click();
+  await expect(page.locator('#device-notification-state')).toContainText('Not enabled');
+  expect(actions.map(action => action.action)).toEqual(['push-subscribe', 'push-test', 'push-unsubscribe']);
+});
+
+test('service worker push displays and clicks route an existing window to the conversation', async ({ page }) => {
+  await page.goto('about:blank');
+  const source = fs.readFileSync(path.join(WEB_ROOT, 'service-worker.js'), 'utf8');
+  const result = await page.evaluate(async source => {
+    const listeners = {};
+    const calls = [];
+    const self = {
+      location: { origin: 'https://viewer.test' },
+      addEventListener: (name, callback) => { listeners[name] = callback; },
+      registration: { showNotification: async (title, options) => { calls.push(['show', title, options]); } },
+      clients: {
+        matchAll: async () => [{ url: 'https://viewer.test/', navigate: async url => { calls.push(['navigate', url]); return { focus: async () => calls.push(['focus']) }; } }],
+        openWindow: async url => calls.push(['open', url]),
+      },
+    };
+    new Function('self', source)(self);
+    let pending;
+    listeners.push({ data: { json: () => ({ title: 'Build', body: 'Which option?', tag: 'session', session_id: 'session', url: '/#conversation/session' }) }, waitUntil: promise => { pending = promise; } });
+    await pending;
+    listeners.notificationclick({ notification: { data: { url: '/#conversation/session' }, close: () => calls.push(['close']) }, waitUntil: promise => { pending = promise; } });
+    await pending;
+    return calls;
+  }, source);
+  expect(result).toEqual([
+    ['show', 'Build', { body: 'Which option?', tag: 'session', data: { url: '/#conversation/session', session_id: 'session' } }],
+    ['close'], ['navigate', 'https://viewer.test/#conversation/session'], ['focus'],
+  ]);
+});
