@@ -1511,6 +1511,24 @@ impl ProfileCatalog {
                 .fetch_live(&key, key.1.clone(), cancellation, &mut revisions)
                 .await;
         }
+        self.fetch_settled(config, id, key.1).await
+    }
+
+    // Admission checks configured choices against the warm owner, including Muse.
+    async fn fetch_settled(
+        self: &Arc<Self>,
+        config: &Config,
+        id: &str,
+        model: Option<String>,
+    ) -> Result<ProfileConfig> {
+        let profile = config.enabled_profile(id).context("profile unavailable")?;
+        let identity = profile.capabilities_key(id);
+        if !self.lock().definitions.contains_key(&identity) {
+            self.ensure(config);
+        }
+        let key = (identity, model);
+        let cancellation = self.lock().definitions[&key.0].cancellation.clone();
+        let mut revisions = self.revisions.subscribe();
         loop {
             // Subscribe before inspecting ownership, so completion cannot be
             // missed. Readers never drive or publish the supervisor's future.
@@ -1729,6 +1747,46 @@ impl ProfileCatalog {
             .await
             .into_iter()
             .collect()
+    }
+
+    pub(crate) async fn admission_options(
+        self: &Arc<Self>,
+        config: &Config,
+        parent: &str,
+        models: std::collections::BTreeSet<String>,
+    ) -> Result<std::collections::BTreeMap<String, mj_core::subagent::SubagentOptions>> {
+        config
+            .enabled_profile(parent)
+            .context("parent profile unavailable")?;
+        let defaults = join_all(config.enabled_profiles().map(|(id, _)| async move {
+            (id.to_owned(), self.fetch_settled(config, id, None).await)
+        }))
+        .await
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+        let results = join_all(models.into_iter().map(|model| {
+            let defaults = &defaults;
+            async move {
+                let options = crate::controller::profile_config::subagent_options_with(
+                    config,
+                    parent,
+                    Some(model.clone()),
+                    |id, selected| async move {
+                        if selected.is_none() {
+                            return defaults[&id]
+                                .as_ref()
+                                .cloned()
+                                .map_err(|error| anyhow::anyhow!("{error:#}"));
+                        }
+                        self.fetch_settled(config, &id, selected).await
+                    },
+                )
+                .await?;
+                Ok::<_, anyhow::Error>((model, options))
+            }
+        }))
+        .await;
+        results.into_iter().collect()
     }
 
     pub(crate) async fn options_for(
@@ -4143,6 +4201,36 @@ mod tests {
         catalog.sync_now(&config).await;
         assert_eq!(snapshot_models(&catalog), ["p-model", "m1", "m2", "m3"]);
     }
+    #[tokio::test]
+    async fn admission_shares_pending_muse_warmup_and_retains_its_result() {
+        let probes = calls();
+        let catalog = ProfileCatalog::with_probe(counting_probe(probes.clone()));
+        let mut config = test_config(&[("parent", HarnessKind::Codex), ("p", HarnessKind::Muse)]);
+        let choice = mj_core::config::SubagentChoice {
+            model: "p-model".into(),
+            effort: None,
+        };
+        config.subagents.straightforward = Some(choice.clone());
+        config.subagents.subtle = Some(choice);
+        catalog.sync(&config);
+        let policy = mj_core::subagent::SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None,
+        };
+        for _ in 0..2 {
+            crate::controller::profile_config::validate_session_subagent_policy(
+                &catalog, &config, "parent", &policy,
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            probes.load(Ordering::SeqCst),
+            2,
+            "one startup probe per profile across both validations"
+        );
+    }
+
     // Hard-won: dfbb210a5: restricted Muse reads restarted default discovery.
     #[tokio::test]
     async fn restricted_live_model_read_reuses_cached_default() {
