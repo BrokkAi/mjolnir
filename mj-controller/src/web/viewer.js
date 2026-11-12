@@ -133,6 +133,7 @@ const PAGES = {
 const entryNodes = new Map();
 let snapshot,
   route = { name: 'dashboard' },
+  initialWorkspaceSelectionDone = false,
   resumeRouteVisit = 0,
   currentSession,
   moveDraft,
@@ -369,7 +370,7 @@ function selectedWorkspaceId() {
     if (session?.workspace_id) return session.workspace_id;
   }
 
-  return route.name === 'dashboard' ? 'notifications' : workspaces[0]?.id;
+  return workspaces[0]?.id;
 }
 
 function applyRoute() {
@@ -6293,6 +6294,16 @@ function refreshOpenSubagentContext(id) {
 
 function presentSnapshot(detailChangedIds = []) {
   snapshot = viewerState.metadata;
+  if (!initialWorkspaceSelectionDone) {
+    initialWorkspaceSelectionDone = true;
+    route = parseRoute(location.hash);
+    // Only workspace views; a conversation or sub-agent link opens as linked.
+    if (route.name === 'dashboard' && !route.subagentParentId && notificationRows().length > 0) {
+      const hash = routeHash({ name: 'dashboard', workspaceId: 'notifications' });
+      history.replaceState(history.state, '', `${location.pathname}${location.search}${hash}`);
+      route = parseRoute(hash);
+    }
+  }
   discardQueuedOperatorActivityIfDisabled();
   activitySignalFailed = false;
   signedOut = false;
