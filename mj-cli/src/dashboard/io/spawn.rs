@@ -401,27 +401,27 @@ pub(crate) fn spawn_first_run_setup(
             // The daemon owns its configuration and its environment. In
             // container placement this discovery runs inside the container,
             // not against the client's host home.
-            let (summary, errors) = mj_core::runtime::block_on(async {
+            mj_core::runtime::block_on(async {
                 let mut daemon = crate::daemon::connect_or_start().await?;
-                let summary = daemon.run_first_run_setup().await?;
-                let errors = if summary.is_some() {
-                    daemon.run_doctor().await?
-                } else {
-                    Vec::new()
+                // An existing installation picks up agents installed since its
+                // last launch through the startup availability check.
+                let Some(summary) = daemon.run_first_run_setup().await? else {
+                    return Ok(None);
                 };
-                Ok::<_, anyhow::Error>((summary, errors))
-            })??;
-            // An existing installation picks up agents installed since its
-            // last launch through the startup availability check.
-            let Some(summary) = summary else {
-                return Ok(None);
-            };
-            report(
-                "first-run setup",
-                &progress,
-                DashboardIoUpdate::FirstRunConfigured(summary),
-            );
-            Ok(Some(errors))
+                report(
+                    "first-run setup",
+                    &progress,
+                    DashboardIoUpdate::FirstRunConfigured(summary),
+                );
+                // Setup is saved by now. A daemon handoff abandons the check,
+                // so its failure is reported as a check, not as failed setup.
+                let errors = daemon.run_doctor().await.unwrap_or_else(|error| {
+                    vec![format!(
+                        "Could not check prerequisites: {error:#}. Run `mj doctor` to check them."
+                    )]
+                });
+                Ok::<_, anyhow::Error>(Some(errors))
+            })?
         },
         DashboardIoUpdate::FirstRunChecked,
     )
