@@ -56,7 +56,10 @@ tracing-subscriber.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Purge freed daemon pages asynchronously, using jemalloc's normal decay policy.
-tikv-jemallocator = { version = "0.7", features = ["background_threads"] }
+# `stats` and `profiling` stay inactive unless `_RJEM_MALLOC_CONF` turns them on
+# for one process (for example `prof:true` or `stats_print:true`), so a live
+# daemon's heap can be measured without a special build.
+tikv-jemallocator = { version = "0.7", features = ["background_threads", "stats", "profiling"] }
 
 [target.'cfg(windows)'.dependencies]
 # Stops an unresponsive daemon through a handle that pins its identity.
