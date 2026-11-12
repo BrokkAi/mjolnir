@@ -9889,10 +9889,17 @@ notificationEnable.onclick = async () => {
 };
 notificationDisable.onclick = async () => {
   try {
-    const subscription = await (await pushRegistration()).pushManager.getSubscription();
-    if (subscription) {
+    const manager = (await pushRegistration()).pushManager;
+    let subscription;
+    // The browser may rotate its subscription during a network request. Keep
+    // disabling the actual current native resource before reporting success.
+    while ((subscription = await manager.getSubscription())) {
+      const removed = await subscription.unsubscribe();
+      if (!removed) {
+        const current = await manager.getSubscription();
+        if (current && JSON.stringify(current.toJSON()) === JSON.stringify(subscription.toJSON())) throw new Error('Could not disable notifications. Try Disable notifications again.');
+      }
       await request('/api/actions', { method: 'POST', body: JSON.stringify({ action: 'push-unsubscribe', endpoint: subscription.endpoint }) });
-      await subscription.unsubscribe();
     }
     await refreshDeviceNotifications();
   } catch (error) { notificationState.textContent = error.message; }

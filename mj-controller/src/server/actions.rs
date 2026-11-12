@@ -26,6 +26,10 @@ pub enum ControllerAction {
     PushSubscribe {
         subscription: crate::web_push::Subscription,
     },
+    PushRenew {
+        old_endpoint: String,
+        subscription: crate::web_push::Subscription,
+    },
     PushUnsubscribe {
         endpoint: String,
     },

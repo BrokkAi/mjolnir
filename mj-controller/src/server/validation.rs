@@ -759,7 +759,8 @@ fn validate_action_against(
                 ));
             }
         }
-        ControllerAction::PushSubscribe { subscription } => {
+        ControllerAction::PushSubscribe { subscription }
+        | ControllerAction::PushRenew { subscription, .. } => {
             subscription
                 .validate()
                 .map_err(|_| ApiError::bad_request("invalid Web Push subscription"))?;

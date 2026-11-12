@@ -9,8 +9,13 @@ pub(crate) fn push_subscribe(subscription: Subscription) -> Result<()> {
 }
 fn push_subscribe_with(db: &Connection, subscription: Subscription) -> Result<()> {
     let tx = db.unchecked_transaction()?;
+    push_subscribe_in(&tx, subscription)?;
+    tx.commit()?;
+    Ok(())
+}
+fn push_subscribe_in(db: &Connection, subscription: Subscription) -> Result<()> {
     let encoded = serde_json::to_string(&subscription)?;
-    let previous: Option<(String, String)> = tx
+    let previous: Option<(String, String)> = db
         .query_row(
             "SELECT subscription,enrollment FROM push_devices WHERE endpoint=?1",
             [&subscription.endpoint],
@@ -29,15 +34,36 @@ fn push_subscribe_with(db: &Connection, subscription: Subscription) -> Result<()
         _ => {
             // Replacement releases the old owner's reservations in the same
             // transaction. An opaque ID also prevents ABA after delete/recreate.
-            tx.execute(
+            db.execute(
                 "UPDATE push_deliveries SET accepted=0 WHERE endpoint=?1 AND accepted=3",
                 [&subscription.endpoint],
             )?;
             mj_core::state::new_session_id().context("generate Web Push enrollment identifier")?
         }
     };
-    tx.execute("INSERT INTO push_devices(endpoint,subscription,enrollment) VALUES(?1,?2,?3) ON CONFLICT(endpoint) DO UPDATE SET subscription=excluded.subscription,enrollment=excluded.enrollment",params![subscription.endpoint,encoded,enrollment])?;
-    tx.execute("UPDATE push_deliveries SET retry_at=0,failures=0,error=NULL WHERE endpoint=?1 AND accepted=0",[subscription.endpoint])?;
+    db.execute("INSERT INTO push_devices(endpoint,subscription,enrollment) VALUES(?1,?2,?3) ON CONFLICT(endpoint) DO UPDATE SET subscription=excluded.subscription,enrollment=excluded.enrollment",params![subscription.endpoint,encoded,enrollment])?;
+    db.execute("UPDATE push_deliveries SET retry_at=0,failures=0,error=NULL WHERE endpoint=?1 AND accepted=0",[subscription.endpoint])?;
+    Ok(())
+}
+pub(crate) fn push_renew(old_endpoint: String, subscription: Subscription) -> Result<()> {
+    submit_database_write("renew Web Push subscription", move |db| {
+        push_renew_with(db, &old_endpoint, subscription)
+    })
+}
+fn push_renew_with(db: &Connection, old_endpoint: &str, subscription: Subscription) -> Result<()> {
+    if old_endpoint == subscription.endpoint {
+        return push_subscribe_with(db, subscription);
+    }
+    let tx = db.unchecked_transaction()?;
+    push_subscribe_in(&tx, subscription.clone())?;
+    // Preserve known receipts across native endpoint rotation. Old in-flight
+    // attempts become uncertain queued work under the new encryption owner.
+    tx.execute("UPDATE push_devices SET retry_at=max(retry_at,coalesce((SELECT retry_at FROM push_devices WHERE endpoint=?1),0)) WHERE endpoint=?2",params![old_endpoint,subscription.endpoint])?;
+    tx.execute("INSERT INTO push_deliveries(endpoint,episode,payload,accepted,retry_at,failures,error,summary_episode)
+        SELECT ?2,q.episode,q.payload,CASE WHEN q.accepted=3 THEN 0 WHEN q.accepted=2 AND EXISTS(SELECT 1 FROM push_deliveries summary WHERE summary.endpoint=q.endpoint AND summary.episode=q.summary_episode AND summary.accepted=1) THEN 1 ELSE q.accepted END,q.retry_at,q.failures,q.error,q.summary_episode
+        FROM push_deliveries q WHERE q.endpoint=?1
+        ON CONFLICT(endpoint,episode) DO UPDATE SET accepted=CASE WHEN push_deliveries.accepted=3 THEN 3 WHEN push_deliveries.accepted=1 OR excluded.accepted=1 THEN 1 ELSE push_deliveries.accepted END",params![old_endpoint,subscription.endpoint])?;
+    tx.execute("DELETE FROM push_devices WHERE endpoint=?1", [old_endpoint])?;
     tx.commit()?;
     Ok(())
 }
@@ -105,7 +131,9 @@ fn push_observe_at_with(
     let mut reserved_episodes = Vec::new();
     for (session, signature, payload) in episodes {
         let identity = match previous_episodes.get(&session) {
-            Some((identity, previous, _)) if same_episode(previous, &signature) => identity.clone(),
+            Some((identity, previous, _)) if same_episode(previous, &signature)? => {
+                identity.clone()
+            }
             _ => {
                 let sequence:i64=tx.query_row("INSERT INTO push_episode_counters VALUES(?1,1) ON CONFLICT(session) DO UPDATE SET sequence=sequence+1 RETURNING sequence",[&session],|r|r.get(0))?;
                 format!("{session}:{sequence}")
@@ -204,14 +232,12 @@ fn push_observe_at_with(
     tx.commit()?;
     Ok(())
 }
-fn same_episode(previous: &str, next: &str) -> bool {
-    let parse = |value: &str| serde_json::from_str::<(String, Vec<String>)>(value);
-    match (parse(previous), parse(next)) {
-        (Ok((old_kind, old)), Ok((kind, new))) => {
-            old_kind == kind && new.iter().all(|source| old.contains(source))
-        }
-        _ => previous == next,
-    }
+fn same_episode(previous: &str, next: &str) -> Result<bool> {
+    let (old_kind, old): (String, Vec<String>) =
+        serde_json::from_str(previous).context("read persisted push episode sources")?;
+    let (kind, new): (String, Vec<String>) =
+        serde_json::from_str(next).context("read published push episode sources")?;
+    Ok(old_kind == kind && new.iter().all(|source| old.contains(source)))
 }
 fn reserve(
     tx: &Transaction<'_>,
@@ -493,7 +519,7 @@ mod tests {
     fn episode(id: &str) -> (String, String, Notice) {
         (
             id.into(),
-            format!("{id}:form:unique"),
+            serde_json::to_string(&("needs_input", vec![format!("{id}:form:unique")])).unwrap(),
             Notice {
                 title: id.into(),
                 body: "Which option?".into(),
@@ -1069,6 +1095,75 @@ mod tests {
                 .unwrap(),
             0
         );
+        // Hard-won: 5a12b9f64: native endpoint rotation lost the device's delivery stream.
+        push_subscribe_with(&db, subscription.clone()).unwrap();
+        push_observe_at_with(
+            &mut db,
+            OperatorPresence {
+                away: true,
+                revision: 15,
+            },
+            vec![episode("renew-ack"), episode("renew-flight")],
+            vec![],
+        )
+        .unwrap();
+        let admitted = push_claim_with(&db, 103).unwrap();
+        assert_eq!(admitted.len(), 2);
+        let acknowledged = admitted
+            .iter()
+            .find(|d| d.episode.starts_with("renew-ack:"))
+            .unwrap();
+        super::apply_push_result_with(
+            &db,
+            acknowledged.subscription.clone(),
+            &acknowledged.enrollment,
+            acknowledged.episode.clone(),
+            Some(201),
+            0,
+            None,
+        )
+        .unwrap();
+        let old_flight = admitted
+            .iter()
+            .find(|d| d.episode.starts_with("renew-flight:"))
+            .unwrap();
+        let mut renewed = subscription.clone();
+        renewed.endpoint = "https://push.example.com/renewed".into();
+        push_renew_with(&db, &endpoint, renewed.clone()).unwrap();
+        let moved = push_claim_with(&db, 103).unwrap();
+        assert_eq!(moved.len(), 1);
+        assert_eq!(moved[0].episode, old_flight.episode);
+        assert_eq!(moved[0].subscription.endpoint, renewed.endpoint);
+        super::apply_push_result_with(
+            &db,
+            old_flight.subscription.clone(),
+            &old_flight.enrollment,
+            old_flight.episode.clone(),
+            Some(410),
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM push_devices", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        super::apply_push_result_with(
+            &db,
+            moved[0].subscription.clone(),
+            &moved[0].enrollment,
+            moved[0].episode.clone(),
+            Some(201),
+            0,
+            None,
+        )
+        .unwrap();
+        // Replaying the browser's same rotation is idempotent, including after
+        // the old endpoint was already removed by the first accepted request.
+        push_renew_with(&db, &endpoint, renewed.clone()).unwrap();
+        assert!(push_claim_with(&db, 103).unwrap().is_empty());
         // Coverage is owned independently of a subscription's lifetime, so a
         // shown summary can still be withdrawn after the endpoint expires.
         assert_eq!(

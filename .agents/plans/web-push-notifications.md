@@ -17,6 +17,7 @@ A user installs the viewer on Android Chrome or an iOS 16.4+ Home Screen and ena
 - [x] (2026-11-12) Addressed second-review device rejection and in-flight ownership defects, including the underlying summary payload growth.
 - [x] (2026-11-12) Addressed third-review enrollment replacement ownership; expiry refresh, key replacement, ABA and endpoint recreation regressions pass.
 - [x] (2026-11-12) Addressed fourth-review draft loss: existing windows receive a router message and focus, with no document reload.
+- [x] (2026-11-12) Addressed fifth-review browser rotation: pushsubscriptionchange registers the current native subscription through authenticated atomic renewal; receipts survive endpoint replacement.
 - [x] (2026-11-12) Final affected checks pass: 2 Rust, 3 Playwright, 38 browser boundary tests, touched-crate clippy and rustfmt.
 - [x] (2026-11-12) Send validated implementation through required review; the final verdict is recorded in the session handback.
 
@@ -46,7 +47,7 @@ Push payloads contain only title, first-line body, session ID, URL and notificat
 
 ## Outcomes & Retrospective
 
-Implementation and affected validation are complete; no real phone delivery has been attempted. Findings from four review rounds were accepted and fixed. The latest change makes races unrepresentable by giving the database writer sole ownership of send admission and coverage, rather than narrowing a task-bookkeeping window. It also removes session-list-sized push bodies instead of adding a guessed limit or a fallback.
+Implementation and affected validation are complete; no real phone delivery has been attempted. Findings from five review rounds were accepted and fixed. The latest change makes races unrepresentable by giving the database writer sole ownership of send admission and coverage, rather than narrowing a task-bookkeeping window. It also removes session-list-sized push bodies instead of adding a guessed limit or a fallback.
 
 ## Context and Orientation
 
@@ -54,9 +55,9 @@ Implementation and affected validation are complete; no real phone delivery has 
 
 `mj-controller/src/database/web_push.rs` uses the existing database writer for every mutation. Its SQL schema lives in `database/web_push.sql`; migration registration is in `database/schema.rs` and `database.rs`. Devices are identified by their browser-provided subscription endpoint. Outbox state and receipts are durable, so replacing the daemon does not depend on a worker turn or an in-memory task.
 
-`server/actions.rs`, `server/validation.rs` and `server_runtime/actions.rs` expose Subscribe, Unsubscribe and Test through the normal cookie-authenticated viewer action path. `server/settings.rs` and `server/routes.rs` serve the public VAPID key, device failure status and summary coverage; private key material never reaches the browser.
+`server/actions.rs`, `server/validation.rs` and `server_runtime/actions.rs` expose Subscribe, Renew, Unsubscribe and Test through the normal cookie-authenticated viewer action path. `server/settings.rs` and `server/routes.rs` serve the public VAPID key, device failure status and summary coverage; private key material never reaches the browser.
 
-`web/viewer.html` and `web/viewer.js` implement device controls and focus cleanup. `web/service-worker.js` displays every push and messages/focuses an existing viewer or opens a same-origin target on click. The viewer routes that message through normal hash navigation, preserving conversation and Settings drafts. Its cache version is v30 and must be reassigned upward if another lane also changes it. Conversation URLs are `/#conversation/<session-id>`; summary URLs open the viewer and carry the cleanup reference.
+`web/viewer.html` and `web/viewer.js` implement device controls and focus cleanup. `web/service-worker.js` displays every push and messages/focuses an existing viewer or opens a same-origin target on click. The viewer routes that message through normal hash navigation, preserving conversation and Settings drafts. Its cache version is v31 and must be reassigned upward if another lane also changes it. Conversation URLs are `/#conversation/<session-id>`; summary URLs open the viewer and carry the cleanup reference.
 
 ## Plan of Work
 
@@ -81,7 +82,7 @@ Expected results are 3 Playwright cases and 38 existing browser boundary tests p
 
 ## Validation and Acceptance
 
-The encryption/JWT test checks RFC 8291 Appendix A ciphertext and derivation values, JWT audience/expiry and signature verification. The database regression covers acknowledged and unknown outcomes across reconnect, present suppression, away summaries, form removal/re-entry, worker recovery, coalesced presence revisions, device deadlines, expiry, summary shrinking/retirement, permanent rejection followed by test/new sends, in-flight individual/summary ownership, stale completions, restart admission and enrollment replacement/refresh ownership. A real 1,000-session summary proves the stored coverage exceeds 4096 bytes while its actual push plaintext stays within the documented RFC 8291 section 4 allowance of 3993 bytes; lookup survives endpoint expiry.
+The encryption/JWT test checks RFC 8291 Appendix A ciphertext and derivation values, JWT audience/expiry and signature verification. The database regression covers acknowledged and unknown outcomes across reconnect, present suppression, away summaries, form removal/re-entry, worker recovery, coalesced presence revisions, device deadlines, expiry, summary shrinking/retirement, permanent rejection followed by test/new sends, in-flight individual/summary ownership, stale completions, restart admission, enrollment replacement/refresh ownership and native endpoint rotation preserving receipts. A real 1,000-session summary proves the stored coverage exceeds 4096 bytes while its actual push plaintext stays within the documented RFC 8291 section 4 allowance of 3993 bytes; lookup survives endpoint expiry.
 
 The browser regression drives the real Settings UI with mocked routes and browser push APIs. It checks permission only from a tap, test/unsubscribe actions, temporary-unavailability retention, resolved individual/summary cleanup through the coverage API, and service-worker click routing without reloading unsaved Settings. The existing Settings golden still fits a 390x844 viewport without sideways overflow.
 
@@ -91,6 +92,8 @@ On a phone, open a trusted HTTPS viewer. On iOS 16.4+, add it to the Home Screen
 
 Unique device/episode reservations and acceptance receipts make ordinary replay safe. Only startup recovers in-flight rows. An unknown remote acceptance may repeat as explicitly approved; tags replace the same card. Resolved queued intents retire before sending. Summary cleanup coverage has an independent durable lifetime because displayed OS notifications can outlive subscriptions and outbox work.
 
+Browser-driven renewal uses the existing viewer cookie and network path. It never bypasses authentication or requests notification permission in the background; after sign-in expires, the normal viewer sign-in is still required. Functional-event failures are reported with context.
+
 Never test against the default instance or live store, never redirect build output, and stop owning processes before deleting test directories. No daemon/browser test build was installed or used against live session data. Subscription expiry allows explicit re-enrollment, while the retained coverage still supports cleanup of already shown cards.
 
 ## Artifacts and Notes
@@ -99,7 +102,7 @@ Evidence is in `/home/jonathan/Projects/mjolnir/.mj/clones/4f86b847ae014721aac99
 
 ## Interfaces and Dependencies
 
-The public viewer action variants are `PushSubscribe`, `PushUnsubscribe` and `PushTest`. Viewer-only GET routes are `/api/push/key`, `/api/push/status?endpoint=...` and `/api/push/summary?id=...`. The dispatcher calls `push_observe`, `push_claim`, `push_result` and startup-only `push_recover`; these all use the single database writer. `READY_PUSH` is shared by admission and scheduling. All background failures propagate or are reported with context, and subscription capability URLs are removed from transport diagnostics.
+The public viewer action variants are `PushSubscribe`, `PushRenew`, `PushUnsubscribe` and `PushTest`. Viewer-only GET routes are `/api/push/key`, `/api/push/status?endpoint=...` and `/api/push/summary?id=...`. The dispatcher calls `push_observe`, `push_claim`, `push_result` and startup-only `push_recover`; these all use the single database writer. `READY_PUSH` is shared by admission and scheduling. All background failures propagate or are reported with context, and subscription capability URLs are removed from transport diagnostics.
 
 Revision note (2026-11-12): Consolidated the final design and evidence after two review rounds, replacing interim mechanisms with durable admission and independent immutable summary coverage. The follow-up commit is ready for required review.
 
@@ -110,3 +113,7 @@ Revision note (2026-11-12): Third-review fixes pass the focused Rust suite, touc
 Revision note (2026-11-12, draft preservation): Notification clicks now focus an existing viewer and message its normal hash router instead of reloading the document. The viewer validates same-origin root URLs before routing. Extended the existing Settings golden case to route an unsaved draft away and back, preserving both the edited value and a same-document marker; the service-worker case asserts postMessage/focus and has no navigate method. JavaScript-only change: rerun affected browser tests and syntax checks; prior Rust validation remains valid.
 
 Revision note (2026-11-12): Draft-preservation checks pass: 3 affected Playwright cases, 38 existing browser boundary tests, JavaScript syntax checks and diff checks. This round changed only JavaScript and the plan, so the prior Rust tests/clippy/rustfmt remain valid.
+
+Revision note (2026-11-12, browser rotation): Added the Push API pushsubscriptionchange handler. It forwards the current native subscription through existing authenticated /api/actions, atomically moving receipts and pending intents from the old endpoint with PushRenew. Repeated rotation is idempotent; old in-flight outcomes cannot affect the new endpoint. No permission is requested in the service worker and a stale event after native Disable cannot recreate a subscription. Disable follows current native subscriptions if the browser rotates during the operation. Existing viewer sign-in and network reachability still govern background mutations; failures reject the functional event with useful context rather than opening an unauthenticated mutation route. Extended the persistence and existing service-worker browser regression. Reference: https://www.w3.org/TR/push-api/#the-pushsubscriptionchange-event .
+
+Revision note (2026-11-12): Native renewal checks pass (2 focused Rust, 3 Playwright, 38 Node, clippy and rustfmt). Removed the prototype lenient signature fallback and aligned persistence fixtures with the production JSON shape; malformed signatures now report context. No new authentication boundary or dependency was added.

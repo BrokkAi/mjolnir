@@ -285,22 +285,39 @@ test('service worker push displays and clicks route an existing window to the co
     const self = {
       location: { origin: 'https://viewer.test' },
       addEventListener: (name, callback) => { listeners[name] = callback; },
-      registration: { showNotification: async (title, options) => { calls.push(['show', title, options]); } },
+      registration: {
+        showNotification: async (title, options) => { calls.push(['show', title, options]); },
+        pushManager: { getSubscription: async () => currentSubscription },
+      },
       clients: {
         matchAll: async () => [{ url: 'https://viewer.test/', postMessage: message => calls.push(['route', message]), focus: async () => calls.push(['focus']) }],
         openWindow: async url => calls.push(['open', url]),
       },
     };
-    new Function('self', source)(self);
+    let currentSubscription = { toJSON: () => ({ endpoint: 'https://push.example/new', keys: { p256dh: 'key', auth: 'auth' } }) };
+    const fetch = async (url, options) => { calls.push(['subscription', url, options.credentials, JSON.parse(options.body)]); return { ok: true }; };
+    new Function('self', 'fetch', source)(self, fetch);
     let pending;
     listeners.push({ data: { json: () => ({ title: 'Build', body: 'Which option?', tag: 'session', session_id: 'session', url: '/#conversation/session' }) }, waitUntil: promise => { pending = promise; } });
     await pending;
     listeners.notificationclick({ notification: { data: { url: '/#conversation/session' }, close: () => calls.push(['close']) }, waitUntil: promise => { pending = promise; } });
+    await pending;
+    // Hard-won: 5a12b9f64: a browser refresh with the viewer closed was never registered.
+    listeners.pushsubscriptionchange({ oldSubscription: { endpoint: 'https://push.example/old' }, newSubscription: currentSubscription, waitUntil: promise => { pending = promise; } });
+    await pending;
+    // A stale refresh after native Disable must not recreate a subscription.
+    currentSubscription = null;
+    listeners.pushsubscriptionchange({ oldSubscription: { endpoint: 'https://push.example/old' }, newSubscription: {}, waitUntil: promise => { pending = promise; } });
+    await pending;
+    // Permission loss has no replacement and removes the previous endpoint.
+    listeners.pushsubscriptionchange({ oldSubscription: { endpoint: 'https://push.example/old' }, newSubscription: null, waitUntil: promise => { pending = promise; } });
     await pending;
     return calls;
   }, source);
   expect(result).toEqual([
     ['show', 'Build', { body: 'Which option?', tag: 'session', data: { url: '/#conversation/session', session_id: 'session' } }],
     ['close'], ['route', { type: 'mj-notification-open', url: 'https://viewer.test/#conversation/session' }], ['focus'],
+    ['subscription', '/api/actions', 'include', { action: 'push-renew', old_endpoint: 'https://push.example/old', subscription: { endpoint: 'https://push.example/new', keys: { p256dh: 'key', auth: 'auth' } } }],
+    ['subscription', '/api/actions', 'include', { action: 'push-unsubscribe', endpoint: 'https://push.example/old' }],
   ]);
 });

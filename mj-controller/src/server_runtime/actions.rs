@@ -140,6 +140,17 @@ pub(super) async fn apply_phone_action(
             crate::web_push::wake();
             Ok(())
         }
+        ControllerAction::PushRenew {
+            old_endpoint,
+            subscription,
+        } => {
+            crate::web_push::blocking(move || {
+                crate::database::push_renew(old_endpoint, subscription)
+            })
+            .await?;
+            crate::web_push::wake();
+            Ok(())
+        }
         ControllerAction::PushUnsubscribe { endpoint } => {
             crate::web_push::blocking(move || crate::database::push_unsubscribe(&endpoint)).await?;
             crate::web_push::wake();
