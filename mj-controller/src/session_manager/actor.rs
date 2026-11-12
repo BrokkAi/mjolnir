@@ -195,7 +195,7 @@ pub(super) async fn run_session_actor(
                 if lifecycle.return_lease(returned.lease_id) {
                     // A dropped lease returns no connection; `submit_actor_command`
                     // reconnects on demand, so the drain needs no special case.
-                    connection = returned.connection;
+                    connection = returned.connection.map(|connection| *connection);
                     failures = 0;
                     schedule.after(SESSION_SYNC_INTERVAL);
                     // A lease syncs the connection it borrowed, so this actor's

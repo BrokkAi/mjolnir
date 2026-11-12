@@ -3250,7 +3250,7 @@ async fn released_connection_can_be_leased_again_immediately() {
             .releases
             .send(ReturnedConnection {
                 lease_id,
-                connection: Some(connection),
+                connection: Some(Box::new(connection)),
             })
             .unwrap();
         actor
@@ -3270,7 +3270,7 @@ async fn released_connection_can_be_leased_again_immediately() {
         .releases
         .send(ReturnedConnection {
             lease_id,
-            connection: Some(connection),
+            connection: Some(Box::new(connection)),
         })
         .unwrap();
 }
@@ -3315,7 +3315,7 @@ async fn full_leased_queue_refuses_excess_and_still_processes_release() {
         .releases
         .send(ReturnedConnection {
             lease_id,
-            connection: Some(connection),
+            connection: Some(Box::new(connection)),
         })
         .unwrap();
     for response in pending {
@@ -3375,7 +3375,7 @@ async fn prompt_submitted_during_lease_is_delivered_after_release() {
         .releases
         .send(ReturnedConnection {
             lease_id,
-            connection: Some(connection),
+            connection: Some(Box::new(connection)),
         })
         .unwrap();
 
@@ -3422,7 +3422,7 @@ async fn returned_lease_publishes_what_it_learned_while_it_held_the_connection()
         .releases
         .send(ReturnedConnection {
             lease_id,
-            connection: Some(connection),
+            connection: Some(Box::new(connection)),
         })
         .unwrap();
 
@@ -3570,7 +3570,7 @@ async fn retirement_rejects_prompts_deferred_during_lease() {
         .releases
         .send(ReturnedConnection {
             lease_id,
-            connection: Some(connection),
+            connection: Some(Box::new(connection)),
         })
         .unwrap();
 
