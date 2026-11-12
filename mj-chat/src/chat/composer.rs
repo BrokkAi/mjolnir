@@ -31,6 +31,10 @@ pub(super) enum ComposerIoUpdate {
         result: Result<mj_core::storage::PromptHistoryPage, String>,
     },
     AttachmentFinished(AttachmentResult),
+    ReceiptPrepared {
+        command_id: String,
+        result: Result<PromptPayload, String>,
+    },
     Remote(remote::ChatRemoteResult),
 }
 
@@ -83,6 +87,8 @@ pub(super) struct ComposerRuntime {
     pub(super) tx: UnboundedSender<ComposerIoUpdate>,
     pub(super) rx: UnboundedReceiver<ComposerIoUpdate>,
     pub(super) paste_in_flight: bool,
+    pub(super) receipt_preparations: BTreeMap<String, RemoteResultForwarder>,
+    pub(super) prepared_receipt_retries: VecDeque<String>,
     pub(super) legacy_draft_images: BTreeMap<u64, ClipboardImage>,
     pub(super) attachment_queue: VecDeque<(u64, AttachmentSource, AttachmentFallback)>,
     pub(super) attachment_tasks_in_flight: usize,
@@ -103,6 +109,8 @@ impl Default for ComposerRuntime {
             tx,
             rx,
             paste_in_flight: false,
+            receipt_preparations: BTreeMap::new(),
+            prepared_receipt_retries: VecDeque::new(),
             legacy_draft_images: BTreeMap::new(),
             attachment_queue: VecDeque::new(),
             attachment_tasks_in_flight: 0,
@@ -558,6 +566,9 @@ impl ChatState {
                 self.composer_runtime.accepting_staged = false;
                 self.composer_runtime.submit_when_ready = submit_when_ready;
             }
+            ComposerIoUpdate::ReceiptPrepared { command_id, result } => {
+                self.finish_receipt_preparation(&command_id, result);
+            }
             ComposerIoUpdate::AttachmentFinished(result) => {
                 self.apply_attachment_result(result);
                 self.pump_attachment_queue();
@@ -634,25 +645,8 @@ impl ChatState {
                 .attachment_cancellations
                 .insert(sequence, cancel);
             tokio::spawn(async move {
-                let upload_session = session_id.clone();
-                let preparation = async move {
-                    let image = match tokio::task::spawn_blocking(move || match source {
-                        AttachmentSource::Clipboard(image) => {
-                            attachments::install_clipboard_image(&session_id, image)
-                        }
-                        AttachmentSource::Path(path) => path
-                            .resolve()
-                            .and_then(|path| attachments::install_path(&session_id, &path)),
-                    })
-                    .await
-                    {
-                        Ok(result) => result.map_err(|error| format!("{error:#}")),
-                        Err(error) => Err(format!("attachment task failed: {error}")),
-                    }?;
-                    attachments::upload_prepared_image(&upload_session, image)
-                        .await
-                        .map_err(|error| format!("{error:#}"))
-                };
+                let upload_session = session_id;
+                let preparation = async move { prepare_attachment(&upload_session, source).await };
                 let result = tokio::select! {
                     result = preparation => result,
                     _ = cancelled => Err("attachment cancelled".to_owned()),
@@ -680,4 +674,28 @@ impl ChatState {
             .remove(&result.sequence);
         self.finish_attachment(result.sequence, result.result, result.fallback);
     }
+}
+
+/// Shared codec and daemon-install path for composer markers and old receipts.
+pub(super) async fn prepare_attachment(
+    session_id: &str,
+    source: AttachmentSource,
+) -> Result<ClipboardImage, String> {
+    let blocking_session = session_id.to_owned();
+    let image = match tokio::task::spawn_blocking(move || match source {
+        AttachmentSource::Clipboard(image) => {
+            attachments::install_clipboard_image(&blocking_session, image)
+        }
+        AttachmentSource::Path(path) => path
+            .resolve()
+            .and_then(|path| attachments::install_path(&blocking_session, &path)),
+    })
+    .await
+    {
+        Ok(result) => result.map_err(|error| format!("{error:#}")),
+        Err(error) => Err(format!("attachment task failed: {error}")),
+    }?;
+    attachments::upload_prepared_image(session_id, image)
+        .await
+        .map_err(|error| format!("{error:#}"))
 }

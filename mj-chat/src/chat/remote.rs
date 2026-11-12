@@ -1536,8 +1536,10 @@ mod tests {
         let mut upload_started = Some(upload_started);
         let (legacy_upload_started, legacy_started) = tokio::sync::oneshot::channel();
         let mut legacy_upload_started = Some(legacy_upload_started);
+        let (receipt_upload_started, receipt_started) = tokio::sync::oneshot::channel();
+        let mut receipt_upload_started = Some(receipt_upload_started);
         let uploads = tokio::spawn(async move {
-            for attempt in 0..4 {
+            for attempt in 0..6 {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut body = Vec::new();
                 loop {
@@ -1550,11 +1552,13 @@ mod tests {
                     if sha256.is_none() {
                         continue;
                     }
-                    if attempt < 2 {
+                    if attempt < 2 || attempt == 4 {
                         if attempt == 0 {
                             upload_started.take().unwrap().send(()).unwrap();
-                        } else {
+                        } else if attempt == 1 {
                             legacy_upload_started.take().unwrap().send(()).unwrap();
+                        } else {
+                            receipt_upload_started.take().unwrap().send(()).unwrap();
                         }
                         use tokio::io::AsyncReadExt as _;
                         assert_eq!(
@@ -1828,6 +1832,74 @@ mod tests {
             fixture.submitted.try_recv().is_err(),
             "oversized input must not reach the actor"
         );
+        // Old receipt bytes stay durable during preparation; retry identity and
+        // the different visible draft both survive closing the first composer.
+        composer.set_input("different visible draft".into());
+        composer.begin_submission(
+            "old-receipt".into(),
+            SubmissionKind::Prompt,
+            PromptPayload::with_image("old image", valid_image()),
+            "Sending…",
+        );
+        composer.unconfirm_submission("old-receipt", "lost acknowledgement");
+        let saved = composer.encoded_draft();
+        composer.restore_draft(saved);
+        assert!(composer.prepare_receipt_retry("old-receipt", "image-session"));
+        assert!(composer.prepare_receipt_retry("old-receipt", "image-session")); // one job per ID
+        receipt_started.await.unwrap();
+        let saved = composer.encoded_draft();
+        assert!(saved.contains(valid_image().data_base64.as_ref()));
+        drop(composer);
+        let mut composer = crate::chat::test_support::grok_chat();
+        composer.restore_draft(saved);
+        assert_eq!(composer.input, "different visible draft");
+        assert!(composer.prepare_receipt_retry("old-receipt", "image-session"));
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                composer.drain_composer();
+                if composer
+                    .composer_runtime
+                    .prepared_receipt_retries
+                    .pop_front()
+                    .is_some()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(composer.input, "different visible draft");
+        assert!(
+            !composer
+                .encoded_draft()
+                .contains(valid_image().data_base64.as_ref())
+        );
+        let operation = composer.resend_submission("old-receipt").unwrap();
+        assert!(
+            matches!(&operation, ChatRemoteOperation::Prompt { command_id, images, .. }
+            if command_id == "old-receipt" && images[0].image.reference.is_some())
+        );
+        fixture.replacement_view.send_modify(|view| {
+            view.snapshot
+                .as_mut()
+                .unwrap()
+                .operational
+                .agent_capabilities = Some(Box::new(
+                serde_json::from_value(serde_json::json!({"promptCapabilities": {"image": true}}))
+                    .unwrap(),
+            ));
+        });
+        remote.operations().send(operation).await.unwrap();
+        assert!(matches!(
+            fixture.submitted.recv().await.unwrap(),
+            RelayCommand::Prompt { .. }
+        ));
+        assert!(
+            matches!(remote.recv().await.unwrap(), ChatRemoteResult::Prompt { command_id, result: Ok(19), .. } if command_id == "old-receipt")
+        );
+        assert!(fixture.submitted.try_recv().is_err());
         uploads.await.unwrap();
     }
 

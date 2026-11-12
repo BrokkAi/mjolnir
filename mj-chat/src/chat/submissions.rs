@@ -212,8 +212,86 @@ impl ChatState {
     }
 
     pub(super) fn dismiss_submission(&mut self, id: &str) {
+        self.composer_runtime.receipt_preparations.remove(id);
         self.pending_submissions
             .retain(|pending| pending.id != id || !pending.can_resend());
+        self.sync_inline_submissions();
+    }
+
+    pub(super) fn prepare_receipt_retry(&mut self, id: &str, session_id: &str) -> bool {
+        if self.composer_runtime.receipt_preparations.contains_key(id) {
+            return true;
+        }
+        let Some(receipt) = self
+            .pending_submissions
+            .iter_mut()
+            .find(|pending| pending.id == id && pending.can_resend())
+        else {
+            return false;
+        };
+        if !receipt
+            .payload
+            .images
+            .iter()
+            .any(|image| image.image.reference.is_none())
+        {
+            return false;
+        }
+        let mut payload = receipt.payload.clone();
+        let command_id = id.to_owned();
+        let session_id = session_id.to_owned();
+        let updates = self.composer_runtime.tx.clone();
+        let task = tokio::spawn(async move {
+            let result = async {
+                for image in &mut payload.images {
+                    if image.image.reference.is_none() {
+                        image.image = composer::prepare_attachment(
+                            &session_id,
+                            composer::AttachmentSource::Clipboard(image.image.clone()),
+                        )
+                        .await?;
+                    }
+                }
+                Ok(payload)
+            }
+            .await;
+            if let Err(error) =
+                updates.send(composer::ComposerIoUpdate::ReceiptPrepared { command_id, result })
+            {
+                tracing::debug!(%error, "receipt preparation result dropped because composer closed");
+            }
+        });
+        self.composer_runtime
+            .receipt_preparations
+            .insert(id.to_owned(), composer::RemoteResultForwarder(Some(task)));
+        self.sync_inline_submissions();
+        true
+    }
+
+    pub(super) fn finish_receipt_preparation(
+        &mut self,
+        id: &str,
+        result: Result<PromptPayload, String>,
+    ) {
+        self.composer_runtime.receipt_preparations.remove(id);
+        let Some(receipt) = self
+            .pending_submissions
+            .iter_mut()
+            .find(|pending| pending.id == id && pending.can_resend())
+        else {
+            return;
+        };
+        match result {
+            Ok(payload) => {
+                receipt.payload = payload;
+                self.composer_runtime
+                    .prepared_receipt_retries
+                    .push_back(id.to_owned());
+            }
+            Err(error) => {
+                receipt.status = format!("Delivery unconfirmed: image preparation failed: {error}")
+            }
+        }
         self.sync_inline_submissions();
     }
 
@@ -331,7 +409,16 @@ impl ChatState {
                 } else {
                     pending.payload.text.clone()
                 };
-                let mut text = format!("{text}\n\n{}", pending.status);
+                let status = if self
+                    .composer_runtime
+                    .receipt_preparations
+                    .contains_key(&pending.id)
+                {
+                    "Delivery unconfirmed: preparing images…"
+                } else {
+                    &pending.status
+                };
+                let mut text = format!("{text}\n\n{status}");
                 if !self.standby && recoverable == Some(pending.id.as_str()) {
                     text.push_str("\nCtrl-Alt-R resend · Ctrl-Alt-D dismiss");
                 }
@@ -456,6 +543,46 @@ mod tests {
         assert_eq!(chat.recoverable_submission_id(), Some("original"));
         assert_eq!(chat.pending_submissions.len(), 1);
         assert_eq!(chat.input, "next draft");
+    }
+
+    // Hard-won: #1514: failed legacy receipt installation must remain retryable.
+    #[tokio::test]
+    async fn failed_receipt_preparation_preserves_bytes_identity_and_visible_draft() {
+        let mut chat = ChatState::new(&snapshot(), &[]);
+        let payload = PromptPayload::with_image("old receipt", crate::chat::tests::test_image());
+        chat.begin_submission(
+            "original".into(),
+            SubmissionKind::Prompt,
+            payload.clone(),
+            "Sending…",
+        );
+        chat.unconfirm_submission("original", "connection reset");
+        chat.set_input("new draft".into());
+        assert!(chat.prepare_receipt_retry("original", "receipt-failure"));
+        assert!(
+            transcript_text(&mut chat, 100)
+                .join("\n")
+                .contains("preparing images")
+        );
+        assert!(!chat.encoded_draft().contains("preparing images"));
+        chat.apply_composer_update(composer::ComposerIoUpdate::ReceiptPrepared {
+            command_id: "original".into(),
+            result: Err("install refused".into()),
+        });
+        assert_eq!(chat.input, "new draft");
+        assert_eq!(chat.pending_submissions[0].payload, payload);
+        assert!(
+            chat.pending_submissions[0]
+                .status
+                .contains("install refused")
+        );
+        assert!(chat.composer_runtime.prepared_receipt_retries.is_empty());
+        let saved = chat.encoded_draft();
+        let mut reopened = ChatState::new(&snapshot(), &[]);
+        reopened.restore_draft(saved);
+        assert_eq!(reopened.recoverable_submission_id(), Some("original"));
+        assert_eq!(reopened.pending_submissions[0].payload, payload);
+        assert!(reopened.prepare_receipt_retry("original", "receipt-failure"));
     }
 
     #[test]

@@ -121,6 +121,12 @@ impl ActiveChat {
                 self.state.dismiss_submission(&command_id);
             }
             ChatAction::ResendSubmission { command_id } => {
+                if self
+                    .state
+                    .prepare_receipt_retry(&command_id, self.session.session_id())
+                {
+                    return ChatEventOutcome::Handled;
+                }
                 if let Some(operation) = self.state.resend_submission(&command_id) {
                     queue_chat_remote_operation(
                         self.remote.operations(),

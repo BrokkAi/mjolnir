@@ -48,6 +48,14 @@ impl ActiveChat {
                 .prepared_startup
                 .push_back(prompt);
         }
+        while let Some(command_id) = self
+            .state
+            .composer_runtime
+            .prepared_receipt_retries
+            .pop_front()
+        {
+            self.dispatch(ChatAction::ResendSubmission { command_id });
+        }
         self.refresh_voice_availability();
         while let Ok(result) = self.remote.try_recv() {
             self.apply_remote_result(result);
