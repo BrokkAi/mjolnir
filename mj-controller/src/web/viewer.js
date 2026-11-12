@@ -8321,7 +8321,10 @@ function scheduleConversationRead() {
 
 async function persistVisibleConversationRead() {
   const sessionId = currentSession;
-  if (document.visibilityState !== 'visible' || route.name !== 'conversation'
+  // A window on another monitor or behind the active one still reports
+  // `visible`; only a focused window means the person is looking at it.
+  if (document.visibilityState !== 'visible' || !document.hasFocus()
+    || route.name !== 'conversation'
     || route.sessionId !== sessionId || !sessionId) return;
   const session = sessionById(sessionId);
   if (!session?.capabilities?.open || isTransitioningSession(session)) return;
@@ -9816,6 +9819,7 @@ window.addEventListener('offline', () => setConnection('offline'));
 
 // A backgrounded progressive web app gets no `online` event, so the first
 // signal that it is back is somebody unlocking the screen.
+window.addEventListener('focus', scheduleConversationRead);
 document.addEventListener('visibilitychange', () => {
   scheduleConversationRead();
   if (document.visibilityState === 'visible' && navigator.onLine) reconnect();

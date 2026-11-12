@@ -1475,14 +1475,15 @@ test('review settings action renders a button that sends its action id', () => {
 });
 
 
-test('conversation receipts require a visible caught-up conversation and coalesce monotonic cursors', async () => {
+test('conversation receipts require a visible focused caught-up conversation and coalesce monotonic cursors', async () => {
   const frames = [];
   const sent = [];
   let finish;
+  let focused = true;
   const context = vm.createContext({
     currentSession: 's', route: { name: 'conversation', sessionId: 's' },
     cursor: 42, acknowledged: 0,
-    document: { visibilityState: 'hidden', querySelector: () => ({ textContent: '' }) },
+    document: { visibilityState: 'hidden', hasFocus: () => focused, querySelector: () => ({ textContent: '' }) },
     window: { innerHeight: 800 },
     feedScroll: { getBoundingClientRect: () => ({ top: 100, bottom: 700 }) },
     feed: { lastElementChild: { getBoundingClientRect: () => ({ top: 500, bottom: 650 }) } },
@@ -1496,6 +1497,11 @@ test('conversation receipts require a visible caught-up conversation and coalesc
   await vm.runInContext('persistVisibleConversationRead()', context);
   assert.equal(sent.length, 0, 'hidden pages do not read');
   context.document.visibilityState = 'visible';
+  focused = false;
+  await vm.runInContext('persistVisibleConversationRead()', context);
+  // Hard-won: 8edb31e9f: a visible but unfocused window cleared Important alerts.
+  assert.equal(sent.length, 0, 'a visible window without focus does not read');
+  focused = true;
   context.feed.lastElementChild.getBoundingClientRect = () => ({ top: 900, bottom: 1000 });
   await vm.runInContext('persistVisibleConversationRead()', context);
   assert.equal(sent.length, 0, 'scrolling away from latest does not read');
