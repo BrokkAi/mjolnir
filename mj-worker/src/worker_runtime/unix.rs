@@ -788,8 +788,39 @@ pub(super) struct SocketGuard(pub(super) PathBuf);
 
 impl Drop for SocketGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        remove_control_socket(&self.0, "shutdown").unwrap_or_else(|error| {
+            tracing::warn!(%error, socket = %self.0.display(), "control socket shutdown cleanup failed");
+        });
     }
+}
+
+// Capture both sides: overlay filesystems can report a successful operation
+// while subsequent path lookup still exposes an old inode.
+fn log_control_socket(path: &std::path::Path, operation: &str, error: Option<&anyhow::Error>) {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::symlink_metadata(path);
+    let errno = error
+        .and_then(|error| error.downcast_ref::<std::io::Error>())
+        .and_then(std::io::Error::raw_os_error);
+    let inode = metadata.as_ref().ok().map(MetadataExt::ino);
+    let links = metadata.as_ref().ok().map(MetadataExt::nlink);
+    let mode = metadata.as_ref().ok().map(MetadataExt::mode);
+    let device = metadata.as_ref().ok().map(MetadataExt::dev);
+    let file_type = metadata.as_ref().ok().map(|m| m.file_type());
+    let lookup_errno = metadata
+        .as_ref()
+        .err()
+        .and_then(std::io::Error::raw_os_error);
+    tracing::info!(socket = %path.display(), operation, success = error.is_none(),
+        ?errno, ?error, ?inode, ?links, ?mode, ?device, ?file_type, ?lookup_errno,
+        pid = std::process::id(), "control socket operation");
+}
+
+fn remove_control_socket(path: &std::path::Path, phase: &str) -> Result<()> {
+    log_control_socket(path, &format!("{phase}: before unlink"), None);
+    let result = std::fs::remove_file(path).map_err(anyhow::Error::from);
+    log_control_socket(path, &format!("{phase}: unlink"), result.as_ref().err());
+    result
 }
 
 /// Bind `control.sock`, restrict it to the owner, and record the `bind-socket`
@@ -800,8 +831,10 @@ fn publish_control_socket(
     socket: &std::path::Path,
 ) -> Result<(UnixListener, SocketGuard)> {
     super::record_startup_step(root, "bind-socket");
-    let listener = bind_unix_listener(socket)
-        .with_context(|| format!("bind worker socket {}", socket.display()))?;
+    log_control_socket(socket, "before bind", None);
+    let bound = bind_unix_listener(socket);
+    log_control_socket(socket, "bind", bound.as_ref().err());
+    let listener = bound.with_context(|| format!("bind worker socket {}", socket.display()))?;
     listener
         .set_nonblocking(true)
         .with_context(|| format!("set worker socket {} nonblocking", socket.display()))?;
@@ -876,14 +909,28 @@ pub async fn run_daemon_owned(
     // Refuse a second daemon before touching durable state: opening the
     // relay recovers the journal in place, so getting that far would
     // corrupt the files a live worker is still writing.
-    if socket.exists() && connect_unix_stream(&socket).is_ok() {
-        bail!("a worker is already running at {}", socket.display());
+    let exists = socket.exists();
+    log_control_socket(
+        &socket,
+        if exists {
+            "startup: exists"
+        } else {
+            "startup: absent"
+        },
+        None,
+    );
+    if exists {
+        let connected = connect_unix_stream(&socket);
+        log_control_socket(&socket, "startup: connect", connected.as_ref().err());
+        if connected.is_ok() {
+            bail!("a worker is already running at {}", socket.display());
+        }
     }
     // A dead daemon can leave its socket inode behind. Remove it before
     // journal recovery so controller liveness can distinguish a worker
     // that is still starting from one that has published its endpoint.
     if socket.exists() {
-        std::fs::remove_file(&socket)
+        remove_control_socket(&socket, "startup")
             .with_context(|| format!("remove stale socket {}", socket.display()))?;
     }
     let relay_state_exists = root.join(RELAY_STATE_FILE).exists();
