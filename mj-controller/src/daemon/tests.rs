@@ -12214,6 +12214,7 @@ async fn suspend_acceptance_survives_client_disconnect_during_checkpoint() {
 
 /// Exercise the real authenticated control boundary: these directories exist
 /// only in the server fixture, never in client-side interpretation.
+// Hard-won: #1514: one archive metadata error discarded readable sizes in the batch.
 #[tokio::test]
 async fn daemon_api_exchange() {
     const CHILD: &str = "MJ_TEST_DAEMON_API_EXCHANGE";
@@ -12311,7 +12312,8 @@ async fn daemon_api_exchange() {
         },
         DaemonAction::CheckpointArchiveSizes {
             paths: [
-                ("archived".into(), archive),
+                ("archived".into(), archive.clone()),
+                ("unreadable".into(), archive.join("child.tar")),
                 ("missing".into(), server_root.join("missing.tar")),
             ]
             .into(),

@@ -17,13 +17,15 @@ This is private-network operation with working SSH authentication and host trust
 - [ ] Implement and validate milestone 1: endpoint, connector, supervised tunnel and command forwarding.
 - [ ] Implement and validate milestone 2: direct HTTP credentials and browser opening.
 - [x] (2026-11-12) Implement milestone 3: daemon path/discovery actions, shared HTTP/control launch preflight, dedicated-connection cancellation and dashboard rewiring. Focused 52 tests and full touched-crate suites pass; control exchange and phone preflight goldens reviewed. The separated-machine SSH driver remains integration acceptance with milestones 1–2.
-- [ ] Milestone 4 in progress (2026-11-12): saved-profile login status, checkpoint archive sizes, spinner persistence and target testing now use daemon requests. Archive sizes and target tests use dedicated cancellable read connections; spinner persistence uses the daemon settings lock and labeled admission. API golden, touched-crate suites (one fixture failure corrected and rerun), workspace Clippy and formatting pass. Discovery/availability are assigned separately; mbx preview/install/re-preview now use daemon actions (API golden, full touched-crate suites, workspace Clippy and formatting pass); the separate-client-process archive proof remains.
+- [ ] Milestone 4 integrated (2026-11-12): discovery/readiness, availability, profile login probes, archive sizes, spinner persistence, target testing and mbx operations use daemon actions. Both lanes merged; per-archive errors preserve readable results and profile probes have independent concurrent 10-second deadlines. Integrated control golden, full core/client/controller/CLI/TUI suites and doctests, formatting and workspace Clippy pass; separate-machine acceptance remains with milestones 1–2.
 - [ ] Implement and validate milestone 5: explicit remote paths, attachment uploads, client-side import upload and daemon-side voice transcription.
 - [ ] Remove the native desktop shell (`mj-desktop`, `mj app`, `mj-cli/src/desktop.rs`, release packaging); independent of the other milestones.
 - [ ] Implement and validate milestone 6: matching-build PowerShell go script.
 - [ ] Implement milestone 7: user documentation, final validation, platform dispatch and real Windows acceptance.
 
 ## Surprises & Discoveries
+
+- (2026-11-12) Archive metadata failures must be per-path replies, not batch errors; an archive-as-parent fixture deterministically exercises a read error alongside a readable archive. Profile probe deadlines use real Instant and external harness probes; no deterministic per-profile timeout test was added because that would require injecting a clock/probe factory solely for the test. Existing executor deadline regressions cover expiration itself.
 
 - (2026-11-12) mbx install uses a blocking HTTP download outside the executor and publishes its binary before setup/profile updates; safe whole-install cancellation is unavailable. Install therefore holds labeled admission through response delivery and disables UI cancellation, while preview and re-preview use disposable dedicated connections with the existing 60-second deadline. Existing core preview types now derive wire serialization; no persisted format changes.
 

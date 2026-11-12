@@ -1485,6 +1485,15 @@ impl DashboardContext {
                 targets,
                 sizes,
             } => {
+                for (id, path) in &targets {
+                    if self.checkpoint_archive_pending.get(id) == Some(&generation)
+                        && self.checkpoint_archive_records.get(id) == Some(path)
+                        && sizes.contains_key(id)
+                    {
+                        self.checkpoint_archive_targets_seen
+                            .insert(id.clone(), path.clone());
+                    }
+                }
                 self.dashboard.patch_checkpoint_archive_sizes(
                     sizes
                         .into_iter()

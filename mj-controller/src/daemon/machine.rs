@@ -18,7 +18,6 @@ pub(super) async fn execute(
             DaemonAction::TestTarget { .. } => executor.with_deadline(Duration::from_secs(15)),
             DaemonAction::DiscoverSetup { .. } => executor.with_deadline(Duration::from_secs(30)),
             DaemonAction::CheckAvailability => executor.with_deadline(Duration::from_secs(60)),
-            DaemonAction::ProfileLoginStatuses => executor.with_deadline(Duration::from_secs(10)),
             DaemonAction::CompletePath { .. } => executor.with_deadline(Duration::from_secs(5)),
             DaemonAction::DiscoverProjects { .. } => {
                 executor.with_deadline(Duration::from_secs(15))
@@ -80,16 +79,13 @@ pub(super) async fn execute(
                     .into_iter()
                     .map(|(id, path)| {
                         let size = match fs::metadata(&path) {
-                            Ok(metadata) => Some(metadata.len()),
-                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                            Err(error) => {
-                                return Err(anyhow::Error::new(error)
-                                    .context(format!("read {}", path.display())));
-                            }
+                            Ok(metadata) => Ok(Some(metadata.len())),
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                            Err(error) => Err(format!("read {}: {error}", path.display())),
                         };
-                        Ok((id, size))
+                        (id, size)
                     })
-                    .collect::<Result<_>>()?;
+                    .collect();
                 Ok(DaemonReply::CheckpointArchiveSizes(sizes))
             }
             DaemonAction::DiscoverSetup { scope, machines } => {
@@ -203,7 +199,7 @@ pub(super) async fn execute(
                 ))
             }
             DaemonAction::ProfileLoginStatuses => Ok(DaemonReply::ProfileLoginStatuses(
-                crate::profile_login::statuses(&controller.config, &executor),
+                crate::profile_login::statuses(&controller.config, quit.clone()),
             )),
             DaemonAction::PreflightNewSession { request } => {
                 crate::server_runtime::preflight::preflight_new_request(

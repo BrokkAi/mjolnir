@@ -1221,7 +1221,9 @@ pub struct ResponseEnvelope {
 pub enum DaemonReply {
     BuildCachePreview(Option<mj_core::state::BuildCachePreview>, bool),
     MbxInstalled(String),
-    CheckpointArchiveSizes(std::collections::BTreeMap<String, Option<u64>>),
+    CheckpointArchiveSizes(
+        std::collections::BTreeMap<String, std::result::Result<Option<u64>, String>>,
+    ),
     SetupDiscovery(Box<crate::discovery::SetupDetection>),
     Availability(
         #[serde(deserialize_with = "deserialize_availability")]

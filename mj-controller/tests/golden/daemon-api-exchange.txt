@@ -45,7 +45,8 @@
       "arguments": {
         "paths": {
           "archived": "<server>/daemon-only.tar",
-          "missing": "<server>/missing.tar"
+          "missing": "<server>/missing.tar",
+          "unreadable": "<server>/daemon-only.tar/child.tar"
         }
       }
     },
@@ -53,8 +54,15 @@
       "Ok": {
         "reply": "checkpoint_archive_sizes",
         "value": {
-          "archived": 20,
-          "missing": null
+          "archived": {
+            "Ok": 20
+          },
+          "missing": {
+            "Ok": null
+          },
+          "unreadable": {
+            "Err": "read <server>/daemon-only.tar/child.tar: Not a directory (os error 20)"
+          }
         }
       }
     }
