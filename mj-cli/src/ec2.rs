@@ -1674,6 +1674,26 @@ else:
     }
 
     #[test]
+    fn zfs_setup_gives_ubuntu_its_config_directory_before_subdirectories() {
+        // `install -d -o ubuntu .../.config/x` makes a missing ~/.config root-owned; the
+        // user-owned ~/.config must be created first or mbx setup cannot write beside it.
+        let lines: Vec<&str> = include_str!("ec2_zfs.sh").lines().map(str::trim).collect();
+        let first_child = lines
+            .iter()
+            .position(|line| line.contains("/home/ubuntu/.config/"))
+            .expect("the setup writes under /home/ubuntu/.config");
+        let parent = lines
+            .iter()
+            .position(|line| *line == "install -d -o ubuntu -g ubuntu /home/ubuntu/.config")
+            .expect("the setup creates /home/ubuntu/.config owned by ubuntu");
+        assert!(
+            parent < first_child,
+            "~/.config must be created before {:?}",
+            lines[first_child]
+        );
+    }
+
+    #[test]
     fn image_download_failure_warns_and_registers_the_usable_host() {
         if fixture_child(
             "ec2::tests::image_download_failure_warns_and_registers_the_usable_host",

@@ -52,6 +52,9 @@ After=mj-ec2-cache.service
 UNIT
 systemctl daemon-reload
 systemctl enable --now mj-ec2-cache.service
+# `install -d` creates missing parents as root, so make ~/.config the user's own first; otherwise the user
+# cannot add directories beside these (mbx setup creates ~/.config/rust-analyzer).
+install -d -o ubuntu -g ubuntu /home/ubuntu/.config
 install -d -o ubuntu -g ubuntu /home/ubuntu/.config/mbx
 printf 'cache_dir = "/mnt/nvme/mbx"\n\n[linker]\ndefault = "path:/usr/bin/mold"\n' > /home/ubuntu/.config/mbx/config.toml
 chown ubuntu:ubuntu /home/ubuntu/.config/mbx/config.toml
