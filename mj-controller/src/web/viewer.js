@@ -1459,19 +1459,30 @@ async function loadInlineHistory() {
       const rows = [];
       const oldest = liveHistoryRows.size ? Math.min(...[...liveHistoryRows.values()].map(entry => entry.id)) : Infinity;
       for (const item of page.items) {
-        if (state.entries.has(item.stable_id)) continue;
         const live = [...liveHistoryRows.values()].find(row => historyMatches(row, item));
         const entry = { ...item, id: item.position, lines: item.text.split('\n'), label: item.label || item.role, tone: item.role };
+        // A later page carries the stored content as it is now, so it always
+        // replaces a copy retained while the item was still changing.
+        const known = state.entries.has(item.stable_id);
         state.entries.set(item.stable_id, entry);
         if (item.position >= oldest) {
           // All members of a collapsed live group belong to that live row.
           if (!live || !clippedHistoryRow(live)) continue;
+          // The full stored text stands in for a clipped live row only while
+          // that row keeps this update; renderEntries checks it.
+          entry.restoredFor = live.updated_seq;
           const node = entryNodes.get(live.stable_id || live.id);
           if (node) paintEntry(node, { ...live, lines: entry.lines }, null);
           continue;
         }
+        if (known) {
+          const shown = entryNodes.get(item.stable_id);
+          if (shown?.dataset.history) paintEntry(shown, entry, null);
+          continue;
+        }
         const node = el('article');
         node.dataset.entryId = item.stable_id;
+        node.dataset.history = '1';
         paintEntry(node, entry, null);
         entryNodes.set(item.stable_id, node);
         rows.push(node);
@@ -8190,6 +8201,7 @@ function renderEntries(entries, replace) {
       if (entry.position >= oldest) continue;
       const node = el('article');
       node.dataset.entryId = entry.stable_id;
+      node.dataset.history = '1';
       paintEntry(node, entry, null);
       entryNodes.set(entry.stable_id, node);
       feed.append(node);
@@ -8199,7 +8211,17 @@ function renderEntries(entries, replace) {
   let lastUserText = null;
   for (let entry of entries) {
     const stored = inlineHistory && [...inlineHistory.entries.values()].find(row => historyMatches(entry, row));
-    if (stored && historyMatches(entry, stored) && clippedHistoryRow(entry)) entry = { ...entry, lines: stored.lines };
+    if (stored && clippedHistoryRow(entry)) {
+      if (stored.restoredFor === entry.updated_seq) {
+        entry = { ...entry, lines: stored.lines };
+      } else if (!inlineHistory.gap) {
+        // The live row changed after its full text was fetched (it is still
+        // growing): show the live lines and fetch the row again through the
+        // one serialized loader.
+        inlineHistory.gap = { before: { position: entry.id + 1, stable_id: '' }, boundary: entry.id };
+        void loadInlineHistory();
+      }
+    }
     lastUserText = turnPromptText(entry, lastUserText);
     const unansweredPrompt = unansweredPromptFor(entry, lastUserText);
     const identity = entry.stable_id || entry.id;
