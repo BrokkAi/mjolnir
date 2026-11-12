@@ -1486,6 +1486,35 @@ test('reviewers open their own workspace and stay out of Subagents', async ({ pa
 });
 
 
+// Hard-won: 6e217adde: rewriting the open workspace select on every snapshot stacked native pickers in Firefox for Android.
+test('snapshots leave the workspace select untouched while it is focused or unchanged', async ({ page }) => {
+  const a = session('notice-a', 'a', 'A', { attention: 'needs_input', activity: SERVER_TIME_MS - 2000 });
+  const b = session('quiet-b', 'b', 'B', { activity: SERVER_TIME_MS - 1000 });
+  const state = await mount(page, [a, b]);
+  const select = page.locator('#workspace-select');
+  await expect(select.locator('option').first()).toHaveText('Notifications (1)');
+  await page.evaluate(() => {
+    window.selectMutations = 0;
+    new MutationObserver(records => { window.selectMutations += records.length; })
+      .observe(document.querySelector('#workspace-select'), { childList: true, subtree: true, characterData: true, attributes: true });
+  });
+
+  // Activity that changes neither the list nor the count writes nothing.
+  b.last_activity_at_ms = SERVER_TIME_MS + 5000;
+  await refresh(page, state);
+  await expect(page.locator('#sessions .session[data-session-id="quiet-b"] .session-activity')).toBeVisible();
+  expect(await page.evaluate(() => window.selectMutations)).toBe(0);
+
+  // A focused select, which is what an open picker has, waits for blur.
+  await select.focus();
+  b.attention = 'important';
+  await refresh(page, state);
+  await expect(page.locator('#sessions .session[data-session-id="quiet-b"] .session-attention-item')).toHaveCount(1);
+  expect(await page.evaluate(() => window.selectMutations)).toBe(0);
+  await select.blur();
+  await expect(select.locator('option').first()).toHaveText('Notifications (2)');
+});
+
 test('notifications retain handled entries below the band until leaving or reloading', async ({ page }) => {
   const a = session('notice-a', 'a', 'A', { attention: 'needs_input', activity: SERVER_TIME_MS - 2000 });
   const b = session('notice-b', 'b', 'B', { attention: 'important', workspaceId: OTHER_WORKSPACE_ID, activity: SERVER_TIME_MS - 1000 });

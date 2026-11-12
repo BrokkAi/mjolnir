@@ -1008,8 +1008,12 @@ function renderWorkspaces() {
     subagentWorkspace.replaceChildren(el('span', '', reviewers ? `Reviewers · ${title}` : title), close);
     return;
   }
-  // Every snapshot re-renders the route. Rebuilding the options only when the
-  // list itself changes keeps a refresh from closing the picker mid-choice.
+  // Every snapshot re-renders the route, and Firefox for Android stacks a
+  // new native picker on each change to an open select until the page stops
+  // responding. So the select is left alone while it has focus, which covers
+  // an open picker, and blur brings it up to date; otherwise it is written
+  // only where its content differs.
+  if (document.activeElement === workspaceSelect) return;
   const options = JSON.stringify(workspaces.map(workspace => [workspace.id, workspace.name]));
   if (workspaceSelect.dataset.options !== options) {
     workspaceSelect.dataset.options = options;
@@ -1021,9 +1025,12 @@ function renderWorkspaces() {
       }),
     );
   }
-  // Attention changes update the existing option rather than rebuilding an open picker.
-  workspaceSelect.options[0].textContent = `Notifications (${notificationRows().length})`;
-  workspaceSelect.value = selectedWorkspaceId() || '';
+  const notifications = `Notifications (${notificationRows().length})`;
+  if (workspaceSelect.options[0].textContent !== notifications) {
+    workspaceSelect.options[0].textContent = notifications;
+  }
+  const selected = selectedWorkspaceId() || '';
+  if (workspaceSelect.value !== selected) workspaceSelect.value = selected;
 }
 
 // ---------------------------------------------------------------------------
@@ -9227,6 +9234,7 @@ resumeSearch.oninput = () => {
   renderResumable();
 };
 
+workspaceSelect.addEventListener('blur', renderWorkspaces);
 workspaceSelect.onchange = () => {
   navigate({ name: 'dashboard', workspaceId: workspaceSelect.value });
 };
