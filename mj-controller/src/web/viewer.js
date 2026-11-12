@@ -1175,7 +1175,6 @@ class NotificationSnapshot {
           ...entry.row, capabilities: {}, operation: null, transitioning: false,
           lifecycle: 'destroyed', attention: 'inactive', configuration_issue: null, move_recovery: null,
         },
-        excerpt: entry.excerpt,
       })),
     ];
     const entriesById = new Map(this.entries.map(entry => [entry.row.id, entry]));
@@ -1184,7 +1183,6 @@ class NotificationSnapshot {
   }
 }
 const notificationSnapshot = new NotificationSnapshot();
-const notificationItems = new Map();
 
 function notificationRows() {
   return [...viewerState.rows.values()].filter(row => !isSubagentSession(row)
@@ -1193,29 +1191,11 @@ function notificationRows() {
 
 function renderNotifications() {
   const header = el('h2', '', 'Notifications');
-  const items = notificationSnapshot.update(notificationRows(), [...viewerState.rows.values()]).map(entry => {
-    const { row } = entry;
-    let item = notificationItems.get(row.id);
-    if (!item) {
-      item = el('div', 'notification-entry');
-      item.dataset.notificationId = row.id;
-      item._excerpt = el('p', 'notification-excerpt');
-      item._meta = el('p', 'dim');
-      notificationItems.set(row.id, item);
-    }
+  const items = notificationSnapshot.update(notificationRows(), [...viewerState.rows.values()]).map(({ row }) => {
     let card = sessionCards.get(row.id);
     if (!card) { card = sessionCard(row); sessionCards.set(row.id, card); }
     else updateSessionCard(card, row);
-    reconcileChildren(item, [card, item._excerpt, item._meta]);
-    const excerpt = row.pending_elicitations?.find(request => request.message)?.message || row.preview?.join('\n') || entry.excerpt;
-    entry.excerpt = excerpt;
-    item._excerpt.textContent = excerpt || '';
-    item._excerpt.hidden = !excerpt;
-    const workspace = snapshot.workspaces?.find(workspace => workspace.id === row.workspace_id);
-    const timestamp = sessionMessageMs(row);
-    const age = timestamp ? `${Math.max(0, Math.floor((serverClockMs() - timestamp) / 60000))}m ago` : 'Age unknown';
-    item._meta.textContent = `${workspace?.name || row.workspace_id} · ${age}`;
-    return item;
+    return card;
   });
   reconcileChildren(sessions, [header, ...items, ...(!items.length ? [el('p', 'dim', 'No notifications.')] : [])]);
 }
@@ -1706,6 +1686,7 @@ function sessionMenuActions(session) {
   const actions = [];
   if (session.configuration_issue) actions.push(['Repair configuration…', 'secondary', 'repair-config']);
   if (session.lifecycle === 'live' && !isTransitioningSession(session)) actions.push(['Changed files…', 'secondary', 'changed-files']);
+  if (can.dismiss_notification) actions.push(['Dismiss notification', 'secondary', 'dismiss-notification']);
   if (can.rename) actions.push(['Rename', 'secondary', 'rename']);
   if (can.change_workspace) actions.push(['Change workspace…', 'secondary', 'change-workspace']);
   if (can.container_settings) actions.push(['Container settings…', 'secondary', 'container-settings']);
@@ -1767,7 +1748,6 @@ function updateSessionCard(card, session) {
   card._metaSeparators[0].hidden = !(shown[0] && shown[1]);
   card._metaSeparators[1].hidden = !((shown[0] || shown[1]) && shown[2]);
   updateSessionActivity(card, session);
-  renderNotificationDismissal(card, session, actionError);
   updateSessionMenu(card, session);
 }
 
@@ -1783,12 +1763,20 @@ function renderNotificationDismissal(container, session, errorNode) {
     container.append(control);
   }
   control.disabled = pendingActions.has(`dismiss-notification:${session.id}`);
-  const target = session.notification_dismissal;
+  control.dataset.action = 'dismiss-notification';
+  control.dataset.id = session.id;
+  markNotificationDismissal(control, session);
   control.onclick = event => {
     event.stopPropagation();
-    return runSessionAction({ action: 'dismiss-notification', id: session.id }, errorNode,
-      { target });
+    return runSessionAction(control.dataset, errorNode);
   };
+}
+
+/// A dismissal names the notification its control showed, so a tap clears
+/// what the person saw and not one that arrived after the last render.
+function markNotificationDismissal(control, session) {
+  if (control.dataset.action !== 'dismiss-notification') return;
+  control.dataset.notificationDismissal = JSON.stringify(session.notification_dismissal ?? null);
 }
 
 function updateSessionMenu(card, session) {
@@ -1806,6 +1794,7 @@ function updateSessionMenu(card, session) {
           target: session.target_id,
         });
         control.setAttribute('role', 'menuitem');
+        markNotificationDismissal(control, session);
         return control;
       }),
     );
@@ -1819,6 +1808,7 @@ function updateSessionMenu(card, session) {
     for (const control of card._menu.querySelectorAll?.('button[data-action]') || []) {
       control.dataset.profile = session.profile_id || '';
       control.dataset.target = session.target_id || '';
+      markNotificationDismissal(control, session);
       control.disabled = pendingActions.has(`${control.dataset.action}:${session.id}`);
     }
   }
@@ -9402,6 +9392,9 @@ async function runSessionAction(dataset, errorNode, extra) {
     const choice = await confirmSessionDestruction(session);
     if (choice === null) return false;
     extra = { ...extra, delete_branch: choice };
+  }
+  if (dataset.action === 'dismiss-notification') {
+    extra = { ...extra, target: JSON.parse(dataset.notificationDismissal) };
   }
   const body = { action: dataset.action, session_id: dataset.id, ...extra };
   if (dataset.action === 'rename') {
