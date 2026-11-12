@@ -520,17 +520,17 @@ pub(crate) fn spawn_availability_check(
 /// Read saved-profile sign-in status off the dashboard's loop.
 pub(crate) fn spawn_profile_login_statuses(
     generation: u64,
-    config: Config,
     updates: UnboundedSender<DashboardIoUpdate>,
 ) -> JoinHandle<()> {
     spawn_io(
         "reading profile sign-in status",
         updates,
-        move || {
-            let executor = mj_controller::targets::BoundedProcessExecutor::new(
-                std::time::Duration::from_secs(10),
-            );
-            Ok(mj_controller::profile_login::statuses(&config, &executor))
+        move || match machine_request(
+            mj_client::daemon::DaemonAction::ProfileLoginStatuses,
+            Arc::new(AtomicBool::new(false)),
+        )? {
+            mj_client::daemon::DaemonReply::ProfileLoginStatuses(statuses) => Ok(statuses),
+            _ => anyhow::bail!("daemon returned an unexpected profile login status reply"),
         },
         move |result| DashboardIoUpdate::ProfileLoginStatuses { generation, result },
     )

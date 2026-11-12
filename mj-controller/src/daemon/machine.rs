@@ -12,6 +12,7 @@ pub(super) async fn execute(
         // Preserve the dashboard's existing command deadlines, including the
         // bound on preflight when it applies confirmed Git repairs.
         let executor = match &action {
+            DaemonAction::ProfileLoginStatuses => executor.with_deadline(Duration::from_secs(10)),
             DaemonAction::CompletePath { .. } => executor.with_deadline(Duration::from_secs(5)),
             DaemonAction::DiscoverProjects { .. } => {
                 executor.with_deadline(Duration::from_secs(15))
@@ -27,6 +28,9 @@ pub(super) async fn execute(
         };
         let controller = crate::controller::config_only_controller(config);
         match action {
+            DaemonAction::ProfileLoginStatuses => Ok(DaemonReply::ProfileLoginStatuses(
+                crate::profile_login::statuses(&controller.config, &executor),
+            )),
             DaemonAction::PreflightNewSession { request } => {
                 crate::server_runtime::preflight::preflight_new_request(
                     controller.config,

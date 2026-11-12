@@ -12238,6 +12238,7 @@ async fn daemon_api_exchange() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let metadata = test_metadata(listener.local_addr().unwrap());
     let actions = vec![
+        DaemonAction::ProfileLoginStatuses,
         DaemonAction::CheckProjectDirectories {
             paths: vec![project.clone(), server_root.as_path().join("absent")],
         },

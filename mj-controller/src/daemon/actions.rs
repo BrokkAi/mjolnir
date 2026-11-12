@@ -8,7 +8,8 @@ pub(super) async fn handle_action(
 ) -> Result<DaemonReply> {
     let _work = upgrade_request_activity(&action)?;
     match action {
-        action @ (DaemonAction::PreflightNewSession { .. }
+        action @ (DaemonAction::ProfileLoginStatuses
+        | DaemonAction::PreflightNewSession { .. }
         | DaemonAction::ValidateProjectDirectory { .. }
         | DaemonAction::CompletePath { .. }
         | DaemonAction::CheckProjectDirectories { .. }

@@ -17,7 +17,7 @@ This is private-network operation with working SSH authentication and host trust
 - [ ] Implement and validate milestone 1: endpoint, connector, supervised tunnel and command forwarding.
 - [ ] Implement and validate milestone 2: direct HTTP credentials and browser opening.
 - [x] (2026-11-12) Implement milestone 3: daemon path/discovery actions, shared HTTP/control launch preflight, dedicated-connection cancellation and dashboard rewiring. Focused 52 tests and full touched-crate suites pass; control exchange and phone preflight goldens reviewed. The separated-machine SSH driver remains integration acceptance with milestones 1–2.
-- [ ] Implement and validate milestone 4: dashboard setup, probes, settings and cache work (deferred to follow-up under the parent-approved milestone-3 budget fallback).
+- [ ] Milestone 4 in progress (2026-11-12): saved-profile login status now uses daemon-owned configuration and credentials over a dedicated cancellable control request. API golden, full core/client/controller/CLI suites, workspace Clippy and formatting pass. Discovery, availability, archive sizes, spinner, target testing and mbx remain.
 - [ ] Implement and validate milestone 5: explicit remote paths, attachment uploads, client-side import upload and daemon-side voice transcription.
 - [ ] Remove the native desktop shell (`mj-desktop`, `mj app`, `mj-cli/src/desktop.rs`, release packaging); independent of the other milestones.
 - [ ] Implement and validate milestone 6: matching-build PowerShell go script.
@@ -40,7 +40,12 @@ The shared HTTP preflight previously held admission even for disposable reads. T
 
 Control requests previously correlated replies but had no generic cancellation mechanism: `serve_client` awaited each action without observing disconnect. Milestone 3 now owns disposable work on a dedicated connection, reuses `ProcessCancellationGuard`, and awaits executor teardown after EOF or handoff. A real OpenSSH proxy fixture emits 128 KiB of stderr before its readiness barrier; the superseded-completion test verifies connection closure terminates its process.
 
+Profile discovery cannot simply return a `Config`: `Environment` serializes sources only and deserialization resolves references on the receiving machine (`config/secrets.rs`). Daemon readiness metadata or a shared settings wire correction is needed before moving discovery safely; the milestone-4 checkpoint therefore concentrates on computed login statuses.
+
 ## Decision Log
+
+
+Decision (parent, 2026-11-12): Discovery returns existing configuration source forms plus daemon-computed readiness metadata per profile/runtime/machine. Never transmit resolved secrets or introduce another configuration representation. The client renders readiness from that metadata and must not resolve received references for display.
 
 
 Decision: Add `[daemon] runtime = "ssh"`, `host`, optional `instance`, and an SSH argument list `ssh_args` using existing `SshTarget` conventions. The remote instance defaults to the client's selected instance, including default. Only this placement table is client-owned; other settings come from daemon settings APIs. Remote host/container placement is separate and never recursively follows another SSH placement. Rationale: paths, profiles and credentials must have one machine owner. Date/Author: 2026-11-12, user design; argument-list field spelling specified by this plan.

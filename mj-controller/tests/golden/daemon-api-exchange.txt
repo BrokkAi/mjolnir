@@ -1,6 +1,19 @@
 [
   {
     "request": {
+      "action": "profile_login_statuses"
+    },
+    "reply": {
+      "Ok": {
+        "reply": "profile_login_statuses",
+        "value": {
+          "agent": "SignedOut"
+        }
+      }
+    }
+  },
+  {
+    "request": {
       "action": "check_project_directories",
       "arguments": {
         "paths": [

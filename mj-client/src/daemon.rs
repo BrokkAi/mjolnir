@@ -692,6 +692,7 @@ pub enum DaemonAction {
         target_id: String,
         directory: PathBuf,
     },
+    ProfileLoginStatuses,
     CompletePath {
         host: mj_core::path_completion::CompletionHost,
         prefix: String,
@@ -1198,6 +1199,7 @@ pub struct ResponseEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "reply", content = "value")]
 pub enum DaemonReply {
+    ProfileLoginStatuses(std::collections::BTreeMap<String, mj_core::credentials::LoginStatus>),
     NewSessionPreflight(PreflightNew),
     PathCompletion(mj_core::path_completion::PathCompletion),
     ProjectDirectories(Vec<(std::path::PathBuf, bool)>),
@@ -3264,7 +3266,8 @@ impl DaemonAction {
         }
         matches!(
             self,
-            Self::PreflightNewSession { .. }
+            Self::ProfileLoginStatuses
+                | Self::PreflightNewSession { .. }
                 | Self::ValidateProjectDirectory { .. }
                 | Self::CompletePath { .. }
                 | Self::CheckProjectDirectories { .. }
