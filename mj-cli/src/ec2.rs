@@ -1227,7 +1227,7 @@ elif op == 'run-instances':
     bootstrap = base64.b64decode(request['UserData']).decode()
     assert '/etc/ssh/sshd_config.d/60-mj-mux.conf' in bootstrap
     assert 'MaxSessions 200\nMaxStartups 100:30:300' in bootstrap
-    assert 'sshd -t\nsystemctl reload' in bootstrap
+    assert 'sshd -t\n# Ubuntu may still have only ssh.socket active during cloud-init.\nsystemctl reload-or-restart' in bootstrap
     assert 'Include /etc/ssh/sshd_config.d/*.conf' in bootstrap
     if (root/'nitro').exists():
         assert request['EnclaveOptions'] == {'Enabled':True}

@@ -9,4 +9,5 @@ MJ_SSHD
 # Prepend the include so earlier global settings cannot override the drop-in.
 sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' /etc/ssh/sshd_config
 sshd -t
-systemctl reload "$(systemctl show -p Id --value sshd.service)"
+# Ubuntu may still have only ssh.socket active during cloud-init.
+systemctl reload-or-restart "$(systemctl show -p Id --value sshd.service)"
