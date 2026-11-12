@@ -59,3 +59,20 @@ Next verification: exercise retirement followed by a delayed publication and ins
 ## Other inspected owners
 
 The store's idle reader pool is bounded to eight connections per database path. Session-manager live views and transcript roots are pruned against the desired actor set. Daemon client JoinSets are drained. These findings lower their priority relative to the candidates above; they do not constitute a complete leak audit.
+
+## Measured heap owners and fixes, 2026-11-12
+
+jemalloc is now built with `stats` and `profiling` (inactive by default; `_RJEM_MALLOC_CONF` on `mj daemon restart` enables them for one daemon). Live heap profiles of the production daemon (60 running sessions, ~25,500 session records) measured:
+
+| Owner | Live bytes | Outcome |
+| --- | ---: | --- |
+| jemalloc arenas: 480 by default on a 120-vCPU host | 380 MB slab fragmentation + 198 MB metadata | `narenas:8` compiled in (139836eae): 200 MB + 71–95 MB |
+| `CommittedState::startup_groups`: full `step_json` of every session's latest startup group | 253 MB | compact step status (1846d802d); owner gone from profiles |
+| Viewer rows for every session | 127–155 MB | boxed optional payloads, shared commands (01366bf04): ~90 MB |
+| Decoded actor windows (`decode_transcript_body`) | 450–680 MB | open; see below |
+| Browser projector entries for every active session | ~180 MB | open; projection results also feed viewer rows |
+| Session state and subagent reports in `CommittedState` | ~120 MB + 37–41 MB | open; the report reconciliation needs report and turn from one snapshot |
+
+Resident plus swap of a fresh daemon at 10–24 minutes fell from 3.0–3.6 GB to 2.3–2.6 GB.
+
+The decoded windows are the largest remaining owner. Their JSON totals ~100 MiB for 60 sessions, but `serde_json` is built with `preserve_order` (enabled by agent-client-protocol), so every object is an `IndexMap` and small structures expand 10x or more. A third of the window JSON comes from two pins: one session's current turn of 7,964 items kept whole, and four turns kept whole for tools stuck `in_progress`. Bounding the current-turn pin, or holding tool calls in a cheaper form than `Value`, are design changes rather than retention fixes.
