@@ -588,6 +588,7 @@ async fn wait_reports_background_knowledge_without_claiming_checkpoint_readiness
     let relay = mj_worker::relay::DurableRelay::open(root.path(), "session-1", "1.0.0").unwrap();
     let materialized = mj_core::state::MaterializedSession::empty("session-1");
     let mut live = mj_client::session::ManagedSessionView {
+        attention: Default::default(),
         connected: true,
         error: None,
         snapshot: Some(mj_core::state::ManagedSessionSnapshot {
@@ -1523,6 +1524,7 @@ fn live_view(model: &str, efforts: &[&str]) -> ManagedSessionView {
     ]))
     .expect("the fixture describes selects the schema accepts");
     ManagedSessionView {
+        attention: Default::default(),
         snapshot: Some(mj_core::state::ManagedSessionSnapshot {
             subagent_requests: Default::default(),
             subagent_completions: Default::default(),
@@ -3898,6 +3900,7 @@ fn live_observation(
     let mut session = snapshot.sessions[0].clone();
     session.capabilities.prompt = true;
     let live = ManagedSessionView {
+        attention: Default::default(),
         connected: true,
         error: None,
         snapshot: Some(mj_core::state::ManagedSessionSnapshot {
@@ -4539,6 +4542,7 @@ fn relay_health_names_each_way_the_live_view_can_be_unusable() {
     use mj_client::session::{ManagedSessionView, ViewError};
 
     let connected = ManagedSessionView {
+        attention: Default::default(),
         connected: true,
         ..ManagedSessionView::default()
     };
@@ -4573,6 +4577,7 @@ fn relay_health_names_each_way_the_live_view_can_be_unusable() {
         // Connected plus an error is what a relay that dropped mid-turn
         // looks like; the error is the thing the caller needs.
         let view = ManagedSessionView {
+            attention: Default::default(),
             connected: true,
             error: Some(error),
             ..ManagedSessionView::default()
@@ -5118,12 +5123,12 @@ fn a_published_session_says_whether_it_has_a_checkpoint() {
     assert!(!snapshot.sessions[0].has_checkpoint);
 
     state.sessions.get_mut("session-1").unwrap().checkpoint =
-        Some(mj_core::state::CheckpointMetadata {
+        Some(Box::new(mj_core::state::CheckpointMetadata {
             archive_path: "/private/archive.hel.zip".into(),
             sha256: "a".repeat(64),
             created_at: "now".into(),
             event_frontier: 3,
-        });
+        }));
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 1);
     assert!(snapshot.sessions[0].has_checkpoint);
     let published = serde_json::to_string(&snapshot.sessions[0]).unwrap();
@@ -5307,6 +5312,7 @@ fn session_wait_uses_the_workers_published_jev_activity() {
     let mut materialized = mj_core::state::MaterializedSession::empty("session-1");
     materialized.last_turn_outcome = Some(completed(7, "end_turn"));
     let mut live = ManagedSessionView {
+        attention: Default::default(),
         connected: true,
         error: None,
         snapshot: Some(mj_core::state::ManagedSessionSnapshot {
@@ -6101,6 +6107,7 @@ async fn a_session_wait_on_a_child_answers_with_its_handback() {
 /// the session's turn state from the store on every decision.
 fn actor_without_projection() -> ManagedSessionView {
     ManagedSessionView {
+        attention: Default::default(),
         snapshot: None,
         connected: true,
         error: None,

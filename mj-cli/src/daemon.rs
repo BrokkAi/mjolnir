@@ -635,12 +635,6 @@ async fn ping_daemon(client: &mut DaemonClient) -> Result<()> {
     Ok(())
 }
 
-/// Local protocol readiness precedes the asynchronously started HTTP server.
-/// API and desktop callers share this wait instead of asking users to retry.
-pub async fn wait_for_web_viewer(client: &mut DaemonClient) -> Result<String> {
-    wait_for_web_viewer_with_timeout(client, START_TIMEOUT).await
-}
-
 /// Wait for the web access publication that owns all local API connection
 /// details: advertised URL, listener address, and certificate pin.
 pub async fn wait_for_web_access(
@@ -669,16 +663,6 @@ async fn wait_for_web_access_with_timeout(
     })
     .await
     .context("timed out waiting for the web viewer to become ready")?
-}
-
-async fn wait_for_web_viewer_with_timeout(
-    client: &mut DaemonClient,
-    timeout: Duration,
-) -> Result<String> {
-    match wait_for_web_access_with_timeout(client, timeout).await? {
-        mj_client::web::WebViewerAccess::Ready { viewer_url, .. } => Ok(viewer_url),
-        _ => unreachable!("wait_for_web_access_with_timeout returns only Ready"),
-    }
 }
 
 /// How the running daemon's build stands against this client's.
@@ -2067,7 +2051,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn api_and_desktop_wait_for_the_viewer_without_a_retry_command() {
+    async fn api_waits_for_the_viewer_without_a_retry_command() {
         let (mut client, task) = viewer_fixture(vec![
             mj_client::web::WebViewerAccess::Starting,
             mj_client::web::WebViewerAccess::Starting,
@@ -2081,10 +2065,11 @@ mod tests {
             },
         ])
         .await;
-        assert_eq!(
-            wait_for_web_viewer(&mut client).await.unwrap(),
-            "http://127.0.0.1:1234"
-        );
+        assert!(matches!(
+            wait_for_web_access(&mut client).await.unwrap(),
+            mj_client::web::WebViewerAccess::Ready { viewer_url, .. }
+                if viewer_url == "http://127.0.0.1:1234"
+        ));
         drop(client);
         task.await.unwrap();
     }
@@ -2101,7 +2086,7 @@ mod tests {
         ])
         .await;
         assert!(
-            wait_for_web_viewer(&mut client)
+            wait_for_web_access(&mut client)
                 .await
                 .unwrap_err()
                 .to_string()
@@ -2113,7 +2098,7 @@ mod tests {
         let start = tokio::time::Instant::now();
         let timeout = Duration::from_millis(100);
         assert!(
-            wait_for_web_viewer_with_timeout(&mut client, timeout)
+            wait_for_web_access_with_timeout(&mut client, timeout)
                 .await
                 .unwrap_err()
                 .to_string()

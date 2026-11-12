@@ -459,7 +459,7 @@ async fn missing_workspace_actor_parks_until_its_target_changes() {
     let mut record = crate::database::load_session_record(LEASED_RELAY_SESSION)
         .unwrap()
         .unwrap();
-    record.target = Some(recovery_source_target());
+    record.target = Some(Box::new(recovery_source_target()));
     crate::database::save_session(&record).unwrap();
 
     let directory = tempfile::tempdir().unwrap();
@@ -937,6 +937,7 @@ fn view_at_ordinal(ordinal: u64) -> ManagedSessionView {
         })
         .collect();
     ManagedSessionView {
+        attention: Default::default(),
         snapshot: Some(ManagedSessionSnapshot {
             subagent_requests: Default::default(),
             subagent_completions: Default::default(),
@@ -2179,7 +2180,7 @@ fn stale_recovery_checks_durable_state_under_target_ownership() {
     let _writer = crate::database::install_isolated_test_writer();
     register_leased_relay_session();
     let mut record = crate::database::load_state().unwrap().sessions[LEASED_RELAY_SESSION].clone();
-    record.target = Some(recovery_source_target());
+    record.target = Some(Box::new(recovery_source_target()));
     let plan = WorkerRecoveryPlan {
         source_target: recovery_source_target(),
         target: None,
@@ -2233,7 +2234,7 @@ fn stale_recovery_checks_durable_state_under_target_ownership() {
             worker_root: PathBuf::from("/replacement-worker").join(LEASED_RELAY_SESSION),
         }),
     ] {
-        record.target = target;
+        record.target = target.map(Box::new);
         crate::database::save_session(&record).unwrap();
         assert_eq!(
             recover_worker_controlled(plan.clone(), true, Some(&record.id), &executor).unwrap(),
@@ -2246,7 +2247,7 @@ fn stale_recovery_checks_durable_state_under_target_ownership() {
     );
     assert!(executor.0.lock().unwrap().is_empty());
 
-    record.target = Some(recovery_source_target());
+    record.target = Some(Box::new(recovery_source_target()));
     for state in [
         SessionState::Running,
         SessionState::Disconnected,
@@ -2304,7 +2305,7 @@ async fn unresponsive_live_relay_worker_is_restarted_and_reconnected() {
     fail_if_the_actor_stalls("unresponsive live relay worker was never restarted");
     register_leased_relay_session();
     let mut record = crate::database::load_state().unwrap().sessions[LEASED_RELAY_SESSION].clone();
-    record.target = Some(recovery_source_target());
+    record.target = Some(Box::new(recovery_source_target()));
     crate::database::save_session(&record).unwrap();
     let relay_root = tempfile::tempdir().unwrap();
     let restarted = relay_root.path().join("worker-restarted");
@@ -2409,7 +2410,7 @@ async fn relay_actor_waits_for_disk_space_then_recovers_its_worker() {
     };
     register_leased_relay_session();
     let mut record = crate::database::load_state().unwrap().sessions[LEASED_RELAY_SESSION].clone();
-    record.target = Some(source_target.clone());
+    record.target = Some(Box::new(source_target.clone()));
     crate::database::save_session(&record).unwrap();
     let relay_root = tempfile::tempdir().unwrap();
     let restarted = relay_root.path().join("worker-restarted");
@@ -2808,7 +2809,7 @@ async fn reconnect_retains_failed_preparation_for_worker_replacement() {
         .unwrap();
     session.harness_kind = mj_core::config::HarnessKind::Claude;
     session.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
-    session.target = Some(durable_target.clone());
+    session.target = Some(Box::new(durable_target.clone()));
     crate::database::save_session(&session).unwrap();
 
     let failure = mj_core::relay::HarnessPreparation::Failed {
@@ -3250,7 +3251,7 @@ async fn released_connection_can_be_leased_again_immediately() {
             .releases
             .send(ReturnedConnection {
                 lease_id,
-                connection: Some(connection),
+                connection: Some(Box::new(connection)),
             })
             .unwrap();
         actor
@@ -3270,7 +3271,7 @@ async fn released_connection_can_be_leased_again_immediately() {
         .releases
         .send(ReturnedConnection {
             lease_id,
-            connection: Some(connection),
+            connection: Some(Box::new(connection)),
         })
         .unwrap();
 }
@@ -3315,7 +3316,7 @@ async fn full_leased_queue_refuses_excess_and_still_processes_release() {
         .releases
         .send(ReturnedConnection {
             lease_id,
-            connection: Some(connection),
+            connection: Some(Box::new(connection)),
         })
         .unwrap();
     for response in pending {
@@ -3375,7 +3376,7 @@ async fn prompt_submitted_during_lease_is_delivered_after_release() {
         .releases
         .send(ReturnedConnection {
             lease_id,
-            connection: Some(connection),
+            connection: Some(Box::new(connection)),
         })
         .unwrap();
 
@@ -3422,7 +3423,7 @@ async fn returned_lease_publishes_what_it_learned_while_it_held_the_connection()
         .releases
         .send(ReturnedConnection {
             lease_id,
-            connection: Some(connection),
+            connection: Some(Box::new(connection)),
         })
         .unwrap();
 
@@ -3570,7 +3571,7 @@ async fn retirement_rejects_prompts_deferred_during_lease() {
         .releases
         .send(ReturnedConnection {
             lease_id,
-            connection: Some(connection),
+            connection: Some(Box::new(connection)),
         })
         .unwrap();
 
@@ -3612,6 +3613,7 @@ fn dashboard_updates_keep_only_the_latest_view_per_session() {
             }),
             session_id: "session-1".into(),
             view: ManagedSessionView {
+                attention: Default::default(),
                 error: Some(ViewError::Unreachable(format!("revision-{revision}"))),
                 ..ManagedSessionView::default()
             },
@@ -3621,6 +3623,7 @@ fn dashboard_updates_keep_only_the_latest_view_per_session() {
         raw_observation: None,
         session_id: "session-2".into(),
         view: ManagedSessionView {
+            attention: Default::default(),
             error: Some(ViewError::Unreachable("other".into())),
             ..ManagedSessionView::default()
         },
@@ -3966,9 +3969,9 @@ async fn delegation_completes_with_web_disabled_and_dashboard_unconsumed() {
         .sessions
         .remove(LEASED_RELAY_SESSION)
         .unwrap();
-    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+    parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: relay_root.path().join(LEASED_RELAY_SESSION),
-    });
+    }));
     crate::database::save_session(&parent).unwrap();
     let (feed, observations) = delegation_channel();
     let manager = spawn_session_manager_observed(Some(feed)).unwrap();
@@ -4062,6 +4065,7 @@ fn replaced_actors_cannot_publish_or_leave_a_queued_observation() {
         raw_observation: None,
         session_id: "session-1".into(),
         view: ManagedSessionView {
+            attention: Default::default(),
             error: Some(ViewError::Unreachable(detail.into())),
             ..Default::default()
         },
@@ -4114,7 +4118,7 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
     let _writer = crate::database::install_isolated_test_writer();
     register_leased_relay_session();
     let mut record = crate::database::load_state().unwrap().sessions[LEASED_RELAY_SESSION].clone();
-    record.target = Some(recovery_source_target());
+    record.target = Some(Box::new(recovery_source_target()));
     record.state = mj_core::state::SessionState::Running;
     crate::database::save_session(&record).unwrap();
     let plan = WorkerRecoveryPlan {

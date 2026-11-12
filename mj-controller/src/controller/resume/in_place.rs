@@ -472,7 +472,7 @@ impl Controller {
             .or(restart_intent
                 .as_ref()
                 .and_then(|intent| intent.handoff.as_ref()))
-            .or(previous.checkpoint.as_ref())
+            .or(previous.checkpoint.as_deref())
             .context("session has no checkpoint")?;
         let verified_archive = verify_resume_checkpoint(session_id, checkpoint)?;
         let profile = self

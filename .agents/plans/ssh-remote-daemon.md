@@ -21,8 +21,8 @@ This is private-network operation with working SSH authentication and host trust
 - [x] (2026-11-12, SSH tunnel worker) Add process-private supervised SshLease, cancellable discover/open, authenticated readiness and collision retry. Real localhost sshd verifies Ping, deterministic occupied-port retry and remote instance survival after lease termination. Connector remains for the next slice.
 - [ ] (2026-11-12, connector worker) Route SSH initial connection, serialized refresh and attachment through process-shared connector; exclude remote executable relaunch. Touched crate suites and workspace clippy pass; real sshd verifies shared initial connections and concurrent reconnect after remote restart. `sessions` acceptance blocked by deferred HTTP API token acquisition; live attachment and killed-tunnel acceptance remain.
 - [ ] Implement and validate milestone 2: direct HTTP credentials and browser opening.
-- [ ] Implement and validate milestone 3: dashboard paths, discovery and preflight.
-- [ ] Implement and validate milestone 4: dashboard setup, probes, settings and cache work.
+- [x] (2026-11-12) Implement milestone 3: daemon path/discovery actions, shared HTTP/control launch preflight, dedicated-connection cancellation and dashboard rewiring. Focused 52 tests and full touched-crate suites pass; control exchange and phone preflight goldens reviewed. The separated-machine SSH driver remains integration acceptance with milestones 1–2.
+- [ ] Implement and validate milestone 4: dashboard setup, probes, settings and cache work (deferred to follow-up under the parent-approved milestone-3 budget fallback).
 - [ ] Implement and validate milestone 5: explicit remote paths, attachment uploads, client-side import upload and daemon-side voice transcription.
 - [ ] Remove the native desktop shell (`mj-desktop`, `mj app`, `mj-cli/src/desktop.rs`, release packaging); independent of the other milestones.
 - [ ] Implement and validate milestone 6: matching-build PowerShell go script.
@@ -49,6 +49,10 @@ SSH discovery checkpoint (2026-11-12): the shared SSH module is private and expo
 
 SSH tunnel checkpoint (2026-11-12): `DaemonClient::request` can reconnect through local metadata after UpgradePending, so tunnel readiness deliberately uses its private `request_once(Ping)` instead. Lease metadata has PID zero and is process-private; connector integration must retain lease ownership and never use it for local lifecycle operations. Real sshd acceptance passed with pinned host keys and a forced first-port collision; terminating both leases leaves the same remote daemon instance available. Native Windows acceptance remains outstanding.
 
+The shared HTTP preflight previously held admission even for disposable reads. The milestone-3 follow-up restricts its admission to confirmed Git repairs and preserves each moved action's existing dashboard subprocess deadline, so an admitted repair preflight remains bounded.
+
+Control requests previously correlated replies but had no generic cancellation mechanism: `serve_client` awaited each action without observing disconnect. Milestone 3 now owns disposable work on a dedicated connection, reuses `ProcessCancellationGuard`, and awaits executor teardown after EOF or handoff. A real OpenSSH proxy fixture emits 128 KiB of stderr before its readiness barrier; the superseded-completion test verifies connection closure terminates its process.
+
 ## Decision Log
 
 
@@ -73,6 +77,8 @@ Decision (user, 2026-11-12, supersedes the earlier deferrals): Remove the native
 Decision: SSH launches require explicit remote project paths wherever cwd was the default. Login uses an interactive SSH terminal; document callback limitations without inventing a harness compatibility matrix. Rationale: client cwd and daemon credential files cannot be used across machines. Date/Author: 2026-11-12, user.
 
 Decision: Default development commit is the remote source checkout's HEAD, resolved once to a full SHA; optional `-Commit` overrides it. Both machines build in one reused, dedicated, clean, detached build worktree each, moved to that SHA (parent review: per-SHA worktrees would make every build cold), without switching the user's current branch. Rationale: the box is the development source of truth, origin/master could omit local committed work, and edits or commits during install split binary stamps. The script's explicitly requested detached build checkouts are build inputs, not development branches. Date/Author: 2026-11-12, plan author within the user's script choice.
+
+Decision (parent approval, 2026-11-12): Cancellable machine requests use dedicated control connections. The action owns its cancellation classification; connection closure cancels its executor and the server awaits cleanup. Disposable probes hold no handoff admission. Reuse ProcessCancellationGuard. Mutating mbx installation holds labeled admission through cleanup and acknowledgement; offer cancellation only if its existing helper safely supports it. Do not introduce a durable generic job owner.
 
 ## Outcomes & Retrospective
 

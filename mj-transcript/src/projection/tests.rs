@@ -2675,7 +2675,7 @@ fn resent_tool_call_keeps_identity_and_replaces_the_call_payload() {
     let TranscriptBody::Tool { call, .. } = &item.body else {
         panic!("re-sent tool call stayed a tool item");
     };
-    assert_eq!(call["title"], json!("read file again"));
+    assert_eq!(call.value()["title"], json!("read file again"));
 
     apply_committed_projection_event(&mut session, &resend, projected.mutation)
         .expect("the merged item passes the projection integrity checks");
@@ -2721,7 +2721,7 @@ fn tool_call_update_then_resent_tool_call_survives_the_projection() {
     let TranscriptBody::Tool { call, .. } = &item.body else {
         panic!("the item stayed a tool item");
     };
-    assert_eq!(call["title"], json!("shell (retried)"));
+    assert_eq!(call.value()["title"], json!("shell (retried)"));
 }
 
 /// A tool call whose only content is a terminal reference, the shape
@@ -2867,7 +2867,7 @@ fn late_fallback_claims_output_from_a_fast_terminal() {
     let TranscriptBody::Tool { call, .. } = &session.transcript[0].body else {
         panic!("the parked output became a fallback tool");
     };
-    let call: ToolCall = serde_json::from_value(call.clone()).unwrap();
+    let call: ToolCall = call.decode().unwrap();
     assert_eq!(call.status, ToolCallStatus::Completed);
 }
 
@@ -3048,7 +3048,7 @@ fn wholesale_tool_call_update_keeps_the_attached_terminal_output() {
     let TranscriptBody::Tool { call, .. } = &session.transcript[0].body else {
         panic!("the item stayed a tool item");
     };
-    assert_eq!(call["status"], json!("completed"));
+    assert_eq!(call.value()["status"], json!("completed"));
 }
 
 /// Grok Build names the terminal on a mid-flight update and then replaces
@@ -3094,7 +3094,7 @@ fn a_tool_call_that_dropped_its_terminal_reference_still_attaches_the_output() {
     };
     assert_eq!(terminal_refs, &["term-1".to_owned()]);
     assert_eq!(
-        tool_call_terminal_ids(call),
+        call.terminal_ids(),
         Vec::<String>::new(),
         "the final call really did drop the reference"
     );
@@ -3586,7 +3586,7 @@ fn windowed_current_turn_keeps_streaming_and_tool_updates_identical_to_full_hist
     let TranscriptBody::Tool { call, .. } = &tool.body else {
         panic!("tool")
     };
-    assert_eq!(call["status"], "completed");
+    assert_eq!(call.value()["status"], "completed");
 }
 
 // Hard-won: 32f1541e: checkpoint recovery failures exposed daemon bookkeeping IDs as transcript messages.
@@ -3714,7 +3714,7 @@ fn canonical_round_trip_preserves_cursor_and_logical_positions() {
         created_at_ms: 40,
         last_changed_at_ms: 40,
         body: TranscriptBody::Tool {
-            call: json!({
+            call: (json!({
                 "toolCallId": "call-1",
                 "title": "Read file",
                 "kind": "read",
@@ -3723,7 +3723,8 @@ fn canonical_round_trip_preserves_cursor_and_logical_positions() {
                 "rawInput": {"path": "README.md"},
                 "rawOutput": {"bytes": 42},
                 "_meta": {"provider": "test"}
-            }),
+            }))
+            .into(),
             terminal_outputs: vec![TerminalOutputRecord {
                 terminal_id: "term-1".into(),
                 output: "ok\n".into(),

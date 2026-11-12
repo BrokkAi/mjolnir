@@ -1138,7 +1138,7 @@ mod tests {
                 &workspace.id,
                 mj_core::state::SessionState::Running,
             );
-            parent.review = Some(review);
+            parent.review = Some(Box::new(review));
             let child = crate::daemon::tests::runtime_test_session(
                 child_id,
                 &workspace.id,

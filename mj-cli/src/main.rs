@@ -27,7 +27,6 @@ mod api_client;
 mod api_commands;
 mod daemon;
 mod dashboard;
-mod desktop;
 mod ec2;
 mod go;
 mod hints;
@@ -108,11 +107,6 @@ enum Command {
     /// Open the workspace selector even when Mjolnir could auto-attach, or
     /// list and create workspaces without a terminal.
     Workspaces(WorkspacesArgs),
-    /// Open the web viewer in a native desktop window.
-    App,
-    /// Mint the private launch document consumed by `mj-desktop`.
-    #[command(hide = true)]
-    DesktopBootstrap,
     /// Inspect or control the persistent per-user daemon.
     Daemon(DaemonArgs),
     /// Internal persistent controller process.
@@ -210,8 +204,10 @@ enum Command {
     Review(api_commands::ReviewArgs),
     /// Stop a session's background task, or all tasks the worker can stop.
     StopTask(api_commands::StopTaskArgs),
-    /// Print the API base URL and where its bearer token lives.
+    /// Print the API base URL.
     ApiInfo(api_commands::ApiInfoArgs),
+    /// Print only the API bearer token for external HTTP clients.
+    ApiToken,
     /// Print a valid GitHub App token for an owner or repository.
     GithubToken(api_commands::GithubTokenArgs),
     /// Change what the person's dashboard shows: pane sizes, which session
@@ -852,8 +848,7 @@ fn process_kind(command: Option<&Command>) -> logging::ProcessKind {
         None
         | Some(Command::Go(_))
         | Some(Command::Simple(_))
-        | Some(Command::Workspaces(WorkspacesArgs { command: None }))
-        | Some(Command::App) => logging::ProcessKind::Tui,
+        | Some(Command::Workspaces(WorkspacesArgs { command: None })) => logging::ProcessKind::Tui,
         _ => logging::ProcessKind::Cli,
     }
 }
@@ -864,8 +859,6 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Go(_)) => "go",
         Some(Command::Simple(_)) => "simple",
         Some(Command::Workspaces(_)) => "workspaces",
-        Some(Command::App) => "app",
-        Some(Command::DesktopBootstrap) => "desktop-bootstrap",
         Some(Command::Daemon(_)) => "daemon",
         Some(Command::DaemonRun) => "daemon-run",
         Some(Command::Acp(_)) => "acp",
@@ -903,6 +896,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::Review(_)) => "review",
         Some(Command::StopTask(_)) => "stop-task",
         Some(Command::ApiInfo(_)) => "api-info",
+        Some(Command::ApiToken) => "api-token",
         Some(Command::GithubToken(_)) => "github-token",
         Some(Command::Ui(_)) => "ui",
         Some(Command::Models(_)) => "models",
@@ -1032,12 +1026,6 @@ async fn run_command(
                 .await
                 .map(|()| DashboardExit::Normal),
         },
-        Some(Command::App) => desktop::run_desktop_app()
-            .await
-            .map(|()| DashboardExit::Normal),
-        Some(Command::DesktopBootstrap) => desktop::desktop_bootstrap()
-            .await
-            .map(|()| DashboardExit::Normal),
         Some(Command::Daemon(args)) => daemon_command(args).await.map(|()| DashboardExit::Normal),
         Some(Command::DaemonRun) => daemon::run_daemon_process()
             .await
@@ -1251,6 +1239,9 @@ async fn run_command(
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::SetConfig(args)) => api_commands::set_config(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::ApiToken) => api_commands::api_token()
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::ApiInfo(args)) => api_commands::api_info(args)
@@ -3493,12 +3484,12 @@ mod tests {
                 draft_input: String::new(),
                 last_error: None,
                 last_checkpoint_error: None,
-                checkpoint: Some(mj_core::state::CheckpointMetadata {
+                checkpoint: Some(Box::new(mj_core::state::CheckpointMetadata {
                     archive_path,
                     sha256: "a".repeat(64),
                     created_at: "2026-08-12T00:00:00Z".into(),
                     event_frontier: 7,
-                }),
+                })),
             },
         );
         let mut controller = Controller {

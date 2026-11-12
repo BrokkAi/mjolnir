@@ -66,6 +66,7 @@
 ]
 === live container session with a second workspace (1 session card) ===
 {
+  "attention": "unknown",
   "oracle": true,
   "review_trigger": "off",
   "review_count": 0,
@@ -171,6 +172,7 @@
 === wire detail row for a live session (1 session row and intern table) ===
 {
   "row": {
+    "attention": "unknown",
     "oracle": true,
     "review_trigger": "off",
     "review_count": 0,
@@ -280,6 +282,7 @@
 }
 === only workspace (1 session card) ===
 {
+  "attention": "unknown",
   "oracle": true,
   "review_trigger": "off",
   "review_count": 0,
@@ -372,6 +375,7 @@
   "activity": "Checking response",
   "session": {
     "row": {
+      "attention": "unknown",
       "oracle": true,
       "review_trigger": "off",
       "review_count": 0,
@@ -473,6 +477,7 @@
   "activity": "[idle]",
   "session": {
     "row": {
+      "attention": "unknown",
       "oracle": true,
       "review_trigger": "off",
       "review_count": 0,
@@ -571,6 +576,7 @@
 === turn running in child session (2 session cards) ===
 {
   "parent": {
+    "attention": "unknown",
     "oracle": true,
     "review_trigger": "off",
     "review_count": 0,
@@ -658,6 +664,7 @@
     }
   },
   "child": {
+    "attention": "unknown",
     "oracle": true,
     "review_trigger": "off",
     "review_count": 0,
@@ -749,6 +756,7 @@
 }
 === bare target (1 session card) ===
 {
+  "attention": "unknown",
   "oracle": true,
   "review_trigger": "off",
   "review_count": 0,
@@ -837,6 +845,7 @@
 }
 === stopped session without recovery copy (1 session card) ===
 {
+  "attention": "unknown",
   "oracle": true,
   "review_trigger": "off",
   "review_count": 0,
@@ -935,6 +944,7 @@
 === wire summary row for a settled suspended session (1 session row and intern table) ===
 {
   "row": {
+    "attention": "unknown",
     "retry_assessment_pending": false,
     "id": "session-1",
     "publication_state": "unknown",
@@ -992,6 +1002,7 @@
 }
 === last top-level message time (1 session card) ===
 {
+  "attention": "unknown",
   "oracle": true,
   "review_trigger": "off",
   "review_count": 0,
@@ -1074,6 +1085,7 @@
 }
 === messages without recorded times (1 session card) ===
 {
+  "attention": "unknown",
   "oracle": true,
   "review_trigger": "off",
   "review_count": 0,
@@ -1154,6 +1166,7 @@
 }
 === conversation not available (1 session card) ===
 {
+  "attention": "unknown",
   "oracle": true,
   "review_trigger": "off",
   "review_count": 0,
@@ -1231,6 +1244,7 @@
 === phone launch before provisioning completes (1 session card and action) ===
 {
   "session": {
+    "attention": "unknown",
     "oracle": true,
     "review_trigger": "off",
     "review_count": 0,

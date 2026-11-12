@@ -132,7 +132,7 @@ jobs:
           # Dependency order: core first, then independent checkpoint,
           # transcript and review implementations, then their runtime/UI consumers.
           # The voice worker is independent. The final binaries come last.
-          for crate in brokk-mj-voice-worker brokk-mj-core brokk-mj-review brokk-mj-transcript brokk-mj-checkpoint brokk-mj-client brokk-mj-worker brokk-mj-controller brokk-mj-chat brokk-mj-tui brokk-mj-desktop brokk-mjolnir; do
+          for crate in brokk-mj-voice-worker brokk-mj-core brokk-mj-review brokk-mj-transcript brokk-mj-checkpoint brokk-mj-client brokk-mj-worker brokk-mj-controller brokk-mj-chat brokk-mj-tui brokk-mjolnir; do
             if already_published "$crate"; then
               echo "$crate $version is already on crates.io, skipping"
               continue

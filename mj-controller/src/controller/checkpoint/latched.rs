@@ -554,7 +554,7 @@ impl Controller {
             && !session_owns_managed_checkout
             && let Some(artifact) = reusable_installed_checkpoint(
                 session_id,
-                session.checkpoint.as_ref(),
+                session.checkpoint.as_deref(),
                 &native_session_id,
                 cursor.ordinal,
                 &canonical_session,

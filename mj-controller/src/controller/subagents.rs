@@ -397,7 +397,7 @@ impl Controller {
             resource_allocation: parent.resource_allocation.clone(),
             additional_mounts: parent.additional_mounts.clone(),
             state: SessionState::Provisioning,
-            target: Some(target),
+            target: Some(Box::new(target)),
             native_session_id: None,
             acp_session_title: None,
             session_title_override: Some(request.task_name.clone()),

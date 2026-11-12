@@ -160,7 +160,7 @@ impl DashboardState {
         self.mode = Mode::Resume(ResumeWizard {
             subagents: Box::new(
                 subagents::SubagentDraft::new(session.subagents.clone().unwrap_or_default())
-                    .with_oracle(session.oracle, session.oracle_choice.clone()),
+                    .with_oracle(session.oracle, session.oracle_choice.as_deref().cloned()),
             ),
             files: Default::default(),
             session_id: session.id.clone(),
@@ -300,7 +300,7 @@ impl DashboardState {
         self.mode = Mode::Resume(ResumeWizard {
             subagents: Box::new(
                 subagents::SubagentDraft::new(session.subagents.clone().unwrap_or_default())
-                    .with_oracle(session.oracle, session.oracle_choice.clone()),
+                    .with_oracle(session.oracle, session.oracle_choice.as_deref().cloned()),
             ),
             files: Default::default(),
             session_id: session.id.clone(),

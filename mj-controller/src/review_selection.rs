@@ -16,15 +16,11 @@ use mj_core::review::autoconfigure::{
 use mj_core::review::settings::{ResolvedReviewSettings, ReviewModelSettings};
 use mj_core::worker_launch::ProfileConfig;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::Arc;
 
 pub(crate) async fn resolve(
     handle: ManagedSessionHandle,
     settings: Option<ReviewConfig>,
-    cancelled: Arc<AtomicBool>,
     backend: Arc<dyn SubagentBackend>,
 ) -> Result<Vec<ResolvedReviewSettings>> {
     let controller = tokio::task::spawn_blocking(Controller::load).await??;
@@ -44,7 +40,7 @@ pub(crate) async fn resolve(
             )
         })?;
     let (mut choices, autoconfigured) =
-        configured_choices(settings.clone(), &controller.config, &cancelled, &backend).await?;
+        configured_choices(settings.clone(), &controller.config, &backend).await?;
     if autoconfigured
         && let Some(SessionReview::Legacy {
             count,
@@ -67,28 +63,19 @@ pub(crate) async fn resolve(
     };
     let selections = join_all(choices.into_iter().map(|SubagentChoice { model, effort }| {
         let backend = Arc::clone(&backend);
-        let cancelled = Arc::clone(&cancelled);
         let pinned_profile = pinned_profile.cloned();
         async move {
-            ensure!(
-                !cancelled.load(Ordering::Acquire),
-                "review preparation cancelled"
-            );
-            let selected = await_or_cancel(&cancelled, async {
-                if let Some(profile) = pinned_profile.as_ref() {
-                    resolve_pinned_reviewer_model_profile_selection(
-                        &backend,
-                        profile,
-                        &model,
-                        effort.as_deref(),
-                    )
-                    .await
-                } else {
-                    resolve_reviewer_model_profile_selection(&backend, &model, effort.as_deref())
-                        .await
-                }
-            })
-            .await?
+            let selected = if let Some(profile) = pinned_profile.as_ref() {
+                resolve_pinned_reviewer_model_profile_selection(
+                    &backend,
+                    profile,
+                    &model,
+                    effort.as_deref(),
+                )
+                .await
+            } else {
+                resolve_reviewer_model_profile_selection(&backend, &model, effort.as_deref()).await
+            }
             .map_err(|error| anyhow::anyhow!("reviewer model {model:?}: {}", error.message))?;
             Ok(ResolvedReviewSettings {
                 profile: selected.profile_id,
@@ -108,7 +95,6 @@ pub(crate) async fn resolve(
 async fn configured_choices(
     settings: ReviewConfig,
     config: &mj_core::config::Config,
-    cancelled: &AtomicBool,
     backend: &Arc<dyn SubagentBackend>,
 ) -> Result<(Vec<SubagentChoice>, bool)> {
     let autoconfigured = settings.is_legacy();
@@ -118,8 +104,7 @@ async fn configured_choices(
             .as_ref()
             .and_then(|legacy| legacy.profile.as_ref())
             .filter(|profile| config.enabled_profile(profile).is_some());
-        let ready =
-            await_or_cancel(cancelled, backend.reviewer_ready_candidates(String::new())).await??;
+        let ready = backend.reviewer_ready_candidates(String::new()).await?;
         let mut usage_priced = usage_priced_profiles(&ready);
         let candidates = if let Some(profile) = pinned {
             if let Some(candidate) = ready
@@ -133,8 +118,8 @@ async fn configured_choices(
                     std::time::Duration::from_secs(30),
                     backend.profile_config(profile.clone(), None, false),
                 );
-                let choices = await_or_cancel(cancelled, discovery)
-                    .await?
+                let choices = discovery
+                    .await
                     .map_err(|_| {
                         anyhow::anyhow!(
                             "review profile {profile:?} did not become available within 30 seconds"
@@ -151,13 +136,12 @@ async fn configured_choices(
                 .iter()
                 .flat_map(|candidate| candidate.choices.models.iter().cloned())
                 .collect::<Vec<_>>();
-            let candidates = if autoconfigure(&merged_model_offers(&ready_models), |_| None)
-                .is_none()
-            {
-                await_or_cancel(cancelled, backend.reviewer_autoconfigure_candidates()).await??
-            } else {
-                ready
-            };
+            let candidates =
+                if autoconfigure(&merged_model_offers(&ready_models), |_| None).is_none() {
+                    backend.reviewer_autoconfigure_candidates().await?
+                } else {
+                    ready
+                };
             usage_priced.extend(usage_priced_profiles(&candidates));
             candidates
                 .offered
@@ -181,9 +165,8 @@ async fn configured_choices(
                 let backend = Arc::clone(backend);
                 async move { backend.profile_config(profile, Some(model), false).await }
             },
-            Some(cancelled),
         )
-        .await?;
+        .await;
         choices
     } else {
         settings.reviewers
@@ -255,12 +238,11 @@ pub(crate) async fn upgrade_reviewers<F, Fut>(
     available: &[(String, ProfileConfig)],
     usage_priced: &BTreeSet<String>,
     probe: F,
-    cancelled: Option<&AtomicBool>,
-) -> Result<(
+) -> (
     Vec<SubagentChoice>,
     bool,
     Vec<mj_core::review::autoconfigure::EffortAdjustment>,
-)>
+)
 where
     F: Fn(String, String) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<ProfileConfig>>,
@@ -276,18 +258,14 @@ where
         let efforts = if choices.model.as_deref() == Some(&model) {
             Some(choices.efforts.clone())
         } else {
-            let discovery = tokio::time::timeout(
+            tokio::time::timeout(
                 std::time::Duration::from_secs(10),
                 probe(legacy.profile.clone().unwrap(), model.clone()),
-            );
-            let result = match cancelled {
-                Some(cancelled) => await_or_cancel(cancelled, discovery).await?,
-                None => discovery.await,
-            };
-            result
-                .ok()
-                .and_then(Result::ok)
-                .map(|choices| choices.efforts)
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .map(|choices| choices.efforts)
         };
         let effort = legacy.effort.as_ref().and_then(|requested| {
             efforts.as_ref().map_or_else(
@@ -312,19 +290,18 @@ where
             .count
             .map_or(2, |count| count.get())
             .clamp(1, mj_core::config::MAX_REVIEWERS);
-        return Ok((
+        return (
             vec![SubagentChoice { model, effort }; count],
             efforts.is_some(),
             adjustments,
-        ));
+        );
     }
-    let (choices, known) =
-        autoconfigure_with_efforts(available, usage_priced, probe, cancelled).await?;
-    Ok((
+    let (choices, known) = autoconfigure_with_efforts(available, usage_priced, probe).await;
+    (
         choices.reviewers,
         known.values().all(|known| *known),
         choices.adjusted,
-    ))
+    )
 }
 
 /// Compute the ordered legacy Auto preset using the same model and effort
@@ -333,8 +310,7 @@ pub(crate) async fn autoconfigure_with_efforts<F, Fut>(
     available: &[(String, ProfileConfig)],
     usage_priced: &BTreeSet<String>,
     probe: F,
-    cancelled: Option<&AtomicBool>,
-) -> Result<(Autoconfigured, BTreeMap<String, bool>)>
+) -> (Autoconfigured, BTreeMap<String, bool>)
 where
     F: Fn(String, String) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<ProfileConfig>>,
@@ -363,14 +339,9 @@ where
     let probe = &probe;
     let discovered = join_all(pairs.iter().map(|(model, profile, offered)| async move {
         if offered.model.as_deref() == Some(model) {
-            return Ok(Some(offered.efforts.clone()));
+            return Some(offered.efforts.clone());
         }
-        let discovery = tokio::time::timeout_at(deadline, probe(profile.clone(), model.clone()));
-        let result = match cancelled {
-            Some(cancelled) => await_or_cancel(cancelled, discovery).await?,
-            None => discovery.await,
-        };
-        Ok::<_, anyhow::Error>(match result {
+        match tokio::time::timeout_at(deadline, probe(profile.clone(), model.clone())).await {
             Ok(Ok(choices)) if choices.models.iter().any(|choice| &choice.value == model) => Some(choices.efforts),
             Ok(Ok(_)) => {
                 tracing::warn!(%profile, %model, "model-specific reviewer discovery omitted the requested model");
@@ -384,12 +355,11 @@ where
                 tracing::warn!(%profile, %model, "reviewer effort discovery timed out during legacy Auto configuration");
                 None
             }
-        })
+        }
     })).await;
     let mut efforts = BTreeMap::<String, Vec<mj_core::acp::SessionConfigChoice>>::new();
     let mut known = BTreeMap::<String, bool>::new();
     for ((model, _, _), result) in pairs.into_iter().zip(discovered) {
-        let result = result?;
         let model_known = known.entry(model.clone()).or_insert(true);
         if let Some(items) = result {
             let union = efforts.entry(model).or_default();
@@ -437,21 +407,7 @@ where
             known.insert(choice.model.clone(), true);
         }
     }
-    Ok((choices, known))
-}
-
-pub(crate) async fn await_or_cancel<T>(
-    cancelled: &AtomicBool,
-    work: impl std::future::Future<Output = T>,
-) -> Result<T> {
-    tokio::select! {
-        value = work => Ok(value),
-        _ = async {
-            while !cancelled.load(Ordering::Acquire) {
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            }
-        } => anyhow::bail!("review preparation cancelled"),
-    }
+    (choices, known)
 }
 
 /// Whether a refusal only says another operation held the session: a lease
@@ -493,15 +449,11 @@ mod tests {
                 observed_at: 1,
             },
         )];
-        let (choices, known, adjusted) = upgrade_reviewers(
-            &legacy,
-            &available,
-            &BTreeSet::new(),
-            |_, _| async { unreachable!() },
-            None,
-        )
-        .await
-        .unwrap();
+        let (choices, known, adjusted) =
+            upgrade_reviewers(&legacy, &available, &BTreeSet::new(), |_, _| async {
+                unreachable!()
+            })
+            .await;
         assert!(known);
         assert_eq!(choices.len(), 3);
         assert_eq!(adjusted.len(), 1);
@@ -534,15 +486,11 @@ mod tests {
                 observed_at: 1,
             },
         )];
-        let (choices, known, _) = upgrade_reviewers(
-            &legacy,
-            &available,
-            &BTreeSet::new(),
-            |_, _| async { anyhow::bail!("probe unavailable") },
-            None,
-        )
-        .await
-        .unwrap();
+        let (choices, known, _) =
+            upgrade_reviewers(&legacy, &available, &BTreeSet::new(), |_, _| async {
+                anyhow::bail!("probe unavailable")
+            })
+            .await;
         assert!(!known);
         assert_eq!(choices.len(), 2);
         assert!(
@@ -575,14 +523,11 @@ mod tests {
                 }]),
             ),
         ];
-        let (choices, known) = autoconfigure_with_efforts(
-            &available,
-            &BTreeSet::new(),
-            |_, _| async { unreachable!() },
-            None,
-        )
-        .await
-        .unwrap();
+        let (choices, known) =
+            autoconfigure_with_efforts(&available, &BTreeSet::new(), |_, _| async {
+                unreachable!()
+            })
+            .await;
         assert!(known.values().all(|known| *known));
         assert!(
             choices
@@ -608,14 +553,11 @@ mod tests {
                 observed_at: 1,
             },
         )];
-        let (configured, known) = autoconfigure_with_efforts(
-            &available,
-            &BTreeSet::new(),
-            |_, _| async { unreachable!() },
-            None,
-        )
-        .await
-        .unwrap();
+        let (configured, known) =
+            autoconfigure_with_efforts(&available, &BTreeSet::new(), |_, _| async {
+                unreachable!()
+            })
+            .await;
         assert_eq!(known.get("claude-sonnet-4.5"), Some(&true));
         assert!(
             configured
@@ -768,14 +710,11 @@ mod tests {
     async fn usage_priced_openrouter_models_do_not_displace_subscription_reviewers() {
         let available = live_catalog();
         let usage_priced = BTreeSet::from(["openrouter".to_owned()]);
-        let (configured, _) = autoconfigure_with_efforts(
-            &available,
-            &usage_priced,
-            |_, model| async move { Ok(catalog_profile(&[&model])) },
-            None,
-        )
-        .await
-        .unwrap();
+        let (configured, _) =
+            autoconfigure_with_efforts(&available, &usage_priced, |_, model| async move {
+                Ok(catalog_profile(&[&model]))
+            })
+            .await;
         assert_eq!(
             picked(&configured),
             [("gpt-6.1-terra", None), ("gpt-6.1-sol", None)]
@@ -800,38 +739,16 @@ mod tests {
             ("second".into(), offered),
         ];
         let start = tokio::time::Instant::now();
-        let (choices, known) = autoconfigure_with_efforts(
-            &available,
-            &BTreeSet::new(),
-            |_, _| async { std::future::pending::<anyhow::Result<ProfileConfig>>().await },
-            None,
-        )
-        .await
-        .unwrap();
+        let (choices, known) =
+            autoconfigure_with_efforts(&available, &BTreeSet::new(), |_, _| async {
+                std::future::pending::<anyhow::Result<ProfileConfig>>().await
+            })
+            .await;
         assert_eq!(choices.reviewers.len(), 2);
         assert_eq!(known.get("claude-sonnet-4.5"), Some(&false));
         assert_eq!(
             tokio::time::Instant::now().duration_since(start),
             std::time::Duration::from_secs(10)
         );
-    }
-
-    #[tokio::test]
-    async fn cancelling_pending_reviewer_discovery_releases_preparation() {
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let waiting = {
-            let cancelled = Arc::clone(&cancelled);
-            tokio::spawn(
-                async move { await_or_cancel(&cancelled, std::future::pending::<()>()).await },
-            )
-        };
-        tokio::task::yield_now().await;
-        cancelled.store(true, Ordering::Release);
-        let error = tokio::time::timeout(std::time::Duration::from_millis(250), waiting)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap_err();
-        assert!(error.to_string().contains("review preparation cancelled"));
     }
 }

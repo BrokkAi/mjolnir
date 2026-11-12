@@ -54,6 +54,11 @@ const REVIEW_SERVER_INSTRUCTIONS: &str = "Commit and call `request_review` befor
 /// is safe: a report that did arrive is refused as already delivered.
 const HANDBACK_UNANSWERED_ADVICE: &str = "It may still be recorded; call handback again with the same report. An answer that it was already delivered means the first call arrived.";
 
+/// A review whose preparation outlasts the reply window keeps preparing; no
+/// deadline stops it (#1503). Calling again is safe: Mjolnir refuses it while
+/// that review prepares or runs, and starts one if that review did not start.
+const REVIEW_UNANSWERED_ADVICE: &str = "The review may still be preparing. Call request_review again to find out: it answers that a review is already open while this one prepares or runs, and starts a new review if this one did not start.";
+
 /// What the model is told when Mjolnir has not answered a request: it may
 /// still run, so repeating it blindly could spawn a second child or send the
 /// same input twice. `list_agents` shows what actually happened.
@@ -67,6 +72,7 @@ fn unanswered_advice(action: &SubagentToolAction) -> &'static str {
         SubagentToolAction::Fetch { .. } => {
             "The fetch is safe to repeat; call fetch again for its result."
         }
+        SubagentToolAction::RequestReview { .. } => REVIEW_UNANSWERED_ADVICE,
         _ => UNANSWERED_ADVICE,
     }
 }

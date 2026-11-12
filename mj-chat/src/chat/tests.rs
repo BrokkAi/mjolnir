@@ -1190,7 +1190,7 @@ fn materialized_diff_counts_arrive_after_the_path_and_ignore_stale_revisions() {
         created_at_ms: 10,
         last_changed_at_ms: 10,
         body: TranscriptBody::Tool {
-            call: serde_json::json!({
+            call: (serde_json::json!({
                 "toolCallId": "edit",
                 "title": "Edit src/lib.rs",
                 "status": "completed",
@@ -1200,7 +1200,8 @@ fn materialized_diff_counts_arrive_after_the_path_and_ignore_stale_revisions() {
                     "oldText": "alpha\n",
                     "newText": "alpha\nbeta\n"
                 }]
-            }),
+            }))
+            .into(),
             terminal_outputs: Vec::new(),
             terminal_refs: Vec::new(),
             presentation: None,

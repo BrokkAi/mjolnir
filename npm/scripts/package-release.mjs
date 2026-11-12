@@ -23,7 +23,7 @@ export const PLATFORMS = [
     target: "x86_64-apple-darwin",
     extension: ".tar.gz",
     binary: "mj",
-    desktop: true,
+    companions: true,
     nativeWorker: true,
     sessionWorkers: [
       "mj-worker-x86_64-unknown-linux-musl",
@@ -39,7 +39,7 @@ export const PLATFORMS = [
     target: "aarch64-apple-darwin",
     extension: ".tar.gz",
     binary: "mj",
-    desktop: true,
+    companions: true,
     nativeWorker: true,
     sessionWorkers: [
       "mj-worker-x86_64-unknown-linux-musl",
@@ -55,7 +55,7 @@ export const PLATFORMS = [
     target: "x86_64-unknown-linux-gnu",
     extension: ".tar.gz",
     binary: "mj",
-    desktop: true,
+    companions: true,
     sessionWorkers: [
       "mj-worker-x86_64-unknown-linux-musl",
       "mj-worker-aarch64-unknown-linux-musl",
@@ -72,7 +72,7 @@ export const PLATFORMS = [
     target: "aarch64-unknown-linux-gnu",
     extension: ".tar.gz",
     binary: "mj",
-    desktop: true,
+    companions: true,
     sessionWorkers: [
       "mj-worker-x86_64-unknown-linux-musl",
       "mj-worker-aarch64-unknown-linux-musl",
@@ -198,10 +198,7 @@ export async function stagePlatform(platform, version, source, stagingRoot) {
     await cp(path.join(source, entry), path.join(destination, entry), { recursive: true });
   }
   await cp(path.join(source, platform.binary), path.join(destination, "bin", platform.binary));
-  if (platform.desktop) {
-    const desktop = platform.binary === "mj.exe" ? "mj-desktop.exe" : "mj-desktop";
-    await cp(path.join(source, desktop), path.join(destination, "bin", desktop));
-    await ensureBinary(path.join(destination, "bin", desktop), platform.binary !== "mj.exe");
+  if (platform.companions) {
     const worker = platform.binary === "mj.exe" ? "mj-voice-worker.exe" : "mj-voice-worker";
     await cp(path.join(source, worker), path.join(destination, "bin", worker));
     await ensureBinary(path.join(destination, "bin", worker), platform.binary !== "mj.exe");
