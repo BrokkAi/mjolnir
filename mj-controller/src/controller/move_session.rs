@@ -1984,6 +1984,13 @@ impl Controller {
         manager: &SessionManagerControl,
     ) -> Result<()> {
         let id = operation.selection.session_id.clone();
+        // Record the destination phase before the record leaves `Closing`, so
+        // a daemon that stops during this retry leaves a state that startup
+        // retries again: `ClosingSource` with an `Error` record does not.
+        operation.phase = MovePhase::ResumingDestination;
+        operation.recovery_session = Some(previous.clone());
+        operation.updated_at = now();
+        crate::database::save_move_operation(operation)?;
         self.retain_failed_in_place_move(
             &id,
             previous,

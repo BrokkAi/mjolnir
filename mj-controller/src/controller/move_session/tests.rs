@@ -5168,21 +5168,24 @@ fn in_place_move_recovery_after_restart_before_swap_finishes_the_close() {
 
 /// Where the daemon died in W-2: right after the source was sealed
 /// (`suspending`), after the Move recorded the destination phase but before
-/// the swap changed the record (still `suspending`), or while the destination
-/// harness was being installed (`starting`).
+/// the swap changed the record (still `suspending`), while the destination
+/// harness was being installed (`starting`), or while an earlier recovery was
+/// setting up its retry (`error`, with the destination phase recorded).
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug)]
 enum DaemonKill {
     Suspending,
     SealedBeforeSwap,
     Starting,
+    RetryRetained,
 }
 
 #[cfg(unix)]
-const DAEMON_KILLS: [DaemonKill; 3] = [
+const DAEMON_KILLS: [DaemonKill; 4] = [
     DaemonKill::Suspending,
     DaemonKill::SealedBeforeSwap,
     DaemonKill::Starting,
+    DaemonKill::RetryRetained,
 ];
 
 /// One daemon lifetime that seals an in-place Move's source and then dies at
@@ -5239,7 +5242,7 @@ fn in_place_move_killed_at(
             .archive_path
             .starts_with(mj_core::config::sessions_dir())
     );
-    if let DaemonKill::SealedBeforeSwap | DaemonKill::Starting = kill {
+    if let DaemonKill::SealedBeforeSwap | DaemonKill::Starting | DaemonKill::RetryRetained = kill {
         // What `execute_move` persisted before the swap: the destination
         // phase and the sealed source identity.
         operation.phase = MovePhase::ResumingDestination;
@@ -5256,6 +5259,17 @@ fn in_place_move_killed_at(
             .unwrap();
         record.state = SessionState::Provisioning;
         record.last_profile = IN_PLACE_DESTINATION_PROFILE.into();
+        crate::database::save_session(record).unwrap();
+    }
+    if let DaemonKill::RetryRetained = kill {
+        // What the automatic retry persisted before the kill: the source
+        // identity in `Error`, with its environment retained for the restore.
+        let record = controller
+            .state
+            .sessions
+            .get_mut(LATCH_RELAY_SESSION)
+            .unwrap();
+        record.state = SessionState::Error;
         crate::database::save_session(record).unwrap();
     }
     operation
