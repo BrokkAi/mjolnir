@@ -19,6 +19,7 @@ pub enum HarnessKind {
     Muse,
     OpenCode,
     Dsh,
+    Antigravity,
 }
 
 /// The operating system of the machine a harness's own CLI runs on, as far as
@@ -486,7 +487,7 @@ impl HarnessKind {
         }
     }
 
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Codex,
         Self::Claude,
         Self::Kimi,
@@ -494,6 +495,7 @@ impl HarnessKind {
         Self::Muse,
         Self::OpenCode,
         Self::Dsh,
+        Self::Antigravity,
     ];
 
     /// Environment variable used to isolate this harness's configuration.
@@ -509,6 +511,7 @@ impl HarnessKind {
             // sessions and would otherwise default to `.dsh-acp` inside the
             // directory it runs in.
             Self::Dsh => "DSH_ACP_DATA_DIR",
+            Self::Antigravity => "MJ_ANTIGRAVITY_HOME",
         }
     }
 
@@ -527,6 +530,7 @@ impl HarnessKind {
             // serves a session is installed on demand and proves nothing
             // about one.
             Self::Dsh => ".dsh",
+            Self::Antigravity => ".gemini",
         }
     }
 
@@ -550,6 +554,7 @@ impl HarnessKind {
             // authenticates with an API key and nothing that decides a login
             // reads this. No dsh-acp release writes the file.
             Self::Dsh => "auth.json",
+            Self::Antigravity => "antigravity-cli/antigravity-oauth-token",
         }
     }
 
@@ -567,9 +572,13 @@ impl HarnessKind {
     pub const fn api_key_variable(self) -> Option<&'static str> {
         match self {
             Self::Dsh => Some("DEEPSEEK_API_KEY"),
-            Self::Codex | Self::Claude | Self::Kimi | Self::Grok | Self::Muse | Self::OpenCode => {
-                None
-            }
+            Self::Codex
+            | Self::Claude
+            | Self::Kimi
+            | Self::Grok
+            | Self::Muse
+            | Self::OpenCode
+            | Self::Antigravity => None,
         }
     }
 
@@ -588,9 +597,13 @@ impl HarnessKind {
                     "the target's permission mode decides it",
                 ),
             ],
-            Self::Codex | Self::Claude | Self::Kimi | Self::Grok | Self::Muse | Self::OpenCode => {
-                &[]
-            }
+            Self::Codex
+            | Self::Claude
+            | Self::Kimi
+            | Self::Grok
+            | Self::Muse
+            | Self::OpenCode
+            | Self::Antigravity => &[],
         }
     }
 
@@ -620,6 +633,7 @@ impl HarnessKind {
             // serve sessions: a machine carrying the bridge but no DeepSeek
             // installation has nothing to detect.
             Self::Dsh => "dsh",
+            Self::Antigravity => "agy",
         }
     }
 
@@ -629,9 +643,13 @@ impl HarnessKind {
             Self::Claude => "CLAUDE.md",
             // dsh-acp reads AGENTS.md from its data directory and workspace
             // roots ([`crate::harness_runtime::dsh_acp_script`]).
-            Self::Codex | Self::Kimi | Self::Grok | Self::Muse | Self::OpenCode | Self::Dsh => {
-                "AGENTS.md"
-            }
+            Self::Codex
+            | Self::Kimi
+            | Self::Grok
+            | Self::Muse
+            | Self::OpenCode
+            | Self::Dsh
+            | Self::Antigravity => "AGENTS.md",
         }
     }
 
@@ -649,7 +667,8 @@ impl HarnessKind {
             | Self::Grok
             | Self::Muse
             | Self::OpenCode
-            | Self::Dsh => &["skills"],
+            | Self::Dsh
+            | Self::Antigravity => &["skills"],
         }
     }
 
@@ -671,7 +690,12 @@ impl HarnessKind {
         match self {
             Self::Claude => &["skills/synced", "skills/.trash"],
             Self::Codex => &["skills/.system"],
-            Self::Kimi | Self::Grok | Self::Muse | Self::OpenCode | Self::Dsh => &[],
+            Self::Kimi
+            | Self::Grok
+            | Self::Muse
+            | Self::OpenCode
+            | Self::Dsh
+            | Self::Antigravity => &[],
         }
     }
 
@@ -685,6 +709,7 @@ impl HarnessKind {
             Self::Muse => "muse",
             Self::OpenCode => "opencode",
             Self::Dsh => "dsh",
+            Self::Antigravity => "antigravity",
         }
     }
 
@@ -698,6 +723,7 @@ impl HarnessKind {
             Self::Muse => "Muse Code",
             Self::OpenCode => "OpenCode",
             Self::Dsh => "DSH",
+            Self::Antigravity => "Antigravity",
         }
     }
 
@@ -736,6 +762,29 @@ impl HarnessKind {
         policy: ExecutionPolicy,
     ) -> Option<ExecutionEnforcement> {
         match (self, policy) {
+            (Self::Antigravity, policy) => Some(ExecutionEnforcement {
+                label: if policy.is_unconstrained() {
+                    "auto / skip-permissions"
+                } else {
+                    "default"
+                },
+                acp_mode: Some(if policy.is_unconstrained() {
+                    "auto"
+                } else {
+                    "default"
+                }),
+                acp_mode_selector: None,
+                acp_setting: None,
+                launch_flag: if policy.is_unconstrained() {
+                    Some("--dangerously-skip-permissions")
+                } else {
+                    None
+                },
+                launch_environment: None,
+                launch_argument: None,
+                session_sandbox: None,
+                staged_setting: None,
+            }),
             (Self::Muse, ExecutionPolicy::Unconstrained) => Some(ExecutionEnforcement {
                 // Isolated targets run Muse without permission checks, like
                 // OpenCode's `permission = "allow"`: `allowAll` emits no
@@ -1038,7 +1087,12 @@ impl HarnessKind {
         match self {
             Self::Claude => Some(".claude.json"),
             Self::Kimi => Some("mcp.json"),
-            Self::Codex | Self::Grok | Self::Muse | Self::OpenCode | Self::Dsh => None,
+            Self::Codex
+            | Self::Grok
+            | Self::Muse
+            | Self::OpenCode
+            | Self::Dsh
+            | Self::Antigravity => None,
         }
     }
 
@@ -1051,7 +1105,7 @@ impl HarnessKind {
     pub const fn supports_delegation_tools(self) -> bool {
         matches!(
             self,
-            Self::Claude | Self::Codex | Self::Dsh | Self::OpenCode
+            Self::Claude | Self::Codex | Self::Dsh | Self::OpenCode | Self::Antigravity
         )
     }
 
@@ -1061,14 +1115,17 @@ impl HarnessKind {
     /// `supports_delegation_tools`, which OpenCode satisfies without having
     /// the gate.
     pub const fn supports_review_gate(self) -> bool {
-        matches!(self, Self::Claude | Self::Codex | Self::Dsh)
+        matches!(
+            self,
+            Self::Claude | Self::Codex | Self::Dsh | Self::Antigravity
+        )
     }
 
     /// Whether the harness has sub-agents of its own, which the Native
     /// delegation choice keeps. dsh-acp has none, so Native would do nothing
     /// for DSH and is not offered there.
     pub const fn has_native_subagents(self) -> bool {
-        !matches!(self, Self::Dsh)
+        !matches!(self, Self::Dsh | Self::Antigravity)
     }
 
     /// The harness-home-relative directories that hold its native session
@@ -1081,6 +1138,7 @@ impl HarnessKind {
             Self::Muse => &[".data/muse/sessions"],
             Self::OpenCode => &[".data/opencode"],
             Self::Dsh => &["sessions"],
+            Self::Antigravity => &[], // Native checkpoint export is not supported yet.
         }
     }
 
@@ -1098,7 +1156,12 @@ impl HarnessKind {
         match self {
             Self::Grok => Some("bin/agent"),
             Self::Claude => Some("node_modules/.bin/claude"),
-            Self::Codex | Self::Kimi | Self::Muse | Self::OpenCode | Self::Dsh => None,
+            Self::Codex
+            | Self::Kimi
+            | Self::Muse
+            | Self::OpenCode
+            | Self::Dsh
+            | Self::Antigravity => None,
         }
     }
 
@@ -1111,6 +1174,10 @@ impl HarnessKind {
             Self::Kimi => vec!["acp"],
             Self::Grok => ["agent"].into_iter().chain(flag).chain(["stdio"]).collect(),
             Self::OpenCode => vec!["acp"],
+            Self::Antigravity => ["acp", "--disable-telemetry"]
+                .into_iter()
+                .chain(flag)
+                .collect(),
         }
     }
 }

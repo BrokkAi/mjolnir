@@ -216,7 +216,7 @@ impl AcpSessionSurface {
         // none) rather than a mode named here.
         if matches!(
             self.harness_kind,
-            Some(HarnessKind::Claude | HarnessKind::Kimi)
+            Some(HarnessKind::Claude | HarnessKind::Kimi | HarnessKind::Antigravity)
         ) && !active
         {
             self.sync_plan_mode();
@@ -249,7 +249,7 @@ impl AcpSessionSurface {
         // none) rather than a mode named here.
         if matches!(
             self.harness_kind,
-            Some(HarnessKind::Claude | HarnessKind::Kimi)
+            Some(HarnessKind::Claude | HarnessKind::Kimi | HarnessKind::Antigravity)
         ) && !active
         {
             return self
@@ -287,7 +287,7 @@ impl AcpSessionSurface {
                     value: value.into(),
                 })
                 .ok_or(PlanControlError::CodexIncompatible),
-            Some(HarnessKind::Claude | HarnessKind::Kimi) => {
+            Some(HarnessKind::Claude | HarnessKind::Kimi | HarnessKind::Antigravity) => {
                 if self.exact_config_has_plan_pair("mode") {
                     Ok(PlanControl::SetConfig {
                         key: "mode".into(),

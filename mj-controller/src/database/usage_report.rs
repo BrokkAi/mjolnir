@@ -288,7 +288,8 @@ mod tests {
         connection.execute_batch(
             "DROP INDEX session_turn_usage_completed_time;
              DROP INDEX materialized_sessions_active_usage;
-             DELETE FROM schema_migrations WHERE version=125;
+             DELETE FROM schema_migrations WHERE version>=125;
+             UPDATE schema_compatibility SET minimum_compatible_version=124;
              PRAGMA user_version=124;",
         )?;
         let mut turn = super::super::turn_outcome::tests::legacy_turns().remove(0);
@@ -301,7 +302,8 @@ mod tests {
             [&body],
         )?;
         schema::migrate_schema(&connection)?;
-        schema::read_schema_state(&connection)?.ensure_supported_by(124)?;
+        schema::read_schema_state(&connection)?
+            .ensure_supported_by(super::super::SCHEMA_VERSION)?;
 
         let read = || -> Result<(Vec<String>, i32)> {
             let mut statement = connection.prepare(REPORT_TURNS_SQL)?;

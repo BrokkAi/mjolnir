@@ -191,6 +191,7 @@ pub(super) fn profile_configuration_paths(harness: HarnessKind) -> Vec<&'static 
         mj_core::config::HarnessKind::OpenCode => &["opencode.json", "opencode.jsonc"],
         // dsh-acp keeps no configuration or login of its own; only the
         // instruction file and skills tree below are staged.
+        mj_core::config::HarnessKind::Antigravity => &["antigravity-cli/antigravity-oauth-token"],
         mj_core::config::HarnessKind::Dsh => &[],
     };
     harness_files

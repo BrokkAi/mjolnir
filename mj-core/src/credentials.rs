@@ -336,6 +336,11 @@ impl HarnessKind {
     /// Read [`credential_freshness`] out of this harness's own credential JSON.
     pub fn credential_freshness_ms(self, json: &serde_json::Value) -> Option<i64> {
         match self {
+            Self::Antigravity => {
+                chrono::DateTime::parse_from_rfc3339(json.get("token")?.get("expiry")?.as_str()?)
+                    .ok()
+                    .map(|expiry| expiry.timestamp_millis())
+            }
             Self::Claude => json.get("claudeAiOauth")?.get("expiresAt")?.as_i64(),
             Self::Codex => {
                 let last_refresh = json.get("last_refresh")?.as_str()?;
@@ -376,7 +381,7 @@ impl HarnessKind {
             Self::Muse => muse_login_expiry_ms(json),
             // None of these has a proactive-refresh path, so none reports an
             // expiry Hel would act on: each refreshes its own tokens on demand.
-            Self::Grok | Self::OpenCode | Self::Dsh => None,
+            Self::Grok | Self::OpenCode | Self::Dsh | Self::Antigravity => None,
         }
     }
 
@@ -393,6 +398,7 @@ impl HarnessKind {
             // dsh-acp has no login; its profiles authenticate with an API
             // key, so `login_command` refuses before this is reached.
             Self::Dsh => Vec::new(),
+            Self::Antigravity => vec!["acp".into(), "--login".into(), "--disable-telemetry".into()],
         };
         (self.cli_binary_name().to_owned(), arguments)
     }
@@ -753,7 +759,15 @@ pub fn login_command(profile: &HarnessProfile) -> Result<(String, Vec<String>)> 
 /// exists, where "this profile needs no login" is not a useful answer: it only
 /// wants the program name to run `--version` against.
 pub fn native_login_command(profile: &HarnessProfile) -> (String, Vec<String>) {
-    profile.kind.native_login_command()
+    let (command, mut args) = profile.kind.native_login_command();
+    if profile.kind == HarnessKind::Antigravity {
+        // agy selects its login with an argument, not our staging variable.
+        args.extend([
+            "--gemini-dir".into(),
+            crate::target_path::text(&profile.home),
+        ]);
+    }
+    (command, args)
 }
 
 /// One live session the coordinator may reconcile with its profile.

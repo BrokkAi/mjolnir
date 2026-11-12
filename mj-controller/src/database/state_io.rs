@@ -174,8 +174,8 @@ pub(super) fn load_state_with(connection: &Connection) -> Result<State> {
         // sub-agent spawn came to be refused with "sub-agent ... has no child
         // session" long after the child in question was gone (#1065). The load
         // already skips a session whose harness it cannot parse; a relation
-        // that pointed at such a session is the same kind of residue, and
-        // `save_state_to` deletes these rows on the next save.
+        // that points at such a session is also omitted from memory.
+        // Snapshot saves preserve relations whose endpoints were not loaded.
         let missing = if !state.sessions.contains_key(&child_id) {
             Some("child")
         } else if !state.sessions.contains_key(&record.parent_session_id) {
@@ -263,12 +263,6 @@ pub fn save_state_to(path: &Path, state: &State) -> Result<()> {
     let mut connection = open(path)?;
     let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let existing_contexts = existing_contexts(&tx)?;
-    let existing_sessions = {
-        let mut statement = tx.prepare("SELECT session_id FROM sessions")?;
-        statement
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-    };
     tx.execute(
         "DELETE FROM subagent_sessions
          WHERE child_session_id NOT IN (SELECT session_id FROM sessions)
@@ -285,9 +279,9 @@ pub fn save_state_to(path: &Path, state: &State) -> Result<()> {
             .collect::<rusqlite::Result<Vec<_>>>()?
     };
     for (child_id, parent_id) in existing_subagents {
-        if !state.subagents.contains_key(&child_id)
-            || !state.sessions.contains_key(&child_id)
-            || !state.sessions.contains_key(&parent_id)
+        if state.sessions.contains_key(&child_id)
+            && state.sessions.contains_key(&parent_id)
+            && !state.subagents.contains_key(&child_id)
         {
             tx.execute(
                 "DELETE FROM subagent_sessions WHERE child_session_id = ?1",
@@ -301,11 +295,9 @@ pub fn save_state_to(path: &Path, state: &State) -> Result<()> {
          WHERE child_session_id NOT IN (SELECT child_session_id FROM subagent_sessions)",
         [],
     )?;
-    for session_id in existing_sessions {
-        if !state.sessions.contains_key(&session_id) {
-            tx.execute("DELETE FROM sessions WHERE session_id = ?1", [session_id])?;
-        }
-    }
+    // A snapshot owns only the records it contains. Absence is not a deletion
+    // request: unsupported or concurrently inserted sessions were never loaded.
+    // Operational deletion goes through delete_session_from instead.
     tx.execute("DELETE FROM mount_history", [])?;
     tx.execute("DELETE FROM host_container_sizes", [])?;
     for session in state.sessions.values() {

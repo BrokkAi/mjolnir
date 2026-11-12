@@ -48,6 +48,7 @@ pub(super) const fn tool_name(kind: HarnessKind) -> &'static str {
         HarnessKind::Muse => "muse",
         HarnessKind::OpenCode => "opencode",
         HarnessKind::Dsh => "dsh",
+        HarnessKind::Antigravity => "antigravity",
     }
 }
 
@@ -70,7 +71,7 @@ fn adapted_tool_name(kind: HarnessKind) -> Option<&'static str> {
         // rather than transcripts this adapter could index.
         HarnessKind::OpenCode => None,
         // No adapter reads dsh-acp's session records yet.
-        HarnessKind::Dsh => None,
+        HarnessKind::Dsh | HarnessKind::Antigravity => None,
     }
 }
 

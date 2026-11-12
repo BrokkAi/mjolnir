@@ -791,6 +791,36 @@ mod tests {
         assert_eq!(allowed.efforts.len(), 1);
     }
 
+    #[test]
+    #[ignore = "requires MJ_ANTIGRAVITY_TEST_HOME with a copied Google login and MJ_WORKER_BINARY pointing to the current mj-worker build"]
+    fn live_antigravity_profile_discovery_reads_base_models_and_efforts() {
+        let home = std::path::PathBuf::from(
+            std::env::var_os("MJ_ANTIGRAVITY_TEST_HOME").expect("set copied Google login home"),
+        );
+        let profile = HarnessProfile::new(mj_core::config::HarnessKind::Antigravity, home);
+        let choices = probe_profile(
+            "antigravity-discovery-test",
+            &profile,
+            Default::default(),
+            None,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .unwrap();
+        assert!(
+            choices
+                .models
+                .iter()
+                .any(|choice| choice.value == "gemini-3.8-flash")
+        );
+        assert!(choices.efforts.iter().any(|choice| choice.value == "low"));
+        assert!(
+            !choices
+                .models
+                .iter()
+                .any(|choice| choice.value == "gemini-4-carbon-high")
+        );
+    }
+
     // Hard-won: #1284: discovery staged Muse credentials outside its XDG home.
     #[test]
     #[ignore = "requires MJ_MUSE_TEST_HOME with a Muse login and MJ_WORKER_BINARY pointing to the current mj-worker build; discovers models without a provider turn"]

@@ -89,9 +89,9 @@ pub(super) async fn handle_action(
             Ok(DaemonReply::FirstRunSetup(report))
         }
         DaemonAction::RunDoctor => {
-            let errors = blocking(|| {
-                // Daemon-owned work is bounded: one deadline per probe, as
-                // `mj doctor` and `mj setup` have.
+            // Not `blocking`: the doctor only reads, so it takes no upgrade
+            // admission, and a handoff abandons it instead of waiting for it.
+            let errors = tokio::task::spawn_blocking(|| {
                 let executor = crate::doctor::probe_executor();
                 let checks = crate::doctor::run_with_config_path(
                     &mj_core::config::config_path(),
@@ -99,9 +99,10 @@ pub(super) async fn handle_action(
                     crate::doctor::current_apple_platform(&executor),
                     crate::doctor::DoctorOptions { smoke: false },
                 );
-                Ok(crate::setup::actionable_errors(&checks))
+                crate::setup::actionable_errors(&checks)
             })
-            .await?;
+            .await
+            .context("daemon doctor task panicked")?;
             Ok(DaemonReply::DoctorErrors(errors))
         }
         DaemonAction::NewSessionRemoteRepairs {
@@ -1117,6 +1118,8 @@ pub(super) fn upgrade_request_activity(
             | DaemonAction::WarmProfileCapabilities { .. }
             | DaemonAction::ProjectCatalog { .. }
             | DaemonAction::ImportSession { .. }
+            // Read-only and repeatable; the client reports an interrupted run.
+            | DaemonAction::RunDoctor
     ) {
         Ok(None)
     } else {
