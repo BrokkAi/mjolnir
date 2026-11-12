@@ -100,7 +100,13 @@ impl DurableRelay {
     pub(super) fn suppress_child_assessment(&mut self) -> Result<()> {
         if self.managed_subagent {
             self.replied_verdict = RepliedVerdictState::default();
-            if let Some(mut assessment) = self.snapshot.assessment.clone().filter(|a| a.current()) {
+            if let Some(mut assessment) = self
+                .snapshot
+                .assessment
+                .as_deref()
+                .cloned()
+                .filter(|a| a.current())
+            {
                 assessment.status = mj_core::assessment::Status::Superseded;
                 assessment.reason = "managed_subagent".into();
                 assessment.retry_at_ms = None;
@@ -129,7 +135,7 @@ impl DurableRelay {
             return self.suppress_child_assessment();
         }
         self.reclassify_assessment_with_generated_authorization()?;
-        if let Some(mut a) = self.snapshot.assessment.clone().filter(|a| {
+        if let Some(mut a) = self.snapshot.assessment.as_deref().cloned().filter(|a| {
             a.current()
                 && matches!(
                     a.action,
@@ -148,10 +154,16 @@ impl DurableRelay {
             }
         }
         self.reask_background_after_restart()?;
-        if let Some(mut assessment) = self.snapshot.assessment.clone().filter(|assessment| {
-            assessment.status == mj_core::assessment::Status::Failed
-                && assessment.needs_classification(epoch_millis())
-        }) {
+        if let Some(mut assessment) =
+            self.snapshot
+                .assessment
+                .as_deref()
+                .cloned()
+                .filter(|assessment| {
+                    assessment.status == mj_core::assessment::Status::Failed
+                        && assessment.needs_classification(epoch_millis())
+                })
+        {
             // A failed request stays failed during backoff. Requeueing it is
             // the durable transition that makes the next check pending again.
             assessment.status = mj_core::assessment::Status::Pending;
@@ -162,7 +174,8 @@ impl DurableRelay {
         let Some(mut a) = self
             .snapshot
             .assessment
-            .clone()
+            .as_deref()
+            .cloned()
             .filter(|a| a.needs_classification(epoch_millis()) && a.evidence.is_none())
         else {
             return Ok(());
@@ -206,7 +219,7 @@ impl DurableRelay {
         if self.verdict_harness.is_none() || self.background_commands().is_empty() {
             return Ok(());
         }
-        let Some(mut a) = self.snapshot.assessment.clone().filter(|a| {
+        let Some(mut a) = self.snapshot.assessment.as_deref().cloned().filter(|a| {
             a.current()
                 && a.status == mj_core::assessment::Status::Assessed
                 && self.replied_verdict.asked_turn.as_ref()
@@ -232,7 +245,7 @@ impl DurableRelay {
     /// way a seeded history does it.
     #[cfg_attr(not(unix), allow(dead_code))]
     fn reclassify_assessment_with_generated_authorization(&mut self) -> Result<()> {
-        let Some(mut a) = self.snapshot.assessment.clone().filter(|a| {
+        let Some(mut a) = self.snapshot.assessment.as_deref().cloned().filter(|a| {
             a.current()
                 && !matches!(
                     a.action,
@@ -286,7 +299,7 @@ impl DurableRelay {
 
     #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn store_question_target(&mut self, revision: u64, stable_id: &str) -> Result<bool> {
-        let Some(mut assessment) = self.snapshot.assessment.clone().filter(|a| {
+        let Some(mut assessment) = self.snapshot.assessment.as_deref().cloned().filter(|a| {
             a.revision == revision
                 && a.current()
                 && a.action == Some(mj_core::assessment::Action::AwaitInput)
@@ -309,7 +322,8 @@ impl DurableRelay {
         let Some(mut a) = self
             .snapshot
             .assessment
-            .clone()
+            .as_deref()
+            .cloned()
             .filter(|a| a.revision == ordinal && a.current())
         else {
             return Ok("stale_turn");
@@ -403,7 +417,8 @@ impl DurableRelay {
         let Some(mut a) = self
             .snapshot
             .assessment
-            .clone()
+            .as_deref()
+            .cloned()
             .filter(|a| a.revision == ordinal && a.current())
         else {
             return Ok(());
@@ -461,7 +476,8 @@ impl DurableRelay {
         let Some(mut a) = self
             .snapshot
             .assessment
-            .clone()
+            .as_deref()
+            .cloned()
             .filter(|a| a.turn_id == id && a.completed_ordinal == ordinal && a.current())
         else {
             return Ok(false);
@@ -601,7 +617,7 @@ mod tests {
         finish_prompt(&mut relay, "user-turn");
         relay.prepare_pending_assessment().unwrap();
         let assessed = |relay: &DurableRelay, peer: bool| {
-            let mut assessment = relay.snapshot.assessment.clone().unwrap();
+            let mut assessment = relay.snapshot.assessment.as_deref().cloned().unwrap();
             let mut evidence = relay.turn_context.evidence(
                 HarnessKind::Claude,
                 TurnPhase::Replied,
@@ -666,7 +682,7 @@ mod tests {
         finish_prompt(&mut relay, "question-turn");
         relay.prepare_pending_assessment().unwrap();
         let (revision, _, _) = relay.pending_replied_verdict().unwrap();
-        let mut assessment = relay.snapshot.assessment.clone().unwrap();
+        let mut assessment = relay.snapshot.assessment.as_deref().cloned().unwrap();
         let mut evidence = relay.turn_context.evidence(
             HarnessKind::Claude,
             TurnPhase::Replied,
@@ -737,7 +753,7 @@ mod tests {
         );
         assert!(!relay.store_question_target(revision, "agent:two").unwrap());
 
-        let mut one_reply = relay.snapshot.assessment.clone().unwrap();
+        let mut one_reply = relay.snapshot.assessment.as_deref().cloned().unwrap();
         one_reply.question_message = None;
         one_reply
             .evidence
@@ -761,12 +777,12 @@ mod tests {
             mj_core::assessment::Action::Finished,
             mj_core::assessment::Action::Wait,
         ] {
-            let mut non_input = relay.snapshot.assessment.clone().unwrap();
+            let mut non_input = relay.snapshot.assessment.as_deref().cloned().unwrap();
             non_input.action = Some(action);
             relay.store_assessment(non_input).unwrap();
             assert!(relay.question_locator_request(revision).is_none());
         }
-        let mut other_failure = relay.snapshot.assessment.clone().unwrap();
+        let mut other_failure = relay.snapshot.assessment.as_deref().cloned().unwrap();
         other_failure.action = Some(mj_core::assessment::Action::AwaitInput);
         other_failure.verdict.as_mut().unwrap().input.choice = Input::None;
         other_failure.verdict.as_mut().unwrap().failure.choice = Failure::Other;

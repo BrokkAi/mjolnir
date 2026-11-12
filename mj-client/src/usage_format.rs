@@ -1091,7 +1091,7 @@ mod tests {
             ),
         ] {
             assessment.status = status;
-            snapshot.assessment = Some(assessment.clone());
+            snapshot.assessment = Some(std::sync::Arc::new(assessment.clone()));
             let operational: mj_core::relay::RelayOperationalState =
                 serde_json::from_value(serde_json::to_value(snapshot.operational_state()).unwrap())
                     .unwrap();

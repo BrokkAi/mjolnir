@@ -17,7 +17,13 @@ fn completed(relay: &mut DurableRelay, id: &str) {
     authorize(relay, mj_core::assessment::Action::Continue);
 }
 fn authorize(relay: &mut DurableRelay, action: mj_core::assessment::Action) {
-    if let Some(mut a) = relay.snapshot.assessment.clone().filter(|a| a.current()) {
+    if let Some(mut a) = relay
+        .snapshot
+        .assessment
+        .as_deref()
+        .cloned()
+        .filter(|a| a.current())
+    {
         a.action = Some(action);
         a.status = mj_core::assessment::Status::Deferred;
         relay

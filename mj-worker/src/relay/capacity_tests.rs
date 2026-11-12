@@ -460,11 +460,7 @@ fn stored_evidence_is_refit_to_the_request_limit_before_sending() {
         role: "assistant".into(),
         text: "a".repeat(2700),
     }));
-    let stored = relay
-        .snapshot
-        .assessment
-        .as_mut()
-        .unwrap()
+    let stored = std::sync::Arc::make_mut(relay.snapshot.assessment.as_mut().unwrap())
         .evidence
         .as_mut()
         .unwrap();
@@ -504,12 +500,12 @@ fn classification_transport_backoff_and_diagnostics_survive_restart() {
     relay
         .fail_turn_assessment(revision, "transport_failed")
         .unwrap();
-    let a = relay.snapshot.assessment.clone().unwrap();
+    let a = relay.snapshot.assessment.as_deref().cloned().unwrap();
     assert!(!a.needs_classification(a.retry_at_ms.unwrap() - 1));
     assert!(a.needs_classification(a.retry_at_ms.unwrap()));
     drop(relay);
     let mut relay = open(root.path());
-    assert_eq!(relay.snapshot.assessment.as_ref().unwrap(), &a);
+    assert_eq!(relay.snapshot.assessment.as_deref().unwrap(), &a);
     assert!(relay.pending_replied_verdict().is_none());
     assert_eq!(a.evidence, Some(evidence.clone()));
     let id = format!("assessment-{SESSION}-{revision}");
@@ -519,7 +515,7 @@ fn classification_transport_backoff_and_diagnostics_survive_restart() {
     assert_eq!(page.decisions[0].action, "transport failed");
 
     relay.prepare_pending_assessment().unwrap();
-    assert_eq!(relay.snapshot.assessment.as_ref().unwrap(), &a);
+    assert_eq!(relay.snapshot.assessment.as_deref().unwrap(), &a);
     let mut due = a.clone();
     due.retry_at_ms = Some(0);
     relay
@@ -528,7 +524,7 @@ fn classification_transport_backoff_and_diagnostics_survive_restart() {
         })
         .unwrap();
     relay.prepare_pending_assessment().unwrap();
-    let pending = relay.snapshot.assessment.clone().unwrap();
+    let pending = relay.snapshot.assessment.as_deref().cloned().unwrap();
     assert_eq!(pending.status, mj_core::assessment::Status::Pending);
     assert_eq!(pending.retry_at_ms, None);
     assert_eq!(pending.failures, a.failures);
@@ -538,7 +534,7 @@ fn classification_transport_backoff_and_diagnostics_survive_restart() {
     assert!(relay.pending_replied_verdict().is_none());
     drop(relay);
     let mut relay = open(root.path());
-    assert_eq!(relay.snapshot.assessment.as_ref().unwrap(), &pending);
+    assert_eq!(relay.snapshot.assessment.as_deref().unwrap(), &pending);
     assert!(relay.pending_replied_verdict().is_some());
 }
 
@@ -557,7 +553,7 @@ fn a_checkpoint_seed_preserves_pending_assessment_and_full_authorization() {
     let state = mj_core::assessment::Checkpoint {
         version: 1,
         context: relay.snapshot.assessment_context.as_deref().cloned(),
-        assessment: relay.snapshot.assessment.clone(),
+        assessment: relay.snapshot.assessment.as_deref().cloned(),
         continuation: relay.snapshot.continuation.clone(),
         capacity_retry: relay.snapshot.capacity_retry.clone(),
         turn_completion: relay.snapshot.turn_completion.clone(),

@@ -1189,7 +1189,7 @@ async fn a_prose_question_survives_worker_polling_and_background_projection() {
 
     let mut dashboard = populated_dashboard();
     let mut relay = mj_core::relay::RelaySnapshot::new("session-1".into());
-    relay.assessment = Some(assessment.clone());
+    relay.assessment = Some(std::sync::Arc::new(assessment.clone()));
     let snapshot = mj_core::state::ManagedSessionSnapshot {
         window: mj_core::state::ProjectionWindow::of(&materialized),
         materialized: materialized.clone(),

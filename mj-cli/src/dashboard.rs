@@ -544,7 +544,7 @@ pub(crate) struct DashboardContext {
 /// One worker publication, kept together while background projections coalesce.
 pub(crate) struct MaterializedProjection {
     materialized: MaterializedSession,
-    assessment: Option<Box<mj_core::assessment::TurnAssessment>>,
+    assessment: Option<std::sync::Arc<mj_core::assessment::TurnAssessment>>,
 }
 
 impl From<MaterializedSession> for MaterializedProjection {

@@ -258,7 +258,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 snapshot.capacity_retry = None;
             }
             snapshot.retry_assessment = None;
-            snapshot.assessment = Some((**assessment).clone());
+            snapshot.assessment = Some(std::sync::Arc::new((**assessment).clone()));
         }
         RelayObservation::SteeringUnconfirmed {
             command_id,
@@ -320,7 +320,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             }
         }
         RelayObservation::SessionConfigured { config_options } => {
-            snapshot.config_options = config_options.clone();
+            snapshot.config_options = std::sync::Arc::new(config_options.clone());
         }
         RelayObservation::SessionModesConfigured { modes } => {
             snapshot.modes = modes.clone();
@@ -459,6 +459,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                         .ok_or_else(|| {
                             anyhow!("dismissed question no longer matches the completed turn")
                         })?;
+                    let assessment = Arc::make_mut(assessment);
                     assessment.status = crate::assessment::Status::Superseded;
                     assessment.reason = "question_dismissed".into();
                     assessment.retry_at_ms = None;
@@ -475,6 +476,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                                 )
                             )
                     }) {
+                        let a = Arc::make_mut(a);
                         a.classify_again(event.ordinal);
                         a.failures = 0;
                         a.retry_at_ms = None;
@@ -1375,13 +1377,15 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             {
                 // Physical completion does not depend on a retained user command.
                 // Missing authorization gates nudges, never provider assessment.
-                snapshot.assessment = Some(crate::assessment::TurnAssessment::pending(
-                    crate::continuation::harness_turn_id(turn.first_ordinal),
-                    event.ordinal,
-                    event.recorded_at_ms,
-                    crate::activity::verdict::CompletionEvidence::bounded(
-                        "harness_turn_settled",
-                        None,
+                snapshot.assessment = Some(std::sync::Arc::new(
+                    crate::assessment::TurnAssessment::pending(
+                        crate::continuation::harness_turn_id(turn.first_ordinal),
+                        event.ordinal,
+                        event.recorded_at_ms,
+                        crate::activity::verdict::CompletionEvidence::bounded(
+                            "harness_turn_settled",
+                            None,
+                        ),
                     ),
                 ));
             }
@@ -1436,10 +1440,11 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 snapshot.goal.apply(update)?;
             }
             SessionUpdate::AvailableCommandsUpdate(update) => {
-                snapshot.available_commands = update.available_commands.clone();
+                snapshot.available_commands =
+                    std::sync::Arc::new(update.available_commands.clone());
             }
             SessionUpdate::ConfigOptionUpdate(update) => {
-                snapshot.config_options = update.config_options.clone();
+                snapshot.config_options = std::sync::Arc::new(update.config_options.clone());
             }
             SessionUpdate::CurrentModeUpdate(update) => {
                 if let Some(modes) = snapshot.modes.as_mut() {
@@ -1975,7 +1980,7 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
                 a.status = Status::Superseded;
                 a.reason = "explicit_handoff_or_cancellation".into();
             }
-            snapshot.assessment = Some(a);
+            snapshot.assessment = Some(std::sync::Arc::new(a));
             if let Some(context) = &mut snapshot.assessment_context {
                 Arc::make_mut(context).open_assistant_id = None;
             }
@@ -2006,6 +2011,7 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
             ) || crate::continuation::is_generated_prompt(command_id)
                 || crate::continuation::is_quota_goal_resume(command_id);
             if let Some(a) = &mut snapshot.assessment {
+                let a = std::sync::Arc::make_mut(a);
                 if let RelayCommand::SetQuotaRecovery { recovery, .. } = command {
                     if a.current() && a.action == Some(crate::assessment::Action::RecoverQuota) {
                         a.status = if recovery.as_ref().is_some_and(|r| r.retry_at_ms.is_some()) {
@@ -2043,6 +2049,7 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
         | RelayObservation::Closing
         | RelayObservation::Closed => {
             if let Some(a) = &mut snapshot.assessment {
+                let a = std::sync::Arc::make_mut(a);
                 a.status = Status::Superseded;
                 a.reason = "turn_or_lifecycle_changed".into();
             }

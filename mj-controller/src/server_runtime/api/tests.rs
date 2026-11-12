@@ -876,9 +876,9 @@ fn ready_view(model: &str) -> ManagedSessionView {
         steering_supported: None,
         mailbox_delivery: None,
         turn_controls: None,
-        config_options: vec![option],
+        config_options: vec![option].into(),
         modes: None,
-        available_commands: Vec::new(),
+        available_commands: Vec::new().into(),
         config: BTreeMap::new(),
         active_prompt: None,
         queued_prompts: Vec::new(),
@@ -5894,7 +5894,7 @@ async fn child_provider_retry_keeps_listings_notifications_and_parking_pending()
     snapshot.materialized.applied_event_ordinal = turn.completed_ordinal;
     snapshot.materialized.applied_event_digest = format!("{:064x}", turn.completed_ordinal);
     snapshot.materialized.last_turn_outcome = Some(turn.clone());
-    snapshot.operational.assessment = Some(Box::new(TurnAssessment::pending(
+    snapshot.operational.assessment = Some(std::sync::Arc::new(TurnAssessment::pending(
         turn.command_id.clone(),
         turn.completed_ordinal,
         turn.completed_at_ms,
@@ -5923,7 +5923,7 @@ async fn child_provider_retry_keeps_listings_notifications_and_parking_pending()
     pending(&backend_for(disconnected), "disconnected").await;
 
     let snapshot = view.snapshot.as_mut().unwrap();
-    let assessment = snapshot.operational.assessment.as_mut().unwrap();
+    let assessment = std::sync::Arc::make_mut(snapshot.operational.assessment.as_mut().unwrap());
     assessment.status = Status::Scheduled;
     assessment.action = Some(Action::RetryProvider);
     let mut retry = CapacityRetry::new(1, turn.completed_ordinal, 1);
@@ -5976,7 +5976,7 @@ async fn child_provider_retry_keeps_listings_notifications_and_parking_pending()
     snapshot.materialized.applied_event_digest = format!("{:064x}", 20);
     snapshot.materialized.last_turn_outcome = Some(turn.clone());
     snapshot.operational.capacity_retry = None;
-    snapshot.operational.assessment = Some(Box::new(TurnAssessment::pending(
+    snapshot.operational.assessment = Some(std::sync::Arc::new(TurnAssessment::pending(
         turn.command_id.clone(),
         turn.completed_ordinal,
         turn.completed_at_ms,
@@ -5988,14 +5988,16 @@ async fn child_provider_retry_keeps_listings_notifications_and_parking_pending()
 
     // Classification can decline another retry. That failure must reach the
     // parent, with no earlier notification having consumed its identity.
-    view.snapshot
-        .as_mut()
-        .unwrap()
-        .operational
-        .assessment
-        .as_mut()
-        .unwrap()
-        .status = Status::Assessed;
+    std::sync::Arc::make_mut(
+        view.snapshot
+            .as_mut()
+            .unwrap()
+            .operational
+            .assessment
+            .as_mut()
+            .unwrap(),
+    )
+    .status = Status::Assessed;
     assert!(
         crate::session_manager::DelegationObservation::from_view(&view)
             .unwrap()

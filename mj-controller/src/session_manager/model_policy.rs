@@ -30,8 +30,7 @@ impl SessionModelPolicy {
         else {
             return;
         };
-        let Some(option) = state
-            .config_options
+        let Some(option) = std::sync::Arc::make_mut(&mut state.config_options)
             .iter_mut()
             .find(|option| option.id == id)
         else {

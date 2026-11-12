@@ -633,7 +633,7 @@ pub struct RelayCursor {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RelayOperationalState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assessment: Option<Box<crate::assessment::TurnAssessment>>,
+    pub assessment: Option<Arc<crate::assessment::TurnAssessment>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assessment_context: Option<Arc<crate::assessment::ContextHistory>>,
     /// The latest prompt's completion identity; see `TurnCompletion`.
@@ -734,10 +734,10 @@ pub struct RelayOperationalState {
     /// Actions decided by the worker against its ordered command queue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_controls: Option<TurnControls>,
-    pub config_options: Vec<SessionConfigOption>,
+    pub config_options: Arc<Vec<SessionConfigOption>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modes: Option<SessionModeState>,
-    pub available_commands: Vec<AvailableCommand>,
+    pub available_commands: Arc<Vec<AvailableCommand>>,
     pub config: BTreeMap<String, String>,
     pub active_prompt: Option<ActiveRelayPrompt>,
     pub queued_prompts: Vec<QueuedRelayPrompt>,
@@ -801,6 +801,22 @@ pub struct RelayOperationalState {
 }
 
 impl RelayOperationalState {
+    /// Reuse unchanged payloads after decoding a new worker response.
+    pub fn share_unchanged_fields(&mut self, previous: &Self) {
+        if self.assessment == previous.assessment {
+            self.assessment = previous.assessment.clone();
+        }
+        if self.assessment_context == previous.assessment_context {
+            self.assessment_context = previous.assessment_context.clone();
+        }
+        if self.available_commands == previous.available_commands {
+            self.available_commands = previous.available_commands.clone();
+        }
+        if self.config_options == previous.config_options {
+            self.config_options = previous.config_options.clone();
+        }
+    }
+
     /// Missing initialization advertises no support for image prompts.
     #[must_use]
     pub fn accepts_prompt_images(&self) -> bool {
@@ -1474,7 +1490,7 @@ pub struct RelaySnapshot {
     #[serde(default)]
     pub assessment_questions: std::collections::BTreeSet<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assessment: Option<crate::assessment::TurnAssessment>,
+    pub assessment: Option<Arc<crate::assessment::TurnAssessment>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assessment_context: Option<Arc<crate::assessment::ContextHistory>>,
     /// The latest prompt's completion identity; see `TurnCompletion`.
@@ -1556,10 +1572,10 @@ pub struct RelaySnapshot {
     pub agent_info: Option<Implementation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<crate::harness_runtime::RuntimeReceipt>,
-    pub config_options: Vec<SessionConfigOption>,
+    pub config_options: Arc<Vec<SessionConfigOption>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modes: Option<SessionModeState>,
-    pub available_commands: Vec<AvailableCommand>,
+    pub available_commands: Arc<Vec<AvailableCommand>>,
     pub config: BTreeMap<String, String>,
     pub active_prompt: Option<StoredActiveRelayPrompt>,
     pub queued_prompts: Vec<StoredQueuedRelayCommand>,
@@ -1672,9 +1688,9 @@ impl RelaySnapshot {
             agent_capabilities: None,
             agent_info: None,
             runtime: None,
-            config_options: Vec::new(),
+            config_options: Arc::default(),
             modes: None,
-            available_commands: Vec::new(),
+            available_commands: Arc::default(),
             config: BTreeMap::new(),
             active_prompt: None,
             queued_prompts: Vec::new(),
@@ -1724,7 +1740,7 @@ impl RelaySnapshot {
 
     pub fn operational_state(&self) -> RelayOperationalState {
         RelayOperationalState {
-            assessment: self.assessment.clone().map(Box::new),
+            assessment: self.assessment.clone(),
             assessment_context: self.assessment_context.clone(),
             turn_completion: self.turn_completion.clone(),
             continuation: self.continuation.clone(),

@@ -181,7 +181,7 @@ mod tests {
             .unwrap();
 
         let state = relay.operational_state();
-        assert_eq!(state.config_options, vec![option]);
+        assert_eq!(*state.config_options, vec![option]);
         assert_eq!(state.config["mode"], "plan");
         assert_eq!(
             state.modes.unwrap().current_mode_id.to_string(),
@@ -224,6 +224,33 @@ mod tests {
         let mut history = mj_core::assessment::ContextHistory::default();
         history.user("prompt", &[]);
         state.assessment_context = Some(std::sync::Arc::new(history.clone()));
+        state.assessment = Some(std::sync::Arc::new(
+            mj_core::assessment::TurnAssessment::pending(
+                "turn".into(),
+                1,
+                2,
+                mj_core::activity::verdict::CompletionEvidence::bounded("test", None),
+            ),
+        ));
+        state.available_commands = std::sync::Arc::new(vec![AvailableCommand::new("help", "Help")]);
+        state.config_options = std::sync::Arc::new(vec![SessionConfigOption::select(
+            "thinking",
+            "Thinking",
+            "on",
+            vec![SessionConfigSelectOption::new("on", "On")],
+        )]);
+        assert_eq!(
+            serde_json::to_string(&state.assessment).unwrap(),
+            serde_json::to_string(&state.assessment.as_deref().cloned().map(Box::new)).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_string(&state.available_commands).unwrap(),
+            serde_json::to_string(state.available_commands.as_ref()).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_string(&state.config_options).unwrap(),
+            serde_json::to_string(state.config_options.as_ref()).unwrap()
+        );
         let mut encoded = serde_json::to_value(&state).unwrap();
         // Arc and the older Box/owned representation must encode identically.
         assert_eq!(
@@ -232,6 +259,23 @@ mod tests {
         );
         let round_trip: RelayOperationalState = serde_json::from_value(encoded.clone()).unwrap();
         assert_eq!(round_trip, state);
+        let mut next = round_trip;
+        next.acp_ready = Some(true);
+        next.share_unchanged_fields(&state);
+        assert!(std::sync::Arc::ptr_eq(
+            next.assessment.as_ref().unwrap(),
+            state.assessment.as_ref().unwrap()
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            &next.available_commands,
+            &state.available_commands
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            &next.config_options,
+            &state.config_options
+        ));
+        std::sync::Arc::make_mut(&mut next.available_commands).clear();
+        assert_eq!(state.available_commands.len(), 1);
         encoded.as_object_mut().unwrap().remove("acp_ready");
 
         let restored: RelayOperationalState = serde_json::from_value(encoded).unwrap();

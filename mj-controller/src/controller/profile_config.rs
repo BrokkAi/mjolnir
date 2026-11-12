@@ -1506,9 +1506,10 @@ mod tests {
                         ]),
                     )
                     .category(SessionConfigOptionCategory::ThoughtLevel),
-                ],
+                ]
+                .into(),
                 modes: None,
-                available_commands: Vec::new(),
+                available_commands: Vec::new().into(),
                 config: BTreeMap::new(),
                 active_prompt: None,
                 queued_prompts: Vec::new(),

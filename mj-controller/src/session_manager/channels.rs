@@ -328,7 +328,7 @@ pub(crate) struct CoalescedUpdateSender {
     pub(crate) pending_observations:
         Arc<Mutex<BTreeMap<String, mj_core::snapshot_map::SharedSnapshot<RelayOperationalState>>>>,
     pub(super) last_raw_options:
-        Arc<Mutex<Option<Vec<agent_client_protocol::v1::schema::SessionConfigOption>>>>,
+        Arc<Mutex<Option<Arc<Vec<agent_client_protocol::v1::schema::SessionConfigOption>>>>>,
     pub(super) model_policies: watch::Sender<BTreeMap<String, SessionModelPolicy>>,
     pub(super) cpu: watch::Sender<SessionCpuTable>,
     producers: Arc<Mutex<BTreeMap<String, Arc<()>>>>,

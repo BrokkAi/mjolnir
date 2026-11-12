@@ -649,7 +649,7 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
         steering_supported: None,
         mailbox_delivery: None,
         turn_controls: None,
-        config_options: Vec::new(),
+        config_options: Vec::new().into(),
         modes: Some(SessionModeState::new(
             "default",
             vec![
@@ -663,7 +663,8 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
             ),
             AvailableCommand::new("Review", "agent collision"),
             AvailableCommand::new("INSPECT", "duplicate agent command"),
-        ],
+        ]
+        .into(),
         config: std::collections::BTreeMap::new(),
         active_prompt: None,
         queued_prompts: Vec::new(),
@@ -805,7 +806,7 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
         (Vec::new(), false),
     ] {
         let offers_config = !options.is_empty();
-        operational.get_mut("session-1").unwrap().config_options = options;
+        operational.get_mut("session-1").unwrap().config_options = options.into();
         let names = project(&operational).sessions[0]
             .available_commands
             .iter()
@@ -1108,7 +1109,7 @@ fn golden_phone_session_snapshot() {
             mj_core::activity::verdict::CompletionEvidence::bounded("EndTurn", None),
         );
         assessment.status = status;
-        state.assessment = Some(Box::new(assessment));
+        state.assessment = Some(std::sync::Arc::new(assessment));
         state.retry_assessment_pending = true;
         state.idle_since_ms = Some(1_000);
         let snapshot = project(&controller, &one_workspace, &assessing, &no_native_agents);

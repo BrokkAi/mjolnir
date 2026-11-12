@@ -3203,12 +3203,12 @@ fn seed_quota_recovery(relay: &mut DurableRelay, id: &str) {
             },
         )
         .unwrap();
-    if let Some(mut assessment) = relay.operational_state().assessment {
+    if let Some(mut assessment) = relay.operational_state().assessment.as_deref().cloned() {
         assessment.action = Some(mj_core::assessment::Action::RecoverQuota);
         assessment.status = mj_core::assessment::Status::Deferred;
         relay
             .record_observation(mj_core::relay::RelayObservation::TurnAssessmentUpdated {
-                assessment,
+                assessment: Box::new(assessment),
             })
             .unwrap();
     }

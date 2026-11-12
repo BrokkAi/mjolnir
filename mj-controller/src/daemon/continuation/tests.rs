@@ -982,7 +982,7 @@ async fn a_self_started_turn_that_hits_the_quota_schedules_recovery_against_itse
             });
             assessment.action = Some(Action::RecoverQuota);
             assessment.status = Status::Deferred;
-            state.assessment = Some(Box::new(assessment));
+            state.assessment = Some(std::sync::Arc::new(assessment));
         }
         remote.publisher.publish("one".into(), after).await.unwrap();
         receive(&mut updates).await;
@@ -2324,7 +2324,7 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
             });
             assessment.action = Some(Action::RecoverQuota);
             assessment.status = Status::Deferred;
-            operational.assessment = Some(Box::new(assessment));
+            operational.assessment = Some(std::sync::Arc::new(assessment));
             let mut disconnected = blocked.clone();
             disconnected.connected = false;
             remote

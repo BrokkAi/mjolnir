@@ -446,7 +446,7 @@ impl DurableRelay {
                 if let Some(value) = &restored.assessment_state {
                     let state = mj_core::assessment::Checkpoint::decode(value)?;
                     snapshot.assessment_context = state.context.map(Arc::new);
-                    snapshot.assessment = state.assessment;
+                    snapshot.assessment = state.assessment.map(std::sync::Arc::new);
                     snapshot.continuation = state.continuation;
                     snapshot.capacity_retry = state.capacity_retry;
                     snapshot.turn_completion = state.turn_completion;
@@ -569,7 +569,7 @@ impl DurableRelay {
                 completion,
             );
             a.evidence = Some(old.evidence);
-            snapshot.assessment = Some(a);
+            snapshot.assessment = Some(std::sync::Arc::new(a));
         }
         ensure_serialized_budget(
             &snapshot.operational_state(),

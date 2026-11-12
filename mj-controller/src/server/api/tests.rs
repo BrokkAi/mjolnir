@@ -4006,7 +4006,7 @@ fn a_stored_expect_continuation_verdict_holds_no_wait_on_an_idle_session() {
         Some(Action::Uncertain),
     );
     harness_turn.reason = "assessment_uncertain".into();
-    operational.assessment = Some(Box::new(harness_turn));
+    operational.assessment = Some(std::sync::Arc::new(harness_turn));
     let observation = live_observation(projection_with(turn), operational);
 
     assert_eq!(
@@ -4192,7 +4192,7 @@ fn a_wait_reads_jev_s_verdict_from_the_turn_s_own_assessment() {
         let mut operational = idle();
         operational.retry_assessment_pending =
             matches!(assessment.status, Status::Pending | Status::Failed);
-        operational.assessment = Some(Box::new(assessment));
+        operational.assessment = Some(std::sync::Arc::new(assessment));
         live_observation(projection_with(turn.clone()), operational)
     };
     for request in [

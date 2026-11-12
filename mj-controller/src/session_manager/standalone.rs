@@ -298,6 +298,7 @@ impl StandaloneSession {
             operational.acknowledged_digest = cursor.digest;
         }
         if self.operational != operational {
+            operational.share_unchanged_fields(&self.operational);
             self.operational = operational;
         }
         Ok(())
