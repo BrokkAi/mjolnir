@@ -14,7 +14,7 @@ use mj_core::remote_git::Shorthand;
 use mj_core::state::SessionState;
 
 #[test]
-fn web_restart_and_move_use_the_lifecycle_cancellation_control() {
+fn web_suspend_restart_and_move_use_the_lifecycle_cancellation_control() {
     let move_request = serde_json::from_value(serde_json::json!({
         "preparation": {
             "selection": {"session_id": "move-web-session"},
@@ -26,6 +26,10 @@ fn web_restart_and_move_use_the_lifecycle_cancellation_control() {
     }))
     .unwrap();
     for action in [
+        ControllerAction::Suspend {
+            session_id: "suspend-web-session".into(),
+            acknowledge_unpublished_work: true,
+        },
         ControllerAction::Restart {
             session_id: "restart-web-session".into(),
             acknowledge_container_recreation: false,
@@ -38,7 +42,7 @@ fn web_restart_and_move_use_the_lifecycle_cancellation_control() {
         let lifecycle_control = control
             .lifecycle
             .as_ref()
-            .expect("web Restart and Move share their lifecycle cancellation control");
+            .expect("web Suspend, Restart and Move share their lifecycle cancellation control");
         assert!(Arc::ptr_eq(
             &control.cancelled,
             &lifecycle_control.cancelled

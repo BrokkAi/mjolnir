@@ -1326,7 +1326,7 @@ pub(crate) async fn run_server(
                                         anyhow::ensure!(!control.cancelled.load(Ordering::Acquire), "phone action cancelled");
                                         Some(mj_core::runtime::block_on(daemon_runtime.start_move_session((**request).clone(), control.lifecycle.clone().expect("Move has a lifecycle control")))??)
                                     }
-                                    ControllerAction::Suspend { session_id, acknowledge_unpublished_work } => Some(mj_core::runtime::block_on(daemon_runtime.admit_session_lifecycle(crate::daemon::SessionLifecycleRequest::Suspend { session_id: session_id.clone(), acknowledge_unpublished_work: *acknowledge_unpublished_work, ignore_nested_repositories: false }))??),
+                                    ControllerAction::Suspend { session_id, acknowledge_unpublished_work } => Some(mj_core::runtime::block_on(daemon_runtime.start_suspend_session_controlled(session_id.clone(), *acknowledge_unpublished_work, false, control.lifecycle.clone().expect("Suspend has a lifecycle control")))??),
                                     _ => None,
                                 };
                                 if let Some(mut started) = lifecycle {

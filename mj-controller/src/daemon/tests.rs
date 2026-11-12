@@ -302,7 +302,7 @@ async fn close_with_an_action_at_a_held_relay_command<T, F, Fut>(
     crate::session_manager::ManagedSessionHandle,
 )
 where
-    F: FnOnce(Arc<RuntimeState>) -> Fut,
+    F: FnOnce(Arc<RuntimeState>, LifecycleControl) -> Fut,
     Fut: std::future::Future<Output = T>,
 {
     use crate::controller::checkpoint::tests::{LATCH_RELAY_HOLD_PATH, LATCH_RELAY_SESSION};
@@ -323,10 +323,32 @@ where
         Vec::new(),
         Controller::load,
     ));
+    // A phone cancel before admission must not persist Closing or register work.
+    let cancelled = LifecycleControl::default();
+    assert!(cancelled.request_cancel("phone cancellation before admission"));
+    assert!(
+        state
+            .start_suspend_session_controlled(LATCH_RELAY_SESSION.into(), true, false, cancelled,)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        crate::database::load_state().unwrap().sessions[LATCH_RELAY_SESSION].state,
+        SessionState::Running
+    );
+    assert!(!state.owner().lifecycle.contains_key(LATCH_RELAY_SESSION));
+    let control = LifecycleControl::default();
     let hold = PathBuf::from(std::env::var_os(LATCH_RELAY_HOLD_PATH).unwrap());
     let closing = tokio::spawn({
         let state = state.clone();
-        async move { state.suspend_session(LATCH_RELAY_SESSION.into()).await }
+        let control = control.clone();
+        async move {
+            let started = state
+                .start_suspend_session_controlled(LATCH_RELAY_SESSION.into(), true, false, control)
+                .await?;
+            RuntimeState::wait_lifecycle_result(started.result).await?;
+            Ok(())
+        }
     });
     tokio::time::timeout(Duration::from_secs(30), async {
         while !hold.with_extension("reached").exists() {
@@ -335,7 +357,7 @@ where
     })
     .await
     .expect("the close never reached the held relay command");
-    let acted = at_hold(state.clone()).await;
+    let acted = at_hold(state.clone(), control).await;
     std::fs::write(hold.with_extension("release"), b"go").unwrap();
     let outcome = tokio::time::timeout(Duration::from_secs(60), closing)
         .await
@@ -375,6 +397,7 @@ fn in_held_close_child(test: &str, held: &str) -> bool {
 /// say `Destroying` yet. A cancel that arrives there is refused, and the
 /// target teardown that follows runs to the end.
 // Hard-won: #1218: a cancel accepted after the suspend's checkpoint commit failed its teardown
+// Hard-won: #1507: phone cancellation must share the admitted close commit control.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_cancel_after_the_close_commits_is_refused_and_the_teardown_finishes() {
@@ -387,7 +410,8 @@ async fn a_cancel_after_the_close_commits_is_refused_and_the_teardown_finishes()
     }
     let _writer = crate::database::install_isolated_test_writer();
     let (outcome, cancel, channels, _handle) =
-        close_with_an_action_at_a_held_relay_command(|state| async move {
+        close_with_an_action_at_a_held_relay_command(|state, control| async move {
+            assert!(!control.request_cancel("phone cancellation after commit"));
             state
                 .cancel_lifecycle_with_intent(LATCH_RELAY_SESSION)
                 .await
@@ -421,6 +445,7 @@ async fn a_cancel_after_the_close_commits_is_refused_and_the_teardown_finishes()
 /// still taking its checkpoint wins, so the close stops before its point of
 /// no return. No teardown runs, the relay is not sealed, and the session keeps
 /// running with its target and checkpoint.
+// Hard-won: #1507: a pre-admission phone cancel was ignored by the new Suspend owner.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_cancel_before_the_close_commits_leaves_the_session_running() {
@@ -441,10 +466,12 @@ async fn a_cancel_before_the_close_commits_leaves_the_session_running() {
     std::fs::create_dir_all(&worker_root).unwrap();
     std::fs::write(worker_root.join("still-here"), b"no teardown ran").unwrap();
     let (outcome, cancel, channels, handle) =
-        close_with_an_action_at_a_held_relay_command(|state| async move {
-            state
-                .cancel_lifecycle_with_intent(LATCH_RELAY_SESSION)
-                .await
+        close_with_an_action_at_a_held_relay_command(|_state, control| async move {
+            ensure!(
+                control.request_cancel("phone cancellation before commit"),
+                "phone cancellation refused"
+            );
+            Ok::<_, anyhow::Error>(())
         })
         .await;
     cancel.expect("a cancel before the commit is accepted");

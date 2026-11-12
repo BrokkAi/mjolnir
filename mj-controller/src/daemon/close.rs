@@ -119,8 +119,31 @@ impl RuntimeState {
         acknowledge_unpublished_work: bool,
         ignore_nested_repositories: bool,
     ) -> Result<StartedLifecycle> {
+        self.start_suspend_session_controlled(
+            session_id,
+            acknowledge_unpublished_work,
+            ignore_nested_repositories,
+            LifecycleControl::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn start_suspend_session_controlled(
+        self: &Arc<Self>,
+        session_id: String,
+        acknowledge_unpublished_work: bool,
+        ignore_nested_repositories: bool,
+        control: LifecycleControl,
+    ) -> Result<StartedLifecycle> {
+        ensure!(
+            !control.cancelled.load(Ordering::Acquire),
+            "phone action cancelled"
+        );
         self.wait_before_close(&session_id).await?;
-        let control = LifecycleControl::default();
+        ensure!(
+            !control.cancelled.load(Ordering::Acquire),
+            "phone action cancelled"
+        );
         let key =
             serde_json::to_string(&(acknowledge_unpublished_work, ignore_nested_repositories))?;
         let (accepted, acceptance) = tokio::sync::watch::channel(None);

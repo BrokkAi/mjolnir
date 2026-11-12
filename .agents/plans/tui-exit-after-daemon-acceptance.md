@@ -22,6 +22,7 @@ The reported suspend of session 5bc0d90883ed581d402cf1eee88b4a2f spent minutes s
 - [x] Committed removal of the unsafe fence as 4b6666729 and completed a second review.
 - [x] Persist accepted Discard failures under daemon ownership after the initiating observer exits. The new regression, two existing Discard cases, independent bounded review and final workspace Clippy/format/diff checks passed.
 - [ ] Commit the Discard correction and complete follow-up review.
+- [x] Fixed the subsequent phone Suspend cancellation finding by carrying the phone action's existing LifecycleControl through admission and execution. Three affected cases passed again on frozen relevant sources in the combined validation run.
 - [x] Claimed #1510 after the user challenged its unilateral deferral. It is included in the current work.
 - [ ] Settle and record an authoritative raw-process ownership design, implement it, and validate process identity and teardown ordering without relying on PID snapshots as ownership.
 - [ ] Push coherent reviewed changes and complete the remaining ownership work. Installation is explicitly excluded.
@@ -69,6 +70,8 @@ Decision: Validate, commit and push this task only. The user clarified that the 
 ## Outcomes & Retrospective
 
 The current latency checkpoint preserves concurrent one-pass retirement and TUI exit after daemon acceptance. The attempted immediate tree-kill mechanism was removed completely; the old snapshot is not containment-safe. The remaining ownership defect is tracked in https://github.com/BrokkAi/mjolnir/issues/1510 and remains unfinished work within this request. The second review's Discard failure-publication defect is fixed: the lifecycle supervisor now routes ForceStop failures through the existing safe durable close-failure publication before completing the result. A real held child-stop failure persists its public reference after the initiating observer leaves, retaining Destroying, checkpoint and target; the exact-ID observer can still obtain the detailed failure. The new test passed in0.40s, both existing Discard cases passed, and final workspace Clippy/format/diff checks passed. No new result ledger or state was added.
+
+Follow-up review found that phone Suspend ignored cancellation accepted before daemon admission. The phone action now receives and passes the same LifecycleControl into a controlled Suspend start, which checks it before and after the existing admission wait. The lifecycle owner remains the single commit/cancel decision point. Held real-relay regressions cover pre-admission cancellation without durable changes, cancellation before commitment and refusal after commitment; all three affected filters passed in the stable combined run. Explicit cancellation remains separate from quitting the UI.
 
 The integrated five-package development suites passed 4,390 tests with 37 ignored, plus one ignored documentation test. One workspace-close fixture failed and was corrected; its affected rerun passed in0.39s. Client phase and TUI guard filters passed after boxing Move/Resume payloads without changing JSON. Workspace Clippy and format/diff checks passed after isolated enum/layout repairs. Passing full suites were not repeated for individual repairs.
 
@@ -135,6 +138,8 @@ Live timings and backend work are in .mj/agents/1cbd92b1e462d4831611d7744363a0df
 API evidence is .mj/agents/3015c9deeefcbc11932935c38d210b42/implementation.md, review-fixes-focused.log and authorized-fixture-boxing-tests.log. The initial incomplete TUI child was closed before parent takeover; the parent owns its final CLI changes.
 
 Discard failure-publication evidence is .mj/agents/3015c9deeefcbc11932935c38d210b42/discard-failure-publication-final.log and the two existing cases in discard-failure-publication-tests.log. Final lint evidence is .mj/agents/b0df254c0e1ea40035ec39f1841037fe/clippy-discard-publication.log with format/diff siblings. Independent inspection found no remaining issue in this correction.
+
+Phone cancellation evidence is .mj/agents/3015c9deeefcbc11932935c38d210b42/phone-suspend-cancellation-tests.log. The authoritative combined phone/primitive run is .mj/agents/b0df254c0e1ea40035ec39f1841037fe/primitive-phone-focused.log: three phone filters passed in1.12s and three real owned-group cases passed in3.04s, with no warnings. The validator confirmed all relevant compiled source hashes were unchanged; only new unwired process-owner drafts changed outside the worker dependency file.
 
 Integrated evidence is .mj/agents/b0df254c0e1ea40035ec39f1841037fe/final-validation.md, test-summary.json and smoke-process-exit-proof.json. Final scope-cut lint is clippy-scope-cut.log with format/diff siblings. Backend final tests and report are .mj/agents/1cbd92b1e462d4831611d7744363a0df/1506-scope-cut-tests.log and1506-backend-cut-report.md. The accepted one-off tmux adapter is accepted_suspend_tmux.py in the validator report directory; full evidence is under /mnt/optane/tmp/1507-tmux-completion-evidence/tui-accepted-suspend-seed-1507-92281.
 
