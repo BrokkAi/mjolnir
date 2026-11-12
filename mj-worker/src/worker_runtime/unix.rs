@@ -898,6 +898,7 @@ pub async fn run_daemon_owned(
     // Only Claude Code's adapter marks the end of a turn it started on its
     // own, so only it can model those turns without leaving a session stuck
     // Running. See `.agents/docs/claude-autonomous-turns.md`.
+    durable_relay.set_managed_subagent(config.is_managed_subagent())?;
     durable_relay.set_turn_verdict_harness(config.harness);
     // Worker admission opens before profile preparation finishes. Claude must
     // already be protected from ACP steering during that window.

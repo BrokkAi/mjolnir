@@ -91,6 +91,25 @@ impl RepliedVerdictState {
 }
 
 impl DurableRelay {
+    pub(crate) fn classifies_turns(&self) -> bool {
+        !self.managed_subagent
+    }
+
+    /// Persist suppression so replaying controllers and older assessment readers
+    /// never wait for a child classification. Keep the shared event format.
+    pub(super) fn suppress_child_assessment(&mut self) -> Result<()> {
+        if self.managed_subagent {
+            self.replied_verdict = RepliedVerdictState::default();
+            if let Some(mut assessment) = self.snapshot.assessment.clone().filter(|a| a.current()) {
+                assessment.status = mj_core::assessment::Status::Superseded;
+                assessment.reason = "managed_subagent".into();
+                assessment.retry_at_ms = None;
+                self.store_assessment(assessment)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn publish_assessment_diagnostic(&self) {
         if let Some(a) = &self.snapshot.assessment
             && let Some(log) = self.turn_context.decision_log()
@@ -106,6 +125,9 @@ impl DurableRelay {
     /// operations stay compiled on Windows so their tests still build there.
     #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn prepare_pending_assessment(&mut self) -> Result<()> {
+        if !self.classifies_turns() {
+            return self.suppress_child_assessment();
+        }
         self.reclassify_assessment_with_generated_authorization()?;
         if let Some(mut a) = self.snapshot.assessment.clone().filter(|a| {
             a.current()
@@ -401,6 +423,9 @@ impl DurableRelay {
     }
 
     pub fn pending_replied_verdict(&mut self) -> Option<PendingRepliedVerdict> {
+        if !self.classifies_turns() {
+            return None;
+        }
         let a = self.snapshot.assessment.as_ref()?;
         if !a.needs_classification(epoch_millis())
             || self.replied_verdict.last_generation == Some(a.revision)
@@ -523,6 +548,44 @@ mod tests {
     use super::*;
     use mj_core::activity::{ActivityState, safe_to_replace};
     use mj_core::config::HarnessKind;
+
+    #[test]
+    fn managed_child_completion_and_silent_turn_never_request_classification() {
+        use crate::relay::test_support::{finish_prompt, prompt, submit_relay};
+        for managed in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut relay = DurableRelay::open(temp.path(), "child-verdict-test", "test").unwrap();
+            relay.set_acp_ready(true);
+            relay.set_managed_subagent(managed).unwrap();
+            relay.set_turn_verdict_harness(HarnessKind::Claude);
+            submit_relay(&mut relay, "user-turn", prompt("Do the assigned work."));
+            relay.claim_pending_commands(true).unwrap();
+            relay.prepare_pending_assessment().unwrap();
+            assert!(relay.pending_replied_verdict().is_none());
+            // Silence alone never ends an observed open turn.
+            assert!(relay.activity_facts().prompt_started_at_ms.is_some());
+            finish_prompt(&mut relay, "user-turn");
+            relay.prepare_pending_assessment().unwrap();
+            assert_eq!(relay.pending_replied_verdict().is_some(), !managed);
+            assert_eq!(relay.operational_state().retry_assessment_pending, !managed);
+            assert!(relay.activity_facts().prompt_started_at_ms.is_none());
+            if managed {
+                assert!(relay.operational_state().is_quiet());
+                assert!(!relay.snapshot.assessment.as_ref().unwrap().current());
+            }
+        }
+        // An old worker's durable pending assessment is superseded on launch.
+        let temp = tempfile::tempdir().unwrap();
+        let mut relay = DurableRelay::open(temp.path(), "legacy-child", "test").unwrap();
+        submit_relay(&mut relay, "old-turn", prompt("Work"));
+        relay.claim_pending_commands(true).unwrap();
+        finish_prompt(&mut relay, "old-turn");
+        drop(relay);
+        let mut relay = DurableRelay::open(temp.path(), "legacy-child", "test").unwrap();
+        relay.set_managed_subagent(true).unwrap();
+        assert!(!relay.operational_state().retry_assessment_pending);
+        assert!(!relay.snapshot.assessment.as_ref().unwrap().current());
+    }
 
     // Hard-won: 97731d30a: an assessment classified with a peer message as user authorization kept its action.
     #[test]

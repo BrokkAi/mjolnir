@@ -278,6 +278,7 @@ pub struct DurableRelay {
     /// long build was failed as if the harness had died (#1020).
     foreground_tools: mj_core::activity::ToolsInFlight,
     turn_context: mj_transcript::turn_context::TurnContext,
+    managed_subagent: bool,
     verdict_harness: Option<mj_core::config::HarnessKind>,
     replied_verdict: verdict::RepliedVerdictState,
     /// Adapter-owned tasks, keyed by their owning session and task identity.
@@ -605,6 +606,7 @@ impl DurableRelay {
             background_work: BackgroundWorkPolicy::default(),
             foreground_tools: mj_core::activity::ToolsInFlight::default(),
             turn_context: Default::default(),
+            managed_subagent: false,
             verdict_harness: None,
             replied_verdict: Default::default(),
             air_tasks: BTreeMap::new(),
@@ -1098,6 +1100,13 @@ impl DurableRelay {
     /// Whether a `Continue` verdict may be parked for the daemon to act on.
     pub fn set_continuation_enabled(&mut self, enabled: bool) {
         self.continuation_enabled = enabled;
+    }
+
+    /// Launch metadata owns this fact, including older environment-only launches.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn set_managed_subagent(&mut self, managed: bool) -> Result<()> {
+        self.managed_subagent = managed;
+        self.suppress_child_assessment()
     }
 
     pub fn set_turn_verdict_harness(&mut self, harness: mj_core::config::HarnessKind) {

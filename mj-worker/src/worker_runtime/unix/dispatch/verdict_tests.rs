@@ -45,6 +45,7 @@ fn scoped_log_capture_sees_every_callsite() {
 
 #[derive(Clone, Copy)]
 enum WhileClassifying {
+    Child,
     Wait,
     Stop,
     KeepCurrent,
@@ -74,7 +75,7 @@ async fn completed_turn_response(
 ) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    let (requested_tx, requested_rx) = tokio::sync::oneshot::channel();
+    let (requested_tx, mut requested_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
@@ -128,6 +129,9 @@ async fn completed_turn_response(
     });
     let temp = tempfile::tempdir().unwrap();
     let mut durable = DurableRelay::open(temp.path(), SESSION_ID, "test").unwrap();
+    durable
+        .set_managed_subagent(matches!(action, WhileClassifying::Child))
+        .unwrap();
     durable.set_turn_verdict_harness(HarnessKind::Claude);
     durable.set_background_work_policy(crate::relay::BackgroundWorkPolicy::AirTasks);
     durable
@@ -202,6 +206,18 @@ async fn completed_turn_response(
         commands_rx.recv().await.unwrap(),
         CommandRequest::Prompt { .. }
     ));
+    if matches!(action, WhileClassifying::Child) {
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        assert!(requested_rx.try_recv().is_err());
+        assert!(
+            relay
+                .lock()
+                .unwrap()
+                .operational_state()
+                .active_prompt
+                .is_some()
+        );
+    }
     events_tx.send(RuntimeEvent::SessionUpdate { update: serde_json::json!({"sessionUpdate":"agent_message_chunk", "content":{"type":"text", "text":"Waiting for my agent to finish."}}) }).await.unwrap();
     events_tx
         .send(RuntimeEvent::PromptFinished {
@@ -212,6 +228,35 @@ async fn completed_turn_response(
         })
         .await
         .unwrap();
+    if matches!(action, WhileClassifying::Child) {
+        wait_for("child completion", async {
+            while relay
+                .lock()
+                .unwrap()
+                .operational_state()
+                .active_prompt
+                .is_some()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        assert!(requested_rx.try_recv().is_err());
+        let state = relay.lock().unwrap().operational_state();
+        assert!(!state.retry_assessment_pending);
+        assert!(!state.assessment.as_ref().unwrap().current());
+        assert_eq!(state.is_quiet(), tasks == 0);
+        assert!(relay.lock().unwrap().handback_verdict_client.is_some());
+        events_tx.send(RuntimeEvent::Stopped).await.unwrap();
+        wait_for("child coordinator shutdown", coordinator)
+            .await
+            .unwrap()
+            .unwrap();
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        return;
+    }
     wait_for("the local classifier request", requested_rx)
         .await
         .unwrap();
@@ -414,6 +459,8 @@ async fn completed_turn_response(
 #[tokio::test]
 async fn replied_verdict_publishes_without_delaying_completion_and_clears_on_output() {
     completed_turn_verdict(WhileClassifying::Wait).await;
+    completed_turn_verdict(WhileClassifying::Child).await;
+    completed_turn_with_background(WhileClassifying::Child, "finished", 1).await;
 }
 
 /// I2-3: the classifier's answer landed after a close's checkpoint cut and

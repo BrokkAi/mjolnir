@@ -52,6 +52,12 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
         .handback_verdict_client = verdict.clone();
     // Owned by this coordinator: dropping it cancels HTTP requests on every
     // exit path, and joining reports panics instead of losing background errors.
+    let verdict = relay
+        .lock()
+        .expect("relay state lock poisoned")
+        .classifies_turns()
+        .then_some(verdict)
+        .flatten();
     let mut verdict_tasks = tokio::task::JoinSet::new();
     let mut locator_tasks = tokio::task::JoinSet::new();
     let mut verdict_generation = None;
@@ -86,7 +92,12 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
             let relay = relay.lock().expect("relay state lock poisoned");
             relay.worker_writes_held() || relay.close_pending()
         };
-        if !held {
+        if !held
+            && relay
+                .lock()
+                .expect("relay state lock poisoned")
+                .classifies_turns()
+        {
             relay
                 .lock()
                 .expect("relay state lock poisoned")
@@ -105,14 +116,18 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
             verdict_tasks.abort_all();
             verdict_generation = None;
         }
-        let pending = (!held)
-            .then(|| {
-                relay
-                    .lock()
-                    .expect("relay state lock poisoned")
-                    .pending_replied_verdict()
-            })
-            .flatten();
+        let pending = (!held
+            && relay
+                .lock()
+                .expect("relay state lock poisoned")
+                .classifies_turns())
+        .then(|| {
+            relay
+                .lock()
+                .expect("relay state lock poisoned")
+                .pending_replied_verdict()
+        })
+        .flatten();
         if let Some((generation, evidence, assessment)) = pending {
             if let Some(client) = verdict.clone() {
                 verdict_tasks.abort_all();
