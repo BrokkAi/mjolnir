@@ -12,7 +12,7 @@ Enable explicit Antigravity profiles using a host-installed agy and isolated cop
 - [x] 2026-11-12: Implement identity, ambient executable lookup, token staging/freshness, selectors, permissions, instructions, stdio MCP and exhaustive handling. Store changes are separately owned.
 - [x] 2026-11-12: Validate installed discovery, copied-home restart/resume and isolated mj file edit, command, memory MCP and model/effort switches. Original login hash unchanged; test session destroyed and daemon stopped.
 - [x] 2026-11-12: Commit harness separately from the store change without pushing. Fix the combined-review login finding; account-boundary regression passes.
-- [ ] Parent acceptance of combined changes after final validation; detailed results are in the report directory.
+- [x] Parent verified the completed isolated E2E and clean combined review through dae8ecdde; original Google credentials stayed unchanged, and the test session and daemon were cleaned up.
 
 ## Surprises & Discoveries
 
@@ -24,7 +24,7 @@ Use antigravity identity, ~/.gemini source home, and token copies. No installati
 
 ## Outcomes & Retrospective
 
-The isolated session completed edits, commands and mj-memory search, and applied base-model and thought-level changes through mj. Direct ACP restart/resume preserves conversation history. The parent owns combined acceptance. Final validation results and any unrelated baseline failures are recorded in the report directory.
+The isolated session completed edits, commands and mj-memory search, and applied base-model and thought-level changes through mj. Direct ACP restart/resume preserves conversation history. The parent verified these results and accepted the clean combined review. Final validation results are recorded in the report directory. The store plan tracks the remaining CLI historical-fixture correction before the user-authorized installation and profile setup.
 
 ## Context and Orientation
 
@@ -59,3 +59,5 @@ Reuse generic ACP configOptions and stdio MCP delivery, existing subprocess help
 2026-11-12: Completed isolated acceptance with original Google token unchanged and verified stdio mj-memory.search_sessions. Added fixture support and early target executable lookup after existing integration tests found missing coverage. Additional-directory cwd defect reproduced directly; see directory-probe.log and directory-primary-probe.log in report directory.
 
 2026-11-12: Combined review found custom-home CLI login omitted --gemini-dir. Native login now uses agy acp --login with the configured home; regression with a home containing spaces proves the default account remains untouched. Corrected TUI harness-name expectation to include Antigravity.
+
+2026-11-12: Parent resumed from the handoff, verified FINAL-EVIDENCE.md and acceptance-summary.md against the actual logs, and accepted the isolated smoke test and cleanup. Remaining publication work is to merge current master, finish the shared store fixture checks, install through scripts/install.sh, verify the live revision-126 migration, and add profiles.antigravity with home /home/jonathan/.gemini. The installed-build smoke test must also use the isolated agy-test instance.

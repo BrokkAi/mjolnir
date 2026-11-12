@@ -11,7 +11,8 @@ New harness kinds must require no schema changes. Unsupported sessions remain st
 - [x] 2026-11-12: traced snapshot deletion and explicit deletion APIs; implemented revision 126 and snapshot ownership change.
 - [x] Migration regression, 42 schema integration tests, 30 prior database failures, and final workspace clippy passed.
 - [x] Final controller suite: 2570 passed, 20 ignored; one unrelated worker-stop fixture failed with OS Text file busy and has a focused retry pending. Store review had no findings.
-- [ ] Collect focused worker-stop retry and combined login-fix rereview.
+- [x] Collected the passing worker-stop retry and clean combined login-fix review through dae8ecdde.
+- [x] Restored the revision-43 harness constraints in the CLI upgrade fixture; all three affected isolated startup regressions pass (12.14 seconds).
 
 ## Surprises & Discoveries
 
@@ -24,6 +25,10 @@ Remove absence-based session deletion; snapshots only own present records. Prese
 ## Outcomes & Retrospective
 
 Revision 126 and snapshot ownership changes pass focused validation. Historical fixture rewinds now restore the removed constraints; explicit deletion replaces snapshot absence in deletion fixtures. Full controller validation passed all store cases; the only failure was an unrelated executable-busy worker-stop fixture. Workspace clippy also passed after the concurrent login correction.
+
+The worker-stop fixture passed its focused retry. The final CLI suite separately exposed three startup regressions sharing an old-store fixture: rewinding its ledger left modern unconstrained harness columns behind. Restore the actual revision-43 CHECK lists in that fixture so the shipped OpenCode, MiMo and DSH migrations still run during the upgrade test; no production migration changes are needed.
+
+The corrected fixture passes ordinary startup, automatic upgrade after admitted work, and concurrent-client daemon replacement. The focused command was `cargo test -p brokk-mjolnir --test daemon_startup -- ordinary_startup_migrates_an_old_store_without_a_daemon automatic_upgrade_waits_for_work_then_migrates_without_another_invocation concurrent_clients_replace_obsolete_daemons_once_and_reuse_the_winner`, run outside the sandbox with the tests' existing isolated stores.
 
 ## Context and Orientation
 
@@ -52,3 +57,5 @@ Evidence is in .mj/agents/6856201e667dfc419aa2578076f6ed4f/.
 ## Interfaces and Dependencies
 
 Reuse rusqlite transactions and existing explicit delete_session_from. No new public or persisted record format is introduced.
+
+2026-11-12: Parent verified the final child reports, accepted the clean combined review and passing worker-stop retry, and took ownership of the CLI historical-fixture correction before installation.
