@@ -8,7 +8,7 @@ impl Controller {
     pub fn cleanup_prepared_move_destination(
         &self,
         operation: &mut MoveOperation,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
         let cleanup = MoveCleanupExecutor(executor);
         let executor = &cleanup;

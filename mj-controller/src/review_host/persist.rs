@@ -198,6 +198,7 @@ impl HostState {
                         state: pending.prepared.state,
                         _background: pending.prepared.background,
                         finishing: false,
+                        delivery: Arc::new(super::resolve::Delivery::default()),
                         retry_delay: std::time::Duration::from_secs(1),
                         start_reply: pending.reply,
                         pending_outcome: None,

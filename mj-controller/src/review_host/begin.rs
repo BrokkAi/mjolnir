@@ -7,6 +7,17 @@ impl HostState {
         session_id: String,
         snapshot: Option<Box<MaterializedSession>>,
     ) {
+        if snapshot.as_ref().is_some_and(|snapshot| {
+            matches!(
+                snapshot.execution,
+                mj_core::state::MaterializedExecutionState::Closing
+                    | mj_core::state::MaterializedExecutionState::Closed
+            )
+        }) && self.reviews.contains_key(&session_id)
+            && let Err(error) = self.resolve(&session_id, Resolution::Cancelled)
+        {
+            tracing::debug!(session_id, %error, "review was already committing when the session closed");
+        }
         self.sessions.insert(
             session_id.clone(),
             SessionWatch {

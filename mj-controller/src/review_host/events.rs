@@ -28,10 +28,6 @@ pub(super) enum HostEvent {
         path: Option<String>,
         reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
     },
-    OverrideValidated {
-        session_id: String,
-        permit: oneshot::Sender<Result<crate::upgrade::Work, StartRefusal>>,
-    },
     OverrideFinished {
         session_id: String,
     },
@@ -182,6 +178,7 @@ pub(super) enum PersistenceRequest {
         reply: oneshot::Sender<Result<TurnReviewState, String>>,
     },
     SaveAcknowledged {
+        operation: &'static str,
         session_id: String,
         state: Box<TurnReviewState>,
         reply: oneshot::Sender<Result<(), String>>,
@@ -210,7 +207,7 @@ pub(super) enum PersistenceRequest {
 /// One asynchronous step's result, belonging to exactly one review.
 pub(super) enum ReviewStep {
     Delta(Result<Vec<mj_core::relay::RepoDelta>, String>),
-    PushDelivered(Result<Box<TurnReviewState>, String>),
+    PushDelivered(Result<(Box<TurnReviewState>, ReviewVerdict), String>),
     /// Delivery failed and the requesting session still exists, or could not
     /// be looked up: the delivery is tried again.
     PushRetry(String),
@@ -268,6 +265,7 @@ pub(super) struct ReviewSlot {
     /// Released when the slot is removed, which is how every review ends.
     pub(super) _background: Option<BackgroundHold>,
     pub(super) finishing: bool,
+    pub(super) delivery: Arc<super::resolve::Delivery>,
     pub(super) retry_delay: std::time::Duration,
     pub(super) start_reply: Option<oneshot::Sender<Result<(), StartRefusal>>>,
     pub(super) pending_outcome: Option<PendingOutcome>,
@@ -341,7 +339,6 @@ pub(super) enum PreparingOperation {
     },
     Override {
         task: tokio::task::JoinHandle<()>,
-        admitted: bool,
         result: oneshot::Receiver<Result<serde_json::Value, StartRefusal>>,
         reply: oneshot::Sender<Result<serde_json::Value, StartRefusal>>,
     },
@@ -373,7 +370,11 @@ pub(super) async fn persistence_loop(
     events: mpsc::UnboundedSender<HostEvent>,
     mut requests: mpsc::UnboundedReceiver<PersistenceRequest>,
 ) {
-    type Delivery = (String, u64, Result<Box<TurnReviewState>, String>);
+    type Delivery = (
+        String,
+        u64,
+        Result<(Box<TurnReviewState>, ReviewVerdict), String>,
+    );
     let mut deliveries = tokio::task::JoinSet::<Delivery>::new();
     let mut delivery_owners = std::collections::HashMap::<tokio::task::Id, (String, u64)>::new();
     let mut accepting = true;
@@ -410,16 +411,31 @@ pub(super) async fn persistence_loop(
                 let _ = reply.send(result);
             }
             PersistenceRequest::SaveAcknowledged {
+                operation,
                 session_id,
                 state,
                 reply,
             } => {
+                // Only local persistence holds admission, never worker queues.
+                let admission = match crate::upgrade::activity_unless_draining(operation) {
+                    Ok(admission) => admission,
+                    Err(error) => {
+                        let _ = reply.send(Err(format!("review state save deferred for daemon handoff: {error}; repeat the request after restart")));
+                        continue;
+                    }
+                };
                 let save = environment.clone();
-                let result =
-                    tokio::task::spawn_blocking(move || save.save_state(&session_id, &state))
-                        .await
-                        .map_err(|error| format!("review state save stopped: {error}"))
-                        .and_then(|result| result);
+                let result = tokio::task::spawn_blocking(move || {
+                    let _admission = admission;
+                    let result = save.save_state(&session_id, &state);
+                    if let Err(error) = &result {
+                        tracing::warn!(session_id, %error, "review state save failed");
+                    }
+                    result
+                })
+                .await
+                .map_err(|error| format!("review state save stopped: {error}"))
+                .and_then(|result| result);
                 let _ = reply.send(result);
             }
             PersistenceRequest::SaveReviewerOutcome {
@@ -574,5 +590,5 @@ pub(super) struct PushCompletion {
     pub(super) state: TurnReviewState,
     pub(super) deltas: Vec<mj_core::relay::RepoDelta>,
     pub(super) verdict: ReviewVerdict,
-    pub(super) _admission: crate::upgrade::Work,
+    pub(super) delivery: Arc<super::resolve::Delivery>,
 }

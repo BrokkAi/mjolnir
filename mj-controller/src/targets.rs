@@ -37,6 +37,7 @@ pub use preflight::*;
 mod platform;
 pub use platform::*;
 mod provision;
+pub(crate) use provision::provision_local_bundle_plan;
 pub use provision::*;
 mod recovery;
 pub use recovery::*;

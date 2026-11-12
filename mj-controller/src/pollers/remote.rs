@@ -646,7 +646,9 @@ pub(super) async fn forward_remote_session_request(request: RemoteSessionRequest
             let _ = reply.send(result);
         }
         RemoteSessionRequest::Reviewer { reply, .. } => {
-            let _ = reply.send(Err("review capture is owned by the daemon".to_owned()));
+            let _ = reply.send(Err(anyhow::anyhow!(
+                "review capture is owned by the daemon"
+            )));
         }
     }
 }

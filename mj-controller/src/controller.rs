@@ -5,6 +5,7 @@ mod cache_host;
 pub(crate) mod checkpoint;
 mod container_upgrade;
 mod environment;
+pub(crate) use environment::StoppedWorker;
 mod git_cache;
 mod github_app;
 mod lifecycle;
@@ -842,7 +843,7 @@ impl Controller {
         &mut self,
         session_id: &str,
         error: anyhow::Error,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
     ) -> Result<anyhow::Error> {
         let original = provisioning::note_new_session_launch_failure(session_id, &error);
         let cleanup_error = self

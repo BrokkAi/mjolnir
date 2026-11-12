@@ -341,21 +341,7 @@ pub(super) async fn apply_phone_action(
             .map(|_| ()),
         ControllerAction::Move { request } => {
             let outcome = services.daemon_runtime.move_session(*request).await?;
-            match outcome.outcome.as_str() {
-                "completed" | "unchanged" | "interrupted" => Ok(()),
-                "cancelled" | "failed" => {
-                    // The daemon keeps detailed diagnostics in its durable
-                    // operation record. Only its safe recovery guidance is
-                    // copied into the phone action error, where the normal
-                    // failed-action path records a visible session error.
-                    let recovery = outcome.recovery.unwrap_or_else(|| {
-                        "Inspect the session and retry Move or Resume with previous settings."
-                            .into()
-                    });
-                    bail!("Move {}: {recovery}", outcome.outcome)
-                }
-                status => bail!("Move returned an unknown outcome: {status}"),
-            }
+            finish_phone_lifecycle(crate::daemon::DaemonReply::MoveOutcome(outcome))
         }
         ControllerAction::Open { .. } => Ok(()),
         ControllerAction::CancelContainerUpgrade { session_id } => {
@@ -618,6 +604,30 @@ pub(super) async fn apply_phone_action(
         ControllerAction::RefreshQuota { .. } | ControllerAction::RefreshCapacity { .. } => {
             bail!("refresh actions must be handled by the phone control loop")
         }
+    }
+}
+
+pub(super) fn finish_phone_lifecycle(reply: crate::daemon::DaemonReply) -> Result<()> {
+    match reply {
+        crate::daemon::DaemonReply::Done => Ok(()),
+        crate::daemon::DaemonReply::MoveOutcome(outcome) => {
+            match outcome.outcome.as_str() {
+                "completed" | "unchanged" | "interrupted" => Ok(()),
+                "cancelled" | "failed" => {
+                    // The daemon keeps detailed diagnostics in its durable
+                    // operation record. Only its safe recovery guidance is
+                    // copied into the phone action error, where the normal
+                    // failed-action path records a visible session error.
+                    let recovery = outcome.recovery.unwrap_or_else(|| {
+                        "Inspect the session and retry Move or Resume with previous settings."
+                            .into()
+                    });
+                    bail!("Move {}: {recovery}", outcome.outcome)
+                }
+                status => bail!("Move returned an unknown outcome: {status}"),
+            }
+        }
+        _ => bail!("unexpected lifecycle outcome"),
     }
 }
 

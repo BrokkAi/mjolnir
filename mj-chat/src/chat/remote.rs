@@ -1290,6 +1290,20 @@ pub(super) fn queue_chat_remote_operation(
     operation: ChatRemoteOperation,
     chat: &mut ChatState,
 ) {
+    // Reserve admission before replacing an unconfirmed receipt. If the
+    // local queue refuses the retry, the original identity remains recoverable.
+    let permit = operations.try_reserve();
+    let retrying = match &operation {
+        ChatRemoteOperation::Prompt { command_id, .. }
+        | ChatRemoteOperation::RunShell { command_id, .. } => {
+            chat.recoverable_submission_id() == Some(command_id.as_str())
+        }
+        _ => false,
+    };
+    if retrying && permit.is_err() {
+        chat.set_notice("The session command queue could not accept the resend; try again");
+        return;
+    }
     let feedback_key = operation.feedback().map(|(key, text)| {
         chat.operation_feedback.insert(key.clone(), text);
         key
@@ -1343,76 +1357,80 @@ pub(super) fn queue_chat_remote_operation(
         }
         _ => {}
     }
-    if let Err(error) = operations.try_send(operation) {
-        if let Some(key) = feedback_key {
-            chat.operation_feedback.remove(&key);
+    match permit {
+        Ok(permit) => {
+            permit.send(operation);
         }
-        let operation = error.into_inner();
-        match operation {
-            ChatRemoteOperation::Prompt {
-                command_id,
-                text,
-                images,
-            } => {
-                chat.finish_submission(&command_id, false);
-                restore_unsent_prompt(chat, text.clone(), images);
-                report_refused_submission(
-                    chat,
-                    SubmissionKind::Prompt,
-                    &text,
-                    "session command queue is full",
-                );
+        Err(_) => {
+            if let Some(key) = feedback_key {
+                chat.operation_feedback.remove(&key);
             }
-            ChatRemoteOperation::RunShell {
-                command_id,
-                command,
-            } => {
-                chat.finish_submission(&command_id, false);
-                report_refused_submission(
-                    chat,
-                    SubmissionKind::Shell,
-                    &command,
-                    "session command queue is full",
-                );
-                restore_unsent_input(chat, &format!("!{command}"));
+            match operation {
+                ChatRemoteOperation::Prompt {
+                    command_id,
+                    text,
+                    images,
+                } => {
+                    chat.finish_submission(&command_id, false);
+                    restore_unsent_prompt(chat, text.clone(), images);
+                    report_refused_submission(
+                        chat,
+                        SubmissionKind::Prompt,
+                        &text,
+                        "session command queue is full",
+                    );
+                }
+                ChatRemoteOperation::RunShell {
+                    command_id,
+                    command,
+                } => {
+                    chat.finish_submission(&command_id, false);
+                    report_refused_submission(
+                        chat,
+                        SubmissionKind::Shell,
+                        &command,
+                        "session command queue is full",
+                    );
+                    restore_unsent_input(chat, &format!("!{command}"));
+                }
+                ChatRemoteOperation::RemoveQueuedPrompt { id, text, kind, .. } => {
+                    chat.fail_queued_prompt_removal(id, text, kind);
+                }
+                ChatRemoteOperation::StopBackgroundTask { id } => {
+                    chat.fail_background_stop(&id, "session command queue is full");
+                }
+                ChatRemoteOperation::GoalControl { action, .. } => {
+                    restore_unsent_input(chat, &format!("/goal {}", action.as_str()));
+                }
+                ChatRemoteOperation::SetConfig { key, value, .. } => {
+                    restore_unsent_input(chat, &config_command_text(&key, &value));
+                }
+                ChatRemoteOperation::PlanCommand {
+                    command_id,
+                    original,
+                    requested_active,
+                    ..
+                } => {
+                    chat.finish_submission(&format!("{command_id}-prompt"), false);
+                    chat.plan_command_pending = false;
+                    chat.finish_plan_mode_change(!requested_active);
+                    restore_unsent_input(chat, &original);
+                }
+                ChatRemoteOperation::RespondElicitation { request, .. } => {
+                    chat.finish_submission(&format!("plan-review-{}-feedback", request.id), false);
+                    chat.restore_elicitation(request)
+                }
+                ChatRemoteOperation::Cancel { intent, .. } => {
+                    chat.turn_control_submitting = false;
+                    chat.turn_control_awaiting_state = None;
+                    chat.turn_control_error =
+                        Some(intent.failure_notice("session command queue is full"));
+                    chat.turn_control_dialog_open = intent == TurnControlIntent::Steer;
+                }
+                ChatRemoteOperation::Sync | ChatRemoteOperation::RecordNotice { .. } => {}
             }
-            ChatRemoteOperation::RemoveQueuedPrompt { id, text, kind, .. } => {
-                chat.fail_queued_prompt_removal(id, text, kind);
-            }
-            ChatRemoteOperation::StopBackgroundTask { id } => {
-                chat.fail_background_stop(&id, "session command queue is full");
-            }
-            ChatRemoteOperation::GoalControl { action, .. } => {
-                restore_unsent_input(chat, &format!("/goal {}", action.as_str()));
-            }
-            ChatRemoteOperation::SetConfig { key, value, .. } => {
-                restore_unsent_input(chat, &config_command_text(&key, &value));
-            }
-            ChatRemoteOperation::PlanCommand {
-                command_id,
-                original,
-                requested_active,
-                ..
-            } => {
-                chat.finish_submission(&format!("{command_id}-prompt"), false);
-                chat.plan_command_pending = false;
-                chat.finish_plan_mode_change(!requested_active);
-                restore_unsent_input(chat, &original);
-            }
-            ChatRemoteOperation::RespondElicitation { request, .. } => {
-                chat.finish_submission(&format!("plan-review-{}-feedback", request.id), false);
-                chat.restore_elicitation(request)
-            }
-            ChatRemoteOperation::Cancel { intent, .. } => {
-                chat.turn_control_submitting = false;
-                chat.turn_control_awaiting_state = None;
-                chat.turn_control_error =
-                    Some(intent.failure_notice("session command queue is full"));
-                chat.turn_control_dialog_open = intent == TurnControlIntent::Steer;
-            }
-            ChatRemoteOperation::Sync | ChatRemoteOperation::RecordNotice { .. } => {}
+            chat.set_notice("The session command queue is full; the command was not sent");
         }
-        chat.set_notice("The session command queue is full; the command was not sent");
     }
 }
 

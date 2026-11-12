@@ -207,6 +207,23 @@ impl ChatState {
                 _ => {}
             }
         }
+        if !self.standby && modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT) {
+            if key.kind == KeyEventKind::Repeat && matches!(code, KeyCode::Char('r' | 'd')) {
+                return ChatAction::None;
+            }
+            if let Some(id) = self.recoverable_submission_id().map(str::to_owned) {
+                match code {
+                    KeyCode::Char('r') => {
+                        return ChatAction::ResendSubmission { command_id: id };
+                    }
+                    KeyCode::Char('d') => {
+                        return ChatAction::DismissSubmission { command_id: id };
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         if modifiers.contains(KeyModifiers::CONTROL) {
             match code {
                 // Reverse-i-search stays on readline's key. The block above

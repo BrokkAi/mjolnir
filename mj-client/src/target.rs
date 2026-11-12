@@ -156,6 +156,15 @@ fn workspace_to_raw_compatibility(
     session: &SessionRecord,
     config: &Config,
 ) -> Result<ResumePlan, String> {
+    // A host checkout can share or clone later history. Keep cutoff sessions
+    // in their independent bundle workspace, just as they started at launch.
+    if session
+        .checkout
+        .as_ref()
+        .is_some_and(|checkout| checkout.no_later_history)
+    {
+        return Ok(ResumePlan::InPlace);
+    }
     let Some(bundle) = session.project_bundle(config) else {
         return Err(BUNDLE_ON_LOCAL_BARE.to_owned());
     };

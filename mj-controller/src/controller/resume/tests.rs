@@ -1289,6 +1289,7 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
     #[derive(Default)]
     struct FailingPreflightExecutor {
         mounts_during_provisioning: Mutex<Option<Vec<AdditionalMount>>>,
+        admission_notified: std::sync::atomic::AtomicBool,
     }
 
     impl CommandExecutor for FailingPreflightExecutor {
@@ -1303,6 +1304,11 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
                 });
             }
             assert_eq!(command.program, "podman");
+            assert!(
+                self.admission_notified
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                "provisioning preceded durable acceptance"
+            );
             let mut observed = self.mounts_during_provisioning.lock().unwrap();
             if observed.is_none() {
                 let durable = crate::database::load_state().unwrap();
@@ -1412,18 +1418,46 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
         .unwrap();
     let executor = FailingPreflightExecutor::default();
     let error = runtime
-        .block_on(controller.resume_session_controlled(
-            session_id,
-            "codex",
-            "podman",
-            SessionResumeOptions {
-                additional_mounts: Some(resumed_mounts.clone()),
-                resource_allocation: None,
-                discard_queue: false,
-            },
-            &executor,
-        ))
+        .block_on(
+            controller.resume_session_controlled_with_repository_preflight_and_admission(
+                session_id,
+                "codex",
+                "podman",
+                SessionResumeOptions {
+                    additional_mounts: Some(resumed_mounts.clone()),
+                    resource_allocation: None,
+                    discard_queue: false,
+                },
+                None,
+                &executor,
+                || {
+                    let durable = crate::database::load_state().unwrap();
+                    let accepted = &durable.sessions[session_id];
+                    assert_eq!(accepted.state, SessionState::Provisioning);
+                    assert_eq!(accepted.last_profile, "codex");
+                    assert_eq!(accepted.target_template_id, "podman");
+                    assert_eq!(accepted.additional_mounts, resumed_mounts);
+                    assert!(
+                        executor
+                            .mounts_during_provisioning
+                            .lock()
+                            .unwrap()
+                            .is_none()
+                    );
+                    assert!(
+                        !executor
+                            .admission_notified
+                            .swap(true, std::sync::atomic::Ordering::SeqCst)
+                    );
+                },
+            ),
+        )
         .unwrap_err();
+    assert!(
+        executor
+            .admission_notified
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
     let detail = format!("{error:#}");
     assert!(
         detail.contains("podman is temporarily unavailable"),
