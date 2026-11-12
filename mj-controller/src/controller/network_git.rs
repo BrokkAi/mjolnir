@@ -13,7 +13,6 @@ impl Controller {
         session_id: &str,
         backend: &targets::TargetLocator,
         executor: &impl CommandExecutor,
-        manifest: Option<&mj_checkpoint::archive::ArchiveManifest>,
     ) -> Result<()> {
         let session = self
             .state
@@ -68,27 +67,10 @@ impl Controller {
             );
             Ok(String::from_utf8(output.stdout)?.trim().to_owned())
         };
-        // The checkpoint identifies the session's other branches, stashes
-        // and review points; they need not be ancestors of its current HEAD.
-        let session_refs = manifest
-            .into_iter()
-            .flat_map(|archive| &archive.repositories)
-            .filter(|repository| repository.metadata.id == checkout.repository_id)
-            .flat_map(|repository| {
-                repository.metadata.saved_refs.values().cloned().chain(
-                    repository
-                        .metadata
-                        .stash_stack
-                        .iter()
-                        .map(|stash| stash.commit.clone()),
-                )
-            })
-            .collect::<Vec<_>>();
         configure_workspace_without_origin(
             &checked,
-            &cutoff.head,
+            None,
             cutoff.base.as_deref().unwrap_or(&cutoff.head),
-            &session_refs,
         )
     }
 
@@ -236,7 +218,7 @@ fn initialize_workspace(
             None => checkout.commit.clone(),
         };
         if checkout.no_later_history {
-            return configure_workspace_without_origin(&checked, &checkout.commit, &base, &[]);
+            return configure_workspace_without_origin(&checked, Some(&checkout.commit), &base);
         }
         return configure_workspace(&git, &checked, &base);
     }
@@ -322,9 +304,8 @@ fn configure_workspace(
 /// `git remote` list it.
 fn configure_workspace_without_origin(
     checked: &impl Fn(&[&str]) -> Result<String>,
-    head: &str,
+    launch_head: Option<&str>,
     base: &str,
-    session_refs: &[String],
 ) -> Result<()> {
     // Checkpoint restore writes archived origin configuration, but performs
     // no network fetch. Remove it before the worker can issue Git commands.
@@ -349,23 +330,24 @@ fn configure_workspace_without_origin(
         checked(&["rev-parse", "--is-shallow-repository"])? == "false",
         "history cutoff workspace is shallow"
     );
-    let mut ancestry = vec!["rev-list", "HEAD", head, base];
-    ancestry.extend(session_refs.iter().map(String::as_str));
-    let allowed = checked(&ancestry)?;
-    let allowed = allowed.lines().collect::<std::collections::HashSet<_>>();
-    // Inspect stored objects too: deleting refs alone leaves later history
-    // available to an agent that knows the object ID.
-    let objects = checked(&[
-        "cat-file",
-        "--batch-all-objects",
-        "--batch-check=%(objectname) %(objecttype)",
-    ])?;
-    for object in objects.lines() {
-        if let Some(commit) = object.strip_suffix(" commit") {
-            ensure!(
-                allowed.contains(commit),
-                "history cutoff workspace contains commit {commit} outside the session and launch base ancestry"
-            );
+    // Launch proves the initial history is clean. Later steps rely on cutoff
+    // provisioning and archive provenance to prove mj added no upstream history:
+    // the agent's discarded commits and imported objects cannot be distinguished.
+    if let Some(head) = launch_head {
+        let allowed = checked(&["rev-list", "HEAD", head, base])?;
+        let allowed = allowed.lines().collect::<std::collections::HashSet<_>>();
+        let objects = checked(&[
+            "cat-file",
+            "--batch-all-objects",
+            "--batch-check=%(objectname) %(objecttype)",
+        ])?;
+        for object in objects.lines() {
+            if let Some(commit) = object.strip_suffix(" commit") {
+                ensure!(
+                    allowed.contains(commit),
+                    "history cutoff workspace contains commit {commit} outside the launch ancestry"
+                );
+            }
         }
     }
     for (key, value) in [("mj.baseCommit", base), ("mj.remoteWorkspace", "true")] {
@@ -1468,12 +1450,7 @@ mod tests {
         // The retained profile-only Move checks the existing workspace, without
         // positioning HEAD or requiring the agent's working tree to be clean.
         controller
-            .verify_history_cutoff_workspace(
-                EXACT_SESSION,
-                &fixture.locator(),
-                &ProcessExecutor,
-                None,
-            )
+            .verify_history_cutoff_workspace(EXACT_SESSION, &fixture.locator(), &ProcessExecutor)
             .unwrap();
         let mut snapshot = collect_git_snapshot(
             &SystemGit,
@@ -1516,12 +1493,7 @@ mod tests {
         restore_git_snapshot(&SystemGit, &fixture.directory, &snapshot).unwrap();
         assert!(!test_git(&fixture.directory, &["remote"]).is_empty());
         controller
-            .verify_history_cutoff_workspace(
-                EXACT_SESSION,
-                &fixture.locator(),
-                &ProcessExecutor,
-                None,
-            )
+            .verify_history_cutoff_workspace(EXACT_SESSION, &fixture.locator(), &ProcessExecutor)
             .unwrap();
         assert_eq!(
             test_git(&fixture.directory, &["rev-parse", "HEAD"]),
@@ -1551,37 +1523,29 @@ mod tests {
         assert_eq!(present, reachable);
         test_git(&fixture.directory, &["tag", "unexpected"]);
         let error = controller
-            .verify_history_cutoff_workspace(
-                EXACT_SESSION,
-                &fixture.locator(),
-                &ProcessExecutor,
-                None,
-            )
+            .verify_history_cutoff_workspace(EXACT_SESSION, &fixture.locator(), &ProcessExecutor)
             .unwrap_err();
         assert!(
             error.to_string().contains("remote refs or tags"),
             "{error:#}"
         );
-        test_git(&fixture.directory, &["tag", "-d", "unexpected"]);
+        // Launch still rejects upstream objects outside the selected ancestry.
+        let contaminated = CutoffFixture::new();
+        contaminated.clone(Some(&contaminated.base), None);
         test_git(
-            &fixture.directory,
+            &contaminated.directory,
             &[
                 "fetch",
                 "--no-tags",
-                fixture.host.path().to_str().unwrap(),
-                &fixture.later[0],
+                contaminated.host.path().to_str().unwrap(),
+                &contaminated.later[0],
             ],
         );
-        let error = controller
-            .verify_history_cutoff_workspace(
-                EXACT_SESSION,
-                &fixture.locator(),
-                &ProcessExecutor,
-                None,
-            )
+        let error = contaminated
+            .initialize(Some(&contaminated.base), Some("town/run-123"))
             .unwrap_err();
         assert!(
-            error.to_string().contains("outside the session"),
+            error.to_string().contains("outside the launch ancestry"),
             "{error:#}"
         );
     }

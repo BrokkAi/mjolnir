@@ -929,12 +929,7 @@ impl Controller {
             }
             // Restore imports only the archived delta; its origin configuration
             // is removed and the cutoff checked before any worker can run.
-            self.verify_history_cutoff_workspace(
-                session_id,
-                &backend,
-                executor,
-                Some(archive_manifest),
-            )?;
+            self.verify_history_cutoff_workspace(session_id, &backend, executor)?;
             let readiness_stage = bridge_readiness_stage(profile);
             let spec = self.reconnect_command(session_id)?;
             let readiness = async {

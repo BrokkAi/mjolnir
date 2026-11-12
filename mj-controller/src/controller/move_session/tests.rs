@@ -4174,6 +4174,7 @@ fn in_place_move_with_pre_v32_worker_stops_children_and_reports_fallback() {
 }
 
 #[cfg(unix)]
+// Hard-won: ea0608d4d: cutoff verification rejected superseded session commits.
 #[test]
 fn profile_move_preserves_a_workspace_without_later_history() {
     let name = test_name("profile_move_preserves_a_workspace_without_later_history");
@@ -4192,10 +4193,24 @@ fn profile_move_preserves_a_workspace_without_later_history() {
     let git = crate::controller::test_support::test_git;
     let base = git(&fixture.checkout, &["rev-parse", "HEAD"]);
     git(&fixture.checkout, &["remote", "remove", "origin"]);
+    fs::write(fixture.checkout.join("session.txt"), "session work").unwrap();
+    git(&fixture.checkout, &["add", "session.txt"]);
     git(
         &fixture.checkout,
         &["commit", "--allow-empty", "-m", "session work"],
     );
+    let superseded = git(&fixture.checkout, &["rev-parse", "HEAD"]);
+    git(
+        &fixture.checkout,
+        &["commit", "--amend", "-m", "amended session work"],
+    );
+    fs::write(fixture.checkout.join("session.txt"), "discarded work").unwrap();
+    git(
+        &fixture.checkout,
+        &["stash", "push", "-m", "discarded session stash"],
+    );
+    let dropped_stash = git(&fixture.checkout, &["rev-parse", "refs/stash"]);
+    git(&fixture.checkout, &["stash", "drop"]);
     let head = git(&fixture.checkout, &["rev-parse", "HEAD"]);
     let bundle = crate::controller::test_support::local_bundle(&fixture.checkout);
     fixture
@@ -4233,6 +4248,9 @@ fn profile_move_preserves_a_workspace_without_later_history() {
         &executor,
     )
     .unwrap();
+    for commit in [&superseded, &dropped_stash] {
+        git(&fixture.checkout, &["cat-file", "-e", commit]);
+    }
     assert_eq!(git(&fixture.checkout, &["rev-parse", "HEAD"]), head);
     assert_eq!(git(&fixture.checkout, &["remote"]), "");
     assert_eq!(
