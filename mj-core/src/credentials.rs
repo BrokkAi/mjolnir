@@ -303,6 +303,11 @@ impl HarnessKind {
     /// Read [`credential_freshness`] out of this harness's own credential JSON.
     pub fn credential_freshness_ms(self, json: &serde_json::Value) -> Option<i64> {
         match self {
+            Self::Antigravity => {
+                chrono::DateTime::parse_from_rfc3339(json.get("token")?.get("expiry")?.as_str()?)
+                    .ok()
+                    .map(|expiry| expiry.timestamp_millis())
+            }
             Self::Claude => json.get("claudeAiOauth")?.get("expiresAt")?.as_i64(),
             Self::Codex => {
                 let last_refresh = json.get("last_refresh")?.as_str()?;
@@ -343,7 +348,7 @@ impl HarnessKind {
             Self::Muse => muse_login_expiry_ms(json),
             // None of these has a proactive-refresh path, so none reports an
             // expiry Hel would act on: each refreshes its own tokens on demand.
-            Self::Grok | Self::OpenCode | Self::Dsh => None,
+            Self::Grok | Self::OpenCode | Self::Dsh | Self::Antigravity => None,
         }
     }
 
@@ -360,6 +365,7 @@ impl HarnessKind {
             // dsh-acp has no login; its profiles authenticate with an API
             // key, so `login_command` refuses before this is reached.
             Self::Dsh => Vec::new(),
+            Self::Antigravity => Vec::new(),
         };
         (self.cli_binary_name().to_owned(), arguments)
     }

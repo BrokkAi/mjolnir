@@ -293,6 +293,10 @@ pub fn fallback_launch(
     policy: crate::config::ExecutionPolicy,
 ) -> (String, Vec<String>) {
     match harness {
+        HarnessKind::Antigravity => {
+            let flag = harness.launch_flag_for(policy).unwrap_or("");
+            ("sh".into(), vec!["-c".into(), format!("if command -v agy >/dev/null 2>&1; then agy=agy; elif [ -x \"$HOME/.local/bin/agy\" ]; then agy=\"$HOME/.local/bin/agy\"; else echo 'Antigravity requires agy installed on this target (PATH or ~/.local/bin/agy)' >&2; exit 127; fi; exec \"$agy\" acp --gemini-dir \"$MJ_ANTIGRAVITY_HOME\" --disable-telemetry {flag}")])
+        }
         HarnessKind::Codex | HarnessKind::Claude | HarnessKind::Muse => {
             let bridge = npm_bridge(harness).expect("npm harness has a bridge");
             (
@@ -455,6 +459,13 @@ pub struct HarnessPin {
 
 pub const fn pin(kind: HarnessKind) -> HarnessPin {
     match kind {
+        // Ambient-only identity; no managed installation or download pin.
+        HarnessKind::Antigravity => HarnessPin {
+            install_id: "antigravity-ambient",
+            display_version: "target-installed agy",
+            entrypoint: "agy",
+            cli_entrypoint: "agy",
+        },
         HarnessKind::Muse => HarnessPin {
             install_id: "muse-acp-0.21.0_muse-1.4.14-R7309.1",
             display_version: "muse-acp 0.21.0 + Muse Code 1.4.14-R7309.1",

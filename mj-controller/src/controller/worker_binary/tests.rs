@@ -3458,7 +3458,8 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
             | HarnessKind::Grok
             | HarnessKind::Muse
             | HarnessKind::OpenCode
-            | HarnessKind::Dsh => &[],
+            | HarnessKind::Dsh
+            | HarnessKind::Antigravity => &[],
         };
         let home = tempfile::tempdir().unwrap();
         let skill = format!("{}/review/SKILL.md", kind.synced_skill_dirs()[0]);
@@ -5361,6 +5362,13 @@ fn fixture_home_entries(kind: HarnessKind) -> &'static [(&'static str, bool)] {
         ],
         // dsh-acp keeps only its sessions, written atomically through a
         // temporary file beside each record.
+        HarnessKind::Antigravity => &[
+            ("antigravity-cli/antigravity-oauth-token", true),
+            ("AGENTS.md", true),
+            ("skills/review/SKILL.md", true),
+            ("antigravity-cli/conversations/old.db", false),
+            ("settings.json", false),
+        ],
         HarnessKind::Dsh => &[
             ("AGENTS.md", true),
             ("skills/review/SKILL.md", true),
@@ -5544,6 +5552,10 @@ fn login_bytes(kind: HarnessKind, generation: i64) -> Vec<u8> {
                 "expires": 1_790_000_000_000_i64 + generation * 1000,
             },
         }]),
+        HarnessKind::Antigravity => serde_json::json!({"token": {
+            "access_token": format!("access-{generation}"), "refresh_token": "stable-refresh",
+            "expiry": format!("2026-09-{:02}T09:00:00Z", 10 + generation),
+        }}),
         HarnessKind::Dsh => panic!("DSH keeps no login; its key comes from DEEPSEEK_API_KEY"),
     };
     serde_json::to_vec(&login).unwrap()

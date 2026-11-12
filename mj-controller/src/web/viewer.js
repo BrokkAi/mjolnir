@@ -2444,7 +2444,7 @@ function selectNewProfile(draft, profileId) {
 // Mirrors HarnessKind::supports_delegation_tools.
 function subagentChoiceApplies(draft = newDraft) {
   const kind = snapshot?.profiles.find(profile => profile.id === draft?.profileId)?.harness_kind;
-  return kind === 'claude' || kind === 'codex' || kind === 'dsh' || kind === 'opencode';
+  return kind === 'claude' || kind === 'codex' || kind === 'dsh' || kind === 'opencode' || kind === 'antigravity';
 }
 
 // Every top-level session's message-only server carries ask_oracle, whatever its harness.
@@ -2456,7 +2456,7 @@ function oracleChoiceApplies(draft = newDraft) {
 // do nothing there and is not offered.
 function subagentNativeOffered(draft = newDraft) {
   const kind = snapshot?.profiles.find(profile => profile.id === draft?.profileId)?.harness_kind;
-  return kind !== 'dsh';
+  return kind !== 'dsh' && kind !== 'antigravity';
 }
 
 // A policy as the delegation choice shows and submits it for the draft's

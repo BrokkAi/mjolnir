@@ -160,6 +160,12 @@ fn every_harness_reports_expiry_only_where_hel_can_refresh_ahead_of_it() {
             Some(1_756_000_000_000),
             Some(1_756_000_000_000),
         ),
+        (
+            HarnessKind::Antigravity,
+            br#"{"token":{"access_token":"a","refresh_token":"r","expiry":"2026-08-17T02:19:01.724226598Z"}}"#.to_vec(),
+            Some(1_786_933_141_724),
+            None,
+        ),
         // DSH has no login; a file in its place orders nothing.
         (
             HarnessKind::Dsh,
