@@ -1550,6 +1550,7 @@ fn golden_phone_session_snapshot() {
         &serde_json::json!({
             "profiles": quota_snapshot.profiles.iter().map(|profile| serde_json::json!({
                 "id": profile.id,
+                "quota_pools": profile.quota_pools,
                 "quota": profile.quota,
             })).collect::<Vec<_>>(),
         }),

@@ -5117,7 +5117,7 @@ function renderQuota() {
   );
   const profiles = snapshot.profiles || [];
   const rows = profiles.flatMap(profile => {
-    const pools = [...new Set((profile.quota?.windows || []).map(window => window.pool).filter(Boolean))];
+    const pools = profile.quota_pools || [];
     return pools.length ? pools.map(pool => ({ profile, pool })) : [{ profile, pool: null }];
   });
   if (!profiles.length) {

@@ -1329,6 +1329,10 @@
   "profiles": [
     {
       "id": "agy",
+      "quota_pools": [
+        "Ge",
+        "Cl"
+      ],
       "quota": {
         "summary": "Week (Ge) 73% left · Week (Cl) 0% left",
         "windows": [
@@ -1372,6 +1376,7 @@
     },
     {
       "id": "claude",
+      "quota_pools": [],
       "quota": {
         "summary": "Week 21% left · Week (Fable) 17% left",
         "windows": [
@@ -1398,6 +1403,7 @@
     },
     {
       "id": "claude-unknown",
+      "quota_pools": [],
       "quota": {
         "summary": "Week available · Week (Fable) 17% left",
         "windows": [
@@ -1422,6 +1428,7 @@
     },
     {
       "id": "codex",
+      "quota_pools": [],
       "quota": {
         "summary": "Week 70% left",
         "windows": [

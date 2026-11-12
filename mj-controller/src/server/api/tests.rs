@@ -2461,6 +2461,7 @@ async fn model_first_session_start_selects_the_profile_that_offers_the_model() {
 
                 harness_kind: "grok".into(),
 
+                quota_pools: Vec::new(),
                 quota: None,
             });
         },
@@ -2677,6 +2678,7 @@ async fn start_without_a_profile_selects_from_all_configured_profiles_by_quota()
 
                 capabilities_key: String::new(),
 
+                quota_pools: Vec::new(),
                 quota: None,
             });
             snapshot.profiles.push(crate::server::ViewerProfile {
@@ -2685,6 +2687,7 @@ async fn start_without_a_profile_selects_from_all_configured_profiles_by_quota()
 
                 capabilities_key: String::new(),
 
+                quota_pools: Vec::new(),
                 quota: None,
             });
         },
@@ -2832,6 +2835,7 @@ async fn start_without_a_saved_default_selects_a_model_with_an_explicit_target()
 
                 capabilities_key: String::new(),
 
+                quota_pools: Vec::new(),
                 quota: None,
             });
         }
