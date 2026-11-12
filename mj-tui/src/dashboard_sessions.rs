@@ -1475,7 +1475,10 @@ mod verdict_tests {
             (SessionAttention::Inactive, AttentionLevel::Inactive),
             (SessionAttention::Idle, AttentionLevel::Unread),
         ] {
-            dashboard.set_session_attention(BTreeMap::from([("session".to_owned(), served)]));
+            dashboard.set_session_attention(mj_core::snapshot_map::SnapshotMap::from([(
+                "session".to_owned(),
+                served,
+            )]));
             assert_eq!(presentation_attention(&dashboard, "session"), expected);
         }
     }

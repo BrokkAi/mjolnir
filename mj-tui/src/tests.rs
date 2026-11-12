@@ -2029,7 +2029,7 @@ fn dashboard_with_attention_mix() -> DashboardState {
         },
         BTreeMap::new(),
     );
-    dashboard.set_session_attention(BTreeMap::from([
+    dashboard.set_session_attention(mj_core::snapshot_map::SnapshotMap::from([
         (
             "asks".into(),
             mj_core::attention::SessionAttention::NeedsInput,

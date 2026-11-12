@@ -45,7 +45,7 @@ pub struct RuntimeStateUpdate {
     /// Session creation history for project-list ordering and the legacy fallback; see
     /// [`mj_client::runtime_feed::LaunchRecency`].
     pub launch_recency: Vec<mj_client::runtime_feed::LaunchRecency>,
-    pub session_attention: BTreeMap<String, mj_core::attention::SessionAttention>,
+    pub session_attention: SnapshotMap<String, mj_core::attention::SessionAttention>,
     pub recent_launch: Option<mj_core::go::RecentLaunch>,
     pub container_upgrade_sessions: std::collections::BTreeSet<String>,
     /// The daemon storage owner's verdict per target host.
