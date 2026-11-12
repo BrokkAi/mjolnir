@@ -5082,84 +5082,10 @@ fn in_place_move_failure_retains_environment_for_retry() {
     );
 }
 
-/// A daemon restart in the middle of the swap does not resume it: the record
-/// is rolled back to the source identity and retains its verified checkpoint
-/// and environment for explicit retry.
-#[cfg(unix)]
-#[test]
-fn in_place_move_recovery_after_restart_during_swap_retains_environment() {
-    let name = test_name("in_place_move_recovery_after_restart_during_swap_retains_environment");
-    if std::env::var_os("MJ_MOVE_IN_PLACE_SWAP_RESTART_CHILD").is_none() {
-        let directory = tempfile::tempdir().unwrap();
-        IsolatedTest::new(name)
-            .env("MJ_MOVE_IN_PLACE_SWAP_RESTART_CHILD", "1")
-            .env("MJ_WORKER_BINARY", fake_worker_dispatcher())
-            .isolated_store(directory.path())
-            .run();
-        return;
-    }
-    let _writer = crate::database::install_isolated_test_writer();
-    let InPlaceFixture {
-        _directory,
-        worker_root,
-        checkpoint,
-        mut controller,
-        ..
-    } = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
-    let source = controller.state.sessions[LATCH_RELAY_SESSION].clone();
-    let mut operation = in_place_operation(&controller, IN_PLACE_DESTINATION_PROFILE);
-    operation.phase = MovePhase::ResumingDestination;
-    operation.checkpoint = Some(checkpoint.clone());
-    // What `restore_session_in_place` persisted before it was interrupted: the
-    // destination identity on the record, the source identity in the operation.
-    operation.recovery_session = Some(source.clone());
-    crate::database::save_move_operation(&operation).unwrap();
-    let interrupted = controller
-        .state
-        .sessions
-        .get_mut(LATCH_RELAY_SESSION)
-        .unwrap();
-    interrupted.state = SessionState::Provisioning;
-    interrupted.harness_kind = HarnessKind::Claude;
-    interrupted.last_profile = IN_PLACE_DESTINATION_PROFILE.into();
-    crate::database::save_session(interrupted).unwrap();
-
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let outcome = runtime.block_on(async {
-        let channels = crate::session_manager::spawn_session_manager().unwrap();
-        let outcome = controller
-            .recover_move_managed_controlled(operation, &ProcessExecutor, &channels.control)
-            .await;
-        channels.shutdown.shutdown().await.unwrap();
-        outcome.unwrap()
-    });
-
-    assert_eq!(outcome.outcome, "failed");
-    assert!(
-        outcome
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("destination restoration was interrupted")),
-        "{:?}",
-        outcome.error
-    );
-    let recovered = &controller.state.sessions[LATCH_RELAY_SESSION];
-    assert_eq!(recovered.state, SessionState::Error);
-    assert!(recovered.target.is_some());
-    assert_eq!(recovered.last_profile, IN_PLACE_SOURCE_PROFILE);
-    assert_eq!(recovered.checkpoint.as_ref(), Some(&checkpoint));
-    assert!(
-        worker_root.exists(),
-        "the interrupted swap retains its environment: {}",
-        worker_root.display()
-    );
-}
-
-/// A daemon restart before the swap started finishes the interrupted close
-/// while retaining the environment the move promised to keep.
+/// A daemon restart before the swap started finishes the interrupted close of
+/// a cancelled Move and retains the environment the move promised to keep.
+/// An uncancelled Move goes on to restore; see
+/// `in_place_move_killed_mid_flight_is_retried_from_its_handoff_after_restart`.
 #[cfg(unix)]
 #[test]
 fn in_place_move_recovery_after_restart_before_swap_finishes_the_close() {
@@ -5175,75 +5101,69 @@ fn in_place_move_recovery_after_restart_before_swap_finishes_the_close() {
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
-    for cancelled in [false, true] {
-        let InPlaceFixture {
-            _directory,
-            worker_root,
-            mut controller,
-            ..
-        } = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
-        let mut operation = in_place_operation(&controller, IN_PLACE_DESTINATION_PROFILE);
-        operation.phase = MovePhase::ClosingSource;
-        crate::database::save_move_operation(&operation).unwrap();
-        let source_relay = seed_source_relay(&worker_root);
+    let InPlaceFixture {
+        _directory,
+        worker_root,
+        mut controller,
+        ..
+    } = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
+    let mut operation = in_place_operation(&controller, IN_PLACE_DESTINATION_PROFILE);
+    operation.phase = MovePhase::ClosingSource;
+    crate::database::save_move_operation(&operation).unwrap();
+    let source_relay = seed_source_relay(&worker_root);
 
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let executor = RecordingProcessExecutor::default();
-        // One daemon lifetime: seal the source and keep its target, exactly as the
-        // first half of an in-place move does.
-        runtime.block_on(async {
-            let channels = start_source_relay_manager(&source_relay);
-            let deferred = controller
-                .suspend_session_for_move(
-                    LATCH_RELAY_SESSION,
-                    &executor,
-                    &channels.control,
-                    &mut operation,
-                    None,
-                    crate::controller::lifecycle::SourceTargetDisposition::RetainForInPlaceSwap,
-                    crate::controller::move_session::MoveSourceRelay::default(),
-                )
-                .await;
-            channels.shutdown.shutdown().await.unwrap();
-            assert!(!deferred.unwrap());
-        });
-        let sealed = &controller.state.sessions[LATCH_RELAY_SESSION];
-        assert_eq!(sealed.state, SessionState::Closing);
-        assert!(sealed.target.is_some());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let executor = RecordingProcessExecutor::default();
+    // One daemon lifetime: seal the source and keep its target, exactly as the
+    // first half of an in-place move does.
+    runtime.block_on(async {
+        let channels = start_source_relay_manager(&source_relay);
+        let deferred = controller
+            .suspend_session_for_move(
+                LATCH_RELAY_SESSION,
+                &executor,
+                &channels.control,
+                &mut operation,
+                None,
+                crate::controller::lifecycle::SourceTargetDisposition::RetainForInPlaceSwap,
+                crate::controller::move_session::MoveSourceRelay::default(),
+            )
+            .await;
+        channels.shutdown.shutdown().await.unwrap();
+        assert!(!deferred.unwrap());
+    });
+    let sealed = &controller.state.sessions[LATCH_RELAY_SESSION];
+    assert_eq!(sealed.state, SessionState::Closing);
+    assert!(sealed.target.is_some());
 
-        // Cancellation after sealing must retain the same environment as a crash.
-        operation.cancellation_requested = cancelled;
-        // The next daemon lifetime recovers the interrupted move.
-        let outcome = runtime.block_on(async {
-            let channels = start_source_relay_manager(&source_relay);
-            let outcome = controller
-                .recover_move_managed_controlled(operation, &executor, &channels.control)
-                .await;
-            channels.shutdown.shutdown().await.unwrap();
-            outcome.unwrap()
-        });
+    operation.cancellation_requested = true;
+    // The next daemon lifetime recovers the interrupted move.
+    let outcome = runtime.block_on(async {
+        let channels = start_source_relay_manager(&source_relay);
+        let outcome = controller
+            .recover_move_managed_controlled(operation, &executor, &channels.control)
+            .await;
+        channels.shutdown.shutdown().await.unwrap();
+        outcome.unwrap()
+    });
 
-        assert_eq!(
-            outcome.outcome,
-            if cancelled { "cancelled" } else { "failed" }
-        );
-        assert_eq!(
-            outcome.error.as_deref(),
-            Some("Move source sealed; environment retained for explicit retry")
-        );
-        let recovered = &controller.state.sessions[LATCH_RELAY_SESSION];
-        assert_eq!(recovered.state, SessionState::Error);
-        assert!(recovered.target.is_some());
-        assert!(recovered.checkpoint.is_some());
-        assert!(
-            worker_root.exists(),
-            "the recovered close retains its environment: {}",
-            worker_root.display()
-        );
-    }
+    let recovered = &controller.state.sessions[LATCH_RELAY_SESSION];
+    assert_eq!(outcome.outcome, "cancelled");
+    assert_eq!(
+        outcome.error.as_deref(),
+        Some("Move source sealed; environment retained for explicit retry")
+    );
+    assert_eq!(recovered.state, SessionState::Error);
+    assert!(recovered.target.is_some());
+    assert!(recovered.checkpoint.is_some());
+    assert!(
+        worker_root.exists(),
+        "the recovered close retains its environment: {}",
+        worker_root.display()
+    );
 }
 
 /// Where the daemon died in W-2: right after the source was sealed
@@ -5373,11 +5293,13 @@ fn restart_daemon_and_recover_move(controller: &mut Controller) -> mj_core::stat
 }
 
 /// W-2: a daemon killed in the middle of an in-place Move leaves a Move the
-/// next daemon can finish. Its startup sweep keeps the handoff the Move
-/// restores from, the published guidance and the API agree that the
-/// checkpoint is retained, and the retry the guidance names succeeds and
-/// clears the failure.
+/// next daemon finishes. Its startup sweep keeps the handoff the Move
+/// restores from, and recovery restores from it without anyone asking. When
+/// the person cancelled the Move, recovery stops instead: the published
+/// guidance and the API agree that the checkpoint is retained, and the retry
+/// the guidance names succeeds and clears the failure.
 // Hard-won: 42de65fd: daemon death mid-swap left the in-place move without recoverable handoff state
+// Hard-won: 555274842: recovery left an in-place Move interrupted after its seal in Error for a manual retry
 #[test]
 #[cfg(unix)]
 fn in_place_move_killed_mid_flight_is_retried_from_its_handoff_after_restart() {
@@ -5394,14 +5316,38 @@ fn in_place_move_killed_mid_flight_is_retried_from_its_handoff_after_restart() {
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
-    for kill in DAEMON_KILLS {
+    for (kill, cancelled) in DAEMON_KILLS
+        .into_iter()
+        .flat_map(|kill| [(kill, false), (kill, true)])
+    {
         let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
         let source_relay = seed_source_relay(&fixture.worker_root);
-        let killed = in_place_move_killed_at(kill, &mut fixture, &source_relay);
+        let mut killed = in_place_move_killed_at(kill, &mut fixture, &source_relay);
         let handoff = killed.handoff.clone().unwrap();
+        if cancelled {
+            killed.cancellation_requested = true;
+            crate::database::save_move_operation(&killed).unwrap();
+        }
 
         let outcome = restart_daemon_and_recover_move(&mut fixture.controller);
-        assert_eq!(outcome.outcome, "failed", "{kill:?}");
+        if !cancelled {
+            assert_eq!(
+                outcome.outcome, "completed",
+                "{kill:?}: {:?}",
+                outcome.error
+            );
+            let finished =
+                crate::database::load_state().unwrap().sessions[LATCH_RELAY_SESSION].clone();
+            assert_eq!(finished.state, SessionState::Running, "{kill:?}");
+            assert_eq!(finished.last_profile, IN_PLACE_DESTINATION_PROFILE);
+            assert_eq!(finished.last_error, None, "{kill:?}");
+            assert_eq!(
+                fs::read(fixture.worker_root.join("build-cache.txt")).unwrap(),
+                b"warm cache"
+            );
+            continue;
+        }
+        assert_eq!(outcome.outcome, "cancelled", "{kill:?}");
         assert!(
             handoff.archive_path.exists(),
             "{kill:?}: the startup sweep deleted the Move's handoff {}",
@@ -5411,6 +5357,7 @@ fn in_place_move_killed_mid_flight_is_retried_from_its_handoff_after_restart() {
             crate::database::load_state().unwrap().sessions[LATCH_RELAY_SESSION].clone();
         assert_eq!(recovered.state, SessionState::Error, "{kill:?}");
         assert!(recovered.target.is_some(), "{kill:?}");
+        assert_eq!(recovered.last_profile, IN_PLACE_SOURCE_PROFILE, "{kill:?}");
         let published = recovered.last_error.clone().unwrap();
         assert!(
             published.contains("Retry Move on the same target"),
@@ -5436,6 +5383,11 @@ fn in_place_move_killed_mid_flight_is_retried_from_its_handoff_after_restart() {
         // The retry the guidance names, as the web sends it: without the
         // large-transfer acknowledgement, which an in-place Move does not use.
         let mut operation = operation;
+        // A retry clears the cancellation, as the accepted retry request does;
+        // a save alone keeps a recorded cancellation.
+        crate::database::clear_move_cancellation_for_retry(LATCH_RELAY_SESSION).unwrap();
+        operation.cancellation_requested = false;
+        operation.error = None;
         operation.selection.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
         crate::database::save_move_operation(&operation).unwrap();
         let mut requested = operation.selection.clone();
@@ -5594,8 +5546,16 @@ fn in_place_move_retry_that_finds_its_handoff_gone_leaves_the_session_destroyabl
     let _writer = crate::database::install_isolated_test_writer();
     let mut fixture = in_place_fixture(HarnessKind::Claude, HarnessKind::Claude);
     let source_relay = seed_source_relay(&fixture.worker_root);
-    in_place_move_killed_at(DaemonKill::Suspending, &mut fixture, &source_relay);
-    restart_daemon_and_recover_move(&mut fixture.controller);
+    let mut killed = in_place_move_killed_at(DaemonKill::Suspending, &mut fixture, &source_relay);
+    // Recovery finishes an uncancelled Move by itself; a cancelled one stops
+    // with its environment retained, which is where a manual retry starts.
+    killed.cancellation_requested = true;
+    crate::database::save_move_operation(&killed).unwrap();
+    assert_eq!(
+        restart_daemon_and_recover_move(&mut fixture.controller).outcome,
+        "cancelled"
+    );
+    crate::database::clear_move_cancellation_for_retry(LATCH_RELAY_SESSION).unwrap();
     let mut operation = crate::database::load_move_operation(LATCH_RELAY_SESSION)
         .unwrap()
         .unwrap();

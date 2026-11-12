@@ -1849,6 +1849,12 @@ impl Controller {
                 if operation.retains_source_environment() && self.state.sessions[&id].state == SessionState::Closing {
                     let previous = self.state.sessions[&id].clone();
                     operation.recovery_session = Some(previous.clone());
+                    // Startup also recovers a Move that already ended (failed
+                    // or cancelled) when its source is still `Closing`; only
+                    // an active Move restores again.
+                    if operation.in_place && operation.is_active() && !operation.cancellation_requested {
+                        return self.retry_interrupted_in_place_move(&mut operation, &previous, executor, manager).await;
+                    }
                     let cause = anyhow::anyhow!("Move source sealed; environment retained for explicit retry");
                     return Err(self.retain_failed_in_place_move(&id, &previous, cause)?);
                 }
@@ -1919,6 +1925,10 @@ impl Controller {
                 }
                 MovePhase::ResumingDestination => {
                     let previous = operation.recovery_session.as_ref().context("move lacks its stopped recovery identity; retain resources for inspection")?;
+                    if operation.in_place && !operation.cancellation_requested {
+                        let previous = previous.clone();
+                        return self.retry_interrupted_in_place_move(&mut operation, &previous, executor, manager).await;
+                    }
                     // The retained environment belongs to this Move, even
                     // when only part of its worker installation completed.
                     let cause = anyhow::anyhow!("destination restoration was interrupted; checkpoint retained for an explicit retry");
@@ -1956,6 +1966,43 @@ impl Controller {
         .await
 
         }).await
+    }
+
+    /// Finish an in-place Move whose daemon stopped after the source was
+    /// sealed: right after the seal, before the swap, or during it. First give
+    /// the record the shape a failed attempt leaves (`Error`, source identity,
+    /// worker stopped, environment retained), then run the same restore the
+    /// manual retry runs from that shape. A failure of this attempt ends the
+    /// Move as `Failed`, where Destroy and a manual retry still work, and a
+    /// `Failed` Move is not recovered again, so each interruption gets one
+    /// automatic attempt.
+    async fn retry_interrupted_in_place_move(
+        &mut self,
+        operation: &mut MoveOperation,
+        previous: &mj_core::state::SessionRecord,
+        executor: &(impl CommandExecutor + Sync),
+        manager: &SessionManagerControl,
+    ) -> Result<()> {
+        let id = operation.selection.session_id.clone();
+        self.retain_failed_in_place_move(
+            &id,
+            previous,
+            anyhow::anyhow!("the daemon stopped during this in-place Move; retrying it"),
+        )?;
+        tracing::info!(
+            session_id = %id,
+            reference = %operation.operation_id,
+            phase = ?operation.phase,
+            "retrying an in-place Move the daemon stopped after sealing its source"
+        );
+        Box::pin(self.execute_move(
+            operation,
+            None,
+            executor,
+            manager,
+            MoveSourceRelay::default(),
+        ))
+        .await
     }
 
     async fn recover_move_source_stop(
