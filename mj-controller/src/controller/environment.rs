@@ -9,7 +9,7 @@ use crate::database::{self, EnvironmentPhase, EnvironmentRecord, EnvironmentWork
 use crate::targets::{self, CommandExecutor};
 use crate::worker_lifecycle::WorkerPermit;
 
-/// Issued only after retirement admission is closed and every writer stopped.
+/// Issued after retirement closes admission and every managed Stop completes.
 /// Holding each worker permit prevents an already admitted mutation from
 /// racing physical removal. Fields are private: callers cannot invent proof.
 pub(super) struct Reclamation {
@@ -18,7 +18,7 @@ pub(super) struct Reclamation {
     _permits: Vec<WorkerPermit>,
 }
 
-/// Exact physical worker covered by a live all-writers-stopped retirement.
+/// Exact worker whose managed Stop completed under retained launch permits.
 pub(crate) struct StoppedWorker<'a> {
     _authority: &'a Reclamation,
     session_id: &'a str,
@@ -129,7 +129,7 @@ impl Reclamation {
                         permit.scope_blocking(|| -> Result<()> {
                             let root = targets::worker_root(target, &worker.session_id)?;
                             if let Err(error) =
-                                super::worker_binary::fence_worker(permit, executor, target, &root)
+                                super::worker_binary::stop_worker(permit, executor, target, &root)
                             {
                                 if !targets::is_borrowed(target)
                                     && targets::cleanup_target_is_confirmed_absent(
@@ -436,7 +436,7 @@ pub(super) fn retire_owned_environment(
 }
 
 /// Suspend can move large Podman storage cleanup to its existing supervised
-/// task. Admission is closed and all writers are stopped before it returns.
+/// task. Admission is closed and managed Stops complete before it returns.
 pub(super) fn quiesce_session_environment(
     session: &SessionRecord,
     config: &Config,
@@ -457,7 +457,7 @@ pub(super) fn quiesce_session_environment(
 }
 
 /// A deletion capability is scoped to one exact checkout and to the lifetime
-/// of the retirement holding all writer permits, or to a just-created checkout
+/// of the retirement holding all worker launch permits, or to a just-created checkout
 /// which has never been handed to a worker.
 pub(super) struct CheckoutRemoval<'a> {
     checkout: &'a ManagedWorktree,
@@ -605,7 +605,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(command.purpose.clone());
-            if command.purpose == "kill retired Mjolnir worker forest" {
+            if command.purpose == "stop Mjolnir worker daemon" {
                 if let Some(barrier) = &self.stop_barrier {
                     barrier.wait();
                 }
@@ -794,10 +794,7 @@ mod tests {
             Reclamation::acquire(environment, &Config::default(), executor.as_ref()).unwrap();
         assert_eq!(
             executor.operations.lock().unwrap().as_slice(),
-            [
-                "kill retired Mjolnir worker forest",
-                "kill retired Mjolnir worker forest"
-            ]
+            ["stop Mjolnir worker daemon", "stop Mjolnir worker daemon"]
         );
         authority.remove_targets(executor.as_ref()).unwrap();
         authority.finish().unwrap();

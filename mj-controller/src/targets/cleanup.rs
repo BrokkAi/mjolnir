@@ -747,7 +747,8 @@ esac
     .purpose("confirm exact Podman session resources are absent")
 }
 
-/// Removal retains the retirement permits through command execution.
+/// Removal follows completed managed Stop and retains the launch permits.
+/// This authority does not assert containment of arbitrary detached writers.
 pub(crate) struct StoppedCleanupPlan<'a> {
     _proof: crate::controller::StoppedWorker<'a>,
     plan: CommandPlan,

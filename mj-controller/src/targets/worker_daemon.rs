@@ -13,10 +13,7 @@ hel_ps() {{
     ps -ww "$@" 2>/dev/null || ps "$@" 2>/dev/null
 }}
 hel_is_worker() {{
-    hel_args=$(hel_ps -o args= -p "$1") || {{
-        kill -0 "$1" 2>/dev/null && return 2
-        return 1
-    }}
+    hel_args=$(hel_ps -o args= -p "$1") || return 1
     case "$hel_args" in
         *"$hel_match"*|*"$hel_match_home"*) return 0 ;;
     esac
@@ -30,14 +27,9 @@ hel_recorded_worker() {{
         esac
         # The pidfile outlives a launch, so a recycled pid has to be ruled out
         # by what the process actually is.
-        if [ -n "$hel_pid" ]; then
-            if hel_is_worker "$hel_pid"; then
-                printf '%s\n' "$hel_pid"
-                return 0
-            else
-                hel_status=$?
-                [ "$hel_status" -eq 1 ] || return "$hel_status"
-            fi
+        if [ -n "$hel_pid" ] && hel_is_worker "$hel_pid"; then
+            printf '%s\n' "$hel_pid"
+            return 0
         fi
     fi
     # Startup records survive process death. Match the process birth as well
@@ -49,79 +41,14 @@ hel_recorded_worker() {{
     esac
     hel_birth=$(sed -n 's/.*"process_birth"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$hel_root/{startup_file}" 2>/dev/null | head -n 1)
     if [ -n "$hel_birth" ]; then
-        hel_current_birth=$(mj_process_birth "$hel_pid") || {{
-            kill -0 "$hel_pid" 2>/dev/null && return 2
-            return 1
-        }}
+        hel_current_birth=$(mj_process_birth "$hel_pid") || return 1
         [ "$hel_birth" = "$hel_current_birth" ] || return 1
     else
         # Older workers have no birth record; only their exact command line
         # can identify them. PID existence alone cannot identify a worker.
-        hel_is_worker "$hel_pid" || return $?
+        hel_is_worker "$hel_pid" || return 1
     fi
     printf '%s\n' "$hel_pid"
-}}
-# Enumerate the same root-scoped identities for probes and both stop paths.
-# A failed census is unknown, never proof that the worker is absent.
-hel_worker_candidates() {{
-    hel_census=$(hel_ps -eo pid=,args=) || return 2
-    hel_candidates=$(hel_recorded_worker) || {{
-        hel_status=$?
-        [ "$hel_status" -eq 1 ] || return "$hel_status"
-        hel_candidates=""
-    }}
-    while read -r hel_pid hel_args; do
-        case "$hel_pid" in '' | *[!0-9]*) continue ;; esac
-        [ "$hel_pid" -eq $$ ] && continue
-        case "$hel_args" in
-            *"$hel_match"*|*"$hel_match_home"*) hel_candidates="$hel_candidates $hel_pid" ;;
-        esac
-    done <<MJ_CENSUS
-$hel_census
-MJ_CENSUS
-    for hel_candidate in $(printf '%s\n' "$hel_candidates" | tr ' ' '\n' | sort -u); do
-        hel_candidate_birth=$(mj_process_birth "$hel_candidate") || {{
-            kill -0 "$hel_candidate" 2>/dev/null && return 2
-            continue
-        }}
-        [ -n "$hel_candidate_birth" ] || {{
-            kill -0 "$hel_candidate" 2>/dev/null && return 2
-            continue
-        }}
-        # Attribute argv (or the authoritative startup birth) inside the
-        # same identity interval, rather than trusting an earlier ps row.
-        if hel_is_worker "$hel_candidate"; then
-            :
-        else
-            hel_status=$?
-            [ "$hel_status" -eq 1 ] || return "$hel_status"
-            hel_recorded=$(hel_recorded_worker) || {{
-                hel_status=$?
-                [ "$hel_status" -eq 1 ] || return "$hel_status"
-                hel_recorded=""
-            }}
-            [ "$hel_recorded" = "$hel_candidate" ] || continue
-        fi
-        hel_after=$(mj_process_birth "$hel_candidate") || {{
-            kill -0 "$hel_candidate" 2>/dev/null && return 2
-            continue
-        }}
-        [ "$hel_after" = "$hel_candidate_birth" ] || continue
-        hel_state=$(hel_ps -o stat= -p "$hel_candidate") || {{
-            kill -0 "$hel_candidate" 2>/dev/null && return 2
-            continue
-        }}
-        case "$hel_state" in
-            *Z*)
-                # A verified dead leader still owns its surviving group.
-                hel_group_rows=$(hel_ps -eo pgid=,stat=) || return 2
-                if ! printf '%s\n' "$hel_group_rows" | awk -v group="$hel_candidate" '$1 == group && $2 !~ /^Z/ {{found=1}} END {{exit !found}}'; then
-                    continue
-                fi
-                ;;
-        esac
-        printf '%s|%s\n' "$hel_candidate" "$hel_candidate_birth"
-    done
 }}"#,
         root = posix_quote(worker_root),
         process_birth_script = mj_core::subprocess::PROCESS_BIRTH_SCRIPT,
@@ -144,11 +71,21 @@ hel_report_worker_state() {
         printf 'starting\n'
     fi
 }
-hel_candidates=$(hel_worker_candidates) || exit $?
-if [ -n "$hel_candidates" ]; then
+if hel_recorded_worker >/dev/null; then
     hel_report_worker_state
     exit 0
 fi
+while read -r hel_pid hel_args; do
+    case "$hel_pid" in
+        '' | *[!0-9]*) continue ;;
+    esac
+    [ "$hel_pid" -eq $$ ] && continue
+    case "$hel_args" in
+        *"$hel_match"*|*"$hel_match_home"*) hel_report_worker_state; exit 0 ;;
+    esac
+done <<MJ_PS
+$(hel_ps -eo pid=,args=)
+MJ_PS
 printf 'dead\n'
 "#,
     );
@@ -255,153 +192,36 @@ hel_stop() {
     echo "worker process tree still running after stop: $1" >&2
     return 1
 }
-hel_candidates=$(hel_worker_candidates) || exit $?
-while IFS='|' read -r hel_pid hel_birth; do
-    [ -n "$hel_pid" ] || continue
-    hel_current=$(mj_process_birth "$hel_pid") || {
-        kill -0 "$hel_pid" 2>/dev/null && exit 1
-        continue
-    }
-    [ "$hel_current" = "$hel_birth" ] || continue
+if hel_pid=$(hel_recorded_worker); then
     hel_stop "$hel_pid" || exit $?
-done <<MJ_CANDIDATES
-$hel_candidates
-MJ_CANDIDATES
-hel_candidates=$(hel_worker_candidates) || exit $?
-if [ -n "$hel_candidates" ]; then
+fi
+hel_ps -eo pid=,args= | while read -r hel_pid hel_args; do
+    case "$hel_pid" in
+        '' | *[!0-9]*) continue ;;
+    esac
+    [ "$hel_pid" -eq $$ ] && continue
+    case "$hel_args" in
+        *"$hel_match"*|*"$hel_match_home"*) hel_stop "$hel_pid" || exit $? ;;
+    esac
+done || exit $?
+hel_left=0
+while read -r hel_pid hel_args; do
+    case "$hel_pid" in
+        '' | *[!0-9]*) continue ;;
+    esac
+    [ "$hel_pid" -eq $$ ] && continue
+    case "$hel_args" in
+        *"$hel_match"*|*"$hel_match_home"*) hel_left=1 ;;
+    esac
+done <<MJ_PS
+$(hel_ps -eo pid=,args=)
+MJ_PS
+if [ "$hel_left" -ne 0 ]; then
     echo "worker still running after stop: $hel_root" >&2
     exit 1
 fi
-
 "#,
     );
-    script
-}
-
-/// Retirement fences the exact worker and its captured process forest before removal.
-pub fn fence_worker_daemon_script(worker_root: &str) -> String {
-    let mut script = worker_daemon_identity_script(worker_root);
-    script.push_str(r#"
-hel_failed=0
-hel_known=""
-hel_capture() {
-    hel_rows=$(hel_ps -eo pid=,ppid=,pgid=,stat=) || return 1
-    hel_roots=$(hel_worker_candidates) || return 1
-    hel_seeds=""
-    hel_workers=""
-    while IFS='|' read -r hel_pid hel_birth; do
-        [ -n "$hel_pid" ] || continue
-        hel_current=$(mj_process_birth "$hel_pid") || {
-            kill -0 "$hel_pid" 2>/dev/null && hel_failed=1
-            continue
-        }
-        if [ "$hel_current" = "$hel_birth" ]; then
-            hel_seeds="$hel_seeds $hel_pid"
-            hel_workers="$hel_workers $hel_pid"
-        fi
-    done <<MJ_ROOTS
-$hel_roots
-MJ_ROOTS
-    while IFS='|' read -r hel_pid hel_birth; do
-        [ -n "$hel_pid" ] || continue
-        hel_current=$(mj_process_birth "$hel_pid") || {
-            hel_current=""
-            kill -0 "$hel_pid" 2>/dev/null && hel_failed=1
-        }
-        [ "$hel_current" != "$hel_birth" ] || hel_seeds="$hel_seeds $hel_pid"
-    done <<MJ_KNOWN
-$hel_known
-MJ_KNOWN
-    # Exclude the control ancestry and helper probes before expanding ownership.
-    hel_owned=$(printf '%s\n' "$hel_rows" | awk -v self="$$" -v seeds="$hel_seeds" -v workers="$hel_workers" '
-        {p[NR]=$1; parent[$1]=$2; group[$1]=$3; state[$1]=$4; n=NR}
-        END {
-            id=self; while(id>0 && !(id in excluded)) {excluded[id]=1; id=parent[id]}
-            probe[self]=1
-            do {grew=0; for(i=1;i<=n;i++) {
-                id=p[i]; if(!(id in probe) && parent[id] in probe) {probe[id]=1; grew=1}
-            }} while(grew)
-            split(seeds, roots, " "); for(i in roots) {
-                id=roots[i]; if(id>1 && !(id in excluded) && !(id in probe)) owned[id]=1
-            }
-            split(workers, leaders, " "); for(j in leaders) {
-                worker=leaders[j]; if(worker>1) for(i=1;i<=n;i++) {
-                    id=p[i]; if(group[id]==worker && !(id in excluded) && !(id in probe)) owned[id]=1
-                }
-            }
-            do {grew=0; for(i=1;i<=n;i++) {
-                id=p[i]; if(!(id in owned) && !(id in excluded) && !(id in probe) && parent[id] in owned) {owned[id]=1; grew=1}
-            }} while(grew)
-            for(i=1;i<=n;i++) {id=p[i]; if(id>1 && id in owned && !(id in excluded) && !(id in probe) && state[id] !~ /^Z/) print id}
-        }') || return 1
-    hel_captured=""
-    for hel_pid in $hel_owned; do
-        hel_birth=$(mj_process_birth "$hel_pid") || {
-            kill -0 "$hel_pid" 2>/dev/null && hel_failed=1
-            continue
-        }
-        hel_captured="$hel_captured
-$hel_pid|$hel_birth"
-    done
-}
-hel_signal_known() {
-    while IFS='|' read -r hel_pid hel_birth; do
-        [ -n "$hel_pid" ] || continue
-        hel_current=$(mj_process_birth "$hel_pid") || {
-            kill -0 "$hel_pid" 2>/dev/null && hel_failed=1
-            continue
-        }
-        [ "$hel_current" = "$hel_birth" ] || continue
-        if ! kill -KILL "$hel_pid" 2>/dev/null; then
-            kill -0 "$hel_pid" 2>/dev/null && hel_failed=1
-        fi
-    done <<MJ_KNOWN
-$hel_known
-MJ_KNOWN
-}
-# Each expansion freezes newly attributed identities before the next census.
-# A stopped forest cannot fork between the final census and KILL.
-while :; do
-    if ! hel_capture; then hel_failed=1; break; fi
-    hel_added=0
-    while IFS='|' read -r hel_pid hel_birth; do
-        [ -n "$hel_pid" ] || continue
-        hel_current=$(mj_process_birth "$hel_pid") || {
-            kill -0 "$hel_pid" 2>/dev/null && hel_failed=1
-            continue
-        }
-        [ "$hel_current" = "$hel_birth" ] || continue
-        case "
-$hel_known
-" in *"
-$hel_pid|$hel_birth
-"*) continue ;; esac
-        hel_known="$hel_known
-$hel_pid|$hel_birth"
-        hel_added=1
-        if ! kill -STOP "$hel_pid" 2>/dev/null; then
-            kill -0 "$hel_pid" 2>/dev/null && hel_failed=1
-        fi
-    done <<MJ_CAPTURED
-$hel_captured
-MJ_CAPTURED
-    [ "$hel_added" -eq 1 ] && [ "$hel_failed" -eq 0 ] || break
-done
-# Even a failed freeze must attempt to kill every identity already owned.
-hel_signal_known
-hel_waited=0
-while :; do
-    if ! hel_capture; then hel_failed=1; break; fi
-    [ -z "$hel_owned" ] && break
-    [ "$hel_waited" -lt 3 ] || { hel_failed=1; break; }
-    sleep 1
-    hel_waited=$((hel_waited + 1))
-done
-if [ "$hel_failed" -ne 0 ]; then
-    echo "could not confirm retired worker forest is gone: $hel_root" >&2
-    exit 1
-fi
-"#);
     script
 }
 
@@ -746,174 +566,53 @@ mod tests {
     /// group empties as soon as the leader exits. The stop must still wait for
     /// the harness, or the `rm` that follows races its last writes (I2-9).
     // Hard-won: 2f859c8f: a harness outlived its worker group and raced removal of staged state.
-    // Hard-won: #1506: retirement must kill owned harness groups without killing another Move generation.
     #[test]
     #[cfg(target_os = "linux")]
     fn stopping_worker_waits_for_a_harness_in_its_own_process_group() {
         use std::os::unix::process::CommandExt;
-        for (hard_fence, fail_signal, breadcrumbs) in [
-            (false, false, 0),
-            (true, false, 0),
-            (true, true, 0),
-            (true, false, 1),
-            (true, false, 2),
-            (false, false, 3),
-            (true, false, 3),
-            (true, false, 4),
-        ] {
-            let outside = tempfile::tempdir().unwrap();
-            let root = outside.path().join("worker");
-            std::fs::create_dir_all(root.join("profile")).unwrap();
-            // The harness ignores TERM and keeps writing into the staged home.
-            let harness = format!(
-                "trap \"\" TERM; echo $$ > {out}/harness; while :; do echo x >> profile/state.sqlite-wal; sleep 0.05; done",
-                out = outside.path().display()
-            );
-            let mut leader = std::process::Command::new("sh")
-                .args([
-                    "-c",
-                    &if breadcrumbs == 3 {
-                        format!("sh -c '{harness}' & exit 0")
-                    } else {
-                        format!("setsid sh -c '{harness}' & wait")
-                    },
-                    &format!("hel worker run --root {}", root.display()),
-                ])
-                .current_dir(&root)
-                .process_group(0)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .unwrap();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while !outside.path().join("harness").exists() {
-                assert!(std::time::Instant::now() < deadline);
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            if breadcrumbs == 3 {
-                loop {
-                    let state =
-                        std::fs::read_to_string(format!("/proc/{}/stat", leader.id())).unwrap();
-                    if state.rsplit_once(") ").unwrap().1.starts_with('Z') {
-                        break;
-                    }
-                    assert!(std::time::Instant::now() < deadline);
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-            }
-            std::fs::write(
+        let outside = tempfile::tempdir().unwrap();
+        let root = outside.path().join("worker");
+        std::fs::create_dir_all(root.join("profile")).unwrap();
+        // The harness ignores TERM and keeps writing into the staged home.
+        let harness = format!(
+            "trap \"\" TERM; echo $$ > {out}/harness; while :; do echo x >> profile/state.sqlite-wal; sleep 0.05; done",
+            out = outside.path().display()
+        );
+        let mut leader = std::process::Command::new("sh")
+            .args(["-c", &format!("setsid sh -c '{harness}' & wait")])
+            .current_dir(&root)
+            .process_group(0)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !outside.path().join("harness").exists() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::fs::write(
             root.join(mj_core::relay::WORKER_STARTUP_FILE),
             serde_json::to_vec(&serde_json::json!({"pid": leader.id(), "process_birth": mj_core::subprocess::process_birth_identity(leader.id()).unwrap()})).unwrap(),
         )
         .unwrap();
-            let session = format!("fence-test-{}", leader.id());
-            let destination_root = outside.path().join("destination-generation");
-            std::fs::create_dir(&destination_root).unwrap();
-            let mut foreign = std::process::Command::new("sleep")
-                .arg("60")
-                .current_dir(&destination_root)
-                .env("MJ_SESSION_ID", &session)
-                .env("UNRELATED", format!("\nMJ_SESSION_ID={session}"))
-                .process_group(0)
-                .spawn()
-                .unwrap();
-            // A same-session worker in a different Move generation is not
-            // owned by this root, even though its session marker matches.
-            // A stale pidfile must not authorize killing it either.
-            std::fs::write(
-                root.join(mj_core::relay::WORKER_PID_FILE),
-                foreign.id().to_string(),
-            )
-            .unwrap();
-            if matches!(breadcrumbs, 1 | 2 | 4) {
-                std::fs::remove_file(root.join(mj_core::relay::WORKER_STARTUP_FILE)).unwrap();
-                if matches!(breadcrumbs, 1 | 4) {
-                    std::fs::remove_file(root.join(mj_core::relay::WORKER_PID_FILE)).unwrap();
-                } else {
-                    std::fs::write(
-                        root.join(mj_core::relay::WORKER_STARTUP_FILE),
-                        serde_json::to_vec(
-                            &serde_json::json!({"pid": foreign.id(), "process_birth": "stale"}),
-                        )
-                        .unwrap(),
-                    )
-                    .unwrap();
-                }
-            }
-            let root_path = root.to_string_lossy().into_owned();
-            let script = format!(
-                "{}\nrm -rf -- \"$hel_root\"\n",
-                if hard_fence {
-                    fence_worker_daemon_script(&root_path)
-                } else {
-                    stop_worker_daemon_script(&root_path)
-                }
-            );
-            let script = if breadcrumbs == 4 {
-                script.replace(
-                    "hel_ps() {",
-                    "hel_ps() {
-    if [ \"$1\" = -o ] && [ \"$2\" = args= ]; then return 1; fi",
-                )
-            } else {
-                script
-            };
-            let script = if fail_signal {
-                format!(
-                    "kill() {{ if [ \"$1\" = -STOP ]; then return 1; fi; command kill \"$@\"; }}\n{script}"
-                )
-            } else {
-                script
-            };
-            // A marked control ancestor must not attribute its unmarked
-            // sibling process to the worker through ancestry expansion.
-            let script = if hard_fence {
-                let control = format!(
-                    "env -u MJ_SESSION_ID sleep 60 & sibling=$!; sh -c {}; result=$?; kill -0 \"$sibling\" 2>/dev/null || exit 92; kill \"$sibling\"; wait \"$sibling\" 2>/dev/null; exit \"$result\"",
-                    posix_quote(&script)
-                );
-                format!(
-                    "MJ_SESSION_ID={} sh -c {}",
-                    posix_quote(&session),
-                    posix_quote(&control)
-                )
-            } else {
-                script
-            };
-            let (status, _) = run_script(&script);
-            if breadcrumbs == 4 {
-                // Failed discovery deliberately leaves the fixture alive.
-                let harness = std::fs::read_to_string(outside.path().join("harness")).unwrap();
-                run_script(&format!("kill -KILL {} {}", leader.id(), harness.trim()));
-            }
-            let _ = leader.wait();
-            let foreign_survived = foreign.try_wait().unwrap().is_none();
-            foreign.kill().unwrap();
-            foreign.wait().unwrap();
-            assert!(foreign_survived, "foreign pidfile process was killed");
-            assert_eq!(
-                status,
-                if breadcrumbs == 4 {
-                    1
-                } else {
-                    i32::from(fail_signal)
-                },
-                "a failed fence must refuse removal"
-            );
-            assert_eq!(
-                root.exists(),
-                fail_signal || breadcrumbs == 4,
-                "only a successful fence permits removal"
-            );
-            let harness = std::fs::read_to_string(outside.path().join("harness")).unwrap();
-            let (_, state) = run_script(&format!("ps -o stat= -p {}", harness.trim()));
-            assert!(
-                state.is_empty() || state.starts_with('Z'),
-                "harness survived: {state}"
-            );
-        }
+        let root_path = root.to_string_lossy().into_owned();
+        let script = format!(
+            "{}\nrm -rf -- \"$hel_root\"\n",
+            stop_worker_daemon_script(&root_path)
+        );
+        let (status, _) = run_script(&script);
+        let _ = leader.wait();
+        assert_eq!(status, 0, "the stop and the removal succeed");
+        assert!(!root.exists(), "the removal is complete");
+        let harness = std::fs::read_to_string(outside.path().join("harness")).unwrap();
+        let (_, state) = run_script(&format!("ps -o stat= -p {}", harness.trim()));
+        assert!(
+            state.is_empty() || state.starts_with('Z'),
+            "harness survived: {state}"
+        );
     }
 
     /// The script runs through the target's own shell and awk. macOS awk
@@ -931,7 +630,7 @@ mod tests {
             let assignment = script[i + 4..].split_whitespace().next().unwrap();
             let (_, value) = assignment.split_once('=').expect("-v name=value");
             assert!(
-                matches!(value, "\"$1\"" | "\"$$\"" | "\"$hel_candidate\""),
+                matches!(value, "\"$1\"" | "\"$$\""),
                 "awk -v value may span lines: {assignment}"
             );
             assert!(!assignment.contains('\n'));
