@@ -434,6 +434,18 @@ is **Settings → Privacy → Jev (hosted service)**.
 
 ## GitHub events `[github.watch]`
 
+`use_gpu` defaults to `true`. The local relevance model selects DirectML on Windows, CoreML on Apple-silicon
+macOS, and CUDA on Linux x64 when its libraries are installed. Other supported
+hosts use CPU. Linux CUDA requires the NVIDIA driver, CUDA 12 and cuDNN 9 libraries
+installed by the administrator; the daemon reports missing libraries and uses CPU.
+The model and runtime are fetched lazily on the first classification request.
+Its native-runtime choice is fixed at the first preparation, so installing libraries
+or enabling GPU scoring on Linux/Windows after CPU preparation requires the next
+daemon start. A GPU must beat the CPU
+on measured real-pair latency; otherwise the preparation owner retains CPU and
+reports why. Set `use_gpu = false` for CPU-only scoring. Device failures also
+select CPU with a visible notice.
+
 `enabled` is a boolean that defaults to `true`. Together with `[jev] enabled`,
 it controls the GitHub watcher as an event source. Jev classifies GitHub
 activity. Neither setting disables mailbox delivery, peer messages, child

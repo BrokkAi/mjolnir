@@ -69,3 +69,5 @@ mod mailbox_outbox;
 #[cfg(test)]
 mod test_log;
 mod upgrade;
+
+pub mod github_student;

@@ -27,7 +27,7 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
         "github" if path.len() == 1 => json!({"watch":{}}),
         "github" if key == "watch" => {
             let watch = mj_core::config::GithubWatchConfig::default();
-            json!({"enabled":watch.enabled,"interval_seconds":watch.interval_seconds,"api_base":watch.api_base})
+            json!({"enabled":watch.enabled,"use_gpu":watch.use_gpu,"interval_seconds":watch.interval_seconds,"api_base":watch.api_base})
         }
         "jev" => json!({"enabled":true}),
         "quota" => json!({"runtime":"auto"}),
@@ -260,6 +260,7 @@ pub fn label(key: &str) -> String {
         "review" => "Code Review",
         "continuation" => "Continuation",
         "watch" => "Watcher",
+        "use_gpu" => "Use GPU for GitHub relevance",
         "jev" => "Jev (hosted service)",
         "quota" => "Quota checks",
         "daemon" => "Daemon",
@@ -870,6 +871,11 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
         .collect::<Vec<_>>()
         .as_slice()
     {
+        ["github", "watch", "use_gpu"] => {
+            return Some(
+                "Automatically use a GPU only when it runs faster than the CPU. Turn off for CPU-only GitHub relevance scoring. Device failures select CPU and report a notice.",
+            );
+        }
         ["github"] | ["github", "watch"] => {
             return Some(
                 "Receive GitHub activity selected by Jev. This switch controls only the GitHub event source. Mailbox hooks, peer messages and child reports remain available at tool boundaries and through idle wakes.",

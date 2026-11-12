@@ -11,6 +11,16 @@ Bare SSH sessions stay on their original host.
 
 By default Mjolnir sends recent prompt and reply text and help-search text to TypeSafe's hosted Jev classifier through a public proxy. When a sub-agent uses adaptive effort, it also sends the clipped task name and instructions plus the child model ID. `[jev] enabled = false` in `config.toml` stops all Jev requests ([details](https://mjolnir.brokk.ai/security/#what-leaves-this-machine-by-default)).
 
+GitHub relevance downloads a pinned local model and native inference runtime
+when the first GitHub item needs classification, verifies their checksums, and caches them in the
+Mjolnir data directory. GLiDE handles classification while preparation runs or
+local scoring is unavailable. Native license texts are kept beside the cached
+runtime; no Python installation is required. GPU scoring uses DirectML on Windows,
+CoreML on Apple-silicon macOS, or CUDA on Linux x64. Linux CUDA requires the NVIDIA
+driver and CUDA 12/cuDNN 9 libraries installed on the host; otherwise scoring uses
+CPU. Windows requires the Microsoft Visual C++ Redistributable (x64); missing
+runtime DLLs produce a notice while GLiDE handles scoring. A GPU is retained only when its measured warm latency beats CPU.
+
 [Documentation](https://mjolnir.brokk.ai/) ·
 [Quickstart](https://mjolnir.brokk.ai/quickstart/) ·
 [Releases](https://github.com/BrokkAi/mjolnir/releases)
