@@ -1191,5 +1191,39 @@ pub(super) fn transcription_auth(
     config: &mj_core::config::Config,
     preferred: &str,
 ) -> Option<PathBuf> {
-    mj_client::auth::available_auth(mj_client::auth::auth_paths(config, preferred))
+    available_auth(auth_paths(config, preferred))
+}
+
+/// Find candidate Codex subscription auth files, preferring the session's
+/// current profile and then sorting all remaining profile IDs.
+fn auth_paths(config: &mj_core::config::Config, preferred: &str) -> Vec<PathBuf> {
+    let mut profiles = config
+        .profiles
+        .iter()
+        .filter(|(_, profile)| profile.kind == mj_core::config::HarnessKind::Codex)
+        .collect::<Vec<_>>();
+    profiles.sort_by_key(|(id, _)| (*id != preferred, *id));
+    profiles
+        .into_iter()
+        .map(|(_, profile)| profile.home.join(profile.kind.credential_file_name()))
+        .collect()
+}
+
+/// Return the first auth file containing complete ChatGPT-subscription OAuth
+/// tokens. API-key auth files are deliberately skipped.
+fn available_auth(paths: Vec<PathBuf>) -> Option<PathBuf> {
+    paths.into_iter().find(
+        |path| match anvil_client::codex_auth::read_auth_dot_json_at(path) {
+            Ok(Some(auth)) => auth.tokens.is_some_and(|tokens| {
+                !tokens.access_token.trim().is_empty()
+                    && !tokens.refresh_token.trim().is_empty()
+                    && !tokens.account_id.trim().is_empty()
+            }),
+            Ok(None) => false,
+            Err(error) => {
+                tracing::warn!(%error, "could not inspect Codex dictation credentials");
+                false
+            }
+        },
+    )
 }
