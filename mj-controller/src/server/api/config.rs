@@ -1,5 +1,11 @@
 use super::*;
 
+pub(super) async fn profile_login_errors(
+    State(state): State<ServerState>,
+) -> Result<Json<std::collections::BTreeMap<String, String>>, ApiFailure> {
+    Ok(Json(backend(&state)?.profile_login_errors()?))
+}
+
 pub(super) async fn profile_config(
     State(state): State<ServerState>,
     Path(profile_id): Path<String>,

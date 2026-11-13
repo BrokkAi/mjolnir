@@ -3816,6 +3816,7 @@ mod tests {
                 (
                     id,
                     crate::quota::QuotaReportPublication {
+                        login_error: None,
                         cache_identity: "test-identity".into(),
                         report: Some(report),
                     },
@@ -3897,6 +3898,7 @@ mod tests {
         reports.lock().unwrap().insert(
             "codex".into(),
             crate::quota::QuotaReportPublication {
+                login_error: None,
                 cache_identity: "test-identity".into(),
                 report: Some(subscription_report("codex", HarnessKind::Codex)),
             },

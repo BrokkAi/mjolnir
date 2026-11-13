@@ -717,7 +717,7 @@ impl ApiBackend {
         }
         match current.get(profile_id) {
             Some(publication) if publication.cache_identity == wanted_identity => {
-                match publication.report.clone() {
+                match publication.effective_report(profile_id) {
                     Some(report) => Ok(QuotaRead::Ready(report)),
                     None => Ok(QuotaRead::Pending(QuotaWait { receiver })),
                 }
@@ -3229,6 +3229,21 @@ fn refusal_reason(stdout: &[u8], stderr: &[u8], purpose: &str) -> String {
 }
 
 impl SubagentBackend for ApiBackend {
+    fn profile_login_errors(&self) -> Result<BTreeMap<String, String>> {
+        Ok(self
+            .quota_reports
+            .lock()
+            .map_err(|_| anyhow!("profile quota reports lock poisoned"))?
+            .iter()
+            .filter_map(|(id, publication)| {
+                publication
+                    .login_error
+                    .clone()
+                    .map(|error| (id.clone(), error))
+            })
+            .collect())
+    }
+
     fn subagent_config(&self) -> BoxFuture<'_, Result<mj_core::config::SubagentConfig>> {
         Box::pin(async move { Ok(self.exports.subagent_config()) })
     }

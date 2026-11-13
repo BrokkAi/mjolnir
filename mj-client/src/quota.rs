@@ -155,6 +155,11 @@ impl PaidCredits {
     }
 }
 
+/// Actionable refusal text shared by profile, doctor, and session views.
+pub fn refused_login_message(profile_id: &str) -> String {
+    format!("login refused; automatic renewal failed; run `mj login --profile {profile_id}`")
+}
+
 impl ProfileQuota {
     /// A display projection of one pool; the original report retains all scopes
     /// for model selection and quota recovery.
@@ -351,7 +356,9 @@ pub fn harness_billing(harness: HarnessKind) -> QuotaBilling {
 fn quota_error_label(error: &str) -> String {
     // This is the stable user-facing marker emitted by the Claude usage
     // adapter. Keep the display contract independent of the controller crate.
-    if error == "login expired" {
+    if error.starts_with("login refused;") {
+        "login required".to_owned()
+    } else if error == "login expired" {
         error.to_string()
     } else if error.starts_with("rate limited") {
         // The provider is throttling the usage endpoint, which is not the same

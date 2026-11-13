@@ -1612,9 +1612,9 @@ pub fn load_operator_presence() -> Result<OperatorPresence> {
 }
 
 /// The shared database writer owns transition and no-op decisions.
-pub fn set_operator_away(away: bool) -> Result<bool> {
+pub fn set_operator_away(away: bool, auto_afk_window: std::time::Duration) -> Result<bool> {
     let changed = submit_database_write("operator away setting", move |connection| {
-        super::operator_away::set_with(connection, away)
+        super::operator_away::set_with(connection, away, auto_afk_window)
     })?;
     if changed {
         crate::mailbox_outbox::notify_mailbox_outbox_changed();

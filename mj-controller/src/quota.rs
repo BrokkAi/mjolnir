@@ -326,8 +326,51 @@ pub struct QuotaRefreshOutcome {
 /// current identity has not completed a check yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct QuotaReportPublication {
+    /// Renewal failure, independent of the usage API result.
+    pub login_error: Option<String>,
     pub cache_identity: String,
     pub report: Option<ProfileQuota>,
+}
+
+impl QuotaReportPublication {
+    pub(crate) fn observe_claude_grant(
+        &mut self,
+        profile_id: &str,
+        check: ClaudeGrantCheck,
+        rejected: bool,
+    ) -> bool {
+        let error = (rejected
+            && matches!(
+                check,
+                ClaudeGrantCheck::Failed | ClaudeGrantCheck::Waiting { due_at_ms: None }
+            ))
+        .then(|| mj_client::quota::refused_login_message(profile_id));
+        if self.login_error == error {
+            return false;
+        }
+        self.login_error = error;
+        true
+    }
+
+    pub(crate) fn effective_report(&self, profile_id: &str) -> Option<ProfileQuota> {
+        let Some(error) = &self.login_error else {
+            return self.report.clone();
+        };
+        let mut report = self.report.clone().unwrap_or_else(|| ProfileQuota {
+            profile_id: profile_id.to_owned(),
+            harness: HarnessKind::Claude,
+            monthly_price_usd: None,
+            paid_credits: None,
+            banked_resets: None,
+            windows: Vec::new(),
+            extra: None,
+            error: None,
+            refreshed_at_epoch_seconds: mj_core::clock::epoch_seconds(),
+            rate_limited_until_epoch_seconds: None,
+        });
+        report.error = Some(error.clone());
+        Some(report)
+    }
 }
 
 pub(crate) type QuotaReportMap = BTreeMap<String, QuotaReportPublication>;
@@ -544,6 +587,10 @@ pub enum ClaudeGrantCheck {
     /// the login as it is now (after a renewal, the new one). `None` when the
     /// login is missing, holds no refresh token, or states no expiry.
     Waiting { due_at_ms: Option<i64> },
+    /// A handoff is draining admission; the next daemon checks the login.
+    Deferred,
+    /// A replacement is ready for immediate credential delivery.
+    Renewed { due_at_ms: Option<i64> },
     /// The refresh failed. The error is already logged with its safe category.
     Failed,
 }
@@ -557,6 +604,7 @@ pub(crate) async fn refresh_claude_grant(
     now_ms: i64,
     launcher: &claude_usage::ClaudeLauncher,
     gate: &std::sync::Arc<crate::upgrade::Gate>,
+    rejected_logins: &BTreeSet<String>,
 ) -> ClaudeGrantCheck {
     if request.harness != HarnessKind::Claude || !request.auth_scheme.uses_native_login_file() {
         return ClaudeGrantCheck::NotApplicable;
@@ -634,7 +682,10 @@ pub(crate) async fn refresh_claude_grant(
         container,
         launcher,
         gate,
-        now_ms,
+        claude_usage::GrantRefreshTrigger {
+            now_ms,
+            rejected_logins,
+        },
     )
     .await
     {
@@ -642,7 +693,7 @@ pub(crate) async fn refresh_claude_grant(
             ClaudeGrantCheck::Waiting { due_at_ms: None }
         }
         // Due, but a handoff is waiting: the next daemon decides again.
-        Ok(claude_usage::GrantRefresh::Deferred) => ClaudeGrantCheck::Waiting { due_at_ms: None },
+        Ok(claude_usage::GrantRefresh::Deferred) => ClaudeGrantCheck::Deferred,
         Ok(claude_usage::GrantRefresh::Current { due_at_ms }) => ClaudeGrantCheck::Waiting {
             due_at_ms: Some(due_at_ms),
         },
@@ -654,10 +705,10 @@ pub(crate) async fn refresh_claude_grant(
                 profile_id = %request.profile_id,
                 new_expires_at_ms = ?expires_at_ms,
                 refreshed_by_this_daemon = by_this_call,
-                "refreshed the Claude login ahead of expiry"
+                "refreshed the Claude login"
             );
             // The credential sync pushes the renewed login to sessions.
-            ClaudeGrantCheck::Waiting {
+            ClaudeGrantCheck::Renewed {
                 due_at_ms: expires_at_ms.map(claude_usage::grant_due_at),
             }
         }
@@ -665,7 +716,7 @@ pub(crate) async fn refresh_claude_grant(
             tracing::warn!(
                 profile_id = %request.profile_id,
                 %error,
-                "could not refresh the Claude login ahead of expiry"
+                "could not refresh the Claude login"
             );
             ClaudeGrantCheck::Failed
         }

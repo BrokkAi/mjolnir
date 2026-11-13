@@ -93,6 +93,7 @@ pub(super) fn spawn_quota_refresher_with(
             launcher,
             gate: crate::upgrade::gate().clone(),
         },
+        Some(updates_tx.clone()),
     );
     tokio::spawn(async move {
         // A daemon that stopped mid-check left its quota container running;
@@ -188,6 +189,7 @@ pub(super) fn spawn_claude_grant_refresher(
     mut batches: tokio::sync::watch::Receiver<QuotaRefreshBatch>,
     recheck: Duration,
     renewal: GrantRenewal,
+    updates: Option<tokio::sync::mpsc::Sender<QuotaUpdate>>,
 ) {
     tokio::spawn(async move {
         let mut tasks = tokio::task::JoinSet::new();
@@ -204,6 +206,7 @@ pub(super) fn spawn_claude_grant_refresher(
                     batches.clone(),
                     recheck,
                     renewal.clone(),
+                    updates.clone(),
                 ));
                 running.insert(handle.id(), request.clone());
             }
@@ -247,33 +250,65 @@ async fn renew_claude_grant_when_due(
     mut batches: tokio::sync::watch::Receiver<QuotaRefreshBatch>,
     recheck: Duration,
     renewal: GrantRenewal,
+    updates: Option<tokio::sync::mpsc::Sender<QuotaUpdate>>,
 ) {
     loop {
-        let current = {
+        let (current, rejected_logins) = {
             let batch = batches.borrow_and_update();
-            batch
+            let current = batch
                 .profiles
                 .iter()
                 .chain(&batch.grants)
                 .find(|candidate| candidate.profile_id == request.profile_id)
-                .cloned()
+                .cloned();
+            (
+                current,
+                batch
+                    .rejected_logins
+                    .get(&request.profile_id)
+                    .cloned()
+                    .unwrap_or_default(),
+            )
         };
         if current.as_ref() != Some(&request) {
             return;
         }
         let now_ms = mj_core::clock::epoch_millis();
-        let wait = match crate::quota::refresh_claude_grant(
+        let check = crate::quota::refresh_claude_grant(
             &request,
             now_ms,
             &renewal.launcher,
             &renewal.gate,
+            &rejected_logins,
         )
-        .await
+        .await;
+        if let Some(updates) = &updates
+            && !matches!(
+                check,
+                crate::quota::ClaudeGrantCheck::NotApplicable
+                    | crate::quota::ClaudeGrantCheck::Deferred
+            )
+            && (!rejected_logins.is_empty()
+                || matches!(check, crate::quota::ClaudeGrantCheck::Renewed { .. }))
+            && updates
+                .send(QuotaUpdate::ClaudeGrant {
+                    request: request.clone(),
+                    check,
+                    rejected_logins: rejected_logins.clone(),
+                })
+                .await
+                .is_err()
         {
+            return;
+        }
+        let wait = match check {
             // Applicability follows from the request, so only a changed
             // batch can alter it.
             crate::quota::ClaudeGrantCheck::NotApplicable => None,
             crate::quota::ClaudeGrantCheck::Waiting {
+                due_at_ms: Some(due_at_ms),
+            }
+            | crate::quota::ClaudeGrantCheck::Renewed {
                 due_at_ms: Some(due_at_ms),
             } => Some(
                 Duration::from_millis(due_at_ms.saturating_sub(now_ms).max(0) as u64)
@@ -283,6 +318,8 @@ async fn renew_claude_grant_when_due(
             // No login or refresh token yet, no readable expiry, or a failed
             // renewal: look again after one interval.
             crate::quota::ClaudeGrantCheck::Waiting { due_at_ms: None }
+            | crate::quota::ClaudeGrantCheck::Renewed { due_at_ms: None }
+            | crate::quota::ClaudeGrantCheck::Deferred
             | crate::quota::ClaudeGrantCheck::Failed => Some(recheck),
         };
         let sleep = async {

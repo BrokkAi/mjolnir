@@ -58,6 +58,55 @@ async fn cleanup_notices_are_authenticated_and_readable_after_session_removal() 
     assert_eq!(notices[0].text, "Cleanup failed; resources may remain.");
 }
 
+// The API, CLI, and doctor must agree on the profile failure without fetching
+// the complete runtime projection or inspecting credential files themselves.
+#[tokio::test]
+async fn refused_profile_login_errors_are_authenticated_and_projected_into_sessions() {
+    let failure = mj_client::quota::refused_login_message("claude");
+    let (app, _actions, _snapshots, _bundles) = api_app(
+        Arc::new(FakeBackend {
+            login_errors: [("claude".into(), failure.clone())].into(),
+            ..Default::default()
+        }),
+        |snapshot| {
+            let ids = snapshot.sessions.0.keys().cloned().collect::<Vec<_>>();
+            for id in ids {
+                snapshot.sessions.0.get_mut(&id).unwrap().profile_id = "claude".into();
+            }
+        },
+    );
+    let path = "/api/v1/profiles/login-errors";
+    let denied = app
+        .clone()
+        .oneshot(Request::get(path).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    for path in [path, "/api/v1/sessions", "/api/v1/sessions/session-1"] {
+        let response = app
+            .clone()
+            .oneshot(bearer(Request::get(path)).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        let value: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        if path.ends_with("login-errors") {
+            assert_eq!(value["claude"], failure);
+        } else if let Some(sessions) = value["sessions"].as_array() {
+            assert!(!sessions.is_empty());
+            assert!(
+                sessions
+                    .iter()
+                    .all(|session| session["profile_login_error"] == failure)
+            );
+        } else {
+            assert_eq!(value["profile_login_error"], failure);
+        }
+    }
+}
+
 // HTTP contract integration: optional All and encoded profile names must reach
 // the same store query, with authentication and no caching on the report.
 #[tokio::test]
@@ -1021,6 +1070,7 @@ struct CapturedSessionMessageRequest {
 
 #[derive(Default)]
 struct FakeBackend {
+    login_errors: std::collections::BTreeMap<String, String>,
     /// When set, a history write announces itself on the first and waits
     /// for the second before it finishes.
     record_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
@@ -1096,6 +1146,9 @@ impl FakeBackend {
 }
 
 impl SubagentBackend for FakeBackend {
+    fn profile_login_errors(&self) -> AnyResult<std::collections::BTreeMap<String, String>> {
+        Ok(self.login_errors.clone())
+    }
     fn usage_report(
         &self,
         query: mj_core::usage::SessionUsageQuery,

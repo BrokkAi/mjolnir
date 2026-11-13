@@ -8,6 +8,7 @@ pub(in crate::server) fn router(state: ServerState) -> Router<ServerState> {
         )
         .route("/events", get(events::events))
         .route("/github-token", get(github_token))
+        .route("/profiles/login-errors", get(profile_login_errors))
         .route("/profiles/{profile_id}/config", get(profile_config))
         .route(
             "/profiles/{profile_id}/subagent-options",
