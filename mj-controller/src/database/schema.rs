@@ -1818,7 +1818,7 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
         connection.execute_batch(&format!(
             "BEGIN IMMEDIATE;
              CREATE TABLE IF NOT EXISTS operator_away (singleton INTEGER PRIMARY KEY CHECK(singleton=1), away INTEGER NOT NULL CHECK(away IN (0,1)), revision INTEGER NOT NULL DEFAULT 0 CHECK(revision >= 0));
-             INSERT OR IGNORE INTO operator_away VALUES(1,0,0);
+             INSERT OR IGNORE INTO operator_away(singleton,away,revision) VALUES(1,0,0);
              CREATE TABLE IF NOT EXISTS operator_away_workers (session_id TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE, protocol INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS operator_away_requests (session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE, requested_seq INTEGER NOT NULL, elicitation_id TEXT NOT NULL, request TEXT NOT NULL, period INTEGER NOT NULL, resolved_seq INTEGER, action TEXT, PRIMARY KEY(session_id, requested_seq));
              {add_frontier}
