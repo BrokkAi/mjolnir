@@ -6,7 +6,7 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
     let key = path.last().map(String::as_str).unwrap_or("");
     match path.first().map(String::as_str).unwrap_or("") {
         "" => {
-            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{},"continuation":{}, "github":{}, "jev":{}, "quota":{}, "daemon":{}, "sessionwiki":{}, "subagents":{}, "keys":{"prefix":mj_core::config::DEFAULT_PREFIX}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
+            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{}, "github":{}, "jev":{}, "quota":{}, "daemon":{}, "sessionwiki":{}, "subagents":{}, "keys":{"prefix":mj_core::config::DEFAULT_PREFIX}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
         }
         "phone" => {
             json!({"enabled":true,"bind":mj_core::config::PhoneConfig::default().bind,"tailscale_detect":true,"tls_cert":null,"tls_key":null})
@@ -23,7 +23,6 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
         // Only the section itself: its reviewer entries are SubagentChoice
         // tables, which reject unknown keys.
         "review" if path.len() == 1 => json!({}),
-        "continuation" => json!({"enabled":true}),
         "github" if path.len() == 1 => json!({"watch":{}}),
         "github" if key == "watch" => {
             let watch = mj_core::config::GithubWatchConfig::default();
@@ -258,7 +257,6 @@ pub fn label(key: &str) -> String {
         "theme" => "Theme",
         "phone" => "Web Access",
         "review" => "Code Review",
-        "continuation" => "Continuation",
         "watch" => "Watcher",
         "use_gpu" => "Use GPU for GitHub relevance",
         "jev" => "Jev (hosted service)",
@@ -513,17 +511,6 @@ pub fn section_summary(
                 "Before push · automatic reviewers".to_owned()
             } else {
                 "Off".to_owned()
-            }
-        }
-        "continuation" => {
-            if section["enabled"] == Value::Bool(false) {
-                "Off".to_owned()
-            } else if !jev_enabled(draft) {
-                // `Config::automatic_continuation_enabled`: the classifier
-                // that judges each reply is Jev, so without it nothing runs.
-                "Off · Jev is off (Privacy)".to_owned()
-            } else {
-                "On · 3 continuations plus quota recovery".to_owned()
             }
         }
         "github" => {
@@ -802,8 +789,8 @@ fn jev_enabled(draft: &Value) -> bool {
 }
 
 /// The description drawn above the page `path`: its [`help`], except where
-/// another setting in the draft changes what the page does. Continuation
-/// cannot run while Jev is off, whatever its own box says.
+/// another setting in the draft changes what the page does. The GitHub
+/// watcher cannot run while Jev is off, whatever its own box says.
 pub fn page_help(path: &[String], draft: &Value) -> &'static str {
     page_specific_help(path, draft).unwrap_or_else(|| help(path))
 }
@@ -819,9 +806,6 @@ pub fn page_specific_help(path: &[String], draft: &Value) -> Option<&'static str
                     .any(|task| draft["_subagent_options"][task].is_null())) =>
         {
             "Discovering available subagent models. Unset models remain None until you choose one."
-        }
-        [section] if section == "continuation" && !jev_enabled(draft) => {
-            "Off because Jev is off: continuation needs Jev to judge each reply. Turn Jev on under Privacy to use it."
         }
         [section] | [section, _]
             if section == "github"
@@ -956,9 +940,6 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
             "Set either a local repository directory or a GitHub source for each repository."
         }
         "review" => "Reviewers for code review before push. With no reviewers, review is off.",
-        "continuation" => {
-            "Continue an unfinished request up to three times per message, and resume a session after its quota resets."
-        }
         "quota" => {
             "Codex, Grok and Claude quota checks start the agent. Auto runs it on this machine when the agent is installed here, else in your local Podman or Docker runtime's image when one is enabled."
         }
@@ -978,7 +959,7 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
             "Directories the daemon container sees, beside your home, Mjolnir's data and settings, and /tmp. Add local projects kept elsewhere."
         }
         "jev" => {
-            "Sends turn and help-search text to a hosted classifier. Off stops it; running sessions follow after a resume or restart."
+            "Sends turn text to a hosted classifier; quota recovery needs it. Off stops both; sessions follow on resume or restart."
         }
         "sessionwiki" => {
             "Sessions are always indexed into SessionWiki. This page sets archiving; the row below shows what it frees."

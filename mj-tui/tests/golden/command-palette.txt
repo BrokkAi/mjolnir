@@ -411,17 +411,17 @@ mode after selecting Open settings: "Setup"
 │           │                                                                                              │           │
 │           │   Sessions                                                                                   │           │
 │           │   Code Review                     Off                                                        │           │
-│           │   Continuation                    On · 3 continuations plus quota recovery                   │  ─────────╯
-│           │   Sub-agents                      Up to 6 at once                                            │  ─────────╮
-│           │   Quota checks                    Auto · container when available                            │           │
+│           │   Sub-agents                      Up to 6 at once                                            │  ─────────╯
+│           │   Quota checks                    Auto · container when available                            │  ─────────╮
 │           │   SessionWiki                     Keeps every session                                        │           │
-│           │   Web Access                      On · 127.0.0.1:3765                                        │  ─────────╯
-│           │                                                                                              │  ── ▁   ▄ ╮
-│           │   Display                                                                                    │           │
-│           │   Interface                       Monochrome (NO_COLOR; configured: Midnight) · sidebar left │  ─────────╯
-│           │   Notifications                   Terminal                                                   │  ── ▁   ▄ ╮
-│           │   Advanced                        All off                                                    │           │
+│           │   Web Access                      On · 127.0.0.1:3765                                        │           │
+│           │                                                                                              │  ─────────╯
+│           │   Display                                                                                    │  ── ▁   ▄ ╮
+│           │   Interface                       Monochrome (NO_COLOR; configured: Midnight) · sidebar left │           │
+│           │   Notifications                   Terminal                                                   │  ─────────╯
+│           │   Advanced                        All off                                                    │  ── ▁   ▄ ╮
 │           │                                                                                              │           │
+│           │   Privacy                                                                                    │           │
 │           │   Save and Close                                                                             │           │
 │           ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯           │
 ╰─────────                                                                                                    ─────────╯

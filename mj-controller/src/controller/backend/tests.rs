@@ -613,7 +613,6 @@ fn deployment_capacity_groups_local_and_same_host_targets() {
         phone: Default::default(),
         daemon: Default::default(),
         github: Default::default(),
-        continuation: Default::default(),
         review: Default::default(),
         sessionwiki: Default::default(),
         legacy_startup: (),

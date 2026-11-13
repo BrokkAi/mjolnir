@@ -182,7 +182,7 @@ the worker holds the turn.
 Automatic upgrades must never cancel accepted work that cannot start again from
 durable state, or use a timeout as permission to stop a busy process. Daemon
 handoff waits only for daemon-owned work: lifecycle operations, startup and
-session recovery, admissions, automatic continuations, and in-flight request and
+session recovery, admissions, quota recovery, and in-flight request and
 response delivery, including after the originating client disconnects. It never
 waits for worker turns, pending questions, or reviews; those live in workers and
 survive the handoff. The wait must take seconds, not minutes. Work that can take

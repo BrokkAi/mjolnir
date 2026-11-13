@@ -5647,12 +5647,12 @@ async fn suspension_rejects_destruction_flags_and_removed_routes() {
     }
 }
 
-/// Mjolnir's automatic continuation starts a new command. A session wait
+/// A quota check starts a new command. A session wait
 /// follows it; a wait on the turn before it answers, and names it as `next`.
 #[tokio::test]
-async fn only_the_session_wait_follows_automatic_continuation() {
+async fn only_the_session_wait_follows_the_quota_check() {
     let observation = WaitObservation {
-        activity: mj_core::activity::ActivityState::CheckingContinuation,
+        activity: mj_core::activity::ActivityState::CheckingQuota,
         execution: MaterializedExecutionState::Idle,
         last_turn_outcome: Some(completed(7, "end_turn")),
         ..Default::default()
@@ -5679,7 +5679,7 @@ async fn only_the_session_wait_follows_automatic_continuation() {
     .unwrap();
     assert_eq!(
         response.next,
-        Some(mj_core::activity::ActivityState::CheckingContinuation)
+        Some(mj_core::activity::ActivityState::CheckingQuota)
     );
 }
 
@@ -5719,7 +5719,7 @@ fn session_wait_uses_the_workers_published_jev_activity() {
         ActivityState::Background {
             started_at_ms: Some(10),
         },
-        ActivityState::CheckingContinuation,
+        ActivityState::CheckingQuota,
         ActivityState::Goal,
         ActivityState::Unrecognized,
     ] {
@@ -5763,9 +5763,9 @@ fn session_wait_uses_the_workers_published_jev_activity() {
     );
     // The daemon's continuation check is published over the worker's state,
     // as the dashboard shows it; the actor's own view never carries it.
-    session.activity_state = Some(ActivityState::CheckingContinuation);
+    session.activity_state = Some(ActivityState::CheckingQuota);
     let checking = build_observation(&snapshot, &session, Some(&live), None, None);
-    assert_eq!(checking.activity, ActivityState::CheckingContinuation);
+    assert_eq!(checking.activity, ActivityState::CheckingQuota);
     assert!(resolve_wait(&checking, &WaitRequest::default()).is_none());
     assert!(resolve_wait(&checking, &explicit).is_some());
 

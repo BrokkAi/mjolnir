@@ -167,7 +167,7 @@ impl SessionActivity {
             SessionActivityKind::Idle
             | SessionActivityKind::Goal
             | SessionActivityKind::Expecting
-            | SessionActivityKind::CheckingContinuation => false,
+            | SessionActivityKind::CheckingQuota => false,
             SessionActivityKind::Lifecycle => {
                 self.execution == Some(mj_core::relay::RelayExecutionState::Closing)
             }
@@ -199,8 +199,8 @@ impl SessionActivity {
             return "Checking response".into();
         }
         let kind = self.kind(current_turn_started_at);
-        if kind == SessionActivityKind::CheckingContinuation {
-            return "Checking continuation".into();
+        if kind == SessionActivityKind::CheckingQuota {
+            return "Checking quota".into();
         }
         if kind == SessionActivityKind::Expecting {
             return "expecting the agent to continue".into();
@@ -319,7 +319,7 @@ impl SessionActivity {
         let label = match kind {
             SessionActivityKind::Lifecycle => Some(self.lifecycle_label().to_owned()),
             SessionActivityKind::Goal => Some("Pursuing goal".into()),
-            SessionActivityKind::CheckingContinuation => Some("Checking continuation".into()),
+            SessionActivityKind::CheckingQuota => Some("Checking quota".into()),
             SessionActivityKind::Expecting => Some("expecting the agent to continue".into()),
             _ => None,
         };
@@ -422,7 +422,7 @@ impl SessionActivity {
             ActivityState::Goal | ActivityState::Retry => SessionActivityKind::Goal,
             ActivityState::Idle { .. } => SessionActivityKind::Idle,
             ActivityState::Expecting { .. } => SessionActivityKind::Expecting,
-            ActivityState::CheckingContinuation => SessionActivityKind::CheckingContinuation,
+            ActivityState::CheckingQuota => SessionActivityKind::CheckingQuota,
             // A state this build does not know is something happening, and
             // "Turn" is the honest way to render an unnamed something.
             ActivityState::Unknown { .. } | ActivityState::Unrecognized => {
@@ -467,7 +467,7 @@ impl SessionActivity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionActivityKind {
     Expecting,
-    CheckingContinuation,
+    CheckingQuota,
     Goal,
     Turn,
     Step,
@@ -573,7 +573,7 @@ pub fn format_activity_columns(
         SessionActivityKind::Lifecycle => vec![activity.lifecycle_label().to_owned()],
         SessionActivityKind::Idle => vec!["[idle]".into()],
         SessionActivityKind::Goal => vec!["Pursuing goal".into()],
-        SessionActivityKind::CheckingContinuation => vec!["Checking continuation".into()],
+        SessionActivityKind::CheckingQuota => vec!["Checking quota".into()],
         SessionActivityKind::Expecting => vec!["expecting the agent to continue".into()],
     }
 }
@@ -615,7 +615,7 @@ pub fn format_activity_clock(
         SessionActivityKind::Lifecycle => format!("[{}]", activity.lifecycle_label()),
         SessionActivityKind::Idle => "[idle]".into(),
         SessionActivityKind::Goal => "Pursuing goal".into(),
-        SessionActivityKind::CheckingContinuation => "Checking continuation".into(),
+        SessionActivityKind::CheckingQuota => "Checking quota".into(),
         SessionActivityKind::Expecting => "expecting the agent to continue".into(),
     }
 }

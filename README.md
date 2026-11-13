@@ -9,7 +9,7 @@ keeps them running after you close the terminal. You can move a session to
 another account, another harness, or a compatible target without starting over.
 Bare SSH sessions stay on their original host.
 
-By default Mjolnir sends recent prompt and reply text and help-search text to TypeSafe's hosted Jev classifier through a public proxy. When a sub-agent uses adaptive effort, it also sends the clipped task name and instructions plus the child model ID. `[jev] enabled = false` in `config.toml` stops all Jev requests ([details](https://mjolnir.brokk.ai/security/#what-leaves-this-machine-by-default)).
+By default Mjolnir sends classifier evidence to GLiDE (Fastino) through its hosted proxy. `[jev] enabled = false` in `config.toml` stops all classifier requests ([details](https://mjolnir.brokk.ai/security/#what-leaves-this-machine-by-default)).
 
 GitHub relevance sends every classification to the public proxy by default.
 Local inference is opt-in: set `local_inference = true` under `[github.watch]`

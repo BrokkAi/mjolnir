@@ -278,7 +278,7 @@ fn newer_user_work_cancels_pending_assessment() {
 
 #[test]
 fn autonomous_provider_failure_arms_one_retry_and_survives_restart() {
-    use mj_core::assessment::{Action, Failure, Input, Judgment, Verdict, Work};
+    use mj_core::assessment::Action;
     let root = tempfile::tempdir().unwrap();
     let mut relay = open(root.path());
     start(&mut relay, "original-prompt");
@@ -304,27 +304,9 @@ fn autonomous_provider_failure_arms_one_retry_and_survives_restart() {
     relay.prepare_pending_assessment().unwrap();
     let (generation, evidence, _) = relay.pending_replied_verdict().unwrap();
     assert!(evidence.completion.is_some());
-    let answer = Verdict {
-        failure: Judgment {
-            choice: Failure::TransientProvider,
-            confidence: 0.91,
-            probabilities: Default::default(),
-        },
-        input: Judgment {
-            choice: Input::Unclear,
-            confidence: 0.32,
-            probabilities: Default::default(),
-        },
-        work: Judgment {
-            choice: Work::Unclear,
-            confidence: 0.24,
-            probabilities: Default::default(),
-        },
-        background: None,
-        reply: None,
-    };
+    let answer = glide_answer("retry_provider", None);
     assert_eq!(
-        relay.apply_turn_assessment(generation, answer).unwrap(),
+        relay.apply_glide_assessment(generation, answer).unwrap(),
         "server_retry_armed"
     );
     let retry = relay.operational_state().capacity_retry.unwrap();
@@ -347,7 +329,6 @@ fn autonomous_provider_failure_arms_one_retry_and_survives_restart() {
 
 #[test]
 fn a_new_user_command_supersedes_an_in_flight_autonomous_assessment() {
-    use mj_core::assessment::{Failure, Input, Judgment, Verdict, Work};
     let root = tempfile::tempdir().unwrap();
     let mut relay = open(root.path());
     start(&mut relay, "original-prompt");
@@ -364,27 +345,9 @@ fn a_new_user_command_supersedes_an_in_flight_autonomous_assessment() {
         "replacement-prompt",
         prompt("Stop that task and do this instead"),
     );
-    let answer = Verdict {
-        failure: Judgment {
-            choice: Failure::TransientProvider,
-            confidence: 1.0,
-            probabilities: Default::default(),
-        },
-        input: Judgment {
-            choice: Input::None,
-            confidence: 1.0,
-            probabilities: Default::default(),
-        },
-        work: Judgment {
-            choice: Work::Unclear,
-            confidence: 0.5,
-            probabilities: Default::default(),
-        },
-        background: None,
-        reply: None,
-    };
+    let answer = glide_answer("retry_provider", None);
     assert_eq!(
-        relay.apply_turn_assessment(generation, answer).unwrap(),
+        relay.apply_glide_assessment(generation, answer).unwrap(),
         "stale_turn"
     );
     assert!(relay.capacity_retry_deadline().is_none());
@@ -392,7 +355,6 @@ fn a_new_user_command_supersedes_an_in_flight_autonomous_assessment() {
 
 #[test]
 fn uncertain_assessment_is_cached_and_pending_completion_recovers() {
-    use mj_core::assessment::{Failure, Input, Judgment, Verdict, Work};
     let root = tempfile::tempdir().unwrap();
     let mut relay = open(root.path());
     start(&mut relay, "original-prompt");
@@ -407,26 +369,8 @@ fn uncertain_assessment_is_cached_and_pending_completion_recovers() {
     relay.prepare_pending_assessment().unwrap();
     let (generation, evidence, _) = relay.pending_replied_verdict().unwrap();
     assert!(evidence.authorization.unwrap().authorization_complete);
-    let answer = Verdict {
-        failure: Judgment {
-            choice: Failure::Unclear,
-            confidence: 0.5,
-            probabilities: Default::default(),
-        },
-        input: Judgment {
-            choice: Input::Unclear,
-            confidence: 0.5,
-            probabilities: Default::default(),
-        },
-        work: Judgment {
-            choice: Work::Unclear,
-            confidence: 0.5,
-            probabilities: Default::default(),
-        },
-        background: None,
-        reply: None,
-    };
-    relay.apply_turn_assessment(generation, answer).unwrap();
+    let answer = glide_answer("uncertain", None);
+    relay.apply_glide_assessment(generation, answer).unwrap();
     assert!(relay.pending_replied_verdict().is_none());
     drop(relay);
     let mut relay = open(root.path());

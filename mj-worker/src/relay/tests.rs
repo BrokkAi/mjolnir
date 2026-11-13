@@ -7081,35 +7081,12 @@ fn legacy_runtime_receipt_replays_without_constraining_new_prompts() {
 /// survives a restart; the process-local inference does not.
 // Hard-won: #1304: a Jev verdict rewrote the completion ordinal, so a parent's handback reminder was refused as stale.
 #[test]
-fn a_jev_verdict_keeps_the_completion_identity_a_handback_reminder_names() {
+fn a_turn_verdict_keeps_the_completion_identity_a_handback_reminder_names() {
     use mj_core::activity::verdict::{Decision, TurnCompletion};
-    use mj_core::assessment::{Failure, Input, Judgment, Verdict, Work};
-    let judged = |failure, work| Verdict {
-        failure: Judgment {
-            choice: failure,
-            confidence: 0.99,
-            probabilities: Default::default(),
-        },
-        input: Judgment {
-            choice: Input::None,
-            confidence: 0.99,
-            probabilities: Default::default(),
-        },
-        work: Judgment {
-            choice: work,
-            confidence: 0.99,
-            probabilities: [("finished".into(), 1.0)].into(),
-        },
-        background: None,
-        reply: None,
-    };
     for (verdict, reason) in [
-        (
-            judged(Failure::None, Work::Waiting),
-            "background_work_pending",
-        ),
-        (judged(Failure::None, Work::Finished), "work_finished"),
-        (judged(Failure::Other, Work::Unclear), "user_input_required"),
+        (glide_answer("wait", None), "background_work_pending"),
+        (glide_answer("finished", None), "work_finished"),
+        (glide_answer("await_input", None), "user_input_required"),
     ] {
         let temp = tempfile::tempdir().unwrap();
         let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
@@ -7130,7 +7107,7 @@ fn a_jev_verdict_keeps_the_completion_identity_a_handback_reminder_names() {
         relay.prepare_pending_assessment().unwrap();
         let (revision, _, _) = relay.pending_replied_verdict().unwrap();
         assert_eq!(
-            relay.apply_turn_assessment(revision, verdict).unwrap(),
+            relay.apply_glide_assessment(revision, verdict).unwrap(),
             reason
         );
         drop(relay);

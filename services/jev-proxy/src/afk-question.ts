@@ -1,4 +1,4 @@
-import questions from "../../../mj-worker/src/acp/afk_question.json" with { type: "json" };
+import questions from "./afk_question.json" with { type: "json" };
 
 export const afkQuestionQuestions = questions;
 

@@ -16,6 +16,32 @@ pub(in crate::controller) enum WorkerFilePreparation {
     RefreshProfile,
 }
 
+/// The session history a launch continues. A restore deletes the worker's
+/// relay state, so the history the restore brings back decides what the
+/// launch must not repeat. Everywhere else the stored projection is the live
+/// history.
+#[derive(Clone, Copy)]
+pub(in crate::controller) enum LaunchHistory<'a> {
+    Stored,
+    Restored(&'a mj_core::archive::CanonicalSessionSnapshot),
+}
+
+/// Whether this history shows the prompt with `command_id` as started. A
+/// transcript item `user:<command id>` appears when a prompt starts; a prompt
+/// that was only queued has none, so its input never ran.
+fn prompt_started(session_id: &str, history: &LaunchHistory<'_>, command_id: &str) -> Result<bool> {
+    let stable_id = format!("user:{command_id}");
+    match history {
+        LaunchHistory::Stored => {
+            crate::database::materialized_transcript_item_exists(session_id, &stable_id)
+        }
+        LaunchHistory::Restored(snapshot) => Ok(snapshot
+            .transcript
+            .iter()
+            .any(|item| item.stable_id == stable_id)),
+    }
+}
+
 fn disable_mbx_cache_shims(
     session_id: &str,
     backend: &targets::TargetLocator,
@@ -145,6 +171,7 @@ impl Controller {
         backend: &targets::TargetLocator,
         worker_root: &str,
         executor: &impl CommandExecutor,
+        history: LaunchHistory<'_>,
     ) -> Result<()> {
         self.prepare_worker_files_for(
             session_id,
@@ -152,6 +179,7 @@ impl Controller {
             worker_root,
             executor,
             WorkerFilePreparation::Install,
+            history,
         )
     }
 
@@ -162,10 +190,16 @@ impl Controller {
         worker_root: &str,
         executor: &impl CommandExecutor,
         preparation: WorkerFilePreparation,
+        history: LaunchHistory<'_>,
     ) -> Result<()> {
-        if let Some(launch) =
-            self.stage_worker_files_for(session_id, backend, worker_root, executor, preparation)?
-        {
+        if let Some(launch) = self.stage_worker_files_for(
+            session_id,
+            backend,
+            worker_root,
+            executor,
+            preparation,
+            history,
+        )? {
             prepare_installed_managed_harness(executor, backend, worker_root, &launch)?;
         }
         Ok(())
@@ -180,6 +214,7 @@ impl Controller {
         worker_root: &str,
         executor: &impl CommandExecutor,
         preparation: WorkerFilePreparation,
+        history: LaunchHistory<'_>,
     ) -> Result<Option<WorkerLaunchConfig>> {
         let _timing =
             crate::launch_timing::LaunchPhaseTimer::new(session_id, "prepare worker files");
@@ -230,7 +265,7 @@ impl Controller {
             .context("session profile is missing")?;
         profile.ensure_ready(&session.last_profile)?;
         let (mut launch, project_memory, target_profile_home) =
-            self.session_launch_config(session_id, backend)?;
+            self.session_launch_config(session_id, backend, history)?;
 
         if session.native_session_id.is_some()
             && profile.kind == mj_core::config::HarnessKind::Codex
@@ -581,10 +616,11 @@ impl Controller {
     /// sub-agent role. The first launch and every relaunch use this, so a
     /// relaunched worker keeps its delegation tools and a relaunched child
     /// keeps its parent's workspace.
-    fn session_launch_config(
+    pub(in crate::controller) fn session_launch_config(
         &self,
         session_id: &str,
         backend: &targets::TargetLocator,
+        history: LaunchHistory<'_>,
     ) -> Result<(
         WorkerLaunchConfig,
         Option<ProjectMemoryLaunchConfig>,
@@ -689,7 +725,6 @@ impl Controller {
             );
         }
         apply_jev_switch(&mut launch, self.config.jev.enabled);
-        apply_continuation_switch(&mut launch, self.config.automatic_continuation_enabled());
         launch.agent_mailboxes_enabled = true;
         launch.subagents = session
             .subagents
@@ -711,41 +746,53 @@ impl Controller {
             .as_ref()
             .filter(|child| child.kind != mj_core::subagent::SubagentKind::Reviewer)
         {
-            launch.initial_commands = crate::database::load_startup_group(
-                session_id,
-                &mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&child.request_key),
-            )?
-            .into_iter()
-            .map(|step| {
-                let (command, optional) =
-                    match serde_json::from_str::<crate::daemon::StartupStep>(&step.step_json)? {
-                        crate::daemon::StartupStep::Configure {
-                            key,
-                            value,
+            let group =
+                mj_core::continuation::GeneratedPrompt::subagent_spawn_id(&child.request_key);
+            let steps = crate::database::load_startup_group(session_id, &group)?;
+            // The assignment is delivered at most once per session history.
+            // A restore deletes the worker's command receipts, so the history
+            // decides: once the assignment has started, the conversation
+            // already holds it and the settings it was sent with.
+            let prompt_id = crate::daemon::startup_followup::startup_step_id(&group, "prompt");
+            let assignment_started = prompt_started(session_id, &history, &prompt_id)?;
+            if !assignment_started {
+                launch.initial_commands = steps
+                    .into_iter()
+                    .map(|step| {
+                        let (command, optional) = match serde_json::from_str::<
+                            crate::daemon::StartupStep,
+                        >(&step.step_json)?
+                        {
+                            crate::daemon::StartupStep::Configure {
+                                key,
+                                value,
+                                optional,
+                            } => (
+                                mj_core::relay::RelayCommand::SetConfig { key, value },
+                                optional,
+                            ),
+                            crate::daemon::StartupStep::ApiPrompt { text } => (
+                                mj_core::relay::RelayCommand::Prompt {
+                                    prompt: vec![
+                                        agent_client_protocol::v1::schema::ContentBlock::Text(
+                                            agent_client_protocol::v1::schema::TextContent::new(
+                                                text,
+                                            ),
+                                        ),
+                                    ],
+                                },
+                                false,
+                            ),
+                            _ => anyhow::bail!("sub-agent startup contains a non-input step"),
+                        };
+                        Ok(mj_core::worker_launch::InitialWorkerCommand {
+                            command_id: step.command_id,
+                            command,
                             optional,
-                        } => (
-                            mj_core::relay::RelayCommand::SetConfig { key, value },
-                            optional,
-                        ),
-                        crate::daemon::StartupStep::ApiPrompt { text } => (
-                            mj_core::relay::RelayCommand::Prompt {
-                                prompt: vec![
-                                    agent_client_protocol::v1::schema::ContentBlock::Text(
-                                        agent_client_protocol::v1::schema::TextContent::new(text),
-                                    ),
-                                ],
-                            },
-                            false,
-                        ),
-                        _ => anyhow::bail!("sub-agent startup contains a non-input step"),
-                    };
-                Ok(mj_core::worker_launch::InitialWorkerCommand {
-                    command_id: step.command_id,
-                    command,
-                    optional,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+            }
         }
         // Top-level sessions and ordinary sub-agents may request review. A
         // reviewer or the oracle never does. The worker derives the review
@@ -834,7 +881,8 @@ impl Controller {
             .sessions
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?;
-        let (mut launch, _, _) = self.session_launch_config(session_id, backend)?;
+        let (mut launch, _, _) =
+            self.session_launch_config(session_id, backend, LaunchHistory::Stored)?;
         if operation.is_some_and(|operation| {
             operation.source_checkpoint_only
                 && operation.destination_target.is_none()
@@ -915,30 +963,14 @@ impl Controller {
 }
 
 /// Carries `[jev] enabled = false` to the worker, which reads it from its
-/// launch environment, and keeps the Jev key out of the worker and the
-/// harness so nothing can reach the service.
+/// launch environment and then makes no classifier calls.
 pub(super) fn apply_jev_switch(launch: &mut WorkerLaunchConfig, enabled: bool) {
     if enabled {
         return;
     }
     for environment in [&mut launch.target_environment, &mut launch.environment] {
-        environment.remove("TYPESAFE_API_KEY");
         environment.insert(
             mj_core::jev::DISABLED_ENVIRONMENT.to_owned(),
-            "1".to_owned(),
-        );
-    }
-}
-
-/// Tell the worker when nobody will act on a `Continue` verdict, so it does
-/// not park the assessment as deferred. Travels like the Jev switch.
-pub(super) fn apply_continuation_switch(launch: &mut WorkerLaunchConfig, enabled: bool) {
-    if enabled {
-        return;
-    }
-    for environment in [&mut launch.target_environment, &mut launch.environment] {
-        environment.insert(
-            mj_core::jev::CONTINUATION_DISABLED_ENVIRONMENT.to_owned(),
             "1".to_owned(),
         );
     }
@@ -1086,11 +1118,6 @@ pub(super) fn worker_launch_config_with_checkout(
         if let Ok(value) = std::env::var(name) {
             target_environment.insert(name.to_owned(), value);
         }
-    }
-    // Resolve the daemon's local key before launching remote or container
-    // workers, whose home directories do not contain its secrets file.
-    if let Some(key) = mj_core::activity::verdict::api_key() {
-        target_environment.insert("TYPESAFE_API_KEY".to_owned(), key);
     }
     // The build cache reaches the harness, its terminals, and the reviewer
     // sidecar, all of which run Cargo through the mbx shim.
