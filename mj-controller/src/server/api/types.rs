@@ -157,6 +157,9 @@ pub struct ApiSession {
     /// Why this session's target cannot take writes: its disk is full.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_problem: Option<String>,
+    /// Profile login failure reported by the daemon, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_login_error: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     /// How the last finished prompt ended. Absent unless the caller asked for
@@ -201,6 +204,7 @@ impl From<&ViewerSession> for ApiSession {
             has_error: session.has_error,
             error: session.launch_error.clone(),
             storage_problem: session.storage_problem.clone(),
+            profile_login_error: None,
             created_at: session.created_at.clone(),
             updated_at: session.updated_at.clone(),
             last_turn_outcome: None,

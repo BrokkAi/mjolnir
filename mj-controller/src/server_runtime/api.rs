@@ -717,7 +717,7 @@ impl ApiBackend {
         }
         match current.get(profile_id) {
             Some(publication) if publication.cache_identity == wanted_identity => {
-                match publication.report.clone() {
+                match publication.effective_report(profile_id) {
                     Some(report) => Ok(QuotaRead::Ready(report)),
                     None => Ok(QuotaRead::Pending(QuotaWait { receiver })),
                 }
@@ -3229,6 +3229,21 @@ fn refusal_reason(stdout: &[u8], stderr: &[u8], purpose: &str) -> String {
 }
 
 impl SubagentBackend for ApiBackend {
+    fn profile_login_errors(&self) -> Result<BTreeMap<String, String>> {
+        Ok(self
+            .quota_reports
+            .lock()
+            .map_err(|_| anyhow!("profile quota reports lock poisoned"))?
+            .iter()
+            .filter_map(|(id, publication)| {
+                publication
+                    .login_error
+                    .clone()
+                    .map(|error| (id.clone(), error))
+            })
+            .collect())
+    }
+
     fn subagent_config(&self) -> BoxFuture<'_, Result<mj_core::config::SubagentConfig>> {
         Box::pin(async move { Ok(self.exports.subagent_config()) })
     }
@@ -3421,9 +3436,9 @@ impl SubagentBackend for ApiBackend {
             while let Some((id, result)) = pending.next().await {
                 if !tried.contains(&id)
                     && let Ok(choices) = result
-                    && choices
-                        .iter()
-                        .any(|choice| choice.models.iter().any(|item| item.value == model))
+                    && choices.iter().any(|choice| {
+                        mj_core::model_catalog::resolve(&choice.models, &model).is_some()
+                    })
                 {
                     drop(pending);
                     let mut candidates = self.reviewer_ready_candidates(model).await?;
@@ -3487,10 +3502,12 @@ impl SubagentBackend for ApiBackend {
 
     fn reviewer_ready_candidates(
         &self,
-        model: String,
+        _model: String,
     ) -> BoxFuture<'_, Result<crate::server::api::SubagentCandidates>> {
         Box::pin(async move {
-            let ids = self.profile_catalog.ready_candidates(&model)?;
+            // Remove refused logins before the shared selector resolves the
+            // requested alias once over the remaining ready profiles.
+            let ids = self.profile_catalog.ready_candidates("")?;
             let config = self.profile_catalog.live()?;
             let snapshot = self.profile_catalog.snapshot();
             let rejected = self

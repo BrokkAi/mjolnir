@@ -22,20 +22,22 @@ pub struct AutocompletePopup;
 impl AutocompletePopup {
     /// Draws an anchored popup shell and returns its outer and inner regions.
     ///
-    /// The caller owns the rows and selection. This helper only chooses a
-    /// clipped rectangle, clears it, and draws the modal frame. At most eight
-    /// rows are visible, matching chat autocomplete's compact surface.
+    /// The caller owns the rows and selection, and says how many are visible
+    /// at once. This helper only chooses a clipped rectangle, clears it, and
+    /// draws the modal frame.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         frame: &mut Frame<'_>,
         bounds: Rect,
         anchor: Rect,
         width: u16,
         rows: usize,
+        max_rows: usize,
         title: &str,
         preferred: PopupSide,
     ) -> Option<(Rect, Rect)> {
-        let visible = rows.min(8);
+        let visible = rows.min(max_rows);
         if visible == 0 || bounds.width == 0 || bounds.height == 0 {
             return None;
         }
@@ -194,6 +196,7 @@ mod tests {
                     Rect::new(8, 4, 1, 1),
                     14,
                     2,
+                    crate::components::ComboBox::DEFAULT_MAX_VISIBLE_ROWS,
                     " choices ",
                     PopupSide::Below,
                 )
@@ -207,6 +210,7 @@ mod tests {
                     Rect::new(8, 15, 1, 1),
                     40,
                     20,
+                    crate::components::ComboBox::DEFAULT_MAX_VISIBLE_ROWS,
                     " choices ",
                     PopupSide::Below,
                 )

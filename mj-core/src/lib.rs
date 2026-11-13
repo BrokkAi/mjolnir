@@ -39,6 +39,7 @@ pub mod lock_wait;
 pub mod logging;
 pub mod login_environment;
 pub mod mailbox;
+pub mod model_catalog;
 pub mod move_workspace;
 pub mod native_agent;
 pub mod observe;

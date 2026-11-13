@@ -58,6 +58,55 @@ async fn cleanup_notices_are_authenticated_and_readable_after_session_removal() 
     assert_eq!(notices[0].text, "Cleanup failed; resources may remain.");
 }
 
+// The API, CLI, and doctor must agree on the profile failure without fetching
+// the complete runtime projection or inspecting credential files themselves.
+#[tokio::test]
+async fn refused_profile_login_errors_are_authenticated_and_projected_into_sessions() {
+    let failure = mj_client::quota::refused_login_message("claude");
+    let (app, _actions, _snapshots, _bundles) = api_app(
+        Arc::new(FakeBackend {
+            login_errors: [("claude".into(), failure.clone())].into(),
+            ..Default::default()
+        }),
+        |snapshot| {
+            let ids = snapshot.sessions.0.keys().cloned().collect::<Vec<_>>();
+            for id in ids {
+                snapshot.sessions.0.get_mut(&id).unwrap().profile_id = "claude".into();
+            }
+        },
+    );
+    let path = "/api/v1/profiles/login-errors";
+    let denied = app
+        .clone()
+        .oneshot(Request::get(path).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    for path in [path, "/api/v1/sessions", "/api/v1/sessions/session-1"] {
+        let response = app
+            .clone()
+            .oneshot(bearer(Request::get(path)).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        let value: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        if path.ends_with("login-errors") {
+            assert_eq!(value["claude"], failure);
+        } else if let Some(sessions) = value["sessions"].as_array() {
+            assert!(!sessions.is_empty());
+            assert!(
+                sessions
+                    .iter()
+                    .all(|session| session["profile_login_error"] == failure)
+            );
+        } else {
+            assert_eq!(value["profile_login_error"], failure);
+        }
+    }
+}
+
 // HTTP contract integration: optional All and encoded profile names must reach
 // the same store query, with authentication and no caching on the report.
 #[tokio::test]
@@ -1021,6 +1070,7 @@ struct CapturedSessionMessageRequest {
 
 #[derive(Default)]
 struct FakeBackend {
+    login_errors: std::collections::BTreeMap<String, String>,
     /// When set, a history write announces itself on the first and waits
     /// for the second before it finishes.
     record_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
@@ -1096,6 +1146,9 @@ impl FakeBackend {
 }
 
 impl SubagentBackend for FakeBackend {
+    fn profile_login_errors(&self) -> AnyResult<std::collections::BTreeMap<String, String>> {
+        Ok(self.login_errors.clone())
+    }
     fn usage_report(
         &self,
         query: mj_core::usage::SessionUsageQuery,
@@ -2842,6 +2895,89 @@ async fn start_without_a_profile_load_balances_with_and_without_explicit_effort(
             "model-first launches must spread across accounts, even with a saved default"
         );
     }
+}
+
+// Hard-won: #1534: model-first starts forwarded the request alias instead of the selected harness value.
+#[tokio::test]
+async fn model_first_sonnet_alias_uses_the_selected_profiles_launch_value() {
+    let recorded: std::collections::BTreeMap<String, Vec<mj_core::acp::SessionConfigChoice>> =
+        serde_json::from_str(include_str!(
+            "../../../../mj-core/tests/fixtures/claude-antigravity-models.json"
+        ))
+        .unwrap();
+    let mut rendered = String::new();
+    for (claude_left, gemini_left) in [(0, 100), (100, 0)] {
+        for effort in [None, Some("high")] {
+            let mut claude = model_candidate_for_harness(
+                "claude",
+                claude_left,
+                "sonnet",
+                mj_core::config::HarnessKind::Claude,
+            );
+            claude.choices.models = recorded["claude"].clone();
+            let mut gemini = model_candidate_for_harness(
+                "gemini",
+                gemini_left,
+                "claude-sonnet-5-5",
+                mj_core::config::HarnessKind::Antigravity,
+            );
+            gemini.choices.models = recorded["antigravity"].clone();
+            if let CandidateQuota::Subscription { windows, .. } = &mut gemini.quota {
+                windows[0].model_scope = Some("claude,gpt".into());
+            }
+            let backend = Arc::new(FakeBackend {
+                session_model_candidates: Some(SubagentCandidates {
+                    offered: vec![claude, gemini],
+                    unavailable: vec![],
+                }),
+                ..Default::default()
+            });
+            let (app, mut actions, _, _) = api_app(backend.clone(), |snapshot| {
+                for (id, kind) in [("claude", "claude"), ("gemini", "antigravity")] {
+                    snapshot.profiles.push(crate::server::ViewerProfile {
+                        id: id.into(),
+                        harness_kind: kind.into(),
+                        capabilities_key: String::new(),
+                        quota_pools: Vec::new(),
+                        quota: None,
+                    });
+                }
+            });
+            let mut body =
+                serde_json::json!({"bundle_id":"hel", "target_id":"podman", "model":"sonnet"});
+            if let Some(effort) = effort {
+                body["effort"] = effort.into();
+            }
+            let mut response = tokio::spawn(app.oneshot(start_request(body.to_string())));
+            let request = tokio::select! {
+                request = actions.recv() => request.unwrap(),
+                early = &mut response => panic!("start failed before creating a session: {:?}", early.unwrap().unwrap().status()),
+            };
+            let ControllerAction::New { profile_id, .. } = &request.action else {
+                panic!("expected New")
+            };
+            let profile = profile_id.clone();
+            request
+                .reply
+                .send(ActionOutcome::Accepted {
+                    session_id: Some("session-2".into()),
+                    notice: None,
+                })
+                .unwrap();
+            let response = response.await.unwrap().unwrap();
+            let status = response.status();
+            assert_eq!(status, StatusCode::CREATED);
+            let response = json_body(response).await;
+            let followups = backend.followups.lock().unwrap();
+            let followup = &followups[0].1;
+            rendered.push_str(&format!("quota Claude={claude_left}% Gemini-Claude={gemini_left}%, effort={}\nHTTP {}\n{}\nprofile={profile}, model={}, effort={}\n\n", effort.unwrap_or("default"), status.as_u16(), serde_json::to_string_pretty(&response).unwrap(), followup.model.as_deref().unwrap(), followup.effort.as_deref().unwrap_or("default")));
+        }
+    }
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "start-sonnet-model-identity",
+        &rendered,
+    );
 }
 
 #[tokio::test]

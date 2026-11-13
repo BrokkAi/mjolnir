@@ -3794,11 +3794,13 @@ fn a_claude_harness_turn_settles_on_its_result_and_not_on_the_origin_marker() {
 }
 
 /// Stop while Claude Code works on its own after a background task sends
-/// `session/cancel`; the announced task's terminal update ends the turn. With
-/// nothing running, or during a Codex goal turn, Stop is still refused.
+/// `session/cancel`; an unanswered Stop ends even an announced turn after
+/// the grace period. With nothing running, or during a Codex goal turn,
+/// Stop is still refused.
 // Hard-won: 4c379acf: Stop was unavailable while Claude ran a cycle started by a completed background task.
+// Hard-won: #1530: an announced Claude turn whose task never ended ignored Stop and blocked the queue for hours.
 #[test]
-fn stop_during_a_claude_harness_turn_waits_for_its_announced_task_to_end() {
+fn unanswered_stop_ends_an_announced_claude_turn_and_releases_its_task() {
     let refused = |relay: &mut DurableRelay, command_id: &str| {
         let response = relay.handle(relay_request(
             &format!("request-{command_id}"),
@@ -3823,6 +3825,7 @@ fn stop_during_a_claude_harness_turn_waits_for_its_announced_task_to_end() {
         .apply_claude_task_fixture("silent-turn".into(), true, true, false, false)
         .unwrap();
     assert!(relay.operational_state().harness_turn.is_some());
+    submit_relay(&mut relay, "queued-prompt", prompt("next"));
     submit_relay(&mut relay, "cancel-harness-turn", RelayCommand::Cancel);
     let claimed = relay.claim_pending_commands(true).unwrap();
     assert_eq!(claimed.len(), 1);
@@ -3832,21 +3835,97 @@ fn stop_during_a_claude_harness_turn_waits_for_its_announced_task_to_end() {
         .unwrap();
     assert!(
         relay.operational_state().harness_turn.is_some(),
-        "the turn runs until the announced task ends"
+        "the applied stop waits for its grace period"
     );
     let ordinal = relay.snapshot.harness_turn.unwrap().first_ordinal;
-    assert!(relay.unanswered_harness_turn_stop().is_none());
-    assert!(!relay.end_unanswered_harness_turn_stop(ordinal).unwrap());
-    relay
-        .claude_turn_result(&cycle_result("task-notification"))
-        .unwrap();
-    assert_eq!(relay.snapshot.harness_turn.unwrap().first_ordinal, ordinal);
-    relay
-        .apply_claude_task_fixture("silent-turn".into(), false, false, false, false)
-        .unwrap();
+    assert_eq!(relay.unanswered_harness_turn_stop(), Some(ordinal));
+    assert!(relay.end_unanswered_harness_turn_stop(ordinal).unwrap());
+    assert_eq!(relay.turn_task_ordinal("silent-turn"), None);
+    assert!(
+        relay.snapshot.assessment.is_some(),
+        "queued work must not erase the autonomous turn assessment"
+    );
     let state = relay.operational_state();
     assert!(state.harness_turn.is_none());
     assert_eq!(state.execution, RelayExecutionState::Idle);
+    assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+    relay
+        .claude_turn_result(&cycle_result("task-notification"))
+        .unwrap();
+    relay
+        .apply_claude_task_fixture("silent-turn".into(), false, false, false, false)
+        .unwrap();
+    assert!(relay.snapshot.active_prompt.is_some());
+    relay
+        .record_command_completed(
+            "queued-prompt",
+            RelayCommandOutcome::Prompt {
+                work_facts: None,
+                stop_reason: "end_turn".into(),
+                usage: None,
+                diagnostic: None,
+            },
+        )
+        .unwrap();
+    // A raw result can precede trailing output. The detached task must not
+    // settle the new turn, but another Stop must still be able to end it.
+    relay
+        .claude_turn_result(&cycle_result("task-notification"))
+        .unwrap();
+    relay
+        .record_session_update(agent_text_chunk("late output"))
+        .unwrap();
+    let late_ordinal = relay.snapshot.harness_turn.unwrap().first_ordinal;
+    assert_ne!(late_ordinal, ordinal);
+    relay
+        .apply_claude_task_fixture("silent-turn".into(), false, false, false, false)
+        .unwrap();
+    assert_eq!(
+        relay.snapshot.harness_turn.unwrap().first_ordinal,
+        late_ordinal
+    );
+    submit_relay(&mut relay, "stop-late-output", RelayCommand::Cancel);
+    assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+    relay
+        .record_command_completed("stop-late-output", RelayCommandOutcome::Cancelled)
+        .unwrap();
+    assert_eq!(relay.unanswered_harness_turn_stop(), Some(late_ordinal));
+    assert!(
+        relay
+            .end_unanswered_harness_turn_stop(late_ordinal)
+            .unwrap()
+    );
+
+    // Announced ownership is process-local; replay retains the applied stop.
+    let replay_temp = tempfile::tempdir().unwrap();
+    let mut replay = claude_relay(replay_temp.path());
+    replay
+        .apply_claude_task_fixture("lost-task".into(), true, true, false, false)
+        .unwrap();
+    submit_relay(&mut replay, "stop-before-restart", RelayCommand::Cancel);
+    replay.claim_pending_commands(true).unwrap();
+    replay
+        .record_command_completed("stop-before-restart", RelayCommandOutcome::Cancelled)
+        .unwrap();
+    let stopped = replay.unanswered_harness_turn_stop().unwrap();
+    drop(replay);
+    // A pre-revision-24 snapshot has only the legacy continuation field.
+    let state_path = replay_temp.path().join(mj_core::relay::RELAY_STATE_FILE);
+    let mut legacy: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    legacy["harness_turn"]
+        .as_object_mut()
+        .unwrap()
+        .remove("autonomous");
+    legacy["format_version"] = serde_json::json!(22);
+    legacy["continuation"]["autonomous_turn_started"] = serde_json::json!(stopped);
+    std::fs::write(&state_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    let mut replay = claude_relay(replay_temp.path());
+    assert_eq!(replay.unanswered_harness_turn_stop(), Some(stopped));
+    assert!(replay.end_unanswered_harness_turn_stop(stopped).unwrap());
+    drop(replay);
+    let replay = claude_relay(replay_temp.path());
+    assert!(replay.snapshot.harness_turn.is_none());
 
     let codex = tempfile::tempdir().unwrap();
     let mut codex = DurableRelay::open(codex.path(), SESSION, "1.0.0").unwrap();

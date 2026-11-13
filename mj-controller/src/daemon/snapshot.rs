@@ -416,9 +416,14 @@ impl RuntimeState {
 
     // Caller holds the inactivity/config coordinator through commit.
     pub(super) async fn persist_operator_away(&self, away: bool) -> Result<Vec<String>> {
-        let changed = tokio::task::spawn_blocking(move || crate::database::set_operator_away(away))
-            .await
-            .context("operator away database writer panicked")??;
+        let auto_afk_window = self.with_config(|config| {
+            Duration::from_secs(u64::from(config.advanced.auto_afk_minutes) * 60)
+        });
+        let changed = tokio::task::spawn_blocking(move || {
+            crate::database::set_operator_away(away, auto_afk_window)
+        })
+        .await
+        .context("operator away database writer panicked")??;
         if !changed {
             return Ok(Vec::new());
         }

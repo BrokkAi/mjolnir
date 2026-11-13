@@ -44,7 +44,7 @@ impl ReviewCapture {
             mj_core::relay::ReviewerRequest::RecordReviewed { trees } => {
                 tokio::task::spawn_blocking(move || -> Result<()> {
                     for (root, (tree, commit)) in trees {
-                        mj_checkpoint::archive::record_reviewed_tree(
+                        crate::review::capture::record_review_base(
                             &mj_checkpoint::archive::SystemGit,
                             &root,
                             &tree,
@@ -156,6 +156,7 @@ impl ReviewCapture {
             if let Some((commit, tree)) =
                 crate::review::capture::later_review_base(git, &root, &commit)?
             {
+                crate::review::capture::set_review_base(git, &root, &commit)?;
                 return Ok((root, commit, tree, false));
             }
             let (commit, tree) = crate::review::capture::set_review_base(git, &root, &commit)?;
@@ -514,6 +515,192 @@ mod tests {
             vec!["solo.rs"]
         );
         assert!(delta.patch.contains("+solo"), "{}", delta.patch);
+    }
+
+    // Hard-won: #1531: a separately reviewed merge parent erased an accepted review baseline.
+    #[tokio::test]
+    async fn set_review_baseline_survives_merging_independent_reviewed_histories() {
+        use crate::test_support::git;
+        use mj_core::relay::CaptureScope;
+
+        let temp = tempfile::tempdir().unwrap();
+        let repository = temp.path().canonicalize().unwrap().join("repository");
+        std::fs::create_dir(&repository).unwrap();
+        git(&repository, &["init", "-q", "-b", "main"]);
+        git(&repository, &["config", "user.name", "Review Test"]);
+        git(
+            &repository,
+            &["config", "user.email", "review@example.invalid"],
+        );
+        std::fs::write(repository.join("feature.rs"), "base\n").unwrap();
+        git(&repository, &["add", "feature.rs"]);
+        git(&repository, &["commit", "-qm", "base"]);
+        let worker = temp.path().join("worker");
+        std::fs::create_dir(&worker).unwrap();
+        let capture = Arc::new(ReviewCapture {
+            session_id: "baseline-1531".into(),
+            cwd: repository.clone(),
+            additional_directories: Vec::new(),
+            primary_relay: Arc::new(RelayCell::new(
+                DurableRelay::open(&worker, "baseline-1531", "1.0.0").unwrap(),
+            )),
+            operation: tokio::sync::Mutex::new(()),
+        });
+
+        git(&repository, &["checkout", "-qb", "feature"]);
+        std::fs::write(repository.join("feature.rs"), "reviewed feature\n").unwrap();
+        git(&repository, &["commit", "-qam", "feature"]);
+        let baseline = git(&repository, &["rev-parse", "HEAD"]);
+        let baseline_tree = git(&repository, &["rev-parse", "HEAD^{tree}"]);
+        git(&repository, &["checkout", "-qb", "sibling", "main"]);
+        for name in ["gate.rs", "classification.tsv"] {
+            std::fs::write(repository.join(name), "reviewed sibling\n").unwrap();
+            git(&repository, &["add", name]);
+        }
+        git(&repository, &["commit", "-qm", "sibling"]);
+        let sibling = git(&repository, &["rev-parse", "HEAD"]);
+        let sibling_tree = git(&repository, &["rev-parse", "HEAD^{tree}"]);
+        for (tree, commit) in [
+            (baseline_tree, baseline.clone()),
+            (sibling_tree, sibling.clone()),
+        ] {
+            capture
+                .handle(ReviewerRequest::RecordReviewed {
+                    trees: std::collections::BTreeMap::from([(repository.clone(), (tree, commit))]),
+                })
+                .await
+                .unwrap();
+        }
+        git(&repository, &["checkout", "-q", "feature"]);
+        git(&repository, &["merge", "-q", "--no-edit", "sibling"]);
+        let accepted = capture
+            .handle(ReviewerRequest::SetReviewBase {
+                path: None,
+                commit: baseline.clone(),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(accepted, RelayResponseBody::Ok {
+            payload: RelayResponsePayload::ReviewBaseSet { commit, changed: true, .. }
+        } if commit == baseline));
+
+        let request = || ReviewerRequest::CaptureDelta {
+            repositories: None,
+            baselines: Default::default(),
+            scope: CaptureScope::PushableCommits,
+        };
+        let result = capture.handle(request()).await.unwrap();
+        let RelayResponseBody::Ok {
+            payload: RelayResponsePayload::ReviewDelta { repositories },
+        } = result
+        else {
+            panic!("capture did not return repository deltas");
+        };
+        assert_eq!(
+            repositories[0].base_commit.as_deref(),
+            Some(baseline.as_str())
+        );
+        assert_eq!(repositories[0].base_kind.as_deref(), Some("review point"));
+        assert_eq!(
+            repositories[0]
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            ["classification.tsv", "gate.rs"]
+        );
+
+        // Linked worktrees share reviewed refs, but each explicit selection is its own.
+        let linked = temp.path().canonicalize().unwrap().join("linked");
+        git(
+            &repository,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                linked.to_str().unwrap(),
+            ],
+        );
+        capture
+            .handle(ReviewerRequest::SetReviewBase {
+                path: Some(linked.clone()),
+                commit: sibling.clone(),
+            })
+            .await
+            .unwrap();
+        let scoped = |root| ReviewerRequest::CaptureDelta {
+            repositories: Some(vec![root]),
+            baselines: Default::default(),
+            scope: CaptureScope::PushableCommits,
+        };
+        for (root, expected) in [(repository.clone(), baseline), (linked, sibling)] {
+            let result = capture.handle(scoped(root)).await.unwrap();
+            let RelayResponseBody::Ok {
+                payload: RelayResponsePayload::ReviewDelta { repositories },
+            } = result
+            else {
+                panic!("capture did not return repository deltas");
+            };
+            assert_eq!(
+                repositories[0].base_commit.as_deref(),
+                Some(expected.as_str())
+            );
+        }
+
+        // Reviewing the merge advances past both parents without another setter call.
+        let head = git(&repository, &["rev-parse", "HEAD"]);
+        let tree = git(&repository, &["rev-parse", "HEAD^{tree}"]);
+        capture
+            .handle(ReviewerRequest::RecordReviewed {
+                trees: std::collections::BTreeMap::from([(
+                    repository.clone(),
+                    (tree, head.clone()),
+                )]),
+            })
+            .await
+            .unwrap();
+        let result = capture.handle(request()).await.unwrap();
+        let RelayResponseBody::Ok {
+            payload: RelayResponsePayload::ReviewDelta { repositories },
+        } = result
+        else {
+            panic!("capture did not return repository deltas");
+        };
+        assert_eq!(repositories[0].base_commit.as_deref(), Some(head.as_str()));
+        assert!(repositories[0].files.is_empty());
+
+        // The completed review remains the base across another independently reviewed merge.
+        let linked = temp.path().canonicalize().unwrap().join("linked");
+        git(&linked, &["checkout", "-qb", "next", "main"]);
+        std::fs::write(linked.join("followup.rs"), "next reviewed branch\n").unwrap();
+        git(&linked, &["add", "followup.rs"]);
+        git(&linked, &["commit", "-qm", "next"]);
+        let next = git(&linked, &["rev-parse", "HEAD"]);
+        let tree = git(&linked, &["rev-parse", "HEAD^{tree}"]);
+        capture
+            .handle(ReviewerRequest::RecordReviewed {
+                trees: std::collections::BTreeMap::from([(linked, (tree, next))]),
+            })
+            .await
+            .unwrap();
+        git(&repository, &["merge", "-q", "--no-edit", "next"]);
+        let result = capture.handle(request()).await.unwrap();
+        let RelayResponseBody::Ok {
+            payload: RelayResponsePayload::ReviewDelta { repositories },
+        } = result
+        else {
+            panic!("capture did not return repository deltas");
+        };
+        assert_eq!(repositories[0].base_commit.as_deref(), Some(head.as_str()));
+        assert_eq!(
+            repositories[0]
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            ["followup.rs"]
+        );
     }
 
     #[tokio::test]

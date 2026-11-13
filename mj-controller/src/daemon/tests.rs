@@ -6242,6 +6242,7 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
     let workspace = crate::database::create_workspace("Hung launches").unwrap();
     let project = project.canonicalize().unwrap();
     let state = test_runtime_state_loading_the_store();
+    // Hard-won: 5e70f76a1: admission fixtures omitted the serving profile catalog.
     state.profile_catalog.get_or_init(|| {
         crate::server_runtime::profile_catalog::ProfileCatalog::new(
             tokio_util::sync::CancellationToken::new(),

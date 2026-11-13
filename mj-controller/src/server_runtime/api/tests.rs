@@ -275,6 +275,7 @@ async fn selection_backend_refusing(
         (
             id,
             crate::quota::QuotaReportPublication {
+                login_error: None,
                 cache_identity: "test-identity".into(),
                 report: Some(report),
             },
@@ -6287,6 +6288,7 @@ async fn oracle_backend(exports: Arc<OracleExports>) -> Arc<ApiBackend> {
         (
             id,
             crate::quota::QuotaReportPublication {
+                login_error: None,
                 cache_identity: "test-identity".into(),
                 report: Some(report),
             },
