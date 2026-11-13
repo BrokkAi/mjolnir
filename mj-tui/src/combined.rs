@@ -725,7 +725,18 @@ fn render_combined_themed(
     let workspace_height = if narrow {
         sidebar_height.saturating_sub(dimensions[0].1.minimized)
     } else {
-        workspace_target.min(sidebar_height.saturating_sub(PANE_MINIMUM))
+        // Sessions keeps its minimum frame plus one row for a session below
+        // the Create/Open/Filter controls. The workspace pane gives up rows
+        // for that row, but never shrinks below its own minimum, and
+        // Sessions' minimum frame always wins.
+        let sessions_floor = PANE_MINIMUM + 1;
+        workspace_target
+            .min(
+                sidebar_height
+                    .saturating_sub(sessions_floor)
+                    .max(PANE_MINIMUM),
+            )
+            .min(sidebar_height.saturating_sub(PANE_MINIMUM))
     };
     let workspace_area = Rect::new(
         sidebar_area.x,
