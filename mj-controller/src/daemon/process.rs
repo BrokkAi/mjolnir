@@ -399,6 +399,7 @@ pub(super) async fn run_daemon_runtime(
     // Before the web viewer starts: it shows this service's readings.
     let capacity_service =
         super::capacity::spawn_capacity_service(state.clone(), cancellation.clone());
+    let observe_delivery = super::observe::spawn(state.clone(), cancellation.clone());
 
     let target_refresh = spawn_manager_target_refresher(
         manager_targets.clone(),
@@ -991,6 +992,14 @@ pub(super) async fn run_daemon_runtime(
         &mut outcome,
         "join capacity service",
         capacity_service.await.map_err(anyhow::Error::new),
+    );
+    epilogue.record(
+        &mut outcome,
+        "join Brokk Observe delivery",
+        observe_delivery
+            .await
+            .context("Brokk Observe delivery task panicked")
+            .and_then(std::convert::identity),
     );
     if let Some(phone_task) = phone_task {
         epilogue.record(

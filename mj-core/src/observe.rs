@@ -7,11 +7,12 @@
 //! transport contract. The stable identity lives in `event.session_id` and
 //! `meta.event_id`; Observe de-duplicates on that pair.
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::Digest;
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 use crate::hex::lower_hex;
 
@@ -20,6 +21,72 @@ pub const OBSERVE_ENVELOPE_VERSION: u8 = 1;
 /// The collector name visible to Brokk Observe.
 pub const OBSERVE_COLLECTOR: &str = "mjolnir";
 const DEFAULT_POLICY_TIMEOUT_SECS: u64 = 3;
+
+/// Configuration for asynchronous session delivery to Brokk Observe.
+///
+/// The token is read from the daemon's environment or the plugin's config file;
+/// it is not written into the spool or exposed by the status surface.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObserveDeliveryConfig {
+    pub url: String,
+    pub token: String,
+    #[serde(default = "default_policy_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+impl fmt::Debug for ObserveDeliveryConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ObserveDeliveryConfig")
+            .field("url", &self.url)
+            .field("token", &"[REDACTED]")
+            .field("timeout_ms", &self.timeout_ms)
+            .finish()
+    }
+}
+
+impl ObserveDeliveryConfig {
+    /// Load the same service and credential the vendor plugins use. Values in
+    /// the process environment win over the config file, one variable at a
+    /// time, so managed settings can override either half.
+    pub fn load() -> Result<Option<Self>> {
+        let (url, token, path) = Self::values()?;
+        match (url, token) {
+            (None, None) => Ok(None),
+            (None, Some(_)) => bail!(
+                "Brokk Observe has a token but no server URL; set OBSERVE_URL or add OBSERVE_URL=... to {}",
+                config_path_display(path.as_deref())
+            ),
+            (Some(_), None) => bail!(
+                "Brokk Observe has a server URL but no ingest token; set OBSERVE_TOKEN or add OBSERVE_TOKEN=... to {}",
+                config_path_display(path.as_deref())
+            ),
+            (Some(url), Some(token)) => Ok(Some(Self {
+                url: validate_observe_url(&url)?,
+                token,
+                timeout_ms: default_policy_timeout_ms(),
+            })),
+        }
+    }
+
+    /// Which halves are present, without exposing the credential. This reads
+    /// the same merged configuration as [`Self::load`].
+    pub fn configured_parts() -> Result<(bool, bool)> {
+        let (url, token, _) = Self::values()?;
+        Ok((url.is_some(), token.is_some()))
+    }
+
+    fn values() -> Result<(Option<String>, Option<String>, Option<PathBuf>)> {
+        let path = config_path();
+        let file = read_config_file()?;
+        Ok((
+            environment_value("OBSERVE_URL").or(file.url),
+            environment_value("OBSERVE_TOKEN").or(file.token),
+            path,
+        ))
+    }
+}
 
 /// Configuration for synchronous Brokk Observe policy decisions.
 ///
@@ -56,39 +123,30 @@ impl ObserveEnforcementConfig {
     /// Read the same variables the Phase 1 collector and vendor plugin use.
     /// Enforcement is absent unless `OBSERVE_ENFORCE` is true.
     pub fn from_environment() -> Result<Option<Self>> {
-        if !environment_true("OBSERVE_ENFORCE") {
+        if !Self::requested()? {
             return Ok(None);
         }
-        let url = std::env::var("OBSERVE_URL")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| anyhow::anyhow!("OBSERVE_ENFORCE=true requires OBSERVE_URL"))?;
-        let parsed =
-            url::Url::parse(&url).map_err(|error| anyhow::anyhow!("parse OBSERVE_URL: {error}"))?;
-        ensure!(
-            matches!(parsed.scheme(), "http" | "https"),
-            "OBSERVE_URL must use http or https"
-        );
-        let token = std::env::var("OBSERVE_TOKEN")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| anyhow::anyhow!("OBSERVE_ENFORCE=true requires OBSERVE_TOKEN"))?;
-        let timeout_ms = match std::env::var("OBSERVE_TIMEOUT") {
-            Ok(value) => {
-                let seconds = value.parse::<u64>().map_err(|_| {
-                    anyhow::anyhow!("OBSERVE_TIMEOUT must be a positive whole number of seconds")
-                })?;
-                ensure!(seconds > 0, "OBSERVE_TIMEOUT must be at least one second");
-                seconds * 1_000
-            }
-            Err(_) => default_policy_timeout_ms(),
-        };
+        let file = read_config_file()?;
+        let delivery = ObserveDeliveryConfig::load()?.ok_or_else(|| {
+            anyhow::anyhow!("OBSERVE_ENFORCE=true requires OBSERVE_URL and OBSERVE_TOKEN")
+        })?;
         Ok(Some(Self {
-            url: url.trim_end_matches('/').to_owned(),
-            token,
-            timeout_ms,
-            fail_closed: environment_true("OBSERVE_FAIL_CLOSED"),
+            url: delivery.url,
+            token: delivery.token,
+            timeout_ms: policy_timeout_ms()?,
+            fail_closed: environment_bool("OBSERVE_FAIL_CLOSED")
+                .or(file.fail_closed)
+                .unwrap_or(false),
         }))
+    }
+
+    /// Whether either the environment or the shared config file requests
+    /// enforcement, even if its server credentials are incomplete.
+    pub fn requested() -> Result<bool> {
+        let file = read_config_file()?;
+        Ok(environment_bool("OBSERVE_ENFORCE")
+            .or(file.enforce)
+            .unwrap_or(false))
     }
 
     /// The only harness that currently asks Mjolnir before every command,
@@ -104,13 +162,136 @@ impl ObserveEnforcementConfig {
     }
 }
 
-fn environment_true(name: &str) -> bool {
-    std::env::var(name).is_ok_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
+/// The vendor plugins' shared configuration file. `OBSERVE_CONFIG` selects a
+/// different file, otherwise the plugin's normal XDG location is used.
+pub fn config_path() -> Option<PathBuf> {
+    if let Some(path) = environment_value_os("OBSERVE_CONFIG") {
+        return Some(PathBuf::from(path));
+    }
+    let config_home = environment_value_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| crate::path_input::user_home().map(|home| home.join(".config")))?;
+    Some(config_home.join("brokk-observe").join("config"))
+}
+
+fn config_path_display(path: Option<&Path>) -> String {
+    path.map_or_else(
+        || "the Brokk Observe config file".to_owned(),
+        |path| path.display().to_string(),
+    )
+}
+
+fn read_config_file() -> Result<ObserveFileConfig> {
+    match config_path().as_deref() {
+        Some(path) => ObserveFileConfig::read(path),
+        None => Ok(ObserveFileConfig::default()),
+    }
+}
+
+#[derive(Default)]
+struct ObserveFileConfig {
+    url: Option<String>,
+    token: Option<String>,
+    enforce: Option<bool>,
+    fail_closed: Option<bool>,
+}
+
+impl ObserveFileConfig {
+    fn read(path: &Path) -> Result<Self> {
+        let body = match std::fs::read_to_string(path) {
+            Ok(body) => body,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("read Brokk Observe config {}", path.display()));
+            }
+        };
+        Ok(Self::parse(&body))
+    }
+
+    fn parse(body: &str) -> Self {
+        let mut config = Self::default();
+        for line in body.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let value = unquote_config_value(value.trim());
+            if value.is_empty() {
+                continue;
+            }
+            match key.trim() {
+                "OBSERVE_URL" => config.url = Some(value.to_owned()),
+                "OBSERVE_TOKEN" => config.token = Some(value.to_owned()),
+                "OBSERVE_ENFORCE" => config.enforce = Some(parse_bool(value)),
+                "OBSERVE_FAIL_CLOSED" => config.fail_closed = Some(parse_bool(value)),
+                _ => {}
+            }
+        }
+        config
+    }
+}
+
+fn unquote_config_value(value: &str) -> &str {
+    for quote in ['"', '\''] {
+        if value.len() >= 2 && value.starts_with(quote) && value.ends_with(quote) {
+            return &value[1..value.len() - 1];
+        }
+    }
+    value
+}
+
+fn environment_value(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn environment_value_os(name: &str) -> Option<std::ffi::OsString> {
+    std::env::var_os(name).filter(|value| !value.is_empty())
+}
+
+fn environment_bool(name: &str) -> Option<bool> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| parse_bool(&value))
+}
+
+fn parse_bool(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn validate_observe_url(url: &str) -> Result<String> {
+    let parsed =
+        url::Url::parse(url).map_err(|error| anyhow::anyhow!("parse OBSERVE_URL: {error}"))?;
+    ensure!(
+        matches!(parsed.scheme(), "http" | "https"),
+        "OBSERVE_URL must use http or https"
+    );
+    Ok(url.trim_end_matches('/').to_owned())
+}
+
+fn policy_timeout_ms() -> Result<u64> {
+    match std::env::var("OBSERVE_TIMEOUT") {
+        Ok(value) => {
+            let seconds = value.parse::<u64>().map_err(|_| {
+                anyhow::anyhow!("OBSERVE_TIMEOUT must be a positive whole number of seconds")
+            })?;
+            ensure!(seconds > 0, "OBSERVE_TIMEOUT must be at least one second");
+            Ok(seconds * 1_000)
+        }
+        Err(_) => Ok(default_policy_timeout_ms()),
+    }
 }
 
 /// One event sent from Mjolnir to Brokk Observe.
@@ -130,6 +311,13 @@ pub struct ObserveMeta {
     pub event_id: String,
     /// Event creation time in Unix epoch milliseconds.
     pub ts: i64,
+    /// Stable transcript position used to order multiple events that share a
+    /// timestamp.
+    #[serde(default)]
+    pub event_position: u64,
+    /// Order of events derived from the same transcript position.
+    #[serde(default)]
+    pub event_ordinal: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_email: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -149,6 +337,9 @@ pub struct ObserveMeta {
     /// The component that produced the envelopes.
     #[serde(default = "default_collector")]
     pub collector: String,
+    /// A session observed after the fact rather than while it ran.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub historical: bool,
     /// Explicit extension used by newer Observe servers to distinguish the
     /// orchestration layer from the selected harness.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -158,6 +349,9 @@ pub struct ObserveMeta {
     pub harness: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_session_id: Option<String>,
+    /// The worker process or container that owns the session on its target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -399,6 +593,28 @@ mod tests {
                 .to_string()
                 .contains("session_id")
         );
+    }
+
+    #[test]
+    fn plugin_config_values_fill_only_the_environment_gaps() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config");
+        std::fs::write(
+            &path,
+            "OBSERVE_URL=https://from-file.example\nOBSERVE_TOKEN='file-token'\nOBSERVE_ENFORCE=true\nOBSERVE_FAIL_CLOSED=yes\n",
+        )
+        .unwrap();
+        let file = ObserveFileConfig::read(&path).unwrap();
+        assert_eq!(file.url.as_deref(), Some("https://from-file.example"));
+        assert_eq!(file.token.as_deref(), Some("file-token"));
+        assert_eq!(file.enforce, Some(true));
+        assert_eq!(file.fail_closed, Some(true));
+
+        let parsed = ObserveFileConfig::parse(
+            "# local configuration\nOBSERVE_URL=\"https://first.example\"\nOBSERVE_URL=https://last.example\nOBSERVE_TOKEN=token\n",
+        );
+        assert_eq!(parsed.url.as_deref(), Some("https://last.example"));
+        assert_eq!(parsed.token.as_deref(), Some("token"));
     }
 
     #[test]

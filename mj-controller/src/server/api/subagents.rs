@@ -444,7 +444,13 @@ async fn resolve_model_profile_selection_from(
             ModelProfileCandidateSource::Reviewers
             | ModelProfileCandidateSource::ReviewersReady => None,
         };
-        draw_candidates(&mut offered, anchor, &prefer, &identity, now_epoch_seconds())?;
+        draw_candidates(
+            &mut offered,
+            anchor,
+            &prefer,
+            &identity,
+            now_epoch_seconds(),
+        )?;
     }
     let reviewer_source = matches!(
         source,
@@ -727,7 +733,13 @@ pub(crate) fn merge_same_models(
     model: &str,
     now_seconds: i64,
 ) -> Vec<SubagentCandidate> {
-    rank_candidates(&mut candidates, Some(parent_profile), &[], model, now_seconds);
+    rank_candidates(
+        &mut candidates,
+        Some(parent_profile),
+        &[],
+        model,
+        now_seconds,
+    );
     let mut seen = std::collections::BTreeSet::new();
     candidates.retain(|candidate| {
         let mut models = candidate
@@ -1117,7 +1129,10 @@ mod tests {
             "luna",
             0,
         );
-        assert_eq!(ids(&candidates), ["c-preferred-first", "b-preferred", "a-plain"]);
+        assert_eq!(
+            ids(&candidates),
+            ["c-preferred-first", "b-preferred", "a-plain"]
+        );
         // An exhausted preference does not win: quota still owns feasibility.
         let mut candidates = vec![
             candidate("plain", Some(50), &["luna"]),

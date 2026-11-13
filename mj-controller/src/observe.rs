@@ -6,19 +6,23 @@
 //! can later use the same conversion and spool after turns. No function here
 //! evaluates policy or delays a tool call.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use mj_core::observe::{
-    OBSERVE_COLLECTOR, OBSERVE_ENVELOPE_VERSION, ObserveEnvelope, ObserveMeta, canonical_tool_name,
-    event_id, session_start_event,
+    OBSERVE_COLLECTOR, OBSERVE_ENVELOPE_VERSION, ObserveCommit, ObserveEnvelope, ObserveGitMeta,
+    ObserveMeta, canonical_tool_name, event_id, session_start_event,
 };
-use mj_core::state::{MaterializedExecutionState, TranscriptBody};
+use mj_core::state::{MaterializedExecutionState, MaterializedSession, TranscriptBody};
+use mj_core::storage::UsagePage;
+use mj_core::usage::UsageScope;
 
 use crate::server::api::{TranscriptItemView, TranscriptResponse};
 
@@ -27,14 +31,21 @@ use crate::server::api::{TranscriptItemView, TranscriptResponse};
 pub struct ObserveSession {
     pub id: String,
     pub parent_id: Option<String>,
+    pub native_session_id: Option<String>,
+    pub worker_id: Option<String>,
     pub harness: String,
     pub model: Option<String>,
     pub cwd: Option<String>,
+    pub hostname: Option<String>,
+    pub os: Option<String>,
     pub started_at_ms: i64,
     pub workspace_id: Option<String>,
     pub profile_id: Option<String>,
     pub target_id: Option<String>,
     pub runtime: Option<String>,
+    pub git: Option<ObserveGitMeta>,
+    pub commits: Vec<ObserveCommit>,
+    pub historical: bool,
 }
 
 /// Convert all supported transcript items into an ordered Observe stream.
@@ -75,19 +86,16 @@ pub fn envelopes_for_transcript(
     } else {
         items.first().map_or(0, |item| item.created_at_ms.max(0))
     };
-    envelopes.push(envelope(
-        session,
-        started_at,
-        0,
-        "SessionStart",
-        0,
-        session_start_event(
-            &session.id,
-            &session.harness,
-            session.model.as_deref(),
-            session.cwd.as_deref(),
-        ),
-    ));
+    let mut start = session_start_event(
+        &session.id,
+        &session.harness,
+        session.model.as_deref(),
+        session.cwd.as_deref(),
+    );
+    if session.historical {
+        start["source"] = "mjolnir-backfill".into();
+    }
+    envelopes.push(envelope(session, started_at, 0, "SessionStart", 0, start));
 
     let mut pending_agent: Option<(String, i64, u64)> = None;
     let mut last_activity = started_at;
@@ -303,15 +311,24 @@ fn envelope(
         meta: ObserveMeta {
             event_id: event_id(&session.id, position, kind, ordinal),
             ts,
+            event_position: position,
+            event_ordinal: ordinal,
             agent: OBSERVE_COLLECTOR.into(),
             collector: OBSERVE_COLLECTOR.into(),
+            historical: session.historical,
+            hostname: session.hostname.clone(),
+            os: session.os.clone(),
             orchestrator: Some(OBSERVE_COLLECTOR.into()),
             harness: Some(session.harness.clone()),
+            native_session_id: session.native_session_id.clone(),
+            worker_id: session.worker_id.clone(),
             parent_session_id: session.parent_id.clone(),
             workspace_id: session.workspace_id.clone(),
             profile_id: session.profile_id.clone(),
             target_id: session.target_id.clone(),
             runtime: session.runtime.clone(),
+            git: session.git.clone(),
+            commits: session.commits.clone(),
             collector_version: Some(env!("CARGO_PKG_VERSION").into()),
             client_version: Some(env!("CARGO_PKG_VERSION").into()),
             ..Default::default()
@@ -320,11 +337,115 @@ fn envelope(
     }
 }
 
+/// Rebuild the public transcript view from the daemon's canonical durable
+/// projection. Automatic publication uses the same item shape as the CLI
+/// export, so both paths derive identical Observe event identities.
+pub fn transcript_response_from_materialized(
+    session_id: &str,
+    materialized: &MaterializedSession,
+) -> Result<TranscriptResponse> {
+    ensure!(
+        materialized.session_id == session_id,
+        "materialized session {} does not match requested session {session_id}",
+        materialized.session_id
+    );
+    let mut items = materialized.transcript.to_vec();
+    items.sort_by(|left, right| {
+        left.position
+            .cmp(&right.position)
+            .then_with(|| left.stable_id.cmp(&right.stable_id))
+    });
+    let latest_seq = items
+        .iter()
+        .map(|item| item.latest_content_event_ordinal.unwrap_or(item.position))
+        .max()
+        .unwrap_or(0);
+    Ok(TranscriptResponse {
+        next_after_seq: latest_seq,
+        session_id: session_id.to_owned(),
+        latest_seq,
+        execution: materialized.execution,
+        items: items
+            .into_iter()
+            .map(|item| TranscriptItemView {
+                stable_id: item.stable_id.clone(),
+                position: item.position,
+                seq: item.seq(),
+                role: mj_core::transcript::transcript_item_role(&item.body).to_owned(),
+                text: mj_transcript::transcript::transcript_item_text(&item),
+                created_at_ms: item.created_at_ms,
+                last_changed_at_ms: item.last_changed_at_ms,
+                body: item.body.clone(),
+            })
+            .collect(),
+    })
+}
+
+/// Convert whole-turn usage into the generic request-usage event Observe
+/// already understands. Partial and unspecified reports are deliberately
+/// omitted rather than presented as complete turn totals.
+pub fn usage_envelopes(
+    session: &ObserveSession,
+    usage: &UsagePage,
+) -> Result<Vec<ObserveEnvelope>> {
+    ensure!(
+        usage.session_id == session.id,
+        "usage session {} does not match Observe session {}",
+        usage.session_id,
+        session.id
+    );
+    let mut envelopes = Vec::new();
+    for turn in &usage.turns {
+        let Some(report) = turn
+            .usage
+            .as_ref()
+            .filter(|report| report.scope == UsageScope::Turn)
+        else {
+            continue;
+        };
+        let selection = usage.turn_selections.get(&turn.command_id);
+        let model = selection
+            .and_then(|selection| selection.model.as_deref())
+            .or(session.model.as_deref())
+            .unwrap_or("unknown");
+        let effort = selection.and_then(|selection| selection.effort.as_deref());
+        let event = json!({
+            "hook_event_name": "PostModelRequest",
+            "session_id": session.id,
+            "status": "completed",
+            "timestamp": turn.completed_at_ms,
+            "turn_id": turn.command_id,
+            "turn_ordinal": turn.completed_ordinal,
+            "model": model,
+            "effort": effort,
+            "input_tokens": report.input_tokens,
+            "output_tokens": report.output_tokens,
+            "cached_input_tokens": report.cached_read_tokens.unwrap_or(0),
+            "cache_write_input_tokens": report.cached_write_tokens.unwrap_or(0),
+            "thought_tokens": report.thought_tokens.unwrap_or(0),
+            "total_tokens": report.total_tokens,
+            "cwd": session.cwd,
+        });
+        let envelope = envelope(
+            session,
+            turn.completed_at_ms,
+            turn.completed_ordinal,
+            "PostModelRequest",
+            0,
+            event,
+        );
+        envelope.validate()?;
+        envelopes.push(envelope);
+    }
+    Ok(envelopes)
+}
+
 /// A directory of newline-delimited Observe envelopes waiting for delivery.
 ///
-/// Files are named by timestamp and the digest of the envelope's session and
-/// event ids. This keeps lexical order equal to event order across sessions
-/// and prevents a caller-supplied id from becoming a path component.
+/// Files are named by timestamp, transcript position, ordinal, and the digest
+/// of the envelope's session and event ids. This preserves event order when a
+/// harness emits several events at one timestamp and prevents a caller-supplied
+/// id from becoming a path component.
 #[derive(Debug, Clone)]
 pub struct ObserveSpool {
     root: PathBuf,
@@ -351,7 +472,12 @@ impl ObserveSpool {
             .context("Observe envelope lost its session id")?;
         let digest = Sha256::digest(format!("{session_id}\0{}", envelope.meta.event_id).as_bytes());
         let digest = mj_core::hex::lower_hex(digest);
-        let name = format!("{:020}-{digest}.json", envelope.meta.ts.max(0));
+        let name = format!(
+            "{:020}-{:020}-{:03}-{digest}.json",
+            envelope.meta.ts.max(0),
+            envelope.meta.event_position,
+            envelope.meta.event_ordinal
+        );
         let path = self.root.join(name);
         let mut nonce = [0_u8; 8];
         getrandom::fill(&mut nonce).context("generate Observe spool temporary name")?;
@@ -425,6 +551,111 @@ impl ObserveSpool {
     }
 }
 
+/// Filesystem locations owned by asynchronous Observe publication.
+#[derive(Debug, Clone)]
+pub struct ObservePaths {
+    pub root: PathBuf,
+    pub spool: PathBuf,
+    pub state: PathBuf,
+}
+
+impl ObservePaths {
+    pub fn current() -> Self {
+        let root = mj_core::config::data_dir().join("observe");
+        Self {
+            spool: root.join("spool"),
+            state: root.join("delivery.json"),
+            root,
+        }
+    }
+}
+
+/// Delivery progress for one Mjolnir session.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObserveSessionDelivery {
+    /// Stable Observe event ids already committed to the local spool. Replaying
+    /// the projection is harmless because entries are filtered through this
+    /// set before the spool's own idempotent filename check.
+    pub emitted_event_ids: BTreeSet<String>,
+    /// The session record revision whose transcript was last examined.
+    pub record_updated_at: String,
+    /// Materialized event frontier whose transcript was last examined.
+    #[serde(default)]
+    pub materialized_event_ordinal: u64,
+    /// Execution state at that frontier, needed because a close can change the
+    /// published session boundary without adding transcript content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<MaterializedExecutionState>,
+    /// A completed historical import records when it was published.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub historical_imported_at_ms: Option<i64>,
+    /// SessionWiki can outlive Mjolnir's full checkpoint. Remember that there
+    /// is nothing richer left to publish instead of rescanning on every event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_source_unavailable_at_ms: Option<i64>,
+}
+
+/// Durable automatic-delivery state. The daemon is the only writer; the CLI
+/// reads the same atomically replaced file for diagnostics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObserveDeliveryState {
+    pub version: u32,
+    pub initialized_at_ms: i64,
+    #[serde(default)]
+    pub sessions: BTreeMap<String, ObserveSessionDelivery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_success_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure: Option<String>,
+}
+
+impl ObserveDeliveryState {
+    pub const VERSION: u32 = 1;
+
+    pub fn load(path: &Path, now_ms: i64) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self {
+                version: Self::VERSION,
+                initialized_at_ms: now_ms,
+                sessions: BTreeMap::new(),
+                last_success_ms: None,
+                last_failure_ms: None,
+                last_failure: None,
+            });
+        }
+        let body = fs::read(path)
+            .with_context(|| format!("read Observe delivery state {}", path.display()))?;
+        let state: Self = serde_json::from_slice(&body)
+            .with_context(|| format!("parse Observe delivery state {}", path.display()))?;
+        ensure!(
+            state.version == Self::VERSION,
+            "unsupported Observe delivery state version {}",
+            state.version
+        );
+        Ok(state)
+    }
+
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let body = serde_json::to_vec_pretty(self)?;
+        mj_core::config::atomic_write(path, &body)
+            .with_context(|| format!("write Observe delivery state {}", path.display()))
+    }
+
+    pub fn mark_success(&mut self, at_ms: i64) {
+        self.last_success_ms = Some(at_ms);
+        self.last_failure = None;
+    }
+
+    pub fn mark_failure(&mut self, at_ms: i64, error: impl Into<String>) {
+        self.last_failure_ms = Some(at_ms);
+        self.last_failure = Some(error.into());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,14 +670,25 @@ mod tests {
         ObserveSession {
             id: "session-1".into(),
             parent_id: Some("parent-1".into()),
+            native_session_id: Some("native-1".into()),
+            worker_id: Some("worker-1".into()),
             harness: "muse".into(),
             model: Some("muse-wonder".into()),
             cwd: Some("/work/app".into()),
+            hostname: Some("build-host".into()),
+            os: Some("linux".into()),
             started_at_ms: 1_000,
             workspace_id: Some("workspace".into()),
             profile_id: Some("muse".into()),
             target_id: Some("localhost".into()),
             runtime: Some("local".into()),
+            git: Some(ObserveGitMeta {
+                remote: Some("https://github.com/acme/app".into()),
+                branch: Some("main".into()),
+                head: Some("0123456789abcdef".into()),
+            }),
+            commits: Vec::new(),
+            historical: false,
         }
     }
 
@@ -676,6 +918,65 @@ mod tests {
     }
 
     #[test]
+    fn whole_turn_usage_becomes_a_stable_request_event() {
+        let usage: UsagePage = serde_json::from_value(json!({
+            "session_id": "session-1",
+            "turns": [{
+                "command_id": "turn-1",
+                "completed_ordinal": 7,
+                "completed_at_ms": 1_700,
+                "outcome": {"kind": "completed", "stop_reason": "end_turn"},
+                "usage": {
+                    "scope": "turn",
+                    "total_tokens": 270,
+                    "input_tokens": 150,
+                    "output_tokens": 70,
+                    "thought_tokens": 50,
+                    "cached_read_tokens": 1000,
+                    "cached_write_tokens": 50
+                }
+            }],
+            "next_after_seq": 7,
+            "latest_seq": 7,
+            "totals": {},
+            "coverage": {
+                "recorded_turns": 1,
+                "full_turn_reports": 1,
+                "last_request_reports": 0,
+                "unspecified_reports": 0,
+                "missing_reports": 0
+            },
+            "turn_selections": {
+                "turn-1": {"model": "muse-wonder", "effort": "high"}
+            }
+        }))
+        .unwrap();
+        let envelopes = usage_envelopes(&session(), &usage).unwrap();
+        assert_eq!(envelopes.len(), 1);
+        assert_eq!(envelopes[0].event["hook_event_name"], "PostModelRequest");
+        assert_eq!(envelopes[0].event["input_tokens"], 150);
+        assert_eq!(envelopes[0].event["cached_input_tokens"], 1000);
+        assert_eq!(envelopes[0].event["model"], "muse-wonder");
+        assert_eq!(envelopes[0].event["turn_ordinal"], 7);
+    }
+
+    #[test]
+    fn delivery_state_is_durable_and_preserves_the_latest_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("delivery.json");
+        let mut state = ObserveDeliveryState::load(&path, 10).unwrap();
+        state.mark_failure(20, "server unavailable");
+        state.save(&path).unwrap();
+        let mut state = ObserveDeliveryState::load(&path, 30).unwrap();
+        assert_eq!(
+            (state.initialized_at_ms, state.last_failure.as_deref()),
+            (10, Some("server unavailable"))
+        );
+        state.mark_success(40);
+        assert_eq!(state.last_failure, None);
+    }
+
+    #[test]
     fn spool_is_atomic_ordered_and_idempotent() {
         let directory = tempfile::tempdir().unwrap();
         let spool = ObserveSpool::open(directory.path()).unwrap();
@@ -691,7 +992,8 @@ mod tests {
                 },
             )],
         };
-        let envelopes = envelopes_for_transcript(&session(), &transcript).unwrap();
+        let mut envelopes = envelopes_for_transcript(&session(), &transcript).unwrap();
+        envelopes[1].meta.ts = envelopes[0].meta.ts;
         let first = spool.enqueue(&envelopes[0]).unwrap();
         assert_eq!(spool.enqueue(&envelopes[0]).unwrap(), first);
         let second = spool.enqueue(&envelopes[1]).unwrap();

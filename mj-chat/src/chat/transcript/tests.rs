@@ -4999,10 +4999,10 @@ fn golden_rich_transcript_tool_presentation() {
     let delivery =
         include_str!("../../../../mj-transcript/tests/golden/mailbox-delivery-transcript.txt");
     let batch = delivery
-        .split_once("19: Mailbox events:\n")
+        .split_once("20: Mailbox events:\n")
         .unwrap()
         .1
-        .split_once("\n20: ")
+        .split_once("\n21: ")
         .unwrap()
         .0;
     let mut mailbox = ChatState::new(&snapshot(), &[]);
@@ -5027,7 +5027,7 @@ fn golden_rich_transcript_tool_presentation() {
     let second_child = mailbox
         .transcript_click_targets
         .iter()
-        .find(|target| target.mailbox_event == Some(MailboxDisclosureId::Event(2, 11)))
+        .find(|target| target.mailbox_event == Some(MailboxDisclosureId::Event(2, 12)))
         .cloned()
         .unwrap();
     mailbox.handle_mouse(MouseEvent {
@@ -5047,7 +5047,7 @@ fn golden_rich_transcript_tool_presentation() {
     );
     assert_eq!(
         mailbox.expanded_mailbox_events,
-        BTreeSet::from([MailboxDisclosureId::Event(2, 11)])
+        BTreeSet::from([MailboxDisclosureId::Event(2, 12)])
     );
     let cached = mailbox.render_cache.entries[0].as_ref().unwrap();
     let report_start = cached
@@ -5103,12 +5103,12 @@ fn golden_rich_transcript_tool_presentation() {
         &[],
     );
     mailbox.anchor = TranscriptAnchor::Row { entry: 0, row: 9 };
-    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 44, 22));
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 44, 24));
     append_transcript_golden_state(
         &mut output,
         "mailbox report scrolled before collapse",
         44,
-        22,
+        24,
         &rows,
         &[],
     );

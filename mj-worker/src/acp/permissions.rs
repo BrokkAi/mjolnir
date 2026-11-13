@@ -69,12 +69,12 @@ pub(super) enum PlanPermissionAnswer {
     ContinueInBypass,
 }
 
-/// The Claude permission mode the session's execution policy enforces: Auto
-/// for Guardian, bypassPermissions for YOLO. It remains the fallback for a
-/// plan approval that did not enter through a recorded Mjolnir Plan control.
-fn claude_policy_mode(policy: ExecutionPolicy) -> &'static str {
-    HarnessKind::Claude
-        .execution_enforcement(policy)
+/// The Claude permission mode the session's enforcement selects: the
+/// profile's `claude_permission_mode` (Auto by default) for Guardian,
+/// bypassPermissions for YOLO. It remains the fallback for a plan approval
+/// that did not enter through a recorded Mjolnir Plan control.
+fn claude_policy_mode(enforcement: Option<ExecutionEnforcement>) -> &'static str {
+    enforcement
         .and_then(ExecutionEnforcement::acp_mode)
         .expect("Claude enforces an ACP mode under every execution policy")
 }
@@ -100,9 +100,9 @@ fn claude_plan_option_mode(option_id: &str) -> Option<(&'static str, bool)> {
 /// both select it.
 fn claude_policy_plan_option(
     request: &RequestPermissionRequest,
-    policy: ExecutionPolicy,
+    enforcement: Option<ExecutionEnforcement>,
 ) -> Option<&PermissionOption> {
-    let mode = claude_policy_mode(policy);
+    let mode = claude_policy_mode(enforcement);
     request.options.iter().find(|option| {
         claude_plan_option_mode(&option.option_id.to_string()) == Some((mode, false))
             && matches!(
@@ -160,9 +160,9 @@ pub(super) struct PermissionAnswers {
 pub(super) fn permission_choices(
     request: &RequestPermissionRequest,
     harness: HarnessKind,
-    policy: ExecutionPolicy,
+    enforcement: Option<ExecutionEnforcement>,
 ) -> PermissionAnswers {
-    let choices = offered_permission_choices(request, harness, policy);
+    let choices = offered_permission_choices(request, harness, enforcement);
     let skip = request
         .options
         .iter()
@@ -179,7 +179,7 @@ pub(super) fn permission_choices(
 fn offered_permission_choices(
     request: &RequestPermissionRequest,
     harness: HarnessKind,
-    policy: ExecutionPolicy,
+    enforcement: Option<ExecutionEnforcement>,
 ) -> Vec<PermissionChoice> {
     if !is_claude_plan_approval(request, harness) {
         return request
@@ -191,8 +191,8 @@ fn offered_permission_choices(
             })
             .collect();
     }
-    let policy_mode = claude_policy_mode(policy);
-    let yes = claude_policy_plan_option(request, policy);
+    let policy_mode = claude_policy_mode(enforcement);
+    let yes = claude_policy_plan_option(request, enforcement);
     // Any option in the policy's mode, its clear-context one included, lets
     // the plan be approved without another mode.
     let policy_offered = request.options.iter().any(|option| {
@@ -232,26 +232,26 @@ pub(super) fn policy_plan_permission_answer(
     request: &RequestPermissionRequest,
     response: ElicitationResponse,
     harness: HarnessKind,
-    policy: ExecutionPolicy,
+    enforcement: Option<ExecutionEnforcement>,
 ) -> Result<PlanPermissionAnswer> {
     if harness != HarnessKind::Claude || plan_review_answer(response.clone()).0 != "implement" {
         return Ok(PlanPermissionAnswer::Native(permission_plan_response(
             request, response,
         )));
     }
-    let mode = claude_policy_mode(policy);
-    if let Some(option) = claude_policy_plan_option(request, policy) {
+    let mode = claude_policy_mode(enforcement);
+    if let Some(option) = claude_policy_plan_option(request, enforcement) {
         return Ok(PlanPermissionAnswer::Native(
             RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
                 SelectedPermissionOutcome::new(option.option_id.clone()),
             )),
         ));
     }
-    if policy.is_unconstrained() {
+    if mode == "bypassPermissions" {
         Ok(PlanPermissionAnswer::ContinueInBypass)
     } else {
         bail!(
-            "Cannot implement the approved plan: Claude did not offer the required {mode} mode. Update the Claude bridge or use a model supporting Auto mode."
+            "Cannot implement the approved plan: Claude did not offer the required {mode} mode. Update the Claude bridge, use a model supporting that mode, or choose another Claude permission mode in the profile's settings."
         )
     }
 }
@@ -560,6 +560,10 @@ fn gh_script(script: &str) -> bool {
 /// project's own configuration adds, named `mj-agents_send` with a `message`
 /// tool) can produce exactly an owned title. Nothing in the request says which
 /// server a call belongs to, so its person decides, and can allow always.
+///
+/// Antigravity's `mcp_<server>_<tool>` titles are ambiguous in the same way,
+/// so it gets no answers here either. agy has a grant that names the server,
+/// which the worker stages instead (`stage_antigravity_mcp_grants`).
 #[derive(Debug, Clone, Default)]
 pub(super) struct OwnedMcpApprovals {
     /// The permission title of each owned server's tool calls, without any

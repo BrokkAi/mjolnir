@@ -31,6 +31,7 @@ pub(super) fn spec(
         initial_model: None,
         harness: HarnessKind::Grok,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
         observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),

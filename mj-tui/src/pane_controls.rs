@@ -857,8 +857,11 @@ mod tests {
         );
         {
             let menu = d.pane_menu.as_ref().expect("the row's menu opened");
-            let labels: Vec<&str> =
-                menu.entries.iter().map(|(label, _)| label.as_str()).collect();
+            let labels: Vec<&str> = menu
+                .entries
+                .iter()
+                .map(|(label, _)| label.as_str())
+                .collect();
             assert_eq!(
                 labels,
                 [

@@ -537,6 +537,14 @@ async fn run_bridge(
             .context("prepare the OpenCode session's logins")??,
         );
     }
+    // Before the process starts, like the pinned selectors: agy reads its
+    // grants at startup.
+    {
+        let staged = spec.clone();
+        tokio::task::spawn_blocking(move || stage_antigravity_mcp_grants(&staged))
+            .await
+            .context("stage Antigravity MCP grants task failed")??;
+    }
     let spec = &spec;
     let mut child = Command::new(&spec.command)
         .args(&spec.args)

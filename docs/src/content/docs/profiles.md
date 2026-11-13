@@ -490,6 +490,35 @@ profile does not advertise and about a current model outside the list. The check
 reads the catalogue from a running daemon; without one, or while discovery is
 still running, it reports "Not checked" and does not fail.
 
+## Choose Claude's permission mode
+
+On a runtime that keeps configured approvals (a bare runtime on this machine,
+or on an SSH machine with `permissions = "guardian"`), Claude sessions run in
+Claude Code's Auto mode by default: Claude's own classifier approves or denies
+each action, without asking you. Set `claude_permission_mode` on a Claude
+profile to choose another mode for its new sessions:
+
+```toml
+[profiles.claude]
+kind = "claude"
+home = "/home/me/.claude"
+claude_permission_mode = "manual"
+```
+
+| Value | Claude Code mode | Behavior |
+| --- | --- | --- |
+| `auto` (default) | Auto | Claude's classifier decides each action. |
+| `accept-edits` | Accept edits | File edits run; every other action asks you. |
+| `manual` | Manual (`default`) | Every action that needs permission asks you. |
+
+You can also set it in Settings, under the Claude profile's **Claude
+permission mode**. Every session the profile launches selects the mode when it
+opens, including when an existing session resumes, so a change applies from the
+next launch on. Runtimes that allow all actions (containers, EC2 machines, and
+SSH machines with `permissions = "yolo"`) always run Claude with
+`bypassPermissions`, whatever this setting says. The setting applies only to a
+Claude profile; setting it on any other profile is a configuration error.
+
 ## Codex profile files
 
 Codex reads profile files beside its `config.toml`: `codex -p ds` layers
