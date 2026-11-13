@@ -758,24 +758,31 @@ impl HarnessKind {
 
     /// How this harness realizes a target-level execution policy. Configured
     /// approvals preserve harness configuration, except that Codex, Claude,
-    /// and Muse select their guardian mode explicitly. Unconstrained targets
-    /// run every harness without approval checks; only the sandbox is
-    /// disabled for Muse, whose profile may opt back into auto-review.
+    /// Muse and Antigravity select their guardian mode explicitly.
+    /// Unconstrained targets run every harness without approval checks; only
+    /// the sandbox is disabled for Muse, whose profile may opt back into
+    /// auto-review.
     pub const fn execution_enforcement(
         self,
         policy: ExecutionPolicy,
     ) -> Option<ExecutionEnforcement> {
         match (self, policy) {
+            // Antigravity's guardian is its Auto mode: agy approves workspace
+            // edits, runs commands in its terminal sandbox, and has a separate
+            // reviewer agent clear or ask about commands that would leave it.
+            // Unconstrained targets use Default mode, which has no reviewer,
+            // and the flag that approves every request except agy's own
+            // system command denylist.
             (Self::Antigravity, policy) => Some(ExecutionEnforcement {
                 label: if policy.is_unconstrained() {
-                    "auto / skip-permissions"
+                    "default / skip-permissions"
                 } else {
-                    "default"
+                    "auto / guardian"
                 },
                 acp_mode: Some(if policy.is_unconstrained() {
-                    "auto"
-                } else {
                     "default"
+                } else {
+                    "auto"
                 }),
                 acp_mode_selector: None,
                 acp_setting: None,
