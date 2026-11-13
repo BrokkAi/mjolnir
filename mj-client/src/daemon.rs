@@ -646,6 +646,15 @@ pub struct CreateSessionRequest {
     pub target_template_id: String,
     pub additional_mounts: Vec<AdditionalMount>,
     pub resource_allocation: Option<SessionResourceAllocation>,
+    /// Per-session container CPU and memory overrides, stored verbatim on the
+    /// record. They win over `resource_allocation` when the container is
+    /// created, so a copy of a resized session carries them as they are. Only
+    /// valid for a container target. Omitted fields are skipped on the wire,
+    /// so a request without them is accepted by every daemon of this protocol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_cpus: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_memory: Option<String>,
     pub title: String,
     pub session_title_override: Option<String>,
 }

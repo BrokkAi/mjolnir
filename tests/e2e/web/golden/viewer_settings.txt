@@ -83,6 +83,14 @@ Context budget (bytes)
 
 Optional positive byte limit for transcript compaction. Leave blank for the default.
 
+Claude permission mode
+Default (Auto)
+Auto
+Accept edits
+Manual
+
+How new sessions on runtimes that ask for approvals handle Claude's permissions. Auto: Claude's classifier approves or denies each action. Accept edits: file edits run, everything else asks you. Manual: every action that needs permission asks you. Runtimes that allow all actions always bypass permissions.
+
 Offered models
 0 entries
 
@@ -93,6 +101,7 @@ control Enabled: checked
 control Type: Claude Code
 control Account directory: "<home>" (text, placeholder "Not set")
 control Context budget (bytes): "" (text, placeholder "262144 (256 KiB)")
+control Claude permission mode: Default (Auto)
 layout: {"overflowsSideways":false,"savebar":false,"saveEnabled":false,"menu":"Settings","hash":"#settings/profiles/claude"}
 === an accepted edit leaves the draft unsaved (390x844) ===
 Settings

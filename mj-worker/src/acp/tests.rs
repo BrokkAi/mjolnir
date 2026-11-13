@@ -88,6 +88,7 @@ for line in sys.stdin:
                 initial_model: None,
                 harness,
                 execution_policy: ExecutionPolicy::ConfiguredApprovals,
+                claude_permission_mode: Default::default(),
                 observe_policy: None,
                 acp_activity: Default::default(),
                 step_clock: Default::default(),
@@ -239,6 +240,7 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
         initial_model: None,
         harness: HarnessKind::Codex,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
         observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
@@ -1128,6 +1130,7 @@ fn native_delegation_follows_policy_independently_of_the_mcp_socket() {
         initial_model: None,
         harness: HarnessKind::Claude,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
         observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
@@ -1230,6 +1233,7 @@ fn project_history_mcp_and_non_claude_file_memory_are_delivered() {
         initial_model: None,
         harness: HarnessKind::Codex,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
         observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
@@ -1329,6 +1333,7 @@ fn a_child_socket_serves_handback_and_hides_native_tools() {
         initial_model: None,
         harness: HarnessKind::Codex,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
         observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
@@ -1477,6 +1482,7 @@ async fn air_tasks_from_root_and_child_sessions_stop_through_the_owning_adapter(
             initial_model: None,
             harness,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
+            claude_permission_mode: Default::default(),
             observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock,
@@ -2526,6 +2532,7 @@ async fn answer_to_ext_request(
         initial_model: None,
         harness: HarnessKind::Grok,
         execution_policy,
+        claude_permission_mode: Default::default(),
         observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
@@ -2731,6 +2738,7 @@ async fn answer_architecture_form(harness: HarnessKind, finish_before_answer: bo
         initial_model: None,
         harness,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
         observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
@@ -3063,7 +3071,7 @@ fn claude_exit_plan_mode_request_is_detected_and_mapped() {
         &request,
         ElicitationResponse::Accept { content: implement },
         HarnessKind::Claude,
-        ExecutionPolicy::ConfiguredApprovals,
+        HarnessKind::Claude.execution_enforcement(ExecutionPolicy::ConfiguredApprovals),
     )
     .unwrap() else {
         panic!("Auto is offered by this bridge");
@@ -3126,6 +3134,7 @@ async fn mode_change_bridge(
             "currentValue": current,
             "options": [
                 {"value": "default", "name": "Default"},
+                {"value": "acceptEdits", "name": "Accept edits"},
                 {"value": "plan", "name": "Plan"},
                 {"value": "agent", "name": "Agent"},
                 {"value": "auto", "name": "Auto"},
@@ -3139,6 +3148,7 @@ async fn mode_change_bridge(
         "currentModeId": "agent",
             "availableModes": [
                 {"id": "default", "name": "Default"},
+                {"id": "acceptEdits", "name": "Accept edits"},
                 {"id": "plan", "name": "Plan"},
                 {"id": "agent", "name": "Agent"},
                 {"id": "auto", "name": "Auto"},
@@ -3210,6 +3220,7 @@ async fn mode_change_bridge(
 async fn policy_is_enforced_before_session_is_reported(
     harness: HarnessKind,
     execution_policy: ExecutionPolicy,
+    claude_permission_mode: mj_core::config::ClaudePermissionMode,
     resume_session: Option<&str>,
 ) {
     let (client_stream, bridge_stream) = tokio::io::duplex(64 * 1024);
@@ -3248,6 +3259,7 @@ async fn policy_is_enforced_before_session_is_reported(
         initial_model: None,
         harness,
         execution_policy,
+        claude_permission_mode,
         observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
@@ -3268,12 +3280,18 @@ async fn policy_is_enforced_before_session_is_reported(
         .await
     });
 
+    use mj_core::config::ClaudePermissionMode;
     let (expected_mode, expected_label) = match (harness, execution_policy) {
         (HarnessKind::Codex, ExecutionPolicy::ConfiguredApprovals) => ("agent", "agent / guardian"),
         (HarnessKind::Codex, ExecutionPolicy::Unconstrained) => {
             ("agent-full-access", "agent-full-access")
         }
-        (HarnessKind::Claude, ExecutionPolicy::ConfiguredApprovals) => ("auto", "auto / guardian"),
+        (HarnessKind::Claude, ExecutionPolicy::ConfiguredApprovals) => match claude_permission_mode
+        {
+            ClaudePermissionMode::Auto => ("auto", "auto / guardian"),
+            ClaudePermissionMode::AcceptEdits => ("acceptEdits", "acceptEdits / guardian"),
+            ClaudePermissionMode::Manual => ("default", "default / guardian"),
+        },
         (HarnessKind::Claude, ExecutionPolicy::Unconstrained) => {
             ("bypassPermissions", "bypassPermissions / sandbox-off")
         }
@@ -3328,6 +3346,7 @@ async fn codex_selects_guardian_for_a_new_session() {
     policy_is_enforced_before_session_is_reported(
         HarnessKind::Codex,
         ExecutionPolicy::ConfiguredApprovals,
+        Default::default(),
         None,
     )
     .await;
@@ -3338,6 +3357,7 @@ async fn codex_selects_target_policy_when_loading_a_session() {
     policy_is_enforced_before_session_is_reported(
         HarnessKind::Codex,
         ExecutionPolicy::ConfiguredApprovals,
+        Default::default(),
         Some("native-session"),
     )
     .await;
@@ -3348,20 +3368,31 @@ async fn unconstrained_policy_is_enforced_before_the_session_is_reported() {
     policy_is_enforced_before_session_is_reported(
         HarnessKind::Codex,
         ExecutionPolicy::Unconstrained,
+        Default::default(),
         None,
     )
     .await;
 }
 
-/// Claude's guardian policy is its Auto mode, which it must select before the
-/// session is reported; unconstrained sessions take bypassPermissions.
+/// Claude's guardian policy is the profile's permission mode (Auto unless
+/// the profile picks another), which it must select before the session is
+/// reported; unconstrained sessions take bypassPermissions whatever the
+/// profile picked.
 #[tokio::test]
-async fn claude_selects_auto_for_guardian_and_bypass_when_unconstrained() {
+async fn claude_selects_the_profile_mode_for_guardian_and_bypass_when_unconstrained() {
+    use mj_core::config::ClaudePermissionMode;
     for policy in [
         ExecutionPolicy::ConfiguredApprovals,
         ExecutionPolicy::Unconstrained,
     ] {
-        policy_is_enforced_before_session_is_reported(HarnessKind::Claude, policy, None).await;
+        for mode in [
+            ClaudePermissionMode::Auto,
+            ClaudePermissionMode::AcceptEdits,
+            ClaudePermissionMode::Manual,
+        ] {
+            policy_is_enforced_before_session_is_reported(HarnessKind::Claude, policy, mode, None)
+                .await;
+        }
     }
 }
 
@@ -3512,6 +3543,7 @@ async fn guardian_muse_offering_only_allow_all_fails(plan: bool) {
         initial_model: None,
         harness: HarnessKind::Muse,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
         observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
@@ -3580,6 +3612,7 @@ async fn a_mode_the_harness_acknowledges_but_does_not_apply_fails_the_session() 
         initial_model: None,
         harness: HarnessKind::Claude,
         execution_policy: ExecutionPolicy::Unconstrained,
+        claude_permission_mode: Default::default(),
         observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
@@ -3865,6 +3898,7 @@ async fn a_failed_prompt_fails_the_turn_and_the_runtime_keeps_serving() {
         initial_model: None,
         harness: HarnessKind::Claude,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
         observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
@@ -4284,6 +4318,7 @@ pub(super) fn silent_bridge_spec(stall_policy: mj_core::activity::StallPolicy) -
         // Muse marks no turn end of its own, so the watchdog covers it.
         harness: HarnessKind::Muse,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
         observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
@@ -4870,6 +4905,7 @@ async fn exercise_image_steering(with_images: bool, steering_outcome: &'static s
         initial_model: None,
         harness: HarnessKind::Codex,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
         observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
@@ -5204,6 +5240,7 @@ async fn acknowledged_cancel_keeps_the_bridge_for_the_next_prompt() {
         initial_model: None,
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
         observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
@@ -5346,6 +5383,7 @@ async fn unacked_cancel_restarts_the_harness_after_sixty_seconds() {
         initial_model: None,
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
         observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
@@ -5442,6 +5480,7 @@ async fn a_request_queued_across_a_restart_never_reaches_the_fresh_bridge() {
             initial_model: None,
             harness: HarnessKind::Kimi,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
+            claude_permission_mode: Default::default(),
             observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
@@ -5780,6 +5819,7 @@ mod terminals {
             initial_model: None,
             harness: HarnessKind::Kimi,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
+            claude_permission_mode: Default::default(),
             observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
@@ -6220,6 +6260,7 @@ for line in sys.stdin:
             initial_model: None,
             harness: HarnessKind::Codex,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
+            claude_permission_mode: Default::default(),
             observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
@@ -6415,6 +6456,7 @@ for line in sys.stdin:
         initial_model: None,
         harness: HarnessKind::Codex,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
         observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
@@ -6573,6 +6615,7 @@ while True:
         initial_model: None,
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
         observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
@@ -6716,6 +6759,7 @@ while True:
         initial_model: None,
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
         observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
@@ -6829,6 +6873,7 @@ async fn bridge_exit_during_initialize_returns_an_actionable_error() {
         initial_model: None,
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::Unconstrained,
+        claude_permission_mode: Default::default(),
         observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
@@ -6909,6 +6954,7 @@ async fn bridge_launch_failure_is_reported_before_the_runtime_stops() {
             initial_model: None,
             harness: HarnessKind::Kimi,
             execution_policy: ExecutionPolicy::Unconstrained,
+            claude_permission_mode: Default::default(),
             observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
@@ -7157,6 +7203,7 @@ fn reload_fallback_spec(harness: HarnessKind) -> LaunchSpec {
         initial_model: None,
         harness,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
         observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
@@ -7242,6 +7289,7 @@ fn resume_failures_report_a_missing_native_session_per_harness() {
             initial_model: None,
             harness,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
+            claude_permission_mode: Default::default(),
             observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock: crate::acp::StepClock::default(),
@@ -7399,6 +7447,7 @@ fn missing_native_session_spec(
         initial_model: None,
         harness,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
         observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),
@@ -7787,6 +7836,7 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
             initial_model: None,
             harness,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
+            claude_permission_mode: Default::default(),
             observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock,
@@ -8238,6 +8288,7 @@ async fn kimi_permission_form_shows_the_command_streamed_as_tool_content() {
         initial_model: None,
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
         observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),
@@ -8646,6 +8697,7 @@ async fn launcher_lines_before_the_first_frame_do_not_break_initialize() {
         initial_model: None,
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
         observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: crate::acp::StepClock::default(),

@@ -1279,6 +1279,7 @@ pub(crate) fn spawn_dashboard_create_session(
             target_template_id,
             additional_mounts,
             resource_allocation,
+            carried,
         } = action.clone()
         else {
             return;
@@ -1333,9 +1334,9 @@ pub(crate) fn spawn_dashboard_create_session(
                         remember_launch_choices: true,
                         remember_container_size,
                         review,
-                        no_project_memory: false,
-                        no_github_events: false,
-                        no_github_credentials: false,
+                        no_project_memory: carried.no_project_memory,
+                        no_github_events: carried.no_github_events,
+                        no_github_credentials: carried.no_github_credentials,
                         at: None,
                         branch: None,
                         base: None,
@@ -1352,6 +1353,8 @@ pub(crate) fn spawn_dashboard_create_session(
                         // Local changes are never part of isolated creation;
                         // the compatibility field is intentionally ignored.
                         resource_allocation,
+                        container_cpus: carried.container_cpus,
+                        container_memory: carried.container_memory,
                         title,
                         session_title_override: None,
                     })

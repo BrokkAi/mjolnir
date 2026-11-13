@@ -1714,6 +1714,7 @@ fn credential_sync_covers_every_harness_on_this_machine_as_in_a_container() {
                 guardian_review_model: None,
                 codex_profile: None,
                 muse_auto_review: None,
+                claude_permission_mode: None,
                 aws: None,
                 ..mj_core::config::HarnessProfile::new(kind, home.clone())
             },
@@ -1810,6 +1811,7 @@ fn credential_sync_skips_a_local_login_file_linked_to_the_profile() {
                 guardian_review_model: None,
                 codex_profile: None,
                 muse_auto_review: None,
+                claude_permission_mode: None,
                 aws: None,
                 ..mj_core::config::HarnessProfile::new(kind, home.clone())
             },

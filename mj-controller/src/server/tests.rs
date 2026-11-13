@@ -1692,7 +1692,7 @@ async fn guardian_permission_mode_is_hidden_and_refused_by_api() {
     ] {
         let enforcement = harness.resolve_execution_enforcement(
             mj_core::config::ExecutionPolicy::ConfiguredApprovals,
-            false,
+            mj_core::config::ApprovalChoices::default(),
         );
         let (app, mut actions, _, _, _) = app_with_snapshot(|snapshot| {
             let session = &mut snapshot.sessions[0];

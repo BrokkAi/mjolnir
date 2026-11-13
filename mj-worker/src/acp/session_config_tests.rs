@@ -223,6 +223,7 @@ fn launch(root: &std::path::Path, script: PathBuf, saved: AcceptedSessionConfig)
         initial_model: None,
         harness: HarnessKind::Kimi,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
         observe_policy: None,
         acp_activity: AcpActivityClock::default(),
         step_clock: StepClock::default(),

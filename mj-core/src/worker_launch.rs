@@ -270,6 +270,14 @@ pub struct WorkerLaunchConfig {
         deserialize_with = "deserialize_execution_policy"
     )]
     pub execution_policy: ExecutionPolicy,
+    /// The Claude profile's `claude_permission_mode`, which picks Claude's
+    /// mode under configured approvals. Written only when it is not Auto, so
+    /// launches that keep the default stay readable by older workers.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::config::ClaudePermissionMode::is_auto"
+    )]
+    pub claude_permission_mode: crate::config::ClaudePermissionMode,
     /// Optional synchronous Brokk Observe guardrails. Present only when the
     /// selected harness can ask Mjolnir before every policy-eligible tool.
     #[serde(default, skip_serializing_if = "Option::is_none")]

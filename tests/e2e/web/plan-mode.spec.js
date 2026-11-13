@@ -466,7 +466,7 @@ test('golden_viewer_conversation', async ({ context }) => {
   ));
   await publishSnapshotDelta(mailboxPage, mailboxState);
   const events = mailboxPage.locator('#conversation-feed .mailbox-event');
-  await expect(events).toHaveCount(12);
+  await expect(events).toHaveCount(13);
   const captureMailbox = async label => {
     await captureConversationState(output, mailboxPage, label, mailboxState);
     const folds = await events.evaluateAll(nodes => nodes.map(node => ({
@@ -483,12 +483,12 @@ test('golden_viewer_conversation', async ({ context }) => {
     expect(await mailboxPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   };
   await captureMailbox('mailbox events are one line each on the phone');
-  await events.nth(11).locator('summary').click();
-  await expect(events.nth(11)).toHaveAttribute('open', '');
-  await expect(events.nth(10)).not.toHaveAttribute('open', '');
-  await expect(events.nth(11).locator('.entry-body')).toContainText('支持 Unicode and <script>literal text</script>.');
-  await expect(events.nth(11).locator('.entry-body')).toContainText('- A report bullet stays in this event.');
-  await expect(events.nth(11).locator('script')).toHaveCount(0);
+  await events.nth(12).locator('summary').click();
+  await expect(events.nth(12)).toHaveAttribute('open', '');
+  await expect(events.nth(11)).not.toHaveAttribute('open', '');
+  await expect(events.nth(12).locator('.entry-body')).toContainText('支持 Unicode and <script>literal text</script>.');
+  await expect(events.nth(12).locator('.entry-body')).toContainText('- A report bullet stays in this event.');
+  await expect(events.nth(12).locator('script')).toHaveCount(0);
   await captureMailbox('click opens only the second repeated mailbox event');
   const mailboxEntry = mailboxState.conversation.entries[0];
   mailboxEntry.lines.push('  - Your PR #4625 was merged.');
@@ -496,13 +496,13 @@ test('golden_viewer_conversation', async ({ context }) => {
   mailboxEntry.updated_seq += 1;
   mailboxState.conversation.latest_seq += 1;
   await publishSnapshotDelta(mailboxPage, mailboxState);
-  await expect(events).toHaveCount(13);
-  await expect(events.nth(11)).toHaveAttribute('open', '');
-  await expect(events.nth(12)).not.toHaveAttribute('open', '');
+  await expect(events).toHaveCount(14);
+  await expect(events.nth(12)).toHaveAttribute('open', '');
+  await expect(events.nth(13)).not.toHaveAttribute('open', '');
   await captureMailbox('live mailbox update preserves the open report');
-  await events.nth(11).locator('summary').focus();
+  await events.nth(12).locator('summary').focus();
   await mailboxPage.keyboard.press('Enter');
-  await expect(events.nth(11)).not.toHaveAttribute('open', '');
+  await expect(events.nth(12)).not.toHaveAttribute('open', '');
   await mailboxPage.setViewportSize({ width: 320, height: 568 });
   await captureMailbox('keyboard collapses mailbox detail at narrow phone width');
   await mailboxPage.setViewportSize({ width: 900, height: 900 });

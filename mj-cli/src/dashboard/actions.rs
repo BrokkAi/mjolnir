@@ -22,10 +22,9 @@ use crate::dashboard::io::{
     spawn_cancellable_io_with_token, spawn_clipboard_read, spawn_config_rename,
     spawn_create_bundle, spawn_dashboard_change_workspace, spawn_dashboard_container_settings,
     spawn_dashboard_create_session, spawn_dashboard_notifications_ignored, spawn_dashboard_rename,
-    spawn_quota_preferences_save,
-    spawn_lifecycle_operation, spawn_remove_bundle, spawn_workspace_close,
-    spawn_workspace_close_cancel, spawn_workspace_create, spawn_workspace_draft_recovery,
-    spawn_workspace_management_load, spawn_workspace_rename,
+    spawn_lifecycle_operation, spawn_quota_preferences_save, spawn_remove_bundle,
+    spawn_workspace_close, spawn_workspace_close_cancel, spawn_workspace_create,
+    spawn_workspace_draft_recovery, spawn_workspace_management_load, spawn_workspace_rename,
 };
 use crate::dashboard::{DashboardContext, QUOTA_REFRESH_NOTICE, resume_progress_notice};
 use crate::import::{DashboardImportSafety, PendingDashboardImport};
@@ -1943,7 +1942,9 @@ fn start_session_launch_with_repository_preflight(
     match action {
         action @ DashboardAction::CreateSession { .. } => {
             debug_assert!(repository_preflight.is_none());
-            context.dashboard.set_notice("Preparing session launch…");
+            context
+                .dashboard
+                .set_notice(action.annotate_launch_notice("Preparing session launch…".to_owned()));
             let go_save = context.dashboard.remember_go_launch(&action);
             spawn_dashboard_create_session(
                 action,

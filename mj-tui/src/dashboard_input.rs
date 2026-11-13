@@ -238,8 +238,8 @@ impl DashboardState {
                 self.record_event_handled();
                 return DashboardAction::None;
             }
-            // A right-clicked session row opens that session's menu, the way
-            // right-clicking a web session card does.
+            // A right-clicked session row opens a small menu for that
+            // session, anchored at the click.
             if let Some((index, _)) = self
                 .session_row_areas
                 .iter()
@@ -247,7 +247,7 @@ impl DashboardState {
                 && let Some(id) = self.session_menu_ids.get(*index).cloned()
                 && self.state.sessions.contains_key(&id)
             {
-                self.begin_session_palette_for(&id);
+                self.begin_session_row_menu(&id, (mouse.column, mouse.row));
                 self.record_event_handled();
                 return DashboardAction::None;
             }

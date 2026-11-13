@@ -6,8 +6,8 @@
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────                                                                                                        │
 │› · ACP pretty                                                                                                        │
-│  Idle  podman  ╭ × ACP pretty name ──────────────────────────────────────────────── Copy session ID ╮                │
-│  │ No message  │                                                                                    │                │
+│  Idle  podman  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  │ No message  │                                                                   Copy session ID  │                │
 │  │             │  codex-1                                                                           │                │
 │                │  Sub-agents Native                                                                 │                │
 │                │  CPU        no CPU data yet                                                        │                │
@@ -46,8 +46,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open                                                                                                        │
 │hel ──────────                                                                                                        │
-│› · ACP pretty  ╭ × ACP pretty name ──────────────────────────────────────────────── Copy session ID ╮                │
-│  Idle  podman  │                                                                                    │                │
+│› · ACP pretty  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  Idle  podman  │                                                                   Copy session ID  │                │
 │  │ No message  │  codex-1                                                                           │                │
 │  │             │  Sub-agents Mjolnir                                                                │                │
 │                │  CPU        no CPU data yet                                                        │                │
@@ -87,8 +87,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open                                                                                                        │
 │hel ──────────                                                                                                        │
-│› · ACP pretty  ╭ × ACP pretty name ──────────────────────────────────────────────── Copy session ID ╮                │
-│  Idle  podman  │                                                                                    │                │
+│› · ACP pretty  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  Idle  podman  │                                                                   Copy session ID  │                │
 │  │ No message  │  codex-1                                                                           │                │
 │  │             │  Sub-agents Native · 0 of 1 working                                                │                │
 │                │  CPU        2.0%+ hourly / 3.0%+ recent                                            │                │
@@ -129,8 +129,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────                                                                                                        │
 │› · ACP pretty                                                                                                        │
-│  Idle  podman  ╭ × ACP pretty name ──────────────────────────────────────────────── Copy session ID ╮                │
-│  │ No message  │                                                                                    │                │
+│  Idle  podman  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  │ No message  │                                                                   Copy session ID  │                │
 │  │             │  codex-1                                                                           │                │
 │                │  Sub-agents Native                                                                 │                │
 │                │  CPU        10% hourly / 23% recent (process tree)                                 │                │
@@ -170,8 +170,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────                                                                                                        │
 │› · ACP pretty                                                                                                        │
-│  Idle  podman  ╭ × ACP pretty name ──────────────────────────────────────────────── Copy session ID ╮                │
-│  │ No message  │                                                                                    │                │
+│  Idle  podman  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  │ No message  │                                                                   Copy session ID  │                │
 │  │             │  codex-1                                                                           │                │
 │                │  Sub-agents Native                                                                 │                │
 │                │  CPU        no CPU data yet                                                        │                │
@@ -203,6 +203,92 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
+=== row context menu, nothing to dismiss (120x40) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│ ╭Session──────────────────────────╮  ││                                                                              │
+│ │Dismiss notification             │  ││                                                                              │
+│ │Copy session ID                  │  ││                                                                              │
+│ │New session with these settings  │  ││                               ✦  M J O L N I R                               │
+│ ╰─────────────────────────────────╯  ││                                                                              │
+│                                      ││                  Select a session to open its conversation.                  │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ No conversation open ────────────────────────────────────────────────────────╮
+│                                      ││No conversation open.                                                         │
+│                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
+disabled context Dismiss click: None
+disabled context Dismiss click: None
+disabled context Dismiss digit: None
+context menu Enter opens on Copy: CopySessionId { session_id: "session-1" }
+=== after the context menu copy (120x40) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman  codex-1               ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                                                                              │
+│                                      ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
+│                                      ││                  Select a session to open its conversation.                  │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ No conversation open ────────────────────────────────────────────────────────╮
+│                                      ││No conversation open.                                                         │
+│                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === copy session ID menu row (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
@@ -211,8 +297,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────                                                                                                        │
 │› · ACP pretty                                                                                                        │
-│  Idle  podman  ╭ × ACP pretty name ──────────────────────────────────────────────── Copy session ID ╮                │
-│  │ No message  │                                                                                    │                │
+│  Idle  podman  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  │ No message  │                                                                   Copy session ID  │                │
 │  │             │  codex-1                                                                           │                │
 │                │  Sub-agents Native                                                                 │                │
 │                │  CPU        no CPU data yet                                                        │                │
@@ -298,8 +384,8 @@ selection after disabled click: Some(RenameSession)
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────                                                                                                        │
 │› · ACP pretty                                                                                                        │
-│  Idle  podman  ╭ × ACP pretty name ──────────────────────────────────────────────── Copy session ID ╮                │
-│  │ No message  │                                                                                    │                │
+│  Idle  podman  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  │ No message  │                                                                   Copy session ID  │                │
 │  │             │  codex-1                                                                           │                │
 │                │  Sub-agents Native                                                                 │                │
 │                │  CPU        no CPU data yet                                                        │                │
@@ -331,6 +417,47 @@ selection after disabled click: Some(RenameSession)
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
+=== row context menu, dismissible notification (120x40) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default ?1                         ≡ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› ? ACP pretty name               ◇ ⋯ ││                                                                              │
+│ ╭Session──────────────────────────╮  ││                                                                              │
+│ │Dismiss notification             │t.││                                                                              │
+│ │Copy session ID                  │  ││                                                                              │
+│ │New session with these settings  │  ││                               ✦  M J O L N I R                               │
+│ ╰─────────────────────────────────╯  ││                                                                              │
+│                                      ││                  Select a session to open its conversation.                  │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ No conversation open ────────────────────────────────────────────────────────╮
+│                                      ││No conversation open.                                                         │
+│                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === active prose question (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default ?1                         ≡ ││                                                                              │
@@ -339,8 +466,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────                                                                                                        │
 │› ? ACP pretty                                                                                                        │
-│  Question  po  ╭ × ACP pretty name ──────────────────────────────────────────────── Copy session ID ╮                │
-│  │ Waiting on  │                                                                                    │                │
+│  Question  po  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  │ Waiting on  │                                                                   Copy session ID  │                │
 │  │             │  codex-1                                                                           │                │
 │                │  Sub-agents Native                                                                 │                │
 │                │  CPU        no CPU data yet                                                        │                │
@@ -381,8 +508,8 @@ dismiss exact question: DismissNotification { session_id: "session-1", target: Q
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────                                                                                                        │
 │› ? ACP pretty                                                                                                        │
-│  Question  po  ╭ × ACP pretty name ──────────────────────────────────────────────── Copy session ID ╮                │
-│  │ Waiting on  │                                                                                    │                │
+│  Question  po  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  │ Waiting on  │                                                                   Copy session ID  │                │
 │  │             │  codex-1                                                                           │                │
 │                │  Sub-agents Native                                                                 │                │
 │                │  CPU        no CPU data yet                                                        │                │
@@ -423,8 +550,8 @@ dismissal failure: Some("Could not dismiss notification: Worker disconnected")
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────                                                                                                        │
 │› ○ ACP pretty                                                                                                        │
-│  Idle  podman  ╭ × ACP pretty name ──────────────────────────────────────────────── Copy session ID ╮                │
-│  │ Waiting on  │                                                                                    │                │
+│  Idle  podman  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  │ Waiting on  │                                                                   Copy session ID  │                │
 │  │             │  codex-1                                                                           │                │
 │                │  Sub-agents Native                                                                 │                │
 │                │  CPU        no CPU data yet                                                        │                │
@@ -464,36 +591,36 @@ unread dismissed: Some("Notification dismissed.")
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
-│hel ──────────────────────────────────││                                                                              │
+│hel ──────────                                                                                                        │
 │› ? ACP pretty                                                                                                        │
-│  ⠁ Sub-agent                                                                                                         │
-│  │ No message  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
-│  │             │  Sub-agents Native · 0 of 1 working                                                │                │
+│  ⠁ Sub-agent   ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  │ No message  │                                                                   Copy session ID  │                │
+│  │             │  codex-1                                                                           │                │
+│                │  Sub-agents Native · 0 of 1 working                                                │                │
 │                │  CPU        no CPU data yet                                                        │                │
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
 │                │› Open sub-agent question                                                           │                │
 │                │  Ignore                                                                            │                │
+│                │                                                                                    │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │  Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
 │                │  Change Workspace › — There is no other workspace.                                 │                │
+│                │                                                                                    │                │
 │                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
 │                │  Container settings                                                                │                │
-│                │  Move…                                                                             │                │
-│                │  Suspend…                                                          ctrl+b shift+x  │                │
+│                │  Move…                                                                             │  ──────────────╯
+│                │  Suspend…                                                          ctrl+b shift+x  │  ──────────────╮
 │                │  Restart                                                                           │                │
-│                │  Interrupt all (parent + sub-agents)…                                              │  ──────────────╯
-│                │  ────────────────────────────────────────────────────────────────────────────────  │  ──────────────╮
-│                │  Copy session ID                                                                   │                │
-│                │  Destroy…                                                                          │                │
-│                │Go to the sub-agent whose question or permission request makes this session wait.   │  ──────────────╯
-│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ─────── ▁   ▄ ╮
+│                │  Interrupt all (parent + sub-agents)…                                              │                │
+│                │  Destroy…                                                                          │  ──────────────╯
+│                │Go to the sub-agent whose question or permission request makes this session wait.   │  ─────── ▁   ▄ ╮
+│                │                                                                                    │                │
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ──────────────╯
+│                                                                                                        ─────── ▁   ▄ ╮
 │                                                                                                                      │
-│                                                                                                        ──────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │

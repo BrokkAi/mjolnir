@@ -43,7 +43,7 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
             json!({"model":null,"effort":null})
         }
         "profiles" if path.len() == 2 => {
-            json!({"enabled":true,"kind":"codex","home":"","environment":{},"context_window_bytes":null,"guardian_review_model":null,"codex_profile":null,"models":[]})
+            json!({"enabled":true,"kind":"codex","home":"","environment":{},"context_window_bytes":null,"guardian_review_model":null,"codex_profile":null,"claude_permission_mode":null,"models":[]})
         }
         "machines" if path.len() == 2 => machine_defaults(value["kind"].as_str().unwrap_or("ssh")),
         // The build cache is its own page, and the saved file keeps only the
@@ -289,6 +289,7 @@ pub fn label(key: &str) -> String {
         "context_window_bytes" => "Context budget (bytes)",
         "guardian_review_model" => "Guardian review model",
         "codex_profile" => "Codex profile",
+        "claude_permission_mode" => "Claude permission mode",
         "models" => "Offered models",
         "bind" => "Listen address and port",
         "tailscale_detect" => "Detect Tailscale",
@@ -426,6 +427,7 @@ pub fn null_label(path: &[String], draft: &Value) -> String {
             mj_core::config::GUARDIAN_REVIEW_NEWEST_FLASH.to_owned()
         }
         ["profiles", _, "codex_profile"] => "None — config.toml only".to_owned(),
+        ["profiles", _, "claude_permission_mode"] => "Auto".to_owned(),
         _ => "Not set".to_owned(),
     }
 }
@@ -610,6 +612,18 @@ pub fn choice_label(path: &[String], value: &Value, draft: &Value) -> String {
     if path.last().is_some_and(|key| key == "machine") {
         return value.to_owned();
     }
+    if path
+        .last()
+        .is_some_and(|key| key == "claude_permission_mode")
+    {
+        return match value {
+            "auto" => "Auto",
+            "accept-edits" => "Accept edits",
+            "manual" => "Manual",
+            _ => value,
+        }
+        .to_owned();
+    }
     match value {
         "native" => "Native",
         "local" => "This machine",
@@ -726,6 +740,7 @@ pub fn choices(path: &[String], draft: &Value) -> Vec<Value> {
         "mode" if path.first().is_some_and(|key| key == "notify") => &["off", "terminal", "system"],
         "spinner" => &[], // Use the canonical animation list below.
         "permissions" => &["guardian", "yolo"],
+        "claude_permission_mode" => &["auto", "accept-edits", "manual"],
         "pull_policy" => &["auto", "always", "newer", "missing", "never"],
         "address_source" => &["public-dns", "public-ip", "private-dns", "private-ip"],
         "kind" if path.iter().any(|key| key == "workspace_storage") => {
@@ -1002,6 +1017,9 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
         }
         "codex_profile" => {
             "Codex only: the name of a profile file in the account directory, such as ds for ds.config.toml, layered over config.toml like codex -p ds."
+        }
+        "claude_permission_mode" => {
+            "How new sessions on runtimes that ask for approvals handle Claude's permissions. Auto: Claude's classifier approves or denies each action. Accept edits: file edits run, everything else asks you. Manual: every action that needs permission asks you. Runtimes that allow all actions always bypass permissions."
         }
         _ => return None,
     })

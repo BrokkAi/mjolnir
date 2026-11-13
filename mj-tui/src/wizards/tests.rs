@@ -1581,6 +1581,7 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
             target_template_id: "machine".into(),
             additional_mounts: Vec::new(),
             resource_allocation: None,
+            carried: Default::default(),
         }
     );
 }
@@ -1600,6 +1601,7 @@ fn profile_picker_marks_harnesses_without_guardian_approvals() {
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 muse_auto_review: None,
+                claude_permission_mode: None,
                 aws: None,
                 codex_profile: None,
                 environment: Default::default(),
@@ -1897,6 +1899,7 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
             target_template_id: "localhost".into(),
             additional_mounts: Vec::new(),
             resource_allocation: None,
+            carried: Default::default(),
         }
     );
 }
@@ -6445,4 +6448,184 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
             subtle: None
         }
     );
+}
+
+/// "New session with these settings" on a sub-agent that works in its
+/// parent's managed worktree must start a top-level session that asks for a
+/// worktree of its own in the parent's source directory (never the parent's
+/// worktree path), takes delegation and review from the owning session (the
+/// child's own are fixed by the launch), and replaces a profile that can no
+/// longer be used instead of refusing.
+#[test]
+fn new_session_like_a_child_in_a_managed_worktree_is_top_level_with_its_own_worktree() {
+    let mut parent = legacy_managed_session(running_session());
+    parent.target_template_id = "localhost".into();
+    // Mjolnir delegation with no sub-agent model configured, and an oracle
+    // with no oracle model: the copy cannot keep either.
+    parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    });
+    parent.oracle = true;
+    parent.review = Some(Box::new(mj_core::config::SessionReview::Off));
+    parent.no_github_credentials = true;
+    let worktree_root = parent.project_directory.clone().unwrap();
+    let mut child = running_session();
+    child.id = "child-session".into();
+    child.target_template_id = "localhost".into();
+    child.project_directory = parent.project_directory.clone();
+    child.managed_worktree = None;
+    child.subagents = Some(mj_core::subagent::SubagentPolicy::None);
+    child.oracle = false;
+    child.review = None;
+    child.no_github_credentials = true;
+    // Size overrides are a container's; a bare runtime has none to carry.
+    child.container_cpus = Some("2".into());
+    child.last_profile = "retired-profile".into();
+    let relation = mj_core::subagent::SubagentMetadata {
+        kind: mj_core::subagent::SubagentKind::Worker,
+        child_session_id: child.id.clone(),
+        parent_session_id: parent.id.clone(),
+        task_name: "Inspect parser".into(),
+        profile_id: child.last_profile.clone(),
+        model: None,
+        effort: None,
+        working_directory: Default::default(),
+        request_key: "request-1".into(),
+        created_at: child.created_at.clone(),
+        noticed_turn: None,
+        reported_finish: None,
+        handback_tool: false,
+    };
+    let mut dashboard = dashboard_with_session(parent.clone());
+    dashboard
+        .config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    let mut state = dashboard.state.clone();
+    state.sessions.insert(child.id.clone(), child.clone());
+    state.subagents.insert(child.id.clone(), relation);
+    dashboard.set_state(state);
+
+    let DashboardAction::CreateSession {
+        project_directory,
+        create_managed_worktree,
+        subagents,
+        review,
+        profile_id,
+        carried,
+        ..
+    } = dashboard.begin_new_session_like(&child.id)
+    else {
+        panic!("the copy creates a session without a dialog");
+    };
+    assert_eq!(project_directory, Some(PathBuf::from("/srv/project")));
+    assert_ne!(project_directory, Some(worktree_root));
+    assert_eq!(create_managed_worktree, Some(true));
+    assert_eq!(subagents, Some(mj_core::subagent::SubagentPolicy::Native));
+    assert_eq!(review, Some(mj_core::config::SessionReview::Off));
+    // The profile the wizard itself would open on.
+    assert_eq!(
+        Some(profile_id.clone()),
+        dashboard.nth_offered_profile(dashboard.default_new_profile_index())
+    );
+    assert!(carried.no_github_credentials);
+    assert_eq!(carried.container_cpus, None);
+    let note = carried.note.expect("the replaced profile is reported");
+    assert!(
+        note.contains("retired-profile") && note.contains(&profile_id),
+        "{note}"
+    );
+    assert!(
+        note.contains("Sub-agents: Mjolnir is not available")
+            && note.contains("so this session uses Native."),
+        "{note}"
+    );
+    assert!(
+        note.contains("Oracle is not available") && note.contains("starts without it."),
+        "{note}"
+    );
+}
+
+/// "New session with these settings" must carry the source's container size
+/// overrides as stored: they win over the allocation when the container is
+/// created, so a copy without them starts at a different size.
+// Hard-won: d2d6ebb14: the copy kept the allocation but dropped container_cpus and container_memory.
+#[test]
+fn new_session_like_a_resized_container_session_carries_its_size_overrides() {
+    let mut source = running_session();
+    source.container_cpus = Some("3.5".into());
+    source.container_memory = Some("6g".into());
+    let mut dashboard = dashboard_with_session(source.clone());
+
+    let DashboardAction::CreateSession { carried, .. } =
+        dashboard.begin_new_session_like(&source.id)
+    else {
+        panic!("the copy creates a session without a dialog");
+    };
+    assert_eq!(carried.container_cpus.as_deref(), Some("3.5"));
+    assert_eq!(carried.container_memory.as_deref(), Some("6g"));
+
+    // Hard-won: 6ddd61a06: a sub-agent's copy read the child's own overrides,
+    // which are always empty because it runs in its parent's container.
+    let mut child = running_session();
+    child.id = "resized-child".into();
+    child.project_directory = source.project_directory.clone();
+    child.container_cpus = None;
+    child.container_memory = None;
+    let relation = mj_core::subagent::SubagentMetadata {
+        kind: mj_core::subagent::SubagentKind::Worker,
+        child_session_id: child.id.clone(),
+        parent_session_id: source.id.clone(),
+        task_name: "Inspect parser".into(),
+        profile_id: child.last_profile.clone(),
+        model: None,
+        effort: None,
+        working_directory: Default::default(),
+        request_key: "request-1".into(),
+        created_at: child.created_at.clone(),
+        noticed_turn: None,
+        reported_finish: None,
+        handback_tool: false,
+    };
+    let mut state = dashboard.state.clone();
+    state.sessions.insert(child.id.clone(), child.clone());
+    state.subagents.insert(child.id.clone(), relation);
+    dashboard.set_state(state);
+    let DashboardAction::CreateSession { carried, .. } =
+        dashboard.begin_new_session_like(&child.id)
+    else {
+        panic!("the copy of a sub-agent creates a session without a dialog");
+    };
+    assert_eq!(carried.container_cpus.as_deref(), Some("3.5"));
+    assert_eq!(carried.container_memory.as_deref(), Some("6g"));
+}
+
+/// A copied launch skips the new-session key, so it must wait for the host's
+/// Git identity check the way a fast-start launch does, then run as copied.
+// Hard-won: aa2206c29: the copied launch bypassed the Git identity gate.
+#[test]
+fn new_session_like_waits_for_the_git_identity_check() {
+    let mut source = legacy_managed_session(running_session());
+    source.target_template_id = "localhost".into();
+    let mut dashboard = dashboard_with_session(source.clone());
+    dashboard
+        .config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    dashboard.require_git_identity_check();
+
+    assert_eq!(
+        dashboard.begin_new_session_like(&source.id),
+        DashboardAction::CheckGitIdentity
+    );
+    dashboard.apply_git_identity_check(Ok(mj_client::daemon::GitIdentity {
+        name: Some("Ada".into()),
+        email: Some("ada@example.test".into()),
+        per_directory: false,
+    }));
+    assert!(matches!(
+        dashboard.take_git_identity_followup(),
+        Some(DashboardAction::CreateSession { .. })
+    ));
 }

@@ -1,6 +1,36 @@
 use super::*;
 
 impl DashboardState {
+    /// The launch the new-session wizard seeds its choices from: the last
+    /// interactive launch when this client made one, else the newest session.
+    fn recent_launch_choice(&self) -> Option<LaunchRecency> {
+        let interactive = self.recent_launch.as_ref().map(|recent| LaunchRecency {
+            bundle_id: recent.bundle_id.clone(),
+            last_profile: recent.profile_id.clone(),
+            target_template_id: recent.target_id.clone(),
+            newest_created_at: String::new(),
+        });
+        match interactive.as_ref() {
+            Some(recent) => {
+                most_recent_configured_session(&self.config, std::slice::from_ref(recent))
+            }
+            None => most_recent_configured_session(&self.config, &self.launch_recency),
+        }
+        .cloned()
+    }
+
+    /// The index among the offered profiles the wizard opens on. A launch
+    /// that copies another session's settings uses it too when that session's
+    /// profile cannot be used.
+    pub(crate) fn default_new_profile_index(&self) -> usize {
+        self.recent_launch_choice()
+            .and_then(|session| {
+                self.offered_profiles()
+                    .position(|(id, _)| id == session.last_profile)
+            })
+            .unwrap_or(0)
+    }
+
     pub(crate) fn begin_new(&mut self) -> DashboardAction {
         if let Some(action) = self.git_identity_gate_action() {
             return action;
@@ -40,23 +70,9 @@ impl DashboardState {
             }
             return DashboardAction::None;
         }
-        let interactive = self.recent_launch.as_ref().map(|recent| LaunchRecency {
-            bundle_id: recent.bundle_id.clone(),
-            last_profile: recent.profile_id.clone(),
-            target_template_id: recent.target_id.clone(),
-            newest_created_at: String::new(),
-        });
-        let recent = if let Some(recent) = interactive.as_ref() {
-            most_recent_configured_session(&self.config, std::slice::from_ref(recent))
-        } else {
-            most_recent_configured_session(&self.config, &self.launch_recency)
-        };
-        let profile = recent
-            .and_then(|session| {
-                self.offered_profiles()
-                    .position(|(id, _)| id == session.last_profile)
-            })
-            .unwrap_or(0);
+        let recent = self.recent_launch_choice();
+        let recent = recent.as_ref();
+        let profile = self.default_new_profile_index();
         let bundle = recent
             .and_then(|session| {
                 bundle_ids_by_recent_creation(&self.config, &self.launch_recency)

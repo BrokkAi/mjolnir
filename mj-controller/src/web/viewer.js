@@ -153,6 +153,10 @@ let snapshot,
 /// failure cannot leave a button dead.
 const pendingActions = new Set();
 const pendingLifecycleActions = new Map();
+/// Session → the notification target its accepted dismissal named. The card
+/// hides that notification's glyph at once rather than waiting for the feed to
+/// lower the session's attention; a cleared or different target renders again.
+const dismissedNotifications = new Map();
 /// Stop failures are tied to a task identity, so a fresh snapshot can redraw
 /// the row without losing the inline error that tells the person what failed.
 const backgroundTaskErrors = new Map();
@@ -1142,7 +1146,12 @@ function isDashboardSession(session) {
 }
 
 function hasNotification(session) {
-  return ['needs_input', 'important', 'failed', 'unreachable'].includes(session.attention);
+  // An ignored session never interrupts: it neither lists nor counts here. A
+  // notification whose dismissal the daemon accepted is already handled.
+  return session.notifications_ignored !== true
+    && dismissedNotifications.get(session.id)
+      !== JSON.stringify(session.notification_dismissal ?? null)
+    && ['needs_input', 'important', 'failed', 'unreachable'].includes(session.attention);
 }
 
 /// Notifications, unread output, then other sessions; newest message first in each band.
@@ -1199,8 +1208,44 @@ function notificationRows() {
     && hasNotification(row));
 }
 
+/// Dismiss every notification that names a target. Failures and forms carry
+/// no target and stay flagged, as does any row whose dismissal is refused.
+let clearingNotifications = false;
+async function dismissAllNotifications() {
+  if (clearingNotifications) return;
+  clearingNotifications = true;
+  renderRoute();
+  const rows = notificationRows().filter(row => row.notification_dismissal);
+  const failures = [];
+  await Promise.all(rows.map(async row => {
+    const key = `dismiss-notification:${row.id}`;
+    pendingActions.add(key);
+    try {
+      await request('/api/actions', {
+        method: 'POST',
+        body: JSON.stringify({ action: 'dismiss-notification', session_id: row.id, target: row.notification_dismissal }),
+      });
+      dismissedNotifications.set(row.id, JSON.stringify(row.notification_dismissal));
+    } catch (error) {
+      failures.push(`${row.title || row.id}: ${error.message}`);
+    } finally {
+      pendingActions.delete(key);
+    }
+  }));
+  clearingNotifications = false;
+  actionError.textContent = failures.join('\n');
+  await refresh();
+}
+
 function renderNotifications() {
-  const header = el('h2', '', 'Notifications');
+  const clearAll = button('Clear all', 'secondary');
+  clearAll.id = 'notifications-clear-all';
+  // Only rows naming a dismissal target can be cleared; the rest stay flagged.
+  clearAll.hidden = clearingNotifications
+    || !notificationRows().some(row => row.notification_dismissal);
+  clearAll.onclick = () => dismissAllNotifications();
+  const header = el('div', 'notifications-header');
+  header.append(el('h2', '', 'Notifications'), clearAll);
   const items = notificationSnapshot.update(notificationRows(), [...viewerState.rows.values()]).map(({ row }) => {
     let card = sessionCards.get(row.id);
     if (!card) { card = sessionCard(row); sessionCards.set(row.id, card); }
@@ -1676,7 +1721,11 @@ function sessionCard(session) {
 function attentionParts(session) {
   const parts = [];
   if (session.operation?.kind === 'move') parts.push(['→', 'Moving']);
-  const attention = {
+  // An ignored session never interrupts, and a notification whose dismissal
+  // the daemon already accepted is done: neither shows an attention glyph.
+  const dismissed = dismissedNotifications.get(session.id)
+    === JSON.stringify(session.notification_dismissal ?? null);
+  const attention = session.notifications_ignored === true || dismissed ? undefined : {
     needs_input: ['?', 'Input needed'],
     important: ['!', 'Important'],
     unread: ['✓', 'Unread'],
@@ -9466,6 +9515,9 @@ async function runSessionAction(dataset, errorNode, extra) {
       });
     } else {
       await request('/api/actions', { method: 'POST', body: JSON.stringify(body) });
+      if (dataset.action === 'dismiss-notification') {
+        dismissedNotifications.set(dataset.id, dataset.notificationDismissal);
+      }
     }
     errorNode.textContent = '';
     await refresh();

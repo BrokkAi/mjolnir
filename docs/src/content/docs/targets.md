@@ -104,7 +104,9 @@ approval so critical actions can still be denied. Muse's guardian on raw
 targets is that same review with the sandbox kept on.
 
 Codex, Claude Code, Grok Build, and Muse Code can preserve guardian approvals
-on raw targets. Kimi Code cannot. OpenCode asks before tools
+on raw targets. Claude Code's guardian is its Auto mode unless the profile sets
+[`claude_permission_mode`](/profiles/#choose-claudes-permission-mode) to Accept
+edits or Manual. Kimi Code cannot. OpenCode asks before tools
 according to its permission rules, and DSH, with dsh-acp's `permission_mode`
 `ask`, asks before every write, command, and MCP tool call. Neither has a
 sandbox, so a prompt is the only thing between the agent and the host.

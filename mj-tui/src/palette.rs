@@ -76,17 +76,11 @@ pub(crate) enum PaletteControl {
     Run,
     /// The combobox anchored on the "Change workspace" row.
     Workspace,
-    /// The copy chip at a session menu's top right.
+    /// The copy button in a session menu's top right.
     CopySessionId,
 }
 
 impl CommandPalette {
-    /// The session a session menu serves, for tests outside this module.
-    #[cfg(test)]
-    pub(crate) fn menu_session_id(&self) -> Option<&str> {
-        self.session_id.as_deref()
-    }
-
     fn prepare(&self) {
         let mut form = self.form.borrow_mut();
         form.begin_update();
@@ -978,37 +972,7 @@ pub(crate) fn render_palette(
         true,
     );
     let mut outer = theme::modal().title(title);
-    if palette.session_only {
-        // The session id copies from a chip on the menu's top border, at the
-        // right. It leaves the command list to lifecycle and content work.
-        let label = " Copy session ID ";
-        let width = u16::try_from(label.len()).unwrap_or(u16::MAX);
-        let enabled = matches!(
-            (spec(CommandId::CopySessionId).available)(dashboard),
-            Availability::Ready
-        );
-        form.register(
-            PaletteControl::CopySessionId,
-            ControlKind::Button,
-            Rect::new(
-                popup.right().saturating_sub(width + 1),
-                popup.y,
-                width.min(popup.width.saturating_sub(4)),
-                1,
-            ),
-            enabled,
-        );
-        let chip_style = if !enabled {
-            theme::muted().patch(theme::raised())
-        } else if form.is_focused(PaletteControl::CopySessionId)
-            || form.is_armed(PaletteControl::CopySessionId)
-        {
-            theme::focus_control()
-        } else {
-            theme::actionable_chip()
-        };
-        outer = outer.title(Line::styled(label, chip_style).right_aligned());
-    } else {
+    if !palette.session_only {
         outer = outer.title(
             Line::styled(
                 format!(
@@ -1022,7 +986,24 @@ pub(crate) fn render_palette(
     }
     let outer = outer.title_bottom(mj_chat::components::DialogShell::hints(true));
     frame.render_widget(outer, popup);
-    if !palette.session_only {
+    if palette.session_only {
+        // The session id copies from an ordinary button in the body's first
+        // row, at the right. That row is the menu's top margin: the title sits
+        // on the border above it and the facts start in the row below, so the
+        // button cannot overlap either. It leaves the command list to
+        // lifecycle and content work.
+        let enabled = matches!(
+            (spec(CommandId::CopySessionId).available)(dashboard),
+            Availability::Ready
+        );
+        Dialog::render_actions_aligned(
+            frame,
+            rows[0],
+            &[(PaletteControl::CopySessionId, "Copy session ID", enabled)],
+            &mut form,
+            mj_chat::components::RowAlign::Right,
+        );
+    } else {
         TextField::render(
             frame,
             rows[0],
@@ -1395,10 +1376,6 @@ mod tests {
         }
     }
 
-    /// The menu says what the row's figure is made of: the tree total, the
-    /// session's own share, and how many members were measured.
-    /// Copy session ID sits under the plain divider, directly above Destroy,
-    /// and hands the host the session's full ID to put on the clipboard.
     /// The open session menu as its lines: a named divider as `[name]`, the
     /// unnamed divider as `---`, and each command by its menu label.
     fn session_menu_layout(dashboard: &DashboardState) -> Vec<String> {
@@ -1743,6 +1720,18 @@ mod tests {
         );
     }
 
+    /// Right-clicks the first session row and returns the screen with the
+    /// row's context menu open.
+    fn right_click_first_row(dashboard: &mut DashboardState) -> Vec<String> {
+        let _ = drawn(dashboard, 120, 40);
+        let row = dashboard.session_row_areas[0].1;
+        dashboard.handle_mouse(mouse_at(
+            MouseEventKind::Down(MouseButton::Right),
+            (row.x + 1, row.y),
+        ));
+        drawn(dashboard, 120, 40)
+    }
+
     // Hard-won: 92684ad3b: dismissing a question must also acknowledge its unread turn.
     #[test]
     fn golden_session_action_menu() {
@@ -1789,6 +1778,31 @@ mod tests {
         dashboard.begin_session_palette();
         let lines = drawn(&mut dashboard, 120, 40);
         append_golden_state(&mut output, "CPU not measured", 120, 40, &lines);
+
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
+        let lines = right_click_first_row(&mut dashboard);
+        append_golden_state(
+            &mut output,
+            "row context menu, nothing to dismiss",
+            120,
+            40,
+            &lines,
+        );
+        let dismiss = point(&lines, "Dismiss notification");
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            let action = dashboard.handle_mouse(mouse_at(kind, dismiss));
+            append_golden_value(&mut output, "disabled context Dismiss click", action);
+        }
+        let action = dashboard.handle_key(key(KeyCode::Char('1')));
+        append_golden_value(&mut output, "disabled context Dismiss digit", action);
+        let action = dashboard.handle_key(key(KeyCode::Enter));
+        append_golden_value(&mut output, "context menu Enter opens on Copy", action);
+        let lines = drawn(&mut dashboard, 120, 40);
+        append_golden_state(&mut output, "after the context menu copy", 120, 40, &lines);
 
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
@@ -1907,6 +1921,15 @@ mod tests {
         };
         project(&mut dashboard, &materialized, &assessment);
         dashboard.focus_sessions();
+        let lines = right_click_first_row(&mut dashboard);
+        append_golden_state(
+            &mut output,
+            "row context menu, dismissible notification",
+            120,
+            40,
+            &lines,
+        );
+        dashboard.handle_key(key(KeyCode::Esc));
         dashboard.begin_session_palette();
         let lines = drawn(&mut dashboard, 120, 40);
         append_golden_state(&mut output, "active prose question", 120, 40, &lines);

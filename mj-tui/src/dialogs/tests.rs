@@ -40,6 +40,7 @@ fn remote_repair_requires_confirmation_and_restores_the_previous_screen() {
         create_managed_worktree: Some(false),
         additional_mounts: Vec::new(),
         resource_allocation: None,
+        carried: Default::default(),
     };
     dashboard.show_remote_repair_confirmation("repo".into(), vec![repair.clone()], retry.clone());
     let mut terminal = Terminal::new(TestBackend::new(100, 25)).unwrap();
@@ -1994,6 +1995,7 @@ fn launch_failure_survives_notices_and_retries_original_settings_once() {
         target_template_id: "docker".into(),
         additional_mounts: Vec::new(),
         resource_allocation: None,
+        carried: Default::default(),
     };
     dashboard.show_launch_failure("upload failed", Some(retry.clone()));
     dashboard.set_notice("Quota refreshed");

@@ -84,6 +84,7 @@ fn populated_dashboard_with(adjust: impl FnOnce(&mut State)) -> DashboardState {
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 muse_auto_review: None,
+                claude_permission_mode: None,
                 aws: None,
                 codex_profile: None,
                 environment: Default::default(),

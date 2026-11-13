@@ -356,7 +356,207 @@ impl DashboardState {
                 wizard.mounts.mounts.clone()
             },
             resource_allocation: wizard.resource_allocation.clone(),
+            carried: crate::CarriedLaunchSettings::default(),
         }
+    }
+
+    /// "New session with these settings": starts a top-level session with the
+    /// settings of `source_id`, without a dialog.
+    ///
+    /// The request is the `CreateSession` the wizard ends in, so the host
+    /// shows the launch, registers it and reports a refusal exactly as it
+    /// does for a wizard launch. Everything that belongs to the source itself
+    /// stays behind: its title, conversation, parent link and managed
+    /// worktree (a new worktree is requested when the source had one).
+    ///
+    /// A choice that cannot apply now is replaced and the launch notice says
+    /// so. When the runtime or the project cannot apply, nothing sensible
+    /// replaces it, so the ordinary new-session wizard opens instead.
+    pub(crate) fn begin_new_session_like(&mut self, source_id: &str) -> DashboardAction {
+        let Some(source) = self.state.sessions.get(source_id).cloned() else {
+            self.notices.set("This session is no longer available.");
+            return DashboardAction::None;
+        };
+        self.want_availability_check();
+        // Like every launch that skips the new-session key, this one waits
+        // for the host's Git identity check; the wizard fallback goes
+        // through the same gate the new-session key uses.
+        match self.new_session_like_request(&source) {
+            Ok(action) => self.gate_launch_on_git_identity(action),
+            Err(reason) => {
+                if let Some(action) = self.git_identity_gate_action() {
+                    if matches!(
+                        self.git_identity_gate,
+                        crate::dialogs::GitIdentityGate::Checking(_)
+                    ) {
+                        self.set_notice(format!(
+                            "{reason} Checking the Git identity on this host before choosing new settings…"
+                        ));
+                    }
+                    return action;
+                }
+                let action = self.begin_new_wizard();
+                // With no profile or runtime to offer, the wizard has already
+                // said why in its own notice.
+                if matches!(self.mode, Mode::New(_)) {
+                    self.notices
+                        .set(format!("{reason} Choose the settings for the new session."));
+                }
+                action
+            }
+        }
+    }
+
+    /// The creation request for [`Self::begin_new_session_like`], or why the
+    /// source's runtime or project cannot be used.
+    pub(crate) fn new_session_like_request(
+        &self,
+        source: &mj_core::state::SessionRecord,
+    ) -> Result<DashboardAction, String> {
+        let target_template_id = source.target_template_id.clone();
+        if let Some(reason) = self.target_unavailable(&target_template_id) {
+            return Err(format!(
+                "Runtime {target_template_id} cannot be used: {reason}"
+            ));
+        }
+        let raw_project = is_bare_project_target(&self.config.targets[&target_template_id]);
+        let container_target =
+            mj_core::config::is_container_target(&self.config.targets[&target_template_id]);
+        // The checkout, not the record's path, names the project: a managed
+        // worktree's own path is the source's, and a sub-agent works in its
+        // owner's checkout.
+        let checkout = self
+            .state
+            .checkout(&source.id)
+            .map_err(|error| format!("The session's project is unknown: {error:#}"))?;
+        let (directory, source_had_worktree) = match checkout.effective() {
+            mj_core::state::Checkout::ManagedWorktree { worktree, .. } => {
+                (Some(worktree.source_project_directory.clone()), true)
+            }
+            mj_core::state::Checkout::Attached { path } => (Some(path.to_path_buf()), false),
+            mj_core::state::Checkout::ManagedWorkspace
+            | mj_core::state::Checkout::Borrowed { .. } => (None, false),
+        };
+        if directory.is_some() != raw_project {
+            return Err(format!(
+                "The session's project does not fit runtime {target_template_id}."
+            ));
+        }
+        let bundle_id = match &directory {
+            Some(directory) => raw_project_context_id(&directory.to_string_lossy()),
+            None => {
+                if !self.config.bundles.contains_key(&source.bundle_id) {
+                    return Err(format!(
+                        "Project {} is no longer configured.",
+                        source.bundle_id
+                    ));
+                }
+                source.bundle_id.clone()
+            }
+        };
+        let mut changes = Vec::new();
+        let profile_id = if self.profile_offered(&source.last_profile) {
+            source.last_profile.clone()
+        } else {
+            let reason = match self.config.enabled_profile(&source.last_profile) {
+                None => "it is disabled or no longer configured".to_owned(),
+                Some(_) => self
+                    .profile_missing(&source.last_profile)
+                    .unwrap_or("it is not available")
+                    .to_owned(),
+            };
+            let replacement = self
+                .nth_offered_profile(self.default_new_profile_index())
+                .ok_or_else(|| "No profile is available here.".to_owned())?;
+            changes.push(format!(
+                "Profile {} is not available ({}), so this session uses {replacement}.",
+                source.last_profile,
+                reason.trim_end_matches('.')
+            ));
+            replacement
+        };
+        let workspace_id = if self.workspace_ids().contains(&source.workspace_id) {
+            source.workspace_id.clone()
+        } else {
+            let active = self.active_workspace_id.clone().unwrap_or_default();
+            changes.push(format!(
+                "The session's workspace no longer exists, so this session starts in {}.",
+                self.workspace_display_name(&active)
+            ));
+            active
+        };
+        // A sub-agent's own delegation, oracle and review are fixed by its
+        // parent's launch; the session that owns it holds the real choices.
+        let chooser = checkout.owner().unwrap_or(source);
+        let policy = chooser.subagents.clone().unwrap_or_default();
+        let mut delegation = subagents::SubagentDraft::new(policy.clone())
+            .with_oracle(chooser.oracle, chooser.oracle_choice.as_deref().cloned());
+        delegation.refresh_create(
+            &profile_id,
+            &self.config,
+            &self.profile_capabilities,
+            &policy,
+            chooser.oracle,
+        );
+        // The launch starts at once, so a choice the refresh could not keep is
+        // reported, like the profile and workspace above. Native shown as None
+        // for a harness without sub-agents of its own is not a change.
+        let kept_policy = delegation.shown(&policy);
+        if delegation.selected() != kept_policy {
+            let reason = delegation
+                .unavailable_reason()
+                .map(|reason| format!(" ({})", reason.trim_end_matches('.')))
+                .unwrap_or_default();
+            changes.push(format!(
+                "Sub-agents: {} is not available{reason}, so this session uses {}.",
+                delegation.policy_label(&policy),
+                delegation.policy_label(&delegation.selected()),
+            ));
+        }
+        if chooser.oracle && !delegation.oracle_available() {
+            changes.push(
+                "Oracle is not available (no oracle model is configured), so this session \
+                 starts without it."
+                    .to_owned(),
+            );
+        }
+        Ok(DashboardAction::CreateSession {
+            remember_container_size: false,
+            subagents: Some(delegation.selected()),
+            oracle: delegation.oracle_available().then_some(delegation.oracle),
+            oracle_choice: delegation.oracle_choice.clone(),
+            review: chooser.review.as_deref().cloned(),
+            // Like the wizard, ask for a worktree only where one can exist,
+            // and ask for a new one rather than reusing the source's.
+            create_managed_worktree: Some(raw_project && source_had_worktree),
+            workspace_id,
+            profile_id,
+            bundle_id,
+            project_directory: directory,
+            target_template_id,
+            additional_mounts: if raw_project {
+                Vec::new()
+            } else {
+                source.additional_mounts.clone()
+            },
+            // A sub-agent runs in its owner's container, whose size lives on
+            // the owner's record: the child's own overrides are always empty.
+            resource_allocation: chooser.resource_allocation.clone(),
+            carried: crate::CarriedLaunchSettings {
+                no_project_memory: source.no_project_memory,
+                no_github_events: source.no_github_events,
+                no_github_credentials: source.no_github_credentials,
+                // Container targets only, as in the container editor; the
+                // runtime was checked above, so this is the target's kind.
+                container_cpus: container_target
+                    .then(|| chooser.container_cpus.clone())
+                    .flatten(),
+                container_memory: container_target
+                    .then(|| chooser.container_memory.clone())
+                    .flatten(),
+                note: (!changes.is_empty()).then(|| changes.join(" ")),
+            },
+        })
     }
 
     pub fn apply_created_bundle(&mut self, config: Config, bundle_id: &str) -> DashboardAction {

@@ -140,6 +140,48 @@ impl PermissionMode {
     }
 }
 
+/// The Claude Code permission mode a Claude profile's sessions run in on
+/// targets that keep configured approvals (raw localhost, guardian SSH).
+/// Unconstrained targets always run Claude in bypassPermissions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClaudePermissionMode {
+    /// Claude Code's own classifier approves or denies each action.
+    #[default]
+    Auto,
+    /// File edits run without asking; other actions ask.
+    AcceptEdits,
+    /// Every action that needs permission asks.
+    Manual,
+}
+
+impl ClaudePermissionMode {
+    /// The claude-agent-acp mode id that realizes this choice.
+    pub const fn acp_mode(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::AcceptEdits => "acceptEdits",
+            Self::Manual => "default",
+        }
+    }
+
+    pub fn is_auto(&self) -> bool {
+        *self == Self::Auto
+    }
+}
+
+/// A profile's own choices about how its harness realizes an execution
+/// policy. The controller reads them from the profile and the worker from its
+/// launch config, and both resolve the enforcement through
+/// [`HarnessKind::resolve_execution_enforcement`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ApprovalChoices {
+    /// See [`HarnessProfile::muse_auto_review`].
+    pub muse_auto_review: bool,
+    /// See [`HarnessProfile::claude_permission_mode`].
+    pub claude_permission_mode: ClaudePermissionMode,
+}
+
 impl ExecutionPolicy {
     pub const fn is_unconstrained(self) -> bool {
         matches!(self, Self::Unconstrained)
@@ -874,20 +916,11 @@ impl HarnessKind {
                 session_sandbox: None,
                 staged_setting: None,
             }),
-            // Claude's guardian is its Auto mode: Claude decides each
-            // permission itself instead of asking the client, which has no
-            // per-tool approval surface of its own.
-            (Self::Claude, ExecutionPolicy::ConfiguredApprovals) => Some(ExecutionEnforcement {
-                label: "auto / guardian",
-                acp_mode: Some("auto"),
-                acp_mode_selector: None,
-                acp_setting: None,
-                launch_flag: None,
-                launch_environment: None,
-                launch_argument: None,
-                session_sandbox: None,
-                staged_setting: None,
-            }),
+            // Claude's guardian defaults to its Auto mode; a profile's
+            // `claude_permission_mode` picks another.
+            (Self::Claude, ExecutionPolicy::ConfiguredApprovals) => Some(
+                Self::claude_guardian_enforcement(ClaudePermissionMode::Auto),
+            ),
             // dsh-acp records each session's permission policy and keeps it
             // across `session/load`, so the policy is selected on every open:
             // a resumed session, or one moved from a container to a raw
@@ -999,19 +1032,44 @@ impl HarnessKind {
         }
     }
 
-    /// Execution enforcement for `policy`, honoring a Muse profile's
-    /// `muse_auto_review` choice. The worker carries that choice in its
-    /// launch config because it only knows the harness kind; the controller
-    /// resolves it from the profile. Guardian targets always review.
+    /// Claude under configured approvals, in the profile's chosen mode.
+    pub const fn claude_guardian_enforcement(mode: ClaudePermissionMode) -> ExecutionEnforcement {
+        ExecutionEnforcement {
+            label: match mode {
+                ClaudePermissionMode::Auto => "auto / guardian",
+                ClaudePermissionMode::AcceptEdits => "acceptEdits / guardian",
+                ClaudePermissionMode::Manual => "default / guardian",
+            },
+            acp_mode: Some(mode.acp_mode()),
+            acp_mode_selector: None,
+            acp_setting: None,
+            launch_flag: None,
+            launch_environment: None,
+            launch_argument: None,
+            session_sandbox: None,
+            staged_setting: None,
+        }
+    }
+
+    /// Execution enforcement for `policy`, honoring the profile's
+    /// [`ApprovalChoices`]: a Muse profile's `muse_auto_review` and a Claude
+    /// profile's `claude_permission_mode`. The worker carries those choices
+    /// in its launch config because it only knows the harness kind; the
+    /// controller resolves them from the profile.
     pub fn resolve_execution_enforcement(
         self,
         policy: ExecutionPolicy,
-        muse_auto_review: bool,
+        choices: ApprovalChoices,
     ) -> Option<ExecutionEnforcement> {
-        if self == Self::Muse && policy == ExecutionPolicy::Unconstrained && muse_auto_review {
-            return Some(Self::muse_unconstrained_review_enforcement());
+        match (self, policy) {
+            (Self::Muse, ExecutionPolicy::Unconstrained) if choices.muse_auto_review => {
+                Some(Self::muse_unconstrained_review_enforcement())
+            }
+            (Self::Claude, ExecutionPolicy::ConfiguredApprovals) => Some(
+                Self::claude_guardian_enforcement(choices.claude_permission_mode),
+            ),
+            _ => self.execution_enforcement(policy),
         }
-        self.execution_enforcement(policy)
     }
 
     /// Apply the launch environment required to realize `policy`. The
@@ -1251,6 +1309,15 @@ pub struct HarnessProfile {
     /// changes nothing there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub muse_auto_review: Option<bool>,
+    /// The Claude Code permission mode this Claude profile's sessions run in
+    /// where the target keeps configured approvals (raw localhost, guardian
+    /// SSH): `"auto"` (the default when absent) lets Claude's classifier
+    /// decide each action, `"accept-edits"` runs file edits and asks for the
+    /// rest, and `"manual"` asks for every action that needs permission.
+    /// Unconstrained targets always bypass permissions. Only valid on a
+    /// Claude profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_permission_mode: Option<ClaudePermissionMode>,
     /// The IAM role Mjolnir assumes for each session of a profile that
     /// authenticates with the AWS credential chain (Bedrock), so the session
     /// gets short-lived credentials limited to that role instead of a copy
@@ -1353,6 +1420,7 @@ impl HarnessProfile {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            claude_permission_mode: None,
             aws: None,
             models: Default::default(),
             legacy_subagents: None,
@@ -1399,7 +1467,15 @@ impl HarnessProfile {
         // unconstrained behavior: the reviewer answers each approval inside
         // the container boundary, with only the sandbox disabled.
         self.kind
-            .resolve_execution_enforcement(policy, self.muse_auto_review.unwrap_or(false))
+            .resolve_execution_enforcement(policy, self.approval_choices())
+    }
+
+    /// This profile's choices about how its harness realizes a policy.
+    pub fn approval_choices(&self) -> ApprovalChoices {
+        ApprovalChoices {
+            muse_auto_review: self.muse_auto_review.unwrap_or(false),
+            claude_permission_mode: self.claude_permission_mode.unwrap_or_default(),
+        }
     }
 
     /// Whether this Muse profile keeps auto-review on in unconstrained
@@ -1691,6 +1767,9 @@ impl HarnessProfile {
         }
         if self.muse_auto_review.is_some() && self.kind != HarnessKind::Muse {
             bail!("profile {id:?}: `muse_auto_review` applies only to a Muse profile");
+        }
+        if self.claude_permission_mode.is_some() && self.kind != HarnessKind::Claude {
+            bail!("profile {id:?}: `claude_permission_mode` applies only to a Claude profile");
         }
         if let Some(aws) = &self.aws {
             aws.validate(id)?;

@@ -46,7 +46,13 @@ pub(super) fn destinations(
             && !c.unhealthy.contains_key(model)
             && !crate::profile_scheduler::exhausted(c, model, now)
     });
-    crate::profile_scheduler::draw_candidates(&mut candidates, None, &config.quota.prefer, model, now)?;
+    crate::profile_scheduler::draw_candidates(
+        &mut candidates,
+        None,
+        &config.quota.prefer,
+        model,
+        now,
+    )?;
     Ok(candidates)
 }
 

@@ -717,6 +717,8 @@ fn launch_options(additional_mounts: Vec<AdditionalMount>) -> SessionLaunchOptio
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         additional_mounts,
         resource_allocation: None,
+        container_cpus: None,
+        container_memory: None,
         project_directory: None,
         session_title_override: None,
     }
@@ -1762,9 +1764,29 @@ fn registration_remembers_launch_size_but_session_overrides_do_not_replace_it() 
         cpus: 12,
         memory_bytes: 48 * 1024 * 1024 * 1024,
     });
+    // A copy of a resized session registers with the source's override
+    // strings, which provisioning reads in preference to the allocation.
+    options.container_cpus = Some("3".into());
+    options.container_memory = Some("6g".into());
     let id = controller
         .register_session_with_resources("codex", "project", "podman", "sized", options)
         .unwrap();
+    let stored = crate::database::load_state().unwrap();
+    for record in [&controller.state.sessions[&id], &stored.sessions[&id]] {
+        assert_eq!(record.container_cpus.as_deref(), Some("3"));
+        assert_eq!(record.container_memory.as_deref(), Some("6g"));
+    }
+    let record = &controller.state.sessions[&id];
+    let targets::TargetTemplate::LocalPodman(container) = backend::backend_target(
+        &controller.config.targets["podman"],
+        record.resource_allocation.as_ref(),
+        backend::ContainerOverrides::for_session(record),
+    )
+    .unwrap() else {
+        panic!("a podman target");
+    };
+    assert!(container.extra_run_args.contains(&"--cpus=3".to_owned()));
+    assert!(container.extra_run_args.contains(&"--memory=6g".to_owned()));
     let expected = HostContainerSize {
         cpus: 12,
         memory_bytes: 48 * 1024 * 1024 * 1024,
