@@ -239,9 +239,9 @@ fn waiting_on_own_work(runtime: &RuntimeProjection, id: &str) -> Vec<&'static st
     if live.native_agent_count > 0 {
         work.push("native agent");
     }
-    if !live.background_commands.is_empty() && live.background_needed == Some(true) {
-        work.push("background command");
-    }
+    // Background commands do not hold: coordinators keep Claude Monitors (and
+    // agents keep servers) running for hours, so a hold bounded by their end
+    // could hide a real question indefinitely. Children and sub-agents end.
     if mj_core::activity::turn_imminent(&live.facts(), mj_core::clock::epoch_millis()) {
         work.push("imminent turn");
     }
@@ -667,6 +667,18 @@ mod tests {
         next.records.get_mut("parent").unwrap().harness_kind = HarnessKind::Kimi;
         next.records.get_mut("parent").unwrap().last_profile = "kimi".into();
         assert_eq!(project(&next)["parent"], SessionAttention::Working);
+        // A background command alone never holds, even when judged needed: a
+        // monitor or server can outlive any wait and hide the question
+        // indefinitely. The worker inferred idle here, as after a needs-input
+        // verdict, so only the hold could hide the question.
+        next.records.get_mut("parent").unwrap().harness_kind = HarnessKind::Claude;
+        next.records.get_mut("parent").unwrap().last_profile = "claude".into();
+        let mut idle_with_background =
+            (*next.sessions["parent"].operational.clone().unwrap()).clone();
+        idle_with_background.activity =
+            Some(mj_core::activity::ActivityState::Idle { since_ms: Some(1) });
+        next.sessions.get_mut("parent").unwrap().operational = Some(idle_with_background.into());
+        assert_eq!(project(&next)["parent"], SessionAttention::NeedsInput);
     }
 
     #[test]
