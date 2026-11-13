@@ -1106,7 +1106,7 @@ and verifies it in-process. Linux and macOS, on x86-64 and ARM64, are supported.
 The pinned installation disables OpenCode's self-update so a running session
 never replaces its own binary.
 DSH is never installed. A launch uses the target's own `dsh-acp` on `PATH` when
-it is 0.5.0 or newer, or fetches the pinned `@brokkai/dsh-acp@0.5.0` package
+it is 0.6.0 or newer, or fetches the pinned `@brokkai/dsh-acp@0.6.0` package
 through `npx`, using the compatible system runtime or the managed Node
 described above; the npm package bundles the release binaries. An older
 `dsh-acp` on `PATH` is not used: Mjolnir falls back to `npx` when Node.js, npm,

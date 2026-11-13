@@ -347,7 +347,7 @@ fn every_launch_request_registers_only_acp_delivered_mcp_servers() {
     spec.subagent_mcp_socket.as_mut().unwrap().review_tools = false;
 }
 
-/// OpenCode 2.2.6 titles an MCP call `<server>_<tool>`, and server names may
+/// OpenCode 2.2.7 titles an MCP call `<server>_<tool>`, and server names may
 /// contain `_`, so another server can produce an owned tool's exact title.
 // Hard-won: 01332d2da: a server named `mj-agents_send` could borrow `send_message`'s approval
 #[test]
