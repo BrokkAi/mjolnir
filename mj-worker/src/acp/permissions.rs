@@ -524,6 +524,10 @@ fn gh_script(script: &str) -> bool {
 /// project's own configuration adds, named `mj-agents_send` with a `message`
 /// tool) can produce exactly an owned title. Nothing in the request says which
 /// server a call belongs to, so its person decides, and can allow always.
+///
+/// Antigravity's `mcp_<server>_<tool>` titles are ambiguous in the same way,
+/// so it gets no answers here either. agy has a grant that names the server,
+/// which the worker stages instead (`stage_antigravity_mcp_grants`).
 #[derive(Debug, Clone, Default)]
 pub(super) struct OwnedMcpApprovals {
     /// The permission title of each owned server's tool calls, without any
