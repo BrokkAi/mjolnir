@@ -378,9 +378,23 @@ impl DashboardState {
             return DashboardAction::None;
         };
         self.want_availability_check();
+        // Like every launch that skips the new-session key, this one waits
+        // for the host's Git identity check; the wizard fallback goes
+        // through the same gate the new-session key uses.
         match self.new_session_like_request(&source) {
-            Ok(action) => action,
+            Ok(action) => self.gate_launch_on_git_identity(action),
             Err(reason) => {
+                if let Some(action) = self.git_identity_gate_action() {
+                    if matches!(
+                        self.git_identity_gate,
+                        crate::dialogs::GitIdentityGate::Checking(_)
+                    ) {
+                        self.set_notice(format!(
+                            "{reason} Checking the Git identity on this host before choosing new settings…"
+                        ));
+                    }
+                    return action;
+                }
                 let action = self.begin_new_wizard();
                 // With no profile or runtime to offer, the wizard has already
                 // said why in its own notice.

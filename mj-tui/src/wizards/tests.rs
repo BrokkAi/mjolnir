@@ -6528,3 +6528,32 @@ fn new_session_like_a_child_in_a_managed_worktree_is_top_level_with_its_own_work
         "{note}"
     );
 }
+
+/// A copied launch skips the new-session key, so it must wait for the host's
+/// Git identity check the way a fast-start launch does, then run as copied.
+// Hard-won: aa2206c29: the copied launch bypassed the Git identity gate.
+#[test]
+fn new_session_like_waits_for_the_git_identity_check() {
+    let mut source = legacy_managed_session(running_session());
+    source.target_template_id = "localhost".into();
+    let mut dashboard = dashboard_with_session(source.clone());
+    dashboard
+        .config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    dashboard.require_git_identity_check();
+
+    assert_eq!(
+        dashboard.begin_new_session_like(&source.id),
+        DashboardAction::CheckGitIdentity
+    );
+    dashboard.apply_git_identity_check(Ok(mj_client::daemon::GitIdentity {
+        name: Some("Ada".into()),
+        email: Some("ada@example.test".into()),
+        per_directory: false,
+    }));
+    assert!(matches!(
+        dashboard.take_git_identity_followup(),
+        Some(DashboardAction::CreateSession { .. })
+    ));
+}
