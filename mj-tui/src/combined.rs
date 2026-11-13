@@ -2488,12 +2488,12 @@ mod tests {
         for (width, height) in [(70, 22), (80, 13), (160, 13)] {
             let mut dashboard = dashboard_with_session(running_session());
             dashboard.set_workspace_names(
-                (0..24)
+                (0..48)
                     .map(|index| (format!("workspace-{index}"), format!("Project {index:02}")))
                     .collect(),
             );
             dashboard.order_workspaces(
-                &(0..24)
+                &(0..48)
                     .map(|index| format!("workspace-{index}"))
                     .collect::<Vec<_>>(),
             );
