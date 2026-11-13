@@ -15,9 +15,13 @@ Commands
 Variants
   P0  direct port of the Jev AFK question (now services/jev-proxy/src/afk_question.json) (criteria `same`/`different` as plain strings)
   P1  GLiDE rewording in the categorical style
+  P1S P1 wording on states with `required` removed from every field (cases-v2.jsonl)
+  P2  P1 wording without the required/optional clause in `different`, read from
+      <root>/glide/P2/afk_question_glide.json, on the same stripped states (cases-v2.jsonl)
 
-`run` never reads the label files. `score` reads labels/final.jsonl and labels/construction.jsonl
-(the construction kind, used only to split the report).
+`run` never reads the label files. `score` reads --labels (default labels/final.jsonl) and
+labels/construction.jsonl (the construction kind, used only to split the report); --variants names the
+variants to score and --name the output file glide/<name>.txt.
 """
 import argparse
 import json
@@ -73,12 +77,18 @@ def read_jsonl(path):
         return [json.loads(line) for line in f if line.strip()]
 
 
-def questions_for(variant):
+# Variants evaluated on the states with `required` removed (production drops the flag from the evidence).
+STRIPPED_VARIANTS = ("P1S", "P2")
+
+
+def questions_for(variant, root=ROOT):
     w = read_json(WORDING)["same_question"]
     if variant == "P0":
         crit = {k: v["what"] for k, v in w["criteria"].items()}
         return {"same_question": {"type": "choice", "instructions": w["instructions"], "criteria": crit}}
-    if variant == "P1":
+    if variant == "P2":
+        return read_json(os.path.join(root, "glide", "P2", "afk_question_glide.json"))
+    if variant in ("P1", "P1S"):
         return {"same_question": {"type": "choice", "instructions": P1_INSTRUCTIONS,
                                   "criteria": {"same": P1_SAME, "different": P1_DIFFERENT}}}
     raise SystemExit(f"unknown variant {variant}")
@@ -87,15 +97,15 @@ def questions_for(variant):
 # --- cases -----------------------------------------------------------------
 
 
-def load_cases(root):
-    """Cases of the double and single queues, with their state from cases.jsonl. No labels."""
+def load_cases(root, cases_file="cases.jsonl"):
+    """Cases of the double and single queues, with their state from `cases_file`. No labels."""
     ids = []
     for q in ("queue_double", "queue_single"):
         ids += [r["case_id"] for r in read_jsonl(os.path.join(root, "labels", q + ".jsonl"))]
-    by_id = {c["case_id"]: c for c in read_jsonl(os.path.join(root, "cases.jsonl"))}
+    by_id = {c["case_id"]: c for c in read_jsonl(os.path.join(root, cases_file))}
     missing = [i for i in ids if i not in by_id]
     if missing:
-        raise SystemExit(f"queue cases missing from cases.jsonl: {missing[:5]}")
+        raise SystemExit(f"queue cases missing from {cases_file}: {missing[:5]}")
     if len(set(ids)) != len(ids):
         raise SystemExit("duplicate case ids across queues")
     return [by_id[i] for i in ids]
@@ -168,13 +178,13 @@ def probabilities(response):
 # --- run -------------------------------------------------------------------
 
 
-def send_jobs(jobs, gap, workers, label):
+def send_jobs(jobs, gap, workers, label, root):
     """jobs: (variant, case, path). Writes each success to its path; returns the errors."""
     errors, done = [], [0]
 
     def work(job):
         variant, c, p = job
-        out = post(c["state"], questions_for(variant), gap)
+        out = post(c["state"], questions_for(variant, root), gap)
         out["variant"], out["key"] = variant, c["case_id"]
         if "error" in out:
             errors.append(out)
@@ -192,15 +202,19 @@ def send_jobs(jobs, gap, workers, label):
     return errors
 
 
+def cases_for(root, variant):
+    return load_cases(root, "cases-v2.jsonl" if variant in STRIPPED_VARIANTS else "cases.jsonl")
+
+
 def cmd_run(args):
-    cases = load_cases(args.root)
     raw_dir = os.path.join(args.root, "glide", "raw")
     for v in args.variants.split(","):
+        cases = cases_for(args.root, v)
         os.makedirs(os.path.join(raw_dir, v), exist_ok=True)
         jobs = [(v, c, cache_path(raw_dir, v, c["case_id"])) for c in cases]
         jobs = [j for j in jobs if args.force or not os.path.exists(j[2])]
         print(f"{v}: {len(jobs)} requests to send", flush=True)
-        errors = send_jobs(jobs, args.gap, args.workers, v)
+        errors = send_jobs(jobs, args.gap, args.workers, v, args.root)
         if errors:
             with open(os.path.join(raw_dir, v + "-errors.jsonl"), "a") as f:
                 for e in errors:
@@ -209,16 +223,18 @@ def cmd_run(args):
 
 
 def cmd_determinism(args):
-    cases = load_cases(args.root)
-    random.Random(20261113).shuffle(cases)
-    cases = cases[: args.n]
+    ids = [c["case_id"] for c in load_cases(args.root)]
+    random.Random(20261113).shuffle(ids)
+    ids = ids[: args.n]
     raw_dir = os.path.join(args.root, "glide", "raw")
     det_dir = os.path.join(args.root, "glide", "raw-determinism")
     lines = []
     for v in args.variants.split(","):
+        by_id = {c["case_id"]: c for c in cases_for(args.root, v)}
+        cases = [by_id[i] for i in ids]
         os.makedirs(os.path.join(det_dir, v), exist_ok=True)
         jobs = [(v, c, cache_path(det_dir, v, c["case_id"])) for c in cases]
-        errors = send_jobs(jobs, args.gap, args.workers, v + "-det")
+        errors = send_jobs(jobs, args.gap, args.workers, v + "-det", args.root)
         max_d, flips, exact, n = 0.0, 0, 0, 0
         for _, c, p in jobs:
             old_p = cache_path(raw_dir, v, c["case_id"])
@@ -234,7 +250,7 @@ def cmd_determinism(args):
                      f"max |delta p(different)| {max_d:.6f}; argmax flips {flips}")
     text = "\n".join(lines)
     print(text)
-    with open(os.path.join(args.root, "glide", "determinism.txt"), "w") as f:
+    with open(os.path.join(args.root, "glide", args.name + ".txt"), "a") as f:
         f.write(text + "\n")
 
 
@@ -326,12 +342,14 @@ def pick_threshold(rows, probs, jev_probs):
 
 def cmd_score(args):
     root = args.root
-    final_path = os.path.join(root, "labels", "final.jsonl")
+    final_path = os.path.join(root, "labels", args.labels)
+    variants = tuple(args.variants.split(","))
     if not os.path.exists(final_path):
         raise SystemExit(f"{final_path} does not exist yet")
-    truth = {}
+    truth, label_source = {}, {}
     for r in read_jsonl(final_path):
         truth[r["case_id"]] = label_of(r)
+        label_source[r["case_id"]] = r.get("source", "")
     construction = {r["case_id"]: r for r in read_jsonl(os.path.join(root, "labels", "construction.jsonl"))}
     cases = load_cases(root)
     raw_dir = os.path.join(root, "glide", "raw")
@@ -348,7 +366,7 @@ def cmd_score(args):
     jev = {r["case_id"]: r for r in read_jsonl(os.path.join(root, "jev_results.jsonl"))}
     sources = {"Jev": {c["case_id"]: {"same": jev[c["case_id"]]["same"], "different": jev[c["case_id"]]["different"]} for c, _ in rows}}
     raw = {}
-    for v in ("P0", "P1"):
+    for v in variants:
         sources[v], raw[v] = {}, {}
         for c, _ in rows:
             p = cache_path(raw_dir, v, c["case_id"])
@@ -360,7 +378,8 @@ def cmd_score(args):
     def group_of(c):
         if c["origin"] == "real":
             return "real"
-        return "constructed:" + construction[c["case_id"]]["kind"]
+        k = construction[c["case_id"]]
+        return "constructed:" + k["kind"] + (":" + k["op"] if k["kind"] == "constraint_change" else "")
 
     groups = {}
     for c, t in rows:
@@ -368,13 +387,16 @@ def cmd_score(args):
     ordered = [("all", rows)]
     ordered.append(("real", [r for r in rows if r[0]["origin"] == "real"]))
     ordered.append(("constructed", [r for r in rows if r[0]["origin"] != "real"]))
+    relabeled = [r for r in rows if label_source[r[0]["case_id"]].startswith("relabeled")]
+    if relabeled:
+        ordered.append(("relabeled-required-flip", relabeled))
     ordered += sorted(groups.items())
 
     emit("")
     emit("## Counts by threshold (FD = false different on `same` cases, with exact one-sided 95% upper bound)")
     for name, subset in ordered:
         emit(f"\n### {name}  (same {sum(1 for _, t in subset if t == 'same')}, different {sum(1 for _, t in subset if t == 'different')})")
-        for src in ("Jev", "P0", "P1"):
+        for src in ("Jev",) + variants:
             for tname, thr in THRESHOLDS:
                 preds = {c["case_id"]: predicted_different(sources[src][c["case_id"]], thr) for c, _ in subset}
                 emit(f"  {src:3} {tname:6} {fmt_counts(*counts(subset, preds))}")
@@ -388,7 +410,7 @@ def cmd_score(args):
     if jev_rate > 0.05:
         emit("STOP: Jev's own false-different rate is above 5%; the plan says do not match it and report to the parent.")
     selection = {}
-    for v in ("P0", "P1"):
+    for v in variants:
         sel = pick_threshold(rows, sources[v], sources["Jev"])
         selection[v] = sel
         if sel is None:
@@ -405,7 +427,7 @@ def cmd_score(args):
     emit("")
     emit(f"## Grouped cross-validation by source_form ({args.folds} folds): threshold picked on the training folds, applied to the held-out fold")
     fold_of = folds_by_group([c for c, _ in rows], args.folds)
-    for v in ("P0", "P1"):
+    for v in variants:
         pooled = {}
         picks = []
         for k in range(args.folds):
@@ -428,7 +450,7 @@ def cmd_score(args):
     # latency and tokens
     emit("")
     emit("## Latency and tokens (cached requests over the labeled cases)")
-    for v in ("P0", "P1"):
+    for v in variants:
         lat = sorted(r["latency_s"] for r in raw[v].values())
         tin = [r["response"]["usage"]["input_tokens"] for r in raw[v].values()]
         tok = [r["response"].get("token_usage", 0) for r in raw[v].values()]
@@ -440,12 +462,12 @@ def cmd_score(args):
     # disagreements worth reading
     emit("")
     emit("## Errors at argmax (case ids)")
-    for v in ("Jev", "P0", "P1"):
+    for v in ("Jev",) + variants:
         wrong = [(c["case_id"], t, round(sources[v][c["case_id"]]["different"], 2)) for c, t in rows
                  if predicted_different(sources[v][c["case_id"]], None) != (t == "different")]
         emit(f"{v}: {len(wrong)} wrong: " + ", ".join(f"{i}({t[0]}, p_diff {p})" for i, t, p in wrong))
 
-    with open(os.path.join(root, "glide", "score.txt"), "w") as f:
+    with open(os.path.join(root, "glide", args.name + ".txt"), "w") as f:
         f.write("\n".join(out) + "\n")
 
 
@@ -456,6 +478,8 @@ def main():
     for name in ("run", "determinism"):
         p = sub.add_parser(name)
         p.add_argument("--variants", default="P0,P1")
+        if name == "determinism":
+            p.add_argument("--name", default="determinism")
         p.add_argument("--workers", type=int, default=4)
         p.add_argument("--gap", type=float, default=0.2, help="minimum seconds between request starts")
         if name == "run":
@@ -464,6 +488,9 @@ def main():
             p.add_argument("--n", type=int, default=15)
     p = sub.add_parser("score")
     p.add_argument("--folds", type=int, default=5)
+    p.add_argument("--labels", default="final.jsonl")
+    p.add_argument("--variants", default="P0,P1")
+    p.add_argument("--name", default="score")
     args = ap.parse_args()
     {"run": cmd_run, "determinism": cmd_determinism, "score": cmd_score}[args.cmd](args)
 

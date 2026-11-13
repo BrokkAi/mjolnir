@@ -138,8 +138,8 @@ const SESSION_MENU_COMMANDS: &[CommandId] = &[
     CommandId::RestartSession,
     CommandId::UpgradeContainer,
     CommandId::InterruptAll,
-    CommandId::CopySessionId,
     CommandId::DestroySession,
+    CommandId::CopySessionId,
 ];
 
 /// The menu of a harness-native child. Its parent's harness owns it, and
@@ -812,6 +812,8 @@ impl DashboardState {
 enum PaletteLine {
     Heading(String),
     Separator,
+    /// An empty row between session-menu sections.
+    Blank,
     /// The entry's index into `entries`, so the highlight can be placed.
     Command(usize),
 }
@@ -836,11 +838,16 @@ fn palette_lines(dashboard: &DashboardState, palette: &CommandPalette) -> Vec<Pa
                 | CommandId::SuspendSession
                 | CommandId::RestartSession
                 | CommandId::UpgradeContainer
-                | CommandId::InterruptAll => 2,
-                CommandId::CopySessionId | CommandId::DestroySession => 3,
+                | CommandId::InterruptAll
+                | CommandId::DestroySession => 2,
+                CommandId::CopySessionId => 3,
                 _ => continue,
             };
             if section != Some(next) {
+                // An empty row sets one section off from the last.
+                if section.is_some() {
+                    lines.push(PaletteLine::Blank);
+                }
                 match next {
                     0 => lines.push(PaletteLine::Heading("Content".to_owned())),
                     1 => lines.push(PaletteLine::Heading("Organize".to_owned())),
@@ -1021,6 +1028,11 @@ pub(crate) fn render_palette(
                     format!("  {}", theme::glyphs().rule.repeat(width.saturating_sub(2))),
                     theme::border(false),
                 )
+            }
+            PaletteLine::Blank => {
+                row_map.push(None);
+                enabled.push(false);
+                Line::default()
             }
             PaletteLine::Command(index) => {
                 row_map.push(Some(*index));
@@ -1352,6 +1364,7 @@ mod tests {
             .map(|line| match line {
                 PaletteLine::Heading(heading) => format!("[{heading}]"),
                 PaletteLine::Separator => "---".to_owned(),
+                PaletteLine::Blank => String::new(),
                 PaletteLine::Command(index) => session_menu_label(dashboard, palette, palette.entries[index].id),
             })
             .collect()
