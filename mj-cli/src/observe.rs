@@ -53,6 +53,8 @@ struct ObserveExportArgs {
 struct ObserveStatus {
     url_configured: bool,
     token_configured: bool,
+    enforcement_requested: bool,
+    enforcement_error: Option<String>,
     spool: PathBuf,
     pending: usize,
     mode: &'static str,
@@ -68,12 +70,20 @@ pub(crate) async fn run(args: ObserveArgs) -> Result<()> {
 fn status(args: ObserveStatusArgs) -> Result<()> {
     let spool_path = spool_path();
     let spool = ObserveSpool::open(&spool_path)?;
+    let enforcement = mj_core::observe::ObserveEnforcementConfig::from_environment();
     let status = ObserveStatus {
         url_configured: std::env::var_os("OBSERVE_URL").is_some_and(|value| !value.is_empty()),
         token_configured: std::env::var_os("OBSERVE_TOKEN").is_some_and(|value| !value.is_empty()),
+        enforcement_requested: std::env::var("OBSERVE_ENFORCE").is_ok_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        }),
+        enforcement_error: enforcement.err().map(|error| format!("{error:#}")),
         spool: spool_path,
         pending: spool.pending()?.len(),
-        mode: "export-only; daemon publication and upload are not enabled yet",
+        mode: "automatic observation is pending; enforcement is available for DSH",
     };
     if args.json {
         println!("{}", serde_json::to_string_pretty(&status)?);
@@ -96,6 +106,14 @@ fn status(args: ObserveStatusArgs) -> Result<()> {
         );
         println!("Spool:         {}", status.spool.display());
         println!("Pending:       {}", status.pending);
+        println!(
+            "Enforcement:   {}",
+            match (&status.enforcement_error, status.enforcement_requested) {
+                (Some(error), _) => format!("misconfigured: {error}"),
+                (None, true) => "enabled among DSH sessions".into(),
+                (None, false) => "off (set OBSERVE_ENFORCE=true)".into(),
+            }
+        );
         println!("Mode:          {}", status.mode);
     }
     Ok(())
@@ -229,6 +247,8 @@ mod tests {
         let status = ObserveStatus {
             url_configured: true,
             token_configured: true,
+            enforcement_requested: false,
+            enforcement_error: None,
             spool: PathBuf::from("/tmp/spool"),
             pending: 2,
             mode: "export-only",

@@ -713,6 +713,7 @@ impl PlanProbe {
             initial_model: None,
             harness,
             execution_policy: policy,
+            observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock: StepClock::default(),
             tools_in_flight: Default::default(),

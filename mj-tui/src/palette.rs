@@ -356,7 +356,11 @@ fn first_ready(entries: &[PaletteEntry]) -> usize {
         .unwrap_or(0)
 }
 
-fn session_menu_label(dashboard: &DashboardState, palette: &CommandPalette, id: CommandId) -> String {
+fn session_menu_label(
+    dashboard: &DashboardState,
+    palette: &CommandPalette,
+    id: CommandId,
+) -> String {
     let label = match id {
         // Opens a second choice, so it carries the menu's submenu glyph.
         CommandId::ChangeWorkspace => {
@@ -830,7 +834,6 @@ impl DashboardState {
 /// One drawn row: either a group heading or a command.
 enum PaletteLine {
     Heading(String),
-    Separator,
     /// An empty row between session-menu sections.
     Blank,
     /// The entry's index into `entries`, so the highlight can be placed.
@@ -849,9 +852,7 @@ fn palette_lines(dashboard: &DashboardState, palette: &CommandPalette) -> Vec<Pa
                 | CommandId::DismissNotification
                 | CommandId::OpenWaitingQuestion
                 | CommandId::IgnoreNotifications => 0,
-                CommandId::RenameSession
-                | CommandId::PinSession
-                | CommandId::ChangeWorkspace => 1,
+                CommandId::RenameSession | CommandId::PinSession | CommandId::ChangeWorkspace => 1,
                 CommandId::ContainerSettings
                 | CommandId::MoveSession
                 | CommandId::SuspendSession
@@ -920,7 +921,7 @@ pub(crate) fn render_palette(
     let facts_height = if facts.is_empty() { 0 } else { facts.len() + 1 };
     // The popup grows with the complete list. The shared modal helper clamps
     // it to the usable terminal bounds when the list cannot fit.
-    let extra_height = facts_height + if palette.session_only { 5 } else { 5 };
+    let extra_height = facts_height + 5;
     let popup_height =
         u16::try_from(lines.len().saturating_add(extra_height).max(5)).unwrap_or(u16::MAX);
     let popup = centered_modal(frame, surfaces, 72, popup_height, area);
@@ -1073,14 +1074,6 @@ pub(crate) fn render_palette(
                         theme::border(false),
                     ),
                 ])
-            }
-            PaletteLine::Separator => {
-                row_map.push(None);
-                enabled.push(false);
-                Line::styled(
-                    format!("  {}", theme::glyphs().rule.repeat(width.saturating_sub(2))),
-                    theme::border(false),
-                )
             }
             PaletteLine::Blank => {
                 row_map.push(None);
@@ -1416,9 +1409,10 @@ mod tests {
             .into_iter()
             .map(|line| match line {
                 PaletteLine::Heading(heading) => format!("[{heading}]"),
-                PaletteLine::Separator => "---".to_owned(),
                 PaletteLine::Blank => String::new(),
-                PaletteLine::Command(index) => session_menu_label(dashboard, palette, palette.entries[index].id),
+                PaletteLine::Command(index) => {
+                    session_menu_label(dashboard, palette, palette.entries[index].id)
+                }
             })
             .collect()
     }
@@ -1819,7 +1813,8 @@ mod tests {
             "keyboard selection after skipping disabled Dismiss",
             selected_command(&dashboard),
         );
-        let down = dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), dismiss));
+        let down =
+            dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), dismiss));
         append_golden_value(&mut output, "disabled Dismiss mouse-down action", down);
         let up = dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), dismiss));
         append_golden_value(&mut output, "disabled Dismiss mouse-up action", up);
@@ -1829,7 +1824,13 @@ mod tests {
             selected_command(&dashboard),
         );
         let lines = drawn(&mut dashboard, 120, 40);
-        append_golden_state(&mut output, "disabled Dismiss remains open", 120, 40, &lines);
+        append_golden_state(
+            &mut output,
+            "disabled Dismiss remains open",
+            120,
+            40,
+            &lines,
+        );
 
         let session = running_session();
         let mut dashboard = dashboard_with_session(session.clone());

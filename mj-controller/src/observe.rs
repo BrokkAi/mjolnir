@@ -15,8 +15,8 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use mj_core::observe::{
-    OBSERVE_COLLECTOR, OBSERVE_ENVELOPE_VERSION, ObserveEnvelope, ObserveMeta, event_id,
-    session_start_event,
+    OBSERVE_COLLECTOR, OBSERVE_ENVELOPE_VERSION, ObserveEnvelope, ObserveMeta, canonical_tool_name,
+    event_id, session_start_event,
 };
 use mj_core::state::{MaterializedExecutionState, TranscriptBody};
 
@@ -288,26 +288,6 @@ fn string_field(value: &Value, names: &[&str]) -> Option<String> {
 fn auxiliary_user_item(stable_id: &str) -> bool {
     stable_id.starts_with(mj_core::transcript::ELICITATION_REPLY_ITEM_PREFIX)
         || stable_id.starts_with(mj_core::transcript::HARNESS_TURN_ITEM_PREFIX)
-}
-
-/// Normalize ACP's portable tool categories to the names Observe's existing
-/// detectors understand. The raw kind and title remain in the event.
-fn canonical_tool_name(kind: &str, title: &str) -> String {
-    match kind {
-        "execute" => "Bash".into(),
-        "read" => "Read".into(),
-        "edit" => {
-            if title.to_ascii_lowercase().contains("write") {
-                "Write".into()
-            } else {
-                "Edit".into()
-            }
-        }
-        "fetch" => "WebFetch".into(),
-        "search" => "Grep".into(),
-        other if title.is_empty() => other.into(),
-        _ => title.into(),
-    }
 }
 
 fn envelope(
