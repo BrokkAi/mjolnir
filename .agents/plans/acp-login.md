@@ -29,6 +29,8 @@ ACP-capable harnesses.
   a dashboard modal.
 - [x] Show each saved profile's sign-in status in the profiles list, read off
   the event loop when Settings opens and after a login.
+- [x] Use the ambient terminal/daemon environment for interactive sign-in
+  instead of starting the account login shell before every attempt.
 - [x] Run formatting, focused tests, full tests, and Clippy.
 - [x] Review the branch in two independent rounds, fix the findings, re-merge
   `origin/master`, and revalidate.
@@ -61,6 +63,10 @@ ACP-capable harnesses.
   handoff must release the stream before the child owns stdin.
 - Headless Codex cannot show the browser for `chat-gpt`; it needs a clear
   refusal or an exported API key.
+- Raising the account login-shell probe from 10 seconds to the 240-second
+  worker-startup budget prevented false failures, but interactive sign-in paid
+  that shell startup before every attempt even though the CLI fallback already
+  used the ambient terminal environment.
 
 ## Decision Log
 
@@ -103,6 +109,13 @@ ACP-capable harnesses.
   through a supervised background connection. Rationale: the dashboard must
   remain a TUI throughout sign-in, while harnesses still receive a real terminal
   in every daemon placement.
+- Decision: build the interactive login environment from the ambient terminal
+  or daemon environment plus profile overrides; do not start the account login
+  shell from the sign-in path. Rationale: the command-line fallback already
+  inherits that same ambient environment, while worker sessions still use the
+  login-shell probe once to establish their isolated toolchain environment.
+  Repeating the probe for sign-in adds no new fact and can delay every attempt
+  by the shell's full startup time.
 - Decision: order status reads with a generation that config changes also bump;
   reuse the setup authentication predicate so OpenCode environment keys, Claude
   tokens and the macOS Keychain agree with doctor.
@@ -126,6 +139,9 @@ Settings → Profiles → **Sign in** runs the same flow for the selected saved
 profile in a centered modal over the live dashboard. The daemon owns the
 pseudo-terminal, the dashboard forwards terminal input from its supervised
 connection task, and the modal reports the result before returning to Settings.
+ACP and command-line sign-in both inherit the ambient terminal or daemon
+environment, with profile overrides applied last; sign-in no longer waits for
+the account's interactive login shell before opening the harness.
 Each saved profile also shows its sign-in status (`signed in`, `signed out`,
 `credential expired`, or the API-key/no-login case); the status is read off the
 event loop when Settings opens and again after a login.
