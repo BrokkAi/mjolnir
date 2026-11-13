@@ -1727,6 +1727,9 @@ fn session_report_lines(session: &ApiSession, now_ms: i64) -> Vec<String> {
     if let Some(problem) = &session.storage_problem {
         lines.push(problem.clone());
     }
+    if let Some(error) = &session.profile_login_error {
+        lines.push(format!("profile {}: {error}", session.profile_id));
+    }
     if let Some(outcome) = &session.last_turn_outcome {
         lines.push(format!("last turn {}", outcome.outcome));
     }
@@ -1962,6 +1965,13 @@ pub(crate) async fn sessions(
             listed_state(session),
             sanitize_terminal_text(&session.title)
         );
+        if let Some(error) = &session.profile_login_error {
+            println!(
+                "  profile {}: {}",
+                sanitize_terminal_text(&session.profile_id),
+                sanitize_terminal_text(error)
+            );
+        }
         if session.attention == mj_core::attention::SessionAttention::Failed {
             println!(
                 "  error details: run `mj sessions --session {}`",
@@ -1989,6 +1999,9 @@ fn listed_state(session: &ApiSession) -> String {
     }
     if session.storage_problem.is_some() {
         state.push_str(" (disk full)");
+    }
+    if session.profile_login_error.is_some() {
+        state.push_str(" (login required)");
     }
     state
 }
@@ -3541,6 +3554,37 @@ mod tests {
         assert_eq!(listed_state(&session), "running (important) (disk full)");
         session.attention = mj_core::attention::SessionAttention::Unreachable;
         assert_eq!(listed_state(&session), "running (unreachable) (disk full)");
+    }
+
+    // Hard-won: #1529: refused unexpired logins were absent from session and doctor diagnostics.
+    #[test]
+    fn golden_refused_profile_login_diagnostics() {
+        let failure = mj_client::quota::refused_login_message("claude");
+        let mut session = wait_response(
+            "error",
+            serde_json::json!({
+                "diagnostic": {"message": "Authentication required", "code": "-32000"}
+            }),
+        )
+        .session;
+        session.profile_id = "claude".into();
+        session.profile_login_error = Some(failure.clone());
+        let mut output = String::from("mj sessions --session s1\n");
+        output.push_str(&session_report_lines(&session, 0).join("\n"));
+        output.push_str("\n\nmj doctor\n");
+        let checks = mj_controller::doctor::login_checks(&[("claude".into(), failure)].into());
+        let mut doctor = Vec::new();
+        mj_controller::doctor::render_human(&checks, &mut doctor).unwrap();
+        output.push_str(&String::from_utf8(doctor).unwrap());
+        output.push_str("\nSession JSON login status: ");
+        output
+            .push_str(&serde_json::to_value(&session).unwrap()["profile_login_error"].to_string());
+        output.push('\n');
+        mj_core::golden::assert_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "profile-login-refused",
+            &output,
+        );
     }
 
     /// Launch finding R11-3: `mj sessions --session` printed `last turn

@@ -581,8 +581,14 @@ pub(crate) enum GrantRefresh {
     },
 }
 
-/// Renew the profile's login when less than [`GRANT_REFRESH_LEAD`] of its
-/// access token remains, under the native refresh locks with a reread, so only
+pub(crate) struct GrantRefreshTrigger<'a> {
+    pub now_ms: i64,
+    /// Identity of the access token used by the authentication-failed turn.
+    pub rejected_logins: &'a std::collections::BTreeSet<String>,
+}
+
+/// Renew the profile's login when refused or when less than
+/// [`GRANT_REFRESH_LEAD`] remains, under the native locks with a reread, so only
 /// one of several daemons sharing the home exchanges the refresh token. This
 /// is the grant's only refresher: copies handed to harnesses carry no refresh
 /// token. The decision does not consult the usage API's rate-limit hold, which
@@ -594,8 +600,12 @@ pub(crate) async fn refresh_grant_if_due(
     container: Option<crate::quota_runtime::ContainerCheck>,
     launcher: &ClaudeLauncher,
     gate: &Arc<crate::upgrade::Gate>,
-    now_ms: i64,
+    trigger: GrantRefreshTrigger<'_>,
 ) -> Result<GrantRefresh, ClaudeUsageError> {
+    let GrantRefreshTrigger {
+        now_ms,
+        rejected_logins,
+    } = trigger;
     let due_at = |credentials: &Value| -> Option<i64> {
         if !oauth_has_refresh_token(credentials) {
             return None;
@@ -609,10 +619,19 @@ pub(crate) async fn refresh_grant_if_due(
         Err(ClaudeUsageError::NotSignedIn) => return Ok(GrantRefresh::NotRefreshable),
         Err(error) => return Err(error),
     };
+    let refused = |credentials: &Value| {
+        oauth_access_token(credentials, now_ms)
+            .ok()
+            .is_some_and(|token| {
+                rejected_logins.contains(&mj_core::credentials::credential_fingerprint(
+                    token.as_bytes(),
+                ))
+            })
+    };
     let Some(due_at_ms) = due_at(&credentials) else {
         return Ok(GrantRefresh::NotRefreshable);
     };
-    if due_at_ms > now_ms {
+    if due_at_ms > now_ms && !refused(&credentials) {
         return Ok(GrantRefresh::Current { due_at_ms });
     }
     // Due. Find a runnable `claude` first: with none, say so on every attempt
@@ -635,7 +654,7 @@ pub(crate) async fn refresh_grant_if_due(
     let active = source.read().await?;
     match due_at(&active) {
         None => return Ok(GrantRefresh::NotRefreshable),
-        Some(due_at_ms) if due_at_ms > now_ms => {
+        Some(due_at_ms) if due_at_ms > now_ms && !refused(&active) => {
             // Another daemon or Claude Code renewed it while this one waited.
             let expires_at_ms = active.get("claudeAiOauth").and_then(oauth_expires_at);
             return Ok(GrantRefresh::Renewed {
@@ -2234,6 +2253,7 @@ Last 7d · 5966 requests · 78 sessions
     async fn renew_keychain_login(
         source: LoginSource,
         mac: &Arc<FakeMac>,
+        rejected_login: Option<&str>,
     ) -> Result<GrantRefresh, ClaudeUsageError> {
         // An ambient `CLAUDE_CONFIG_DIR`, as a profile's own environment may
         // set, must not reach the renewal.
@@ -2250,7 +2270,10 @@ Last 7d · 5966 requests · 78 sessions
             None,
             &ClaudeLauncher::Program(PathBuf::from("claude")),
             &Arc::new(crate::upgrade::Gate::default()),
-            mj_core::clock::epoch_millis(),
+            GrantRefreshTrigger {
+                now_ms: mj_core::clock::epoch_millis(),
+                rejected_logins: &rejected_login.into_iter().map(str::to_owned).collect(),
+            },
         )
         .await
     }
@@ -2264,7 +2287,7 @@ Last 7d · 5966 requests · 78 sessions
         let directory = tempfile::tempdir().unwrap();
         let mac = fake_mac(directory.path(), 0, ONE_HOUR_MS);
 
-        let first = renew_keychain_login(keychain_source(directory.path(), &mac), &mac)
+        let first = renew_keychain_login(keychain_source(directory.path(), &mac), &mac, None)
             .await
             .unwrap();
         assert!(
@@ -2284,7 +2307,7 @@ Last 7d · 5966 requests · 78 sessions
         }
         assert!(!directory.path().join(".oauth_refresh.lock").exists());
 
-        let second = renew_keychain_login(keychain_source(directory.path(), &mac), &mac)
+        let second = renew_keychain_login(keychain_source(directory.path(), &mac), &mac, None)
             .await
             .unwrap();
         assert!(matches!(second, GrantRefresh::Current { .. }), "{second:?}");
@@ -2306,7 +2329,7 @@ Last 7d · 5966 requests · 78 sessions
         .unwrap();
         let follower = tokio::spawn({
             let (source, mac) = (keychain_source(directory.path(), &mac), mac.clone());
-            async move { renew_keychain_login(source, &mac).await }
+            async move { renew_keychain_login(source, &mac, None).await }
         });
         tokio::time::sleep(Duration::from_millis(150)).await;
         assert!(!follower.is_finished(), "the lock is held");
@@ -2328,6 +2351,43 @@ Last 7d · 5966 requests · 78 sessions
         assert!(mac.claude_runs.lock().unwrap().is_empty());
     }
 
+    // A delayed refusal must adopt the login another daemon renewed under the lock.
+    #[tokio::test]
+    async fn a_refused_unexpired_keychain_login_is_reread_under_the_native_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let mac = fake_mac(directory.path(), 0, 7 * ONE_HOUR_MS);
+        let refused = mj_core::credentials::claude_access_token_fingerprint(
+            &serde_json::to_vec(mac.login.lock().unwrap().as_ref().unwrap()).unwrap(),
+        )
+        .unwrap();
+        let held = mj_core::credentials::CredentialWriteGuard::acquire(
+            mj_core::config::HarnessKind::Claude,
+            &directory.path().join(".credentials.json"),
+        )
+        .await
+        .unwrap();
+        let source = keychain_source(directory.path(), &mac);
+        let follower = tokio::spawn({
+            let (mac, refused) = (mac.clone(), refused.clone());
+            async move { renew_keychain_login(source, &mac, Some(&refused)).await }
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            !follower.is_finished(),
+            "even an unexpired refusal must take the native lock"
+        );
+        *mac.login.lock().unwrap() = Some(mac.renewed.clone());
+        drop(held);
+        assert!(matches!(
+            follower.await.unwrap().unwrap(),
+            GrantRefresh::Renewed {
+                by_this_call: false,
+                ..
+            }
+        ));
+        assert!(mac.claude_runs.lock().unwrap().is_empty());
+    }
+
     /// #1491: a Keychain that cannot be read (locked) is not a missing login.
     /// The exchange spends the single-use refresh token, so none may start
     /// while the result could not be read back; the failure is reported.
@@ -2336,7 +2396,7 @@ Last 7d · 5966 requests · 78 sessions
         let directory = tempfile::tempdir().unwrap();
         let mac = fake_mac(directory.path(), 36, ONE_HOUR_MS);
 
-        let error = renew_keychain_login(keychain_source(directory.path(), &mac), &mac)
+        let error = renew_keychain_login(keychain_source(directory.path(), &mac), &mac, None)
             .await
             .unwrap_err();
 
@@ -2347,9 +2407,10 @@ Last 7d · 5966 requests · 78 sessions
         assert!(mac.claude_runs.lock().unwrap().is_empty());
         // And no login in the Keychain is simply nothing to renew.
         let absent = fake_mac(directory.path(), 44, ONE_HOUR_MS);
-        let outcome = renew_keychain_login(keychain_source(directory.path(), &absent), &absent)
-            .await
-            .unwrap();
+        let outcome =
+            renew_keychain_login(keychain_source(directory.path(), &absent), &absent, None)
+                .await
+                .unwrap();
         assert_eq!(outcome, GrantRefresh::NotRefreshable);
     }
 }

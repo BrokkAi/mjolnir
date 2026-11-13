@@ -403,6 +403,20 @@ impl ApiClient {
         decode(self.send(request).await?).await
     }
 
+    pub(crate) async fn profile_login_errors(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, String>> {
+        decode(
+            self.send(
+                self.http
+                    .get(self.url("/profiles/login-errors"))
+                    .timeout(REQUEST_TIMEOUT),
+            )
+            .await?,
+        )
+        .await
+    }
+
     pub(crate) async fn set_config(
         &self,
         session: &str,

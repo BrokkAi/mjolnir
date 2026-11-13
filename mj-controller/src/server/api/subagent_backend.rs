@@ -6,6 +6,11 @@ use super::*;
 /// The daemon's implementation lives in `server_runtime::api`; route tests
 /// supply a fake.
 pub trait SubagentBackend: Send + Sync {
+    /// Current login failures from the daemon's publication; memory only.
+    fn profile_login_errors(&self) -> AnyResult<std::collections::BTreeMap<String, String>> {
+        Ok(Default::default())
+    }
+
     fn subagent_config(&self) -> BoxFuture<'_, AnyResult<mj_core::config::SubagentConfig>> {
         Box::pin(async { anyhow::bail!("sub-agent configuration unavailable") })
     }

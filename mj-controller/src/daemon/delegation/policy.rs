@@ -329,6 +329,7 @@ impl Policy {
     fn reconcile_publications(&mut self, requests: &[crate::quota::QuotaRefreshRequest]) {
         let desired = requests
             .iter()
+            .chain(&self.batch.grants)
             .map(|request| (request.profile_id.clone(), request.cache_identity()))
             .collect::<BTreeMap<_, _>>();
         let changed = {
@@ -361,15 +362,100 @@ impl Policy {
         });
     }
     pub fn observe(&mut self, id: &str, observation: &DelegationObservation) {
-        if let Some(signal) = &observation.credential_signal
-            && let Some(session) = self.state.session_record(id)
-        {
+        let Some(session) = self.state.session_record(id) else {
+            return;
+        };
+        if let Some(signal) = &observation.credential_signal {
             self.signals
                 .observe(id, &session.last_profile, signal.clone());
+        }
+        if session.harness_kind == mj_core::config::HarnessKind::Claude
+            && let Some(diagnostic) = observation
+                .outcome
+                .as_ref()
+                .and_then(|outcome| outcome.diagnostic.as_ref())
+            && mj_core::credentials::turn_diagnostic_reports_auth_failure(diagnostic)
+            && let Some(fingerprint) = &diagnostic.login_fingerprint
+            && self
+                .batch
+                .rejected_logins
+                .entry(session.last_profile.clone())
+                .or_default()
+                .insert(fingerprint.clone())
+        {
+            // Use the failed turn's token identity, not the copy a later sync
+            // happened to find. Another daemon may already have replaced it.
+            self.profiles_tx.send_replace(self.batch.clone());
         }
     }
     pub fn quota(&mut self, update: QuotaUpdate) {
         match update {
+            QuotaUpdate::ClaudeGrant {
+                request,
+                check,
+                rejected_logins,
+            } => {
+                // A result belongs to the exact configured request and refusal
+                // it started with. A newer failure must win over this completion.
+                if !self
+                    .batch
+                    .profiles
+                    .iter()
+                    .chain(&self.batch.grants)
+                    .any(|current| current == &request)
+                    || self
+                        .batch
+                        .rejected_logins
+                        .get(&request.profile_id)
+                        .cloned()
+                        .unwrap_or_default()
+                        != rejected_logins
+                {
+                    return;
+                }
+                let notice = {
+                    let mut reports = self.reports.lock().expect("quota reports poisoned");
+                    let changed = reports
+                        .get_mut(&request.profile_id)
+                        .is_some_and(|publication| {
+                            publication.observe_claude_grant(
+                                &request.profile_id,
+                                check,
+                                !rejected_logins.is_empty(),
+                            )
+                        });
+                    let notice = changed
+                        .then(|| reports[&request.profile_id].login_error.clone())
+                        .flatten();
+                    if changed {
+                        self.quotas_tx.send_replace(reports.clone());
+                    }
+                    notice
+                };
+                if let Some(error) = notice {
+                    self.state
+                        .push_notice("", format!("Profile {}: {error}", request.profile_id));
+                }
+                if matches!(check, crate::quota::ClaudeGrantCheck::Renewed { .. })
+                    || (!rejected_logins.is_empty()
+                        && matches!(
+                            check,
+                            crate::quota::ClaudeGrantCheck::Waiting { due_at_ms: Some(_) }
+                        ))
+                {
+                    self.credentials
+                        .handle()
+                        .sync_profile_now(&request.profile_id, None);
+                    if self
+                        .batch
+                        .rejected_logins
+                        .remove(&request.profile_id)
+                        .is_some()
+                    {
+                        self.profiles_tx.send_replace(self.batch.clone());
+                    }
+                }
+            }
             QuotaUpdate::Refreshing { profile_ids } => self.probing.extend(profile_ids),
             QuotaUpdate::Report(outcome) => {
                 let profile_id = outcome.report.profile_id.clone();
@@ -437,6 +523,7 @@ impl Policy {
         if grants != self.batch.grants {
             self.batch.grants = grants;
             self.profiles_tx.send_replace(self.batch.clone());
+            self.reconcile_publications(&self.batch.profiles.clone());
         }
     }
     pub fn tick(&mut self) {
@@ -448,6 +535,13 @@ impl Policy {
         );
         while let Some(result) = self.credentials.try_result() {
             log_credential_sync_actions(&result);
+            if result.credential_sessions() > 0
+                && self.batch.rejected_logins.contains_key(&result.profile_id)
+            {
+                // A manual login or another daemon's renewal reached a copy.
+                // Recheck now so a resolved refusal is not shown for an interval.
+                self.profiles_tx.send_replace(self.batch.clone());
+            }
             let notice = {
                 let owner = self.state.owner();
                 let controller = owner.controller();
@@ -535,6 +629,7 @@ fn reconcile_quota_publications(
             reports.insert(
                 id.clone(),
                 QuotaReportPublication {
+                    login_error: None,
                     cache_identity: identity.clone(),
                     report: None,
                 },
@@ -550,9 +645,8 @@ fn surface_quota_reports(reports: &QuotaReportMap) -> BTreeMap<String, ProfileQu
         .iter()
         .filter_map(|(id, publication)| {
             publication
-                .report
-                .as_ref()
-                .map(|report| (id.clone(), crate::quota::surface_quota_report(report)))
+                .effective_report(id)
+                .map(|report| (id.clone(), crate::quota::surface_quota_report(&report)))
         })
         .collect()
 }
@@ -785,6 +879,7 @@ mod tests {
         let mut reports = BTreeMap::from([(
             "codex".to_owned(),
             QuotaReportPublication {
+                login_error: None,
                 cache_identity: "old-profile".into(),
                 report: Some(ProfileQuota {
                     profile_id: "codex".into(),
@@ -894,6 +989,7 @@ mod tests {
                 (
                     id.clone(),
                     QuotaReportPublication {
+                        login_error: None,
                         cache_identity: "test-identity".into(),
                         report: Some(report.clone()),
                     },

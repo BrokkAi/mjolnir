@@ -2619,6 +2619,20 @@ async fn doctor(args: DoctorArgs) -> Result<()> {
         let catalogs = doctor_catalogs(&config).await;
         checks.extend(mj_controller::doctor::catalog_checks(&config, &catalogs));
     }
+    if let Ok(client) = api_client::ApiClient::connect_running().await {
+        match client.profile_login_errors().await {
+            Ok(failures) => checks.extend(mj_controller::doctor::login_checks(&failures)),
+            Err(error) => checks.push(mj_controller::doctor::DoctorCheck {
+                id: "harness.logins".into(),
+                title: "Profile login status".into(),
+                status: mj_controller::doctor::CheckStatus::Warning,
+                detail: format!(
+                    "The running daemon did not report profile login status: {error:#}"
+                ),
+                remediation: None,
+            }),
+        }
+    }
     if args.json {
         println!("{}", serde_json::to_string_pretty(&checks)?);
     } else {
