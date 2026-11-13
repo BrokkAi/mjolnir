@@ -910,6 +910,13 @@ test('menus follow capabilities, long press cancellation, right click, keyboard,
   await openTrigger.click();
   await expect(openMenu).toBeVisible();
   await expect(openMenu.getByRole('menuitem')).toHaveText(['Changed files…', 'Ignore', 'Rename', 'Copy session ID', 'Cancel operation', 'Suspend session…']);
+  // The menu's bare top line reads the session's model, effort, and profile.
+  state.snapshot.sessions.find(item => item.id === 'openable').config_options = [
+    { key: 'model', current: 'opus', choices: [] },
+    { key: 'effort', current: 'high', choices: [] },
+  ];
+  await refresh(page, state);
+  await expect(openMenu.locator('.session-menu-info')).toHaveText('opus · high · codex');
   await openMenu.getByRole('menuitem', { name: 'Rename' }).focus();
   await page.keyboard.press('ArrowDown');
   expect(await page.evaluate(() => document.activeElement?.dataset.action)).toBe('copy-session-id');

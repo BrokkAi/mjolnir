@@ -2121,11 +2121,15 @@ impl DurableRelay {
         evidence.completion = Some(mj_core::activity::verdict::CompletionEvidence::bounded(
             "end_turn", None,
         ));
-        crate::acp::verdict_client::bound_authorization(&mut evidence, Some(context));
+        // The whole history goes in; only GLiDE's own size refusal shrinks it,
+        // and the client refuses to shrink away the parent's instructions.
+        // Authorization is historical context. Only the turn owner supplies the
+        // current reply; an older question must not become this turn's answer.
+        evidence.authorization = Some(context);
+        evidence.transcript_summary.clear();
         // GLiDE judges the report against the parent's instructions. When they
-        // did not survive whole (a non-text block, or a request too large to
-        // carry them), there is nothing to judge against: deliver unchecked and
-        // leave the check unspent.
+        // did not arrive whole (a non-text block), there is nothing to judge
+        // against: deliver unchecked and leave the check unspent.
         if !evidence
             .authorization
             .as_ref()
