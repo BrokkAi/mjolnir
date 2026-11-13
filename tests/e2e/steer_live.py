@@ -245,7 +245,7 @@ class SteerLab:
             [str(wrapper), "--version"], capture_output=True, text=True,
             timeout=15, env=self.env,
         )
-        if result.returncode or "0.165.0" not in result.stdout:
+        if result.returncode or versions["CODEX_CLI_VERSION"] not in result.stdout:
             raise ScenarioFailure(
                 "isolated Codex wrapper did not launch the pinned CLI: "
                 f"status={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}"

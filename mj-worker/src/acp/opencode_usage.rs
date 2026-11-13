@@ -9,14 +9,14 @@ const USAGE_SCOPE_KEY: &str = "mjolnir.dev/usage-scope";
 /// older one that containers built from an older image still run. Another
 /// version, for example one found on PATH, may report only the last step, so
 /// its report keeps the adapter's undeclared scope.
-const WHOLE_TURN_VERSIONS: [&str; 2] = ["2.2.1", "2.2.6"];
+const WHOLE_TURN_VERSIONS: [&str; 3] = ["2.2.1", "2.2.6", "2.2.7"];
 
 /// Whether this OpenCode, as it named itself in `initialize`, reports whole turns.
 pub fn reports_whole_turns(agent_version: Option<&str>) -> bool {
     agent_version.is_some_and(|version| WHOLE_TURN_VERSIONS.contains(&version))
 }
 
-/// OpenCode 2.2.1 and 2.2.6 sum their model steps into one per-prompt figure but does not
+/// OpenCode 2.2.1, 2.2.6, and 2.2.7 sum their model steps into one per-prompt figure but do not
 /// declare a scope, and it counts differently from the rest of mj: `input`
 /// excludes cache reads and writes, and `output` excludes reasoning. Fold both
 /// back in so input and output are the full counts, then mark the report as a
