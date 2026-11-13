@@ -1824,8 +1824,9 @@ mod settled_task_tests {
     /// #1202: a legacy (Jev-era) background judgment is process-local, so a
     /// restarted worker holds none. When the new harness reports leftover
     /// processes again (Kimi re-reads its task journal on attach), the worker
-    /// asks once more instead of leaving the session busy for good. The answer
-    /// is a GLiDE judgment, which later restarts restore without asking.
+    /// asks once more instead of leaving the session busy for good. The retry
+    /// after an unclear answer at a later restart is not covered; see the end
+    /// of the test.
     // Hard-won: 9cb9d651: after restart, leftover processes kept `mj wait` blocked because Jev was never asked again.
     #[test]
     fn a_restarted_worker_asks_again_about_leftover_processes_once() {
@@ -1894,12 +1895,12 @@ mod settled_task_tests {
         }
         drop(relay);
 
-        // The answer is now a GLiDE judgment for this inventory: the next restart
-        // restores it instead of asking again.
-        let mut relay = restart(dir.path());
-        relay.set_air_tasks(vec![task("srv")]).unwrap();
-        relay.prepare_pending_assessment().unwrap();
-        assert!(relay.pending_replied_verdict().is_none());
+        // Not asserted, on purpose: the 9cb9d651 design asked once more at the
+        // next restart after an unclear answer. A stored unclear GLiDE answer is
+        // restored as-is by `reask_background_after_restart` (since dc4c34617), so
+        // the next restart asks nothing and, with the process still running, the
+        // session stays in `background work` and `mj wait` stays blocked. That is
+        // the defect this test was written for, still open on the GLiDE path.
     }
 
     /// Session 979dc, through the worker: prompt turn 20 ends while a build
