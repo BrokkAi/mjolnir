@@ -458,3 +458,46 @@ dismissal failure: Some("Could not dismiss notification: Worker disconnected")
 Notification dismissed.
 publication before acknowledgement: Some("Notification dismissed.")
 unread dismissed: Some("Notification dismissed.")
+=== sub-agent question menu (120x40) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default ?1                         ≡ ││                                                                              │
+╰──────────────────────────────────────╯│                                                                              │
+╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
+│ Create   Open   Filter: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› ? ACP pretty                                                                                                        │
+│  ⠁ Sub-agent                                                                                                         │
+│  │ No message  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  │             │  Sub-agents Native · 0 of 1 working                                                │                │
+│                │  CPU        no CPU data yet                                                        │                │
+│                │                                                                                    │                │
+│                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
+│                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
+│                │› Open sub-agent question                                                           │                │
+│                │  Ignore                                                                            │                │
+│                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
+│                │  Rename…                                                           ctrl+b shift+t  │                │
+│                │  Pin…                                                                              │                │
+│                │  Change Workspace › — There is no other workspace.                                 │                │
+│                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
+│                │  Container settings                                                                │                │
+│                │  Move…                                                                             │                │
+│                │  Suspend…                                                          ctrl+b shift+x  │                │
+│                │  Restart                                                                           │                │
+│                │  Interrupt all (parent + sub-agents)…                                              │  ──────────────╯
+│                │  ────────────────────────────────────────────────────────────────────────────────  │  ──────────────╮
+│                │  Copy session ID                                                                   │                │
+│                │  Destroy…                                                                          │                │
+│                │Go to the sub-agent whose question or permission request makes this session wait.   │  ──────────────╯
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ─────── ▁   ▄ ╮
+│                                                                                                                      │
+│                                                                                                        ──────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
+open sub-agent question action: Open { session_id: "child-session" }
+selected after opening the sub-agent question: Some("child-session")

@@ -129,6 +129,7 @@ impl CommandPalette {
 const SESSION_MENU_COMMANDS: &[CommandId] = &[
     CommandId::ChangedFiles,
     CommandId::DismissNotification,
+    CommandId::OpenWaitingQuestion,
     CommandId::IgnoreNotifications,
     CommandId::RenameSession,
     CommandId::PinSession,
@@ -386,6 +387,18 @@ fn session_menu_label(dashboard: &DashboardState, palette: &CommandPalette, id: 
             } else {
                 "Pin…".to_owned()
             };
+        }
+        // Names the child the row's own status line names.
+        CommandId::OpenWaitingQuestion => {
+            return match palette
+                .session_id
+                .as_deref()
+                .and_then(|id| dashboard.waiting_child_kind(id))
+            {
+                Some(mj_core::subagent::SubagentKind::Reviewer) => "Open reviewer question",
+                _ => "Open sub-agent question",
+            }
+            .to_owned();
         }
         CommandId::OpenSession => "Open",
         CommandId::RenameSession => "Rename…",
@@ -834,6 +847,7 @@ fn palette_lines(dashboard: &DashboardState, palette: &CommandPalette) -> Vec<Pa
                 CommandId::OpenSession
                 | CommandId::ChangedFiles
                 | CommandId::DismissNotification
+                | CommandId::OpenWaitingQuestion
                 | CommandId::IgnoreNotifications => 0,
                 CommandId::RenameSession
                 | CommandId::PinSession
@@ -2047,6 +2061,35 @@ mod tests {
             crate::dashboard_sessions::AttentionLevel::Idle
         );
         append_golden_value(&mut output, "unread dismissed", dashboard.notice());
+
+        // A parent marked only by its sub-agent's open form has nothing of
+        // its own to dismiss; the row in Dismiss's place goes to the child.
+        let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
+        crate::test_support::set_working(&mut dashboard, &parent);
+        crate::test_support::set_working(&mut dashboard, "child-session");
+        dashboard
+            .session_details
+            .get_mut("child-session")
+            .unwrap()
+            .pending_elicitations = vec![crate::test_support::question("child-session")];
+        crate::test_support::serve_attention(
+            &mut dashboard,
+            &[&parent, "child-session"],
+            mj_core::attention::SessionAttention::NeedsInput,
+        );
+        dashboard.focus_sessions();
+        dashboard.begin_session_palette();
+        let lines = drawn(&mut dashboard, 120, 40);
+        append_golden_state(&mut output, "sub-agent question menu", 120, 40, &lines);
+        let open = point(&lines, "Open sub-agent question");
+        dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), open));
+        let action = dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), open));
+        append_golden_value(&mut output, "open sub-agent question action", action);
+        append_golden_value(
+            &mut output,
+            "selected after opening the sub-agent question",
+            dashboard.selected_session_id(),
+        );
 
         mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "session-action-menu", &output);
     }
