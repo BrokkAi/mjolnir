@@ -74,8 +74,6 @@ pull_policy = "never"
 [targets.docker]
 kind = "docker"
 pull_policy = "never"
-[continuation]
-enabled = true
 [subagents]
 max_concurrent = 2
 [subagents.straightforward]

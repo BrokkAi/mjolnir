@@ -48,7 +48,7 @@ page. Edit that source instead of `src/content/docs/configuration.md`.
 | Surface | Implementation to check | Documentation |
 | --- | --- | --- |
 | Commands and flags | `mj-cli/src/main.rs`, `mj-cli/src/api_commands.rs`, `mj-cli/src/acp.rs`; `mj --help` | CLI reference, ACP agent, README examples |
-| Configuration fields and defaults | `mj-core/src/config.rs`, `mj-core/src/config/`, `mj-core/src/continuation.rs` | Configuration reference and affected task guide |
+| Configuration fields and defaults | `mj-core/src/config.rs`, `mj-core/src/config/` | Configuration reference and affected task guide |
 | Harness capabilities and launch policy | `mj-core/src/config/harness.rs`, `mj-core/src/harness_runtime.rs`, worker launch code | Profiles, targets, overview, security |
 | Session and workspace lifecycle | `mj-controller/src/controller/`, `mj-controller/src/daemon/`, `mj-controller/src/server/api/` | Sessions, durability, workspaces, CLI and API references |
 | Packaging and prerequisites | `install.sh`, `scripts/install.sh`, `npm/scripts/package-release.mjs`, Cargo manifests | Install, README, contributing guide |

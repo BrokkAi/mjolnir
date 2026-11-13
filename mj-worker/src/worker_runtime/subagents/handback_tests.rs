@@ -47,8 +47,7 @@ async fn pending_handback_check_withholds_publication_and_repeat_is_forwarded_wi
     owner.claim_pending_commands(true).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     owner.handback_verdict_client = Some(
-        VerdictClient::new(VerdictSource::Direct {
-            key: "test".into(),
+        VerdictClient::new(VerdictSource::Hosted {
             endpoint: format!("http://{}/", listener.local_addr().unwrap()),
         })
         .unwrap(),
@@ -237,8 +236,7 @@ async fn slow_handback_glide_delivers_unchecked_and_consumes_check() {
     owner.claim_pending_commands(true).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     owner.handback_verdict_client = Some(
-        VerdictClient::new(VerdictSource::Direct {
-            key: "test".into(),
+        VerdictClient::new(VerdictSource::Hosted {
             endpoint: format!("http://{}/", listener.local_addr().unwrap()),
         })
         .unwrap()

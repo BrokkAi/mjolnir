@@ -195,7 +195,7 @@ impl ChatState {
             || self.harness_turn_stoppable()
             || matches!(
                 self.session_activity.state().last_known(),
-                mj_core::activity::ActivityState::CheckingContinuation
+                mj_core::activity::ActivityState::CheckingQuota
             )
             || (self.session_activity.capacity_retry.is_some()
                 || self.session_activity.quota_recovery.is_some())

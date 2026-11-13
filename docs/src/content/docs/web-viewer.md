@@ -112,7 +112,7 @@ state.
 
 Choose **Menu › Settings** to see and change the same settings as the
 terminal's Settings dialog: agent profiles, projects, runtimes, machines, code
-review, continuation, sub-agents, SessionWiki, web access, display and privacy.
+review, sub-agents, SessionWiki, web access, display and privacy.
 Each section names what it is set to; open it to change its fields, add or
 remove entries, then press **Save**. Saving writes the configuration file with
 the same checks the terminal uses. A setting another client changed since you

@@ -680,8 +680,7 @@ Both fields are optional. `timeout_secs` defaults to 600 and may not exceed
   retry, which answers for the turn when it ends), while Jev is still reading
   the reply, and while a sub-agent child still owes its report. It does not
   wait for anything that starts new work: a turn the agent starts on its own,
-  background work, an expected continuation, Mjolnir's automatic continuation,
-  a later prompt, or a goal. To learn when your prompt's turn ended, pass its
+  background work, an expected continuation, a later prompt, or a goal. To learn when your prompt's turn ended, pass its
   `turn_id`, or use `mj prompt`.
 - **Without `turn_id`, the wait answers when the session settles**: the
   worker's activity state is idle (the same state the dashboard shows as

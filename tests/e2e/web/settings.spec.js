@@ -139,8 +139,8 @@ test('golden_viewer_settings', async ({ page }) => {
   await capture('a profile page names the terminal step for signing in');
 
   await page.locator('#settings-trail button', { hasText: 'Settings' }).click();
-  await page.locator('.settings-link', { hasText: 'Continuation' }).click();
-  await expect(page.locator('#settings-heading')).toHaveText('Continuation');
+  await page.locator('.settings-link', { hasText: 'Web Access' }).click();
+  await expect(page.locator('#settings-heading')).toHaveText('Web Access');
   await page.getByLabel('Enabled').click();
   await expect(page.locator('#settings-savebar')).toBeVisible();
   await capture('an accepted edit leaves the draft unsaved');
@@ -155,7 +155,7 @@ test('golden_viewer_settings', async ({ page }) => {
     }));
   });
   await expect(page).toHaveURL(new RegExp(`#workspace/${WORKSPACE_ID}$`));
-  await page.evaluate(() => { location.hash = '#settings/continuation'; });
+  await page.evaluate(() => { location.hash = '#settings/phone'; });
   await expect(page.locator('#settings-savebar')).toBeVisible();
   expect(await page.getByLabel('Enabled').isChecked()).toBe(draftEnabled);
   expect(await page.evaluate(() => window.notificationDraftMarker)).toBe('same document');

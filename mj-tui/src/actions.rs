@@ -26,7 +26,6 @@ pub enum CommandId {
     OpenSession,
     PinSession,
     ChangeWorkspace,
-    UnpinSession,
     OpenSessionSplitRight,
     OpenSessionSplitBelow,
     ClosePane,
@@ -57,7 +56,6 @@ pub enum CommandId {
     ChangedFiles,
     DismissNotification,
     IgnoreNotifications,
-    StopIgnoringNotifications,
     ContainerSettings,
     MoveSession,
     CopySessionId,
@@ -299,46 +297,20 @@ fn dismiss_notification_available(dashboard: &DashboardState) -> Availability {
 }
 
 fn ignore_notifications_available(dashboard: &DashboardState) -> Availability {
-    let Some(session) = dashboard.command_session() else {
-        return Availability::Hidden;
-    };
-    if session.notifications_ignored {
-        Availability::Blocked("notifications are already ignored")
-    } else {
-        Availability::Ready
-    }
-}
-
-fn stop_ignoring_notifications_available(dashboard: &DashboardState) -> Availability {
-    let Some(session) = dashboard.command_session() else {
-        return Availability::Hidden;
-    };
-    if session.notifications_ignored {
+    // Always applies to a session: the row's label says which way it flips.
+    if dashboard.command_session().is_some() {
         Availability::Ready
     } else {
-        Availability::Blocked("notifications are not ignored")
+        Availability::Hidden
     }
 }
 
 fn pin_session_available(dashboard: &DashboardState) -> Availability {
-    let Some(session) = dashboard.command_session() else {
-        return Availability::Hidden;
-    };
-    if dashboard.pin_id(&session.id).is_some() {
-        Availability::Blocked("this session is already pinned")
-    } else {
-        Availability::Ready
-    }
-}
-
-fn unpin_session_available(dashboard: &DashboardState) -> Availability {
-    let Some(session) = dashboard.command_session() else {
-        return Availability::Hidden;
-    };
-    if dashboard.pin_id(&session.id).is_some() {
+    // The row flips with the pin state: it pins, or it unpins.
+    if dashboard.command_session().is_some() {
         Availability::Ready
     } else {
-        Availability::Blocked("this session is not pinned")
+        Availability::Hidden
     }
 }
 
@@ -589,7 +561,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::PinSession,
         label: "Pin session…",
-        description: "Keep a session visible while browsing others.",
+        description: "Keep a session visible while browsing others; when pinned, leaves this pane without stopping the session.",
         scope: Scope::Session,
         pane_keys: &[],
         action: None,
@@ -597,18 +569,6 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
         available: pin_session_available,
-    },
-    CommandSpec {
-        id: CommandId::UnpinSession,
-        label: "Unpin session",
-        description: "Leave this pane empty without stopping its session.",
-        scope: Scope::Session,
-        pane_keys: &[],
-        action: None,
-        footer: no_footer,
-        footer_group: FooterGroup::Pane,
-        footer_rank: 0,
-        available: unpin_session_available,
     },
     CommandSpec {
         id: CommandId::OpenSessionSplitRight,
@@ -1040,7 +1000,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::IgnoreNotifications,
         label: "Ignore notifications",
-        description: "This session raises no bell, desktop, or push notifications. It still shows its attention state.",
+        description: "Toggle whether this session raises bell, desktop, and push notifications. Its attention state still renders.",
         scope: Scope::Session,
         pane_keys: &[],
         action: None,
@@ -1048,18 +1008,6 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
         available: ignore_notifications_available,
-    },
-    CommandSpec {
-        id: CommandId::StopIgnoringNotifications,
-        label: "Stop ignoring notifications",
-        description: "This session raises notifications again.",
-        scope: Scope::Session,
-        pane_keys: &[],
-        action: None,
-        footer: no_footer,
-        footer_group: FooterGroup::Pane,
-        footer_rank: 0,
-        available: stop_ignoring_notifications_available,
     },
     CommandSpec {
         id: CommandId::InterruptTurn,
@@ -1756,17 +1704,15 @@ impl DashboardState {
         }
         match id {
             CommandId::PinSession => {
-                if let Some(session) = self.command_session_id().map(str::to_owned) {
-                    self.begin_pin_menu(session);
+                match self.command_session_id().map(str::to_owned) {
+                    Some(session_id) if self.pin_id(&session_id).is_some() => {
+                        return DashboardAction::UnpinSession { session_id };
+                    }
+                    Some(session_id) => self.begin_pin_menu(session_id),
+                    None => {}
                 }
                 DashboardAction::None
             }
-            CommandId::UnpinSession => self
-                .command_session_id()
-                .map(str::to_owned)
-                .map_or(DashboardAction::None, |session_id| {
-                    DashboardAction::UnpinSession { session_id }
-                }),
             CommandId::OpenSession => self.open_selected_session(),
             CommandId::OpenSessionSplitRight => {
                 self.split_command(ratatui::layout::Direction::Horizontal)
@@ -1895,14 +1841,15 @@ impl DashboardState {
                 }
                 Availability::Hidden => DashboardAction::None,
             },
-            CommandId::IgnoreNotifications | CommandId::StopIgnoringNotifications => {
-                self.command_session_id().map(str::to_owned).map_or(
-                    DashboardAction::None,
-                    |session_id| DashboardAction::SetSessionNotificationsIgnored {
-                        session_id,
-                        ignored: id == CommandId::IgnoreNotifications,
-                    },
-                )
+            CommandId::IgnoreNotifications => {
+                self.command_session()
+                    .map(|session| (session.id.clone(), session.notifications_ignored))
+                    .map_or(DashboardAction::None, |(session_id, ignored)| {
+                        DashboardAction::SetSessionNotificationsIgnored {
+                            session_id,
+                            ignored: !ignored,
+                        }
+                    })
             }
             CommandId::InterruptTurn => match interrupt_available(self) {
                 Availability::Ready => self

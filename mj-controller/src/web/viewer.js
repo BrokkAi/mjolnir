@@ -1699,7 +1699,7 @@ function sessionMenuActions(session) {
   if (session.configuration_issue) actions.push(['Repair configuration…', 'secondary', 'repair-config']);
   if (session.lifecycle === 'live' && !isTransitioningSession(session)) actions.push(['Changed files…', 'secondary', 'changed-files']);
   if (can.dismiss_notification) actions.push(['Dismiss notification', 'secondary', 'dismiss-notification']);
-  actions.push([session.notifications_ignored ? 'Stop ignoring notifications' : 'Ignore notifications', 'secondary', 'set-session-notifications-ignored']);
+  actions.push([session.notifications_ignored ? 'Stop ignoring' : 'Ignore', 'secondary', 'set-session-notifications-ignored']);
   if (can.rename) actions.push(['Rename', 'secondary', 'rename']);
   if (can.change_workspace) actions.push(['Change workspace…', 'secondary', 'change-workspace']);
   if (can.container_settings) actions.push(['Container settings…', 'secondary', 'container-settings']);

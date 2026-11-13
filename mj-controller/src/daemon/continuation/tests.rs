@@ -1,5 +1,5 @@
 use super::*;
-use mj_core::continuation::{ContinuationState, ContinuationVerdict};
+use mj_core::continuation::ContinuationState;
 use mj_core::relay::RelaySnapshot;
 use mj_core::state::{
     ManagedSessionSnapshot, MaterializedSession, MaterializedTurnOutcome, ProjectionWindow,
@@ -16,7 +16,7 @@ fn live_sessions(ids: &[&str]) -> LiveSessions {
         })
         .collect()
 }
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 fn view(id: &str, completed: bool) -> ManagedSessionView {
     let mut materialized = MaterializedSession::empty(id);
@@ -62,7 +62,8 @@ fn view(id: &str, completed: bool) -> ManagedSessionView {
         });
     }
     let mut operational = RelaySnapshot::new(id.into()).operational_state();
-    // These fixtures exercise the explicitly retained legacy classifier.
+    // A worker before the assessment protocol: its recoveries are resumed,
+    // but the daemon never classifies its turns.
     operational.relay_protocol_version = Some(24);
     operational.continuation = ContinuationState {
         user_command_id: Some("request".into()),
@@ -86,425 +87,51 @@ fn view(id: &str, completed: bool) -> ManagedSessionView {
     }
 }
 
+/// Marks the view's last turn as one the worker's own assessment found
+/// blocked by a provider quota, as a worker on the assessment protocol reports
+/// it. The daemon acts on that assessment and never classifies a turn itself.
+fn quota_assessed(v: &mut ManagedSessionView) {
+    use mj_core::assessment::{
+        Action, Failure, Input, Judgment, Status, TurnAssessment, Verdict, Work,
+    };
+    let state = &mut v.snapshot.as_mut().unwrap().operational;
+    state.relay_protocol_version = Some(mj_core::assessment::PROTOCOL);
+    state.assessment_context = Some(Default::default());
+    let mut assessment = TurnAssessment::pending(
+        state.continuation.completed_command_id.clone().unwrap(),
+        99,
+        99,
+        mj_core::activity::verdict::CompletionEvidence::bounded("harness_turn_settled", None),
+    );
+    assessment.verdict = Some(Verdict {
+        failure: Judgment {
+            choice: Failure::Quota,
+            confidence: 0.99,
+            probabilities: Default::default(),
+        },
+        input: Judgment {
+            choice: Input::Unclear,
+            confidence: 0.5,
+            probabilities: Default::default(),
+        },
+        work: Judgment {
+            choice: Work::Unclear,
+            confidence: 0.5,
+            probabilities: Default::default(),
+        },
+        background: None,
+        reply: None,
+    });
+    assessment.action = Some(Action::RecoverQuota);
+    assessment.status = Status::Deferred;
+    state.assessment = Some(std::sync::Arc::new(assessment));
+}
+
 async fn receive(rx: &mut SessionManagerUpdates) -> SessionManagerUpdate {
     tokio::time::timeout(Duration::from_secs(3), rx.recv())
         .await
         .unwrap()
         .unwrap()
-}
-
-#[tokio::test]
-async fn continuation_checks_run_concurrently_and_defer_review_until_each_settles() {
-    let remote = spawn_remote_session_manager().unwrap();
-    remote.targets.send_replace(
-        ["one", "two"]
-            .into_iter()
-            .map(|id| RelaySessionTarget {
-                session_id: id.into(),
-                spec: CommandSpec::new("unused", std::iter::empty::<&str>()),
-                worker_recovery: None,
-                project_memory: None,
-            })
-            .collect(),
-    );
-    let log_dir = tempfile::tempdir().unwrap();
-    let decision_log = mj_core::jev::DecisionLog::open(log_dir.path().to_path_buf()).unwrap();
-    let reviews = Arc::new(Mutex::new(Vec::new()));
-    let enabled = Arc::new(AtomicBool::new(true));
-    let environment = Environment {
-        start_quota_move: Arc::new(|_, _, _| {
-            Box::pin(async { anyhow::bail!("unexpected Move start") })
-        }),
-        quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected quota request") })),
-        profile: Arc::new(|_| Some("test".into())),
-        log: Some(decision_log),
-        control: remote.control,
-        claim: {
-            let enabled = enabled.clone();
-            Arc::new(move |_| {
-                if enabled.load(Ordering::SeqCst) {
-                    Claim::Allowed
-                } else {
-                    Claim::Blocked
-                }
-            })
-        },
-        allowed: {
-            let enabled = enabled.clone();
-            Arc::new(move |_| enabled.load(Ordering::SeqCst))
-        },
-        live: Arc::new(|| live_sessions(&["one", "two"])),
-        review: {
-            let reviews = reviews.clone();
-            Arc::new(move |id, view| {
-                if view
-                    .snapshot
-                    .as_ref()
-                    .unwrap()
-                    .materialized
-                    .last_turn_outcome
-                    .is_some()
-                {
-                    reviews.lock().unwrap().push(id.to_owned());
-                }
-            })
-        },
-    };
-    let (calls, mut requests) = mpsc::unbounded_channel();
-    let classifier: Classifier = Arc::new(move |evidence, _diagnostic| {
-        let (tx, rx) = oneshot::channel::<Result<ContinuationVerdict>>();
-        calls.send((evidence, tx)).unwrap();
-        Box::pin(async move { rx.await.context("fake classifier cancelled")? })
-    });
-    let cancellation = CancellationToken::new();
-    let (mut updates, task) = spawn_in(
-        environment,
-        remote.updates,
-        cancellation.clone(),
-        classifier,
-    );
-    for id in ["one", "two"] {
-        remote
-            .publisher
-            .publish(id.into(), view(id, false))
-            .await
-            .unwrap();
-        receive(&mut updates).await;
-        remote
-            .publisher
-            .publish(id.into(), view(id, true))
-            .await
-            .unwrap();
-        let update = receive(&mut updates).await;
-        assert_eq!(
-            update.view.snapshot.unwrap().operational.activity,
-            Some(ActivityState::CheckingContinuation)
-        );
-    }
-    let (evidence, first) = tokio::time::timeout(Duration::from_secs(3), requests.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    let (_, second) = tokio::time::timeout(Duration::from_secs(3), requests.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        evidence.messages[0].text,
-        "Implement the fix and run the tests."
-    );
-    assert!(reviews.lock().unwrap().is_empty());
-    first
-        .send(Ok(ContinuationVerdict {
-            quota_limit: 0.0,
-            unfinished: 0.0,
-            no_input_needed: 1.0,
-        }))
-        .unwrap();
-    receive(&mut updates).await;
-    assert_eq!(reviews.lock().unwrap().len(), 1);
-    // Disabling cancels the independent remaining HTTP request and releases review.
-    enabled.store(false, Ordering::SeqCst);
-    receive(&mut updates).await;
-    assert_eq!(reviews.lock().unwrap().len(), 2);
-    tokio::task::yield_now().await;
-    assert!(second.is_closed());
-    let statuses: Vec<_> = ["one", "two"]
-        .iter()
-        .flat_map(|id| {
-            mj_core::jev::read(log_dir.path(), id, None)
-                .unwrap()
-                .decisions
-        })
-        .map(|d| d.status)
-        .collect();
-    assert!(statuses.contains(&"uncertain".to_owned()));
-    assert!(statuses.contains(&"cancelled".to_owned()));
-    cancellation.cancel();
-    task.await.unwrap().unwrap();
-    remote.shutdown.shutdown().await.unwrap();
-}
-
-// Hard-won: #1487: disconnected first attachment consumed the same-turn recovery trigger.
-#[tokio::test]
-async fn continuation_rechecks_disconnected_attachment_once_and_new_input_cancels_it() {
-    let remote = spawn_remote_session_manager().unwrap();
-    remote.targets.send_replace(
-        ["one", "two"]
-            .into_iter()
-            .map(|id| RelaySessionTarget {
-                session_id: id.into(),
-                spec: CommandSpec::new("unused", std::iter::empty::<&str>()),
-                worker_recovery: None,
-                project_memory: None,
-            })
-            .collect(),
-    );
-    let (calls, mut requests) = mpsc::unbounded_channel();
-    let classifier: Classifier = Arc::new(move |_, _| {
-        let (tx, rx) = oneshot::channel::<Result<ContinuationVerdict>>();
-        calls.send(tx).unwrap();
-        Box::pin(async move { rx.await.context("fake classifier cancelled")? })
-    });
-    let log_dir = tempfile::tempdir().unwrap();
-    let log = mj_core::jev::DecisionLog::open(log_dir.path().to_path_buf()).unwrap();
-    let environment = Environment {
-        start_quota_move: Arc::new(|_, _, _| {
-            Box::pin(async { anyhow::bail!("unexpected Move start") })
-        }),
-        quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected quota request") })),
-        profile: Arc::new(|_| Some("test".into())),
-        log: Some(log),
-        control: remote.control,
-        allowed: Arc::new(|_| true),
-        claim: Arc::new(|_| Claim::Allowed),
-        live: Arc::new(|| live_sessions(&["one"])),
-        review: Arc::new(|_, _| {}),
-    };
-    let cancellation = CancellationToken::new();
-    let (mut updates, task) = spawn_in(
-        environment,
-        remote.updates,
-        cancellation.clone(),
-        classifier,
-    );
-    let mut disconnected = view("one", true);
-    disconnected.connected = false;
-    remote
-        .publisher
-        .publish("one".into(), disconnected)
-        .await
-        .unwrap();
-    receive(&mut updates).await;
-    assert!(requests.try_recv().is_err());
-    remote
-        .publisher
-        .publish("one".into(), view("one", true))
-        .await
-        .unwrap();
-    receive(&mut updates).await;
-    let reply = tokio::time::timeout(Duration::from_secs(3), requests.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    let mut same_turn = view("one", true);
-    same_turn
-        .snapshot
-        .as_mut()
-        .unwrap()
-        .operational
-        .latest_ordinal += 1;
-    remote
-        .publisher
-        .publish("one".into(), same_turn)
-        .await
-        .unwrap();
-    receive(&mut updates).await;
-    assert!(
-        requests.try_recv().is_err(),
-        "the reconnected turn is classified once"
-    );
-    let mut next = view("one", true);
-    next.snapshot.as_mut().unwrap().operational.continuation = ContinuationState {
-        user_command_id: Some("new-request".into()),
-        ..Default::default()
-    };
-    remote.publisher.publish("one".into(), next).await.unwrap();
-    let update = receive(&mut updates).await;
-    assert_ne!(
-        update.view.snapshot.unwrap().operational.activity,
-        Some(ActivityState::CheckingContinuation)
-    );
-    tokio::task::yield_now().await;
-    assert!(reply.is_closed());
-    assert_eq!(
-        mj_core::jev::read(log_dir.path(), "one", None)
-            .unwrap()
-            .decisions[0]
-            .status,
-        "stale"
-    );
-    cancellation.cancel();
-    task.await.unwrap().unwrap();
-    remote.shutdown.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn continuation_submits_a_guarded_prompt_and_reviews_only_after_the_chain() {
-    for rejected in [false, true] {
-        let mut remote = spawn_remote_session_manager().unwrap();
-        remote.targets.send_replace(vec![RelaySessionTarget {
-            session_id: "one".into(),
-            spec: CommandSpec::new("unused", std::iter::empty::<&str>()),
-            worker_recovery: None,
-            project_memory: None,
-        }]);
-        let log_dir = tempfile::tempdir().unwrap();
-        let log = mj_core::jev::DecisionLog::open(log_dir.path().to_path_buf()).unwrap();
-        let reviews = Arc::new(Mutex::new(Vec::new()));
-        let environment = Environment {
-            start_quota_move: Arc::new(|_, _, _| {
-                Box::pin(async { anyhow::bail!("unexpected Move start") })
-            }),
-            quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected quota request") })),
-            profile: Arc::new(|_| Some("test".into())),
-            log: Some(log),
-            control: remote.control,
-            allowed: Arc::new(|_| true),
-            claim: Arc::new(|_| Claim::Allowed),
-            live: Arc::new(|| live_sessions(&["one"])),
-            review: {
-                let reviews = reviews.clone();
-                Arc::new(move |_, v| {
-                    if eligible(v) {
-                        reviews.lock().unwrap().push(v.clone());
-                    }
-                })
-            },
-        };
-        let (calls, mut requests) = mpsc::unbounded_channel();
-        let classifier: Classifier = Arc::new(move |_, _| {
-            let (tx, rx) = oneshot::channel::<Result<ContinuationVerdict>>();
-            calls.send(tx).unwrap();
-            Box::pin(async move { rx.await.context("fake classifier cancelled")? })
-        });
-        let cancellation = CancellationToken::new();
-        let (mut updates, task) = spawn_in(
-            environment,
-            remote.updates,
-            cancellation.clone(),
-            classifier,
-        );
-        remote
-            .publisher
-            .publish("one".into(), view("one", false))
-            .await
-            .unwrap();
-        receive(&mut updates).await;
-        remote
-            .publisher
-            .publish("one".into(), view("one", true))
-            .await
-            .unwrap();
-        receive(&mut updates).await;
-        let answer = tokio::time::timeout(Duration::from_secs(3), requests.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        answer
-            .send(Ok(ContinuationVerdict {
-                quota_limit: 0.0,
-                unfinished: 0.99,
-                no_input_needed: 0.99,
-            }))
-            .unwrap();
-        let request = tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        let RemoteSessionRequest::Submit {
-            command_id,
-            command,
-            reply,
-            ..
-        } = request
-        else {
-            panic!("expected continuation prompt")
-        };
-        assert_eq!(command_id, "auto-continue-3-1");
-        assert!(
-            matches!(command, RelayCommand::ContinueAuthorizedWork { user_command_id, completed_command_id, attempt: 1, .. }
-        if user_command_id == "request" && completed_command_id == "request")
-        );
-        if rejected {
-            reply
-                .send(Err(
-                    "continuation guard rejected changed worker frontier".into()
-                ))
-                .unwrap();
-            receive(&mut updates).await;
-            let records = mj_core::jev::read(log_dir.path(), "one", None).unwrap();
-            assert_eq!(records.decisions[0].status, "failed");
-            assert!(
-                records.decisions[0]
-                    .answer
-                    .contains("already-requested work remains")
-            );
-            assert!(!records.decisions[0].action.contains("accepted"));
-            cancellation.cancel();
-            task.await.unwrap().unwrap();
-            remote.shutdown.shutdown().await.unwrap();
-            continue;
-        }
-        reply.send(Ok(4)).unwrap();
-        let mut running = view("one", true);
-        let operational = &mut running.snapshot.as_mut().unwrap().operational;
-        operational.execution = mj_core::relay::RelayExecutionState::Running;
-        operational.continuation.attempts = 1;
-        operational.continuation.completed_command_id = None;
-        remote
-            .publisher
-            .publish("one".into(), running)
-            .await
-            .unwrap();
-        receive(&mut updates).await;
-        assert!(reviews.lock().unwrap().is_empty());
-        // The submitted job is supervised even when the worker's running view arrives first.
-        for _ in 0..20 {
-            if mj_core::jev::read(log_dir.path(), "one", None)
-                .unwrap()
-                .decisions
-                .iter()
-                .any(|d| d.status == "applied")
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        assert!(
-            mj_core::jev::read(log_dir.path(), "one", None)
-                .unwrap()
-                .decisions
-                .iter()
-                .any(|d| d.status == "applied")
-        );
-        let mut finished = view("one", true);
-        let s = finished.snapshot.as_mut().unwrap();
-        s.operational.continuation.attempts = 1;
-        s.operational.continuation.completed_command_id = Some(command_id.clone());
-        s.materialized
-            .last_turn_outcome
-            .as_mut()
-            .unwrap()
-            .command_id = command_id;
-        remote
-            .publisher
-            .publish("one".into(), finished)
-            .await
-            .unwrap();
-        let update = receive(&mut updates).await;
-        assert_eq!(
-            update.view.snapshot.unwrap().operational.activity,
-            Some(ActivityState::CheckingContinuation)
-        );
-        let answer = tokio::time::timeout(Duration::from_secs(3), requests.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        answer.send(Err(anyhow!("classifier unavailable"))).unwrap();
-        receive(&mut updates).await;
-        assert_eq!(reviews.lock().unwrap().len(), 1);
-        assert!(
-            mj_core::jev::read(log_dir.path(), "one", None)
-                .unwrap()
-                .decisions
-                .iter()
-                .any(|d| d.status == "failed")
-        );
-        cancellation.cancel();
-        task.await.unwrap().unwrap();
-        remote.shutdown.shutdown().await.unwrap();
-    }
 }
 
 fn recovery_for(
@@ -524,7 +151,7 @@ fn recovery_for(
 }
 
 #[tokio::test]
-async fn quota_classification_survives_exhausted_allowance_and_unusable_authorization() {
+async fn a_worker_quota_assessment_schedules_recovery_whatever_the_spent_allowance() {
     let mut remote = spawn_remote_session_manager().unwrap();
     remote.targets.send_replace(vec![RelaySessionTarget {
         session_id: "one".into(),
@@ -547,30 +174,8 @@ async fn quota_classification_survives_exhausted_allowance_and_unusable_authoriz
             Box::pin(async move { Ok(quota::Plan::Wait(recovery_for(&view, None))) })
         }),
     };
-    let classifier: Classifier = Arc::new(|evidence, _| {
-        Box::pin(async move {
-            assert!(evidence.messages.is_empty());
-            assert!(
-                evidence
-                    .quota_message
-                    .as_ref()
-                    .unwrap()
-                    .contains("Provider error")
-            );
-            Ok(ContinuationVerdict {
-                quota_limit: 0.99,
-                unfinished: 1.0,
-                no_input_needed: 1.0,
-            })
-        })
-    });
     let cancellation = CancellationToken::new();
-    let (mut updates, task) = spawn_in(
-        environment,
-        remote.updates,
-        cancellation.clone(),
-        classifier,
-    );
+    let (mut updates, task) = spawn_in(environment, remote.updates, cancellation.clone());
     remote
         .publisher
         .publish("one".into(), view("one", false))
@@ -592,12 +197,7 @@ async fn quota_classification_survives_exhausted_allowance_and_unusable_authoriz
         reset_at: None,
         login_fingerprint: None,
     });
-    // Authorization that depends on non-text content is unusable, so only
-    // the quota message is classified.
-    let item = Arc::make_mut(&mut s.materialized.transcript[0]);
-    item.body = TranscriptBody::User {
-        content: vec![json!({"type":"image", "data":"", "mimeType":"image/png"})],
-    };
+    quota_assessed(&mut blocked);
     remote
         .publisher
         .publish("one".into(), blocked)
@@ -691,16 +291,8 @@ async fn recovered_deadlines_wait_resume_or_clear_without_reclassification() {
             }),
             quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected refresh") })),
         };
-        let classifier: Classifier = Arc::new(|_, _| {
-            Box::pin(async { panic!("durable recovery must not be reclassified") })
-        });
         let cancellation = CancellationToken::new();
-        let (mut updates, task) = spawn_in(
-            environment,
-            remote.updates,
-            cancellation.clone(),
-            classifier,
-        );
+        let (mut updates, task) = spawn_in(environment, remote.updates, cancellation.clone());
         let mut recovered = view("one", true);
         let deadline = match case {
             "unknown" | "moving" | "moved" => None,
@@ -789,15 +381,8 @@ async fn a_due_recovery_that_cannot_be_submitted_says_which_fact_refused_it() {
         profile: Arc::new(|_| Some("test".into())),
         quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected refresh") })),
     };
-    let classifier: Classifier =
-        Arc::new(|_, _| Box::pin(async { panic!("durable recovery must not be reclassified") }));
     let cancellation = CancellationToken::new();
-    let (mut updates, task) = spawn_in(
-        environment,
-        remote.updates,
-        cancellation.clone(),
-        classifier,
-    );
+    let (mut updates, task) = spawn_in(environment, remote.updates, cancellation.clone());
     let mut stuck = view("one", true);
     let recovery = recovery_for(&stuck, Some(mj_core::clock::epoch_millis() - 1));
     let operational = &mut stuck.snapshot.as_mut().unwrap().operational;
@@ -834,16 +419,6 @@ async fn a_due_recovery_that_cannot_be_submitted_says_which_fact_refused_it() {
 
 /// The first decision recorded for session "one", with its technical detail,
 /// which a listing leaves out.
-fn technical(dir: &std::path::Path) -> mj_core::jev::Decision {
-    let id = mj_core::jev::read(dir, "one", None).unwrap().decisions[0]
-        .id
-        .clone();
-    mj_core::jev::read(dir, "one", Some(&id))
-        .unwrap()
-        .decisions
-        .remove(0)
-}
-
 /// `view(id, true)` after the harness started a turn on its own at ordinal 10
 /// and ended it at 12 with `reply`.
 fn self_started(id: &str, reply: &str) -> ManagedSessionView {
@@ -884,6 +459,8 @@ fn self_started(id: &str, reply: &str) -> ManagedSessionView {
 
 #[tokio::test]
 async fn a_self_started_turn_that_hits_the_quota_schedules_recovery_against_itself() {
+    // Workers before the assessment protocol have no worker assessment, and
+    // the daemon no longer classifies their turns: they are not scheduled.
     for protocol in [24, 22, mj_core::assessment::PROTOCOL] {
         let mut remote = spawn_remote_session_manager().unwrap();
         remote.targets.send_replace(vec![RelaySessionTarget {
@@ -909,28 +486,11 @@ async fn a_self_started_turn_that_hits_the_quota_schedules_recovery_against_itse
                 Box::pin(async move { Ok(quota::Plan::Wait(recovery_for(&view, None))) })
             }),
         };
-        let (calls, mut checks) = mpsc::unbounded_channel();
-        let classifier: Classifier = Arc::new(move |evidence, _| {
-            calls.send(evidence.quota_message.clone()).unwrap();
-            Box::pin(async move {
-                Ok(ContinuationVerdict {
-                    quota_limit: 0.99,
-                    unfinished: 1.0,
-                    no_input_needed: 1.0,
-                })
-            })
-        });
         let cancellation = CancellationToken::new();
-        let (mut updates, task) = spawn_in(
-            environment,
-            remote.updates,
-            cancellation.clone(),
-            classifier,
-        );
+        let (mut updates, task) = spawn_in(environment, remote.updates, cancellation.clone());
         let mut before = view("one", true);
-        // Keep the preceding prompted completion cancelled in both views;
-        // only protocols that understand the new harness turn may classify it.
         let mut after = self_started("one", "You've hit your session limit · resets 1:40pm");
+        // Keep the preceding prompted completion cancelled in both views.
         for v in [&mut before, &mut after] {
             let snapshot = v.snapshot.as_mut().unwrap();
             snapshot
@@ -950,64 +510,17 @@ async fn a_self_started_turn_that_hits_the_quota_schedules_recovery_against_itse
             .unwrap();
         receive(&mut updates).await;
         if protocol >= mj_core::assessment::PROTOCOL {
-            use mj_core::assessment::{
-                Action, Failure, Input, Judgment, Status, TurnAssessment, Verdict, Work,
-            };
-            let state = &mut after.snapshot.as_mut().unwrap().operational;
-            let mut assessment = TurnAssessment::pending(
-                state.continuation.completed_command_id.clone().unwrap(),
-                99,
-                99,
-                mj_core::activity::verdict::CompletionEvidence::bounded(
-                    "harness_turn_settled",
-                    None,
-                ),
-            );
-            assessment.verdict = Some(Verdict {
-                failure: Judgment {
-                    choice: Failure::Quota,
-                    confidence: 0.99,
-                    probabilities: Default::default(),
-                },
-                input: Judgment {
-                    choice: Input::Unclear,
-                    confidence: 0.5,
-                    probabilities: Default::default(),
-                },
-                work: Judgment {
-                    choice: Work::Unclear,
-                    confidence: 0.5,
-                    probabilities: Default::default(),
-                },
-                background: None,
-                reply: None,
-            });
-            assessment.action = Some(Action::RecoverQuota);
-            assessment.status = Status::Deferred;
-            state.assessment = Some(std::sync::Arc::new(assessment));
+            quota_assessed(&mut after);
         }
         remote.publisher.publish("one".into(), after).await.unwrap();
         receive(&mut updates).await;
-        if protocol < ENDED_TURN_PROTOCOL {
-            // An older worker's state is read as it always was.
+        if protocol < mj_core::assessment::PROTOCOL {
             assert!(
-                tokio::time::timeout(Duration::from_millis(250), checks.recv())
+                tokio::time::timeout(Duration::from_millis(250), remote.requests.recv())
                     .await
                     .is_err()
             );
         } else {
-            if protocol < mj_core::assessment::PROTOCOL {
-                let message = tokio::time::timeout(Duration::from_secs(3), checks.recv())
-                    .await
-                    .unwrap()
-                    .unwrap();
-                assert!(message.unwrap().contains("hit your session limit"));
-            } else {
-                assert!(
-                    checks.try_recv().is_err(),
-                    "new workers must never be classified again by the daemon"
-                );
-            }
             let request = tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
                 .await
                 .unwrap()
@@ -1029,151 +542,18 @@ async fn a_self_started_turn_that_hits_the_quota_schedules_recovery_against_itse
             reply
                 .send(Err("end isolated scheduling probe".into()))
                 .unwrap();
-            if protocol < mj_core::assessment::PROTOCOL {
-                let decision = technical(log_dir.path());
-                assert_eq!(decision.technical.unwrap()["turn"], "self-started");
-            } else {
-                assert!(
-                    mj_core::jev::read(log_dir.path(), "one", None)
-                        .unwrap()
-                        .decisions
-                        .is_empty(),
-                    "only the worker owns a new assessment's diagnostic"
-                );
-            }
+            assert!(
+                mj_core::jev::read(log_dir.path(), "one", None)
+                    .unwrap()
+                    .decisions
+                    .is_empty(),
+                "only the worker owns a new assessment's diagnostic"
+            );
         }
         cancellation.cancel();
         task.await.unwrap().unwrap();
         remote.shutdown.shutdown().await.unwrap();
     }
-}
-
-#[tokio::test]
-async fn background_work_defers_continuation_and_its_end_brings_a_fresh_check() {
-    let mut remote = spawn_remote_session_manager().unwrap();
-    remote.targets.send_replace(vec![RelaySessionTarget {
-        session_id: "one".into(),
-        spec: CommandSpec::new("unused", std::iter::empty::<&str>()),
-        worker_recovery: None,
-        project_memory: None,
-    }]);
-    let log_dir = tempfile::tempdir().unwrap();
-    let log = mj_core::jev::DecisionLog::open(log_dir.path().to_path_buf()).unwrap();
-    let environment = Environment {
-        start_quota_move: Arc::new(|_, _, _| {
-            Box::pin(async { anyhow::bail!("unexpected Move start") })
-        }),
-        log: Some(log),
-        control: remote.control,
-        allowed: Arc::new(|_| true),
-        claim: Arc::new(|_| Claim::Allowed),
-        live: Arc::new(|| live_sessions(&["one"])),
-        review: Arc::new(|_, _| {}),
-        profile: Arc::new(|_| Some("test".into())),
-        quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected quota request") })),
-    };
-    let (calls, mut checks) = mpsc::unbounded_channel();
-    let classifier: Classifier = Arc::new(move |_, _| {
-        calls.send(()).unwrap();
-        Box::pin(async {
-            Ok(ContinuationVerdict {
-                quota_limit: 0.0,
-                unfinished: 0.99,
-                no_input_needed: 0.99,
-            })
-        })
-    });
-    let cancellation = CancellationToken::new();
-    let (mut updates, task) = spawn_in(
-        environment,
-        remote.updates,
-        cancellation.clone(),
-        classifier,
-    );
-    remote
-        .publisher
-        .publish("one".into(), view("one", false))
-        .await
-        .unwrap();
-    receive(&mut updates).await;
-    let mut busy = view("one", true);
-    busy.snapshot
-        .as_mut()
-        .unwrap()
-        .operational
-        .background_commands
-        .push(mj_core::relay::BackgroundCommand {
-            id: "claude:0".into(),
-            started_at_ms: 1,
-            command: "sleep infinity".into(),
-            can_stop: true,
-        });
-    remote.publisher.publish("one".into(), busy).await.unwrap();
-    receive(&mut updates).await;
-    tokio::time::timeout(Duration::from_secs(3), checks.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    receive(&mut updates).await;
-    assert!(
-        tokio::time::timeout(Duration::from_millis(250), remote.requests.recv())
-            .await
-            .is_err(),
-        "a busy session is not nudged"
-    );
-    let decision = technical(log_dir.path());
-    assert_eq!(decision.status, "deferred");
-    assert_eq!(decision.technical.unwrap()["deferred_by"], "background");
-
-    remote
-        .publisher
-        .publish("one".into(), view("one", true))
-        .await
-        .unwrap();
-    receive(&mut updates).await;
-    tokio::time::timeout(Duration::from_secs(3), checks.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    let request = tokio::time::timeout(Duration::from_secs(3), remote.requests.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    let RemoteSessionRequest::Submit { command, reply, .. } = request else {
-        panic!("expected continuation prompt");
-    };
-    assert!(matches!(
-        command,
-        RelayCommand::ContinueAuthorizedWork { attempt: 1, .. }
-    ));
-    reply
-        .send(Err("end isolated continuation probe".into()))
-        .unwrap();
-    for _ in 0..20 {
-        if mj_core::jev::read(log_dir.path(), "one", None)
-            .unwrap()
-            .decisions
-            .len()
-            == 2
-        {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    let decisions = mj_core::jev::read(log_dir.path(), "one", None)
-        .unwrap()
-        .decisions;
-    assert!(decisions.iter().any(|d| {
-        mj_core::jev::read(log_dir.path(), "one", Some(&d.id))
-            .unwrap()
-            .decisions[0]
-            .technical
-            .as_ref()
-            .is_some_and(|t| t["trigger"] == "eligibility-restored")
-    }));
-    cancellation.cancel();
-    task.await.unwrap().unwrap();
-    remote.shutdown.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -1199,16 +579,8 @@ async fn a_due_recovery_resumes_a_usage_limited_goal_and_leaves_a_spent_budget_a
             profile: Arc::new(|_| Some("test".into())),
             quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected refresh") })),
         };
-        let classifier: Classifier = Arc::new(|_, _| {
-            Box::pin(async { panic!("durable recovery must not be reclassified") })
-        });
         let cancellation = CancellationToken::new();
-        let (mut updates, task) = spawn_in(
-            environment,
-            remote.updates,
-            cancellation.clone(),
-            classifier,
-        );
+        let (mut updates, task) = spawn_in(environment, remote.updates, cancellation.clone());
         let mut recovered = view("one", true);
         let recovery = recovery_for(&recovered, Some(mj_core::clock::epoch_millis() - 1));
         let operational = &mut recovered.snapshot.as_mut().unwrap().operational;
@@ -1288,7 +660,7 @@ fn distant_quota_reset_records_the_wait_instead_of_scheduling_one() {
 }
 
 #[tokio::test]
-async fn handoff_defers_a_completion_without_consuming_its_trigger() {
+async fn handoff_defers_a_quota_assessment_without_consuming_its_trigger() {
     let remote = spawn_remote_session_manager().unwrap();
     remote.targets.send_replace(vec![RelaySessionTarget {
         session_id: "one".into(),
@@ -1296,11 +668,15 @@ async fn handoff_defers_a_completion_without_consuming_its_trigger() {
         worker_recovery: None,
         project_memory: None,
     }]);
+    let (calls, mut requests) = mpsc::unbounded_channel();
     let environment = Environment {
         start_quota_move: Arc::new(|_, _, _| {
             Box::pin(async { anyhow::bail!("unexpected Move start") })
         }),
-        quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected quota request") })),
+        quota: Arc::new(move |_, _| {
+            calls.send(()).unwrap();
+            Box::pin(async { anyhow::bail!("end isolated quota probe") })
+        }),
         profile: Arc::new(|_| Some("test".into())),
         log: None,
         control: remote.control,
@@ -1309,17 +685,6 @@ async fn handoff_defers_a_completion_without_consuming_its_trigger() {
         live: Arc::new(|| live_sessions(&["one"])),
         review: Arc::new(|_, _| {}),
     };
-    let (calls, mut requests) = mpsc::unbounded_channel();
-    let classifier: Classifier = Arc::new(move |_, _| {
-        calls.send(()).unwrap();
-        Box::pin(async {
-            Ok(ContinuationVerdict {
-                quota_limit: 0.0,
-                unfinished: 0.0,
-                no_input_needed: 0.0,
-            })
-        })
-    });
     let gate = Arc::new(crate::upgrade::Gate::default());
     let blocker = gate.enter("accepted operation").unwrap();
     assert!(!gate.try_close());
@@ -1328,24 +693,19 @@ async fn handoff_defers_a_completion_without_consuming_its_trigger() {
         environment,
         remote.updates,
         cancellation.clone(),
-        classifier,
         gate.clone(),
     );
+    let mut assessed = view("one", true);
+    quota_assessed(&mut assessed);
     remote
         .publisher
-        .publish("one".into(), view("one", false))
-        .await
-        .unwrap();
-    receive(&mut updates).await;
-    remote
-        .publisher
-        .publish("one".into(), view("one", true))
+        .publish("one".into(), assessed)
         .await
         .unwrap();
     receive(&mut updates).await;
     assert!(requests.try_recv().is_err());
     // When the upgrading client goes away, draining lapses. No new worker
-    // publication is needed to recover the refused completed-turn trigger.
+    // publication is needed to recover the refused assessment.
     drop(blocker);
     tokio::time::timeout(Duration::from_secs(12), requests.recv())
         .await
@@ -1357,7 +717,7 @@ async fn handoff_defers_a_completion_without_consuming_its_trigger() {
     remote.shutdown.shutdown().await.unwrap();
 }
 
-/// A continuation service with no sessions, reading updates from `input`.
+/// The update service with no sessions, reading updates from `input`.
 fn idle_feed(
     control: SessionManagerControl,
     input: SessionManagerUpdates,
@@ -1376,9 +736,7 @@ fn idle_feed(
         quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected quota request") })),
         profile: Arc::new(|_| None),
     };
-    let classifier: Classifier =
-        Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected classification") }));
-    let (updates, service) = spawn_in(environment, input, cancellation, classifier);
+    let (updates, service) = spawn_in(environment, input, cancellation);
     UpdateFeed::new(updates, service)
 }
 
@@ -2279,58 +1637,32 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
             live: Arc::new(|| live_sessions(&["one"])),
             review: Arc::new(|_, _| {}),
         };
-        let (classified, mut classifications) = mpsc::unbounded_channel();
-        let classifier: Classifier = Arc::new(move |_, _| {
-            let (answer, result) = oneshot::channel();
-            classified.send(answer).unwrap();
-            Box::pin(async move { result.await.context("classification cancelled")? })
-        });
         let gate = Arc::new(crate::upgrade::Gate::default());
         let mut cancellation = CancellationToken::new();
         let (mut updates, mut task) = spawn_with_gate(
             environment.clone(),
             remote.updates,
             cancellation.clone(),
-            classifier.clone(),
             gate.clone(),
         );
         let mut blocked = view("one", true);
-        if case == "assessment-reconnect" {
-            use mj_core::assessment::{
-                Action, Failure, Input, Judgment, Status, TurnAssessment, Verdict, Work,
-            };
-            let snapshot = blocked.snapshot.as_mut().unwrap();
-            let operational = &mut snapshot.operational;
-            operational.relay_protocol_version = Some(mj_core::assessment::PROTOCOL);
-            operational.assessment_context = Some(Default::default());
-            let mut assessment = TurnAssessment::pending(
-                "request".into(),
-                3,
-                3,
-                mj_core::activity::verdict::CompletionEvidence::bounded("turn_completed", None),
+        quota_assessed(&mut blocked);
+        if case == "complete" {
+            // A reply the worker found finished is left untouched.
+            let assessment = std::sync::Arc::make_mut(
+                blocked
+                    .snapshot
+                    .as_mut()
+                    .unwrap()
+                    .operational
+                    .assessment
+                    .as_mut()
+                    .unwrap(),
             );
-            assessment.verdict = Some(Verdict {
-                failure: Judgment {
-                    choice: Failure::Quota,
-                    confidence: 0.99,
-                    probabilities: Default::default(),
-                },
-                input: Judgment {
-                    choice: Input::Unclear,
-                    confidence: 0.5,
-                    probabilities: Default::default(),
-                },
-                work: Judgment {
-                    choice: Work::Unclear,
-                    confidence: 0.5,
-                    probabilities: Default::default(),
-                },
-                background: None,
-                reply: None,
-            });
-            assessment.action = Some(Action::RecoverQuota);
-            assessment.status = Status::Deferred;
-            operational.assessment = Some(std::sync::Arc::new(assessment));
+            assessment.action = Some(mj_core::assessment::Action::Finished);
+            assessment.status = mj_core::assessment::Status::Assessed;
+        }
+        if case == "assessment-reconnect" {
             let mut disconnected = blocked.clone();
             disconnected.connected = false;
             remote
@@ -2340,32 +1672,17 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
                 .unwrap();
             receive(&mut updates).await;
             assert!(preparations.try_recv().is_err());
-            assert!(classifications.try_recv().is_err());
         }
-        // Initial attachment alone must rediscover a legacy turn after handoff.
+        // Initial attachment alone must rediscover the durable assessment.
         remote
             .publisher
             .publish("one".into(), blocked.clone())
             .await
             .unwrap();
         receive(&mut updates).await;
-        if case != "assessment-reconnect" {
-            observed(classifications.recv())
-                .await
-                .unwrap()
-                .send(Ok(ContinuationVerdict {
-                    quota_limit: if case == "complete" { 0.0 } else { 0.99 },
-                    unfinished: 0.0,
-                    no_input_needed: 0.0,
-                }))
-                .unwrap();
-        } else {
-            assert!(
-                classifications.try_recv().is_err(),
-                "worker assessment is already durable"
-            );
+        if case != "complete" {
+            receive(&mut updates).await;
         }
-        receive(&mut updates).await;
         if case == "complete" {
             assert!(
                 preparations.try_recv().is_err(),
@@ -2388,8 +1705,8 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
                 .unwrap();
             receive(&mut updates).await;
             assert!(
-                classifications.try_recv().is_err(),
-                "one service must not recheck the same attached turn"
+                preparations.try_recv().is_err(),
+                "a finished reply is never prepared for quota recovery"
             );
             cancellation.cancel();
             task.await.unwrap().unwrap();
@@ -2505,17 +1822,8 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
                 .await
                 .unwrap();
             receive(&mut updates).await;
-            observed(classifications.recv())
-                .await
-                .unwrap()
-                .send(Ok(ContinuationVerdict {
-                    quota_limit: 0.99,
-                    unfinished: 0.0,
-                    no_input_needed: 0.0,
-                }))
-                .unwrap();
             // A new publication with the same turn/evidence must join the
-            // resumed decision, rather than start another classification.
+            // resumed decision, rather than start another one.
             reconnected
                 .snapshot
                 .as_mut()
@@ -2528,7 +1836,6 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
                 .await
                 .unwrap();
             receive(&mut updates).await;
-            assert!(classifications.try_recv().is_err());
         }
         if case == "identity" {
             config.profiles.get_mut("claude").unwrap().home = home.path().join("other-account");
@@ -2570,7 +1877,6 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
                 environment,
                 remote.updates,
                 cancellation.clone(),
-                classifier,
                 Arc::new(crate::upgrade::Gate::default()),
             );
             remote
@@ -2579,15 +1885,6 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
                 .await
                 .unwrap();
             receive(&mut updates).await;
-            observed(classifications.recv())
-                .await
-                .unwrap()
-                .send(Ok(ContinuationVerdict {
-                    quota_limit: 0.99,
-                    unfinished: 0.0,
-                    no_input_needed: 0.0,
-                }))
-                .unwrap();
             receive(&mut updates).await;
             assert!(
                 observed(preparations.recv()).await.unwrap(),
@@ -2632,10 +1929,6 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
             assert!(
                 preparations.try_recv().is_err(),
                 "reconnect prepares the quota decision once"
-            );
-            assert!(
-                classifications.try_recv().is_err(),
-                "reconnect classifies the same turn once"
             );
         }
         reply

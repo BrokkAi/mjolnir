@@ -16,7 +16,6 @@
 │                     │                                                                                              │                     │
 │                     │   Sessions                                                                                   │                     │
 │                     │   Code Review                     Off                                                        │                     │
-│                     │   Continuation                    On · 3 continuations plus quota recovery                   │                     │
 │                     │   Sub-agents                      Up to 6 at once                                            │                     │
 │                     │   Quota checks                    Auto · container when available                            │                     │
 │                     │   SessionWiki                     Keeps every session                                        │                     │
@@ -26,12 +25,13 @@
 │                     │   Interface                       Monochrome (NO_COLOR; configured: Midnight) · sidebar left │                     │
 │                     │   Notifications                   Terminal                                                   │                     │
 │                     │   Advanced                        All off                                                    │                     │
-│                     │                                                                                              │  ───────────────────╯
-│                     │   Privacy                                                                                    │  ───────────────────╮
-│                     │   Jev (hosted service)            On · sends turn text for classification                    │                     │
 │                     │                                                                                              │                     │
-│                     │   Other                                                                                      │  ───────────────────╯
-│                     │   GitHub events                   On · GitHub activity                                       │  ──────────── ▁   ▄ ╮
+│                     │   Privacy                                                                                    │  ───────────────────╯
+│                     │   Jev (hosted service)            On · sends turn text for classification                    │  ───────────────────╮
+│                     │                                                                                              │                     │
+│                     │   Other                                                                                      │                     │
+│                     │   GitHub events                   On · GitHub activity                                       │  ───────────────────╯
+│                     │                                                                                              │  ──────────── ▁   ▄ ╮
 │                     │                                                                                              │                     │
 │                     │                                                                                              │  ───────────────────╯
 │                     │   Save and Close                                                                             │  ──────────── ▁   ▄ ╮
@@ -156,7 +156,6 @@ draft paths: theme="light"; interface.theme present=false; keys.prefix="ctrl+b"
   │                                                                                              │
   │   Sessions                                                                                   │
   │   Code Review                     Off                                                        │
-  │   Continuation                    On · 3 continuations plus quota recovery                   │
   │   Sub-agents                      Up to 6 at once                                            │
   │   Quota checks                    Auto · container when available                            │
   │   SessionWiki                     Keeps every session                                        │
@@ -167,6 +166,7 @@ draft paths: theme="light"; interface.theme present=false; keys.prefix="ctrl+b"
   │   Notifications                   Terminal                                                   │
   │   Advanced                        All off                                                    │
   │                                                                                              │
+  │   Privacy                                                                                    │
   │   Save and Close                                                                             │
   ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 
@@ -354,7 +354,6 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │                                                                                              │
   │   Sessions                                                                                   │
   │   Code Review                     Off                                                        │
-  │   Continuation                    On · 3 continuations plus quota recovery                   │
   │   Sub-agents                      Up to 6 at once                                            │
   │   Quota checks                    Auto · container when available                            │
   │   SessionWiki                     Keeps every session                                        │
@@ -365,6 +364,7 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │   Notifications                   Terminal                                                   │
   │   Advanced                        All off                                                    │
   │                                                                                              │
+  │   Privacy                                                                                    │
   │   Save and Close                                                                             │
   ╰ ↑/↓ move · Enter apply/open · Tab moves · Esc back ──────────────────────────────────────────╯
 

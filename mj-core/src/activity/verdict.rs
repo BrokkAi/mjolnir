@@ -1,5 +1,4 @@
 //! Bounded turn evidence and conservative decisions for the optional Jev classifier.
-use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
@@ -337,26 +336,6 @@ pub fn stale_finished(evidence: &TurnEvidence, verdict: &TurnVerdict) -> bool {
         }) || assessment.action(false) == crate::assessment::Action::Finished)
 }
 
-/// Resolve once during startup, outside an event or render loop. Never log this value.
-pub fn api_key() -> Option<String> {
-    resolve_key(
-        std::env::var("TYPESAFE_API_KEY").ok().as_deref(),
-        crate::path_input::user_home().as_deref(),
-    )
-}
-
-fn resolve_key(environment: Option<&str>, home: Option<&Path>) -> Option<String> {
-    fn nonblank(value: &str) -> Option<String> {
-        let value = value.trim();
-        (!value.is_empty()).then(|| value.to_owned())
-    }
-    environment.and_then(nonblank).or_else(|| {
-        let value =
-            std::fs::read_to_string(home?.join(".secrets").join("typesafe_api_key")).ok()?;
-        nonblank(&value)
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -581,28 +560,5 @@ mod tests {
             }
         }
         assert!(TurnVerdict::parse(&json!({})).is_err());
-    }
-
-    #[test]
-    fn key_resolution_prefers_nonblank_environment_and_trims_file() {
-        let home = tempfile::tempdir().unwrap();
-        std::fs::create_dir(home.path().join(".secrets")).unwrap();
-        let file = home.path().join(".secrets/typesafe_api_key");
-        std::fs::write(&file, " file-key\n").unwrap();
-        assert_eq!(
-            resolve_key(Some(" env-key \n"), Some(home.path())).as_deref(),
-            Some("env-key")
-        );
-        assert_eq!(
-            resolve_key(Some("  "), Some(home.path())).as_deref(),
-            Some("file-key")
-        );
-        assert_eq!(
-            resolve_key(None, Some(home.path())).as_deref(),
-            Some("file-key")
-        );
-        std::fs::write(&file, " \n").unwrap();
-        assert_eq!(resolve_key(None, Some(home.path())), None);
-        assert_eq!(resolve_key(None, None), None);
     }
 }

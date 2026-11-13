@@ -224,8 +224,10 @@ pub enum ActivityState {
     },
     /// A native goal is active; durable intent alone is not work in flight.
     Goal,
-    /// The daemon is checking whether already-authorized work should continue.
-    CheckingContinuation,
+    /// The daemon is checking or waiting on a provider quota recovery. The wire
+    /// value predates the rename and stays for older readers and writers.
+    #[serde(rename = "checking-continuation")]
+    CheckingQuota,
     /// The worker is waiting to resubmit a prompt the provider refused for
     /// capacity. Nothing is computing, but the session is not finished.
     Retry,
@@ -265,7 +267,7 @@ impl ActivityState {
             Self::Expecting { .. }
             | Self::Idle { .. }
             | Self::Goal
-            | Self::CheckingContinuation
+            | Self::CheckingQuota
             | Self::Retry
             | Self::Closed
             | Self::Unrecognized => false,
@@ -307,7 +309,7 @@ impl ActivityState {
             Self::Expecting { .. }
             | Self::Background { .. }
             | Self::Goal
-            | Self::CheckingContinuation
+            | Self::CheckingQuota
             | Self::Retry
             | Self::Idle { .. } => RelayExecutionState::Idle,
             Self::Unknown { last_known, .. } => last_known.chat_phase(),

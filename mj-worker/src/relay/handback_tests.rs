@@ -47,14 +47,6 @@ fn handback_attempt_survives_restart_and_reminders_but_new_assignment_gets_a_che
             .contains("Assistant progress")
     );
     let stale_snapshot = std::fs::read(root.path().join(RELAY_STATE_FILE)).unwrap();
-    relay.set_continuation_enabled(false);
-    assert!(
-        relay
-            .prepare_handback_check("Disabled continuation")
-            .unwrap()
-            .is_none()
-    );
-    relay.set_continuation_enabled(true);
     let (_, _, evidence) = relay
         .prepare_handback_check("Implementation still needs validation.")
         .unwrap()

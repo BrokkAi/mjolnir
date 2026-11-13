@@ -725,7 +725,6 @@ impl Controller {
             );
         }
         apply_jev_switch(&mut launch, self.config.jev.enabled);
-        apply_continuation_switch(&mut launch, self.config.automatic_continuation_enabled());
         launch.agent_mailboxes_enabled = true;
         launch.subagents = session
             .subagents
@@ -964,30 +963,14 @@ impl Controller {
 }
 
 /// Carries `[jev] enabled = false` to the worker, which reads it from its
-/// launch environment, and keeps the Jev key out of the worker and the
-/// harness so nothing can reach the service.
+/// launch environment and then makes no classifier calls.
 pub(super) fn apply_jev_switch(launch: &mut WorkerLaunchConfig, enabled: bool) {
     if enabled {
         return;
     }
     for environment in [&mut launch.target_environment, &mut launch.environment] {
-        environment.remove("TYPESAFE_API_KEY");
         environment.insert(
             mj_core::jev::DISABLED_ENVIRONMENT.to_owned(),
-            "1".to_owned(),
-        );
-    }
-}
-
-/// Tell the worker when nobody will act on a `Continue` verdict, so it does
-/// not park the assessment as deferred. Travels like the Jev switch.
-pub(super) fn apply_continuation_switch(launch: &mut WorkerLaunchConfig, enabled: bool) {
-    if enabled {
-        return;
-    }
-    for environment in [&mut launch.target_environment, &mut launch.environment] {
-        environment.insert(
-            mj_core::jev::CONTINUATION_DISABLED_ENVIRONMENT.to_owned(),
             "1".to_owned(),
         );
     }
@@ -1135,11 +1118,6 @@ pub(super) fn worker_launch_config_with_checkout(
         if let Ok(value) = std::env::var(name) {
             target_environment.insert(name.to_owned(), value);
         }
-    }
-    // Resolve the daemon's local key before launching remote or container
-    // workers, whose home directories do not contain its secrets file.
-    if let Some(key) = mj_core::activity::verdict::api_key() {
-        target_environment.insert("TYPESAFE_API_KEY".to_owned(), key);
     }
     // The build cache reaches the harness, its terminals, and the reviewer
     // sidecar, all of which run Cargo through the mbx shim.
