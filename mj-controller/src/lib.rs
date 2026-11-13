@@ -22,6 +22,7 @@ pub(crate) mod handoff;
 pub mod harness_login;
 pub mod image;
 pub mod import;
+pub mod observe;
 pub mod opencode_logins;
 pub mod profile_health;
 pub mod profile_login;
