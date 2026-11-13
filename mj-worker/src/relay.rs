@@ -303,9 +303,6 @@ pub struct DurableRelay {
     /// Whether Kimi's provider-owned background work is synchronized. Other
     /// policies leave this absent.
     background_work_known: Option<bool>,
-    /// Whether the daemon will act on a `Continue` verdict. Off when the
-    /// launch environment says automatic continuation is disabled.
-    continuation_enabled: bool,
     /// The classifier the sub-agent handback check asks. Only the Unix worker
     /// sets and reads it; the field stays on Windows so the relay type matches.
     #[cfg_attr(not(unix), allow(dead_code))]
@@ -631,7 +628,6 @@ impl DurableRelay {
             kimi_observed_task_ids: BTreeSet::new(),
             kimi_observed_tool_ids: BTreeSet::new(),
             background_work_known: None,
-            continuation_enabled: true,
             handback_verdict_client: None,
             task_settled_at_ms: None,
             active_agent_terminals: BTreeMap::new(),
@@ -1110,11 +1106,6 @@ impl DurableRelay {
     #[cfg(unix)]
     pub(crate) fn uses_claude_harness_turns(&self) -> bool {
         self.harness_turns == HarnessTurnPolicy::ClaudeAdapter
-    }
-
-    /// Whether a `Continue` verdict may be parked for the daemon to act on.
-    pub fn set_continuation_enabled(&mut self, enabled: bool) {
-        self.continuation_enabled = enabled;
     }
 
     /// Launch metadata owns this fact, including older environment-only launches.

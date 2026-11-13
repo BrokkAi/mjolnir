@@ -398,9 +398,9 @@ pub(super) fn build_observation(
         // dashboard shows. The actor's own view never carries it.
         if observation.activity.is_idle()
             && session.activity_state
-                == Some(mj_core::activity::ActivityState::CheckingContinuation)
+                == Some(mj_core::activity::ActivityState::CheckingQuota)
         {
-            observation.activity = mj_core::activity::ActivityState::CheckingContinuation;
+            observation.activity = mj_core::activity::ActivityState::CheckingQuota;
         }
         observation
             .pending_elicitations

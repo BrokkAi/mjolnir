@@ -459,7 +459,7 @@ fn publish(
 ) {
     if checking {
         if let Some(snapshot) = &mut view.snapshot {
-            snapshot.operational.activity = Some(ActivityState::CheckingContinuation);
+            snapshot.operational.activity = Some(ActivityState::CheckingQuota);
         }
     } else if view.snapshot.as_ref().is_none_or(|s| {
         s.operational

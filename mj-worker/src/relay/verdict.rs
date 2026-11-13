@@ -440,7 +440,7 @@ impl DurableRelay {
             .as_ref()
             .map(|g| serde_json::to_value(g).expect("typed probabilities serialize"));
         let action = if let Some(answers) = &answers {
-            mj_core::activity::eot_glide::action(answers, complete)
+            mj_core::activity::eot_glide::action(answers)
         } else {
             verdict
                 .as_ref()
@@ -506,16 +506,12 @@ impl DurableRelay {
                     a.status = Status::Deferred;
                     "quota_resolution_required"
                 }
-                Action::Continue if !self.continuation_enabled => "continuation_disabled",
-                Action::Continue if self.snapshot.continuation.eligible() => {
-                    a.status = Status::Deferred;
-                    "authorized_continuation_ready"
-                }
-                Action::Continue => "continuation_allowance_unavailable",
                 Action::AwaitInput => "user_input_required",
                 Action::Finished => "work_finished",
                 Action::Wait => "background_work_pending",
-                Action::Uncertain => "assessment_uncertain",
+                // `Continue` is legacy: stored assessments may carry it, but
+                // nothing acts on it, so it reads as uncertain.
+                Action::Uncertain | Action::Continue => "assessment_uncertain",
             }
         };
         a.reason = reason.into();
@@ -2160,81 +2156,6 @@ mod settled_task_tests {
         assert_eq!(completion.decision, Decision::KeepCurrent);
     }
 
-    // Hard-won: 1ee54bfa: a disabled continuation left its unconsumed Continue verdict holding `mj wait` open.
-    #[test]
-    fn a_continue_verdict_is_not_parked_when_nobody_will_act_on_it() {
-        use crate::relay::test_support::{prompt, submit_relay};
-        use agent_client_protocol::v1::schema::{ContentBlock, ContentChunk, TextContent};
-        use mj_core::assessment::{Failure, Input, Judgment, Status, Verdict, Work};
-        use mj_core::relay::RelayCommandOutcome;
-        let dir = tempfile::tempdir().unwrap();
-        let mut relay = claude_relay(dir.path());
-        relay
-            .record_observation(RelayObservation::SessionConfigured {
-                config_options: vec![],
-            })
-            .unwrap();
-        relay.set_continuation_enabled(false);
-        // A real user prompt, so the authorization history is complete and
-        // the verdict can reach `Continue` at all.
-        submit_relay(
-            &mut relay,
-            "original-prompt",
-            prompt("Fix the failing test and push when done."),
-        );
-        assert_eq!(
-            relay.claim_pending_commands(true).unwrap()[0].command_id,
-            "original-prompt"
-        );
-        relay
-            .record_session_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                ContentBlock::Text(TextContent::new("Fixed the test. I'll push next.")),
-            )))
-            .unwrap();
-        relay
-            .record_command_completed(
-                "original-prompt",
-                RelayCommandOutcome::Prompt {
-                    work_facts: None,
-                    diagnostic: None,
-                    stop_reason: "EndTurn".into(),
-                    usage: None,
-                },
-            )
-            .unwrap();
-        relay.prepare_pending_assessment().unwrap();
-        let (generation, evidence, _) = relay.pending_replied_verdict().unwrap();
-        assert!(evidence.authorization.is_some());
-        let verdict = Verdict {
-            failure: Judgment {
-                choice: Failure::None,
-                confidence: 0.99,
-                probabilities: Default::default(),
-            },
-            input: Judgment {
-                choice: Input::None,
-                confidence: 0.99,
-                probabilities: Default::default(),
-            },
-            work: Judgment {
-                choice: Work::AuthorizedUnfinished,
-                confidence: 0.99,
-                probabilities: Default::default(),
-            },
-            background: None,
-            reply: None,
-        };
-        let reason = relay.apply_turn_assessment(generation, verdict).unwrap();
-        assert_eq!(reason, "continuation_disabled");
-        let assessment = relay.snapshot.assessment.as_ref().unwrap();
-        assert_eq!(
-            assessment.status,
-            Status::Assessed,
-            "nothing would consume a deferred one"
-        );
-        assert!(!relay.operational_state().retry_assessment_pending);
-    }
-
     #[test]
     fn stopped_tasks_do_not_anticipate_a_notification_turn() {
         let dir = tempfile::tempdir().unwrap();
@@ -2278,7 +2199,7 @@ impl DurableRelay {
         &mut self,
         report: &str,
     ) -> Result<Option<(String, u64, TurnEvidence)>> {
-        if !self.continuation_enabled || mj_core::jev::continuation_disabled_by_environment() {
+        if mj_core::jev::disabled_by_environment() {
             return Ok(None);
         }
         let Some(harness) = self.verdict_harness else {

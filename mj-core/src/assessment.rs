@@ -322,6 +322,8 @@ impl Verdict {
 pub enum Action {
     RetryProvider,
     RecoverQuota,
+    /// Legacy: decoded from stored assessments; no longer produced by the
+    /// GLiDE rule, and nothing acts on it.
     Continue,
     AwaitInput,
     Finished,

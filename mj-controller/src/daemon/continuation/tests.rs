@@ -178,7 +178,7 @@ async fn continuation_checks_run_concurrently_and_defer_review_until_each_settle
         let update = receive(&mut updates).await;
         assert_eq!(
             update.view.snapshot.unwrap().operational.activity,
-            Some(ActivityState::CheckingContinuation)
+            Some(ActivityState::CheckingQuota)
         );
     }
     let (evidence, first) = tokio::time::timeout(Duration::from_secs(3), requests.recv())
@@ -313,7 +313,7 @@ async fn continuation_rechecks_disconnected_attachment_once_and_new_input_cancel
     let update = receive(&mut updates).await;
     assert_ne!(
         update.view.snapshot.unwrap().operational.activity,
-        Some(ActivityState::CheckingContinuation)
+        Some(ActivityState::CheckingQuota)
     );
     tokio::task::yield_now().await;
     assert!(reply.is_closed());
@@ -485,7 +485,7 @@ async fn continuation_submits_a_guarded_prompt_and_reviews_only_after_the_chain(
         let update = receive(&mut updates).await;
         assert_eq!(
             update.view.snapshot.unwrap().operational.activity,
-            Some(ActivityState::CheckingContinuation)
+            Some(ActivityState::CheckingQuota)
         );
         let answer = tokio::time::timeout(Duration::from_secs(3), requests.recv())
             .await

@@ -1046,7 +1046,7 @@ pub(super) fn viewer_activity_details(
             mj_client::usage_format::SessionActivityKind::Lifecycle
             | mj_client::usage_format::SessionActivityKind::Goal
             | mj_client::usage_format::SessionActivityKind::Expecting
-            | mj_client::usage_format::SessionActivityKind::CheckingContinuation => {
+            | mj_client::usage_format::SessionActivityKind::CheckingQuota => {
                 ViewerActivityKind::Lifecycle
             }
         },

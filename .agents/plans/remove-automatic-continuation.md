@@ -10,7 +10,7 @@ After this change, mj never sends an automatic "continue" prompt for ordinary un
 
 ## Progress
 
-- [ ] Milestone 1: worker and core: remove the GLiDE Continue switch, the worker `continuation_enabled` flag and its environment variable, keep legacy decoding.
+- [x] (2026-11-13) Milestone 1: worker and core: remove the GLiDE Continue switch, the worker `continuation_enabled` flag and its environment variable, keep legacy decoding.
 - [ ] Milestone 2: daemon: remove the automatic-continuation decider and submit path; keep quota recovery, the seed job, the update feed and the review observer.
 - [ ] Milestone 3: configuration, settings UI, goldens, docs, shipped skill, e2e scripts, AGENTS.md.
 - [ ] Milestone 4: proxy: keep serving the old routes, move their question files into the proxy package.
@@ -21,6 +21,8 @@ After this change, mj never sends an automatic "continue" prompt for ordinary un
 - Observation: `mj-controller/src/daemon/continuation.rs` (about 1,235 lines) is not only automatic continuation. It also owns quota recovery, the "seed authorization" job, the update feed that every session update passes through, and the review observer. It cannot be deleted; only its automatic-continuation branches go.
   Evidence: reconnaissance map `.mj/agents/4dad49d8c7e779ee135dfb0efba16a3d/MAP.md` §2.2 (not checked in; facts repeated below).
 - Observation: the `[continuation] enabled` switch also gates quota recovery (`claim()` in `daemon/continuation.rs` ~402-424 calls `Config::automatic_continuation_enabled()`, which is `continuation.enabled && jev.enabled`).
+- Observation: Cargo package names carry a `brokk-` prefix (`cargo test -p brokk-mj-worker`).
+- Observation: the worker's live `ContinueAuthorizedWork` handler was the only thing the quota tests used to raise `attempts`; those tests were reduced to their quota assertions (`attempts` now stays 0 live and is only set by replaying old journals). `generated_prompts_neither_renew_allowance_nor_grant_authorization` was kept, trimmed and renamed `generated_prompts_do_not_grant_authorization`, because its Hard-won marker (8b08e8bc1: handback reminders and peer messages must not count as user authorization) still applies to quota recovery's `user_command_id`.
 - Observation: the worker flag `continuation_enabled` also gates the sub-agent handback check (`mj-worker/src/relay/verdict.rs` ~2281).
 
 ## Decision Log
@@ -51,6 +53,12 @@ After this change, mj never sends an automatic "continue" prompt for ordinary un
   Date/Author: 2026-11-13, parent session.
 - Decision: the daemon module keeps its name `daemon/continuation.rs`.
   Rationale: quota recovery is also a continuation; renaming a 1,200-line module adds churn without changing behavior.
+  Date/Author: 2026-11-13, parent session.
+
+- Decision (revises the abstention decision above): the GLiDE rule's Continue branch and `CONTINUE_FLOOR` are deleted outright, not kept as an explicit abstention, and `eot_glide::action` loses its `authorization_complete` parameter. The frozen-sample test is renamed `frozen_fresh_test_probabilities_match_research`.
+  Rationale: output-equivalent. When the branch's condition held, `turn_state.continue` >= .90 forces `turn_state.finished` <= .10 (< `FINISHED_CATEGORICAL` .916) and `work.authorized_unfinished` >= .90 forces `work.waiting` <= .10 (< `WAITING_WORK_WINNER` .40), so the function already fell through to the final `Action::Uncertain`.
+  Date/Author: 2026-11-13, parent session.
+- Decision: the daemon's quota assessment path stays. The admission formerly labelled "automatic continuation" is relabelled "quota assessment"; the unified-worker branch that turns a worker's `Action::RecoverQuota` assessment into quota resolution stays, and so does whatever minimal quota-only value it needs in place of `ContinuationVerdict`. Only the Continue parts and the legacy non-unified Jev classify branch go. A quota test must cover a worker `RecoverQuota` assessment leading to a scheduled recovery.
   Date/Author: 2026-11-13, parent session.
 
 ## Outcomes & Retrospective

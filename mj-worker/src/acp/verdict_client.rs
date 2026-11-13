@@ -682,7 +682,7 @@ impl VerdictClient {
             let body = glide_turn::project(evidence, history.clone(), facts, native)?;
             if let Some(log) = &attempt.diagnostic { log.update(None, serde_json::json!({"request":body,"contract":"glide-turn-v1"})); }
             let answer = self.ask_glide_turn(evidence, history, facts, native).await?;
-            if let Some(log) = &attempt.diagnostic { log.update(None, serde_json::json!({"probabilities":answer,"action":mj_core::activity::eot_glide::action(&serde_json::to_value(&answer)?, evidence.authorization.as_ref().is_some_and(|h| h.authorization_complete && !h.final_reply_omitted))})); }
+            if let Some(log) = &attempt.diagnostic { log.update(None, serde_json::json!({"probabilities":answer,"action":mj_core::activity::eot_glide::action(&serde_json::to_value(&answer)?)})); }
             Ok(answer)
         }.await;
         match &result {
