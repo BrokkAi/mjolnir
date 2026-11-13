@@ -270,7 +270,9 @@ pub(super) async fn start_session(
         .start_followup(
             session_id.clone(),
             StartFollowup {
-                model: request.model,
+                model: model_selection
+                    .map(|selection| selection.model)
+                    .or(request.model),
                 effort: request.effort,
                 prompt: request.prompt,
                 ..Default::default()

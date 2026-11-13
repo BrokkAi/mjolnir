@@ -324,25 +324,30 @@ where
         .unwrap_or_default()
         .reviewers;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let all = available
+        .iter()
+        .flat_map(|(_, choices)| choices.models.iter().cloned())
+        .collect::<Vec<_>>();
     let mut pairs = Vec::new();
     for model in draft
         .iter()
         .map(|choice| &choice.model)
         .collect::<BTreeSet<_>>()
     {
+        let identity = mj_core::model_catalog::model_id(&all, model);
         for (profile, offered) in available {
-            if offered.models.iter().any(|choice| &choice.value == model) {
-                pairs.push((model.clone(), profile.clone(), offered));
+            if let Some(offer) = mj_core::model_catalog::offer(&offered.models, &identity, model) {
+                pairs.push((model.clone(), profile.clone(), offered, offer.value));
             }
         }
     }
     let probe = &probe;
-    let discovered = join_all(pairs.iter().map(|(model, profile, offered)| async move {
-        if offered.model.as_deref() == Some(model) {
+    let discovered = join_all(pairs.iter().map(|(model, profile, offered, value)| async move {
+        if offered.model.as_deref() == Some(value) {
             return Some(offered.efforts.clone());
         }
-        match tokio::time::timeout_at(deadline, probe(profile.clone(), model.clone())).await {
-            Ok(Ok(choices)) if choices.models.iter().any(|choice| &choice.value == model) => Some(choices.efforts),
+        match tokio::time::timeout_at(deadline, probe(profile.clone(), value.clone())).await {
+            Ok(Ok(choices)) if choices.models.iter().any(|choice| &choice.value == value) => Some(choices.efforts),
             Ok(Ok(_)) => {
                 tracing::warn!(%profile, %model, "model-specific reviewer discovery omitted the requested model");
                 None
@@ -359,7 +364,7 @@ where
     })).await;
     let mut efforts = BTreeMap::<String, Vec<mj_core::acp::SessionConfigChoice>>::new();
     let mut known = BTreeMap::<String, bool>::new();
-    for ((model, _, _), result) in pairs.into_iter().zip(discovered) {
+    for ((model, _, _, _), result) in pairs.into_iter().zip(discovered) {
         let model_known = known.entry(model.clone()).or_insert(true);
         if let Some(items) = result {
             let union = efforts.entry(model).or_default();

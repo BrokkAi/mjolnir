@@ -852,10 +852,12 @@ impl ProfileCatalog {
         for model in &choices.models {
             let model_key = (identity.to_owned(), Some(model.value.clone()));
             let current = choices.model.as_ref() == Some(&model.value);
-            let selected = inner
-                .wanted
-                .get(identity)
-                .is_some_and(|wanted| wanted.contains(&model.value));
+            let selected = inner.wanted.get(identity).is_some_and(|wanted| {
+                wanted.iter().any(|wanted| {
+                    mj_core::model_catalog::resolve(&choices.models, wanted)
+                        .is_some_and(|offer| offer.value == model.value)
+                })
+            });
             if inner.entries.contains_key(&model_key) || !(current || selected) {
                 continue;
             }
@@ -1674,6 +1676,7 @@ impl ProfileCatalog {
     pub(crate) fn ready_candidates(&self, model: &str) -> Result<Vec<(String, HarnessKind)>> {
         let config = self.live()?;
         let snapshot = self.snapshot();
+        let identity = snapshot.model_id(&config, model);
         Ok(config
             .enabled_profiles()
             .filter(|(id, profile)| {
@@ -1682,7 +1685,7 @@ impl ProfileCatalog {
                     .get(&profile.capabilities_key(id))
                     .is_some_and(|entry| {
                         matches!(&entry.choices, CapabilityState::Ready(choices)
-                        if model.is_empty() || choices.models.iter().any(|choice| choice.value == model))
+                        if model.is_empty() || mj_core::model_catalog::offer(&choices.models, &identity, model).is_some())
                     })
             })
             .map(|(id, profile)| (id.to_owned(), profile.kind))

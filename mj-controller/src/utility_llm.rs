@@ -1,6 +1,6 @@
 //! Direct, tool-free utility-model selection and inference for compaction.
 
-use mj_core::review::settings::model_version_cmp;
+use mj_core::model_catalog::model_version_cmp;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;

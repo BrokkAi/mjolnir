@@ -139,26 +139,38 @@ where
         .map(|(id, _)| id.clone())
         .collect::<Vec<_>>();
     let mut options = mj_core::subagent::SubagentOptions::default();
-    let results = futures::future::join_all(candidates.into_iter().map(|id| {
-        let model = model.clone();
+    let defaults = futures::future::join_all(candidates.into_iter().map(|id| async move {
+        let result = probe(id.clone(), None)
+            .await
+            .map(|choices| choices.restricted_to(&config.profiles[&id].models));
+        (id, result)
+    }))
+    .await;
+    let models = defaults
+        .iter()
+        .filter_map(|(_, result)| result.as_ref().ok())
+        .flat_map(|choices| choices.models.iter().cloned())
+        .collect::<Vec<_>>();
+    let identity = model
+        .as_deref()
+        .map(|model| mj_core::model_catalog::model_id(&models, model));
+    let results = futures::future::join_all(defaults.into_iter().map(|(id, result)| {
+        let identity = identity.as_deref();
+        let model = model.as_deref();
         async move {
             let result = async {
-                // Both probes apply the profile's `models` list, so a hidden
-                // model is never offered or accepted for delegation. The
-                // model-specific probe runs only for a model the list allows.
-                let allowed = &config.profiles[&id].models;
-                let mut choices = probe(id.clone(), None).await?.restricted_to(allowed);
-                if let Some(model) = model
-                    .as_ref()
-                    .filter(|model| choices.models.iter().any(|choice| &choice.value == *model))
-                {
-                    // That probe switches to the requested model, so restrict
-                    // its list with the default as the kept model, as the
-                    // default probe did.
+                let mut choices = result?;
+                if let Some(offer) = identity.and_then(|identity| {
+                    mj_core::model_catalog::offer(
+                        &choices.models,
+                        identity,
+                        model.unwrap_or(identity),
+                    )
+                }) {
                     let default = choices.model.clone();
-                    let mut specific = probe(id.clone(), Some(model.clone())).await?;
+                    let mut specific = probe(id.clone(), Some(offer.value)).await?;
                     let selected = std::mem::replace(&mut specific.model, default);
-                    specific = specific.restricted_to(allowed);
+                    specific = specific.restricted_to(&config.profiles[&id].models);
                     specific.model = selected;
                     choices = specific;
                 }
@@ -172,10 +184,14 @@ where
     for (id, result) in results {
         match result {
             Ok(choices) => {
-                if model
-                    .as_ref()
-                    .is_some_and(|model| choices.models.iter().any(|choice| &choice.value == model))
-                {
+                if identity.as_deref().is_some_and(|identity| {
+                    mj_core::model_catalog::offer(
+                        &choices.models,
+                        identity,
+                        model.as_deref().unwrap_or(identity),
+                    )
+                    .is_some()
+                }) {
                     for choice in choices.efforts {
                         if !options
                             .efforts

@@ -1,7 +1,8 @@
 //! Ordered reviewer defaults from advertised enabled-profile models.
 use crate::acp::SessionConfigChoice;
 use crate::config::SubagentChoice;
-use crate::review::settings::{ReviewModelFamily, model_version_cmp};
+use crate::model_catalog::{self, model_version_cmp};
+use crate::review::settings::ReviewModelFamily;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,7 +45,8 @@ pub fn fallback_effort(requested: &str, choices: &[SessionConfigChoice]) -> Opti
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelOffer {
     pub choice: SessionConfigChoice,
-    /// Enabled profiles offering this exact value.
+    pub identity: String,
+    /// Enabled profiles offering this model identity.
     pub profiles: usize,
     /// Those profiles that are not usage-priced. A profile whose billing is
     /// unknown counts as a subscription.
@@ -52,7 +54,7 @@ pub struct ModelOffer {
 }
 
 /// Merge each enabled profile's advertised models, flagged usage-priced or
-/// not, into one offer per distinct value, in first-seen order.
+/// not, into one offer per distinct identity, in first-seen order.
 pub fn model_offers<'a>(
     profiles: impl IntoIterator<Item = (&'a [SessionConfigChoice], bool)>,
 ) -> Vec<ModelOffer> {
@@ -60,17 +62,16 @@ pub fn model_offers<'a>(
     for (models, usage_priced) in profiles {
         let mut seen = std::collections::BTreeSet::new();
         for choice in models {
-            if !seen.insert(choice.value.as_str()) {
+            let identity = model_catalog::choice_model_id(choice);
+            if !seen.insert(identity.clone()) {
                 continue;
             }
-            let index = match offers
-                .iter()
-                .position(|offer| offer.choice.value == choice.value)
-            {
+            let index = match offers.iter().position(|offer| offer.identity == identity) {
                 Some(index) => index,
                 None => {
                     offers.push(ModelOffer {
                         choice: choice.clone(),
+                        identity,
                         profiles: 0,
                         subscription_profiles: 0,
                     });
@@ -79,6 +80,15 @@ pub fn model_offers<'a>(
             };
             offers[index].profiles += 1;
             offers[index].subscription_profiles += usize::from(!usage_priced);
+        }
+    }
+    let models = offers
+        .iter()
+        .map(|offer| offer.choice.clone())
+        .collect::<Vec<_>>();
+    for offer in &mut offers {
+        if model_catalog::model_id(&models, &offer.choice.value) != offer.identity {
+            offer.choice.value = offer.identity.clone();
         }
     }
     offers
@@ -99,9 +109,7 @@ pub fn offers_drafted_family(
     all: &[SessionConfigChoice],
     drafted: &[SubagentChoice],
 ) -> bool {
-    let family = |value: &str| {
-        ReviewModelFamily::for_model(&crate::usage::model_catalog::model_id(all, value))
-    };
+    let family = |value: &str| ReviewModelFamily::for_model(&model_catalog::model_id(all, value));
     let drafted = drafted
         .iter()
         .filter_map(|choice| family(&choice.model))
@@ -145,21 +153,17 @@ fn full_model(id: &str) -> bool {
 /// family full models precede reduced variants, then a subscription value
 /// beats one only usage-priced profiles offer, then the value offered by
 /// more enabled profiles wins, then the newest version. Reviewers are load-balanced only across
-/// profiles that offer their exact value, so this keeps reviews on
+/// profiles that offer the same resolved identity, so this keeps reviews on
 /// subscriptions and spread over as many profiles as possible.
 pub fn autoconfigure(
     offers: &[ModelOffer],
     efforts: impl Fn(&str) -> Option<Vec<SessionConfigChoice>>,
 ) -> Option<Autoconfigured> {
-    let models = offers
-        .iter()
-        .map(|offer| offer.choice.clone())
-        .collect::<Vec<_>>();
     // Each family keeps its best (offer, identity) pair; identities decide
     // versions, values are what the reviewer is launched with.
     let mut selected: BTreeMap<ReviewModelFamily, (&ModelOffer, String)> = BTreeMap::new();
     for offer in offers {
-        let id = crate::usage::model_catalog::model_id(&models, &offer.choice.value);
+        let id = offer.identity.clone();
         let Some(family) = ReviewModelFamily::for_model(&id) else {
             continue;
         };
@@ -246,6 +250,44 @@ pub fn autoconfigure(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Hard-won: #1534: alias spellings hid shared capacity and could double-count a profile.
+    #[test]
+    fn model_offers_count_each_profile_once_per_identity_across_harness_aliases() {
+        let recorded: BTreeMap<String, Vec<SessionConfigChoice>> = serde_json::from_str(
+            include_str!("../../tests/fixtures/claude-antigravity-models.json"),
+        )
+        .unwrap();
+        let mut claude = recorded["claude"].clone();
+        claude.push(recorded["antigravity"][2].clone());
+        let offers = model_offers([(&claude[..], false), (&recorded["antigravity"][..], false)]);
+        let sonnet = offers
+            .iter()
+            .find(|offer| offer.identity == "claude-sonnet-5-5")
+            .unwrap();
+        assert_eq!((sonnet.profiles, sonnet.subscription_profiles), (2, 2));
+        assert_eq!(
+            offers
+                .iter()
+                .find(|offer| offer.identity == "claude-sonnet-5")
+                .unwrap()
+                .profiles,
+            1
+        );
+        // An older, more widely offered alias must remain pinned to that
+        // version when Autoconfigure prefers its larger subscription pool.
+        let mut stale = recorded["claude"].clone();
+        stale[1].name = "Sonnet 5".into();
+        let offers = model_offers([
+            (&stale[..], false),
+            (&stale[..], false),
+            (&claude[..], false),
+        ]);
+        assert_eq!(
+            autoconfigure(&offers, |_| None).unwrap().reviewers[0].model,
+            "claude-sonnet-5"
+        );
+    }
 
     fn choices(ids: &[&str]) -> Vec<SessionConfigChoice> {
         ids.iter()

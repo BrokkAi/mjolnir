@@ -246,7 +246,7 @@ pub struct SubagentOptions {
 impl SubagentOptions {
     pub fn validate(&self, choice: &crate::config::SubagentChoice) -> Result<(), String> {
         let crate::config::SubagentChoice { model, effort } = choice;
-        if model.trim().is_empty() || !self.models.iter().any(|choice| &choice.value == model) {
+        if model.trim().is_empty() || crate::model_catalog::resolve(&self.models, model).is_none() {
             return Err(format!(
                 "Selected subagent model {model:?} is unavailable.{} {ELIGIBILITY_NOTE}",
                 choice_list(" Available models", &self.models)
