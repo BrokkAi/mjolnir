@@ -375,12 +375,12 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
 
   ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
   │ Settings › Runtimes                                                                          │
-  │ Add a runtime and choose its machine, or use Detect runtimes to find what every machine can  │
-  │ run.                                                                                         │
+  │ Add a runtime and choose its machine, or use Detect runtimes to probe every machine. Add SSH │
+  │ hosts under Machines.                                                                        │
   │                                                                                              │
   │   podman                          10 settings  ›                           Add               │
   │                                                                            Detect runtimes   │
-  │                                                                                              │
+  │                                                                            Machines          │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -535,12 +535,12 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
 
   ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
   │ Settings › Runtimes                                                                          │
-  │ Add a runtime and choose its machine, or use Detect runtimes to find what every machine can  │
-  │ run.                                                                                         │
+  │ Add a runtime and choose its machine, or use Detect runtimes to probe every machine. Add SSH │
+  │ hosts under Machines.                                                                        │
   │                                                                                              │
   │   podman                          10 settings  ›                           Add               │
   │                                                                            Detect runtimes   │
-  │                                                                                              │
+  │                                                                            Machines          │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -567,12 +567,12 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
 
   ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
   │ Settings › Runtimes                                                                          │
-  │ Add a runtime and choose its machine, or use Detect runtimes to find what every machine can  │
-  │ run.                                                                                         │
+  │ Add a runtime and choose its machine, or use Detect runtimes to probe every machine. Add SSH │
+  │ hosts under Machines.                                                                        │
   │                                                                                              │
   │   podman                          10 settings  ›                           Add               │
   │                                                                            Detect runtimes   │
-  │                                                                                              │
+  │                                                                            Machines          │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -600,8 +600,8 @@ focused control: Some(Add)
 
   ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮
   │ Settings › Runtimes                                                                          │
-  │ Add a runtime and choose its machine, or use Detect runtimes to find what every machine can  │
-  │ run.                                                                                         │
+  │ Add a runtime and choose its machine, or use Detect runtimes to probe every machine. Add SSH │
+  │ hosts under Machines.                                                                        │
   │                                                                                              │
   │ Name for the new entry                                                               Apply   │
   │                                                                                              │

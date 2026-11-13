@@ -540,6 +540,9 @@ impl DashboardState {
             {
                 dialog.report = Some(ReportState::default());
             }
+            Some(Interaction::Activate(OpenMachines)) => {
+                dialog.open_page(vec!["machines".to_owned()]);
+            }
             Some(Interaction::Edit(Search, edit)) => {
                 if let Some(search) = &mut dialog.search
                     && TextField::apply(&mut search.input, edit)
