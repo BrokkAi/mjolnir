@@ -2264,7 +2264,7 @@ pub(super) fn load_continuation_evidence_from(
             row.get::<_, String>(5)?,
         ))
     })?;
-    crate::continuation::evidence_from_items(rows.map(|row| {
+    mj_transcript::authorization::evidence_from_items(rows.map(|row| {
         let (
             stable_id,
             position,

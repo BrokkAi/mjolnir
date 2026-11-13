@@ -1,41 +1,14 @@
 //! Evidence and durable admission for bounded, already-authorized continuation.
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
-pub const MAX_NUDGES: u8 = 3;
 pub const USER_BYTES: usize = 32 * 1024;
 pub const ASSISTANT_BYTES: usize = 16 * 1024;
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
-pub const CONFIDENCE: f64 = 0.90;
-pub const QUESTIONS: &str = include_str!("continuation/questions.json");
 pub const PROMPT: &str = "Continue the unfinished work already requested by the user, following their latest instructions. This message supplies no new approval or missing information. If a genuine decision, required approval, or external action remains necessary, explain it and stop.";
 /// Historical sub-agent reminder, retained to exclude old journal prompts from authorization.
 pub const PARENT_WAIT_PROMPT_TEXT: &str =
     "One or more sub-agents finished. Call wait to collect their reports.";
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ContinuationConfig {
-    #[serde(default = "enabled_by_default")]
-    pub enabled: bool,
-}
-impl Default for ContinuationConfig {
-    fn default() -> Self {
-        Self::enabled()
-    }
-}
-const fn enabled_by_default() -> bool {
-    true
-}
-impl ContinuationConfig {
-    pub fn enabled() -> Self {
-        Self { enabled: true }
-    }
-    pub fn is_default(&self) -> bool {
-        self.enabled
-    }
-}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContinuationState {
@@ -44,6 +17,8 @@ pub struct ContinuationState {
     pub awaiting_children_since_ms: Option<i64>,
     /// Original user request, or an automatic request retained only for quota recovery.
     pub user_command_id: Option<String>,
+    /// Legacy automatic-continuation counters: still written so older readers
+    /// decode the state, and still set by replaying old journals.
     pub attempts: u8,
     pub suppressed: bool,
     pub completed_command_id: Option<String>,
@@ -89,17 +64,6 @@ pub fn is_quota_goal_resume(command_id: &str) -> bool {
     command_id.starts_with(QUOTA_GOAL_RESUME_PREFIX)
 }
 
-impl ContinuationState {
-    pub fn eligible(&self) -> bool {
-        self.user_command_id
-            .as_deref()
-            .is_some_and(|id| !is_generated_prompt(id))
-            && self.completed_command_id.is_some()
-            && !self.suppressed
-            && self.attempts < MAX_NUDGES
-    }
-}
-
 /// Durable recovery for one completed turn; a missing deadline records abstention.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuotaRecovery {
@@ -123,25 +87,10 @@ pub struct EvidenceMessage {
 #[serde(deny_unknown_fields)]
 pub struct ContinuationEvidence {
     pub assistant_history_omitted: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quota_message: Option<String>,
     pub messages: Vec<EvidenceMessage>,
 }
 impl ContinuationEvidence {
     pub fn validate(&self) -> Result<()> {
-        if let Some(message) = &self.quota_message {
-            ensure!(
-                !message.trim().is_empty() && message.len() <= ASSISTANT_BYTES,
-                "invalid quota evidence"
-            );
-            if self.messages.is_empty() {
-                ensure!(
-                    serde_json::to_vec(self)?.len() <= MAX_BODY_BYTES,
-                    "quota evidence exceeds byte limit"
-                );
-                return Ok(());
-            }
-        }
         ensure!(
             !self.messages.is_empty() && self.messages.len() <= 256,
             "invalid continuation messages"
@@ -176,42 +125,6 @@ impl ContinuationEvidence {
             "continuation evidence exceeds byte limit"
         );
         Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ContinuationVerdict {
-    pub quota_limit: f64,
-    pub unfinished: f64,
-    pub no_input_needed: f64,
-}
-impl ContinuationVerdict {
-    pub fn parse(body: &Value) -> Result<Self> {
-        fn probability(body: &Value, key: &str) -> Result<f64> {
-            let answer = &body["answers"][key];
-            ensure!(answer["type"] == "noul", "invalid continuation answer type");
-            let value = answer["noul"]
-                .as_f64()
-                .ok_or_else(|| anyhow::anyhow!("missing continuation probability"))?;
-            ensure!(
-                value.is_finite() && (0.0..=1.0).contains(&value),
-                "invalid continuation probability"
-            );
-            Ok(value)
-        }
-        Ok(Self {
-            quota_limit: probability(body, "quota_limit")?,
-            unfinished: probability(body, "unfinished")?,
-            no_input_needed: probability(body, "no_input_needed")?,
-        })
-    }
-    pub fn is_quota_limit(self) -> bool {
-        (CONFIDENCE..=1.0).contains(&self.quota_limit)
-    }
-    pub fn should_continue(self) -> bool {
-        !self.is_quota_limit()
-            && (CONFIDENCE..=1.0).contains(&self.unfinished)
-            && (CONFIDENCE..=1.0).contains(&self.no_input_needed)
     }
 }
 
@@ -388,7 +301,6 @@ pub fn is_user_authored_message(stable_id: Option<&str>, text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     // The mining script keeps its own copy of the rules, so the two sides
     // can drift without either failing to compile.
@@ -443,33 +355,8 @@ mod tests {
     }
 
     #[test]
-    fn confident_quota_preempts_ordinary_continuation_and_invalid_scores_fail_closed() {
-        for (score, quota) in [(0.89, false), (0.90, true), (1.0, true)] {
-            let verdict = ContinuationVerdict::parse(&json!({"answers": {
-                "quota_limit": {"type":"noul", "noul":score},
-                "unfinished": {"type":"noul", "noul":1.0},
-                "no_input_needed": {"type":"noul", "noul":1.0}
-            }}))
-            .unwrap();
-            assert_eq!(verdict.is_quota_limit(), quota);
-            assert_eq!(verdict.should_continue(), !quota);
-        }
-        for score in [json!(null), json!(-0.1), json!(1.1), json!("0.99")] {
-            assert!(
-                ContinuationVerdict::parse(&json!({"answers": {
-                    "quota_limit": {"type":"noul", "noul":score},
-                    "unfinished": {"type":"noul", "noul":1.0},
-                    "no_input_needed": {"type":"noul", "noul":1.0}
-                }}))
-                .is_err()
-            );
-        }
-    }
-
-    #[test]
     fn incomplete_and_oversized_evidence_is_rejected() {
         let mut e = ContinuationEvidence {
-            quota_message: None,
             assistant_history_omitted: false,
             messages: vec![
                 EvidenceMessage {

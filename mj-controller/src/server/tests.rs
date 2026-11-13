@@ -84,7 +84,6 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         phone: Default::default(),
         daemon: Default::default(),
         github: Default::default(),
-        continuation: Default::default(),
         review: Default::default(),
         sessionwiki: Default::default(),
         legacy_startup: (),
@@ -5061,15 +5060,6 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
         root(),
         (
             "/api/settings/page",
-            serde_json::json!({"path": ["continuation"]}),
-        ),
-        (
-            "/api/settings/edit",
-            serde_json::json!({"page": ["continuation"], "edit": {"kind": "toggle", "path": ["continuation", "enabled"]}}),
-        ),
-        root(),
-        (
-            "/api/settings/page",
             serde_json::json!({"path": ["subagents"]}),
         ),
         (
@@ -5132,7 +5122,6 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
     assert!(saved.contains(SECRET), "{saved}");
     assert!(saved.contains(RUNTIME_SECRET), "{saved}");
     let saved = Config::load_from(&path).unwrap();
-    assert!(!saved.continuation.enabled);
     assert_eq!(
         serde_json::to_value(&saved.subagents).unwrap()["straightforward"]["model"],
         "opus"

@@ -6528,7 +6528,7 @@ fn continuation_reads_earlier_authorization_outside_the_ui_window_at_one_frontie
         .unwrap()
         .unwrap();
     assert!(metadata.omitted_items > 0);
-    assert!(crate::continuation::evidence(&window).is_err());
+    assert!(mj_transcript::authorization::evidence(&window).is_err());
     let collected = load_continuation_evidence_from(
         &database,
         "session-1",
@@ -6538,7 +6538,7 @@ fn continuation_reads_earlier_authorization_outside_the_ui_window_at_one_frontie
     .unwrap();
     assert_eq!(
         collected,
-        crate::continuation::evidence(&materialized).unwrap()
+        mj_transcript::authorization::evidence(&materialized).unwrap()
     );
     assert_eq!(
         collected.messages[0].text,

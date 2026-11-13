@@ -713,7 +713,6 @@ impl ContextHistory {
         crate::continuation::ContinuationEvidence {
             messages: self.messages.clone(),
             assistant_history_omitted: self.assistant_history_omitted,
-            quota_message: None,
         }
     }
 }

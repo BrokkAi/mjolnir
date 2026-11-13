@@ -496,7 +496,6 @@ fn sample_config() -> Config {
         phone: Default::default(),
         daemon: Default::default(),
         github: Default::default(),
-        continuation: Default::default(),
         review: Default::default(),
         sessionwiki: Default::default(),
         subagents: Default::default(),

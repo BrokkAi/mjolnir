@@ -825,7 +825,6 @@ fn sample_config() -> Config {
         phone: PhoneConfig::default(),
         daemon: Default::default(),
         github: GithubConfig::default(),
-        continuation: Default::default(),
         review: ReviewConfig::default(),
         sessionwiki: SessionWikiConfig::default(),
         subagents: SubagentConfig::default(),
@@ -1424,7 +1423,8 @@ fn github_app_configuration_is_optional_and_round_trips() {
         (Some(true), Some(false), false),
         (Some(true), Some(true), true),
     ] {
-        let mut body = "version = 17\n".to_owned();
+        // Automatic continuation was removed (#1532); its section still loads.
+        let mut body = "version = 17\n[continuation]\nenabled = false\n".to_owned();
         if let Some(enabled) = legacy {
             body.push_str(&format!("[mailbox]\nenabled = {enabled}\n"));
         }
@@ -1437,6 +1437,7 @@ fn github_app_configuration_is_optional_and_round_trips() {
         loaded.save_to(&path).unwrap();
         let saved = fs::read_to_string(&path).unwrap();
         assert!(!saved.contains("[mailbox]"), "{saved}");
+        assert!(!saved.contains("[continuation]"), "{saved}");
         assert_eq!(
             Config::load_from(&path).unwrap().github.watch.enabled,
             expected
