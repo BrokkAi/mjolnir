@@ -222,9 +222,31 @@ impl DurableRelay {
         self.store_assessment(a)
     }
 
+    /// Queue one more completed-turn check for the leftover processes. Waiting
+    /// and uncertain assessments classify again; other completed actions keep
+    /// their authority while the background judgment refreshes.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn request_background_refresh(
+        &mut self,
+        mut a: mj_core::assessment::TurnAssessment,
+    ) -> Result<()> {
+        if matches!(
+            a.action,
+            Some(mj_core::assessment::Action::Wait | mj_core::assessment::Action::Uncertain)
+        ) {
+            a.classify_again(self.snapshot.latest_ordinal + 1);
+        } else {
+            a.revision = self.snapshot.latest_ordinal + 1;
+            a.status = mj_core::assessment::Status::Pending;
+            a.evidence = None;
+        }
+        self.store_assessment(a)
+    }
+
     /// Restore a stored GLiDE judgment only for the inventory it assessed.
     /// Changed inventories refresh through the same durable request admission.
-    /// Legacy Jev judgments remain process-local and are reasked after restart.
+    /// Legacy Jev judgments remain process-local and are reasked after restart,
+    /// and so is an unclear stored GLiDE judgment, once per restart.
     #[cfg_attr(not(unix), allow(dead_code))]
     fn reask_background_after_restart(&mut self) -> Result<()> {
         if self.verdict_harness.is_none() {
@@ -262,29 +284,24 @@ impl DurableRelay {
                 if blocked(&self.activity_facts()).is_some() {
                     return Ok(());
                 }
-                if matches!(
-                    a.action,
-                    Some(
-                        mj_core::assessment::Action::Wait | mj_core::assessment::Action::Uncertain
-                    )
-                ) {
-                    a.classify_again(self.snapshot.latest_ordinal + 1);
-                } else {
-                    // Other completed actions retain authority during background refresh.
-                    a.revision = self.snapshot.latest_ordinal + 1;
-                    a.status = mj_core::assessment::Status::Pending;
-                    a.evidence = None;
-                }
-                return self.store_assessment(a);
+                return self.request_background_refresh(a);
             }
             let answers = serde_json::to_value(glide)?;
-            self.replied_verdict.judge_background(
-                self.turn_context.generation(),
-                mj_core::activity::eot_glide::background_needed(
-                    &answers,
-                    !self.background_commands().is_empty(),
-                ),
-            );
+            let listed = !self.background_commands().is_empty();
+            let needed = mj_core::activity::eot_glide::background_needed(&answers, listed);
+            // 9cb9d651: a worker asks once per restart about leftover processes.
+            // An unclear stored answer is not a judgment, so the first call after
+            // a restart asks again; once this process has asked, it does not.
+            if needed.is_none()
+                && listed
+                && self.replied_verdict.asked_turn.as_ref()
+                    != Some(&(a.turn_id.clone(), a.completed_ordinal))
+                && blocked(&self.activity_facts()).is_none()
+            {
+                return self.request_background_refresh(a);
+            }
+            self.replied_verdict
+                .judge_background(self.turn_context.generation(), needed);
             self.replied_verdict.asked_turn = Some((a.turn_id.clone(), a.completed_ordinal));
             return Ok(());
         }
@@ -1824,10 +1841,10 @@ mod settled_task_tests {
     /// #1202: a legacy (Jev-era) background judgment is process-local, so a
     /// restarted worker holds none. When the new harness reports leftover
     /// processes again (Kimi re-reads its task journal on attach), the worker
-    /// asks once more instead of leaving the session busy for good. The retry
-    /// after an unclear answer at a later restart is not covered; see the end
-    /// of the test.
+    /// asks once more instead of leaving the session busy for good. An unclear
+    /// answer is asked again at the next restart, not within the same process.
     // Hard-won: 9cb9d651: after restart, leftover processes kept `mj wait` blocked because Jev was never asked again.
+    // Hard-won: dc4c34617: a restored unclear GLiDE background answer was never re-asked after restart, so mj wait stayed blocked
     #[test]
     fn a_restarted_worker_asks_again_about_leftover_processes_once() {
         use crate::relay::test_support::glide_answer;
@@ -1895,12 +1912,19 @@ mod settled_task_tests {
         }
         drop(relay);
 
-        // Not asserted, on purpose: the 9cb9d651 design asked once more at the
-        // next restart after an unclear answer. A stored unclear GLiDE answer is
-        // restored as-is by `reask_background_after_restart` (since dc4c34617), so
-        // the next restart asks nothing and, with the process still running, the
-        // session stays in `background work` and `mj wait` stays blocked. That is
-        // the defect this test was written for, still open on the GLiDE path.
+        // The next restart asks once more, and a confident answer applies.
+        let mut relay = restart(dir.path());
+        relay.set_air_tasks(vec![task("srv")]).unwrap();
+        relay.prepare_pending_assessment().unwrap();
+        let (revision, _, _) = relay.pending_replied_verdict().unwrap();
+        relay
+            .apply_glide_assessment(revision, glide_answer("finished", Some([0.0, 1.0, 0.0])))
+            .unwrap();
+        assert_eq!(relay.activity_facts().background_needed, Some(false));
+        let quiet = relay.operational_state().quiet();
+        assert!(quiet.is_yes(), "{}", quiet.reason());
+        relay.prepare_pending_assessment().unwrap();
+        assert!(relay.pending_replied_verdict().is_none());
     }
 
     /// Session 979dc, through the worker: prompt turn 20 ends while a build
