@@ -442,9 +442,9 @@ modal body: Rect { x: 3, y: 3, width: 94, height: 24 }
   │ Add a profile, then choose Sign in. Detect profiles finds installed agents.                  │
   │                                                                                              │
   │                                                                                              │
-  │   claude-1                        8 settings  ›                            Add               │
-  │   codex-1                         8 settings  ›                            Detect profiles   │
-  │   codex-2                         8 settings  ›                            Set up managed    │
+  │   claude-1                        9 settings  ›                            Add               │
+  │   codex-1                         9 settings  ›                            Detect profiles   │
+  │   codex-2                         9 settings  ›                            Set up managed    │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │

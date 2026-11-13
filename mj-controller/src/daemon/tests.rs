@@ -13237,12 +13237,11 @@ async fn dismiss_notification_clears_the_served_question_attention() {
         snapshot.materialized.execution = mj_core::state::MaterializedExecutionState::Idle;
         snapshot.window = mj_core::state::ProjectionWindow::of(&snapshot.materialized);
         snapshot.operational.person_input_through = if dismissed { 10 } else { 0 };
-        snapshot.operational.open_request = (!dismissed).then(|| {
-            mj_core::assessment::OpenRequest {
+        snapshot.operational.open_request =
+            (!dismissed).then(|| mj_core::assessment::OpenRequest {
                 question: question.clone(),
                 question_message: None,
-            }
-        });
+            });
         view
     };
     state
