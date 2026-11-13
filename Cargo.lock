@@ -669,7 +669,6 @@ dependencies = [
  "agent-client-protocol",
  "anyhow",
  "base64 0.22.1",
- "brokk-anvil-client",
  "brokk-mj-core",
  "brokk-mj-transcript",
  "brokk-mj-worker",
