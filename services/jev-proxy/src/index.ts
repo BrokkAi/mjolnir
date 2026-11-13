@@ -10,7 +10,6 @@ import questionsV4 from "../../../mj-core/src/activity/verdict_questions_v4.json
 import questionsV5 from "../../../mj-core/src/activity/verdict_questions_v5.json" with { type: "json" };
 import questionsV6 from "../../../mj-core/src/activity/verdict_questions_v6.json" with { type: "json" };
 import questions from "../../../mj-core/src/activity/verdict_questions.json" with { type: "json" };
-import { helpRequest, helpQuestions, helpAnswers, type HelpSearchRequest } from "./help-search.ts";
 import { githubItemRequest, githubItemAnswers, githubItemQuestions, githubItemRequestV2, githubItemAnswersV2, githubItemQuestionsV2, type GithubItemEvidence, type GithubItemEvidenceV2 } from "./github-item.ts";
 import { questionLocatorRequest, questionLocatorAnswers, questionLocatorQuestions, type QuestionLocatorRequest } from "./question-locator.ts";
 import { afkQuestionRequest, afkQuestionAnswers, afkQuestionQuestions, type AfkQuestionRequest } from "./afk-question.ts";
@@ -19,7 +18,6 @@ export interface Env {
   TYPESAFE_API_KEY: string;
   FASTINO_API_KEY?: string;
   TURN_RATE_LIMITER: RateLimit;
-  HELP_RATE_LIMITER?: RateLimit;
   CONTINUATION_RATE_LIMITER?: RateLimit;
   GITHUB_ITEM_RATE_LIMITER?: RateLimit;
 }
@@ -325,7 +323,7 @@ async function readBounded(message: Request | Response, limit = MAX_BODY_BYTES):
   return JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(body));
 }
 
-async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | TurnEvidenceV6 | HelpSearchRequest | ContinuationEvidence | GithubItemEvidence | GithubItemEvidenceV2 | QuestionLocatorRequest | AfkQuestionRequest, key: string, version: 1 | 2 | 3 | 4 | 5 | 6 | 7 = 1, continuationV2 = false, githubV2 = false): Promise<Response> {
+async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | TurnEvidenceV6 | ContinuationEvidence | GithubItemEvidence | GithubItemEvidenceV2 | QuestionLocatorRequest | AfkQuestionRequest, key: string, version: 1 | 2 | 3 | 4 | 5 | 6 | 7 = 1, continuationV2 = false, githubV2 = false): Promise<Response> {
   const abort = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
@@ -342,7 +340,6 @@ async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | 
           : "latest_user_message" in state ? questionLocatorQuestions(state)
           : githubV2 ? githubItemQuestionsV2
             : "item" in state ? githubItemQuestions
-          : "entries" in state ? helpQuestions(state)
             : "messages" in state ? (continuationV2 ? continuationQuestionsV2 : continuationQuestions)
               : version === 7 ? questions
                 : version === 6 ? questionsV6
@@ -368,14 +365,13 @@ async function classify(state: TurnEvidence | TurnEvidenceV2 | TurnEvidenceV4 | 
           : "latest_user_message" in state ? questionLocatorAnswers(body, state)
           : githubV2 ? githubItemAnswersV2(body)
             : "item" in state ? githubItemAnswers(body)
-          : "entries" in state ? helpAnswers(body, state)
             : "messages" in state ? (continuationV2 ? continuationAnswersV2(body) : continuationAnswers(body))
               : version === 7 ? answersV7(body)
                 : version === 6 ? answersV6(body)
                 : version === 5 ? answersV5(body)
                   : version === 4 ? answersV4(body)
                     : version === 3 ? answersV3(body) : answers(body);
-        return result ? json("current_question" in state || "latest_user_message" in state || "entries" in state ? result : { answers: result }) : error("invalid_upstream_response", 502);
+        return result ? json("current_question" in state || "latest_user_message" in state ? result : { answers: result }) : error("invalid_upstream_response", 502);
       })(),
     ]);
   } catch (cause) {
@@ -439,7 +435,6 @@ export default {
     const url = new URL(request.url);
     const eot = url.pathname === "/v1/glide-turn-verdict";
     const handback = url.pathname === "/v1/handback-verdict";
-    const search = url.pathname === "/v1/help-search";
     const questionLocator = url.pathname === "/v1/question-locator";
     const afkQuestion = url.pathname === "/v1/afk-question-verdict";
     const githubItem = url.pathname === "/v1/github-item-verdict";
@@ -447,7 +442,7 @@ export default {
     const githubItemV2 = url.pathname === "/v2/github-item-verdict";
     const continuationV2 = url.pathname === "/v2/continuation-verdict";
     const continuation = continuationV2 || url.pathname === "/v1/continuation-verdict";
-    if ((!eot && !handback && !afkQuestion && !search && !questionLocator && !githubItem && !githubItemV2 && !githubGlide && !continuation && url.pathname !== "/v1/turn-verdict" && url.pathname !== "/v2/turn-verdict" && url.pathname !== "/v3/turn-verdict" && url.pathname !== "/v4/turn-verdict" && url.pathname !== "/v5/turn-verdict" && url.pathname !== "/v6/turn-verdict" && url.pathname !== "/v7/turn-verdict") || url.search) return error("not_found", 404);
+    if ((!eot && !handback && !afkQuestion && !questionLocator && !githubItem && !githubItemV2 && !githubGlide && !continuation && url.pathname !== "/v1/turn-verdict" && url.pathname !== "/v2/turn-verdict" && url.pathname !== "/v3/turn-verdict" && url.pathname !== "/v4/turn-verdict" && url.pathname !== "/v5/turn-verdict" && url.pathname !== "/v6/turn-verdict" && url.pathname !== "/v7/turn-verdict") || url.search) return error("not_found", 404);
     if (request.method !== "POST") return error("method_not_allowed", 405, { Allow: "POST" });
     if (request.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
       return error("unsupported_media_type", 415);
@@ -455,7 +450,7 @@ export default {
     // Handback and completed-turn GLiDE checks use Fastino.
     const key = ((handback || eot || githubGlide) ? env.FASTINO_API_KEY : env.TYPESAFE_API_KEY)?.trim();
     const ip = request.headers.get("CF-Connecting-IP");
-    const limiter = (githubItem || githubItemV2 || githubGlide) ? env.GITHUB_ITEM_RATE_LIMITER : continuation ? env.CONTINUATION_RATE_LIMITER : search ? env.HELP_RATE_LIMITER : env.TURN_RATE_LIMITER;
+    const limiter = (githubItem || githubItemV2 || githubGlide) ? env.GITHUB_ITEM_RATE_LIMITER : continuation ? env.CONTINUATION_RATE_LIMITER : env.TURN_RATE_LIMITER;
     if (!key || !ip || !limiter) return error("service_unavailable", 503);
     try {
       const { success } = await limiter.limit({ key: ip });
@@ -487,9 +482,6 @@ export default {
     if (afkQuestion) return afkQuestionRequest(state) ? classify(state, key) : error("invalid_evidence", 400);
     if (continuationV2) return continuationRequestV2(state) ? classify(state, key, 1, true) : error("invalid_continuation_request", 400);
     if (continuation) return continuationRequest(state) ? classify(state, key) : error("invalid_continuation_request", 400);
-    if (search) {
-      return helpRequest(state) ? classify(state, key) : error("invalid_help_request", 400);
-    }
     if (url.pathname === "/v7/turn-verdict") {
       return evidenceV6(state) ? classify(state, key, 7) : error("invalid_evidence", 400);
     }

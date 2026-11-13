@@ -29,7 +29,6 @@ pub mod golden;
 #[cfg(unix)]
 pub mod harness_install;
 pub mod harness_runtime;
-pub mod help_search;
 pub mod hex;
 pub mod history;
 pub mod jev;

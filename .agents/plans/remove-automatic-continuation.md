@@ -14,6 +14,7 @@ After this change, mj never sends an automatic "continue" prompt for ordinary un
 - [x] (2026-11-13) Milestone 2: daemon (also removed `ContinuationConfig` and the `Config.continuation` field with the legacy `[continuation]` decoder, because core could not compile otherwise): remove the automatic-continuation decider and submit path; keep quota recovery, the seed job, the update feed and the review observer.
 - [x] (2026-11-13) Milestone 3: configuration, settings UI, goldens, docs, shipped skill, e2e scripts, AGENTS.md.
 - [x] (2026-11-13) Milestone 4: proxy: keep serving the old routes, move their question files into the proxy package.
+- [x] (2026-11-13) Milestone 5: remove the dead help-search classifier (core module, proxy route and rate limiter, wording, agent docs).
 - [ ] Full validation, commit, review, push; close #1304 and #1532.
 
 ## Surprises & Discoveries
@@ -68,6 +69,9 @@ After this change, mj never sends an automatic "continue" prompt for ordinary un
 
 - Decision (milestone 3, implementer): the settings golden exchange and the web settings e2e used the Continuation page as the page that is opened, edited and kept across a notification navigation (Hard-won 7a50f9da7). They now use the Web Access (`phone`) page and its `Enabled` toggle, because the exchange must still contain one page edit. `scripts/jev-continuation-eval.py` was deleted. The Privacy help now reads "Sends turn text to a hosted classifier; quota recovery needs it. Off stops both; sessions follow on resume or restart." (it has to fit two rows, and tests require the words "resume or restart"). `docs/src/content/docs/sessions.md` has a "Quota recovery" section in place of "Automatic continuation".
   Date/Author: 2026-11-13, implementer.
+
+- Decision (added 2026-11-13, parent, after the user's instruction "if not, just remove it instead of porting to glide"): remove the dead help-search classifier as Milestone 5. Nothing in Rust calls it since the command palette replaced Help on 2026-10-27. Remove `mj-core/src/help_search.rs` and its question file (and the Cargo include entry and `pub mod`), the proxy's `help-search.ts`, the `/v1/help-search` route and the help parts of `classify()`, `HELP_RATE_LIMITER` (in `index.ts` and `wrangler.jsonc`) and `tests/help-search.test.ts`; drop help search from `README.md`, the Privacy help in `schema.rs`, the docs and the agent docs. Removing the route is deliberate: only releases from before 2026-10-27 call it. No proxy deployment is made here.
+  Date/Author: 2026-11-13, parent session.
 
 ## Outcomes & Retrospective
 

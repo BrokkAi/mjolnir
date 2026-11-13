@@ -1,24 +1,12 @@
 # Jev proxy operations
 
-The public service is `https://mj-jev-proxy.eng-admin-a63.workers.dev`, deployed as `mj-jev-proxy` in the Brokk Cloudflare account. Its POST routes include `/v1/turn-verdict` through `/v6/turn-verdict`, `/v1/help-search`, `/v1/continuation-verdict`, `/v2/continuation-verdict`, and `/v1/github-item-verdict`. Source, pinned development dependencies, and Wrangler configuration live in `services/jev-proxy/` in the OSS repository. Deployment is independent of mj releases. GitHub CI validates changes but does not deploy them.
+The public service is `https://mj-jev-proxy.eng-admin-a63.workers.dev`, deployed as `mj-jev-proxy` in the Brokk Cloudflare account. Its POST routes include `/v1/turn-verdict` through `/v6/turn-verdict`, `/v1/continuation-verdict`, `/v2/continuation-verdict`, and `/v1/github-item-verdict`. Source, pinned development dependencies, and Wrangler configuration live in `services/jev-proxy/` in the OSS repository. Deployment is independent of mj releases. GitHub CI validates changes but does not deploy them.
 
 The turn-verdict routes accept POST JSON turn evidence. The proxy supplies the fixed model and versioned questions: `verdict_questions.json` for v6, frozen `verdict_questions_v5.json` for v5, `verdict_questions_v4.json` for v4, `verdict_questions_v3.json` for v3, and the frozen v2/v1 files for older routes. A local TypeSafe key makes mj use TypeSafe directly; otherwise mj uses the public endpoint without credentials. Changing the current question resource affects both implementations and requires deploying the Worker as well as releasing mj.
 
-## Help search
+## Help search (removed)
 
-`POST /v1/help-search` accepts `{query, entries}`. Each entry has an integer `id` (0–127, unique within the request), `category`, `label`, and `description`. The client supplies its own static help catalog so old and new client versions work with the same deployment. Maximums are 128 entries, 1024 UTF-8 bytes for the query, 128 bytes for a category, 256 for a label, and 1024 for a description. Query, category and label must be nonempty (query must not be whitespace). The whole request remains limited to 64 KiB. Unknown request fields are rejected.
-
-The Worker builds one relevance question per entry using `mj-core/src/help_search/question.json`; callers cannot supply questions, models or endpoints. Jev answers all questions in one request without an index. The response is `{scores: [{id, probability}]}` with exactly one finite probability in [0,1] for each submitted ID. Incomplete or malformed upstream answers return 502, not partial results.
-
-The TUI updates substring matches immediately, then waits 400 ms without query edits before asking for semantic matches. It shows at most eight additional results at probability ≥0.70. Requests are cancelled on edits, closing help and shutdown; generation checks reject late replies. Failures retain local filtering and display a fallback status, with no automatic retry. Local queries beyond the remote byte limit remain searchable locally. The client deadline is ten seconds; the Worker retains its eight-second deadline.
-
-Synthetic verification:
-
-    curl --fail-with-body https://mj-jev-proxy.eng-admin-a63.workers.dev/v1/help-search \
-      -H 'Content-Type: application/json' \
-      --data '{"query":"leave agents running when I exit","entries":[{"id":0,"category":"Essentials","label":"Detach from this terminal","description":"Leave this terminal client; the daemon and its sessions keep running."},{"id":1,"category":"Sessions","label":"Stop session","description":"Stop the selected session."}]}'
-
-Expect HTTP 200 and a score for each ID. Detach should be relevant and Stop session should not; exact probabilities can vary. Also verify the turn-verdict route after deployment. Rolling back to a version without help search makes help fall back to substring search.
+`POST /v1/help-search` and `HELP_RATE_LIMITER` were removed from the source on 2026-11-13 at the user's direction ("if not, just remove it instead of porting to glide"). No Rust code called the route after the command palette replaced Help on 2026-10-27; only releases before that date used it, and they get a 404 once the proxy is deployed from this source. The route stays live until that deployment. Do not deploy the proxy just for this; it goes out with the next proxy deployment.
 
 ## Deployment and key rotation
 
@@ -36,7 +24,7 @@ Expect HTTP 200 with `answers.waiting_on` containing `type`, `choice`, and `conf
 
 ## Limits and data handling
 
-The endpoints are public. Separate Cloudflare rate limiters (`TURN_RATE_LIMITER`, `HELP_RATE_LIMITER`, `CONTINUATION_RATE_LIMITER` and `GITHUB_ITEM_RATE_LIMITER`) each allow approximately 120 requests per 60 seconds per client IP at each Cloudflare location. Help traffic does not consume turn-verdict capacity. Users behind the same NAT share these allowances. This is abuse mitigation, not a global spending ceiling; there is no daily budget counter. Adjust the binding limits in wrangler.jsonc and deploy when necessary.
+The endpoints are public. Separate Cloudflare rate limiters (`TURN_RATE_LIMITER`, `CONTINUATION_RATE_LIMITER` and `GITHUB_ITEM_RATE_LIMITER`) each allow approximately 120 requests per 60 seconds per client IP at each Cloudflare location. Users behind the same NAT share these allowances. This is abuse mitigation, not a global spending ceiling; there is no daily budget counter. Adjust the binding limits in wrangler.jsonc and deploy when necessary.
 
 Request and upstream response bodies are bounded to 64 KiB. All turn versions retain prompt 1024-byte, assistant 2048-byte, active-title 128-byte and sixteen-active-tool caps. V1 accepts eight recent 128-byte tool strings. V2–v4 use `transcript_summary`, at most 48 KiB: Jev selects the conversation from the latest delivered user message and removes all transcript tool-call entries before budgeting. V4 adds a stop reason of at most 128 bytes and optional diagnostic fields capped at 4096 bytes for message, 128 for code, and 256 for reset text. Separate live-tool, background-work, and queue facts remain. Other summary consumers retain the eight-call policy. Bounded text excerpts are explicitly marked. The Rust collector measures the serialized direct request, questions included, to keep the entire request within 64 KiB. The hosted request omits the questions, so it is smaller, and the proxy's upstream request has the same shape as the direct one. Upstream requests have an eight-second deadline, including reading the response, and do not follow redirects. Rate limiting returns 429 with Retry-After; upstream errors return sanitized 502/504 responses. mj preserves its current activity state on failures.
 
