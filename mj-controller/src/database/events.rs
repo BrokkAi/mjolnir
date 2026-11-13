@@ -623,8 +623,18 @@ mod tests {
         // when the worker's away resolution arrives.
         page_for(&path, "pre-away", vec![requested()], false).unwrap();
         let mut connection = open(&path).unwrap();
-        assert!(super::super::operator_away::set_with(&mut connection, true, std::time::Duration::ZERO).unwrap());
-        assert!(!super::super::operator_away::set_with(&mut connection, true, std::time::Duration::ZERO).unwrap());
+        assert!(
+            super::super::operator_away::set_with(&mut connection, true, std::time::Duration::ZERO)
+                .unwrap()
+        );
+        assert!(
+            !super::super::operator_away::set_with(
+                &mut connection,
+                true,
+                std::time::Duration::ZERO
+            )
+            .unwrap()
+        );
         assert_eq!(
             load_state_from(&path).unwrap().operator_presence,
             OperatorPresence {
@@ -683,9 +693,23 @@ mod tests {
         connection
             .execute("DELETE FROM api_events WHERE session_id='late'", [])
             .unwrap();
-        assert!(super::super::operator_away::set_with(&mut connection, false, std::time::Duration::ZERO).unwrap());
+        assert!(
+            super::super::operator_away::set_with(
+                &mut connection,
+                false,
+                std::time::Duration::ZERO
+            )
+            .unwrap()
+        );
         // Repeating the same write and rebuilding a projection emit nothing twice.
-        assert!(!super::super::operator_away::set_with(&mut connection, false, std::time::Duration::ZERO).unwrap());
+        assert!(
+            !super::super::operator_away::set_with(
+                &mut connection,
+                false,
+                std::time::Duration::ZERO
+            )
+            .unwrap()
+        );
         assert_eq!(
             load_state_from(&path).unwrap().operator_presence,
             OperatorPresence {

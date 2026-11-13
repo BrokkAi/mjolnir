@@ -40,6 +40,10 @@ pub enum ControllerAction {
         session_id: String,
         target: mj_core::attention::NotificationDismissal,
     },
+    SetSessionNotificationsIgnored {
+        session_id: String,
+        ignored: bool,
+    },
     RecordOperatorActivity,
     SetOperatorAway {
         away: bool,

@@ -56,6 +56,8 @@ pub enum CommandId {
     RenameSession,
     ChangedFiles,
     DismissNotification,
+    IgnoreNotifications,
+    StopIgnoringNotifications,
     ContainerSettings,
     MoveSession,
     CopySessionId,
@@ -294,6 +296,28 @@ fn dismiss_notification_available(dashboard: &DashboardState) -> Availability {
         return Availability::Blocked("No dismissible notification is active");
     }
     Availability::Ready
+}
+
+fn ignore_notifications_available(dashboard: &DashboardState) -> Availability {
+    let Some(session) = dashboard.command_session() else {
+        return Availability::Hidden;
+    };
+    if session.notifications_ignored {
+        Availability::Blocked("notifications are already ignored")
+    } else {
+        Availability::Ready
+    }
+}
+
+fn stop_ignoring_notifications_available(dashboard: &DashboardState) -> Availability {
+    let Some(session) = dashboard.command_session() else {
+        return Availability::Hidden;
+    };
+    if session.notifications_ignored {
+        Availability::Ready
+    } else {
+        Availability::Blocked("notifications are not ignored")
+    }
 }
 
 fn pin_session_available(dashboard: &DashboardState) -> Availability {
@@ -1012,6 +1036,30 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
         available: dismiss_notification_available,
+    },
+    CommandSpec {
+        id: CommandId::IgnoreNotifications,
+        label: "Ignore notifications",
+        description: "This session raises no bell, desktop, or push notifications. It still shows its attention state.",
+        scope: Scope::Session,
+        pane_keys: &[],
+        action: None,
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: ignore_notifications_available,
+    },
+    CommandSpec {
+        id: CommandId::StopIgnoringNotifications,
+        label: "Stop ignoring notifications",
+        description: "This session raises notifications again.",
+        scope: Scope::Session,
+        pane_keys: &[],
+        action: None,
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: stop_ignoring_notifications_available,
     },
     CommandSpec {
         id: CommandId::InterruptTurn,
@@ -1847,6 +1895,15 @@ impl DashboardState {
                 }
                 Availability::Hidden => DashboardAction::None,
             },
+            CommandId::IgnoreNotifications | CommandId::StopIgnoringNotifications => {
+                self.command_session_id().map(str::to_owned).map_or(
+                    DashboardAction::None,
+                    |session_id| DashboardAction::SetSessionNotificationsIgnored {
+                        session_id,
+                        ignored: id == CommandId::IgnoreNotifications,
+                    },
+                )
+            }
             CommandId::InterruptTurn => match interrupt_available(self) {
                 Availability::Ready => self
                     .command_session_id()

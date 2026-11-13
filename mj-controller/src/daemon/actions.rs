@@ -425,6 +425,17 @@ pub(super) async fn handle_action(
             refresh_runtime_controller(state).await;
             Ok(DaemonReply::Text(title))
         }
+        DaemonAction::SetSessionNotificationsIgnored {
+            session_id,
+            ignored,
+        } => {
+            blocking(move || {
+                Controller::load()?.set_session_notifications_ignored(&session_id, ignored)
+            })
+            .await?;
+            refresh_runtime_controller(state).await;
+            Ok(DaemonReply::Done)
+        }
         DaemonAction::SetSessionWorkspace {
             session_id,
             workspace_id,

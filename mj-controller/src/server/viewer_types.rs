@@ -273,6 +273,7 @@ impl ViewerSnapshot {
                     attention: Default::default(),
                     unread_frontier: None,
                     notification_dismissal: None,
+                    notifications_ignored: session.notifications_ignored,
                     oracle: session.oracle,
                     oracle_choice: session.oracle_choice.clone().map(|v| *v),
                     subagents: session.subagents.clone().unwrap_or_default(),
@@ -555,6 +556,9 @@ pub struct ViewerSession {
     pub unread_frontier: Option<u64>,
     #[serde(default)]
     pub notification_dismissal: Option<mj_core::attention::NotificationDismissal>,
+    /// The session raises no notifications; its attention still renders.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub notifications_ignored: bool,
     #[serde(default = "oracle_default_enabled")]
     pub oracle: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

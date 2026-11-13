@@ -1512,6 +1512,7 @@ pub(crate) fn runtime_test_session(
     SessionRecord {
         oracle_choice: None,
         oracle: true,
+        notifications_ignored: false,
         project: None,
         target_runtime: None,
         launch_base: None,
@@ -10526,6 +10527,56 @@ async fn changing_a_sessions_workspace_reaches_the_published_projection() {
     };
     assert_eq!(members(&destination.id), ["session-1"]);
     assert!(members(mj_core::workspace::DEFAULT_WORKSPACE_ID).is_empty());
+}
+
+/// Toggling a session's notification mute persists it and reaches the
+/// published projection an attached dashboard reads.
+#[tokio::test]
+async fn ignoring_notifications_persists_and_reaches_the_published_projection() {
+    let Some(_writer) = startup_prompt_test_store(
+        "ignoring_notifications_persists_and_reaches_the_published_projection",
+    ) else {
+        return;
+    };
+    let manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    crate::database::save_session(&runtime_test_session(
+        "session-1",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    ))
+    .unwrap();
+    handle_action(
+        DaemonAction::SetSessionNotificationsIgnored {
+            session_id: "session-1".into(),
+            ignored: true,
+        },
+        &test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))),
+        &state,
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("ignore notifications");
+    let fresh = state.runtime_changes(None, false).await.unwrap();
+    let mj_client::runtime_feed::RuntimeFrame::Snapshot { projection, .. } = fresh else {
+        panic!("a new dashboard is given a snapshot")
+    };
+    assert!(projection.records["session-1"].notifications_ignored);
+    assert!(
+        crate::database::load_state().unwrap().sessions["session-1"].notifications_ignored,
+        "the flag is durable"
+    );
+    handle_action(
+        DaemonAction::SetSessionNotificationsIgnored {
+            session_id: "missing".into(),
+            ignored: true,
+        },
+        &test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))),
+        &state,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
 }
 
 #[tokio::test]

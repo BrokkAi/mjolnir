@@ -1049,6 +1049,32 @@ pub(super) fn set_session_archived_to(path: &Path, session_id: &str, archived: b
     Ok(())
 }
 
+/// Change only whether this session raises notifications. Ignoring is a
+/// display choice, so it has its own writer and never rewrites lifecycle,
+/// checkpoint, or title columns another task owns.
+pub fn set_session_notifications_ignored(session_id: &str, ignored: bool) -> Result<()> {
+    let session_id = session_id.to_owned();
+    submit_database_write("set_session_notifications_ignored", move |_| {
+        set_session_notifications_ignored_to(&database_path(), &session_id, ignored)
+    })
+}
+
+pub(super) fn set_session_notifications_ignored_to(
+    path: &Path,
+    session_id: &str,
+    ignored: bool,
+) -> Result<()> {
+    let connection = open(path)?;
+    let changed = connection.execute(
+        "UPDATE sessions SET notifications_ignored = ?2 WHERE session_id = ?1",
+        params![session_id, ignored],
+    )?;
+    if changed != 1 {
+        bail!("unknown session {session_id}");
+    }
+    Ok(())
+}
+
 /// Native sessions the resume dialog hides. Hel never writes into a harness
 /// home, so the hidden set lives here instead of in the harness's own store.
 pub fn hidden_native_sessions() -> Result<BTreeSet<(mj_core::config::HarnessKind, String)>> {

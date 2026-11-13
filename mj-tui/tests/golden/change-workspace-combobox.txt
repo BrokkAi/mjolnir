@@ -4,18 +4,19 @@
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
-│hel ──────────────────────────────────││                                                                              │
+│hel ──────────                                                                                                        │
 │› · ACP pretty                                                                                                        │
-│  Idle  podman                                                                                                        │
-│  │ No message  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
-│  │             │  Sub-agents Native                                                                 │                │
-│                │  CPU        no CPU data yet                                                        │                │
+│  Idle  podman  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  │ No message  │  Sub-agents Native                                                                 │                │
+│  │             │  CPU        no CPU data yet                                                        │                │
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
 │                │  Dismiss notification — No dismissible notification is active.                     │                │
+│                │› Ignore notifications                                                              │                │
+│                │  Stop ignoring notifications — Notifications are not ignored.                      │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
-│                │› Rename…                                                           ctrl+b shift+t  │                │
+│                │  Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
 │                │  Unpin — This session is not pinned.                                               │                │
 │                │  Change Workspace ›                                                                │                │
@@ -23,16 +24,15 @@
 │                │  Container settings                                                                │                │
 │                │  Move…                                                                             │                │
 │                │  Suspend…                                                          ctrl+b shift+x  │                │
-│                │  Restart                                                                           │                │
-│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
-│                │  ────────────────────────────────────────────────────────────────────────────────  │  ──────────────╮
+│                │  Restart                                                                           │  ──────────────╯
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╮
+│                │  ────────────────────────────────────────────────────────────────────────────────  │                │
 │                │  Copy session ID                                                                   │                │
-│                │  Destroy…                                                                          │                │
-│                │Give the selected session your own title.                                           │  ──────────────╯
-│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ─────── ▁   ▄ ╮
-│                                                                                                                      │
+│                │  Destroy…                                                                          │  ──────────────╯
+│                │This session raises no bell, desktop, or push notifications. It still shows its atte│  ─────── ▁   ▄ ╮
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                        ──────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│                                                                                                        ─────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -46,16 +46,17 @@ menu popup action: None
 ╰────────────────────────────────────────────╯│                                                                                            │
 ╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
 │ Create   Open   Filter: ___________________││                                                                                            │
-│hel ────────────────────────────────────────││                                                                                            │
+│hel ─────────────                                                                                                                         │
 │› · ACP pretty na                                                                                                                         │
-│  Idle  podman  c                                                                                                                         │
-│  │ No messages y  ╭ × ACP pretty name ───────────────────────────────────────────────────────────────────────────────╮                   │
-│  │                │  Sub-agents Native                                                                               │                   │
-│                   │  CPU        no CPU data yet                                                                      │                   │
+│  Idle  podman  c  ╭ × ACP pretty name ───────────────────────────────────────────────────────────────────────────────╮                   │
+│  │ No messages y  │  Sub-agents Native                                                                               │                   │
+│  │                │  CPU        no CPU data yet                                                                      │                   │
 │                   │                                                                                                  │                   │
 │                   │  Content  ─────────────────────────────────────────────────────────────────────────────────────  │                   │
 │                   │  Changed files — The session's target is not running.                                  ctrl+b d  │                   │
 │                   │  Dismiss notification — No dismissible notification is active.                                   │                   │
+│                   │  Ignore notifications                                                                            │                   │
+│                   │  Stop ignoring notifications — Notifications are not ignored.                                    │                   │
 │                   │  Organize  ────────────────────────────────────────────────────────────────────────────────────  │                   │
 │                   │  Rename…                                                                         ctrl+b shift+t  │                   │
 │                   │  Pin…                                                                                            │                   │
@@ -65,16 +66,15 @@ menu popup action: None
 │                   │  │Default (current)                      │                                                       │                   │
 │                   │  │Other                                  │                                                       │                   │
 │                   │  │Third                                  │                                       ctrl+b shift+x  │                   │
-│                   │  ╰───────────────────────────────────────╯                                                       │                   │
-│                   │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-agents.            │  ─────────────────╯
-│                   │  ──────────────────────────────────────────────────────────────────────────────────────────────  │  ─────────────────╮
+│                   │  ╰───────────────────────────────────────╯                                                       │  ─────────────────╯
+│                   │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-agents.            │  ─────────────────╮
+│                   │  ──────────────────────────────────────────────────────────────────────────────────────────────  │                   │
 │                   │  Copy session ID                                                                                 │                   │
-│                   │  Destroy…                                                                                        │                   │
-│                   │Move the selected session, and its sub-agents, to another workspace, after you confirm.           │  ─────────────────╯
-│                   ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ───────────────────────────────────────────╯  ────────── ▁   ▄ ╮
-│                                                                                                                                          │
+│                   │  Destroy…                                                                                        │  ─────────────────╯
+│                   │Move the selected session, and its sub-agents, to another workspace, after you confirm.           │  ────────── ▁   ▄ ╮
+│                   ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ───────────────────────────────────────────╯                   │
 │                                                                                                                         ─────────────────╯
-│                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                                                                                                         ────────── ▁   ▄ ╮
 │                                            ││            Harness      Weekly      Resets  5H Resets                                      │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
@@ -88,16 +88,17 @@ menu popup action: None
 ╰──────────────────────────────────────╯│                                      │
 ╭ Sessions ───────────────────── ▁   ▄ ╮│                                      │
 │ Create   Open   Filter: _____________││                                      │
-│hel ──────────────────────────────────││                                      │
+│hel ────                                                                      │
 │› · ACP                                                                       │
-│  Idle                                                                        │
-│  │ No m  ╭ × ACP pretty name ────────────────────────────────────╮           │
-│  │       │  Sub-agents Native                                    │           │
-│          │  CPU        no CPU data yet                           │           │
+│  Idle    ╭ × ACP pretty name ────────────────────────────────────╮           │
+│  │ No m  │  Sub-agents Native                                    │           │
+│  │       │  CPU        no CPU data yet                           │           │
 │          │                                                       │           │
-│          │  Content  ──────────────────────────────────────────  │  conversat│
-│          │  Changed files — The session's target is …  ctrl+b d  │           │
+│          │  Content  ──────────────────────────────────────────  │           │
+│          │  Changed files — The session's target is …  ctrl+b d  │  conversat│
 │          │  Dismiss notification — No dismissible notificati…    │           │
+│          │  Ignore notifications                                 │           │
+│          │  Stop ignoring notifications — Notifications are …    │           │
 │          │  Organize  ─────────────────────────────────────────  │           │
 │          │  Rename…                              ctrl+b shift+t  │           │
 │          │  Pin…                                                 │           │
@@ -107,16 +108,15 @@ menu popup action: None
 │          │  │Default (current)                      │            │           │
 │          │  │Other                                  │            │           │
 │          │  │Third                                  │+b shift+x  │           │
-│          │  ╰───────────────────────────────────────╯            │           │
-│          │  Interrupt all (parent + sub-agents)… — No turn i…    │  ─────────╯
-│          │  ───────────────────────────────────────────────────  │  ─────────╮
-│          │  Copy session ID                                      │           │
-│          │  Destroy…                                             │  Enter on │
-╰────────  │Move the selected session, and its sub-agents, to anoth│  ─────────╯
-╭ Targets  ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ╯  ── ▁   ▄ ╮
-│  Host /                                                                      │
+│          │  ╰───────────────────────────────────────╯            │  ─────────╯
+│          │  Interrupt all (parent + sub-agents)… — No turn i…    │  ─────────╮
+│          │  ───────────────────────────────────────────────────  │           │
+│          │  Copy session ID                                      │  Enter on │
+╰────────  │  Destroy…                                             │  ─────────╯
+╭ Targets  │Move the selected session, and its sub-agents, to anoth│  ── ▁   ▄ ╮
+│  Host /  ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ╯           │
 ╰────────                                                             ─────────╯
-╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+╭ Profile                                                             ── ▁   ▄ ╮
 │            Harness      Weekly      Resets  5H Resets                        │
 │  claude-1  Claude Code  refreshing…                                          │
 │  codex-1   Codex        refreshing…                                          │
@@ -214,16 +214,17 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ Workspace w3  Workspace w4           ││                                                                              │
 │ Workspace w5  Workspace w6           ││                                                                              │
 │ Workspace w7  Workspace w8           ││                                                                              │
-│ Workspace w9                         ││                                                                              │
+│ Workspace w9                                                                                                         │
 ╰──────────────                                                                                                        │
-╭ Sessions ────                                                                                                        │
-│ Create   Open  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
-│hel ──────────  │  Sub-agents Native                                                                 │                │
-│› · ACP pretty  │  CPU        no CPU data yet                                                        │                │
-│  Idle  podman  │                                                                                    │                │
-│  │ No message  │  Content  ───────────────────────────────────────────────────────────────────────  │                │
-│  │             │  Changed files — The session's target is not running.                    ctrl+b d  │                │
-│                │  Dismiss notification — No dismissible notification is active.                     │                │
+╭ Sessions ────  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│ Create   Open  │  Sub-agents Native                                                                 │                │
+│hel ──────────  │  CPU        no CPU data yet                                                        │                │
+│› · ACP pretty  │                                                                                    │                │
+│  Idle  podman  │  Content  ───────────────────────────────────────────────────────────────────────  │                │
+│  │ No message  │  Changed files — The session's target is not running.                    ctrl+b d  │                │
+│  │             │  Dismiss notification — No dismissible notification is active.                     │                │
+│                │  Ignore notifications                                                              │                │
+│                │  Stop ignoring notifications — Notifications are not ignored.                      │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │  Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
@@ -233,16 +234,15 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │  │Workspace default (current)           ▐│                                         │                │
 │                │  │Workspace w2                          ▐│                                         │                │
 │                │  │Workspace w3                          ▐│                         ctrl+b shift+x  │                │
-│                │  │Workspace w4                          ▐│                                         │                │
-│                │  │Workspace w5                          ││ turn is running here or in its sub-…    │  ──────────────╯
-│                │  │Workspace w6                          ││───────────────────────────────────────  │  ──────────────╮
+│                │  │Workspace w4                          ▐│                                         │  ──────────────╯
+│                │  │Workspace w5                          ││ turn is running here or in its sub-…    │  ──────────────╮
+│                │  │Workspace w6                          ││───────────────────────────────────────  │                │
 │                │  ╰───────────────────────────────────────╯                                         │                │
-│                │  Destroy…                                                                          │                │
-│                │Move the selected session, and its sub-agents, to another workspace, after you confi│  ──────────────╯
-│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ─────── ▁   ▄ ╮
-│                                                                                                                      │
+│                │  Destroy…                                                                          │  ──────────────╯
+│                │Move the selected session, and its sub-agents, to another workspace, after you confi│  ─────── ▁   ▄ ╮
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                        ──────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│                                                                                                        ─────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
@@ -256,16 +256,17 @@ first Escape action: None
 ╰──────────────────────────────────────╯│                                                                              │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                              │
 │ Create   Open   Filter: _____________││                                                                              │
-│hel ──────────────────────────────────││                                                                              │
+│hel ──────────                                                                                                        │
 │› · ACP pretty                                                                                                        │
-│  Idle  podman                                                                                                        │
-│  │ No message  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
-│  │             │  Sub-agents Native                                                                 │                │
-│                │  CPU        no CPU data yet                                                        │                │
+│  Idle  podman  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  │ No message  │  Sub-agents Native                                                                 │                │
+│  │             │  CPU        no CPU data yet                                                        │                │
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
 │                │  Dismiss notification — No dismissible notification is active.                     │                │
+│                │  Ignore notifications                                                              │                │
+│                │  Stop ignoring notifications — Notifications are not ignored.                      │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │  Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
@@ -275,16 +276,15 @@ first Escape action: None
 │                │  Container settings                                                                │                │
 │                │  Move…                                                                             │                │
 │                │  Suspend…                                                          ctrl+b shift+x  │                │
-│                │  Restart                                                                           │                │
-│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╯
-│                │  ────────────────────────────────────────────────────────────────────────────────  │  ──────────────╮
+│                │  Restart                                                                           │  ──────────────╯
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╮
+│                │  ────────────────────────────────────────────────────────────────────────────────  │                │
 │                │  Copy session ID                                                                   │                │
-│                │  Destroy…                                                                          │                │
-│                │Move the selected session, and its sub-agents, to another workspace, after you confi│  ──────────────╯
-│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ─────── ▁   ▄ ╮
-│                                                                                                                      │
+│                │  Destroy…                                                                          │  ──────────────╯
+│                │Move the selected session, and its sub-agents, to another workspace, after you confi│  ─────── ▁   ▄ ╮
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
 │                                                                                                        ──────────────╯
-│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│                                                                                                        ─────── ▁   ▄ ╮
 │                                      ││            Harness      Weekly      Resets  5H Resets                        │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │

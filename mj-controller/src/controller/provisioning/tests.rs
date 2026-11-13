@@ -916,6 +916,7 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
     let mut session = SessionRecord {
         oracle_choice: None,
         oracle: true,
+        notifications_ignored: false,
         project: None,
         target_runtime: Some((&serde_json::from_str::<TargetTemplate>(
             r#"{"kind":"ssh-bare","host":"builder","user":"original","permissions":"yolo","workspace_prefix":"workspaces"}"#
