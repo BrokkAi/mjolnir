@@ -12,6 +12,7 @@ import questionsV6 from "../../../mj-core/src/activity/verdict_questions_v6.json
 import questions from "../../../mj-core/src/activity/verdict_questions.json" with { type: "json" };
 import { githubItemRequest, githubItemAnswers, githubItemQuestions, githubItemRequestV2, githubItemAnswersV2, githubItemQuestionsV2, type GithubItemEvidence, type GithubItemEvidenceV2 } from "./github-item.ts";
 import { questionLocatorRequest, questionLocatorAnswers, questionLocatorQuestions, type QuestionLocatorRequest } from "./question-locator.ts";
+import { questionLocatorGlideQuestions, questionLocatorGlideProbabilities } from "./question-locator-glide.ts";
 import { afkQuestionRequest, afkQuestionAnswers, afkQuestionQuestions, type AfkQuestionRequest } from "./afk-question.ts";
 
 export interface Env {
@@ -401,6 +402,17 @@ async function handbackVerdict(state: unknown, key: string): Promise<Response> {
   } catch { return error("invalid_upstream_response", 502); }
 }
 
+/// GLiDE's V0 locator question for one worker state. Provider errors, including
+/// backpressure and its Retry-After, pass through without retries.
+async function questionLocatorGlideVerdict(state: QuestionLocatorRequest, key: string): Promise<Response> {
+  const response = await glide(state, questionLocatorGlideQuestions(state), key);
+  if (!response.ok) return response;
+  try {
+    const probabilities = questionLocatorGlideProbabilities(await response.json(), state);
+    return probabilities ? json({ probabilities }) : error("invalid_upstream_response", 502);
+  } catch { return error("invalid_upstream_response", 502); }
+}
+
 // Evidence projection adds only worker-observed facts and recent message text.
 function eotEvidence(value: unknown): boolean {
   if (!object(value)) return false;
@@ -436,19 +448,20 @@ export default {
     const eot = url.pathname === "/v1/glide-turn-verdict";
     const handback = url.pathname === "/v1/handback-verdict";
     const questionLocator = url.pathname === "/v1/question-locator";
+    const questionLocatorGlide = url.pathname === "/v1/question-locator-glide";
     const afkQuestion = url.pathname === "/v1/afk-question-verdict";
     const githubItem = url.pathname === "/v1/github-item-verdict";
     const githubGlide = url.pathname === "/v1/github-item-glide";
     const githubItemV2 = url.pathname === "/v2/github-item-verdict";
     const continuationV2 = url.pathname === "/v2/continuation-verdict";
     const continuation = continuationV2 || url.pathname === "/v1/continuation-verdict";
-    if ((!eot && !handback && !afkQuestion && !questionLocator && !githubItem && !githubItemV2 && !githubGlide && !continuation && url.pathname !== "/v1/turn-verdict" && url.pathname !== "/v2/turn-verdict" && url.pathname !== "/v3/turn-verdict" && url.pathname !== "/v4/turn-verdict" && url.pathname !== "/v5/turn-verdict" && url.pathname !== "/v6/turn-verdict" && url.pathname !== "/v7/turn-verdict") || url.search) return error("not_found", 404);
+    if ((!eot && !handback && !afkQuestion && !questionLocator && !questionLocatorGlide && !githubItem && !githubItemV2 && !githubGlide && !continuation && url.pathname !== "/v1/turn-verdict" && url.pathname !== "/v2/turn-verdict" && url.pathname !== "/v3/turn-verdict" && url.pathname !== "/v4/turn-verdict" && url.pathname !== "/v5/turn-verdict" && url.pathname !== "/v6/turn-verdict" && url.pathname !== "/v7/turn-verdict") || url.search) return error("not_found", 404);
     if (request.method !== "POST") return error("method_not_allowed", 405, { Allow: "POST" });
     if (request.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
       return error("unsupported_media_type", 415);
     }
     // Handback and completed-turn GLiDE checks use Fastino.
-    const key = ((handback || eot || githubGlide) ? env.FASTINO_API_KEY : env.TYPESAFE_API_KEY)?.trim();
+    const key = ((handback || eot || githubGlide || questionLocatorGlide) ? env.FASTINO_API_KEY : env.TYPESAFE_API_KEY)?.trim();
     const ip = request.headers.get("CF-Connecting-IP");
     const limiter = (githubItem || githubItemV2 || githubGlide) ? env.GITHUB_ITEM_RATE_LIMITER : continuation ? env.CONTINUATION_RATE_LIMITER : env.TURN_RATE_LIMITER;
     if (!key || !ip || !limiter) return error("service_unavailable", 503);
@@ -460,12 +473,13 @@ export default {
     }
     let state: unknown;
     try {
-      state = await readBounded(request, (eot || handback) ? GLIDE_BODY_BYTES : MAX_BODY_BYTES);
+      state = await readBounded(request, (eot || handback || questionLocatorGlide) ? GLIDE_BODY_BYTES : MAX_BODY_BYTES);
     } catch (cause) {
       return cause instanceof BodyTooLarge ? error("body_too_large", 413) : error("invalid_json", 400);
     }
     if (eot) return eotEvidence(state) ? eotVerdict(state, key) : error("invalid_evidence", 400);
     if (handback) return glideEvidence(state) ? handbackVerdict(state, key) : error("invalid_evidence", 400);
+    if (questionLocatorGlide) return questionLocatorRequest(state) ? questionLocatorGlideVerdict(state, key) : error("invalid_evidence", 400);
     if (githubGlide) {
       if (!githubItemGlideRequest(state)) return error("invalid_github_item_request", 400);
       const response = await glide(state, githubItemGlideQuestions, key);
