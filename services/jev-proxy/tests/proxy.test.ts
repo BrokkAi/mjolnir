@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import proxy from "../src/index.ts";
-import questions from "../../../mj-core/src/activity/verdict_questions_v1.json" with { type: "json" };
+import questions from "../src/verdict_questions_v1.json" with { type: "json" };
 
 const base = {
   harness: "claude", phase: "running", silent_for_s: 60,
@@ -185,7 +185,7 @@ test("the deadline also covers a stalled response body", async t => {
 
 
 test("v2 forwards shared transcript evidence and rejects legacy/mixed shapes", async t => {
-  const { default: questionsV2 } = await import("../../../mj-core/src/activity/verdict_questions_v2.json", { with: { type: "json" } });
+  const { default: questionsV2 } = await import("../src/verdict_questions_v2.json", { with: { type: "json" } });
   const { recent_tools: _old, ...rest } = base;
   const state = { ...rest, transcript_summary: '<tool cargo test [completed]>full results</tool>' };
   const calls = upstream(t, async (_url, options) => {
@@ -205,7 +205,7 @@ test("v2 forwards shared transcript evidence and rejects legacy/mixed shapes", a
 });
 
 test("v3 assesses input and work independently using the direct client's shared questions", async t => {
-  const { default: questionsV3 } = await import("../../../mj-core/src/activity/verdict_questions_v3.json", { with: { type: "json" } });
+  const { default: questionsV3 } = await import("../src/verdict_questions_v3.json", { with: { type: "json" } });
   const { recent_tools: _old, ...rest } = base;
   const state = { ...rest, transcript_summary: "Assistant: Approve deployment? The independent heap task continues.", background_commands: 1 };
   const result = { answers: {
@@ -235,7 +235,7 @@ test("v3 assesses input and work independently using the direct client's shared 
 });
 
 test("v4 supplies completion diagnostics and requires a typed server retry answer", async t => {
-  const { default: questionsV4 } = await import("../../../mj-core/src/activity/verdict_questions_v4.json", { with: { type: "json" } });
+  const { default: questionsV4 } = await import("../src/verdict_questions_v4.json", { with: { type: "json" } });
   const { recent_tools: _old, ...rest } = base;
   const state = { ...rest, phase: "replied", transcript_summary: "User: Continue the task.",
     assistant_text_tail: "Provider temporarily unavailable", completion: {
@@ -272,7 +272,7 @@ test("v4 supplies completion diagnostics and requires a typed server retry answe
 });
 
 test("v5 independently assesses an autonomous capacity refusal", async (t) => {
-  const { default: unifiedQuestions } = await import("../../../mj-core/src/activity/verdict_questions_v5.json", { with: { type: "json" } });
+  const { default: unifiedQuestions } = await import("../src/verdict_questions_v5.json", { with: { type: "json" } });
   const { recent_tools: _recent, ...ordinary } = base;
   const state = { ...ordinary, phase: "replied", transcript_summary: "",
     assistant_text_tail: "Selected model is at capacity. Please try a different model.",
@@ -300,7 +300,7 @@ test("v5 independently assesses an autonomous capacity refusal", async (t) => {
 });
 
 test("v6 lists background commands and returns the background judgment", async (t) => {
-  const { default: frozenQuestions } = await import("../../../mj-core/src/activity/verdict_questions_v6.json", { with: { type: "json" } });
+  const { default: frozenQuestions } = await import("../src/verdict_questions_v6.json", { with: { type: "json" } });
   assert.ok("background" in frozenQuestions, "the frozen v6 question set carries the background question");
   assert.ok(!("reply" in frozenQuestions), "the frozen v6 question set has no reply question");
   const { recent_tools: _recent, ...ordinary } = base;
@@ -344,7 +344,7 @@ test("v6 lists background commands and returns the background judgment", async (
 });
 
 test("v7 asks the reply question and requires its complete probability distribution", async (t) => {
-  const { default: currentQuestions } = await import("../../../mj-core/src/activity/verdict_questions.json", { with: { type: "json" } });
+  const { default: currentQuestions } = await import("../src/verdict_questions.json", { with: { type: "json" } });
   assert.ok("reply" in currentQuestions, "the live question set carries the reply question");
   const { recent_tools: _recent, ...ordinary } = base;
   const state = { ...ordinary, phase: "running", transcript_summary: "", authorization: {

@@ -14,7 +14,6 @@ include = [
     "tests/fixtures/*.sh",
     "tests/fixtures/claude-antigravity-models.json",
     # Turn-classifier questions shared with the hosted proxy.
-    "src/activity/verdict_questions.json",
     "src/activity/question_locator.json",
     "src/activity/eot_glide_questions.json",
     "src/activity/eot_glide_fresh_sample.json",

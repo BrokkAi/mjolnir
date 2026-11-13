@@ -341,7 +341,7 @@ impl TurnContext {
                     .to_owned(),
             })
             .collect();
-        let mut evidence = TurnEvidence {
+        TurnEvidence {
             authorization: None,
             final_tool_calls,
             background: Vec::new(),
@@ -376,13 +376,7 @@ impl TurnContext {
                 state.assistant_text_tail.clone()
             },
             completion: None,
-        };
-        let mut limit = 48 * 1024;
-        while limit > 0 && !mj_core::activity::verdict::request_fits(&evidence) {
-            limit /= 2;
-            evidence.transcript_summary = summary.render(limit);
         }
-        evidence
     }
 }
 
