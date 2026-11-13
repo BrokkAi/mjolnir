@@ -15,7 +15,7 @@ After this change, mj never sends an automatic "continue" prompt for ordinary un
 - [x] (2026-11-13) Milestone 3: configuration, settings UI, goldens, docs, shipped skill, e2e scripts, AGENTS.md.
 - [x] (2026-11-13) Milestone 4: proxy: keep serving the old routes, move their question files into the proxy package.
 - [x] (2026-11-13) Milestone 5: remove the dead help-search classifier (core module, proxy route and rate limiter, wording, agent docs).
-- [ ] Full validation, commit, review, push; close #1304 and #1532.
+- [x] (2026-11-13) Full validation done (clippy, fmt, per-crate cargo tests, proxy npm, web settings spec). Review, push and closing #1304 and #1532 are the parent's.
 
 ## Surprises & Discoveries
 
@@ -75,7 +75,7 @@ After this change, mj never sends an automatic "continue" prompt for ordinary un
 
 ## Outcomes & Retrospective
 
-(Fill in at completion.)
+Automatic continuation is removed in commits 6dfb81125 through 5d2c6d367 on master, together with the dead help-search classifier. Validation: workspace clippy clean; cargo tests pass for mj-core, mj-transcript, mj-client, mj-chat, mj-tui, mj-worker and mj-controller; proxy `npm run check` and `npm test` pass (45); web settings spec passes (5). Live check: `mj doctor` with an isolated `MJ_CONFIG_DIR` whose config holds `[continuation] enabled = false` reports the configuration valid; no daemon was started. User-visible changes: users who had turned `[continuation]` off now get quota recovery while Jev is on; workers on relay protocol 24 and below no longer get automatic quota recovery until replaced. Not deployed: the proxy still serves the continuation routes (kept) and `/v1/help-search` (removed in source, live until the next proxy deployment). Lesson: `mj-chat` golden_transcript_navigation needs `TZ=UTC`.
 
 ## Context and Orientation
 
