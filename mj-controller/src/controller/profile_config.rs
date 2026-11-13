@@ -1664,6 +1664,9 @@ mod tests {
             // None asks for no Mjolnir sub-agents at all; every harness
             // accepts it, including one without delegation tools (#1284).
             validate_session_subagent_policy(
+                &crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                    CancellationToken::new(),
+                ),
                 &config,
                 "parent",
                 &mj_core::subagent::SubagentPolicy::None,
