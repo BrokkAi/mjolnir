@@ -475,7 +475,7 @@ pub(super) fn collect_native_tree(
         HarnessKind::Grok => inside && grok_session_artifact(relative, session_id),
         HarnessKind::Muse => inside && name == "session.jsonl",
         HarnessKind::OpenCode => is_opencode_native_artifact(relative),
-        HarnessKind::Antigravity => false, // No native checkpoint adapter yet.
+        HarnessKind::Antigravity => is_antigravity_native_artifact(relative, session_id),
         HarnessKind::Dsh => is_dsh_session_record(relative, session_id),
     };
     if !selected {
@@ -486,8 +486,8 @@ pub(super) fn collect_native_tree(
         "native artifact is too large"
     );
     validate_relative_path(relative)?;
-    let data = if harness == HarnessKind::OpenCode {
-        opencode_database_without_logins(path)?
+    let data = if is_sqlite_native_database(harness, relative) {
+        sqlite_native_database_snapshot(harness, path)?
     } else {
         fs::read(path)?
     };
@@ -509,43 +509,107 @@ pub(super) fn is_dsh_session_record(relative_path: &Path, session_id: &str) -> b
 /// OpenCode's database within a session home.
 pub(super) const OPENCODE_DATABASE: &str = ".data/opencode/opencode.db";
 
-/// The files SQLite keeps beside [`OPENCODE_DATABASE`] while it is open: the
-/// write-ahead log, whose pages SQLite replays over the database when it next
-/// opens it, and the shared-memory index of that log.
-pub(super) const OPENCODE_DATABASE_SIDECARS: [&str; 2] = [
-    ".data/opencode/opencode.db-wal",
-    ".data/opencode/opencode.db-shm",
-];
-
 /// OpenCode keeps every session of a data directory in one SQLite database,
 /// [`OPENCODE_DATABASE`]. A session home has exactly one data directory, so
-/// the database is the session's native state. It is captured as a snapshot
-/// ([`opencode_database_without_logins`]) that already holds the pages of the
-/// write-ahead log, so no [`OPENCODE_DATABASE_SIDECARS`] are captured, and a
-/// restore removes any it finds beside the database it replaces.
+/// the database is the session's native state.
 pub(super) fn is_opencode_native_artifact(relative_path: &Path) -> bool {
     relative_path == Path::new(OPENCODE_DATABASE)
+}
+
+/// Where agy keeps one SQLite database per conversation, named by the ACP
+/// session ID, and the directory per conversation beside it.
+pub(super) const ANTIGRAVITY_CONVERSATIONS: &str = "antigravity-cli/conversations";
+pub(super) const ANTIGRAVITY_BRAIN: &str = "antigravity-cli/brain";
+
+/// A native session's own agy files: its conversation database, and
+/// everything under its `brain` directory (the full text of long tool output,
+/// which the conversation points the model at, and agy's artifacts). Never
+/// the login, the logs, the indexes shared by all conversations, or another
+/// conversation's files. The database's `-wal` and `-shm` files are not
+/// selected: the snapshot taken of the database already holds their pages.
+pub(super) fn is_antigravity_native_artifact(relative_path: &Path, session_id: &str) -> bool {
+    relative_path == Path::new(ANTIGRAVITY_CONVERSATIONS).join(format!("{session_id}.db"))
+        || relative_path.starts_with(Path::new(ANTIGRAVITY_BRAIN).join(session_id))
+}
+
+/// Whether `relative_path` is a SQLite database a checkpoint carries as a
+/// snapshot, which is also the one rule for what a restore must not leave
+/// beside the database it replaces ([`sqlite_sidecars`]).
+pub(super) fn is_sqlite_native_database(harness: HarnessKind, relative_path: &Path) -> bool {
+    match harness {
+        HarnessKind::OpenCode => is_opencode_native_artifact(relative_path),
+        HarnessKind::Antigravity => {
+            relative_path.parent() == Some(Path::new(ANTIGRAVITY_CONVERSATIONS))
+                && relative_path.extension().is_some_and(|ext| ext == "db")
+        }
+        _ => false,
+    }
+}
+
+/// The files SQLite keeps beside a database while it is open: the
+/// write-ahead log, whose pages SQLite replays over the database when it next
+/// opens it, and the shared-memory index of that log. A snapshot already
+/// holds the log's pages, so a restore removes any it finds beside the
+/// database it writes; an old log replayed over the restored pages would
+/// corrupt them.
+pub(super) fn sqlite_sidecars(database: &Path) -> [PathBuf; 2] {
+    let beside = |suffix: &str| {
+        let mut name = database.as_os_str().to_owned();
+        name.push(suffix);
+        PathBuf::from(name)
+    };
+    [beside("-wal"), beside("-shm")]
 }
 
 /// The tables in which OpenCode keeps logins: provider and connector
 /// credentials, and the tokens of OpenCode's own accounts.
 const OPENCODE_LOGIN_TABLES: [&str; 3] = ["credential", "account", "control_account"];
 
-/// OpenCode's database as a checkpoint carries it: a consistent copy of the
-/// live database, write-ahead log included, without the rows of
-/// [`OPENCODE_LOGIN_TABLES`]. OpenCode 2 keeps its logins in the same file as
-/// its sessions, and every launch imports the profile's logins into the
-/// staged home afresh, so a checkpoint needs none of them and must not carry
-/// their secrets.
-fn opencode_database_without_logins(path: &Path) -> Result<Vec<u8>> {
-    let scratch = tempfile::tempdir().context("create OpenCode database snapshot directory")?;
-    let snapshot_path = scratch.path().join("opencode.db");
+/// A database as a checkpoint carries it. OpenCode 2 keeps its logins in the
+/// same file as its sessions, and every launch imports the profile's logins
+/// into the staged home afresh, so a checkpoint needs none of them and must
+/// not carry their secrets. agy's logins are in another file, so its
+/// conversation database needs nothing removed.
+fn sqlite_native_database_snapshot(harness: HarnessKind, path: &Path) -> Result<Vec<u8>> {
+    match harness {
+        HarnessKind::OpenCode => sqlite_snapshot(path, "OpenCode", |copy| {
+            for table in OPENCODE_LOGIN_TABLES {
+                let exists: bool = copy.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+                    [table],
+                    |row| row.get(0),
+                )?;
+                if exists {
+                    copy.execute(&format!("DELETE FROM \"{table}\""), [])?;
+                }
+            }
+            // VACUUM rebuilds the file, so no freed page keeps a deleted login.
+            copy.execute_batch("VACUUM;")?;
+            Ok(())
+        }),
+        _ => sqlite_snapshot(path, harness.display_name(), |_| Ok(())),
+    }
+}
+
+/// A consistent copy of a database a harness may be writing, write-ahead log
+/// included, with `edit` applied to the copy. SQLite's backup API reads every
+/// page in one transaction, so the copy holds exactly what a reader of the
+/// live database sees; copying the file alone would leave out whatever is
+/// still in the log.
+fn sqlite_snapshot(
+    path: &Path,
+    label: &str,
+    edit: impl FnOnce(&rusqlite::Connection) -> Result<()>,
+) -> Result<Vec<u8>> {
+    let scratch =
+        tempfile::tempdir().with_context(|| format!("create {label} snapshot directory"))?;
+    let snapshot_path = scratch.path().join("snapshot.db");
     let snapshot = || -> Result<()> {
         let source = rusqlite::Connection::open_with_flags(
             path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
-        // The running OpenCode may hold a brief write lock.
+        // The running harness may hold a brief write lock.
         source.busy_timeout(std::time::Duration::from_secs(5))?;
         // SQLite's backup takes the destination as a path, whatever its
         // encoding. Copying every page in one step reads them all in one
@@ -562,33 +626,20 @@ fn opencode_database_without_logins(path: &Path) -> Result<Vec<u8>> {
                     _ if std::time::Instant::now() < deadline => {
                         std::thread::sleep(std::time::Duration::from_millis(50));
                     }
-                    other => bail!("OpenCode's database stayed busy ({other:?})"),
+                    other => bail!("{label}'s database stayed busy ({other:?})"),
                 }
             }
         }
         drop(source);
-        for table in OPENCODE_LOGIN_TABLES {
-            let exists: bool = copy.query_row(
-                "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
-                [table],
-                |row| row.get(0),
-            )?;
-            if exists {
-                copy.execute(&format!("DELETE FROM \"{table}\""), [])?;
-            }
-        }
-        // VACUUM rebuilds the file, so no freed page keeps a deleted login;
-        // the checkpoint moves a copy in WAL mode back into the file itself.
-        copy.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
+        edit(&copy)?;
+        // A copy in WAL mode keeps its pages in a log until a checkpoint moves
+        // them into the file itself, which is all the checkpoint carries.
+        copy.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         Ok(())
     };
-    snapshot().with_context(|| format!("snapshot OpenCode database {}", path.display()))?;
-    fs::read(&snapshot_path).with_context(|| {
-        format!(
-            "read OpenCode database snapshot {}",
-            snapshot_path.display()
-        )
-    })
+    snapshot().with_context(|| format!("snapshot {label} database {}", path.display()))?;
+    fs::read(&snapshot_path)
+        .with_context(|| format!("read {label} database snapshot {}", snapshot_path.display()))
 }
 
 pub(super) fn kimi_session_artifact(relative: &Path, session_id: &str) -> bool {

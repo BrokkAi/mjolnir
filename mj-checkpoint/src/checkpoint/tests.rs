@@ -287,6 +287,292 @@ fn an_opencode_checkpoint_keeps_live_sessions_and_no_login_secret() {
     }
 }
 
+/// The workspace record agy writes at `trajectory_metadata_blob.main`, as a
+/// protobuf: every workspace root nested in a repeated field 1 and again in a
+/// repeated field 7, around fields that relocation must leave as they are.
+/// Encoded here independently of the editor that rewrites it.
+fn antigravity_workspace_record(session: &str, roots: &[&str]) -> Vec<u8> {
+    antigravity_workspace_record_naming(session, roots, roots)
+}
+
+fn antigravity_workspace_record_naming(
+    session: &str,
+    nested_roots: &[&str],
+    roots: &[&str],
+) -> Vec<u8> {
+    fn varint(mut value: u64, out: &mut Vec<u8>) {
+        while value >= 0x80 {
+            out.push((value & 0x7f) as u8 | 0x80);
+            value >>= 7;
+        }
+        out.push(value as u8);
+    }
+    fn string(number: u64, payload: &[u8], out: &mut Vec<u8>) {
+        varint(number << 3 | 2, out);
+        varint(payload.len() as u64, out);
+        out.extend_from_slice(payload);
+    }
+    let mut stamp = Vec::new();
+    varint(1 << 3, &mut stamp);
+    varint(1_794_582_301, &mut stamp);
+    varint(2 << 3, &mut stamp);
+    varint(592_695_273, &mut stamp);
+    let mut record = Vec::new();
+    for uri in nested_roots {
+        let mut root = Vec::new();
+        string(1, uri.as_bytes(), &mut root);
+        string(3, b"", &mut root);
+        string(1, &root, &mut record);
+    }
+    string(2, &stamp, &mut record);
+    string(3, b"05300845-02a9-4765-ab5f-3b8ce6691497", &mut record);
+    string(6, session.as_bytes(), &mut record);
+    for uri in roots {
+        string(7, uri.as_bytes(), &mut record);
+    }
+    // Fields this checkpoint does not understand are copied as they were.
+    string(15, &[1, 2, 3, 4, 5, 0xff, 0xfe, 0xfd], &mut record);
+    string(18, b"default-cli-project", &mut record);
+    record
+}
+
+/// agy keeps each conversation in a SQLite database it holds open in WAL mode,
+/// so the newest turn is only in the log while agy runs, and records every
+/// workspace it was given inside the database (the launch directory and any
+/// additional ones, with nothing to tell which is which). It runs commands in
+/// the first root it knows, so a restore at another path records the new
+/// launch directory as the only root, even when a recorded root still exists
+/// where the session is restored (an old copy of the tree would run its
+/// commands); the request that opens the conversation names the additional
+/// directories again. A checkpoint keeps the conversation's database and its
+/// `brain` files and nothing else in the home, a restore removes the log of
+/// the database it replaces, and a workspace record it cannot read refuses the
+/// restore.
+#[test]
+fn an_antigravity_checkpoint_keeps_the_live_conversation_and_follows_the_workspace() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut spec, _) = fixture(temp.path());
+    spec.session.harness_kind = HarnessKind::Antigravity;
+    spec.harness_home = temp.path().join("antigravity");
+    let agy = spec.harness_home.join("antigravity-cli");
+    let conversations = agy.join("conversations");
+    fs::create_dir_all(&conversations).unwrap();
+    let old_uri = "file:///old/workspace/app";
+    // Roots that still exist where the session is restored: an additional
+    // directory, and the tree the session was launched in, now an old copy.
+    let extra = temp.path().join("extra library");
+    fs::create_dir_all(&extra).unwrap();
+    let extra_uri = format!("file://{}/extra%20library", temp.path().display());
+    let old_copy_uri = format!("file://{}/app", spec.workspace_root.display());
+    let database = conversations.join(format!("{NATIVE}.db"));
+    // The tables agy 1.5.8 creates that hold what the checkpoint relocates.
+    let live = rusqlite::Connection::open(&database).unwrap();
+    live.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA wal_autocheckpoint = 0;
+         CREATE TABLE `trajectory_meta` (`trajectory_id` text,`cascade_id` text,`trajectory_type` integer,`source` integer,PRIMARY KEY (`trajectory_id`));
+         CREATE TABLE `steps` (`idx` integer,`step_type` integer NOT NULL DEFAULT 0,`status` integer NOT NULL DEFAULT 0,`step_payload` blob,PRIMARY KEY (`idx`));
+         CREATE TABLE `trajectory_metadata_blob` (`id` text DEFAULT \"main\",`data` blob,PRIMARY KEY (`id`));",
+    )
+    .unwrap();
+    live.execute(
+        "INSERT INTO trajectory_metadata_blob VALUES ('main', ?1)",
+        [antigravity_workspace_record(
+            NATIVE,
+            &[&extra_uri, &old_copy_uri, old_uri],
+        )],
+    )
+    .unwrap();
+    live.execute("INSERT INTO steps VALUES (0, 14, 3, 'first turn')", [])
+        .unwrap();
+    live.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap();
+    live.execute(
+        "INSERT INTO steps VALUES (1, 15, 3, 'turn only in the log')",
+        [],
+    )
+    .unwrap();
+    assert!(
+        conversations
+            .join(format!("{NATIVE}.db-wal"))
+            .metadata()
+            .unwrap()
+            .len()
+            > 0
+    );
+
+    // Everything else agy keeps in its home, none of which a checkpoint takes.
+    let secrets = ["agy-access-token", "agy-refresh-token", "me@example.test"];
+    let write = |relative: &str, body: &str| {
+        let path = agy.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, body).unwrap();
+    };
+    write(
+        "antigravity-oauth-token",
+        &format!(
+            r#"{{"token":{{"access_token":"{}","refresh_token":"{}"}}}}"#,
+            secrets[0], secrets[1]
+        ),
+    );
+    write("log/acp-server-1.log", &format!("account {}", secrets[2]));
+    write("conversation_summaries.db", "index of every conversation");
+    write("annotations/other.pbtxt", "title:\"other\"");
+    write("conversations/other.db", "another conversation");
+    write("conversations/other.db-wal", "another conversation's log");
+    write(
+        "brain/other/.system_generated/steps/2/output.txt",
+        "another conversation's output",
+    );
+    // The conversation's own files: the full output its database points at.
+    write(
+        &format!("brain/{NATIVE}/.system_generated/steps/2/output.txt"),
+        "the full output",
+    );
+    write(&format!("brain/{NATIVE}/notes/plan.md"), "an artifact");
+
+    export_checkpoint(&spec).unwrap();
+    drop(live);
+
+    let archive = read_archive_verified(&spec.output_path).unwrap();
+    let native = archive
+        .manifest
+        .payloads
+        .iter()
+        .filter_map(|descriptor| match &descriptor.role {
+            PayloadRole::NativeArtifact { relative_path } => Some(relative_path.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        native,
+        [
+            format!("antigravity-cli/brain/{NATIVE}/.system_generated/steps/2/output.txt"),
+            format!("antigravity-cli/brain/{NATIVE}/notes/plan.md"),
+            format!("antigravity-cli/conversations/{NATIVE}.db"),
+        ]
+        .map(PathBuf::from)
+    );
+    for descriptor in &archive.manifest.payloads {
+        let payload = archive.payload(descriptor).unwrap();
+        for secret in secrets {
+            assert!(
+                !payload
+                    .windows(secret.len())
+                    .any(|window| window == secret.as_bytes()),
+                "the checkpoint carries {secret} in {:?}",
+                descriptor.role
+            );
+        }
+    }
+
+    // The home a resume finds still holds the log of the conversation's
+    // previous run, which SQLite would replay over the restored pages.
+    let retained = temp.path().join("retained");
+    let retained_conversations = retained.join("antigravity-cli/conversations");
+    fs::create_dir_all(&retained_conversations).unwrap();
+    for sidecar in ["db-wal", "db-shm"] {
+        fs::write(
+            retained_conversations.join(format!("{NATIVE}.{sidecar}")),
+            b"stale pages",
+        )
+        .unwrap();
+    }
+    fs::write(retained_conversations.join("other.db-wal"), b"not ours").unwrap();
+    // A path of another length, with a space, a non-ASCII letter and
+    // characters agy escapes and the `url` crate does not.
+    let moved = temp.path().join("new wörk space (copy)/app");
+    let restore_spec = |archive_path: &Path, home: &Path| CheckpointRestoreSpec {
+        report_root: None,
+        archive_path: archive_path.to_owned(),
+        workspace_root: spec.workspace_root.clone(),
+        relay_root: temp.path().join(format!(
+            "relay-{}",
+            home.file_name().unwrap().to_string_lossy()
+        )),
+        harness_home: home.to_owned(),
+        restore_repositories: false,
+        restore_native: true,
+        queue_policy: QueueRestorePolicy::Restore,
+        primary_repository_root: Some(moved.clone()),
+    };
+    restore_checkpoint(&restore_spec(&spec.output_path, &retained), &SystemGit).unwrap();
+
+    let restored_path = retained_conversations.join(format!("{NATIVE}.db"));
+    assert!(
+        !retained_conversations
+            .join(format!("{NATIVE}.db-wal"))
+            .exists()
+    );
+    assert!(
+        !retained_conversations
+            .join(format!("{NATIVE}.db-shm"))
+            .exists()
+    );
+    assert!(retained_conversations.join("other.db-wal").exists());
+    let restored = rusqlite::Connection::open(&restored_path).unwrap();
+    let turns = restored
+        .prepare("SELECT step_payload FROM steps ORDER BY idx")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(turns, ["first turn", "turn only in the log"]);
+    let record: Vec<u8> = restored
+        .query_row(
+            "SELECT data FROM trajectory_metadata_blob WHERE id = 'main'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let new_uri = format!(
+        "file://{}/new%20w%C3%B6rk%20space%20%28copy%29/app",
+        temp.path().display()
+    );
+    assert_eq!(record, antigravity_workspace_record(NATIVE, &[&new_uri]));
+    assert_eq!(
+        fs::read_to_string(retained.join(format!(
+            "antigravity-cli/brain/{NATIVE}/.system_generated/steps/2/output.txt"
+        )))
+        .unwrap(),
+        "the full output"
+    );
+    drop(restored);
+
+    // A record whose two lists of roots name different workspaces is not one
+    // to guess at.
+    let overwrite = |record: Vec<u8>| {
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute(
+                "UPDATE trajectory_metadata_blob SET data = ?1 WHERE id = 'main'",
+                [record],
+            )
+            .unwrap();
+    };
+    let export_again = |name: &str| {
+        let mut again = spec.clone();
+        again.output_path = temp.path().join(format!("worker/{name}.hel.zip"));
+        export_checkpoint(&again).unwrap();
+        again.output_path
+    };
+    overwrite(antigravity_workspace_record_naming(
+        NATIVE,
+        &[old_uri],
+        &["file:///elsewhere/app"],
+    ));
+    let error = restore_checkpoint(
+        &restore_spec(&export_again("mismatch"), &temp.path().join("refused")),
+        &SystemGit,
+    )
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("two different sets of workspaces"),
+        "{error:#}"
+    );
+}
+
 /// R4-5: a Codex session whose only turn failed at the usage limit, followed
 /// by `/clear`, could not be suspended ("no session artifacts found"). The
 /// clear had replaced the native session with one that never received a
