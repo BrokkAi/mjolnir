@@ -14,6 +14,7 @@ Issues #1523 and #1522 concern the standalone `mj ec2` CLI. Users should be able
 - [x] (2026-11-12) Exercise capacity exhaustion, region skipping, cleanup failures, ambiguous launch failures, and inventory across regions: all nine EC2 subprocess fixtures pass, including JSON output assertions and legacy-record cleanup.
 - [x] (2026-11-12) Run the final CLI crate suite: 297 tests passed, four existing tests ignored; formatting and diff checks pass.
 - [x] (2026-11-12) Validate the missing-default-subnet review correction: the focused regression and final complete CLI suite pass; workspace Clippy, formatting, and diff checks pass.
+- [x] (2026-11-12) Validate the second review correction: all ten EC2 fixtures pass, including replacement between discovery and teardown and protection of the successor from an old operation selector. Workspace Clippy, formatting, and diff checks pass. Final CLI validation covers 298 passing tests and four existing ignored tests; an unrelated login-terminal timeout passes on its sole-test rerun, and the remaining integration suites pass.
 
 ## Surprises & Discoveries
 
@@ -31,9 +32,11 @@ Query AWS instance-type offerings before provisioning so a type absent from a zo
 
 Review correction: a discovered zone with no default subnet is another unavailable placement, not a fatal request error. Extend the multi-region fixture with a region whose two zones have no default subnets and prove it creates no keys there before advancing to a usable region. Keep region-wide skipping on vCPU quota refusals as explicitly requested in #1523; decline the review suggestion to continue into other quota classes because that changes the requested selection policy.
 
+Second review correction: rereading a cached operation's path after taking the target lock was insufficient because capacity fallback can remove that operation entirely. `HostLocation` now retains only the target name for local records; `destroy_located` selects the current operation from the original user selector only after acquiring the target lock. A target selector follows the current operation; an explicitly selected old operation cannot destroy its successor. Discovery tolerates replacement/history records sharing a single target lock name.
+
 ## Outcomes & Retrospective
 
-The implementation accepts both positional comma-separated types and `--type`, repeated/comma-separated zones and regions, and region-only requests with zone discovery. Capacity refusals clean up before advancing, regional quota/opt-in refusals skip the region, and all outcomes are retained in create/list output. Failed cleanups and uncertain or already-accepted launches retain recovery information and stop. `zfs_cache` now follows the actual Podman cache configuration. After the review correction for zones without default subnets, all 297 active CLI tests pass (four existing tests ignored), including nine EC2 fixtures. Workspace Clippy, formatting, and diff checks pass. No paid AWS instance was launched; fixtures emulate AWS/SSH/Podman with isolated configuration and data directories. Publication follows the commit/review/push procedure below; Git history and issue state record publication.
+The implementation accepts both positional comma-separated types and `--type`, repeated/comma-separated zones and regions, and region-only requests with zone discovery. Capacity refusals clean up before advancing, regional quota/opt-in refusals skip the region, and all outcomes are retained in create/list output. Failed cleanups and uncertain or already-accepted launches retain recovery information and stop. `zfs_cache` now follows the actual Podman cache configuration. Review corrections cover zones without default subnets and destroy's stale discovery across record replacement. All 298 active CLI tests pass across the final suite and targeted completion (four existing tests ignored), including ten EC2 fixtures. One unrelated login-terminal timeout passed on its sole-test rerun. Workspace Clippy, formatting, and diff checks pass. No paid AWS instance was launched; fixtures emulate AWS/SSH/Podman with isolated configuration and data directories. Publication follows the commit/review/push procedure below; Git history and issue state record publication.
 
 ## Context and Orientation
 
@@ -84,3 +87,7 @@ Updated 2026-11-12 after validation: recorded nine passing EC2 fixtures, JSON/le
 Updated 2026-11-12 after review: added default-subnet absence to placement refusals and retained the issue's explicit region quota policy. The first Clippy run was discarded when committing changed its build stamp; the retry runs against a fixed commit with no build-storage overrides.
 
 Updated 2026-11-12 after final validation: the expanded multi-region regression passes, as do all 297 active CLI tests and workspace Clippy. Implementation and validation are complete.
+
+Updated 2026-11-12 after the second review: corrected destroy's ownership across capacity-record replacement and added a deterministic stale-discovery regression. Its validation is in progress.
+
+Updated 2026-11-12 after ownership validation: ten EC2 fixtures and all 298 active CLI cases pass across the final suite, sole failing-test rerun, and remaining suites. Workspace Clippy is clean.

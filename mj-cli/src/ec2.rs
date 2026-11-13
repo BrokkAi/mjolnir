@@ -238,6 +238,10 @@ fn refusal(error: &anyhow::Error) -> Option<Refusal> {
 }
 
 impl Record {
+    fn matches_selector(&self, host: &str) -> bool {
+        self.target == host || self.operation == host || self.instance_id.as_deref() == Some(host)
+    }
+
     fn directory(&self, root: &Path) -> Result<PathBuf> {
         ensure!(
             self.operation.len() == 32 && self.operation.bytes().all(|b| b.is_ascii_hexdigit()),
@@ -1312,35 +1316,101 @@ fn text_field<'a>(value: &'a Value, key: &str) -> &'a str {
     value[key].as_str().unwrap_or("-")
 }
 
-fn destroy(args: DestroyArgs, root: &Path) -> Result<()> {
-    let mut saved: Vec<_> = records(root)?
+fn find_record(root: &Path, host: &str) -> Result<Option<Record>> {
+    let mut matches = records(root)?
         .into_iter()
-        .filter(|r| {
-            r.target == args.host
-                || r.operation == args.host
-                || r.instance_id.as_deref() == Some(&args.host)
+        .filter(|record| record.matches_selector(host));
+    let record = matches.next();
+    ensure!(
+        matches.next().is_none(),
+        "multiple provisioning records match {host}; use an operation ID"
+    );
+    Ok(record)
+}
+
+struct HostLocation {
+    target: String,
+    // Needed only for managed hosts without a local record. Local discovery
+    // retains no record snapshot across the wait for the target lock.
+    instance: Option<Value>,
+}
+
+fn locate_host(args: &DestroyArgs, root: &Path) -> Result<HostLocation> {
+    let mut matches = records(root)?
+        .into_iter()
+        .filter(|record| record.matches_selector(&args.host));
+    if let Some(record) = matches.next() {
+        // Saving a replacement can briefly expose both history and its new
+        // operation. Discovery needs only their common lock name.
+        ensure!(
+            matches.all(|other| other.target == record.target),
+            "multiple targets match {}; use an operation ID",
+            args.host
+        );
+        return Ok(HostLocation {
+            target: record.target,
+            instance: None,
+        });
+    }
+    let cloud = Cloud::new(args.aws.clone());
+    let instances = cloud.instances()?;
+    let matches: Vec<_> = instances
+        .iter()
+        .filter(|instance| {
+            instance["InstanceId"] == args.host
+                || tag(instance, "mj:target").as_deref() == Some(&args.host)
+                || tag(instance, "mj:operation").as_deref() == Some(&args.host)
         })
         .collect();
+    let live: Vec<_> = matches
+        .iter()
+        .copied()
+        .filter(|instance| instance["State"]["Name"] != "terminated")
+        .collect();
+    let matches = if live.is_empty() { matches } else { live };
     ensure!(
-        saved.len() <= 1,
-        "multiple provisioning records match {}; use an operation ID",
+        matches.len() <= 1,
+        "multiple VMs match {}; use an instance or operation ID",
         args.host
     );
-    let saved_lock = if let Some(record) = saved.first_mut() {
-        let lock = lock_target(root, &record.target)?;
-        let directory = record.directory(root)?;
-        *record = serde_json::from_slice(&fs::read(directory.join("resources.json"))?)?;
+    let instance = matches.first().context(format!(
+        "no mj-managed host or local provisioning operation matches {:?}",
+        args.host
+    ))?;
+    Ok(HostLocation {
+        target: tag(instance, "mj:target").context("managed instance has no target tag")?,
+        instance: Some((*instance).clone()),
+    })
+}
+
+fn destroy(args: DestroyArgs, root: &Path) -> Result<()> {
+    let location = locate_host(&args, root)?;
+    destroy_located(args, root, location)
+}
+
+fn destroy_located(args: DestroyArgs, root: &Path, location: HostLocation) -> Result<()> {
+    // Only the owner of this lock chooses which operation the selector means.
+    // A capacity search can replace its record while destroy waits for it.
+    let _lock = lock_target(root, &location.target)?;
+    let saved = find_record(root, &args.host)?;
+    ensure!(
+        saved.is_some() || location.instance.is_some(),
+        "provisioning operation {:?} no longer exists",
+        args.host
+    );
+    if let Some(record) = &saved {
+        ensure!(
+            record.target == location.target,
+            "EC2 selector changed targets while waiting for its lock"
+        );
         if record.state != RecordState::Active {
-            fs::remove_dir_all(directory)?;
+            fs::remove_dir_all(record.directory(root)?)?;
             println!("Destroyed {}.", record.target);
             return Ok(());
         }
-        Some(lock)
-    } else {
-        None
-    };
+    }
     let mut cloud = Cloud::new(args.aws.clone());
-    if let Some(record) = saved.first() {
+    if let Some(record) = &saved {
         if cloud.options.region.is_none() {
             cloud.options.region = Some(record.region.clone());
         }
@@ -1353,46 +1423,26 @@ fn destroy(args: DestroyArgs, root: &Path) -> Result<()> {
             "AWS region/profile differs from the saved host; use the recorded region/profile"
         );
     }
-    let instances = cloud.instances()?;
-    let matches: Vec<_> = instances
-        .iter()
-        .filter(|i| {
-            if let Some(record) = saved.first() {
-                return tag(i, "mj:operation").as_deref() == Some(&record.operation);
-            }
-            i["InstanceId"] == args.host
-                || tag(i, "mj:target").as_deref() == Some(&args.host)
-                || tag(i, "mj:operation").as_deref() == Some(&args.host)
-        })
-        .collect();
-    let live: Vec<_> = matches
-        .iter()
-        .copied()
-        .filter(|i| i["State"]["Name"] != "terminated")
-        .collect();
-    let matches = if live.is_empty() { matches } else { live };
-    ensure!(
-        matches.len() <= 1,
-        "multiple VMs match {}; use an instance or operation ID",
-        args.host
-    );
     let identity = cloud.call("sts", &["get-caller-identity"], json!({}))?;
     let account = identity["Account"]
         .as_str()
         .context("AWS identity has no account ID")?;
-    let record = if let Some(record) = saved.first() {
+    let record = if let Some(record) = saved {
         ensure!(
             record.account == account,
             "AWS account {account} differs from the host's account {}; select its original credentials",
             record.account
         );
-        record.clone()
-    } else if let Some(instance) = matches.first() {
+        record
+    } else {
+        let instance = location
+            .instance
+            .context("managed host disappeared before teardown")?;
         Record {
             account: account.to_owned(),
-            operation: tag(instance, "mj:operation")
+            operation: tag(&instance, "mj:operation")
                 .context("managed instance has no operation tag")?,
-            target: tag(instance, "mj:target").context("managed instance has no target tag")?,
+            target: location.target,
             region: cloud
                 .options
                 .region
@@ -1403,27 +1453,8 @@ fn destroy(args: DestroyArgs, root: &Path) -> Result<()> {
             state: RecordState::Active,
             attempts: Vec::new(),
         }
-    } else {
-        bail!(
-            "no mj-managed host or local provisioning operation matches {:?}",
-            args.host
-        )
     };
-    let directory = record.directory(root)?;
-    let _lock = match saved_lock {
-        Some(lock) => lock,
-        None => lock_target(root, &record.target)?,
-    };
-    let record = if directory.join("resources.json").is_file() {
-        serde_json::from_slice::<Record>(&fs::read(directory.join("resources.json"))?)?
-    } else {
-        record
-    };
-    if record.state == RecordState::CleanedUp || record.state == RecordState::Preparing {
-        fs::remove_dir_all(&directory)?;
-    } else {
-        cleanup_record(&cloud, &record, root)?;
-    }
+    cleanup_record(&cloud, &record, root)?;
     println!("Destroyed {}.", record.target);
     Ok(())
 }
@@ -2034,6 +2065,51 @@ else:
             assert!(!bin.join(region).join("key.json").exists());
             assert!(!bin.join(region).join("group.json").exists());
         }
+    }
+
+    // Hard-won: #1523: destroy kept a superseded candidate record across its lock wait.
+    #[test]
+    fn destroy_resolves_a_replaced_target_record_after_taking_ownership() {
+        if fixture_child(
+            "ec2::tests::destroy_resolves_a_replaced_target_record_after_taking_ownership",
+            None,
+        ) {
+            return;
+        }
+        let fixture = PathBuf::from(std::env::var_os("MJ_EC2_FIXTURE_CHILD").unwrap());
+        let bin = fixture.join("bin");
+        let root = config_dir().join("ec2");
+        fs::write(bin.join("fail-launch"), "").unwrap();
+        create(create_args(), &root).unwrap_err();
+        let superseded = records(&root).unwrap().pop().unwrap();
+        let args = DestroyArgs {
+            host: "builder".into(),
+            aws: AwsArgs::default(),
+        };
+        let location = locate_host(&args, &root).unwrap();
+        let old_operation = DestroyArgs {
+            host: superseded.operation.clone(),
+            aws: AwsArgs::default(),
+        };
+        let old_location = locate_host(&old_operation, &root).unwrap();
+        // Drive the exact stale ordering: discovery, replacement under the
+        // create lock, then destroy's ownership and current-record selection.
+        fs::remove_file(bin.join("fail-launch")).unwrap();
+        create(create_args(), &root).unwrap();
+        assert!(!superseded.directory(&root).unwrap().exists());
+        let current = records(&root).unwrap().pop().unwrap();
+        assert_ne!(current.operation, superseded.operation);
+        let error = destroy_located(old_operation, &root, old_location).unwrap_err();
+        assert!(error.to_string().contains("no longer exists"));
+        assert!(Config::load().unwrap().targets.contains_key("builder"));
+        destroy_located(args, &root, location).unwrap();
+        assert!(records(&root).unwrap().is_empty());
+        assert!(!Config::load().unwrap().targets.contains_key("builder"));
+        let instance: Value =
+            serde_json::from_slice(&fs::read(bin.join("instance.json")).unwrap()).unwrap();
+        assert_eq!(instance["State"]["Name"], "terminated");
+        assert!(!current.directory(&root).unwrap().exists());
+        assert!(!bin.join("key.json").exists() && !bin.join("group.json").exists());
     }
 
     #[test]
