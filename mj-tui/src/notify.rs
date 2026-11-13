@@ -239,6 +239,12 @@ impl DashboardState {
                         target,
                     )
                 })
+                .or_else(|| {
+                    let detail = detail?;
+                    (!detail.supports_open_request)
+                        .then(|| detail.last_agent_message.as_deref().map(str::to_owned))
+                        .flatten()
+                })
                 .unwrap_or_else(|| "Waiting for your input".to_owned()),
             AttentionLevel::Important => detail
                 .and_then(|detail| detail.last_agent_message.as_deref())
@@ -484,6 +490,7 @@ mod tests {
         let mut dashboard = dashboard();
         let detail = dashboard.session_details.get_mut("asks").unwrap();
         detail.pending_elicitations.clear();
+        detail.supports_open_request = true;
         detail.question_message = Some("agent:original".into());
         detail.last_agent_message = Some("The background build finished".into());
         detail.projection.transcript.push(std::sync::Arc::new(mj_core::state::TranscriptItem {
@@ -491,6 +498,23 @@ mod tests {
             created_at_ms: 1, last_changed_at_ms: 1,
             body: mj_core::state::TranscriptBody::Agent { chunks: vec![serde_json::json!({"content":{"type":"text","text":"Keep the old format?"}})], streaming: false },
         }));
+        detail.question_message = None;
+        assert_eq!(
+            dashboard.notification_body("asks", AttentionLevel::Waiting),
+            "Waiting for your input"
+        );
+        dashboard
+            .session_details
+            .get_mut("asks")
+            .unwrap()
+            .supports_open_request = false;
+        assert_eq!(
+            dashboard.notification_body("asks", AttentionLevel::Waiting),
+            "The background build finished"
+        );
+        let detail = dashboard.session_details.get_mut("asks").unwrap();
+        detail.supports_open_request = true;
+        detail.question_message = Some("agent:original".into());
         assert!(dashboard.notification_events(0).is_empty());
         let notices = dashboard.notification_events(2000);
         assert_eq!(

@@ -220,10 +220,10 @@ fn waiting_on_own_work(runtime: &RuntimeProjection, id: &str) -> Vec<&'static st
                 .sessions
                 .get(child)
                 .and_then(|view| view.operational.as_deref())
+                // The shared "still owns work" answer: a closed child (or one
+                // that is only expecting a continuation) must not hold forever.
                 .is_some_and(|child| {
-                    child.active_prompt.is_some()
-                        || child.harness_turn.is_some()
-                        || !child.queued_prompts.is_empty()
+                    child.activity_state().has_work_in_flight() || !child.queued_prompts.is_empty()
                 })
     }) {
         work.push("managed child");
@@ -598,8 +598,24 @@ mod tests {
         assert_eq!(project(&next)["parent"], SessionAttention::NeedsInput);
         next.records.get_mut("parent").unwrap().harness_kind = HarnessKind::Claude;
         next.records.get_mut("parent").unwrap().last_profile = "claude".into();
-        let previous = next.clone();
         child.harness_turn = None;
+        child
+            .background_commands
+            .push(mj_core::relay::BackgroundCommand {
+                id: "child-build".into(),
+                started_at_ms: 1,
+                command: "cargo test".into(),
+                can_stop: false,
+            });
+        child.background_needed = Some(true);
+        assert!(matches!(
+            child.activity_state(),
+            mj_core::activity::ActivityState::Background { .. }
+        ));
+        next.sessions.get_mut("child").unwrap().operational = Some(child.clone().into());
+        assert_eq!(project(&next)["parent"], SessionAttention::Working);
+        let previous = next.clone();
+        child.background_commands.clear();
         next.sessions.get_mut("child").unwrap().operational = Some(child.into());
         update(&previous, &mut next);
         assert_eq!(

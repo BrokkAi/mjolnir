@@ -18,6 +18,8 @@ To see it working: in an isolated instance, run a Claude or Codex session that s
 
 ## Progress
 
+- [x] Review follow-up: managed-child activity uses the shared activity state plus queued prompts; legacy notification fallback uses the same worker capability check as question_message. Focused controller/TUI tests, touched-crate Clippy, formatting and whitespace checks pass.
+
 - [x] Review follow-up: shared legacy snapshot/checkpoint seeding and exact checkpoint envelope implemented. Core snapshot/open_request filters: 11 passed; worker upgrade/restore filters: seven passed; touched-crate Clippy with warnings denied, formatting and whitespace checks passed. No commit.
 
 - [x] (2026-11-13) Milestone 1, study: does an agent settle its own held question before the user replies? Concluded: almost never (about 2%); the resolution check is dropped by user decision. Evidence and numbers in Outcomes.
@@ -31,6 +33,8 @@ To see it working: in an isolated instance, run a Claude or Codex session that s
 
 
 ## Surprises & Discoveries
+
+Review follow-up: project_states already uses RelayOperationalState::activity_state directly to distinguish Working from Idle; there is no separate helper to reuse. Child holding now reads that same activity state plus queued prompts. TUI details previously carried only a question target, so CLI presentation now passes the shared supports_open_request capability beside that target for notification fallback selection.
 
 Review follow-up: `DurableRelay::open_with_harness` (`mj-worker/src/relay.rs`) is the shared startup/checkpoint-seed load point. Existing snapshots are decoded there before their private schema marker advances. Legacy harness InputRequired can be recovered from `assessment.completion.stop_reason` plus the assessment turn id/completion ordinal; no inference from a rendered reply is needed. Checkpoint export receives only `RelayOperationalState`; the parent decided to add only `person_input_through` there and export derived `open_request` plus that frontier. Restoring a retained request that was already fenced is unnecessary: the frontier still fences every late update.
 
@@ -95,6 +99,8 @@ Review follow-up: `DurableRelay::open_with_harness` (`mj-worker/src/relay.rs`) i
 
 
 ## Outcomes & Retrospective
+
+Child/notification review follow-up: parent holds now include a managed child with Background activity and no foreground turn. Legacy workers retain last-reply notifications; modern missing targets remain generic. Existing projector and notification tests were extended. Targeted controller attention/TUI notification checks and Clippy (controller, TUI, core, CLI) passed outside the sandbox; fmt and whitespace checks passed. Evidence: `review-child-notify-{tests,clippy,fmt}.log` in the report directory. No commit.
 
 Persistence review follow-up: pre-23 worker snapshots and legacy checkpoint seeds preserve unanswered legacy questions through one load-boundary helper. New checkpoint export/restore preserves derived open request and frontier exactly. The real-load regression covers dismissed, later-prompt fenced, harness InputRequired, legacy checkpoints and current exact-empty snapshots. Focused checks pass (11 core, seven worker); Clippy passes for core, worker, controller, chat and CLI. Logs are `review-upgrade-{core,worker,clippy,fmt}.log` in the report directory.
 
@@ -230,3 +236,5 @@ Revision note (2026-11-13, review): restored the shared activity-idle gate, corr
 Revision note (review upgrade/checkpoint follow-up): recorded the shared loader and the missing exporter transport facts; implementation paused for the parent’s contract decision.
 
 Revision note (review persistence decision): implemented shared pre-23/legacy-checkpoint seeding, and the parent-selected CheckpointOpenRequest envelope (absent is legacy; present is exact). RelayOperationalState exports only the person frontier in addition to the existing derived request; protocol remains unshipped 64.
+
+Revision note (child/notification review): shared operational activity now covers a managed child’s background work and other non-idle activity; pre-64 notifications retain their historical last-reply fallback through the common question capability check.

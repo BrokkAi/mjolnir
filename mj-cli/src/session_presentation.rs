@@ -40,6 +40,9 @@ pub(crate) fn apply_session_activity(
             .as_ref()
             .filter(|_| view.attention == mj_core::attention::SessionAttention::NeedsInput)
             .and_then(|snapshot| snapshot.operational.question_message().map(str::to_owned)),
+        view.snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.operational.supports_open_request()),
     );
     dashboard.set_session_connectivity(session_id, view.connected);
 }

@@ -49,6 +49,7 @@ pub(crate) struct SessionDetail {
     pub(crate) materialized_applied_event_ordinal: Option<u64>,
     pub(crate) current_turn_started_at: Option<u64>,
     pub(crate) question_message: Option<String>,
+    pub(crate) supports_open_request: bool,
     pub(crate) notification_dismissal: Option<NotificationDismissalState>,
     pub(crate) last_activity_at_ms: Option<u64>,
     pub(crate) last_agent_message: Option<Arc<str>>,
@@ -1412,11 +1413,18 @@ impl DashboardState {
     }
 
     /// The current open question target, if the worker located one.
-    pub fn set_question_message(&mut self, session_id: &str, target: Option<String>) {
-        self.session_details
+    pub fn set_question_message(
+        &mut self,
+        session_id: &str,
+        target: Option<String>,
+        supports_open_request: bool,
+    ) {
+        let detail = self
+            .session_details
             .entry(session_id.to_owned())
-            .or_default()
-            .question_message = target;
+            .or_default();
+        detail.question_message = target;
+        detail.supports_open_request = supports_open_request;
     }
 
     pub fn question_message(&self, session_id: &str) -> Option<&str> {

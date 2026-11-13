@@ -806,12 +806,15 @@ pub struct RelayOperationalState {
 }
 
 impl RelayOperationalState {
+    /// Whether this worker owns a persistent open request.
+    pub fn supports_open_request(&self) -> bool {
+        self.relay_protocol_version
+            .is_some_and(|version| version >= super::RELAY_OPEN_REQUEST_PROTOCOL)
+    }
+
     /// The original question target, with compatibility for pre-64 workers.
     pub fn question_message(&self) -> Option<&str> {
-        if self
-            .relay_protocol_version
-            .is_some_and(|version| version >= super::RELAY_OPEN_REQUEST_PROTOCOL)
-        {
+        if self.supports_open_request() {
             self.open_request
                 .as_ref()
                 .and_then(|request| request.question_message.as_deref())
