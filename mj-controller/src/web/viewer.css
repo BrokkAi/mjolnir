@@ -1063,6 +1063,19 @@ details.mailbox-event[open] > summary::before {
   margin: 12px 0;
 }
 
+/* Above the session list so a failed card action is seen where it ran. */
+#action-error:empty {
+  display: none;
+}
+
+/* The Notifications heading holds its Clear all at the right edge. */
+.notifications-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
 .project {
   margin-top: 20px;
 }

@@ -13160,3 +13160,151 @@ async fn dismiss_notification_refuses_a_stale_target_before_dispatch() {
             .contains("notification is no longer current")
     );
 }
+
+/// The whole dismiss seam: a served question target, the daemon operation the
+/// web and TUI menus call, and the next view the worker publishes once the
+/// command lands. The attention must drop so the card glyph clears.
+#[tokio::test]
+async fn dismiss_notification_clears_the_served_question_attention() {
+    const CHILD: &str = "MJ_TEST_DISMISS_CLEARS_ATTENTION";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "dismiss_notification_clears_the_served_question_attention",
+            ),
+        )
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "dismiss-clears-attention")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let question = mj_core::assessment::InferredQuestion {
+        turn_id: "turn-1".into(),
+        completed_ordinal: 9,
+    };
+    let record = runtime_test_session(
+        "session-1",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    );
+    crate::database::save_session(&record).unwrap();
+    let mut applied = mj_core::state::MaterializedSession::empty("session-1");
+    applied.applied_event_ordinal = question.completed_ordinal;
+    applied.applied_event_digest = "11".repeat(32);
+    crate::database::save_materialized_session(&applied).unwrap();
+
+    let mut manager = TestRemoteManager::new().await;
+    let recovery = crate::recovery::RecoveryCoordinator::spawn(manager.control.clone());
+    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
+        manager.control.clone(),
+        &recovery.observer(),
+    );
+    let state = Arc::new(RuntimeState::new_with_controller_loader(
+        manager.control.clone(),
+        Controller {
+            config: runtime_test_config(),
+            state: Default::default(),
+        },
+        recovery.observer(),
+        upgrades.observer(),
+        Vec::new(),
+        || {
+            Ok(Controller {
+                config: runtime_test_config(),
+                state: Default::default(),
+            })
+        },
+    ));
+    state.owner().edit_sessions(|sessions| {
+        sessions.insert(record.id.clone(), record);
+    });
+    state
+        .owner()
+        .install_relay_sessions(["session-1".to_owned()].into());
+
+    let question_view = |dismissed: bool| {
+        let mut view = ready_startup_view();
+        let snapshot = view.snapshot.as_mut().unwrap();
+        snapshot.materialized.applied_event_ordinal = question.completed_ordinal;
+        snapshot.materialized.applied_event_digest = "11".repeat(32);
+        snapshot.materialized.execution = mj_core::state::MaterializedExecutionState::Idle;
+        snapshot.window = mj_core::state::ProjectionWindow::of(&snapshot.materialized);
+        snapshot.operational.person_input_through = if dismissed { 10 } else { 0 };
+        snapshot.operational.open_request = (!dismissed).then(|| {
+            mj_core::assessment::OpenRequest {
+                question: question.clone(),
+                question_message: None,
+            }
+        });
+        view
+    };
+    state
+        .publish_session("session-1".into(), question_view(false))
+        .await
+        .unwrap();
+    let served = state.runtime_publication().unwrap();
+    assert_eq!(
+        served.metadata.session_attention["session-1"],
+        mj_core::attention::SessionAttention::NeedsInput
+    );
+    let target = served
+        .metadata
+        .notification_dismissals
+        .get("session-1")
+        .cloned()
+        .expect("a needs-input session serves its dismissal target");
+    assert_eq!(
+        target,
+        mj_core::attention::NotificationDismissal::Question(question.clone())
+    );
+
+    let answerer = tokio::spawn(async move {
+        let request = tokio::time::timeout(Duration::from_secs(5), manager.requests.recv())
+            .await
+            .expect("the dismissal submit reached the worker bridge")
+            .expect("request bridge open");
+        let crate::session_manager::RemoteSessionRequest::Submit {
+            command_id,
+            command,
+            reply,
+            ..
+        } = request
+        else {
+            panic!("the dismissal is a submit");
+        };
+        assert_eq!(command_id, "dismiss-question-9");
+        assert!(
+            matches!(command, RelayCommand::DismissQuestion { .. }),
+            "{command:?}"
+        );
+        let _ = reply.send(Ok(10));
+    });
+    let ordinal = state
+        .dismiss_notification("session-1".into(), target)
+        .await
+        .unwrap();
+    assert_eq!(ordinal, 10);
+    answerer.await.unwrap();
+
+    // The worker's next view closes the request; the publication must lower
+    // the attention it serves, which is what clears the card glyph.
+    state
+        .publish_session("session-1".into(), question_view(true))
+        .await
+        .unwrap();
+    let cleared = state.runtime_publication().unwrap();
+    assert_eq!(
+        cleared.metadata.session_attention["session-1"],
+        mj_core::attention::SessionAttention::Idle
+    );
+    assert!(
+        !cleared
+            .metadata
+            .notification_dismissals
+            .contains_key("session-1")
+    );
+}

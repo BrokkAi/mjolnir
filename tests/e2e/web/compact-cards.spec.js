@@ -1028,6 +1028,104 @@ test('menus follow capabilities, long press cancellation, right click, keyboard,
   await expect(page).toHaveURL(/#workspace\/workspace-1$/);
 });
 
+test('dismiss clears the input glyph once the daemon lowers attention; ignoring hides it at once', async ({ page }) => {
+  const state = await mount(page, [
+    session('asking', 'project-asking', 'Asking', {
+      attention: 'needs_input',
+      activity: SERVER_TIME_MS - 1_000,
+      capabilities: { dismiss_notification: true },
+    }),
+  ]);
+  const askingCard = card(page, 'asking');
+  const askingMenu = askingCard.locator('.session-menu');
+  const trigger = askingCard.locator('button[aria-label^="Actions for"]');
+  await expect(askingCard.locator('.session-attention')).toContainText('?');
+
+  // The daemon's answer to the dismissal lowers the card's attention; the
+  // glyph follows it. An accepted dismissal hides the glyph at once, before
+  // that answer arrives.
+  const row = state.snapshot.sessions.find(item => item.id === 'asking');
+  row.notification_dismissal = { read_through: 4 };
+  await refresh(page, state);
+  await trigger.click();
+  await askingMenu.getByRole('menuitem', { name: 'Dismiss notification' }).click();
+  await expect.poll(() => state.actions.at(-1)).toEqual({ action: 'dismiss-notification', session_id: 'asking', target: { read_through: 4 } });
+  await expect(askingCard.locator('.session-attention')).not.toContainText('?');
+
+  // A different notification renders again; the dismissal names one target.
+  row.notification_dismissal = { read_through: 5 };
+  await refresh(page, state);
+  await expect(askingCard.locator('.session-attention')).toContainText('?');
+  row.attention = 'idle';
+  row.notification_dismissal = null;
+  row.capabilities.dismiss_notification = false;
+  await refresh(page, state);
+  await expect(askingCard.locator('.session-attention')).not.toContainText('?');
+
+  // Ignoring hides the glyph immediately, without waiting for the daemon.
+  row.attention = 'needs_input';
+  row.notifications_ignored = true;
+  await refresh(page, state);
+  await expect(askingCard.locator('.session-attention')).not.toContainText('?');
+
+  // ...and an ignored session neither counts nor lists on Notifications.
+  // (Retention keeps entries handled during the visit; a reload resets it.)
+  await expect(page.locator('#notifications-badge')).toBeHidden();
+  await page.reload();
+  await expect(page.locator('#notifications-badge')).toBeHidden();
+  await page.locator('#workspace-select').selectOption('notifications');
+  await expect(page.locator('#sessions .session')).toHaveCount(0);
+  await page.locator('#workspace-select').selectOption(WORKSPACE_ID);
+
+  row.notifications_ignored = false;
+  await refresh(page, state);
+  await expect(askingCard.locator('.session-attention')).toContainText('?');
+  await expect(page.locator('#notifications-badge')).toHaveText('1');
+});
+
+test('notifications Clear all dismisses every targeted row and leaves the rest flagged', async ({ page }) => {
+  const a = session('clear-a', 'a', 'A', { attention: 'needs_input', activity: SERVER_TIME_MS - 2000 });
+  const b = session('clear-b', 'b', 'B', { attention: 'important', workspaceId: OTHER_WORKSPACE_ID, activity: SERVER_TIME_MS - 1000 });
+  const broken = session('clear-failed', 'c', 'C', { attention: 'failed', activity: SERVER_TIME_MS });
+  const state = await mount(page, [a, b, broken]);
+  a.notification_dismissal = { read_through: 4 };
+  b.notification_dismissal = { question: { turn_id: 't', completed_ordinal: 7 } };
+  await refresh(page, state);
+  await page.locator('#workspace-select').selectOption('notifications');
+  const clearAll = page.locator('#notifications-clear-all');
+  await expect(clearAll).toBeVisible();
+  await clearAll.click();
+  await expect.poll(() => state.actions
+    .filter(action => action.action === 'dismiss-notification').length).toBe(2);
+  const dismissed = Object.fromEntries(state.actions
+    .filter(action => action.action === 'dismiss-notification')
+    .map(action => [action.session_id, action.target]));
+  expect(dismissed).toEqual({
+    'clear-a': { read_through: 4 },
+    'clear-b': { question: { turn_id: 't', completed_ordinal: 7 } },
+  });
+
+  // Cleared glyphs hide at once and the rows drop out of the count; the
+  // failure carries no dismissal target and stays flagged.
+  await expect(card(page, 'clear-a').locator('.session-attention')).not.toContainText('?');
+  await expect(card(page, 'clear-b').locator('.session-attention')).not.toContainText('!');
+  await expect(card(page, 'clear-failed').locator('.session-attention')).toContainText('×');
+  await expect(page.locator('#notifications-badge')).toHaveText('1');
+  await expect(clearAll).toBeHidden();
+
+  // Once the daemon lowers attention the handled rows stay for the visit,
+  // below the failure that still needs a person.
+  a.attention = 'idle';
+  a.notification_dismissal = null;
+  b.attention = 'idle';
+  b.notification_dismissal = null;
+  await refresh(page, state);
+  const ids = () => page.locator('#sessions .session').evaluateAll(nodes => nodes.map(node => node.dataset.sessionId));
+  expect(await ids()).toEqual(['clear-failed', 'clear-b', 'clear-a']);
+  await expect(page.locator('#notifications-badge')).toHaveText('1');
+  await expect(clearAll).toBeHidden();
+});
+
 test('composer steering survives reconnect and Escape never confirms cancellation', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 740 });
   const parent = session('steering', 'project', 'Project', {
