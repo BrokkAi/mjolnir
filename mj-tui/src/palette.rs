@@ -128,10 +128,8 @@ const SESSION_MENU_COMMANDS: &[CommandId] = &[
     CommandId::ChangedFiles,
     CommandId::DismissNotification,
     CommandId::IgnoreNotifications,
-    CommandId::StopIgnoringNotifications,
     CommandId::RenameSession,
     CommandId::PinSession,
-    CommandId::UnpinSession,
     CommandId::ChangeWorkspace,
     CommandId::ContainerSettings,
     CommandId::MoveSession,
@@ -139,8 +137,8 @@ const SESSION_MENU_COMMANDS: &[CommandId] = &[
     CommandId::RestartSession,
     CommandId::UpgradeContainer,
     CommandId::InterruptAll,
-    CommandId::CopySessionId,
     CommandId::DestroySession,
+    CommandId::CopySessionId,
 ];
 
 /// The menu of a harness-native child. Its parent's harness owns it, and
@@ -345,16 +343,40 @@ fn first_ready(entries: &[PaletteEntry]) -> usize {
         .unwrap_or(0)
 }
 
-fn session_menu_label(id: CommandId) -> String {
+fn session_menu_label(dashboard: &DashboardState, palette: &CommandPalette, id: CommandId) -> String {
     let label = match id {
         // Opens a second choice, so it carries the menu's submenu glyph.
         CommandId::ChangeWorkspace => {
             return format!("Change Workspace {}", theme::glyphs().navigate);
         }
+        // One row that flips with the session's preference.
+        CommandId::IgnoreNotifications => {
+            return if palette
+                .session_id
+                .as_deref()
+                .and_then(|id| dashboard.state.sessions.get(id))
+                .is_some_and(|session| session.notifications_ignored)
+            {
+                "Stop ignoring".to_owned()
+            } else {
+                "Ignore".to_owned()
+            };
+        }
+        // One row that flips with the pin state, like Ignore's.
+        CommandId::PinSession => {
+            return if palette
+                .session_id
+                .as_deref()
+                .and_then(|id| dashboard.pin_id(id))
+                .is_some()
+            {
+                "Unpin".to_owned()
+            } else {
+                "Pin…".to_owned()
+            };
+        }
         CommandId::OpenSession => "Open",
         CommandId::RenameSession => "Rename…",
-        CommandId::PinSession => "Pin…",
-        CommandId::UnpinSession => "Unpin",
         CommandId::MoveSession => "Move…",
         CommandId::SuspendSession => "Suspend…",
         CommandId::RestartSession => "Restart",
@@ -777,6 +799,8 @@ impl DashboardState {
 enum PaletteLine {
     Heading(String),
     Separator,
+    /// An empty row between session-menu sections.
+    Blank,
     /// The entry's index into `entries`, so the highlight can be placed.
     Command(usize),
 }
@@ -791,22 +815,25 @@ fn palette_lines(dashboard: &DashboardState, palette: &CommandPalette) -> Vec<Pa
                 CommandId::OpenSession
                 | CommandId::ChangedFiles
                 | CommandId::DismissNotification
-                | CommandId::IgnoreNotifications
-                | CommandId::StopIgnoringNotifications => 0,
+                | CommandId::IgnoreNotifications => 0,
                 CommandId::RenameSession
                 | CommandId::PinSession
-                | CommandId::UnpinSession
                 | CommandId::ChangeWorkspace => 1,
                 CommandId::ContainerSettings
                 | CommandId::MoveSession
                 | CommandId::SuspendSession
                 | CommandId::RestartSession
                 | CommandId::UpgradeContainer
-                | CommandId::InterruptAll => 2,
-                CommandId::CopySessionId | CommandId::DestroySession => 3,
+                | CommandId::InterruptAll
+                | CommandId::DestroySession => 2,
+                CommandId::CopySessionId => 3,
                 _ => continue,
             };
             if section != Some(next) {
+                // An empty row sets one section off from the last.
+                if section.is_some() {
+                    lines.push(PaletteLine::Blank);
+                }
                 match next {
                     0 => lines.push(PaletteLine::Heading("Content".to_owned())),
                     1 => lines.push(PaletteLine::Heading("Organize".to_owned())),
@@ -988,6 +1015,11 @@ pub(crate) fn render_palette(
                     theme::border(false),
                 )
             }
+            PaletteLine::Blank => {
+                row_map.push(None);
+                enabled.push(false);
+                Line::default()
+            }
             PaletteLine::Command(index) => {
                 row_map.push(Some(*index));
                 enabled.push(palette.entries[*index].availability == Availability::Ready);
@@ -1010,7 +1042,7 @@ pub(crate) fn render_palette(
                 let key_width = Line::raw(keys.as_str()).width();
                 let label_width = width.saturating_sub(key_width + 4);
                 let label = if palette.session_only {
-                    session_menu_label(entry.id)
+                    session_menu_label(dashboard, palette, entry.id)
                 } else {
                     spec.label.to_owned()
                 };
@@ -1257,13 +1289,13 @@ mod tests {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
         dashboard.begin_palette();
-        type_query(&mut dashboard, "unpin");
+        type_query(&mut dashboard, "dismiss");
         let joined = drawn(&mut dashboard, 120, 30).join("\n");
         assert!(
-            joined.contains("Unpin session — This session is not pinned."),
+            joined.contains("Dismiss notification — No dismissible notification is active."),
             "{joined}"
         );
-        assert!(!joined.contains("(this session"), "{joined}");
+        assert!(!joined.contains("[No dismissible"), "{joined}");
     }
 
     // Hard-won: e063b7f41d77: palette command availability stayed stale after session creation finished.
@@ -1318,9 +1350,39 @@ mod tests {
             .map(|line| match line {
                 PaletteLine::Heading(heading) => format!("[{heading}]"),
                 PaletteLine::Separator => "---".to_owned(),
-                PaletteLine::Command(index) => session_menu_label(palette.entries[index].id),
+                PaletteLine::Blank => String::new(),
+                PaletteLine::Command(index) => session_menu_label(dashboard, palette, palette.entries[index].id),
             })
             .collect()
+    }
+
+    /// The menu's Ignore row is one option that says which way it flips.
+    #[test]
+    fn the_ignore_row_reads_the_sessions_notification_preference() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.dispatch_command(CommandId::SessionActions);
+        assert!(
+            session_menu_layout(&dashboard).contains(&"Ignore".to_owned()),
+            "{:?}",
+            session_menu_layout(&dashboard)
+        );
+        dashboard.handle_key(key(KeyCode::Esc));
+        assert!(
+            matches!(dashboard.mode, Mode::Dashboard),
+            "Esc closes the menu"
+        );
+        dashboard
+            .state
+            .sessions
+            .get_mut("session-1")
+            .expect("the fixture session")
+            .notifications_ignored = true;
+        dashboard.dispatch_command(CommandId::SessionActions);
+        assert!(
+            session_menu_layout(&dashboard).contains(&"Stop ignoring".to_owned()),
+            "{:?}",
+            session_menu_layout(&dashboard)
+        );
     }
 
     /// R10-2: a native child's menu offered Rename, Pin, Restart and Destroy,
@@ -1666,25 +1728,24 @@ mod tests {
         dashboard.focus_sessions();
         dashboard.begin_session_palette();
         let lines = drawn(&mut dashboard, 120, 40);
-        let unpin = point(&lines, "Unpin");
-        dashboard.handle_key(key(KeyCode::Down));
+        let dismiss = point(&lines, "Dismiss notification");
         dashboard.handle_key(key(KeyCode::Down));
         append_golden_value(
             &mut output,
-            "keyboard selection after skipping disabled Unpin",
+            "keyboard selection after skipping disabled Dismiss",
             selected_command(&dashboard),
         );
-        let down = dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), unpin));
-        append_golden_value(&mut output, "disabled Unpin mouse-down action", down);
-        let up = dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), unpin));
-        append_golden_value(&mut output, "disabled Unpin mouse-up action", up);
+        let down = dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), dismiss));
+        append_golden_value(&mut output, "disabled Dismiss mouse-down action", down);
+        let up = dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), dismiss));
+        append_golden_value(&mut output, "disabled Dismiss mouse-up action", up);
         append_golden_value(
             &mut output,
             "selection after disabled click",
             selected_command(&dashboard),
         );
         let lines = drawn(&mut dashboard, 120, 40);
-        append_golden_state(&mut output, "disabled Unpin remains open", 120, 40, &lines);
+        append_golden_state(&mut output, "disabled Dismiss remains open", 120, 40, &lines);
 
         let session = running_session();
         let mut dashboard = dashboard_with_session(session.clone());

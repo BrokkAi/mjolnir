@@ -13,27 +13,27 @@
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
 │                │  Dismiss notification — No dismissible notification is active.                     │                │
-│                │› Ignore notifications                                                              │                │
-│                │  Stop ignoring notifications — Notifications are not ignored.                      │                │
+│                │› Ignore                                                                            │                │
+│                │                                                                                    │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │  Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
-│                │  Unpin — This session is not pinned.                                               │                │
 │                │  Change Workspace ›                                                                │                │
+│                │                                                                                    │                │
 │                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
 │                │  Container settings                                                                │                │
 │                │  Move…                                                                             │                │
 │                │  Suspend…                                                          ctrl+b shift+x  │                │
 │                │  Restart                                                                           │  ──────────────╯
 │                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╮
-│                │  ────────────────────────────────────────────────────────────────────────────────  │                │
-│                │  Copy session ID                                                                   │                │
-│                │  Destroy…                                                                          │  ──────────────╯
-│                │This session raises no bell, desktop, or push notifications. It still shows its atte│  ─────── ▁   ▄ ╮
-│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
-│                                                                                                        ──────────────╯
+│                │  Destroy…                                                                          │                │
+│                │                                                                                    │                │
+│                │  ────────────────────────────────────────────────────────────────────────────────  │  ──────────────╯
+│                │  Copy session ID                                                                   │  ─────── ▁   ▄ ╮
+│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│                │
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ──────────────╯
 │                                                                                                        ─────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                                                                                                      │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
@@ -55,27 +55,27 @@ menu popup action: None
 │                   │  Content  ─────────────────────────────────────────────────────────────────────────────────────  │                   │
 │                   │  Changed files — The session's target is not running.                                  ctrl+b d  │                   │
 │                   │  Dismiss notification — No dismissible notification is active.                                   │                   │
-│                   │  Ignore notifications                                                                            │                   │
-│                   │  Stop ignoring notifications — Notifications are not ignored.                                    │                   │
+│                   │  Ignore                                                                                          │                   │
+│                   │                                                                                                  │                   │
 │                   │  Organize  ────────────────────────────────────────────────────────────────────────────────────  │                   │
 │                   │  Rename…                                                                         ctrl+b shift+t  │                   │
 │                   │  Pin…                                                                                            │                   │
-│                   │  Unpin — This session is not pinned.                                                             │                   │
 │                   │› Change Workspace ▾                                                                              │                   │
-│                   │  ╭ workspace · ↑/↓ select · Enter choose ╮─────────────────────────────────────────────────────  │                   │
-│                   │  │Default (current)                      │                                                       │                   │
+│                   │  ╭ workspace · ↑/↓ select · Enter choose ╮                                                       │                   │
+│                   │  │Default (current)                      │─────────────────────────────────────────────────────  │                   │
 │                   │  │Other                                  │                                                       │                   │
-│                   │  │Third                                  │                                       ctrl+b shift+x  │                   │
-│                   │  ╰───────────────────────────────────────╯                                                       │  ─────────────────╯
+│                   │  │Third                                  │                                                       │                   │
+│                   │  ╰───────────────────────────────────────╯                                       ctrl+b shift+x  │                   │
+│                   │  Restart                                                                                         │  ─────────────────╯
 │                   │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-agents.            │  ─────────────────╮
-│                   │  ──────────────────────────────────────────────────────────────────────────────────────────────  │                   │
-│                   │  Copy session ID                                                                                 │                   │
-│                   │  Destroy…                                                                                        │  ─────────────────╯
-│                   │Move the selected session, and its sub-agents, to another workspace, after you confirm.           │  ────────── ▁   ▄ ╮
-│                   ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ───────────────────────────────────────────╯                   │
-│                                                                                                                         ─────────────────╯
+│                   │  Destroy…                                                                                        │                   │
+│                   │                                                                                                  │                   │
+│                   │  ──────────────────────────────────────────────────────────────────────────────────────────────  │  ─────────────────╯
+│                   │  Copy session ID                                                                                 │  ────────── ▁   ▄ ╮
+│                   │Move the selected session, and its sub-agents, to another workspace, after you confirm.           │                   │
+│                   ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ───────────────────────────────────────────╯  ─────────────────╯
 │                                                                                                                         ────────── ▁   ▄ ╮
-│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
+│                                                                                                                                          │
 │                                            ││  claude-1  Claude Code  refreshing…                                                        │
 │                                            ││  codex-1   Codex        refreshing…                                                        │
 │                                            ││  codex-2   Codex        refreshing…                                                        │
@@ -97,27 +97,27 @@ menu popup action: None
 │          │  Content  ──────────────────────────────────────────  │           │
 │          │  Changed files — The session's target is …  ctrl+b d  │  conversat│
 │          │  Dismiss notification — No dismissible notificati…    │           │
-│          │  Ignore notifications                                 │           │
-│          │  Stop ignoring notifications — Notifications are …    │           │
+│          │  Ignore                                               │           │
+│          │                                                       │           │
 │          │  Organize  ─────────────────────────────────────────  │           │
 │          │  Rename…                              ctrl+b shift+t  │           │
 │          │  Pin…                                                 │           │
-│          │  Unpin — This session is not pinned.                  │           │
 │          │› Change Workspace ▾                                   │           │
-│          │  ╭ workspace · ↑/↓ select · Enter choose ╮──────────  │           │
-│          │  │Default (current)                      │            │           │
+│          │  ╭ workspace · ↑/↓ select · Enter choose ╮            │           │
+│          │  │Default (current)                      │──────────  │           │
 │          │  │Other                                  │            │           │
-│          │  │Third                                  │+b shift+x  │           │
-│          │  ╰───────────────────────────────────────╯            │  ─────────╯
+│          │  │Third                                  │            │           │
+│          │  ╰───────────────────────────────────────╯+b shift+x  │           │
+│          │  Restart                                              │  ─────────╯
 │          │  Interrupt all (parent + sub-agents)… — No turn i…    │  ─────────╮
-│          │  ───────────────────────────────────────────────────  │           │
-│          │  Copy session ID                                      │  Enter on │
-╰────────  │  Destroy…                                             │  ─────────╯
-╭ Targets  │Move the selected session, and its sub-agents, to anoth│  ── ▁   ▄ ╮
-│  Host /  ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ╯           │
-╰────────                                                             ─────────╯
+│          │  Destroy…                                             │           │
+│          │                                                       │  Enter on │
+╰────────  │  ───────────────────────────────────────────────────  │  ─────────╯
+╭ Targets  │  Copy session ID                                      │  ── ▁   ▄ ╮
+│  Host /  │Move the selected session, and its sub-agents, to anoth│           │
+╰────────  ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ╯  ─────────╯
 ╭ Profile                                                             ── ▁   ▄ ╮
-│            Harness      Weekly      Resets  5H Resets                        │
+│                                                                              │
 │  claude-1  Claude Code  refreshing…                                          │
 │  codex-1   Codex        refreshing…                                          │
 │  codex-2   Codex        refreshing…                                          │
@@ -223,27 +223,27 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  Idle  podman  │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │  │ No message  │  Changed files — The session's target is not running.                    ctrl+b d  │                │
 │  │             │  Dismiss notification — No dismissible notification is active.                     │                │
-│                │  Ignore notifications                                                              │                │
-│                │  Stop ignoring notifications — Notifications are not ignored.                      │                │
+│                │  Ignore                                                                            │                │
+│                │                                                                                    │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │  Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
-│                │  Unpin — This session is not pinned.                                               │                │
 │                │› Change Workspace ▾                                                                │                │
-│                │  ╭ workspace · ↑/↓ select · Enter choose ╮───────────────────────────────────────  │                │
-│                │  │Workspace default (current)           ▐│                                         │                │
+│                │  ╭ workspace · ↑/↓ select · Enter choose ╮                                         │                │
+│                │  │Workspace default (current)           ▐│───────────────────────────────────────  │                │
 │                │  │Workspace w2                          ▐│                                         │                │
-│                │  │Workspace w3                          ▐│                         ctrl+b shift+x  │                │
-│                │  │Workspace w4                          ▐│                                         │  ──────────────╯
-│                │  │Workspace w5                          ││ turn is running here or in its sub-…    │  ──────────────╮
-│                │  │Workspace w6                          ││───────────────────────────────────────  │                │
+│                │  │Workspace w3                          ▐│                                         │                │
+│                │  │Workspace w4                          ▐│                         ctrl+b shift+x  │                │
+│                │  │Workspace w5                          ││                                         │  ──────────────╯
+│                │  │Workspace w6                          ││ turn is running here or in its sub-…    │  ──────────────╮
 │                │  ╰───────────────────────────────────────╯                                         │                │
-│                │  Destroy…                                                                          │  ──────────────╯
-│                │Move the selected session, and its sub-agents, to another workspace, after you confi│  ─────── ▁   ▄ ╮
-│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
-│                                                                                                        ──────────────╯
+│                │                                                                                    │                │
+│                │  ────────────────────────────────────────────────────────────────────────────────  │  ──────────────╯
+│                │  Copy session ID                                                                   │  ─────── ▁   ▄ ╮
+│                │Move the selected session, and its sub-agents, to another workspace, after you confi│                │
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ──────────────╯
 │                                                                                                        ─────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                                                                                                      │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
@@ -265,27 +265,27 @@ first Escape action: None
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
 │                │  Dismiss notification — No dismissible notification is active.                     │                │
-│                │  Ignore notifications                                                              │                │
-│                │  Stop ignoring notifications — Notifications are not ignored.                      │                │
+│                │  Ignore                                                                            │                │
+│                │                                                                                    │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
 │                │  Rename…                                                           ctrl+b shift+t  │                │
 │                │  Pin…                                                                              │                │
-│                │  Unpin — This session is not pinned.                                               │                │
 │                │› Change Workspace ›                                                                │                │
+│                │                                                                                    │                │
 │                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
 │                │  Container settings                                                                │                │
 │                │  Move…                                                                             │                │
 │                │  Suspend…                                                          ctrl+b shift+x  │                │
 │                │  Restart                                                                           │  ──────────────╯
 │                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╮
-│                │  ────────────────────────────────────────────────────────────────────────────────  │                │
-│                │  Copy session ID                                                                   │                │
-│                │  Destroy…                                                                          │  ──────────────╯
-│                │Move the selected session, and its sub-agents, to another workspace, after you confi│  ─────── ▁   ▄ ╮
-│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯                │
-│                                                                                                        ──────────────╯
+│                │  Destroy…                                                                          │                │
+│                │                                                                                    │                │
+│                │  ────────────────────────────────────────────────────────────────────────────────  │  ──────────────╯
+│                │  Copy session ID                                                                   │  ─────── ▁   ▄ ╮
+│                │Move the selected session, and its sub-agents, to another workspace, after you confi│                │
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ──────────────╯
 │                                                                                                        ─────── ▁   ▄ ╮
-│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                                                                                                      │
 │                                      ││  claude-1  Claude Code  refreshing…                                          │
 │                                      ││  codex-1   Codex        refreshing…                                          │
 │                                      ││  codex-2   Codex        refreshing…                                          │
