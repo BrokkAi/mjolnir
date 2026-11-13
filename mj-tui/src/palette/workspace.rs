@@ -91,6 +91,8 @@ impl WorkspacePopup {
             true,
             " workspace · ↑/↓ select · Enter choose ",
             PopupSide::Below,
+            // The palette stays open underneath; the list takes less of it.
+            ComboBox::DEFAULT_MAX_VISIBLE_ROWS - 2,
             form,
             PaletteControl::Workspace,
         );
@@ -398,6 +400,25 @@ mod tests {
             40,
             &lines,
         );
+
+        // More workspaces than the list's six rows: it scrolls rather than
+        // covering more of the palette.
+        let mut dashboard = dashboard_with_session(running_session());
+        let ids: Vec<String> = ["default"]
+            .into_iter()
+            .map(str::to_owned)
+            .chain((2..=9).map(|index| format!("w{index}")))
+            .collect();
+        dashboard.set_workspace_names(
+            ids.iter()
+                .map(|id| (id.clone(), format!("Workspace {id}")))
+                .collect(),
+        );
+        dashboard.order_workspaces(&ids);
+        dashboard.focus_sessions();
+        dashboard.dispatch_command(CommandId::ChangeWorkspace);
+        let lines = drawn(&mut dashboard, 120, 40);
+        append_golden_state(&mut output, "nine workspaces in a six-row list", 120, 40, &lines);
 
         let mut dashboard = dashboard_with_workspaces();
         dashboard.dispatch_command(CommandId::ChangeWorkspace);
