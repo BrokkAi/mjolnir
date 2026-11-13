@@ -2056,6 +2056,10 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
         } => {
             snapshot.assessment_context = Some(Default::default());
             snapshot.assessment = None;
+            // The conversation that held any open request is gone, so fence it
+            // like person input; a fresh conversation inherits no question.
+            snapshot.person_input_through = event.ordinal;
+            snapshot.completed_reply_message = None;
         }
         RelayObservation::CommandQueued {
             command_id,

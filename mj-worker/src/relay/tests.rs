@@ -6194,6 +6194,49 @@ fn clearable_relay(root: &Path) -> DurableRelay {
     relay
 }
 
+// The conversation that held an open request is discarded by /clear, so the
+// request must not reappear as a question in the fresh conversation.
+#[test]
+fn clear_fences_an_open_request_across_reopen() {
+    use mj_core::assessment::{Action, Status};
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = clearable_relay(temp.path());
+    relay.set_acp_ready(true);
+    submit_relay(&mut relay, "ask-turn", prompt("Choose the format"));
+    relay.claim_pending_commands(true).unwrap();
+    finish_prompt(&mut relay, "ask-turn");
+    let mut assessment = (**relay.snapshot.assessment.as_ref().unwrap()).clone();
+    assessment.status = Status::Assessed;
+    assessment.action = Some(Action::AwaitInput);
+    relay
+        .record_observation(RelayObservation::TurnAssessmentUpdated {
+            assessment: Box::new(assessment),
+        })
+        .unwrap();
+    assert!(relay.snapshot.open_request().is_some());
+    submit_relay(
+        &mut relay,
+        "clear-request",
+        RelayCommand::Prompt {
+            prompt: vec![ContentBlock::from("/clear")],
+        },
+    );
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed(
+            "clear-request",
+            RelayCommandOutcome::ContextCleared {
+                native_session_id: "replacement".into(),
+                memory: None,
+            },
+        )
+        .unwrap();
+    assert!(relay.snapshot.open_request().is_none());
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    assert!(relay.snapshot.open_request().is_none());
+}
+
 #[test]
 fn clear_changes_only_native_context_and_is_idempotent_across_reopen() {
     let temp = tempfile::tempdir().unwrap();
