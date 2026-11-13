@@ -2,9 +2,9 @@ use super::grok_usage_tests::spec;
 use super::*;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-/// What Grok Build 1.0.70 answers to `initialize`, recorded from the pinned
+/// What Grok Build 1.0.77 answers to `initialize`, recorded from the pinned
 /// binary: its `sessionCapabilities` has no `additionalDirectories`.
-const GROK_INITIALIZE: &str = include_str!("testdata/grok_1_0_70_initialize.json");
+const GROK_INITIALIZE: &str = include_str!("testdata/grok_1_0_77_initialize.json");
 
 /// Open a session against a bridge that answers `initialize` with the given
 /// result and rejects a non-empty `additionalDirectories` the way Grok does,
