@@ -1055,6 +1055,15 @@ mod tests {
             }
             submit_relay(&mut relay, "required-turn", prompt("Choose the next step"));
             relay.claim_pending_commands(true).unwrap();
+            // An explicit ACP message ID becomes the transcript's `agent:` identity.
+            relay
+                .record_session_update(SessionUpdate::AgentMessageChunk(
+                    agent_client_protocol::v1::schema::ContentChunk::new(ContentBlock::Text(
+                        agent_client_protocol::v1::schema::TextContent::new("Keep the old format?"),
+                    ))
+                    .message_id("msg_question"),
+                ))
+                .unwrap();
             relay
                 .record_command_completed(
                     "required-turn",
@@ -1067,6 +1076,17 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(relay.snapshot.open_request().is_some(), !managed);
+            if !managed {
+                assert_eq!(
+                    relay
+                        .snapshot
+                        .open_request()
+                        .unwrap()
+                        .question_message
+                        .as_deref(),
+                    Some("agent:msg_question")
+                );
+            }
             drop(relay);
             let relay = DurableRelay::open(temp.path(), "child-verdict-test", "test").unwrap();
             assert_eq!(relay.snapshot.managed_subagent, managed);

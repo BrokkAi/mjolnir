@@ -194,11 +194,19 @@ fn semantic_question(
 }
 
 fn request_hold(runtime: &RuntimeProjection, id: &str) -> Vec<&'static str> {
+    // Holding is safe only when the worker retains the request: a pre-64
+    // worker's latest-turn question is replaced by the agent-only turn that
+    // ends the wait, so holding it would lose the question.
     if runtime.subagents.contains_key(id)
         || !runtime
             .records
             .get(id)
             .is_some_and(|record| record.harness_kind.has_reliable_background_inventory())
+        || !runtime
+            .sessions
+            .get(id)
+            .and_then(|view| view.operational.as_deref())
+            .is_some_and(|live| live.supports_open_request())
     {
         return vec![];
     }
@@ -573,6 +581,16 @@ mod tests {
             next.metadata.session_attention["parent"],
             SessionAttention::Working
         );
+        // A pre-64 worker cannot retain the request, so it is never held.
+        let mut legacy_runtime = next.clone();
+        let mut legacy = (*next.sessions["parent"].operational.clone().unwrap()).clone();
+        legacy.relay_protocol_version = Some(mj_core::relay::RELAY_OPEN_REQUEST_PROTOCOL - 1);
+        legacy_runtime
+            .sessions
+            .get_mut("parent")
+            .unwrap()
+            .operational = Some(legacy.into());
+        assert!(request_hold(&legacy_runtime, "parent").is_empty());
         next.transcripts
             .get_mut("parent")
             .unwrap()

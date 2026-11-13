@@ -1406,7 +1406,8 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 snapshot.completed_reply_message = snapshot
                     .assessment_context
                     .as_ref()
-                    .and_then(|context| context.open_assistant_id.clone());
+                    .and_then(|context| context.open_assistant_id.as_deref())
+                    .and_then(crate::activity::question_locator::transcript_stable_id);
                 // Physical completion does not depend on a retained user command.
                 // Missing authorization gates nudges, never provider assessment.
                 snapshot.assessment = Some(std::sync::Arc::new(
@@ -2008,7 +2009,8 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
             snapshot.completed_reply_message = snapshot
                 .assessment_context
                 .as_ref()
-                .and_then(|context| context.open_assistant_id.clone());
+                .and_then(|context| context.open_assistant_id.as_deref())
+                .and_then(crate::activity::question_locator::transcript_stable_id);
             let mut a = TurnAssessment::pending(
                 command_id.clone(),
                 event.ordinal,
