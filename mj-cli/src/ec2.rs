@@ -767,14 +767,12 @@ fn create_attempt(
         .as_array()
         .and_then(|v| v.first())
         .context("AWS returned no instance type")?;
-    if args.runtime == Ec2Runtime::Nitro {
-        if instance_type["NitroEnclavesSupport"] != "supported" {
-            return Err(PlacementUnavailable(format!(
-                "{} does not support Nitro Enclaves",
-                placement.instance_type
-            ))
-            .into());
-        }
+    if args.runtime == Ec2Runtime::Nitro && instance_type["NitroEnclavesSupport"] != "supported" {
+        return Err(PlacementUnavailable(format!(
+            "{} does not support Nitro Enclaves",
+            placement.instance_type
+        ))
+        .into());
     }
     let architecture = instance_type["ProcessorInfo"]["SupportedArchitectures"]
         .as_array()
@@ -808,6 +806,13 @@ fn create_attempt(
     let subnets = subnet["Subnets"]
         .as_array()
         .context("AWS returned no Subnets")?;
+    if subnets.is_empty() && args.subnet.is_none() {
+        return Err(PlacementUnavailable(format!(
+            "{} has no default subnet; trying the next placement",
+            placement.zone
+        ))
+        .into());
+    }
     ensure!(
         subnets.len() == 1,
         "no unique default subnet in {}; pass --subnet",
@@ -1504,7 +1509,7 @@ fn cleanup_record(cloud: &Cloud, record: &Record, root: &Path) -> Result<()> {
     {
         cloud.ec2("delete-key-pair", json!({"KeyPairId":key["KeyPairId"]}))?;
     }
-    remove_configuration(&record, root, &config_path())?;
+    remove_configuration(record, root, &config_path())?;
     if directory.exists() {
         fs::remove_dir_all(&directory)
             .with_context(|| format!("remove local EC2 keys {}", directory.display()))?;
@@ -1657,7 +1662,8 @@ elif op == 'describe-instance-types':
     response = {'InstanceTypes':[kind]}
 elif op == 'describe-subnets':
     zone = next((f['Values'][0] for f in request.get('Filters',[]) if f['Name']=='availability-zone'), region+'a')
-    response = {'Subnets':[{'SubnetId':'subnet-test','VpcId':'vpc-test','AvailabilityZone':zone}]}
+    missing = json.loads((root/'missing-subnets.json').read_text()) if (root/'missing-subnets.json').exists() else []
+    response = {'Subnets':[] if zone in missing else [{'SubnetId':'subnet-test','VpcId':'vpc-test','AvailabilityZone':zone}]}
 elif op == 'get-parameter':
     if (root/'nitro').exists(): assert request['Name'] == '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.18-x86_64'
     else: assert request['Name'] == '/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id'
@@ -1872,7 +1878,7 @@ else:
             assert_eq!(host["zone"], "us-west-2b");
             assert_eq!(host["instance_type"], "m8id.8xlarge");
             assert_eq!(host["zfs_cache"], false);
-            assert_eq!(host["attempts"].as_array().unwrap().len(), 6);
+            assert_eq!(host["attempts"].as_array().unwrap().len(), 10);
             assert!(stdout.contains("VcpuLimitExceeded") && stdout.contains("OptInRequired"));
             return;
         }
@@ -1880,6 +1886,12 @@ else:
         let bin = fixture.join("bin");
         let root = config_dir().join("ec2");
         fs::write(bin.join("multi-region"), "").unwrap();
+        // Hard-won: #1523: a deleted default subnet stopped the region-only search.
+        fs::write(
+            bin.join("missing-subnets.json"),
+            r#"["us-west-1a","us-west-1b"]"#,
+        )
+        .unwrap();
         fs::write(bin.join("errors.json"), serde_json::to_vec(&json!([
             {"operation":"run-instances","region":"us-east-1","code":"VcpuLimitExceeded","message":"On-Demand Standard vCPU quota exceeded"},
             {"operation":"describe-instances","region":"us-east-2","code":"OptInRequired","message":"Region is not opted in"},
@@ -1904,7 +1916,7 @@ else:
             "--zone",
             "us-east-1a",
             "--region",
-            "us-east-1,us-east-2",
+            "us-east-1,us-east-2,us-west-1",
             "--region",
             "us-west-2",
             "--name",
@@ -1923,7 +1935,7 @@ else:
         create(args, &root).unwrap();
         let record = records(&root).unwrap().pop().unwrap();
         assert_eq!(record.region, "us-west-2");
-        assert_eq!(record.attempts.len(), 6);
+        assert_eq!(record.attempts.len(), 10);
         assert_eq!(record.attempts[0].outcome, "skipped_region");
         assert_eq!(record.attempts[1].outcome, "skipped_region");
         assert_eq!(record.attempts.last().unwrap().outcome, "created");
@@ -1936,6 +1948,21 @@ else:
             .iter()
             .filter(|call| call["operation"] == "run-instances")
             .collect();
+        assert!(record.attempts[2..6].iter().all(|attempt| {
+            attempt
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("no default subnet")
+        }));
+        assert!(!calls.iter().any(|call| {
+            call["operation"] == "import-key-pair"
+                && call["args"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|arg| arg == "us-west-1")
+        }));
         let placements: Vec<_> = launches
             .iter()
             .map(|call| {
@@ -1986,7 +2013,7 @@ else:
             .find(|row| row["instance_id"] == "i-test")
             .unwrap();
         assert_eq!(winner["region"], "us-west-2");
-        assert_eq!(winner["attempts"].as_array().unwrap().len(), 6);
+        assert_eq!(winner["attempts"].as_array().unwrap().len(), 10);
         list(
             ListArgs {
                 aws: AwsArgs::default(),
@@ -2003,7 +2030,7 @@ else:
             &root,
         )
         .unwrap();
-        for region in ["us-east-1", "us-east-2", "us-west-2"] {
+        for region in ["us-east-1", "us-east-2", "us-west-1", "us-west-2"] {
             assert!(!bin.join(region).join("key.json").exists());
             assert!(!bin.join(region).join("group.json").exists());
         }

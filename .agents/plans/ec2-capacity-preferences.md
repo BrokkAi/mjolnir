@@ -13,7 +13,7 @@ Issues #1523 and #1522 concern the standalone `mj ec2` CLI. Users should be able
 - [x] (2026-11-12) Add ordered instance type, zone, and region selection, refusal classification, cleanup, and durable history.
 - [x] (2026-11-12) Exercise capacity exhaustion, region skipping, cleanup failures, ambiguous launch failures, and inventory across regions: all nine EC2 subprocess fixtures pass, including JSON output assertions and legacy-record cleanup.
 - [x] (2026-11-12) Run the final CLI crate suite: 297 tests passed, four existing tests ignored; formatting and diff checks pass.
-- [ ] Finish workspace Clippy, automated review, and push to origin/master; verify both issues close.
+- [x] (2026-11-12) Validate the missing-default-subnet review correction: the focused regression and final complete CLI suite pass; workspace Clippy, formatting, and diff checks pass.
 
 ## Surprises & Discoveries
 
@@ -29,9 +29,11 @@ Retry only explicit AWS rejections before an instance is accepted. Capacity and 
 
 Query AWS instance-type offerings before provisioning so a type absent from a zone is skipped without creating cloud resources. Use defaulted record states Preparing, Active, and CleanedUp: legacy records default to Active, preserving their ownership; history-only records can be destroyed locally even when their region is disabled. Inventory reports per-region errors alongside successful regions and treats an explicit opt-in refusal as a displayed unavailable region rather than hiding the winner.
 
+Review correction: a discovered zone with no default subnet is another unavailable placement, not a fatal request error. Extend the multi-region fixture with a region whose two zones have no default subnets and prove it creates no keys there before advancing to a usable region. Keep region-wide skipping on vCPU quota refusals as explicitly requested in #1523; decline the review suggestion to continue into other quota classes because that changes the requested selection policy.
+
 ## Outcomes & Retrospective
 
-The implementation accepts both positional comma-separated types and `--type`, repeated/comma-separated zones and regions, and region-only requests with zone discovery. Capacity refusals clean up before advancing, regional quota/opt-in refusals skip the region, and all outcomes are retained in create/list output. Failed cleanups and uncertain or already-accepted launches retain recovery information and stop. `zfs_cache` now follows the actual Podman cache configuration. All 297 active CLI tests pass (four existing tests ignored), including nine EC2 fixtures; workspace Clippy and automated review are pending. No paid AWS instance was launched; fixtures emulate AWS/SSH/Podman with isolated configuration and data directories.
+The implementation accepts both positional comma-separated types and `--type`, repeated/comma-separated zones and regions, and region-only requests with zone discovery. Capacity refusals clean up before advancing, regional quota/opt-in refusals skip the region, and all outcomes are retained in create/list output. Failed cleanups and uncertain or already-accepted launches retain recovery information and stop. `zfs_cache` now follows the actual Podman cache configuration. After the review correction for zones without default subnets, all 297 active CLI tests pass (four existing tests ignored), including nine EC2 fixtures. Workspace Clippy, formatting, and diff checks pass. No paid AWS instance was launched; fixtures emulate AWS/SSH/Podman with isolated configuration and data directories. Publication follows the commit/review/push procedure below; Git history and issue state record publication.
 
 ## Context and Orientation
 
@@ -78,3 +80,7 @@ Initial plan written 2026-11-12 after inspecting the two issues and the existing
 Updated 2026-11-12 after implementation: documented offering checks, lifecycle states, Nitro storage consistency, and isolated failure fixtures.
 
 Updated 2026-11-12 after validation: recorded nine passing EC2 fixtures, JSON/legacy-record assertions, and the complete CLI suite result.
+
+Updated 2026-11-12 after review: added default-subnet absence to placement refusals and retained the issue's explicit region quota policy. The first Clippy run was discarded when committing changed its build stamp; the retry runs against a fixed commit with no build-storage overrides.
+
+Updated 2026-11-12 after final validation: the expanded multi-region regression passes, as do all 297 active CLI tests and workspace Clippy. Implementation and validation are complete.
