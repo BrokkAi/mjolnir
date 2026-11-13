@@ -89,7 +89,14 @@ pub(crate) fn draw_candidates<T: AsRef<SubagentCandidate>>(
         // 53 random bits as a float in (0, 1], so its logarithm is finite.
         units.push(((bits >> 11) + 1) as f64 / (1u64 << 53) as f64);
     }
-    order_by_draw(candidates, ranking_anchor, prefer, &units, model, now_seconds);
+    order_by_draw(
+        candidates,
+        ranking_anchor,
+        prefer,
+        &units,
+        model,
+        now_seconds,
+    );
     Ok(())
 }
 
@@ -168,7 +175,9 @@ pub(crate) fn rank_candidates<T: AsRef<SubagentCandidate>>(
                     .cmp(&projects_short_window_exhaustion(right, model, now_seconds))
             })
             // A preferred profile leads the profiles quota treats alike.
-            .then_with(|| preference_position(left, prefer).cmp(&preference_position(right, prefer)))
+            .then_with(|| {
+                preference_position(left, prefer).cmp(&preference_position(right, prefer))
+            })
             .then_with(|| left_rank.order(right_rank))
             .then_with(|| {
                 let left_is_anchor = ranking_anchor == Some(left.profile_id.as_str());

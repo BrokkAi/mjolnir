@@ -686,7 +686,8 @@ pub(crate) fn render_quotas(
                 row_ids[index].clone(),
                 Rect::new(
                     table_inner.x,
-                    table_inner.y
+                    table_inner
+                        .y
                         .saturating_add(1)
                         .saturating_add(u16::try_from(index - offset).unwrap_or(0)),
                     table_inner.width,
