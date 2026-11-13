@@ -602,8 +602,9 @@ before a 5-hour reset is plenty, while 5% left six days before a weekly reset
 is not. The window furthest behind decides. A limit for one model, such as a
 weekly Fable limit, counts only for that model. A pay-per-use profile counts as
 exactly on pace, so a subscription with quota to spare comes first. A profile
-with no quota left, then one with no quota report, comes last. On a tie, the
-parent's own profile wins. `mj doctor` shows, for each profile, where its quota
+with no quota left, then one with no quota report, comes last. Profiles named
+in `[quota] prefer` lead, most preferred first, while their quota tier allows.
+On a tie, the parent's own profile wins. `mj doctor` shows, for each profile, where its quota
 comes from and that sub-agents may use it.
 
 A sub-agent ends its task by handing its report back to the session that

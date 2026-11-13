@@ -415,7 +415,8 @@ mj new --workspace eval --bundle product --target builder \
 - `mj new --model <name>` chooses the enabled, usable profile offering that
   exact model with the strongest quota headroom relative to its reset times,
   then starts the session on it. It conflicts with
-  `--profile`; the saved default profile breaks quota ties. If `--effort` is
+  `--profile`; profiles named in `[quota] prefer` lead quota ties in the order
+  listed, then the saved default profile. If `--effort` is
   supplied, the selected profile must offer that exact effort for the model or
   the request fails.
 - `mj new --subagents native|mjolnir|none` selects delegation. Omitted defaults to

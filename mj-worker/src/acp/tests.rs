@@ -380,6 +380,96 @@ fn opencode_mcp_calls_always_reach_the_person() {
     }
 }
 
+/// agy 1.5.8 titles an MCP call `mcp_<server>_<tool>` and names no server in
+/// the request, so a title cannot tell an owned tool from a lookalike. Its own
+/// `mcp(<server>/*)` grant can: the worker stages one per registered owned
+/// server in agy's project file and answers none of agy's requests itself.
+/// `tests/e2e/antigravity_owned_mcp_grants.py` runs the same golden file
+/// through the real agy.
+// Hard-won: 14ded1285: agy's Auto mode still asked a person before every mj MCP tool call, including handback.
+#[test]
+fn antigravity_owned_mcp_servers_are_granted_in_its_project_file() {
+    use agent_client_protocol::v1::schema::{PermissionOption, ToolCallUpdateFields, ToolKind};
+    use mj_core::worker_launch::ReviewMcpServer;
+    let home = tempfile::tempdir().unwrap();
+    let project = home.path().join("config/projects/default-cli-project.json");
+    std::fs::create_dir_all(project.parent().unwrap()).unwrap();
+    // What interactive agy writes, plus a grant of the person's own and one an
+    // earlier launch left for a server this launch no longer registers.
+    std::fs::write(
+        &project,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "id": "default-cli-project",
+            "name": "CLI Project",
+            "projectResources": {},
+            "permissionGrants": {
+                "permissionGrants": {
+                    "allow": ["command(gh pr list)", "mcp(mj-review/*)"],
+                    "deny": ["command(rm)"]
+                },
+                "v2Migrated": true
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut spec = reload_fallback_spec(HarnessKind::Antigravity);
+    spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
+    spec.environment.insert(
+        "MJ_ANTIGRAVITY_HOME".into(),
+        home.path().to_string_lossy().into_owned(),
+    );
+    spec.subagent_mcp_socket = Some(worker_socket(SubagentMcpRole::Child));
+    spec.project_memory = Some(ProjectMemoryLaunchConfig {
+        history_socket: Some("/worker/history.sock".into()),
+        project_key: "project".into(),
+        root: "/memory".into(),
+        baseline_root: "/baseline".into(),
+        repository_roots: BTreeMap::new(),
+        mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+    });
+    // A configured server never gets a grant, even one named like ours.
+    spec.extra_mcp_servers = vec![ReviewerMcpServer::new(ReviewMcpServer {
+        name: "mj-agents_send".into(),
+        command: "analyzer".into(),
+        args: vec![],
+    })];
+    stage_antigravity_mcp_grants(&spec).unwrap();
+    let staged = std::fs::read_to_string(&project).unwrap();
+    assert_eq!(
+        staged,
+        include_str!("testdata/antigravity_project_grants.json")
+    );
+    // Every worker start stages again.
+    stage_antigravity_mcp_grants(&spec).unwrap();
+    assert_eq!(std::fs::read_to_string(&project).unwrap(), staged);
+    // The worker itself answers nothing for agy.
+    let request = RequestPermissionRequest::new(
+        "native",
+        ToolCallUpdate::new(
+            "call",
+            ToolCallUpdateFields::new()
+                .title("Run mcp_mj-agents_handback")
+                .kind(ToolKind::Other),
+        ),
+        vec![PermissionOption::new(
+            "allow",
+            "Allow",
+            PermissionOptionKind::AllowOnce,
+        )],
+    );
+    assert!(
+        OwnedMcpApprovals::for_launch(&spec)
+            .response(&request)
+            .is_none()
+    );
+    // Unconstrained targets run agy with its skip-permissions flag instead.
+    spec.execution_policy = ExecutionPolicy::Unconstrained;
+    std::fs::write(&project, "unchanged").unwrap();
+    stage_antigravity_mcp_grants(&spec).unwrap();
+    assert_eq!(std::fs::read_to_string(&project).unwrap(), "unchanged");
+}
+
 #[test]
 fn guardian_preapproves_trusted_gh_and_owned_mcp_on_every_session_open() {
     use agent_client_protocol::v1::schema::{PermissionOption, ToolCallUpdateFields};

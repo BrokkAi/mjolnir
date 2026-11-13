@@ -22,6 +22,7 @@ use crate::dashboard::io::{
     spawn_cancellable_io_with_token, spawn_clipboard_read, spawn_config_rename,
     spawn_create_bundle, spawn_dashboard_change_workspace, spawn_dashboard_container_settings,
     spawn_dashboard_create_session, spawn_dashboard_notifications_ignored, spawn_dashboard_rename,
+    spawn_quota_preferences_save,
     spawn_lifecycle_operation, spawn_remove_bundle, spawn_workspace_close,
     spawn_workspace_close_cancel, spawn_workspace_create, spawn_workspace_draft_recovery,
     spawn_workspace_management_load, spawn_workspace_rename,
@@ -994,6 +995,24 @@ pub(crate) async fn apply_dashboard_action(
                 session_id,
                 &session_name,
                 ignored,
+                context.dashboard_io_tx.clone(),
+                context.critical_operations.clone(),
+            );
+        }
+        DashboardAction::PreferLoadBalancingProfile { profile_id } => {
+            // The most recently preferred profile wins among quota-equals.
+            let mut prefer = context.controller.config.quota.prefer.clone();
+            prefer.retain(|id| *id != profile_id);
+            prefer.insert(0, profile_id);
+            spawn_quota_preferences_save(
+                prefer,
+                context.dashboard_io_tx.clone(),
+                context.critical_operations.clone(),
+            );
+        }
+        DashboardAction::ClearLoadBalancingPreferences => {
+            spawn_quota_preferences_save(
+                Vec::new(),
                 context.dashboard_io_tx.clone(),
                 context.critical_operations.clone(),
             );

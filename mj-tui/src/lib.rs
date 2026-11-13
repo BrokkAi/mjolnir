@@ -567,6 +567,12 @@ pub enum DashboardAction {
         session_id: String,
         ignored: bool,
     },
+    /// Move a profile to the front of `[quota] prefer`.
+    PreferLoadBalancingProfile {
+        profile_id: String,
+    },
+    /// Empty `[quota] prefer`.
+    ClearLoadBalancingPreferences,
     OpenResumeDialog,
     ImportSession {
         profile_id: String,
@@ -1024,6 +1030,9 @@ pub struct DashboardState {
     /// Keyboard commands use this geometry to anchor the details dropdown.
     pub(crate) capacity_disks_areas: RefCell<Vec<Option<Rect>>>,
     pub(crate) quota_index: usize,
+    /// Last rendered Quota row bounds, by profile id, for the row's
+    /// right-click menu.
+    pub(crate) quota_row_areas: RefCell<Vec<(String, Rect)>>,
     pub(crate) focus: Focus,
     /// The independently selected sizes of Sessions, Targets, and Quota.
     pane_sizes: PaneSizes,
@@ -1314,6 +1323,7 @@ impl DashboardState {
             container_capacities: BTreeMap::new(),
             target_storage: Vec::new(),
             capacity_disks_areas: RefCell::new(Vec::new()),
+            quota_row_areas: RefCell::new(Vec::new()),
             version_label: if cfg!(test) {
                 TEST_VERSION_LABEL
             } else {

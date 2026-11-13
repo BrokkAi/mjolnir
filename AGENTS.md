@@ -268,6 +268,10 @@ container sessions run the same harness versions as managed bare workers:
   refresh token and rely on Claude Code never refreshing it and rereading a
   replaced file (#1490); on macOS, also on Claude Code reading that file when
   the Keychain has no item for the session's config directory (#1491).
+- Antigravity: run `python3 tests/e2e/antigravity_owned_mcp_grants.py`
+  against the new pin. Sessions trust Mjolnir's MCP servers through agy's
+  undocumented project grant file; the script checks that agy still reads it
+  and still matches a grant to the owning server rather than the call title.
 - Muse: update `mj-core/assets/muse/runtime.json`. The image installs Muse
   from that file.
 - dsh-acp: update `DSH_ACP_VERSION` in `mj-core/src/harness_runtime.rs` and

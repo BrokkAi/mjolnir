@@ -1,0 +1,18 @@
+{
+  "id": "default-cli-project",
+  "name": "CLI Project",
+  "projectResources": {},
+  "permissionGrants": {
+    "permissionGrants": {
+      "allow": [
+        "command(gh pr list)",
+        "mcp(mj-memory/*)",
+        "mcp(mj-agents/*)"
+      ],
+      "deny": [
+        "command(rm)"
+      ]
+    },
+    "v2Migrated": true
+  }
+}

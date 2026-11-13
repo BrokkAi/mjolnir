@@ -200,6 +200,9 @@ impl LaunchSpec {
     }
 }
 
+/// The project-history server's name.
+const MEMORY_MCP_SERVER: &str = "mj-memory";
+
 pub(super) fn project_history_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
     if spec
         .project_memory
@@ -223,7 +226,7 @@ pub(super) fn project_history_mcp(spec: &LaunchSpec) -> Vec<McpServer> {
     }
     vec![McpServer::Stdio(approve_owned_mcp(
         spec,
-        McpServerStdio::new("mj-memory", spec.command.clone()).args(args),
+        McpServerStdio::new(MEMORY_MCP_SERVER, spec.command.clone()).args(args),
     ))]
 }
 
@@ -446,6 +449,118 @@ fn approve_owned_mcp(spec: &LaunchSpec, server: McpServerStdio) -> McpServerStdi
     } else {
         server
     }
+}
+
+/// The project agy runs every ACP conversation in (its log says
+/// "Conversation using project ID: default-cli-project"). agy reads that
+/// project's permission grants from `config/projects/<id>.json` under its
+/// `--gemini-dir`.
+const ANTIGRAVITY_PROJECT_ID: &str = "default-cli-project";
+
+/// Every server name Mjolnir may register, so a grant left by an earlier
+/// launch for a server this launch no longer registers is removed.
+const OWNED_MCP_SERVERS: [&str; 3] = [
+    MEMORY_MCP_SERVER,
+    mj_core::subagent::SUBAGENT_MCP_SERVER,
+    mj_core::subagent::REVIEW_MCP_SERVER,
+];
+
+/// Trust the Mjolnir-owned MCP servers this launch registered over ACP, for
+/// agy in its guardian (Auto) mode, which asks a person before every MCP tool
+/// call. agy names a call `mcp_<server>_<tool>` and the request says nothing
+/// more, so the title cannot tell `mj-agents`/`send_message` from a foreign
+/// server `mj-agents_send`/`message`. agy's own grant rule
+/// `mcp(<server>/*)` names the server, and agy matches it against the server
+/// that owns the tool, so the lookalike still asks (checked against agy 1.5.8;
+/// `tests/e2e/antigravity_owned_mcp_grants.py` repeats the check). That is the
+/// whole mechanism: the worker answers none of agy's permission requests for
+/// these servers. Claude's allowed tools and Codex's server approval mode do
+/// the same for those harnesses.
+///
+/// Unconstrained targets run agy with `--dangerously-skip-permissions`, which
+/// already approves every call.
+pub(super) fn stage_antigravity_mcp_grants(spec: &LaunchSpec) -> Result<()> {
+    if spec.harness != HarnessKind::Antigravity
+        || spec.execution_policy != ExecutionPolicy::ConfiguredApprovals
+    {
+        return Ok(());
+    }
+    let home = spec
+        .environment
+        .get(spec.harness.home_env())
+        .map(|value| spec.harness.home_from_environment(value))
+        .with_context(|| {
+            format!(
+                "the Antigravity launch has no {}, so its MCP grants cannot be staged",
+                spec.harness.home_env()
+            )
+        })?;
+    let path = home
+        .join("config/projects")
+        .join(format!("{ANTIGRAVITY_PROJECT_ID}.json"));
+    let existing = match std::fs::read(&path) {
+        Ok(bytes) => Some(
+            serde_json::from_slice(&bytes)
+                .with_context(|| format!("parse Antigravity project file {}", path.display()))?,
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read Antigravity project file {}", path.display()));
+        }
+    };
+    let servers = owned_acp_mcp_tools(spec)
+        .into_iter()
+        .map(|(server, _)| server)
+        .collect::<Vec<_>>();
+    let mut project = with_owned_mcp_grants(existing, &servers)
+        .with_context(|| format!("update Antigravity project file {}", path.display()))?;
+    project.push(b'\n');
+    mj_core::config::atomic_write(&path, &project)
+        .with_context(|| format!("write Antigravity project file {}", path.display()))
+}
+
+/// agy's project file with `mcp(<server>/*)` allowed for `servers` and for no
+/// other Mjolnir server. Everything else agy keeps in the file, and every
+/// other grant, is preserved.
+fn with_owned_mcp_grants(
+    existing: Option<serde_json::Value>,
+    servers: &[String],
+) -> Result<Vec<u8>> {
+    fn object<'a>(
+        parent: &'a mut serde_json::Map<String, serde_json::Value>,
+        key: &str,
+    ) -> Result<&'a mut serde_json::Map<String, serde_json::Value>> {
+        parent
+            .entry(key)
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+            .as_object_mut()
+            .with_context(|| format!("{key} is not a JSON object"))
+    }
+    let rule = |server: &str| format!("mcp({server}/*)");
+    let mut project = existing.unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+    let root = project
+        .as_object_mut()
+        .context("the project file is not a JSON object")?;
+    let grants = object(root, "permissionGrants")?;
+    let config = object(grants, "permissionGrants")?;
+    let allow = config
+        .entry("allow")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+        .as_array_mut()
+        .context("allow is not a JSON array")?;
+    let owned = OWNED_MCP_SERVERS.map(rule);
+    allow.retain(|entry| {
+        !entry
+            .as_str()
+            .is_some_and(|rule| owned.iter().any(|owned| owned == rule))
+    });
+    allow.extend(
+        servers
+            .iter()
+            .map(|server| serde_json::Value::String(rule(server))),
+    );
+    serde_json::to_vec_pretty(&project).context("serialize the project file")
 }
 
 fn session_mcp(spec: &LaunchSpec, include_history_tools: bool) -> Vec<McpServer> {

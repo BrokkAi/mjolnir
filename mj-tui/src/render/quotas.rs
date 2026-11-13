@@ -351,6 +351,8 @@ pub(crate) fn quota_reset_cells(quota: &ProfileQuota, now: u64) -> (String, Stri
 }
 
 pub(crate) struct QuotaTableRow {
+    /// The profile's id, for the row's right-click menu.
+    pub(crate) id: String,
     profile: String,
     harness: String,
     weekly: Line<'static>,
@@ -486,6 +488,7 @@ pub(crate) fn quota_table_rows(dashboard: &DashboardState, now: u64) -> Vec<Quot
                     }
                 };
             QuotaTableRow {
+                id: row.id.to_owned(),
                 profile: row.label(),
                 harness: row.harness.display_name().into(),
                 weekly: quota_chart(weekly, weekly_chart),
@@ -624,6 +627,8 @@ pub(crate) fn render_quotas(
         ))
     });
     let row_count = rows.len();
+    let row_ids: Vec<String> = rows.iter().map(|row| row.id.clone()).collect();
+    let table_inner = block.inner(area);
     let table = Table::new(rows.into_iter().map(QuotaTableRow::into_row), widths)
         .column_spacing(0)
         // The pane's own title already says these rows are profiles, so the
@@ -673,6 +678,23 @@ pub(crate) fn render_quotas(
         );
     }
     dashboard.quota_scroll.set(state.offset());
+    // Right-clicking a profile row opens its load-balancing menu.
+    let offset = state.offset();
+    *dashboard.quota_row_areas.borrow_mut() = (offset..row_count.min(offset + viewport))
+        .map(|index| {
+            (
+                row_ids[index].clone(),
+                Rect::new(
+                    table_inner.x,
+                    table_inner.y
+                        .saturating_add(1)
+                        .saturating_add(u16::try_from(index - offset).unwrap_or(0)),
+                    table_inner.width,
+                    1,
+                ),
+            )
+        })
+        .collect();
     render_session_scrollbar(
         frame,
         area,

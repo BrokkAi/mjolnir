@@ -437,13 +437,14 @@ async fn resolve_model_profile_selection_from(
         )));
     }
     if profile_id.is_none() {
+        let prefer = backend.quota_preferences().await?;
         let anchor = match source {
             ModelProfileCandidateSource::Subagents { parent_profile } => Some(parent_profile),
             ModelProfileCandidateSource::Session { ranking_anchor } => ranking_anchor,
             ModelProfileCandidateSource::Reviewers
             | ModelProfileCandidateSource::ReviewersReady => None,
         };
-        draw_candidates(&mut offered, anchor, &identity, now_epoch_seconds())?;
+        draw_candidates(&mut offered, anchor, &prefer, &identity, now_epoch_seconds())?;
     }
     let reviewer_source = matches!(
         source,
@@ -726,7 +727,7 @@ pub(crate) fn merge_same_models(
     model: &str,
     now_seconds: i64,
 ) -> Vec<SubagentCandidate> {
-    rank_candidates(&mut candidates, Some(parent_profile), model, now_seconds);
+    rank_candidates(&mut candidates, Some(parent_profile), &[], model, now_seconds);
     let mut seen = std::collections::BTreeSet::new();
     candidates.retain(|candidate| {
         let mut models = candidate
@@ -1093,13 +1094,37 @@ mod tests {
             candidate("high", Some(90), &["luna"]),
             candidate("empty", Some(0), &["luna"]),
         ];
-        rank_candidates(&mut candidates, Some("parent"), "luna", 0);
+        rank_candidates(&mut candidates, Some("parent"), &[], "luna", 0);
         assert_eq!(
             ids(&candidates),
             vec![
                 "high", "parent", "a-other", "b-other", "unknown", "api", "empty"
             ]
         );
+    }
+
+    #[test]
+    fn load_balancing_preferences_lead_among_quota_equals_in_list_order() {
+        let mut candidates = vec![
+            candidate("a-plain", Some(50), &["luna"]),
+            candidate("b-preferred", Some(50), &["luna"]),
+            candidate("c-preferred-first", Some(50), &["luna"]),
+        ];
+        rank_candidates(
+            &mut candidates,
+            None,
+            &["c-preferred-first".into(), "b-preferred".into()],
+            "luna",
+            0,
+        );
+        assert_eq!(ids(&candidates), ["c-preferred-first", "b-preferred", "a-plain"]);
+        // An exhausted preference does not win: quota still owns feasibility.
+        let mut candidates = vec![
+            candidate("plain", Some(50), &["luna"]),
+            candidate("preferred-out", Some(0), &["luna"]),
+        ];
+        rank_candidates(&mut candidates, None, &["preferred-out".into()], "luna", 0);
+        assert_eq!(ids(&candidates), ["plain", "preferred-out"]);
     }
 
     #[test]
@@ -1131,11 +1156,11 @@ mod tests {
         let other = candidate("other", Some(40), &["claude-fable-5-1", "claude-opus-5"]);
 
         let mut for_fable = vec![fable.clone(), other.clone()];
-        rank_candidates(&mut for_fable, None, "claude-fable-5-1", 1_000);
+        rank_candidates(&mut for_fable, None, &[], "claude-fable-5-1", 1_000);
         assert_eq!(ids(&for_fable), ["other", "fable-profile"]);
 
         let mut for_opus = vec![fable, other];
-        rank_candidates(&mut for_opus, None, "claude-opus-5", 1_000);
+        rank_candidates(&mut for_opus, None, &[], "claude-opus-5", 1_000);
         assert_eq!(ids(&for_opus), ["fable-profile", "other"]);
     }
 
@@ -1175,23 +1200,23 @@ mod tests {
         ];
 
         let mut ranked = profiles.clone();
-        rank_candidates(&mut ranked, None, "luna", now);
+        rank_candidates(&mut ranked, None, &[], "luna", now);
         assert_eq!(ids(&ranked), ["pacing", "steady", "burning", "unknown"]);
 
         for unit in [1e-9, 0.5, 1.0] {
             let mut drawn = profiles.clone();
             let units = vec![unit; drawn.len()];
-            order_by_draw(&mut drawn, None, &units, "luna", now);
+            order_by_draw(&mut drawn, None, &[], &units, "luna", now);
             assert_eq!(ids(&drawn)[2..], ["burning", "unknown"]);
         }
 
         // The pace was measured at the reading: an unchanged reading still
         // projects later, until the window resets.
         let mut stale = profiles.clone();
-        rank_candidates(&mut stale, None, "luna", now + 30 * 60);
+        rank_candidates(&mut stale, None, &[], "luna", now + 30 * 60);
         assert_eq!(ids(&stale), ["pacing", "steady", "burning", "unknown"]);
         let mut reset = profiles.clone();
-        rank_candidates(&mut reset, None, "luna", now + 4 * 60 * 60);
+        rank_candidates(&mut reset, None, &[], "luna", now + 4 * 60 * 60);
         assert_eq!(ids(&reset), ["burning", "pacing", "steady", "unknown"]);
     }
 
@@ -1251,7 +1276,7 @@ mod tests {
             for _ in 0..draws {
                 let mut candidates = profiles.clone();
                 let units = (0..candidates.len()).map(|_| unit()).collect::<Vec<_>>();
-                order_by_draw(&mut candidates, Some("thirty-b"), &units, "luna", 0);
+                order_by_draw(&mut candidates, Some("thirty-b"), &[], &units, "luna", 0);
                 let chosen = if included {
                     assert_eq!(ids(&candidates)[3..], ["unknown", "api", "empty"]);
                     &candidates[0]
