@@ -1300,10 +1300,10 @@ mod tests {
         let delivery =
             include_str!("../../mj-transcript/tests/golden/mailbox-delivery-transcript.txt");
         let batch = delivery
-            .split_once("19: Mailbox events:\n")
+            .split_once("20: Mailbox events:\n")
             .unwrap()
             .1
-            .split_once("\n20: ")
+            .split_once("\n21: ")
             .unwrap()
             .0;
         let entry = ChatEntry::plain(
