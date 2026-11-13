@@ -813,6 +813,28 @@ pub(crate) fn spawn_dashboard_rename(
     );
 }
 
+pub(crate) fn spawn_dashboard_notifications_ignored(
+    session_id: String,
+    session_name: &str,
+    ignored: bool,
+    updates: UnboundedSender<DashboardIoUpdate>,
+    tracker: CriticalOperationTracker,
+) {
+    spawn_critical_async(
+        tracker,
+        format!("changing notification setting for {session_name}"),
+        updates,
+        SAVE_ACK_TIMEOUT,
+        async move {
+            daemon::connect_existing()
+                .await?
+                .set_session_notifications_ignored(session_id, ignored)
+                .await
+        },
+        move |result| DashboardIoUpdate::NotificationsIgnored { ignored, result },
+    );
+}
+
 pub(crate) fn spawn_dashboard_change_workspace(
     session_id: String,
     session_name: &str,

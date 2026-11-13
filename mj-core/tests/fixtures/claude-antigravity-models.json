@@ -1,0 +1,12 @@
+{
+  "claude": [
+    {"value": "opus", "name": "Opus 5.5", "description": "For complex work and everyday tasks"},
+    {"value": "sonnet", "name": "Sonnet 5.5", "description": "Most efficient for simpler tasks"},
+    {"value": "claude-sonnet-5", "name": "Sonnet 5", "description": "Efficient for routine tasks"}
+  ],
+  "antigravity": [
+    {"value": "gemini-4-carbon", "name": "Gemini 4 Carbon", "description": null},
+    {"value": "claude-opus-5-5", "name": "Claude Opus 5.5", "description": null},
+    {"value": "claude-sonnet-5-5", "name": "Claude Sonnet 5.5", "description": null}
+  ]
+}

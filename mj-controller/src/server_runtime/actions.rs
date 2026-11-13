@@ -449,6 +449,10 @@ pub(super) async fn apply_phone_action(
                 .await?;
             Ok(())
         }
+        ControllerAction::SetSessionNotificationsIgnored {
+            session_id,
+            ignored,
+        } => controller.set_session_notifications_ignored(&session_id, ignored),
         ControllerAction::TurnControl {
             session_id,
             command,

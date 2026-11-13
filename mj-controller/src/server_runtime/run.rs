@@ -36,8 +36,7 @@ fn quota_reports_for_viewer(
         .iter()
         .filter_map(|(id, publication)| {
             publication
-                .report
-                .clone()
+                .effective_report(id)
                 .map(|report| (id.clone(), report))
         })
         .collect()

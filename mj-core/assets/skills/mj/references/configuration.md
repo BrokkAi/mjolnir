@@ -433,7 +433,15 @@ is **Settings → Privacy → Jev (hosted service)**.
 
 ## GitHub events `[github.watch]`
 
-`use_gpu` defaults to `true`. The local relevance model selects DirectML on Windows, CoreML on Apple-silicon
+`local_inference` defaults to `false`: every GitHub relevance classification
+goes to the hosted GLiDE classifier through the public proxy, and no local
+model or native runtime is downloaded or loaded. Set `local_inference = true`
+to opt in to local scoring with GLiDE handling the middle band and unavailable
+local scoring. Changes apply on the next watcher poll; disabling local inference
+also stops model preparation and retries and releases the loaded model.
+
+`use_gpu` defaults to `true` and applies only when local inference is enabled.
+The local relevance model selects DirectML on Windows, CoreML on Apple-silicon
 macOS, and CUDA on Linux x64 when its libraries are installed. Other supported
 hosts use CPU. Linux CUDA requires the NVIDIA driver, CUDA 12 and cuDNN 9 libraries
 installed by the administrator; the daemon reports missing libraries and uses CPU.

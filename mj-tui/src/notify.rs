@@ -107,6 +107,17 @@ impl DashboardState {
         let mut due = Vec::new();
         episodes.retain(|id, _| self.state.sessions.contains_key(id));
         for id in self.state.sessions.keys() {
+            // An ignored session's attention still renders in its row; it
+            // simply never starts or keeps an episode that interrupts.
+            if self
+                .state
+                .sessions
+                .get(id)
+                .is_some_and(|session| session.notifications_ignored)
+            {
+                episodes.remove(id);
+                continue;
+            }
             let parent = self
                 .state
                 .subagents
@@ -397,6 +408,16 @@ impl DashboardState {
         // word, most urgent first: "waiting" means a question for a person.
         let (mut failed, mut unreachable, mut waiting, mut important, mut unread) = (0, 0, 0, 0, 0);
         for entry in self.attention_queue() {
+            // Ignored sessions still render their state in the list; the
+            // title is an interruption channel, so they are not in it.
+            if self
+                .state
+                .sessions
+                .get(&entry.session_id)
+                .is_some_and(|session| session.notifications_ignored)
+            {
+                continue;
+            }
             match entry.level {
                 AttentionLevel::Failed => failed += 1,
                 AttentionLevel::Unreachable => unreachable += 1,
@@ -712,6 +733,38 @@ mod tests {
         assert_eq!(
             dashboard.notice().as_deref(),
             Some("The daemon found a missing target.")
+        );
+    }
+
+    #[test]
+    fn an_ignored_session_never_notifies_or_counts_in_the_title() {
+        let mut dashboard = dashboard();
+        // Prime the episodes before the delay, as an ordinary quiet pass does.
+        assert!(dashboard.notification_events(0).is_empty());
+        dashboard
+            .state
+            .sessions
+            .get_mut("asks")
+            .unwrap()
+            .notifications_ignored = true;
+        let due = dashboard.notification_events(2_000);
+        assert_eq!(due.len(), 1, "{due:?}");
+        assert_eq!(due[0].session_id, "done");
+        let title = dashboard.terminal_title().unwrap();
+        assert!(!title.contains("waiting"), "{title}");
+        assert!(title.contains("1 unread"), "{title}");
+        // Unignoring starts its episode fresh, so it still notifies once.
+        dashboard
+            .state
+            .sessions
+            .get_mut("asks")
+            .unwrap()
+            .notifications_ignored = false;
+        assert!(dashboard.notification_events(2_500).is_empty());
+        let due = dashboard.notification_events(4_500);
+        assert!(
+            due.iter().any(|notice| notice.session_id == "asks"),
+            "{due:?}"
         );
     }
 }

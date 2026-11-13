@@ -3016,7 +3016,7 @@ async fn reconnect_retries_subagent_admission_after_lost_open_reply() {
 
     let relay_root = tempfile::tempdir().unwrap();
     let target = leased_relay_target(relay_root.path());
-    crate::database::set_operator_away(true).unwrap();
+    crate::database::set_operator_away(true, std::time::Duration::ZERO).unwrap();
     let mut connection = None;
     let first = sync_actor_connection(&target, &mut connection).await;
     assert!(first.is_err(), "the first worker lost the open reply");
@@ -3033,14 +3033,14 @@ async fn reconnect_retries_subagent_admission_after_lost_open_reply() {
 
     // The worker misses off/on. Reconnect must deliver revision3 although
     // the last availability value it received was already true.
-    crate::database::set_operator_away(false).unwrap();
-    crate::database::set_operator_away(true).unwrap();
+    crate::database::set_operator_away(false, std::time::Duration::ZERO).unwrap();
+    crate::database::set_operator_away(true, std::time::Duration::ZERO).unwrap();
     sync_actor_connection(&target, &mut connection)
         .await
         .expect("the next relay connection repairs the gate");
     // A still-connected actor must also send a new revision with the same bool.
-    crate::database::set_operator_away(false).unwrap();
-    crate::database::set_operator_away(true).unwrap();
+    crate::database::set_operator_away(false, std::time::Duration::ZERO).unwrap();
+    crate::database::set_operator_away(true, std::time::Duration::ZERO).unwrap();
     sync_actor_connection(&target, &mut connection)
         .await
         .unwrap();
@@ -3121,6 +3121,7 @@ fn register_leased_relay_session() {
     crate::database::save_session(&mj_core::state::SessionRecord {
         oracle_choice: None,
         oracle: true,
+        notifications_ignored: false,
         project: None,
         target_runtime: None,
         launch_base: None,

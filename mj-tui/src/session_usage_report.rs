@@ -430,6 +430,7 @@ pub(crate) fn render(
         true,
         "Profile",
         PopupSide::Below,
+        ComboBox::DEFAULT_MAX_VISIBLE_ROWS,
         &mut form,
         UsageControl::Profile,
     );
@@ -452,6 +453,7 @@ pub(crate) fn render(
         true,
         "Period",
         PopupSide::Below,
+        ComboBox::DEFAULT_MAX_VISIBLE_ROWS,
         &mut form,
         UsageControl::Period,
     );

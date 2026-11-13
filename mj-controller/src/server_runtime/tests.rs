@@ -2026,6 +2026,7 @@ fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
     SessionRecord {
         oracle_choice: None,
         oracle: true,
+        notifications_ignored: false,
         project: None,
         target_runtime: None,
         launch_base: None,

@@ -353,6 +353,7 @@ impl Controller {
         let session = SessionRecord {
             oracle_choice: None,
             oracle: false,
+            notifications_ignored: false,
             project: parent.project.clone(),
             target_runtime: Some(match &parent.target_runtime {
                 Some(runtime) => runtime.clone(),

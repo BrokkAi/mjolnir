@@ -20,12 +20,13 @@ following.
 
 | Feature | What is sent | Where it goes | How to turn it off |
 | --- | --- | --- | --- |
-| GLiDE classifiers | The completed-turn verdict sends recent user/assistant conversation and live activity facts; the handback check sends handback evidence; the GitHub item classifier sends item text and relevant session titles; the AFK repeated-question check sends the current question and previously declined questions; the question locator sends the latest user message and candidate assistant replies. | The hosted proxy `https://mj-jev-proxy.eng-admin-a63.workers.dev`, which forwards requests to GLiDE (Fastino). | `[jev] enabled = false`, or **Settings → Privacy → Jev (hosted service)**. |
+| GLiDE classifiers | The completed-turn verdict sends recent user/assistant conversation and live activity facts; the handback check sends handback evidence; the AFK repeated-question check sends the current question and previously declined questions; the question locator sends the latest user message and candidate assistant replies. | The hosted proxy `https://mj-jev-proxy.eng-admin-a63.workers.dev`, which forwards requests to GLiDE (Fastino). | `[jev] enabled = false`, or **Settings → Privacy → Jev (hosted service)**. |
+| GitHub relevance | GitHub item text and bounded session conversation history for every item needing classification. Local scoring can reduce these requests when explicitly enabled with `[github.watch] local_inference = true`. | The same proxy (`/v1/github-item-glide`), which forwards it to GLiDE. | `[github.watch] enabled = false` or `[jev] enabled = false`. |
 | Update check | The installed version's channel is asked for the latest release. No session content is sent. | GitHub Releases, the npm registry, or the Homebrew tap on GitHub. | Set `MJOLNIR_NO_UPDATE_CHECK`. |
 
 One switch stops every Jev request: set `enabled = false` under `[jev]` in
 `config.toml`, or clear **Settings → Privacy → Jev (hosted service)**. Then
-nothing in the first row leaves the machine from the dashboard or
+nothing in these classifier rows leaves the machine from the dashboard or
 from sessions started afterwards. Workers read the switch when they start,
 so a session that was already running keeps sending turn text until you
 resume or restart it. What you give up: a turn ends only when the harness

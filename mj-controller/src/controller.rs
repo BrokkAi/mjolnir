@@ -1098,6 +1098,7 @@ impl Controller {
         let record = SessionRecord {
             oracle_choice: oracle_choice.map(Box::new),
             oracle: oracle_enabled,
+            notifications_ignored: false,
             project: project.map(std::sync::Arc::new),
             target_runtime: Some(template.into()),
             build_cache: None,
@@ -1203,6 +1204,27 @@ impl Controller {
         record.session_title_override = Some(title.clone());
         record.updated_at = updated_at;
         Ok(title)
+    }
+
+    /// Change only whether the session raises notifications. Archiving-style
+    /// display preference: the durable write and the in-memory record move
+    /// together, and nothing else about the session is rewritten.
+    pub fn set_session_notifications_ignored(
+        &mut self,
+        session_id: &str,
+        ignored: bool,
+    ) -> Result<()> {
+        ensure!(
+            self.state.sessions.contains_key(session_id),
+            "unknown session {session_id}"
+        );
+        crate::database::set_session_notifications_ignored(session_id, ignored)?;
+        self.state
+            .sessions
+            .get_mut(session_id)
+            .expect("session was checked before updating its flag")
+            .notifications_ignored = ignored;
+        Ok(())
     }
 
     /// Move a session, and the sub-agents under it, to another workspace.

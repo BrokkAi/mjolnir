@@ -623,8 +623,18 @@ mod tests {
         // when the worker's away resolution arrives.
         page_for(&path, "pre-away", vec![requested()], false).unwrap();
         let mut connection = open(&path).unwrap();
-        assert!(super::super::operator_away::set_with(&mut connection, true).unwrap());
-        assert!(!super::super::operator_away::set_with(&mut connection, true).unwrap());
+        assert!(
+            super::super::operator_away::set_with(&mut connection, true, std::time::Duration::ZERO)
+                .unwrap()
+        );
+        assert!(
+            !super::super::operator_away::set_with(
+                &mut connection,
+                true,
+                std::time::Duration::ZERO
+            )
+            .unwrap()
+        );
         assert_eq!(
             load_state_from(&path).unwrap().operator_presence,
             OperatorPresence {
@@ -683,9 +693,23 @@ mod tests {
         connection
             .execute("DELETE FROM api_events WHERE session_id='late'", [])
             .unwrap();
-        assert!(super::super::operator_away::set_with(&mut connection, false).unwrap());
+        assert!(
+            super::super::operator_away::set_with(
+                &mut connection,
+                false,
+                std::time::Duration::ZERO
+            )
+            .unwrap()
+        );
         // Repeating the same write and rebuilding a projection emit nothing twice.
-        assert!(!super::super::operator_away::set_with(&mut connection, false).unwrap());
+        assert!(
+            !super::super::operator_away::set_with(
+                &mut connection,
+                false,
+                std::time::Duration::ZERO
+            )
+            .unwrap()
+        );
         assert_eq!(
             load_state_from(&path).unwrap().operator_presence,
             OperatorPresence {
@@ -1682,7 +1706,7 @@ mod tests {
         super::super::schema::restore_github_v84_schema(&connection);
         super::super::schema::restore_pre101_subagent_preference(&connection);
         super::super::schema::restore_review_state_schema(&connection, 56);
-        connection.execute_batch("DROP TABLE checkpoint_operations; DELETE FROM schema_migrations WHERE version >= 57; UPDATE schema_compatibility SET minimum_compatible_version = 56; DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 56;").unwrap();
+        connection.execute_batch("DROP TABLE checkpoint_operations; DELETE FROM schema_migrations WHERE version >= 57; UPDATE schema_compatibility SET minimum_compatible_version = 56; DROP TABLE IF EXISTS operator_away_requests; DROP TABLE IF EXISTS operator_away_workers; DROP TABLE IF EXISTS operator_away; DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 56;").unwrap();
         drop(connection);
         forget_verified_schema(&path);
         let page = load_api_events_from(&path, &ApiEventFilter::default(), Some(0), 100).unwrap();

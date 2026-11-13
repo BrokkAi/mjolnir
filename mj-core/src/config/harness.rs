@@ -1147,7 +1147,9 @@ impl HarnessKind {
             Self::Muse => &[".data/muse/sessions"],
             Self::OpenCode => &[".data/opencode"],
             Self::Dsh => &["sessions"],
-            Self::Antigravity => &[], // Native checkpoint export is not supported yet.
+            // agy's conversation database and, beside it, the files each
+            // conversation owns, such as the full output of a long command.
+            Self::Antigravity => &["antigravity-cli/conversations", "antigravity-cli/brain"],
         }
     }
 

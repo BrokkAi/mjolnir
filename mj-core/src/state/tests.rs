@@ -282,6 +282,7 @@ fn sample_state() -> State {
     let session = SessionRecord {
         oracle_choice: None,
         oracle: true,
+        notifications_ignored: false,
         project: None,
         target_runtime: None,
         launch_base: None,

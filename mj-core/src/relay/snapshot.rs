@@ -1429,6 +1429,9 @@ pub struct RelayDispatchRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoredHarnessTurn {
+    /// Whether no Mjolnir prompt was in flight when this turn began.
+    #[serde(default)]
+    pub autonomous: bool,
     pub started_at_ms: i64,
     /// Ordinal of the `harness_turn_started` event that opened this turn.
     pub first_ordinal: u64,
@@ -1690,8 +1693,7 @@ impl RelaySnapshot {
 
     /// The open turn that began without a prompt.
     pub fn autonomous_harness_turn(&self) -> Option<StoredHarnessTurn> {
-        self.harness_turn
-            .filter(|turn| self.continuation.autonomous_turn_started == Some(turn.first_ordinal))
+        self.harness_turn.filter(|turn| turn.autonomous)
     }
     pub fn new(session_id: String) -> Self {
         Self {

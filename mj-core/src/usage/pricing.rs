@@ -14,33 +14,14 @@ use std::collections::BTreeMap;
 
 /// Normalize provider qualifiers and context hints without losing versions.
 pub fn normalize_model(model: &str) -> String {
-    let lowercase = model.to_ascii_lowercase();
-    let model = lowercase.as_str();
-    // Known provider-qualified ids and dated snapshots share a base rate.
-    let model = model
-        .strip_prefix("global.")
-        .or_else(|| model.strip_prefix("us."))
-        .or_else(|| model.strip_prefix("eu."))
-        .unwrap_or(model);
-    let model = model
-        .strip_prefix("openai.")
-        .or_else(|| model.strip_prefix("anthropic."))
-        .unwrap_or(model);
-    let model = model
-        .strip_prefix("openai/")
-        .or_else(|| model.strip_prefix("anthropic/"))
-        .or_else(|| model.strip_prefix("z-ai/"))
-        .or_else(|| model.strip_prefix("deepseek/"))
-        .or_else(|| model.strip_prefix("x-ai/"))
-        .or_else(|| model.strip_prefix("moonshotai/"))
-        .unwrap_or(model);
-    let model = model.strip_suffix(":0").unwrap_or(model);
-    // Claude's context hint (`[1m]`); context premiums are excluded.
-    let model = match model.strip_suffix(']').and_then(|m| m.rsplit_once('[')) {
-        Some((base, _)) => base,
-        None => model,
-    };
-    model.to_owned()
+    let normalized = crate::model_catalog::normalize_model(model);
+    match normalized
+        .strip_suffix(']')
+        .and_then(|m| m.rsplit_once('['))
+    {
+        Some((base, _)) => base.to_owned(),
+        None => normalized,
+    }
 }
 
 fn base_model(model: &str) -> String {

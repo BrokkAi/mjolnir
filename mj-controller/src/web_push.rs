@@ -238,6 +238,10 @@ fn episodes(runtime: &mj_client::runtime_feed::RuntimeProjection) -> Vec<(String
                 return None;
             }
             let record = runtime.records.get(id)?;
+            // An ignored session never interrupts; its row still shows why.
+            if record.notifications_ignored {
+                return None;
+            }
             let mut identities = Vec::new();
             let mut question = String::new();
             let belongs_to_session = |source: &str| {
@@ -629,6 +633,28 @@ mod tests {
             !crate::database::web_push::same_episode_for_tests(&first[0].1, &second[0].1).unwrap(),
             "a newly added reviewer question must be a new episode"
         );
+    }
+
+    #[test]
+    fn an_ignored_session_raises_no_push_episode() {
+        use mj_core::attention::SessionAttention;
+        let runtime = |ignored: bool| {
+            let mut runtime = mj_client::runtime_feed::RuntimeProjection::default();
+            let mut record = crate::daemon::tests::runtime_test_session(
+                "s",
+                "workspace",
+                mj_core::state::SessionState::Running,
+            );
+            record.notifications_ignored = ignored;
+            runtime.records.insert("s".into(), record);
+            runtime
+                .metadata
+                .session_attention
+                .insert("s".into(), SessionAttention::NeedsInput);
+            runtime
+        };
+        assert_eq!(episodes(&runtime(false)).len(), 1);
+        assert!(episodes(&runtime(true)).is_empty());
     }
 
     #[test]

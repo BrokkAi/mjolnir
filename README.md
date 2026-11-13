@@ -11,7 +11,9 @@ Bare SSH sessions stay on their original host.
 
 By default Mjolnir sends classifier evidence to GLiDE (Fastino) through its hosted proxy. `[jev] enabled = false` in `config.toml` stops all classifier requests ([details](https://mjolnir.brokk.ai/security/#what-leaves-this-machine-by-default)).
 
-GitHub relevance downloads a pinned local model and native inference runtime
+GitHub relevance sends every classification to the public proxy by default.
+Local inference is opt-in: set `local_inference = true` under `[github.watch]`
+in `config.toml`. When enabled, it downloads a pinned local model and native inference runtime
 when the first GitHub item needs classification, verifies their checksums, and caches them in the
 Mjolnir data directory. GLiDE handles classification while preparation runs or
 local scoring is unavailable. Native license texts are kept beside the cached

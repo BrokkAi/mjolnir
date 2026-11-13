@@ -1091,6 +1091,15 @@ fn aws_scope_check(
     checks
 }
 
+/// Login failures observed by the running daemon, even when a local file
+/// still exists and claims hours of lifetime.
+pub fn login_checks(failures: &BTreeMap<String, String>) -> Vec<DoctorCheck> {
+    failures.iter().map(|(id, error)| DoctorCheck::fixable(
+        format!("harness.{id}.login"), format!("Harness profile {id} login"),
+        error.clone(), format!("Run `mj login --profile {id}`. Interrupted authentication-failed work continues when the new login reaches its worker."),
+    )).collect()
+}
+
 /// The readiness of one profile: its home, and whether it can authenticate.
 fn harness_profile_check(
     id: &str,

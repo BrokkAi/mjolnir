@@ -1465,6 +1465,7 @@ async fn quota_recovery_reads_full_owner_reports_without_requesting_another_prob
         reports.lock().unwrap().insert(
             "claude".into(),
             crate::quota::QuotaReportPublication {
+                login_error: None,
                 cache_identity: request.cache_identity(),
                 report: Some(observed),
             },
@@ -1574,6 +1575,7 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
         let reports = Arc::new(Mutex::new(QuotaReportMap::from([(
             "claude".into(),
             QuotaReportPublication {
+                login_error: None,
                 cache_identity: identity.clone(),
                 report: None,
             },
@@ -1759,6 +1761,7 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
             reports.insert(
                 "claude".into(),
                 QuotaReportPublication {
+                    login_error: None,
                     cache_identity: identity.into(),
                     report: Some(report),
                 },

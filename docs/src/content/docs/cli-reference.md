@@ -83,6 +83,27 @@ Doctor checks configuration compatibility, harness authentication, worker binari
 
 `--json` emits a machine-readable array. `--smoke` adds real disposable pull/run probes where a target supports them; run it after resolving ordinary fixable checks because it can download an image and provision short-lived resources.
 
+## Prepare Brokk Observe export
+
+```text
+mj observe status [--json]
+mj observe export --session <id> [--output <path>]
+```
+
+These commands expose the first Mjolnir-native Brokk Observe checkpoint.
+`status` reports whether `OBSERVE_URL` and `OBSERVE_TOKEN` are present and lists
+the local delivery spool. `export` reads a session and all of its transcript
+pages through the daemon, then writes newline-delimited Observe envelopes to
+standard output or `--output`. It does not upload them or wait for a policy
+decision.
+
+The export identifies the logical agent as Mjolnir and records the selected
+harness separately. It includes session boundaries, user prompts, tool input
+and results, turn ends, and a stopped session's end. Re-running the same export
+produces the same event identities. Automatic daemon publication, historical
+backfill, and Brokk Observe's broader orchestrator and harness dimensions are
+later milestones.
+
 ## Authenticate a profile
 
 ```text
