@@ -41,6 +41,7 @@ pub mod login_environment;
 pub mod mailbox;
 pub mod move_workspace;
 pub mod native_agent;
+pub mod observe;
 pub mod path_completion;
 pub mod path_input;
 pub mod placement;
