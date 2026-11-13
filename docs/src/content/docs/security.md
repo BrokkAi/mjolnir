@@ -20,9 +20,7 @@ following.
 
 | Feature | What is sent | Where it goes | How to turn it off |
 | --- | --- | --- | --- |
-| Jev turn classifier | After a minute of silence in a turn, and after a reply ends: up to 1 KiB of your latest prompt, up to 2 KiB of the latest assistant text, a size-limited transcript summary, tool titles (up to 128 bytes each), the harness name, and counts of background and queued commands. | The public Cloudflare proxy `mj-jev-proxy.eng-admin-a63.workers.dev`, which forwards it to TypeSafe (`api.typesafe.ai`). With `TYPESAFE_API_KEY` set, or a key in `~/.secrets/typesafe_api_key`, it goes straight to `api.typesafe.ai` with your key. | `[jev] enabled = false`, or **Settings → Privacy → Jev (hosted service)**. A blank key does not disable it; it falls back to the proxy. |
-| Automatic continuation | When a reply ends and the agent may have stopped early: your messages since the last context reset and recent assistant replies. Tool history is not sent. | The same proxy (`/v2/continuation-verdict`), or `api.typesafe.ai` with your key. | `[continuation] enabled = false` or `[jev] enabled = false` in `config.toml`, or clear **Enabled** under **Settings → Continuation**. |
-| Semantic help search | While you type in the help filter, 200 ms after the last key: the filter text and the text of every help row. | The same proxy (`/v1/help-search`), or `api.typesafe.ai` with your key. | `[jev] enabled = false`. It runs only while the help filter has text. |
+| GLiDE classifiers | The completed-turn verdict sends recent user/assistant conversation and live activity facts; the handback check sends handback evidence; the AFK repeated-question check sends the current question and previously declined questions; the question locator sends the latest user message and candidate assistant replies. | The hosted proxy `https://mj-jev-proxy.eng-admin-a63.workers.dev`, which forwards requests to GLiDE (Fastino). | `[jev] enabled = false`, or **Settings → Privacy → Jev (hosted service)**. |
 | GitHub relevance | GitHub item text and bounded session conversation history for every item needing classification. Local scoring can reduce these requests when explicitly enabled with `[github.watch] local_inference = true`. | The same proxy (`/v1/github-item-glide`), which forwards it to GLiDE. | `[github.watch] enabled = false` or `[jev] enabled = false`. |
 | Update check | The installed version's channel is asked for the latest release. No session content is sent. | GitHub Releases, the npm registry, or the Homebrew tap on GitHub. | Set `MJOLNIR_NO_UPDATE_CHECK`. |
 
@@ -33,8 +31,8 @@ from sessions started afterwards. Workers read the switch when they start,
 so a session that was already running keeps sending turn text until you
 resume or restart it. What you give up: a turn ends only when the harness
 ends it, so a turn that goes quiet while the agent waits for you stays
-**Working** until the harness reports the end of the turn; automatic
-continuation does not run; and help search matches text only. See
+**Working** until the harness reports the end of the turn; quota
+recovery does not run. See
 [Configuration](/configuration/#hosted-jev-service-jev).
 
 The proxy source is in `services/jev-proxy/`. It does not write request bodies

@@ -2442,6 +2442,28 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
              COMMIT;"
         ))?;
     }
+    // Compatible: adds a per-session notification mute. Older daemons read and
+    // write sessions with explicit column lists, so the default applies to
+    // anything they save; the flag is person-facing only and never gates work.
+    if version < 129 {
+        let add_column = if super::legacy_schema::table_has_column(
+            connection,
+            "sessions",
+            "notifications_ignored",
+        )? {
+            ""
+        } else {
+            "ALTER TABLE sessions ADD COLUMN notifications_ignored INTEGER NOT NULL DEFAULT 0 CHECK(notifications_ignored IN (0,1));"
+        };
+        connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             {add_column}
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (129, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 129;
+             COMMIT;"
+        ))?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -4336,6 +4358,14 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
+        if version < 129
+            && legacy_schema::table_has_column(&connection, "sessions", "notifications_ignored")
+                .unwrap()
+        {
+            connection
+                .execute_batch("ALTER TABLE sessions DROP COLUMN notifications_ignored;")
+                .unwrap();
+        }
         if version < 122 {
             drop_environment_schema(&connection);
         }

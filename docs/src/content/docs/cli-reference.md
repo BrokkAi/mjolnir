@@ -597,9 +597,8 @@ and `mj message` print is the handle `mj wait --turn` takes, not a count. With `
 - `mj wait --session <id> --turn <turn-id>` waits until that turn has ended and
   says how. The turn ID is the number `mj new` and `mj message` print. A server
   retry of the turn is part of it, but nothing that starts new work is: not a
-  turn the agent starts on its own, background work it left running, or
-  Mjolnir's automatic continuation. When the session is still busy as the wait
-  answers, the first line ends with what it is doing, in the dashboard's words,
+  turn the agent starts on its own, and not background work it left running.
+  When the session is still busy as the wait answers, the first line ends with what it is doing, in the dashboard's words,
   for example
   `turn finished (completed, end of turn) in 5.3s; the session is not idle: [BG 2m10s]`.
   `--json` carries it as `next`.

@@ -637,6 +637,10 @@ fn validate_action_against(
             validate_public_id(session_id)?;
             require_session_record(snapshot, session_id)?;
         }
+        ControllerAction::SetSessionNotificationsIgnored { session_id, .. } => {
+            validate_public_id(session_id)?;
+            require_session_record(snapshot, session_id)?;
+        }
         ControllerAction::TurnControl {
             session_id,
             command,

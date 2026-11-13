@@ -14,7 +14,6 @@ fn completed(relay: &mut DurableRelay, id: &str) {
             },
         )
         .unwrap();
-    authorize(relay, mj_core::assessment::Action::Continue);
 }
 fn authorize(relay: &mut DurableRelay, action: mj_core::assessment::Action) {
     if let Some(mut a) = relay
@@ -36,18 +35,6 @@ fn authorize(relay: &mut DurableRelay, action: mj_core::assessment::Action) {
             .unwrap();
     }
 }
-fn request(relay: &DurableRelay) -> RelayCommand {
-    let s = relay.operational_state();
-    RelayCommand::ContinueAuthorizedWork {
-        expected: RelayCursor {
-            ordinal: s.latest_ordinal,
-            digest: s.latest_digest,
-        },
-        user_command_id: s.continuation.user_command_id.unwrap(),
-        completed_command_id: s.continuation.completed_command_id.unwrap(),
-        attempt: s.continuation.attempts + 1,
-    }
-}
 fn open(root: &std::path::Path) -> DurableRelay {
     let mut relay = DurableRelay::open(root, SESSION, "test").unwrap();
     relay
@@ -58,109 +45,14 @@ fn open(root: &std::path::Path) -> DurableRelay {
     relay
 }
 #[test]
-fn continuation_admits_three_fixed_prompts_then_requires_new_user_input() {
-    let root = tempfile::tempdir().unwrap();
-    let mut relay = open(root.path());
-    submit_relay(&mut relay, "original-prompt", prompt("Implement and test"));
-    completed(&mut relay, "original-prompt");
-    for attempt in 1..=3 {
-        let id = format!("auto-continue-{attempt}");
-        let cmd = request(&relay);
-        assert!(relay.submit_command(&id, cmd.clone()).unwrap().is_ok());
-        // Repeated delivery is an acknowledgement, not another attempt.
-        assert!(relay.submit_command(&id, cmd).unwrap().is_ok());
-        assert_eq!(relay.snapshot.continuation.attempts, attempt);
-        assert_eq!(
-            relay.snapshot.active_prompt.as_ref().unwrap().prompt,
-            mj_core::continuation::prompt_blocks()
-        );
-        completed(&mut relay, &id);
-    }
-    assert!(
-        relay
-            .submit_command("auto-continue-four", request(&relay))
-            .unwrap()
-            .is_err()
-    );
-    drop(relay);
-    let mut relay = open(root.path());
-    assert_eq!(relay.snapshot.continuation.attempts, 3);
-    assert!(
-        relay
-            .submit_command("auto-continue-after-restart", request(&relay))
-            .unwrap()
-            .is_err()
-    );
-    submit_relay(
-        &mut relay,
-        "another-user-prompt",
-        prompt("Now also document it"),
-    );
-    completed(&mut relay, "another-user-prompt");
-    assert_eq!(relay.snapshot.continuation.attempts, 0);
-    assert!(
-        relay
-            .submit_command("auto-continue-new-task", request(&relay))
-            .unwrap()
-            .is_ok()
-    );
-}
-#[test]
-fn continuation_rejects_stale_evidence_and_active_work() {
-    for action in ["prompt", "cancel", "checkpoint", "background"] {
-        let root = tempfile::tempdir().unwrap();
-        let mut relay = open(root.path());
-        submit_relay(&mut relay, "original-prompt", prompt("Implement and test"));
-        completed(&mut relay, "original-prompt");
-        let old = request(&relay);
-        match action {
-            "prompt" => {
-                submit_relay(
-                    &mut relay,
-                    "new-user-message",
-                    prompt("Stop; explain first"),
-                );
-            }
-            "cancel" => {
-                submit_relay(&mut relay, "cancel-the-turn", RelayCommand::CancelTurn);
-            }
-            "checkpoint" => {
-                submit_relay(
-                    &mut relay,
-                    "checkpoint-test",
-                    RelayCommand::BeginCheckpoint { reason: None },
-                );
-            }
-            _ => {
-                relay
-                    .record_observation(RelayObservation::HarnessTurnStarted { started_at_ms: 1 })
-                    .unwrap();
-            }
-        }
-        assert!(
-            relay
-                .submit_command("auto-continue-stale", old)
-                .unwrap()
-                .is_err(),
-            "{action}"
-        );
-        assert_eq!(relay.snapshot.continuation.attempts, 0);
-    }
-}
-#[test]
-fn generated_prompts_neither_renew_allowance_nor_grant_authorization() {
+fn generated_prompts_do_not_grant_authorization() {
     let root = tempfile::tempdir().unwrap();
     let mut relay = open(root.path());
     submit_relay(&mut relay, "capacity-retry-123", prompt("Continue"));
     completed(&mut relay, "capacity-retry-123");
-    assert!(!relay.snapshot.continuation.eligible());
+    assert!(relay.snapshot.continuation.user_command_id.is_none());
     submit_relay(&mut relay, "original-prompt", prompt("Implement and test"));
     completed(&mut relay, "original-prompt");
-    relay
-        .submit_command("auto-continue-first", request(&relay))
-        .unwrap()
-        .unwrap();
-    completed(&mut relay, "auto-continue-first");
     submit_relay(&mut relay, "review-forward-123", prompt("Fix this finding"));
     completed(&mut relay, "review-forward-123");
     // Hard-won: 8b08e8bc1: handback reminders and peer-session messages counted as user authorization
@@ -171,7 +63,6 @@ fn generated_prompts_neither_renew_allowance_nor_grant_authorization() {
         submit_relay(&mut relay, &id, prompt("Please also update the docs"));
         completed(&mut relay, &id);
     }
-    assert_eq!(relay.snapshot.continuation.attempts, 1);
     assert_eq!(
         relay.snapshot.continuation.user_command_id.as_deref(),
         Some("original-prompt")
@@ -219,12 +110,6 @@ fn mailbox_quota_recovery_survives_missing_user_request_and_prior_cancellation()
         if !no_user_request {
             submit_relay(&mut relay, "user-request", prompt("Implement and test"));
             completed(&mut relay, "user-request");
-            for attempt in 1..=3 {
-                let cmd = request(&relay);
-                let id = format!("auto-continue-{attempt}");
-                submit_relay(&mut relay, &id, cmd);
-                completed(&mut relay, &id);
-            }
         }
         submit_relay(&mut relay, "cancel-old-work", RelayCommand::CancelTurn);
         relay.claim_pending_commands(true).unwrap();
@@ -295,41 +180,22 @@ fn mailbox_quota_recovery_survives_missing_user_request_and_prior_cancellation()
                 "user-request"
             })
         );
-        assert!(!relay.snapshot.continuation.eligible());
         let cmd = quota_schedule(&mut relay, Some(epoch_millis() - 60_001));
         submit_relay(&mut relay, "quota-schedule", cmd);
         drop(relay);
         let mut relay = open(root.path());
         let cmd = quota_resume(&relay);
         submit_relay(&mut relay, "quota-retry", cmd);
-        assert_eq!(
-            relay.snapshot.continuation.attempts,
-            if no_user_request { 0 } else { 3 }
-        );
         completed(&mut relay, "quota-retry");
-        assert!(!relay.snapshot.continuation.eligible());
-        let cmd = request(&relay);
-        assert!(
-            relay
-                .submit_command("auto-continue-unearned", cmd)
-                .unwrap()
-                .is_err()
-        );
     }
 }
 
 #[test]
-fn quota_retry_survives_restart_and_does_not_consume_or_renew_ordinary_allowance() {
+fn quota_retry_survives_restart_and_a_duplicate_is_refused() {
     let root = tempfile::tempdir().unwrap();
     let mut relay = open(root.path());
     submit_relay(&mut relay, "user-request", prompt("Implement and test"));
     completed(&mut relay, "user-request");
-    for attempt in 1..=3 {
-        let id = format!("auto-continue-{attempt}");
-        let cmd = request(&relay);
-        submit_relay(&mut relay, &id, cmd);
-        completed(&mut relay, &id);
-    }
     let cmd = quota_schedule(&mut relay, Some(epoch_millis() - 60_001));
     submit_relay(&mut relay, "quota-schedule", cmd);
     drop(relay);
@@ -338,7 +204,6 @@ fn quota_retry_survives_restart_and_does_not_consume_or_renew_ordinary_allowance
     let cmd = quota_resume(&relay);
     submit_relay(&mut relay, "quota-retry-1", cmd.clone());
     submit_relay(&mut relay, "quota-retry-1", cmd);
-    assert_eq!(relay.snapshot.continuation.attempts, 3);
     assert_eq!(
         relay.snapshot.continuation.user_command_id.as_deref(),
         Some("user-request")
@@ -348,7 +213,6 @@ fn quota_retry_survives_restart_and_does_not_consume_or_renew_ordinary_allowance
         relay.snapshot.continuation.completed_command_id.as_deref(),
         Some("quota-retry-1")
     );
-    assert!(!relay.snapshot.continuation.eligible());
     assert!(
         relay
             .submit_command("duplicate-quota", quota_resume(&relay))
@@ -359,7 +223,6 @@ fn quota_retry_survives_restart_and_does_not_consume_or_renew_ordinary_allowance
     submit_relay(&mut relay, "quota-schedule-next", cmd);
     let cmd = quota_resume(&relay);
     submit_relay(&mut relay, "quota-retry-2", cmd);
-    assert_eq!(relay.snapshot.continuation.attempts, 3);
 }
 
 #[test]
@@ -389,7 +252,6 @@ fn quota_retry_requires_a_due_deadline_and_is_cancelled_by_user_work() {
         if matches!(action, "cancel" | "prompt") {
             assert!(relay.snapshot.continuation.quota_recovery.is_none());
         }
-        assert_eq!(relay.snapshot.continuation.attempts, 0);
     }
 }
 
@@ -453,19 +315,15 @@ fn self_started_turn(relay: &mut DurableRelay) -> u64 {
             prompt_in_flight: false,
         })
         .unwrap();
-    authorize(relay, mj_core::assessment::Action::Continue);
     start
 }
 
 #[test]
-fn a_self_started_turn_becomes_the_completed_turn_without_renewing_the_allowance() {
+fn a_self_started_turn_becomes_the_completed_turn() {
     let root = tempfile::tempdir().unwrap();
     let mut relay = open(root.path());
     submit_relay(&mut relay, "user-request", prompt("Implement and test"));
     completed(&mut relay, "user-request");
-    let cmd = request(&relay);
-    submit_relay(&mut relay, "auto-continue-1", cmd);
-    completed(&mut relay, "auto-continue-1");
 
     let start = self_started_turn(&mut relay);
     let c = &relay.snapshot.continuation;
@@ -476,15 +334,7 @@ fn a_self_started_turn_becomes_the_completed_turn_without_renewing_the_allowance
         (turn.start_position, turn.id.as_str()),
         (start, id.as_str())
     );
-    assert_eq!(c.attempts, 1);
     assert_eq!(c.user_command_id.as_deref(), Some("user-request"));
-
-    let cmd = request(&relay);
-    assert!(
-        matches!(&cmd, RelayCommand::ContinueAuthorizedWork { completed_command_id, attempt: 2, .. } if *completed_command_id == id)
-    );
-    submit_relay(&mut relay, "auto-continue-2", cmd);
-    assert!(relay.snapshot.continuation.harness_turn.is_none());
 }
 
 #[test]
@@ -557,59 +407,6 @@ fn a_second_self_started_turn_clears_a_waiting_recovery_and_its_end_can_schedule
     );
 }
 
-#[test]
-fn background_work_holds_continuation_back_only_until_jev_judges_it_idle() {
-    let root = tempfile::tempdir().unwrap();
-    let mut relay = open(root.path());
-    relay.set_turn_verdict_harness(mj_core::config::HarnessKind::Claude);
-    relay.background_work = BackgroundWorkPolicy::AirTasks;
-    submit_relay(&mut relay, "user-request", prompt("Implement and test"));
-    completed(&mut relay, "user-request");
-    relay
-        .set_air_tasks(vec![crate::relay::AirTaskFixture {
-            task_id: "0".into(),
-            description: "sleep infinity".into(),
-        }])
-        .unwrap();
-    assert!(
-        relay
-            .submit_command("auto-continue-early", request(&relay))
-            .unwrap()
-            .is_err()
-    );
-    // A due quota recovery is recorded whatever keeps the session busy.
-    let cmd = quota_schedule(&mut relay, Some(epoch_millis() + 3_600_000));
-    assert!(relay.submit_command("quota-schedule", cmd).unwrap().is_ok());
-    let cancel = RelayCommand::SetQuotaRecovery {
-        expected: RelayCursor {
-            ordinal: relay.snapshot.latest_ordinal,
-            digest: relay.snapshot.latest_digest.clone(),
-        },
-        recovery: None,
-    };
-    submit_relay(&mut relay, "quota-cancel", cancel);
-
-    authorize(&mut relay, mj_core::assessment::Action::Continue);
-    let generation = relay.turn_context.generation();
-    assert_eq!(
-        relay
-            .apply_replied_decision(
-                generation,
-                mj_core::activity::verdict::Decision::InferIdle,
-                200
-            )
-            .unwrap(),
-        "applied"
-    );
-    assert!(!relay.operational_state().background_commands.is_empty());
-    assert!(
-        relay
-            .submit_command("auto-continue-idle", request(&relay))
-            .unwrap()
-            .is_ok()
-    );
-}
-
 fn limited_goal(relay: &mut DurableRelay, reason: &str) {
     relay.snapshot.goal.capability = Some(mj_core::goal::GoalCapability {
         version: 1,
@@ -646,12 +443,6 @@ fn a_due_recovery_resumes_a_usage_limited_goal_and_a_spent_budget_blocks_everyth
             assert!(
                 relay
                     .submit_command("quota-retry-7", quota_resume(&relay))
-                    .unwrap()
-                    .is_err()
-            );
-            assert!(
-                relay
-                    .submit_command("auto-continue-1", request(&relay))
                     .unwrap()
                     .is_err()
             );
@@ -833,12 +624,10 @@ fn legacy_subagent_wait_journal_command_is_a_noop_after_replay() {
             .is_none()
     );
     completed(&mut relay, "parent-turn");
-    assert!(relay.snapshot.continuation.eligible());
     let mut legacy = serde_json::to_value(&relay.snapshot).unwrap();
     legacy["continuation"]["awaiting_children_since_ms"] = 123.into();
     let decoded: mj_core::relay::RelaySnapshot = serde_json::from_value(legacy).unwrap();
     assert_eq!(decoded.continuation.awaiting_children_since_ms, Some(123));
-    assert!(decoded.continuation.eligible());
     drop(relay);
     let relay = open(root.path());
     assert!(
@@ -848,5 +637,46 @@ fn legacy_subagent_wait_journal_command_is_a_noop_after_replay() {
             .awaiting_children_since_ms
             .is_none()
     );
-    assert!(relay.snapshot.continuation.eligible());
+}
+
+#[test]
+fn a_legacy_automatic_continuation_is_refused_live_but_its_journal_entry_still_replays() {
+    let root = tempfile::tempdir().unwrap();
+    let mut relay = open(root.path());
+    submit_relay(&mut relay, "user-request", prompt("Implement and test"));
+    completed(&mut relay, "user-request");
+    let s = relay.operational_state();
+    let command = RelayCommand::ContinueAuthorizedWork {
+        expected: RelayCursor {
+            ordinal: s.latest_ordinal,
+            digest: s.latest_digest,
+        },
+        user_command_id: "user-request".into(),
+        completed_command_id: "user-request".into(),
+        attempt: 2,
+    };
+    assert!(
+        relay
+            .submit_command("auto-continue-live", command.clone())
+            .unwrap()
+            .is_err()
+    );
+    // An older worker journalled the command before accepting it.
+    relay
+        .append_relay_event(
+            Some("auto-continue-old"),
+            RelayObservation::CommandQueued {
+                command_id: "auto-continue-old".into(),
+                command,
+                created_at_ms: 1,
+            },
+        )
+        .unwrap();
+    let c = &relay.snapshot.continuation;
+    assert_eq!((c.attempts, c.completed_command_id.as_deref()), (2, None));
+    drop(relay);
+    let relay = open(root.path());
+    let c = &relay.snapshot.continuation;
+    assert_eq!((c.attempts, c.completed_command_id.as_deref()), (2, None));
+    assert_eq!(c.user_command_id.as_deref(), Some("user-request"));
 }

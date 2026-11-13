@@ -222,9 +222,31 @@ impl DurableRelay {
         self.store_assessment(a)
     }
 
+    /// Queue one more completed-turn check for the leftover processes. Waiting
+    /// and uncertain assessments classify again; other completed actions keep
+    /// their authority while the background judgment refreshes.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn request_background_refresh(
+        &mut self,
+        mut a: mj_core::assessment::TurnAssessment,
+    ) -> Result<()> {
+        if matches!(
+            a.action,
+            Some(mj_core::assessment::Action::Wait | mj_core::assessment::Action::Uncertain)
+        ) {
+            a.classify_again(self.snapshot.latest_ordinal + 1);
+        } else {
+            a.revision = self.snapshot.latest_ordinal + 1;
+            a.status = mj_core::assessment::Status::Pending;
+            a.evidence = None;
+        }
+        self.store_assessment(a)
+    }
+
     /// Restore a stored GLiDE judgment only for the inventory it assessed.
     /// Changed inventories refresh through the same durable request admission.
-    /// Legacy Jev judgments remain process-local and are reasked after restart.
+    /// Legacy Jev judgments remain process-local and are reasked after restart,
+    /// and so is an unclear stored GLiDE judgment, once per restart.
     #[cfg_attr(not(unix), allow(dead_code))]
     fn reask_background_after_restart(&mut self) -> Result<()> {
         if self.verdict_harness.is_none() {
@@ -262,29 +284,24 @@ impl DurableRelay {
                 if blocked(&self.activity_facts()).is_some() {
                     return Ok(());
                 }
-                if matches!(
-                    a.action,
-                    Some(
-                        mj_core::assessment::Action::Wait | mj_core::assessment::Action::Uncertain
-                    )
-                ) {
-                    a.classify_again(self.snapshot.latest_ordinal + 1);
-                } else {
-                    // Other completed actions retain authority during background refresh.
-                    a.revision = self.snapshot.latest_ordinal + 1;
-                    a.status = mj_core::assessment::Status::Pending;
-                    a.evidence = None;
-                }
-                return self.store_assessment(a);
+                return self.request_background_refresh(a);
             }
             let answers = serde_json::to_value(glide)?;
-            self.replied_verdict.judge_background(
-                self.turn_context.generation(),
-                mj_core::activity::eot_glide::background_needed(
-                    &answers,
-                    !self.background_commands().is_empty(),
-                ),
-            );
+            let listed = !self.background_commands().is_empty();
+            let needed = mj_core::activity::eot_glide::background_needed(&answers, listed);
+            // 9cb9d651: a worker asks once per restart about leftover processes.
+            // An unclear stored answer is not a judgment, so the first call after
+            // a restart asks again; once this process has asked, it does not.
+            if needed.is_none()
+                && listed
+                && self.replied_verdict.asked_turn.as_ref()
+                    != Some(&(a.turn_id.clone(), a.completed_ordinal))
+                && blocked(&self.activity_facts()).is_none()
+            {
+                return self.request_background_refresh(a);
+            }
+            self.replied_verdict
+                .judge_background(self.turn_context.generation(), needed);
             self.replied_verdict.asked_turn = Some((a.turn_id.clone(), a.completed_ordinal));
             return Ok(());
         }
@@ -386,16 +403,6 @@ impl DurableRelay {
         Ok(true)
     }
 
-    #[cfg_attr(not(unix), allow(dead_code))]
-    #[cfg(test)]
-    pub(crate) fn apply_turn_assessment(
-        &mut self,
-        ordinal: u64,
-        verdict: mj_core::assessment::Verdict,
-    ) -> Result<&'static str> {
-        self.apply_assessment_result(ordinal, Some(verdict), None)
-    }
-
     #[cfg(any(unix, test))]
     pub(crate) fn glide_runtime(&self) -> (ActivityFacts, usize) {
         (self.activity_facts(), self.native_agent_count())
@@ -407,16 +414,6 @@ impl DurableRelay {
         ordinal: u64,
         glide: mj_core::activity::eot_glide::types::Probabilities,
     ) -> Result<&'static str> {
-        self.apply_assessment_result(ordinal, None, Some(glide))
-    }
-
-    #[cfg(any(unix, test))]
-    fn apply_assessment_result(
-        &mut self,
-        ordinal: u64,
-        verdict: Option<mj_core::assessment::Verdict>,
-        glide: Option<mj_core::activity::eot_glide::types::Probabilities>,
-    ) -> Result<&'static str> {
         use mj_core::assessment::{Action, Status};
         let Some(mut a) = self
             .snapshot
@@ -427,26 +424,8 @@ impl DurableRelay {
         else {
             return Ok("stale_turn");
         };
-        let complete = a
-            .evidence
-            .as_ref()
-            .and_then(|e| e.authorization.as_ref())
-            .is_some_and(|c| {
-                c.authorization_complete
-                    && !c.final_reply_omitted
-                    && c.evidence().validate().is_ok()
-            });
-        let answers = glide
-            .as_ref()
-            .map(|g| serde_json::to_value(g).expect("typed probabilities serialize"));
-        let action = if let Some(answers) = &answers {
-            mj_core::activity::eot_glide::action(answers, complete)
-        } else {
-            verdict
-                .as_ref()
-                .expect("assessment result")
-                .action(complete)
-        };
+        let answers = serde_json::to_value(&glide).expect("typed probabilities serialize");
+        let action = mj_core::activity::eot_glide::action(&answers);
         // The quiet judgment is separate from the action: it only ever says
         // whether the listed leftover processes still matter, and only when
         // the request listed some.
@@ -454,32 +433,18 @@ impl DurableRelay {
             .evidence
             .as_ref()
             .is_some_and(|e| !e.background.is_empty());
-        let needed = verdict.as_ref().and_then(|v| {
-            v.background
-                .as_ref()
-                .filter(|judgment| {
-                    listed && judgment.confidence >= mj_core::activity::verdict::ACT_CONFIDENCE
-                })
-                .and_then(|judgment| match judgment.choice {
-                    mj_core::assessment::Background::Needed => Some(true),
-                    mj_core::assessment::Background::Unneeded => Some(false),
-                    mj_core::assessment::Background::Unclear => None,
-                })
-        });
-        let needed = answers.as_ref().map_or(needed, |answers| {
-            mj_core::activity::eot_glide::background_needed(answers, listed)
-        });
+        let needed = mj_core::activity::eot_glide::background_needed(&answers, listed);
         self.replied_verdict
             .judge_background(self.turn_context.generation(), needed);
-        if a.glide.is_some() && a.action.is_some() && glide.is_some() {
-            a.glide = glide;
+        if a.glide.is_some() && a.action.is_some() {
+            a.glide = Some(glide);
             a.status = Status::Assessed;
             a.retry_at_ms = None;
             self.store_assessment(a)?;
             return Ok("background_judgment_refreshed");
         }
-        a.verdict = verdict;
-        a.glide = glide;
+        a.verdict = None;
+        a.glide = Some(glide);
         a.attention = glide_attention(&a.glide, action);
         a.action = Some(action);
         a.status = Status::Assessed;
@@ -506,16 +471,12 @@ impl DurableRelay {
                     a.status = Status::Deferred;
                     "quota_resolution_required"
                 }
-                Action::Continue if !self.continuation_enabled => "continuation_disabled",
-                Action::Continue if self.snapshot.continuation.eligible() => {
-                    a.status = Status::Deferred;
-                    "authorized_continuation_ready"
-                }
-                Action::Continue => "continuation_allowance_unavailable",
                 Action::AwaitInput => "user_input_required",
                 Action::Finished => "work_finished",
                 Action::Wait => "background_work_pending",
-                Action::Uncertain => "assessment_uncertain",
+                // `Continue` is legacy: stored assessments may carry it, but
+                // nothing acts on it, so it reads as uncertain.
+                Action::Uncertain | Action::Continue => "assessment_uncertain",
             }
         };
         a.reason = reason.into();
@@ -1466,27 +1427,9 @@ mod settled_task_tests {
 
     #[test]
     fn person_input_frontier_fences_late_assessments_and_locators_across_replay() {
+        use crate::relay::test_support::glide_answer;
         use crate::relay::test_support::{finish_prompt, prompt, submit_relay};
-        use mj_core::assessment::{Action, Failure, Input, Judgment, Status, Verdict, Work};
-        let required = || Verdict {
-            failure: Judgment {
-                choice: Failure::None,
-                confidence: 1.0,
-                probabilities: Default::default(),
-            },
-            input: Judgment {
-                choice: Input::Required,
-                confidence: 1.0,
-                probabilities: [("required".into(), 1.0)].into(),
-            },
-            work: Judgment {
-                choice: Work::Waiting,
-                confidence: 1.0,
-                probabilities: Default::default(),
-            },
-            background: None,
-            reply: None,
-        };
+        use mj_core::assessment::{Action, Status};
         for form_answer in [true, false] {
             for replay_before_late in [false, true] {
                 let dir = tempfile::tempdir().unwrap();
@@ -1541,7 +1484,9 @@ mod settled_task_tests {
                     );
                 } else {
                     assert_eq!(
-                        relay.apply_turn_assessment(revision, required()).unwrap(),
+                        relay
+                            .apply_glide_assessment(revision, glide_answer("await_input", None))
+                            .unwrap(),
                         "stale_turn"
                     );
                 }
@@ -1622,28 +1567,9 @@ mod settled_task_tests {
 
     #[test]
     fn dismissed_questions_survive_journal_replay_and_reject_stale_requests() {
+        use crate::relay::test_support::glide_answer;
         use crate::relay::test_support::{finish_prompt, prompt, relay_request, submit_relay};
-        use mj_core::assessment::{Failure, Input, Judgment, Verdict, Work};
 
-        let required = || Verdict {
-            failure: Judgment {
-                choice: Failure::None,
-                confidence: 0.99,
-                probabilities: Default::default(),
-            },
-            input: Judgment {
-                choice: Input::Required,
-                confidence: 0.99,
-                probabilities: [("required".into(), 1.0)].into(),
-            },
-            work: Judgment {
-                choice: Work::Waiting,
-                confidence: 0.99,
-                probabilities: Default::default(),
-            },
-            background: None,
-            reply: None,
-        };
         let dir = tempfile::tempdir().unwrap();
         let mut relay = claude_relay(dir.path());
         relay.set_acp_ready(true);
@@ -1657,7 +1583,9 @@ mod settled_task_tests {
         finish_prompt(&mut relay, "first-turn");
         relay.prepare_pending_assessment().unwrap();
         let (revision, _, _) = relay.pending_replied_verdict().unwrap();
-        relay.apply_turn_assessment(revision, required()).unwrap();
+        relay
+            .apply_glide_assessment(revision, glide_answer("await_input", None))
+            .unwrap();
         let question = relay
             .snapshot
             .assessment
@@ -1685,7 +1613,9 @@ mod settled_task_tests {
             "dismissal grants no new authorization"
         );
         // Late classification can finish without reopening the answered request.
-        relay.apply_turn_assessment(revision, required()).unwrap();
+        relay
+            .apply_glide_assessment(revision, glide_answer("await_input", None))
+            .unwrap();
         assert!(relay.operational_state().open_request.is_none());
 
         // Force reconstruction from the journal, rather than merely reading
@@ -1711,7 +1641,9 @@ mod settled_task_tests {
         finish_prompt(&mut relay, "second-turn");
         relay.prepare_pending_assessment().unwrap();
         let (revision, _, _) = relay.pending_replied_verdict().unwrap();
-        relay.apply_turn_assessment(revision, required()).unwrap();
+        relay
+            .apply_glide_assessment(revision, glide_answer("await_input", None))
+            .unwrap();
         let next = relay
             .snapshot
             .assessment
@@ -1849,7 +1781,7 @@ mod settled_task_tests {
 
     #[test]
     fn a_confident_unneeded_judgment_releases_the_leftover_tasks_until_the_evidence_moves() {
-        use mj_core::assessment::{Background, Failure, Input, Judgment, Verdict, Work};
+        use crate::relay::test_support::glide_answer;
         let dir = tempfile::tempdir().unwrap();
         let mut relay = claude_relay(dir.path());
         // A configured harness session; otherwise nothing is ever quiet.
@@ -1885,31 +1817,8 @@ mod settled_task_tests {
             "background work"
         );
 
-        let judged = |background| Verdict {
-            failure: Judgment {
-                choice: Failure::None,
-                confidence: 0.99,
-                probabilities: Default::default(),
-            },
-            input: Judgment {
-                choice: Input::None,
-                confidence: 0.99,
-                probabilities: Default::default(),
-            },
-            work: Judgment {
-                choice: Work::Finished,
-                confidence: 0.99,
-                probabilities: [("finished".into(), 1.0)].into(),
-            },
-            background: Some(Judgment {
-                choice: background,
-                confidence: 0.95,
-                probabilities: Default::default(),
-            }),
-            reply: None,
-        };
         relay
-            .apply_turn_assessment(generation, judged(Background::Unneeded))
+            .apply_glide_assessment(generation, glide_answer("finished", Some([0.0, 1.0, 0.0])))
             .unwrap();
         let after = relay.activity_facts();
         assert_eq!(after.background_needed, Some(false));
@@ -1929,37 +1838,16 @@ mod settled_task_tests {
         assert!(relay.activity_facts().background_needed.is_none());
     }
 
-    /// #1202: the background judgment is process-local, so a restarted
-    /// worker holds none. When the new harness reports leftover processes
-    /// again (Kimi re-reads its task journal on attach), the worker asks Jev
-    /// once more instead of leaving the session busy for good.
+    /// #1202: a legacy (Jev-era) background judgment is process-local, so a
+    /// restarted worker holds none. When the new harness reports leftover
+    /// processes again (Kimi re-reads its task journal on attach), the worker
+    /// asks once more instead of leaving the session busy for good. An unclear
+    /// answer is asked again at the next restart, not within the same process.
     // Hard-won: 9cb9d651: after restart, leftover processes kept `mj wait` blocked because Jev was never asked again.
+    // Hard-won: dc4c34617: a restored unclear GLiDE background answer was never re-asked after restart, so mj wait stayed blocked
     #[test]
     fn a_restarted_worker_asks_again_about_leftover_processes_once() {
-        use mj_core::assessment::{Background, Failure, Input, Judgment, Verdict, Work};
-        let judged = |background| Verdict {
-            failure: Judgment {
-                choice: Failure::None,
-                confidence: 0.99,
-                probabilities: Default::default(),
-            },
-            input: Judgment {
-                choice: Input::None,
-                confidence: 0.99,
-                probabilities: Default::default(),
-            },
-            work: Judgment {
-                choice: Work::Finished,
-                confidence: 0.99,
-                probabilities: [("finished".into(), 1.0)].into(),
-            },
-            background: Some(Judgment {
-                choice: background,
-                confidence: 0.95,
-                probabilities: Default::default(),
-            }),
-            reply: None,
-        };
+        use crate::relay::test_support::glide_answer;
         let restart = |root: &Path| {
             // What the worker records when it starts on an existing root.
             let mut relay = claude_relay(root);
@@ -1991,12 +1879,18 @@ mod settled_task_tests {
         relay.prepare_pending_assessment().unwrap();
         let (revision, _, _) = relay.pending_replied_verdict().unwrap();
         relay
-            .apply_turn_assessment(revision, judged(Background::Unneeded))
+            .apply_glide_assessment(revision, glide_answer("finished", Some([0.0, 1.0, 0.0])))
             .unwrap();
         assert!(relay.operational_state().quiet().is_yes());
         // The answer was applied by this process: nothing more to ask.
         relay.prepare_pending_assessment().unwrap();
         assert!(relay.pending_replied_verdict().is_none());
+        // Store the judgment in the legacy shape an older worker wrote: no GLiDE
+        // distribution, so only this process remembers the background answer.
+        let mut legacy = (**relay.snapshot.assessment.as_ref().unwrap()).clone();
+        legacy.glide = None;
+        legacy.attention = None;
+        relay.store_assessment(legacy).unwrap();
         drop(relay);
 
         let mut relay = restart(dir.path());
@@ -2009,9 +1903,8 @@ mod settled_task_tests {
         assert_eq!(evidence.background.len(), 1);
         assert!(evidence.background[0].command.contains("srv"));
         // One request per restart: an unclear answer is not asked again.
-        let mut unclear = judged(Background::Unclear);
-        unclear.background.as_mut().unwrap().confidence = 0.5;
-        relay.apply_turn_assessment(revision, unclear).unwrap();
+        let unclear = glide_answer("finished", Some([0.0, 0.0, 1.0]));
+        relay.apply_glide_assessment(revision, unclear).unwrap();
         assert!(relay.activity_facts().background_needed.is_none());
         for _ in 0..3 {
             relay.prepare_pending_assessment().unwrap();
@@ -2025,7 +1918,7 @@ mod settled_task_tests {
         relay.prepare_pending_assessment().unwrap();
         let (revision, _, _) = relay.pending_replied_verdict().unwrap();
         relay
-            .apply_turn_assessment(revision, judged(Background::Unneeded))
+            .apply_glide_assessment(revision, glide_answer("finished", Some([0.0, 1.0, 0.0])))
             .unwrap();
         assert_eq!(relay.activity_facts().background_needed, Some(false));
         let quiet = relay.operational_state().quiet();
@@ -2044,30 +1937,12 @@ mod settled_task_tests {
     // Hard-won: #1304: the worker kept turn 20's Wait verdict after the session went idle.
     #[test]
     fn a_verdict_stays_with_its_own_turn_in_the_published_state() {
+        use crate::relay::test_support::glide_answer;
         use crate::relay::test_support::{prompt, submit_relay};
         use agent_client_protocol::v1::schema::{ContentBlock, ContentChunk, TextContent};
         use mj_core::activity::verdict::Decision;
-        use mj_core::assessment::{Action, Failure, Input, Judgment, Verdict, Work};
+        use mj_core::assessment::Action;
         use mj_core::relay::RelayCommandOutcome;
-        let verdict = |work| Verdict {
-            failure: Judgment {
-                choice: Failure::None,
-                confidence: 0.99,
-                probabilities: Default::default(),
-            },
-            input: Judgment {
-                choice: Input::None,
-                confidence: 0.99,
-                probabilities: Default::default(),
-            },
-            work: Judgment {
-                choice: work,
-                confidence: 0.99,
-                probabilities: Default::default(),
-            },
-            background: None,
-            reply: None,
-        };
         let say = |relay: &mut DurableRelay, text: &str| {
             relay
                 .record_session_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
@@ -2102,7 +1977,7 @@ mod settled_task_tests {
         let (revision, _, _) = relay.pending_replied_verdict().unwrap();
         assert_eq!(
             relay
-                .apply_turn_assessment(revision, verdict(Work::Waiting))
+                .apply_glide_assessment(revision, glide_answer("wait", None))
                 .unwrap(),
             "background_work_pending"
         );
@@ -2137,7 +2012,7 @@ mod settled_task_tests {
         );
         assert_eq!(
             relay
-                .apply_turn_assessment(revision, verdict(Work::Unclear))
+                .apply_glide_assessment(revision, glide_answer("uncertain", None))
                 .unwrap(),
             "assessment_uncertain"
         );
@@ -2158,81 +2033,6 @@ mod settled_task_tests {
         let completion = state.turn_completion.unwrap();
         assert_eq!(completion.command_id, assessment.turn_id);
         assert_eq!(completion.decision, Decision::KeepCurrent);
-    }
-
-    // Hard-won: 1ee54bfa: a disabled continuation left its unconsumed Continue verdict holding `mj wait` open.
-    #[test]
-    fn a_continue_verdict_is_not_parked_when_nobody_will_act_on_it() {
-        use crate::relay::test_support::{prompt, submit_relay};
-        use agent_client_protocol::v1::schema::{ContentBlock, ContentChunk, TextContent};
-        use mj_core::assessment::{Failure, Input, Judgment, Status, Verdict, Work};
-        use mj_core::relay::RelayCommandOutcome;
-        let dir = tempfile::tempdir().unwrap();
-        let mut relay = claude_relay(dir.path());
-        relay
-            .record_observation(RelayObservation::SessionConfigured {
-                config_options: vec![],
-            })
-            .unwrap();
-        relay.set_continuation_enabled(false);
-        // A real user prompt, so the authorization history is complete and
-        // the verdict can reach `Continue` at all.
-        submit_relay(
-            &mut relay,
-            "original-prompt",
-            prompt("Fix the failing test and push when done."),
-        );
-        assert_eq!(
-            relay.claim_pending_commands(true).unwrap()[0].command_id,
-            "original-prompt"
-        );
-        relay
-            .record_session_update(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                ContentBlock::Text(TextContent::new("Fixed the test. I'll push next.")),
-            )))
-            .unwrap();
-        relay
-            .record_command_completed(
-                "original-prompt",
-                RelayCommandOutcome::Prompt {
-                    work_facts: None,
-                    diagnostic: None,
-                    stop_reason: "EndTurn".into(),
-                    usage: None,
-                },
-            )
-            .unwrap();
-        relay.prepare_pending_assessment().unwrap();
-        let (generation, evidence, _) = relay.pending_replied_verdict().unwrap();
-        assert!(evidence.authorization.is_some());
-        let verdict = Verdict {
-            failure: Judgment {
-                choice: Failure::None,
-                confidence: 0.99,
-                probabilities: Default::default(),
-            },
-            input: Judgment {
-                choice: Input::None,
-                confidence: 0.99,
-                probabilities: Default::default(),
-            },
-            work: Judgment {
-                choice: Work::AuthorizedUnfinished,
-                confidence: 0.99,
-                probabilities: Default::default(),
-            },
-            background: None,
-            reply: None,
-        };
-        let reason = relay.apply_turn_assessment(generation, verdict).unwrap();
-        assert_eq!(reason, "continuation_disabled");
-        let assessment = relay.snapshot.assessment.as_ref().unwrap();
-        assert_eq!(
-            assessment.status,
-            Status::Assessed,
-            "nothing would consume a deferred one"
-        );
-        assert!(!relay.operational_state().retry_assessment_pending);
     }
 
     #[test]
@@ -2278,7 +2078,7 @@ impl DurableRelay {
         &mut self,
         report: &str,
     ) -> Result<Option<(String, u64, TurnEvidence)>> {
-        if !self.continuation_enabled || mj_core::jev::continuation_disabled_by_environment() {
+        if mj_core::jev::disabled_by_environment() {
             return Ok(None);
         }
         let Some(harness) = self.verdict_harness else {

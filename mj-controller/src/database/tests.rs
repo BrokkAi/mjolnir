@@ -534,6 +534,7 @@ pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
     SessionRecord {
         oracle_choice: None,
         oracle: true,
+        notifications_ignored: false,
         project: None,
         target_runtime: None,
         launch_base: None,
@@ -1966,6 +1967,29 @@ fn the_archived_flag_round_trips_without_touching_other_session_fields() {
     set_session_archived_to(&database, "session-1", false).unwrap();
     assert!(!load_state_from(&database).unwrap().sessions["session-1"].archived);
     assert!(set_session_archived_to(&database, "missing", true).is_err());
+}
+
+/// Ignoring notifications is a display choice with its own writer: it must not
+/// disturb the lifecycle state, checkpoint, or titles other writers own.
+#[test]
+fn the_notifications_ignored_flag_round_trips_without_touching_other_session_fields() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let mut session = session("session-1", "project-1");
+    save_session_to(&database, &session).unwrap();
+    assert!(!load_state_from(&database).unwrap().sessions["session-1"].notifications_ignored);
+
+    set_session_notifications_ignored_to(&database, "session-1", true).unwrap();
+    let reloaded = load_state_from(&database).unwrap().sessions["session-1"].clone();
+    assert!(reloaded.notifications_ignored);
+    session.notifications_ignored = true;
+    assert_eq!(reloaded.state, session.state);
+    assert_eq!(reloaded.checkpoint, session.checkpoint);
+    assert_eq!(reloaded.acp_session_title, session.acp_session_title);
+
+    set_session_notifications_ignored_to(&database, "session-1", false).unwrap();
+    assert!(!load_state_from(&database).unwrap().sessions["session-1"].notifications_ignored);
+    assert!(set_session_notifications_ignored_to(&database, "missing", true).is_err());
 }
 
 /// Hel never writes a harness home, so the hidden set for native sessions
@@ -6528,7 +6552,7 @@ fn continuation_reads_earlier_authorization_outside_the_ui_window_at_one_frontie
         .unwrap()
         .unwrap();
     assert!(metadata.omitted_items > 0);
-    assert!(crate::continuation::evidence(&window).is_err());
+    assert!(mj_transcript::authorization::evidence(&window).is_err());
     let collected = load_continuation_evidence_from(
         &database,
         "session-1",
@@ -6538,7 +6562,7 @@ fn continuation_reads_earlier_authorization_outside_the_ui_window_at_one_frontie
     .unwrap();
     assert_eq!(
         collected,
-        crate::continuation::evidence(&materialized).unwrap()
+        mj_transcript::authorization::evidence(&materialized).unwrap()
     );
     assert_eq!(
         collected.messages[0].text,

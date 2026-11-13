@@ -165,19 +165,20 @@ pub fn restore_checkpoint_with_native_state(
                 &spec.workspace_root,
             )
         });
-        // A restored OpenCode database replaces the one in the home, and
-        // SQLite would replay a write-ahead log left beside the old one over
-        // it. An archive from before snapshots carries its own log, which the
-        // loop below writes after this.
-        let opencode_database = Path::new(super::native_scan::OPENCODE_DATABASE);
-        if archive.manifest.session.harness_kind == HarnessKind::OpenCode
-            && archive.manifest.payloads.iter().any(|descriptor| {
-                matches!(&descriptor.role, PayloadRole::NativeArtifact { relative_path }
-                    if relative_path == opencode_database)
-            })
-        {
-            for sidecar in super::native_scan::OPENCODE_DATABASE_SIDECARS {
-                remove_private_file(&spec.harness_home, Path::new(sidecar))?;
+        // A restored database replaces the one in the home, and SQLite would
+        // replay a write-ahead log left beside the old one over it. An archive
+        // from before OpenCode snapshots carries its own log, which the loop
+        // below writes after this.
+        for descriptor in &archive.manifest.payloads {
+            if let PayloadRole::NativeArtifact { relative_path } = &descriptor.role
+                && super::native_scan::is_sqlite_native_database(
+                    archive.manifest.session.harness_kind,
+                    relative_path,
+                )
+            {
+                for sidecar in super::native_scan::sqlite_sidecars(relative_path) {
+                    remove_private_file(&spec.harness_home, &sidecar)?;
+                }
             }
         }
         for descriptor in &archive.manifest.payloads {
@@ -510,6 +511,19 @@ pub(super) fn restored_native_artifact_bytes(
     }
     if harness == HarnessKind::Dsh && relative_path.starts_with("sessions") {
         return rewrite_dsh_session_cwd(data, target_cwd);
+    }
+    // agy names the workspace inside the conversation database, and runs
+    // commands in the first root it records.
+    if harness == HarnessKind::Antigravity
+        && super::native_scan::is_sqlite_native_database(harness, relative_path)
+    {
+        return crate::native::antigravity::relocate(data, target_cwd).with_context(|| {
+            format!(
+                "relocate Antigravity conversation {} to {}",
+                relative_path.display(),
+                target_cwd.display()
+            )
+        });
     }
     if !matches!(harness, HarnessKind::Kimi | HarnessKind::Grok) {
         return Ok(data.to_vec());

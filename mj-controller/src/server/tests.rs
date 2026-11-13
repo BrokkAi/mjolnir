@@ -84,7 +84,6 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         phone: Default::default(),
         daemon: Default::default(),
         github: Default::default(),
-        continuation: Default::default(),
         review: Default::default(),
         sessionwiki: Default::default(),
         legacy_startup: (),
@@ -142,6 +141,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
             SessionRecord {
                 oracle_choice: None,
                 oracle: true,
+                notifications_ignored: false,
                 project: None,
                 target_runtime: None,
                 launch_base: None,
@@ -5059,13 +5059,10 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
             serde_json::json!({"path": ["profiles", "claude"]}),
         ),
         root(),
-        (
-            "/api/settings/page",
-            serde_json::json!({"path": ["continuation"]}),
-        ),
+        ("/api/settings/page", serde_json::json!({"path": ["phone"]})),
         (
             "/api/settings/edit",
-            serde_json::json!({"page": ["continuation"], "edit": {"kind": "toggle", "path": ["continuation", "enabled"]}}),
+            serde_json::json!({"page": ["phone"], "edit": {"kind": "toggle", "path": ["phone", "enabled"]}}),
         ),
         root(),
         (
@@ -5132,7 +5129,7 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
     assert!(saved.contains(SECRET), "{saved}");
     assert!(saved.contains(RUNTIME_SECRET), "{saved}");
     let saved = Config::load_from(&path).unwrap();
-    assert!(!saved.continuation.enabled);
+    assert!(!saved.phone.enabled);
     assert_eq!(
         serde_json::to_value(&saved.subagents).unwrap()["straightforward"]["model"],
         "opus"

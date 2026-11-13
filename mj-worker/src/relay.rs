@@ -303,9 +303,6 @@ pub struct DurableRelay {
     /// Whether Kimi's provider-owned background work is synchronized. Other
     /// policies leave this absent.
     background_work_known: Option<bool>,
-    /// Whether the daemon will act on a `Continue` verdict. Off when the
-    /// launch environment says automatic continuation is disabled.
-    continuation_enabled: bool,
     /// The classifier the sub-agent handback check asks. Only the Unix worker
     /// sets and reads it; the field stays on Windows so the relay type matches.
     #[cfg_attr(not(unix), allow(dead_code))]
@@ -637,7 +634,6 @@ impl DurableRelay {
             kimi_observed_task_ids: BTreeSet::new(),
             kimi_observed_tool_ids: BTreeSet::new(),
             background_work_known: None,
-            continuation_enabled: true,
             handback_verdict_client: None,
             task_settled_at_ms: None,
             active_agent_terminals: BTreeMap::new(),
@@ -1116,11 +1112,6 @@ impl DurableRelay {
     #[cfg(unix)]
     pub(crate) fn uses_claude_harness_turns(&self) -> bool {
         self.harness_turns == HarnessTurnPolicy::ClaudeAdapter
-    }
-
-    /// Whether a `Continue` verdict may be parked for the daemon to act on.
-    pub fn set_continuation_enabled(&mut self, enabled: bool) {
-        self.continuation_enabled = enabled;
     }
 
     /// Launch metadata owns this fact, including older environment-only launches.
@@ -1619,6 +1610,29 @@ pub(crate) mod test_support {
     use super::*;
 
     pub(crate) const SESSION: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
+
+    /// A recorded GLiDE answer whose frozen rule gives `expected` (`await_input`,
+    /// `finished`, `wait`, `retry_provider`, `recover_quota` or `uncertain`).
+    /// `background` replaces the leftover-process distribution `[needed, unneeded,
+    /// unclear]` when a test needs a particular quiet judgment.
+    pub(crate) fn glide_answer(
+        expected: &str,
+        background: Option<[f64; 3]>,
+    ) -> mj_core::activity::eot_glide::types::Probabilities {
+        let samples = crate::acp::verdict_client::glide_turn::test_samples();
+        let mut answer = samples
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|sample| sample["expected"] == expected)
+            .unwrap_or_else(|| panic!("no recorded GLiDE answer for {expected}"))
+            .clone();
+        if let Some([needed, unneeded, unclear]) = background {
+            answer["answers"]["background"]["probabilities"] =
+                serde_json::json!({"needed":needed,"unneeded":unneeded,"unclear":unclear});
+        }
+        crate::acp::verdict_client::glide_turn::Probabilities::parse(&answer).unwrap()
+    }
 
     pub(crate) fn relay_request(request_id: &str, request: RelayRequest) -> RelayRequestEnvelope {
         RelayRequestEnvelope {

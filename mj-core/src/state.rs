@@ -1718,6 +1718,10 @@ pub struct SessionRecord {
     /// Current surfaces do not hide sessions based on this flag.
     #[serde(default, skip_serializing_if = "is_false")]
     pub archived: bool,
+    /// The session raises no notifications: no bell, desktop, or push episode.
+    /// Its attention and unread state still render normally.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub notifications_ignored: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<Box<TargetLocator>>,
     /// Connection and worker settings captured when this target was selected.

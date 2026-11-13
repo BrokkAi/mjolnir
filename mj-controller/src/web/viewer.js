@@ -1699,6 +1699,7 @@ function sessionMenuActions(session) {
   if (session.configuration_issue) actions.push(['Repair configuration…', 'secondary', 'repair-config']);
   if (session.lifecycle === 'live' && !isTransitioningSession(session)) actions.push(['Changed files…', 'secondary', 'changed-files']);
   if (can.dismiss_notification) actions.push(['Dismiss notification', 'secondary', 'dismiss-notification']);
+  actions.push([session.notifications_ignored ? 'Stop ignoring' : 'Ignore', 'secondary', 'set-session-notifications-ignored']);
   if (can.rename) actions.push(['Rename', 'secondary', 'rename']);
   if (can.change_workspace) actions.push(['Change workspace…', 'secondary', 'change-workspace']);
   if (can.container_settings) actions.push(['Container settings…', 'secondary', 'container-settings']);
@@ -1793,7 +1794,9 @@ function markNotificationDismissal(control, session) {
 
 function updateSessionMenu(card, session) {
   const actions = sessionMenuActions(session);
-  const signature = actions.map(action => action[2]).join('|');
+  // Labels carry state too ("Ignore notifications" flips when it applies),
+  // so a label-only change must rebuild the same-length menu.
+  const signature = actions.map(([label, , name]) => `${name}=${label}`).join('|');
   const menuChanged = card._sessionMenuSignature !== signature;
   if (menuChanged) {
     const activeAction = card._menu?.ownerDocument?.activeElement?.dataset?.action;
@@ -9420,6 +9423,9 @@ async function runSessionAction(dataset, errorNode, extra) {
   }
   if (dataset.action === 'dismiss-notification') {
     extra = { ...extra, target: JSON.parse(dataset.notificationDismissal) };
+  }
+  if (dataset.action === 'set-session-notifications-ignored') {
+    extra = { ...extra, ignored: !sessionById(dataset.id)?.notifications_ignored };
   }
   const body = { action: dataset.action, session_id: dataset.id, ...extra };
   if (dataset.action === 'rename') {

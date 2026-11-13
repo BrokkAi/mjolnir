@@ -709,10 +709,10 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
     let operational = RelayOperationalState {
         assessment: None,
         open_request: None,
+        continuation: Default::default(),
         person_input_through: 0,
         assessment_context: None,
         turn_completion: None,
-        continuation: Default::default(),
         relay_protocol_version: Some(mj_core::relay::RELAY_PROTOCOL_VERSION),
         native_agents: Vec::new(),
         steering: None,
@@ -1594,7 +1594,6 @@ fn controller_with_profiles(ids: &[&str]) -> Controller {
             phone: Default::default(),
             daemon: Default::default(),
             github: Default::default(),
-            continuation: Default::default(),
             review: Default::default(),
             sessionwiki: Default::default(),
             legacy_startup: (),
@@ -2027,6 +2026,7 @@ fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
     SessionRecord {
         oracle_choice: None,
         oracle: true,
+        notifications_ignored: false,
         project: None,
         target_runtime: None,
         launch_base: None,

@@ -5,11 +5,14 @@ import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import re
 import socket
 import sqlite3
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 import uuid
 import zipfile
 
@@ -44,6 +47,7 @@ def main():
     parser.add_argument("--worker", type=Path, required=True)
     parser.add_argument("--instance", required=True)
     parser.add_argument("--mailbox-regression-only", action="store_true")
+    parser.add_argument("--restart-regression-only", action="store_true")
     args = parser.parse_args()
     if args.instance == "default":
         parser.error("use a separate named test instance")
@@ -596,6 +600,113 @@ def main():
                 "artifacts": str(lab.root),
                 "result": "passed",
                 "mailbox_delivery": ["tool_boundary", "turn_boundary"],
+            }), flush=True)
+            return
+
+        # Hard-won: #1535: a Restart re-sent a finished sub-agent's assignment and froze its view.
+        if args.restart_regression_only:
+            config.write_text(config.read_text().replace(
+                "[phone]\nenabled = false", "[phone]\nenabled = true"
+            ))
+            cli("daemon", "restart")
+            assignment = "Return a short fixture report."
+            spawned = tool(parent, "spawn", {
+                "task_name": "fixture-child",
+                "task_type": "straightforward",
+                "instructions": assignment,
+            })
+            child = spawned["child_session_id"]
+            wait_prompt(child, assignment)
+            # The automatic completion check may refuse the first handback once;
+            # the same report is then delivered without another check.
+            for attempt in range(2):
+                try:
+                    tool(child, "handback", {"message": "finished before the restart"})
+                    break
+                except json.JSONDecodeError:
+                    if attempt:
+                        raise
+            release(child, assignment)
+            wait_report(parent, child, "finished before the restart")
+
+            def child_state():
+                with sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
+                    row = database.execute(
+                        "SELECT state, last_error FROM sessions WHERE session_id=?", (child,)
+                    ).fetchone()
+                return row
+
+            def wait_child_state(state):
+                deadline = time.monotonic() + WAIT_SECONDS
+                row = None
+                while time.monotonic() < deadline:
+                    row = child_state()
+                    if row and row[0].lower() == state:
+                        return
+                    if row and row[0].lower() == "error":
+                        raise RuntimeError(f"child entered an error state: {row}")
+                    time.sleep(0.1)
+                raise RuntimeError(f"child never reached {state}: {row}")
+
+            wait_child_state("parked")
+            info = json.loads(cli("api-info", "--json"))
+            api_url = info["base_url"]
+            token = cli("api-token").strip()
+
+            def api(method, path):
+                request = urllib.request.Request(
+                    api_url + path, method=method,
+                    headers={"Authorization": "Bearer " + token},
+                )
+                try:
+                    with urllib.request.urlopen(request, timeout=WAIT_SECONDS) as response:
+                        payload = response.read()
+                        return response.status, json.loads(payload) if payload else None
+                except urllib.error.HTTPError as error:
+                    return error.code, error.read().decode("utf-8", "replace")
+
+            def journal_spawn_commands():
+                found = []
+                for journal in lab.data.rglob("active.jsonl"):
+                    if child not in journal.parts:
+                        continue
+                    for line in journal.read_text().splitlines():
+                        if "command_queued" in line:
+                            found += re.findall(r"subagent-spawn-[0-9a-f]+-[a-z-]+", line)[:1]
+                return found
+
+            # The first launch queued the brief once.
+            assert len(journal_spawn_commands()) >= 1, "the first launch never queued the brief"
+            status, body = api("POST", f"/sessions/{child}/restart")
+            assert status in (200, 202, 204), (status, body)
+            # Wait for the restart to settle either way, so a re-sent brief is
+            # reported as such and not only as the failure it later causes.
+            deadline = time.monotonic() + WAIT_SECONDS
+            while (child_state() or ("",))[0].lower() not in ("running", "error"):
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(f"restart did not settle: {child_state()}")
+                time.sleep(0.1)
+            time.sleep(5)
+            resent = journal_spawn_commands()
+            assert not resent, f"the restart re-sent the child's initial input: {resent}"
+            wait_child_state("running")
+            wait_worker_ready(child)
+            status, view = api("GET", f"/sessions/{child}")
+            assert status == 200 and not view.get("has_error"), (status, view)
+            with sqlite3.connect(f"file:{lab.data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
+                items = database.execute(
+                    "SELECT count(*) FROM materialized_transcript_items "
+                    "WHERE session_id=? AND stable_id LIKE 'user:subagent-spawn-%-prompt'",
+                    (child,),
+                ).fetchone()[0]
+            assert items == 1, items
+            for log in (lab.data / "logs").rglob("*.log"):
+                assert "changed immutable identity" not in log.read_text(errors="replace"), log
+            print(json.dumps({
+                "instance": args.instance,
+                "artifacts": str(lab.root),
+                "result": "passed",
+                "child": child,
             }), flush=True)
             return
 

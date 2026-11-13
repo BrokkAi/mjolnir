@@ -830,41 +830,15 @@ impl DurableRelay {
                 )));
             }
         }
-        if let RelayCommand::ContinueAuthorizedWork {
-            expected,
-            user_command_id,
-            completed_command_id,
-            attempt,
-        } = &command
-        {
-            let state = &self.snapshot.continuation;
-            let facts = self.activity_facts();
-            // A background command that Jev judged idle does not hold this
-            // back, and plan mode does not either: the prompt cannot get past
-            // plan approval, and Jev already weighs whether input is needed.
-            if self.snapshot.assessment.as_ref().is_some_and(|a| {
-                !a.current() || a.action != Some(mj_core::assessment::Action::Continue)
-            }) || !self.snapshot.assessment_questions.is_empty()
-                || state.quota_recovery.as_ref().is_some_and(|r| !r.submitted)
-                || self.snapshot.goal.budget_limited()
-                || !state.eligible()
-                || state.user_command_id.as_ref() != Some(user_command_id)
-                || state.completed_command_id.as_ref() != Some(completed_command_id)
-                || *attempt != state.attempts + 1
-                || self.snapshot.latest_ordinal != expected.ordinal
-                || self.snapshot.latest_digest != expected.digest
-                || !mj_core::activity::can_submit(&facts)
-                || mj_core::activity::driver_present(&facts)
-                || !self.snapshot.queued_prompts.is_empty()
-                || self.pending_close_barrier_id().is_some()
-            {
-                return Ok(Err(relay_protocol_error(
-                    RelayErrorCode::InvalidState,
-                    "continuation evidence is stale or the allowance is exhausted",
-                    false,
-                    None,
-                )));
-            }
+        // Legacy: automatic continuation was removed (#1532). Journals still
+        // replay the command, but a live one is never accepted.
+        if matches!(&command, RelayCommand::ContinueAuthorizedWork { .. }) {
+            return Ok(Err(relay_protocol_error(
+                RelayErrorCode::InvalidState,
+                "automatic continuation is no longer supported",
+                false,
+                None,
+            )));
         }
         if let RelayCommand::SeedAssessmentContext { expected, context } = &command
             && (expected.ordinal != self.snapshot.latest_ordinal

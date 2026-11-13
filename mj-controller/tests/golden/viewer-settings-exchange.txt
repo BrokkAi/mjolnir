@@ -105,15 +105,6 @@
               },
               {
                 "path": [
-                  "continuation"
-                ],
-                "label": "Continuation",
-                "help": "Continue an unfinished request up to three times per message, and resume a session after its quota resets.",
-                "control": "page",
-                "summary": "On · 3 continuations plus quota recovery"
-              },
-              {
-                "path": [
                   "subagents"
                 ],
                 "label": "Sub-agents",
@@ -189,7 +180,7 @@
                   "jev"
                 ],
                 "label": "Jev (hosted service)",
-                "help": "Sends turn and help-search text to a hosted classifier. Off stops it; running sessions follow after a resume or restart.",
+                "help": "Sends turn text to a hosted classifier; quota recovery needs it. Off stops both; sessions follow on resume or restart.",
                 "control": "page",
                 "summary": "On · sends turn text for classification"
               }
@@ -473,15 +464,6 @@
               },
               {
                 "path": [
-                  "continuation"
-                ],
-                "label": "Continuation",
-                "help": "Continue an unfinished request up to three times per message, and resume a session after its quota resets.",
-                "control": "page",
-                "summary": "On · 3 continuations plus quota recovery"
-              },
-              {
-                "path": [
                   "subagents"
                 ],
                 "label": "Sub-agents",
@@ -557,7 +539,7 @@
                   "jev"
                 ],
                 "label": "Jev (hosted service)",
-                "help": "Sends turn and help-search text to a hosted classifier. Off stops it; running sessions follow after a resume or restart.",
+                "help": "Sends turn text to a hosted classifier; quota recovery needs it. Off stops both; sessions follow on resume or restart.",
                 "control": "page",
                 "summary": "On · sends turn text for classification"
               }
@@ -636,31 +618,73 @@
     "uri": "/api/settings/page",
     "request": {
       "path": [
-        "continuation"
+        "phone"
       ]
     },
     "status": 200,
     "response": {
       "page": {
         "path": [
-          "continuation"
+          "phone"
         ],
         "breadcrumb": [
           "Settings",
-          "Continuation"
+          "Web Access"
         ],
-        "help": "Continue an unfinished request up to three times per message, and resume a session after its quota resets.",
+        "help": "Web access changes take effect when the background server next starts. Remote access requires a certificate and key.",
         "groups": [
           {
             "rows": [
               {
                 "path": [
-                  "continuation",
+                  "phone",
                   "enabled"
                 ],
                 "label": "Enabled",
                 "control": "checkbox",
                 "checked": true
+              },
+              {
+                "path": [
+                  "phone",
+                  "bind"
+                ],
+                "label": "Listen address and port",
+                "control": "text",
+                "value": "127.0.0.1:3765",
+                "placeholder": "Not set",
+                "number": false
+              },
+              {
+                "path": [
+                  "phone",
+                  "tailscale_detect"
+                ],
+                "label": "Detect Tailscale",
+                "control": "checkbox",
+                "checked": true
+              },
+              {
+                "path": [
+                  "phone",
+                  "tls_cert"
+                ],
+                "label": "TLS certificate file",
+                "control": "text",
+                "value": "",
+                "placeholder": "None (HTTP only)",
+                "number": false
+              },
+              {
+                "path": [
+                  "phone",
+                  "tls_key"
+                ],
+                "label": "TLS private key file",
+                "control": "text",
+                "value": "",
+                "placeholder": "None (HTTP only)",
+                "number": false
               }
             ]
           }
@@ -723,12 +747,12 @@
     "uri": "/api/settings/edit",
     "request": {
       "page": [
-        "continuation"
+        "phone"
       ],
       "edit": {
         "kind": "toggle",
         "path": [
-          "continuation",
+          "phone",
           "enabled"
         ]
       }
@@ -752,24 +776,66 @@
       },
       "page": {
         "path": [
-          "continuation"
+          "phone"
         ],
         "breadcrumb": [
           "Settings",
-          "Continuation"
+          "Web Access"
         ],
-        "help": "Continue an unfinished request up to three times per message, and resume a session after its quota resets.",
+        "help": "Web access changes take effect when the background server next starts. Remote access requires a certificate and key.",
         "groups": [
           {
             "rows": [
               {
                 "path": [
-                  "continuation",
+                  "phone",
                   "enabled"
                 ],
                 "label": "Enabled",
                 "control": "checkbox",
                 "checked": false
+              },
+              {
+                "path": [
+                  "phone",
+                  "bind"
+                ],
+                "label": "Listen address and port",
+                "control": "text",
+                "value": "127.0.0.1:3765",
+                "placeholder": "Not set",
+                "number": false
+              },
+              {
+                "path": [
+                  "phone",
+                  "tailscale_detect"
+                ],
+                "label": "Detect Tailscale",
+                "control": "checkbox",
+                "checked": true
+              },
+              {
+                "path": [
+                  "phone",
+                  "tls_cert"
+                ],
+                "label": "TLS certificate file",
+                "control": "text",
+                "value": "",
+                "placeholder": "None (HTTP only)",
+                "number": false
+              },
+              {
+                "path": [
+                  "phone",
+                  "tls_key"
+                ],
+                "label": "TLS private key file",
+                "control": "text",
+                "value": "",
+                "placeholder": "None (HTTP only)",
+                "number": false
               }
             ]
           }
@@ -856,15 +922,6 @@
               },
               {
                 "path": [
-                  "continuation"
-                ],
-                "label": "Continuation",
-                "help": "Continue an unfinished request up to three times per message, and resume a session after its quota resets.",
-                "control": "page",
-                "summary": "Off"
-              },
-              {
-                "path": [
                   "subagents"
                 ],
                 "label": "Sub-agents",
@@ -897,7 +954,7 @@
                 "label": "Web Access",
                 "help": "Web access changes take effect when the background server next starts. Remote access requires a certificate and key.",
                 "control": "page",
-                "summary": "On · 127.0.0.1:3765"
+                "summary": "Off"
               }
             ]
           },
@@ -940,7 +997,7 @@
                   "jev"
                 ],
                 "label": "Jev (hosted service)",
-                "help": "Sends turn and help-search text to a hosted classifier. Off stops it; running sessions follow after a resume or restart.",
+                "help": "Sends turn text to a hosted classifier; quota recovery needs it. Off stops both; sessions follow on resume or restart.",
                 "control": "page",
                 "summary": "On · sends turn text for classification"
               }

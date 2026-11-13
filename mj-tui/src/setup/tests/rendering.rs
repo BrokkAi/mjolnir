@@ -6,7 +6,6 @@ use super::*;
 #[test]
 fn every_boolean_setting_is_drawn_as_a_checkbox() {
     for (section, label) in [
-        ("continuation", "Enabled"),
         ("github.watch", "Enabled"),
         ("jev", "Enabled"),
         ("phone", "Enabled"),
@@ -38,42 +37,6 @@ fn every_boolean_setting_is_drawn_as_a_checkbox() {
             "{section} › {label} has no On/Off text: {row:?}"
         );
     }
-}
-
-/// Continuation runs only while Jev is on (`Config::automatic_continuation_enabled`).
-/// With Jev off, the Continuation row and page say it is off and why, and
-/// point to the Privacy page, rather than "On" and a ticked box alone.
-/// Launch re-verification finding R3-2.
-// Hard-won: 76289ac9: the continuation row implied it remained active while jev was off.
-#[test]
-fn continuation_reads_as_off_while_jev_is_off() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.config.jev.enabled = false;
-    dashboard.begin_setup();
-    let lines = drawn(&mut dashboard, 140, 48);
-    let row = lines
-        .iter()
-        .find(|line| line.contains("Continuation"))
-        .unwrap_or_else(|| panic!("missing row: {lines:#?}"));
-    assert!(row.contains("Off"), "{row:?}");
-    assert!(row.contains("Jev"), "{row:?}");
-    assert!(!row.contains("On ·"), "{row:?}");
-
-    dashboard.begin_settings_section("continuation", None);
-    setup_dialog_mut(&mut dashboard.mode).unwrap().prepare();
-    let page = drawn(&mut dashboard, 140, 40).join("\n");
-    assert!(page.contains("Jev is off"), "{page}");
-    assert!(page.contains("Privacy"), "{page}");
-
-    // With Jev on, the page and row keep their ordinary text.
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_setup();
-    let lines = drawn(&mut dashboard, 140, 48);
-    let row = lines
-        .iter()
-        .find(|line| line.contains("Continuation"))
-        .unwrap();
-    assert!(row.contains("On · 3 continuations"), "{row:?}");
 }
 
 #[test]
@@ -136,52 +99,6 @@ fn the_breadcrumb_shows_a_user_chosen_name_as_the_user_wrote_it() {
     assert!(
         text.contains("Settings › Machines › local › Build caches"),
         "a schema key below it still gets its label:\n{text}"
-    );
-}
-
-/// Launch campaign finding A-9 / C-4: the Continuation section has a short
-/// name, its row shows its whole value, and its page shows its whole
-/// description.
-// Hard-won: 70f7a0f5: the continuation label and description were clipped.
-#[test]
-fn continuation_section_has_a_short_name_a_whole_value_and_a_whole_description() {
-    let mut dashboard = dashboard_with_session(stopped_session());
-    dashboard.begin_setup();
-    let text = drawn(&mut dashboard, 100, 30).join("\n");
-    let row = text
-        .lines()
-        .find(|line| line.contains("Continuation"))
-        .unwrap_or_else(|| panic!("no Continuation row in {text}"));
-    assert!(
-        row.contains("Continuation ") && row.contains(" On · 3 continuations plus quota recovery"),
-        "{row}"
-    );
-
-    dashboard.begin_settings_section("continuation", None);
-    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-    terminal
-        .draw(|frame| crate::render::render(frame, &mut dashboard))
-        .unwrap();
-    let body = dashboard
-        .frame_surfaces()
-        .surface(mj_chat::selection::SurfaceId::ModalBody)
-        .expect("rendered Settings modal surface")
-        .rect;
-    let buffer = terminal.backend().buffer();
-    // Join only the modal's cells: backdrop text beside a wrapped help line
-    // must not become part of its description.
-    let text = (body.y..body.bottom())
-        .map(|y| {
-            (body.x..body.right())
-                .map(|x| buffer[(x, y)].symbol())
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(
-        text.contains(schema::help(&["continuation".to_owned()])),
-        "{text}"
     );
 }
 
@@ -256,7 +173,6 @@ fn every_setting_description_fits_its_two_rows() {
         &["bundles"],
         &["bundles", "b", "repositories"],
         &["review"],
-        &["continuation"],
         &["jev"],
         &["sessionwiki"],
         &["sessionwiki", "archive_after_days"],
@@ -289,15 +205,6 @@ fn every_setting_description_fits_its_two_rows() {
         .map(|path| path.join("."))
         .collect::<Vec<_>>();
     assert!(overflowing.is_empty(), "{overflowing:#?}");
-    let jev_off = json!({"jev": {"enabled": false}});
-    let continuation = schema::page_help(&["continuation".to_owned()], &jev_off);
-    assert!(
-        ratatui::widgets::Paragraph::new(continuation)
-            .wrap(Wrap { trim: false })
-            .line_count(width)
-            <= 2,
-        "{continuation}"
-    );
 }
 
 /// A page lists its settings in one fixed order, whichever of them the file

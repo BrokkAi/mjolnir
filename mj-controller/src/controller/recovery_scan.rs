@@ -525,6 +525,7 @@ fn adopted_session_record(
     SessionRecord {
         oracle_choice: None,
         oracle: true,
+        notifications_ignored: false,
         project: None,
         target_runtime: None,
         launch_base: None,

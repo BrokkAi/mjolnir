@@ -922,6 +922,10 @@ pub enum DaemonAction {
         session_id: String,
         title: String,
     },
+    SetSessionNotificationsIgnored {
+        session_id: String,
+        ignored: bool,
+    },
     SetSessionWorkspace {
         session_id: String,
         workspace_id: String,
@@ -2509,6 +2513,23 @@ impl DaemonClient {
         {
             DaemonReply::Text(title) => Ok(title),
             reply => bail!("unexpected session-title reply {reply:?}"),
+        }
+    }
+
+    pub async fn set_session_notifications_ignored(
+        &mut self,
+        session_id: String,
+        ignored: bool,
+    ) -> Result<()> {
+        match self
+            .request(DaemonAction::SetSessionNotificationsIgnored {
+                session_id,
+                ignored,
+            })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected notifications-ignored reply {reply:?}"),
         }
     }
 

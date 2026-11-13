@@ -1,4 +1,6 @@
-//! A supervised completion gate: user input always wins over automatic work.
+//! The daemon's session-update service: it forwards every update, records and
+//! resumes quota recoveries, seeds authorization context, and tells review when
+//! a session settles. User input always wins over automatic work.
 use super::*;
 use crate::session_manager::{
     CoalescedUpdateSender, ManagedSessionView, SessionManagerUpdate, SessionManagerUpdates,
@@ -10,14 +12,14 @@ use mj_core::state::{PromptCompletion, TurnOutcomeKind, classify_prompt_completi
 use tokio::task::{AbortHandle, JoinSet};
 
 enum Outcome {
-    Classified(Result<mj_core::continuation::ContinuationVerdict>),
     QuotaPrepared(Result<Box<quota::Plan>>),
     QuotaChanged(Result<()>),
     Submitted(Result<Box<ManagedSessionView>>),
 }
 
 enum Phase {
-    Checking(crate::upgrade::Work),
+    /// Resolving the reset deadline of a quota-limited turn.
+    Resolving(crate::upgrade::Work),
     WaitingQuota,
     Submitting(crate::upgrade::Work),
 }
@@ -25,27 +27,21 @@ enum Phase {
 impl Phase {
     fn work(&self) -> &crate::upgrade::Work {
         match self {
-            Self::Checking(work) | Self::Submitting(work) => work,
+            Self::Resolving(work) | Self::Submitting(work) => work,
             Self::WaitingQuota => unreachable!("quota waits hold no admission"),
         }
     }
 
     fn submitting(self) -> Self {
         match self {
-            Self::Checking(work) | Self::Submitting(work) => Self::Submitting(work),
+            Self::Resolving(work) | Self::Submitting(work) => Self::Submitting(work),
             Self::WaitingQuota => unreachable!("quota waits must readmit before submission"),
         }
     }
 }
 
-enum DeferredReason {
-    Continue,
-    Quota,
-}
-
 struct Pending {
     phase: Phase,
-    diagnostic: Option<mj_core::jev::Attempt>,
     generation: u64,
     abort: AbortHandle,
     view: ManagedSessionView,
@@ -72,8 +68,8 @@ fn evidence_ordinal(view: &ManagedSessionView) -> Option<u64> {
 }
 
 /// Workers from this protocol on record turns the harness ends on its own and
-/// admit continuation by [`mj_core::activity::driver_present`] instead of raw
-/// background counts, and without a plan-mode exclusion.
+/// admit quota recovery by [`mj_core::activity::submit_blockers`] instead of raw
+/// background counts.
 const ENDED_TURN_PROTOCOL: u32 = 23;
 
 fn current_rules(s: &mj_core::state::ManagedSessionSnapshot) -> bool {
@@ -103,15 +99,6 @@ pub(super) struct EndedTurn<'a> {
 }
 
 impl EndedTurn<'_> {
-    fn self_started(&self) -> bool {
-        self.outcome.is_none()
-    }
-    fn finished(&self) -> bool {
-        self.outcome.is_none_or(|outcome| {
-            matches!(outcome, TurnOutcomeKind::Completed { stop_reason }
-                if classify_prompt_completion(stop_reason) == PromptCompletion::Finished)
-        })
-    }
     fn quota_candidate(&self) -> bool {
         self.outcome.is_none_or(|outcome| {
             matches!(outcome, TurnOutcomeKind::Completed { stop_reason }
@@ -149,67 +136,12 @@ pub(super) fn ended_turn(s: &mj_core::state::ManagedSessionSnapshot) -> Option<E
         })
 }
 
-/// What older workers still require before automatic work, and so what their
-/// sessions are still held to.
+/// What workers older than the ended-turn rules still require before a quota
+/// recovery is recorded or resumed.
 fn legacy_quiet(s: &mj_core::state::ManagedSessionSnapshot) -> bool {
     mj_core::activity::is_quiet(&s.operational.facts())
         && s.operational.background_commands.is_empty()
         && !s.operational.goal.active()
-}
-
-/// Everything ordinary continuation needs except that nothing else is about
-/// to move the session on.
-fn continuation_allowed(view: &ManagedSessionView) -> bool {
-    let Some(s) = &view.snapshot else {
-        return false;
-    };
-    view.connected
-        && s.operational
-            .relay_protocol_version
-            .is_some_and(|v| v >= 18)
-        && !s.operational.goal.budget_limited()
-        && s.operational
-            .continuation
-            .quota_recovery
-            .as_ref()
-            .is_none_or(|r| r.submitted)
-        && s.operational.continuation.eligible()
-        && s.materialized.pending_elicitations.is_empty()
-        && ended_turn(s).is_some_and(|t| unified(s) || t.finished())
-}
-
-/// A background command, agent or goal will move the session on, so an
-/// ordinary nudge waits until it stops.
-fn driven(view: &ManagedSessionView) -> bool {
-    view.snapshot.as_ref().is_some_and(|s| {
-        current_rules(s) && mj_core::activity::driver_present(&s.operational.facts())
-    })
-}
-
-/// What [`driven`] saw, for the decision log.
-fn driver_name(view: &ManagedSessionView) -> &'static str {
-    let Some(s) = &view.snapshot else {
-        return "unknown";
-    };
-    match mj_core::activity::classify(&s.operational.facts()) {
-        ActivityState::Background { .. } => "background",
-        ActivityState::Goal => "goal",
-        ActivityState::Retry => "retry",
-        _ => "turn",
-    }
-}
-
-fn eligible(view: &ManagedSessionView) -> bool {
-    let Some(s) = &view.snapshot else {
-        return false;
-    };
-    continuation_allowed(view)
-        && if current_rules(s) {
-            let facts = s.operational.facts();
-            mj_core::activity::can_submit(&facts) && !mj_core::activity::driver_present(&facts)
-        } else {
-            legacy_quiet(s)
-        }
 }
 
 /// Everything a quota recovery needs except the chance to submit a prompt.
@@ -343,56 +275,39 @@ fn unified(s: &mj_core::state::ManagedSessionSnapshot) -> bool {
         .is_some_and(|v| v >= mj_core::assessment::PROTOCOL)
 }
 
+/// A worker's current assessment says the turn hit a provider quota, and a
+/// recovery for that turn may be recorded. Workers older than the assessment
+/// protocol have no such assessment and are not recovered automatically.
 fn check_eligible(view: &ManagedSessionView) -> bool {
     let Some(s) = &view.snapshot else {
         return false;
     };
-    if unified(s) {
-        return s.operational.assessment.as_ref().is_some_and(|a| {
+    unified(s)
+        && s.operational.assessment.as_ref().is_some_and(|a| {
             a.current()
-                && match a.action {
-                    Some(mj_core::assessment::Action::Continue) => continuation_allowed(view),
-                    Some(mj_core::assessment::Action::RecoverQuota) => {
-                        quota_schedulable(view)
-                            && s.operational
-                                .continuation
-                                .quota_recovery
-                                .as_ref()
-                                .is_none_or(|r| r.completed_command_id != a.turn_id)
-                    }
-                    _ => false,
-                }
-        });
-    }
-    // Current workers are checked whatever else is running; the answer is
-    // acted on only when it can be.
-    let ordinary = if current_rules(s) {
-        continuation_allowed(view)
-    } else {
-        eligible(view)
-    };
-    ordinary
-        || (quota_schedulable(view) && {
-            let c = &s.operational.continuation;
-            c.quota_recovery
-                .as_ref()
-                .is_none_or(|r| c.completed_command_id.as_ref() != Some(&r.completed_command_id))
+                && a.action == Some(mj_core::assessment::Action::RecoverQuota)
+                && quota_schedulable(view)
+                && s.operational
+                    .continuation
+                    .quota_recovery
+                    .as_ref()
+                    .is_none_or(|r| r.completed_command_id != a.turn_id)
         })
 }
 
-/// Who may act on a session now. One call reads the continuation setting, the
+/// Who may act on a session now. One call reads the quota recovery setting, the
 /// lifecycle entry and the Move owner together under one owner lock, so a
 /// caller that needs two answers derives both from the same instant. Reading
 /// them separately lets a failed Move release the session in between.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Claim {
-    /// Continuation is on and nothing else owns the session.
+    /// Quota recovery is on and nothing else owns the session.
     Allowed,
     /// A Move owns the session. A timed quota recovery outlasts one: a
     /// completed Move changes the profile, which clears the recovery, and a
     /// failed one leaves the quota stop real, so the retry stands.
     Move,
-    /// Continuation is off, the session is gone, or another lifecycle
+    /// Quota recovery is off, the session is gone, or another lifecycle
     /// operation owns it.
     Blocked,
 }
@@ -407,7 +322,7 @@ fn claim(state: &RuntimeState, session: &str) -> Claim {
     }
     let controller = owner.controller();
     if lifecycle.is_none()
-        && controller.config.automatic_continuation_enabled()
+        && controller.config.quota_recovery_enabled()
         && controller.state.sessions.contains_key(session)
         && !controller.state.subagents.contains_key(session)
     {
@@ -439,17 +354,6 @@ struct Environment {
 type ProfileLookup = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 type LiveSessions = mj_core::snapshot_map::SnapshotMap<String, SessionRecord>;
 type ReviewObserver = Arc<dyn Fn(&str, &ManagedSessionView) + Send + Sync>;
-type Classifier = Arc<
-    dyn Fn(
-            mj_core::continuation::ContinuationEvidence,
-            Option<mj_core::jev::Attempt>,
-        ) -> futures::future::BoxFuture<
-            'static,
-            Result<mj_core::continuation::ContinuationVerdict>,
-        > + Send
-        + Sync,
->;
-
 fn publish(
     tx: &CoalescedUpdateSender,
     environment: &Environment,
@@ -459,7 +363,7 @@ fn publish(
 ) {
     if checking {
         if let Some(snapshot) = &mut view.snapshot {
-            snapshot.operational.activity = Some(ActivityState::CheckingContinuation);
+            snapshot.operational.activity = Some(ActivityState::CheckingQuota);
         }
     } else if view.snapshot.as_ref().is_none_or(|s| {
         s.operational
@@ -601,16 +505,7 @@ pub(super) fn spawn(
         },
         review: Arc::new(move |id, view| state.review_host().observe(id, view)),
     };
-    let (updates, service) = spawn_in(
-        environment,
-        input,
-        cancellation,
-        Arc::new(|evidence, diagnostic| {
-            Box::pin(
-                async move { crate::continuation::classify(&evidence, diagnostic.as_ref()).await },
-            )
-        }),
-    );
+    let (updates, service) = spawn_in(environment, input, cancellation);
     UpdateFeed::new(updates, service)
 }
 
@@ -618,7 +513,6 @@ fn spawn_in(
     environment: Environment,
     input: SessionManagerUpdates,
     cancellation: CancellationToken,
-    classifier: Classifier,
 ) -> (
     SessionManagerUpdates,
     tokio::task::JoinHandle<Result<FeedEnd>>,
@@ -627,7 +521,6 @@ fn spawn_in(
         environment,
         input,
         cancellation,
-        classifier,
         crate::upgrade::gate().clone(),
     )
 }
@@ -636,7 +529,6 @@ fn spawn_with_gate(
     environment: Environment,
     mut input: SessionManagerUpdates,
     cancellation: CancellationToken,
-    classifier: Classifier,
     gate: Arc<crate::upgrade::Gate>,
 ) -> (
     SessionManagerUpdates,
@@ -644,10 +536,9 @@ fn spawn_with_gate(
 ) {
     let (tx, rx) = coalesced_update_channel();
     let task = tokio::spawn(async move {
-        let mut seen = BTreeMap::<String, Option<String>>::new();
-        // An ordinary continuation waits for its driver to stop; quota
-        // recovery can also wait for the same turn to reconnect.
-        let mut deferred = BTreeMap::<String, (String, DeferredReason)>::new();
+        // A quota recovery can wait for the same turn to reconnect; the value
+        // is the completed turn it was deferred for.
+        let mut deferred = BTreeMap::<String, String>::new();
         // A refused admission must not consume a completed-turn trigger.
         let mut admission_deferred = BTreeMap::<String, Option<String>>::new();
         let mut pending = BTreeMap::<String, Pending>::new();
@@ -722,18 +613,7 @@ fn spawn_with_gate(
                         .as_ref()
                         .and_then(ended_turn)
                         .map(|t| t.key.to_owned());
-                    let self_started = view
-                        .snapshot
-                        .as_ref()
-                        .and_then(ended_turn)
-                        .is_some_and(|t| t.self_started());
-                    let previous = seen.get(&id).cloned();
-                    // An unfinished connected turn establishes attachment, but
-                    // an ineligible completed view must not consume its trigger.
-                    if view.connected && completed.is_none() {
-                        seen.insert(id.clone(), None);
-                    }
-                    if deferred.get(&id).is_some_and(|(key, _)| Some(key) != completed.as_ref()) {
+                    if deferred.get(&id).is_some_and(|key| Some(key) != completed.as_ref()) {
                         deferred.remove(&id);
                     }
                     if let Some(p) = pending.get_mut(&id) {
@@ -750,43 +630,31 @@ fn spawn_with_gate(
                             continue;
                         }
                         if same_frontier && !view.connected && matches!(p.phase, Phase::WaitingQuota) {
-                            deferred.insert(id.clone(), (p.completed.clone(), DeferredReason::Quota));
+                            deferred.insert(id.clone(), p.completed.clone());
                         }
                         let previous = pending.remove(&id).expect("pending request");
                         if !matches!(previous.phase, Phase::Submitting(_)) {
-                            if let Some(diagnostic) = &previous.diagnostic {
-                                diagnostic.finish("stale", "Session evidence or runtime state changed before this check completed; no action was taken.");
-                            }
                             previous.abort.abort();
                         }
                         // An already-dispatched submission retains its bounded task
                         // to record the worker's actual acceptance or rejection.
                         // Its atomic frontier guard still lets new input win.
                     }
+                    // The worker's assessment decides whether the turn hit a
+                    // quota; each assessment revision is acted on once.
                     let worker_assessment = view.snapshot.as_ref().filter(|s| unified(s)).and_then(|s| s.operational.assessment.as_ref()).filter(|a| a.current() && (a.verdict.is_some() || a.glide.is_some()));
-                    // A quota wait is restartable from this durable turn. Legacy
-                    // workers have no persisted verdict, so attachment reuses the
-                    // normal classifier; its frontier and eligibility guards still
-                    // decide whether anything may be submitted.
-                    let bootstrap = previous.is_none() && !driven(&view);
-                    let new_completion = if let Some(a) = worker_assessment {
-                        assessed.get(&id).copied() != Some(a.revision)
-                    } else { (bootstrap || previous.is_some_and(|old| old != completed)) && completed.is_some() };
-                    // Each deferred decision retains its own eligibility rule.
-                    let released = !new_completion && deferred.get(&id).is_some_and(|(_, reason)| match reason {
-                        DeferredReason::Continue => eligible(&view),
-                        DeferredReason::Quota => quota_schedulable(&view),
-                    });
+                    let new_completion = worker_assessment.is_some_and(|a| assessed.get(&id).copied() != Some(a.revision));
+                    // A deferred recovery is released once it can be recorded.
+                    let released = !new_completion && deferred.contains_key(&id) && quota_schedulable(&view);
                     let admission_retry = admission_deferred.remove(&id).is_some_and(|key| key == completed);
                     if (new_completion || released || admission_retry) && check_eligible(&view) && (environment.allowed)(&id) {
-                        let Ok(upgrade_work) = gate.enter_unless_draining("automatic continuation") else {
+                        let Ok(upgrade_work) = gate.enter_unless_draining("quota assessment") else {
                             admission_deferred.insert(id.clone(), completed);
                             publish(&tx, &environment, id, view, false);
                             continue;
                         };
                         // Commit the processed frontier only after this decision
                         // can run. Disconnection and refused admission preserve it.
-                        seen.insert(id.clone(), completed.clone());
                         if let Some(a) = worker_assessment {
                             assessed.insert(id.clone(), a.revision);
                         }
@@ -794,62 +662,15 @@ fn spawn_with_gate(
                         generation = generation.wrapping_add(1);
                         let epoch = generation;
                         let session = id.clone();
-                        let snapshot = view.snapshot.as_ref().expect("eligible snapshot").clone();
-                        let diagnostic = environment.log.as_ref().filter(|_| !unified(&snapshot)).map(|log| log.start(&id, "continuation",
-                            "Is the turn blocked by subscription quota, or does authorized unfinished work remain?",
-                            "All real user instructions since context reset and whole recent assistant messages. Tool history is excluded; assistant_history_omitted reports older omitted assistant context."));
-                        if let Some(diagnostic) = &diagnostic {
-                            diagnostic.update(None, serde_json::json!({
-                                "turn": if self_started { "self-started" } else { "prompted" },
-                                "trigger": if released { "eligibility-restored" } else if bootstrap { "daemon-attachment" } else { "turn-ended" },
-                            }));
-                        }
-                        let request_diagnostic = diagnostic.clone();
-                        let classify = classifier.clone();
+                        let env = environment.clone();
+                        let quota_view = view.clone();
                         let task_work = upgrade_work.clone();
+                        // The worker's assessment already identified the quota
+                        // stop; resolve its reset deadline without an LLM.
                         let abort = jobs.spawn(async move {
                             let _task_work = task_work;
-                            let result = async {
-                                if unified(&snapshot) {
-                                    let a = snapshot.operational.assessment.as_ref().context("missing worker assessment")?;
-                                    return Ok(mj_core::continuation::ContinuationVerdict {
-                                        quota_limit: f64::from(a.action == Some(mj_core::assessment::Action::RecoverQuota)),
-                                        unfinished: f64::from(a.action == Some(mj_core::assessment::Action::Continue)),
-                                        no_input_needed: f64::from(a.action == Some(mj_core::assessment::Action::Continue)),
-                                    });
-                                }
-                                let evidence_work = _task_work.clone();
-                                let evidence = tokio::task::spawn_blocking(move || {
-                                    let _evidence_work = evidence_work;
-                                    let quota_message = quota::message(&snapshot);
-                                    let materialized = snapshot.materialized;
-                                    let ordinary = if snapshot.window.omitted_items > 0 {
-                                        crate::database::load_continuation_evidence(
-                                            &materialized.session_id,
-                                            materialized.applied_event_ordinal,
-                                            &materialized.applied_event_digest,
-                                        )
-                                    } else { crate::continuation::evidence(&materialized) };
-                                    let mut evidence = ordinary.unwrap_or_else(|error| {
-                                        tracing::debug!(%error, "ordinary continuation evidence unavailable; checking only current quota message");
-                                        mj_core::continuation::ContinuationEvidence {
-                                            messages: Vec::new(), assistant_history_omitted: true, quota_message: None,
-                                        }
-                                    });
-                                    evidence.quota_message = quota_message;
-                                    if evidence.validate().is_err() && evidence.quota_message.is_some() {
-                                        evidence.messages.clear();
-                                        evidence.assistant_history_omitted = true;
-                                    }
-                                    evidence.validate()?;
-                                    Ok::<_, anyhow::Error>(evidence)
-                                })
-                                .await
-                                .context("collect continuation evidence")??;
-                                classify(evidence, request_diagnostic).await
-                            }
-                            .await;
-                            (session, epoch, Outcome::Classified(result))
+                            let result = (env.quota)(session.clone(), quota_view).await;
+                            (session, epoch, Outcome::QuotaPrepared(result.map(Box::new)))
                         });
                         let s = &view
                             .snapshot
@@ -860,8 +681,7 @@ fn spawn_with_gate(
                         pending.insert(
                             id.clone(),
                             Pending {
-                                phase: Phase::Checking(upgrade_work),
-                                diagnostic,
+                                phase: Phase::Resolving(upgrade_work),
                                 generation: epoch,
                                 abort,
                                 view: view.clone(),
@@ -889,7 +709,7 @@ fn spawn_with_gate(
                                 continue;
                             }
                             let mut p = pending.remove(&id).expect("current request");
-                            let result = match result {
+                            match result {
                                 Outcome::QuotaChanged(result) => {
                                     if let Err(error) = result {
                                         tracing::warn!(session=%id, %error, "quota publication wait failed");
@@ -909,7 +729,7 @@ fn spawn_with_gate(
                                     let session = id.clone();
                                     let view = p.view.clone();
                                     let task_work = work.clone();
-                                    p.phase = Phase::Checking(work);
+                                    p.phase = Phase::Resolving(work);
                                     let abort = jobs.spawn(async move {
                                         let _work = task_work;
                                         let result = (env.quota)(session.clone(), view).await;
@@ -955,150 +775,21 @@ fn spawn_with_gate(
                                         Ok(view) => {
                                             latest.insert(id.clone(), (*view).clone());
                                             tx.send(SessionManagerUpdate {
-                                                raw_observation: None,                                                session_id: id,
+                                                raw_observation: None,
+                                                session_id: id,
                                                 view: *view,
                                             });
                                         }
                                         Err(error) => {
-                                            if let Some(diagnostic) = &p.diagnostic {
-                                                diagnostic.update(None, serde_json::json!({"submission_error":format!("{error:#}")}));
-                                                diagnostic.finish("failed", "Automatic continuation could not be confirmed. No further continuation was submitted by this check.");
-                                            }
-                                            tracing::warn!(session=%id,%error,"automatic continuation not submitted");
+                                            tracing::warn!(session=%id, %error, "quota recovery not submitted");
                                             publish(&tx, &environment, id, p.view, false);
                                         }
                                     }
-                                    continue;
                                 }
-                                Outcome::Classified(result) => result,
-                            };
-                            if let Some(diagnostic) = &p.diagnostic {
-                                match &result {
-                                    Ok(verdict) => diagnostic.update(Some(if verdict.is_quota_limit() { "Jev identified a current subscription quota limit." } else if verdict.should_continue() {
-                                        "Jev assessed that already-requested work remains and needs no new input."
-                                    } else { "Jev did not confidently establish both unfinished work and no need for user input." }), serde_json::json!({"result":{"quota_limit":verdict.quota_limit,"unfinished":verdict.unfinished,"no_input_needed":verdict.no_input_needed}})),
-                                    Err(error) => diagnostic.update(Some("No usable Jev answer."), serde_json::json!({"error":format!("{error:#}")})),
-                                }
-                            }
-                            if result.as_ref().is_ok_and(|v| v.is_quota_limit())
-                                && quota_schedulable(&p.view) && (environment.allowed)(&id) {
-                                let env = environment.clone();
-                                let session = id.clone();
-                                let view = p.view.clone();
-                                let task_work = p.phase.work().clone();
-                                            let abort = jobs.spawn(async move {
-                                                let _task_work = task_work;
-                                    let result = (env.quota)(session.clone(), view).await;
-                                    (session, epoch, Outcome::QuotaPrepared(result.map(Box::new)))
-                                });
-                                if let Some(diagnostic) = &p.diagnostic {
-                                    diagnostic.finish("applied", "Quota exhaustion identified; resolving the reset deadline without an LLM.");
-                                }
-                                pending.insert(id, Pending { abort, ..p });
-                                continue;
-                            }
-                            let continuing = result.as_ref().is_ok_and(|v| v.should_continue())
-                                && eligible(&p.view)
-                                && (environment.allowed)(&id);
-                            tracing::info!(target:"mj_jev",session=%id,generation=epoch,?result,continuing,"continuation decision");
-                            if continuing {
-                                let control = environment.control.clone();
-                                let environment = environment.clone();
-                                let submit_id = id.clone();
-                                let user = p.user.clone();
-                                let completed = p.completed.clone();
-                                let evidence_frontier = p.evidence_ordinal;
-                                let diagnostic = p.diagnostic.clone();
-                                let task_work = p.phase.work().clone();
-                                            let abort = jobs.spawn(async move {
-                                                let _task_work = task_work;
-                                    let outcome = tokio::time::timeout(Duration::from_secs(15), async {
-                                        let handle = control
-                                            .wait_for_session(&submit_id, Duration::from_secs(5))
-                                            .await?;
-                                        let current = handle.view();
-                                        ensure!(
-                                            eligible(&current)
-                                                && (environment.allowed)(&submit_id)
-                                                && evidence_ordinal(&current) == evidence_frontier,
-                                            "continuation no longer eligible"
-                                        );
-                                        let snapshot = current.snapshot.as_ref().unwrap();
-                                        let c = &snapshot.operational.continuation;
-                                        ensure!(
-                                            c.user_command_id.as_ref() == Some(&user)
-                                                && c.completed_command_id.as_ref() == Some(&completed),
-                                            "continuation evidence changed"
-                                        );
-                                        let command_id = mj_core::continuation::GeneratedPrompt::AutoContinue
-                                            .command_id(format_args!(
-                                                "{}-{}",
-                                                ended_turn(snapshot)
-                                                    .context("missing ended turn")?
-                                                    .completed_ordinal,
-                                                c.attempts + 1
-                                            ));
-                                        if let Some(diagnostic) = &diagnostic {
-                                            diagnostic.update(None, serde_json::json!({"command_id":command_id, "attempt":c.attempts + 1, "expected_ordinal":snapshot.operational.latest_ordinal}));
-                                        }
-                                        handle
-                                            .submit(
-                                                command_id,
-                                                RelayCommand::ContinueAuthorizedWork {
-                                                    expected: RelayCursor {
-                                                        ordinal: snapshot.operational.latest_ordinal,
-                                                        digest: snapshot.operational.latest_digest.clone(),
-                                                    },
-                                                    user_command_id: user,
-                                                    completed_command_id: completed,
-                                                    attempt: c.attempts + 1,
-                                                },
-                                            )
-                                            .await?;
-                                        if let Some(diagnostic) = &diagnostic {
-                                            diagnostic.finish("applied", "The worker accepted mj's automatic continuation of already-requested work.");
-                                        }
-                                        handle.sync_now().await?;
-                                        Ok::<_, anyhow::Error>(Box::new(handle.view()))
-                                    })
-                                    .await
-                                    .context("continuation submission timed out")
-                                    .and_then(|result| result);
-                                    if let Err(error) = &outcome {
-                                        tracing::warn!(session=%submit_id, %error, "automatic continuation submission or refresh failed");
-                                        if let Some(diagnostic) = &diagnostic {
-                                            diagnostic.update(None, serde_json::json!({"submission_error":format!("{error:#}")}));
-                                            diagnostic.finish("failed", "Mj could not confirm automatic continuation. The submission failed or the worker rejected its guard.");
-                                        }
-                                    }
-                                    (submit_id, epoch, Outcome::Submitted(outcome))
-                                });
-                                pending.insert(id, Pending { abort, phase: p.phase.submitting(), ..p });
-                            } else if result.as_ref().is_ok_and(|v| v.should_continue())
-                                && continuation_allowed(&p.view)
-                                && driven(&p.view)
-                                && (environment.allowed)(&id)
-                            {
-                                if let Some(diagnostic) = &p.diagnostic {
-                                    diagnostic.update(None, serde_json::json!({"deferred_by": driver_name(&p.view)}));
-                                    diagnostic.finish("deferred", "Something else is still moving the session on. Mj will check again once it stops.");
-                                }
-                                deferred.insert(id.clone(), (p.completed.clone(), DeferredReason::Continue));
-                                publish(&tx, &environment, id, p.view, false);
-                            } else {
-                                if let Some(diagnostic) = &p.diagnostic {
-                                    let (status, action) = match &result {
-                                        Err(_) => ("failed", "Mj left the session ready for operator input because the check failed."),
-                                        Ok(v) if !v.should_continue() => ("uncertain", "Both scores must reach 90%. Mj left the session ready for operator input."),
-                                        _ => ("stale", "The session is no longer eligible; mj did not continue it."),
-                                    };
-                                    diagnostic.finish(status, action);
-                                }
-                                publish(&tx, &environment, id, p.view, false);
                             }
                         }
                         Some(Err(error)) if !error.is_cancelled() => {
-                            tracing::error!(%error,"continuation classifier task failed");
+                            tracing::error!(%error,"quota recovery task failed");
                             let failed = pending
                                 .iter()
                                 .find(|(_, p)| p.abort.id() == error.id())
@@ -1137,9 +828,6 @@ fn spawn_with_gate(
                     for id in invalid {
                         let p = pending.remove(&id).unwrap();
                         if !matches!(p.phase, Phase::Submitting(_)) {
-                            if let Some(diagnostic) = &p.diagnostic {
-                                diagnostic.finish("cancelled", "Continuation was disabled or a session lifecycle operation took ownership.");
-                            }
                             p.abort.abort();
                         }
                         publish(&tx, &environment, id, p.view, false);
@@ -1158,7 +846,7 @@ fn spawn_with_gate(
                         match claim {
                             Claim::Allowed => {}
                             Claim::Move if !clear => refusal.push("a Move owns the session"),
-                            Claim::Blocked if !clear => refusal.push("continuation is off or another lifecycle operation owns the session"),
+                            Claim::Blocked if !clear => refusal.push("quota recovery is off or another lifecycle operation owns the session"),
                             _ => {}
                         }
                         if clear && !view.connected { refusal.push("session is not connected"); }
@@ -1181,7 +869,7 @@ fn spawn_with_gate(
                             (session, epoch, Outcome::Submitted(result))
                         });
                         retry_after.insert(id.clone(), std::time::Instant::now() + Duration::from_secs(30));
-                        pending.insert(id.clone(), Pending { phase: Phase::Submitting(upgrade_work), diagnostic: None, generation: epoch, abort,
+                        pending.insert(id.clone(), Pending { phase: Phase::Submitting(upgrade_work), generation: epoch, abort,
                             view: view.clone(), user: recovery.user_command_id.clone(), completed: recovery.completed_command_id.clone(), evidence_ordinal: evidence_ordinal(view) });
                     }
                     for (id, view) in &latest {
@@ -1195,7 +883,6 @@ fn spawn_with_gate(
                         }
                     }
                     let live = (environment.live)();
-                    seen.retain(|id, _| live.contains_key(id));
                     deferred.retain(|id, _| live.contains_key(id));
                     admission_deferred.retain(|id, _| live.contains_key(id));
                     rechecks.retain(|id| live.contains_key(id));
@@ -1220,7 +907,7 @@ fn spawn_with_gate(
                 seed_jobs = running.0,
                 jobs = running.1,
                 duration_ms = took.as_millis(),
-                "continuation checks stopped"
+                "session update service stopped"
             );
         }
 

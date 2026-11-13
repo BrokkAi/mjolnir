@@ -793,8 +793,8 @@ impl Default for LegacyBuildCacheConfig {
 }
 
 /// The one switch for the hosted Jev service. When it is off, Mjolnir sends
-/// nothing to Jev: no turn or GitHub-item classification, no automatic
-/// continuation verdicts, and no semantic help search. `[jev] enabled = false`.
+/// nothing to Jev: no turn or GitHub-item classification and no quota recovery.
+/// `[jev] enabled = false`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct JevConfig {
@@ -851,6 +851,15 @@ impl QuotaRuntimeChoice {
     fn is_default(&self) -> bool {
         *self == Self::default()
     }
+}
+
+/// Legacy automatic-continuation switch, read but never written. The feature
+/// was removed (#1532); an existing `[continuation]` section is still accepted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct LegacyContinuationConfig {
+    #[allow(dead_code, reason = "decoded only so an existing section still loads")]
+    enabled: bool,
 }
 
 /// Legacy GitHub event source switch, read but never written.
@@ -939,11 +948,11 @@ impl Config {
             .collect()
     }
 
-    /// Automatic continuation asks Jev whether a finished turn left work
-    /// undone, so it runs only while `[continuation]` and `[jev]` are both on.
+    /// Quota recovery resumes a session after a provider quota resets. It
+    /// depends on the turn classifier, so the Privacy switch owns it.
     #[must_use]
-    pub fn automatic_continuation_enabled(&self) -> bool {
-        self.continuation.enabled && self.jev.enabled
+    pub fn quota_recovery_enabled(&self) -> bool {
+        self.jev.enabled
     }
 
     /// The GitHub watcher uses Jev to classify activity, so both switches
@@ -1049,7 +1058,6 @@ pub struct Config {
     pub daemon: DaemonConfig,
     pub github: GithubConfig,
     pub review: ReviewConfig,
-    pub continuation: crate::continuation::ContinuationConfig,
     pub sessionwiki: SessionWikiConfig,
     pub subagents: SubagentConfig,
     pub jev: JevConfig,
@@ -1106,11 +1114,10 @@ struct StoredConfig {
     github: GithubConfig,
     #[serde(default)]
     review: ReviewConfig,
-    #[serde(
-        default = "crate::continuation::ContinuationConfig::enabled",
-        skip_serializing_if = "crate::continuation::ContinuationConfig::is_default"
-    )]
-    continuation: crate::continuation::ContinuationConfig,
+    /// Legacy `[continuation]` section, read and ignored, never written.
+    #[serde(default, skip_serializing)]
+    #[allow(dead_code, reason = "decoded only so an existing section still loads")]
+    continuation: LegacyContinuationConfig,
     #[serde(default, skip_serializing)]
     mailbox: LegacyMailboxConfig,
     #[serde(default, skip_serializing_if = "SessionWikiConfig::is_default")]
@@ -1298,7 +1305,7 @@ impl TryFrom<StoredConfig> for Config {
             daemon,
             mut github,
             review,
-            continuation,
+            continuation: _,
             mailbox,
             sessionwiki,
             subagents,
@@ -1379,7 +1386,7 @@ impl TryFrom<StoredConfig> for Config {
             notify,
             // Versions 1 through 19 acquire this build's defaults in memory
             // and upgrade on the next ordinary save. Version 12 splits
-            // machines from runtimes; version 13 adds automatic continuation;
+            // machines from runtimes; version 13 added automatic continuation (since removed);
             // version 14 moves the global cache opt-out onto machines; version
             // 15 stops writing the default image into a container target;
             // 16 adds native tool cache storage; 17 replaces per-profile
@@ -1398,7 +1405,6 @@ impl TryFrom<StoredConfig> for Config {
             daemon,
             github,
             review,
-            continuation,
             sessionwiki,
             subagents,
             jev,
@@ -1449,7 +1455,7 @@ impl From<Config> for StoredConfig {
             daemon: config.daemon,
             github: config.github,
             review: config.review,
-            continuation: config.continuation,
+            continuation: LegacyContinuationConfig::default(),
             mailbox: LegacyMailboxConfig::default(),
             sessionwiki: config.sessionwiki,
             subagents: config.subagents,
@@ -1480,7 +1486,6 @@ impl Default for Config {
             daemon: DaemonConfig::default(),
             github: GithubConfig::default(),
             review: ReviewConfig::default(),
-            continuation: crate::continuation::ContinuationConfig::enabled(),
             sessionwiki: SessionWikiConfig::default(),
             subagents: SubagentConfig::default(),
             jev: JevConfig::default(),
@@ -1856,7 +1861,8 @@ impl Config {
         // visibility as an advanced setting; version 8 lets profiles be
         // disabled; version 9 adds sub-agent policy; version 10 adds the
         // SessionWiki section; version 11 adds the key bindings; version 12
-        // splits machines from runtimes; version 13 adds automatic continuation.
+        // splits machines from runtimes; version 13 added automatic continuation
+        // (since removed).
         // Earlier configs acquire defaults in
         // memory, and their fused target kinds become machines plus runtimes,
         // on the next ordinary save. The version bump itself happens in
