@@ -83,29 +83,54 @@ Doctor checks configuration compatibility, harness authentication, worker binari
 
 `--json` emits a machine-readable array. `--smoke` adds real disposable pull/run probes where a target supports them; run it after resolving ordinary fixable checks because it can download an image and provision short-lived resources.
 
-## Prepare Brokk Observe export
+## Publish sessions to Brokk Observe
 
 ```text
 mj observe status [--json]
 mj observe export --session <id> [--output <path>]
 ```
 
-These commands expose the first Mjolnir-native Brokk Observe checkpoint.
-`status` reports whether `OBSERVE_URL` and `OBSERVE_TOKEN` are present and lists
-the local delivery spool. `export` reads a session and all of its transcript
-pages through the daemon, then writes newline-delimited Observe envelopes to
-standard output or `--output`. It does not upload them or wait for a policy
-decision.
+Mjolnir publishes sessions itself; neither the Claude Code nor the Codex
+Observe plugin is required. Set `OBSERVE_URL` and `OBSERVE_TOKEN`, or put the
+same two values in `~/.config/brokk-observe/config`. Environment variables win
+one at a time, so managed environment settings can override either value.
+`OBSERVE_CONFIG` selects a different configuration file. Start or restart the
+daemon after the values are in place.
 
-The export identifies the logical agent as Mjolnir and records the selected
-harness separately. It includes session boundaries, user prompts, tool input
-and results, turn ends, and a stopped session's end. Re-running the same export
-produces the same event identities. Automatic daemon publication, historical
-backfill, and Brokk Observe's broader orchestrator and harness dimensions are
-later milestones.
+Each session is written as a Mjolnir orchestrator session with the selected
+harness, native session id, worker, target, profile, model, git context, parent
+session, prompts, tool calls and results, turn boundaries, usage, and session
+end. Events first enter a durable local spool. Delivery is ordered and retried
+in the background, so an unavailable Observe server never blocks or cancels a
+session. Existing Claude Code or Codex plugin events are correlated by native
+session id and do not create a second top-level session.
+
+On the first configured daemon start, SessionWiki supplies the ids of earlier
+Mjolnir sessions. Mjolnir reads their full canonical transcripts from its own
+checkpoint store, marks them as historical, and publishes them through the same
+idempotent path. Historical events retain their original timestamps and are
+marked imported; they do not raise live alerts or start an automatic audit.
+SessionWiki is the discovery index; it is not used as the raw event source
+because its tool projection is summarized.
+
+`status` reports the active configuration, automatic delivery mode, spool, and
+the last success or failure. `export` is a diagnostic path: it reads a session
+through the daemon and writes the same newline-delimited envelopes to standard
+output or `--output` without uploading them. Re-running an export produces the
+same event identities.
+
+The canonical transcript does not retain a separate native compaction
+boundary or every permission prompt. Those gaps are visible rather than
+invented. Observe records a policy decision and permission outcome when
+Mjolnir enforcement is active. If Mjolnir's full checkpoint has already been
+removed by its archive-retention job, SessionWiki can still find the session
+but its summarized history is not presented as a full audit record. Token
+usage is included when the durable usage rows remain available; a
+checkpoint-only reconstruction does not invent missing usage.
 
 Set `OBSERVE_ENFORCE=true` on the Mjolnir daemon with `OBSERVE_URL` and
-`OBSERVE_TOKEN` to enable central guardrails. Enforcement currently supports
+`OBSERVE_TOKEN`, or put all three values in the Observe config file, to enable
+central guardrails. Enforcement currently supports
 DSH only because dsh-acp asks Mjolnir before every command, write, and MCP call.
 Other harnesses may auto-approve tools internally, so Mjolnir refuses their
 sessions rather than claiming protection it cannot provide.

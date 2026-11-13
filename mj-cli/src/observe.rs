@@ -1,8 +1,7 @@
 //! CLI inspection and export of Mjolnir's Brokk Observe envelopes.
 //!
-//! This first checkpoint deliberately exports locally. It proves the
-//! harness-neutral conversion without making a running daemon depend on
-//! Observe's availability.
+//! The daemon publishes automatically when Observe is configured. This command
+//! also supports a local export for inspecting the same envelopes.
 
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -12,7 +11,9 @@ use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use mj_controller::observe::{ObserveSession, ObserveSpool, envelopes_for_transcript};
+use mj_controller::observe::{
+    ObserveDeliveryState, ObservePaths, ObserveSession, ObserveSpool, envelopes_for_transcript,
+};
 use mj_controller::server::api::{ApiSession, TranscriptItemView, TranscriptResponse};
 
 use crate::api_client::ApiClient;
@@ -55,8 +56,14 @@ struct ObserveStatus {
     token_configured: bool,
     enforcement_requested: bool,
     enforcement_error: Option<String>,
+    delivery_enabled: bool,
+    delivery_error: Option<String>,
+    config_file: Option<PathBuf>,
     spool: PathBuf,
     pending: usize,
+    last_success_ms: Option<i64>,
+    last_failure_ms: Option<i64>,
+    last_failure: Option<String>,
     mode: &'static str,
 }
 
@@ -68,22 +75,35 @@ pub(crate) async fn run(args: ObserveArgs) -> Result<()> {
 }
 
 fn status(args: ObserveStatusArgs) -> Result<()> {
-    let spool_path = spool_path();
-    let spool = ObserveSpool::open(&spool_path)?;
+    let paths = ObservePaths::current();
+    let spool = ObserveSpool::open(&paths.spool)?;
     let enforcement = mj_core::observe::ObserveEnforcementConfig::from_environment();
+    let enforcement_requested =
+        mj_core::observe::ObserveEnforcementConfig::requested().unwrap_or(false);
+    let delivery = mj_core::observe::ObserveDeliveryConfig::load();
+    let configured_parts = mj_core::observe::ObserveDeliveryConfig::configured_parts();
+    let delivery_enabled = delivery.as_ref().is_ok_and(Option::is_some);
+    let delivery_error = delivery.err().map(|error| format!("{error:#}"));
+    let configured_parts = configured_parts.unwrap_or_default();
+    let delivery_state = ObserveDeliveryState::load(&paths.state, mj_core::clock::epoch_millis())?;
     let status = ObserveStatus {
-        url_configured: std::env::var_os("OBSERVE_URL").is_some_and(|value| !value.is_empty()),
-        token_configured: std::env::var_os("OBSERVE_TOKEN").is_some_and(|value| !value.is_empty()),
-        enforcement_requested: std::env::var("OBSERVE_ENFORCE").is_ok_and(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        }),
+        url_configured: configured_parts.0,
+        token_configured: configured_parts.1,
+        enforcement_requested,
         enforcement_error: enforcement.err().map(|error| format!("{error:#}")),
-        spool: spool_path,
+        delivery_enabled,
+        delivery_error,
+        config_file: mj_core::observe::config_path(),
+        spool: paths.spool,
         pending: spool.pending()?.len(),
-        mode: "automatic observation is pending; enforcement is available for DSH",
+        last_success_ms: delivery_state.last_success_ms,
+        last_failure_ms: delivery_state.last_failure_ms,
+        last_failure: delivery_state.last_failure,
+        mode: if delivery_enabled {
+            "automatic session delivery is enabled"
+        } else {
+            "export-only; set OBSERVE_URL and OBSERVE_TOKEN for automatic delivery"
+        },
     };
     if args.json {
         println!("{}", serde_json::to_string_pretty(&status)?);
@@ -104,8 +124,29 @@ fn status(args: ObserveStatusArgs) -> Result<()> {
                 "not configured (set OBSERVE_TOKEN)"
             }
         );
+        if let Some(path) = &status.config_file {
+            println!("Config file:   {}", path.display());
+        }
         println!("Spool:         {}", status.spool.display());
         println!("Pending:       {}", status.pending);
+        println!(
+            "Delivery:      {}",
+            match (&status.delivery_error, status.delivery_enabled) {
+                (Some(error), _) => format!("misconfigured: {error}"),
+                (None, true) => "automatic".into(),
+                (None, false) => "disabled".into(),
+            }
+        );
+        if let Some(at) = status.last_success_ms {
+            println!("Last success:  {at}");
+        }
+        if let Some(failure) = &status.last_failure {
+            println!(
+                "Last failure:  {} at {}",
+                failure,
+                status.last_failure_ms.unwrap_or_default()
+            );
+        }
         println!(
             "Enforcement:   {}",
             match (&status.enforcement_error, status.enforcement_requested) {
@@ -198,14 +239,21 @@ fn observe_session(session: &ApiSession) -> ObserveSession {
     ObserveSession {
         id: session.id.clone(),
         parent_id: None,
+        native_session_id: None,
+        worker_id: None,
         harness: session.harness_kind.clone(),
         model,
         cwd: None,
+        hostname: None,
+        os: None,
         started_at_ms: parse_timestamp(&session.created_at).unwrap_or_default(),
         workspace_id: Some(session.workspace_id.clone()),
         profile_id: Some(session.profile_id.clone()),
         target_id: Some(session.target_id.clone()),
         runtime: None,
+        git: None,
+        commits: Vec::new(),
+        historical: false,
     }
 }
 
@@ -213,10 +261,6 @@ fn parse_timestamp(value: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(value)
         .ok()
         .map(|time| time.timestamp_millis())
-}
-
-fn spool_path() -> PathBuf {
-    mj_core::config::data_dir().join("observe").join("spool")
 }
 
 #[cfg(test)]
@@ -249,9 +293,15 @@ mod tests {
             token_configured: true,
             enforcement_requested: false,
             enforcement_error: None,
+            delivery_enabled: true,
+            delivery_error: None,
+            config_file: Some(PathBuf::from("/tmp/config")),
             spool: PathBuf::from("/tmp/spool"),
             pending: 2,
-            mode: "export-only",
+            last_success_ms: Some(1),
+            last_failure_ms: None,
+            last_failure: None,
+            mode: "automatic",
         };
         let encoded = serde_json::to_string(&status).unwrap();
         assert!(encoded.contains("\"token_configured\":true"));

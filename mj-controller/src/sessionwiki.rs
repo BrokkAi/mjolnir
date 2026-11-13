@@ -113,7 +113,7 @@ fn project_directories_of(
 
 /// The project path SessionWiki should search for this session: the attached
 /// or managed raw checkout, or the primary repository in a managed workspace.
-fn indexed_project_directory(
+pub(crate) fn indexed_project_directory(
     state: &State,
     config: Option<&Config>,
     session_id: &str,
@@ -411,6 +411,43 @@ fn checkpoint_archive_session(name: &std::ffi::OsStr) -> Option<(String, u64)> {
     mj_core::config::validate_id("session", stem)
         .is_ok()
         .then(|| (stem.to_owned(), 0))
+}
+
+/// The newest full checkpoint for one session, if Mjolnir still has one.
+/// Observe uses this after SessionWiki discovers a session whose operational
+/// record has been removed but whose canonical archive has not.
+pub(crate) fn newest_checkpoint_archive(session_id: &str) -> Result<Option<PathBuf>> {
+    let directory = mj_core::config::sessions_dir();
+    let entries = match std::fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("list checkpoint directory {}", directory.display()));
+        }
+    };
+    let mut newest: Option<(u64, PathBuf)> = None;
+    for entry in entries {
+        let entry = entry.context("read a checkpoint directory entry")?;
+        if !entry
+            .file_type()
+            .context("read a checkpoint entry type")?
+            .is_file()
+        {
+            continue;
+        }
+        let Some((found, frontier)) = checkpoint_archive_session(&entry.file_name()) else {
+            continue;
+        };
+        if found == session_id
+            && newest
+                .as_ref()
+                .is_none_or(|(current, _)| frontier > *current)
+        {
+            newest = Some((frontier, entry.path()));
+        }
+    }
+    Ok(newest.map(|(_, path)| path))
 }
 
 /// A running session's conversation, as SessionWiki stores it.
@@ -741,7 +778,6 @@ pub struct WikiIndexer {
     inner: Arc<Indexer>,
 }
 
-#[derive(Default)]
 struct Indexer {
     /// Held for the whole of one run: this is what makes syncs single-flight.
     running: tokio::sync::Mutex<()>,
@@ -755,6 +791,24 @@ struct Indexer {
     in_flight: AtomicBool,
     last_success: std::sync::Mutex<Option<Success>>,
     native_scan_cache: crate::import::NativeScanCache,
+    /// Completed sync passes. Observe uses this to look again for sessions
+    /// that exist only in the index, without polling or delaying live events.
+    completed: tokio::sync::watch::Sender<u64>,
+}
+
+impl Default for Indexer {
+    fn default() -> Self {
+        Self {
+            running: tokio::sync::Mutex::new(()),
+            notify: tokio::sync::Notify::new(),
+            requested: AtomicBool::new(false),
+            full_requested: AtomicBool::new(false),
+            in_flight: AtomicBool::new(false),
+            last_success: std::sync::Mutex::new(None),
+            native_scan_cache: crate::import::NativeScanCache::default(),
+            completed: tokio::sync::watch::channel(0).0,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -825,6 +879,12 @@ impl WikiIndexer {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .map(|success| success.at)
     }
+
+    /// A change fires after each successful pass. A receiver made before
+    /// `request_sync` therefore cannot miss the pass it asked for.
+    pub fn changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.inner.completed.subscribe()
+    }
 }
 
 impl Indexer {
@@ -883,6 +943,8 @@ impl Indexer {
                 at: started,
                 epoch_seconds: Utc::now().timestamp(),
             });
+            self.completed
+                .send_modify(|generation| *generation = generation.saturating_add(1));
         }
         Ok(())
     }
@@ -1743,6 +1805,24 @@ pub fn query_rows(
         &ownership,
         &cache,
     )
+}
+
+/// Session ids SessionWiki has indexed under Mjolnir's tool name. This is a
+/// discovery supplement: the daemon's durable session table remains the
+/// authority, while the index can reveal a checkpointed session that has not
+/// been materialized into controller state in this daemon run.
+pub(crate) fn mjolnir_session_ids() -> Result<BTreeSet<String>> {
+    let Some(connection) = readable_index()? else {
+        return Ok(BTreeSet::new());
+    };
+    let mut statement = connection
+        .prepare("SELECT DISTINCT session_id FROM files WHERE tool = ?1")
+        .context("prepare Mjolnir SessionWiki discovery")?;
+    statement
+        .query_map([TOOL], |row| row.get::<_, String>(0))
+        .context("query Mjolnir SessionWiki discovery")?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()
+        .context("read Mjolnir SessionWiki discovery")
 }
 
 fn query_rows_from(
