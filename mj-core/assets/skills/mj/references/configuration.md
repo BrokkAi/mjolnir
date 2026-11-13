@@ -412,9 +412,9 @@ enabled = false
 | --- | --- | --- | --- | --- |
 | `enabled` | boolean | no | `true` | `false` stops every request to the hosted Jev service: turn classification and quota recovery. |
 
-Jev reads recent conversation text to answer two questions: whether a
-silent turn is waiting for you, and whether a finished reply needs you or
-hit a quota limit. [Security
+GLiDE (Fastino), through the hosted proxy, classifies current requests. The
+completed-turn verdict uses recent conversation and activity evidence; other
+classifiers receive their task-specific evidence. [Security
 boundaries](/security/#what-leaves-this-machine-by-default) lists exactly what
 each request sends and where.
 
@@ -446,7 +446,7 @@ reports why. Set `use_gpu = false` for CPU-only scoring. Device failures also
 select CPU with a visible notice.
 
 `enabled` is a boolean that defaults to `true`. Together with `[jev] enabled`,
-it controls the GitHub watcher as an event source. Jev classifies GitHub
+it controls the GitHub watcher as an event source. The hosted GLiDE service classifies GitHub
 activity. Neither setting disables mailbox delivery, peer messages, child
 reports, drain hooks or idle wakes. The old `[mailbox] enabled` key still loads
 silently. If either key is `false`, the watcher stays off. Saving writes only
@@ -461,8 +461,8 @@ old. Saved progress preserves unfinished ranges across pauses and failed
 requests. An item can still be missed if page movement affects both reads.
 The watcher also overlaps processing times by 30 seconds to allow for response
 timing and clock differences. Repeated event IDs deliver only once.
-Jev classifies new items only for sessions that were already running when the
-item was created. When Jev identifies a session as the creator, that session
+GLiDE classifies new items only for sessions that were already running when the
+item was created. When GLiDE identifies a session as the creator, that session
 receives new comments, reviews and pull request lifecycle events from the item's
 timeline. Pull request line comments are read separately and saved with the
 timeline events. Each source keeps its own cursor, and both are saved in one

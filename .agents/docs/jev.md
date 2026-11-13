@@ -8,9 +8,9 @@ The classifiers described below began on Jev (TypeSafe). Every live classifier n
 
 ## What Jev is
 
-Jev is TypeSafe's "System One" classifier. A request carries a JSON `state` and a fixed set of typed questions; the answer is a choice with a confidence, or a probability, and never generated text. Mjolnir sends bounded evidence about one session turn and asks three independent questions: did the turn fail and how, does the user need to respond, and what authorized work remains. The answers are advisory. Deterministic code in the worker and daemon decides what to do with them, and every automatic action has a confidence threshold, a stable command identity, and a fallback to today's behavior when Jev is unavailable, uncertain, or wrong.
+Jev is the legacy name for Mjolnir's classification setting and history. Current classifiers use GLiDE (Fastino) through the hosted proxy. Requests carry task-specific evidence and return structured judgments; deterministic code decides what to do with them.
 
-Requests go through the public Cloudflare proxy in `services/jev-proxy/` unless a local TypeSafe key exists (`TYPESAFE_API_KEY` or `~/.secrets/typesafe_api_key`), in which case the worker calls TypeSafe directly and the daemon forwards the key to container and SSH workers. `[jev] enabled = false` disables everything. The proxy runbook, routes, and deployment history are in `.agents/docs/jev-proxy.md`.
+Current classifier requests go through the hosted proxy in `services/jev-proxy/` to GLiDE (Fastino). Current builds do not use local TypeSafe keys or send requests to TypeSafe; legacy Jev routes remain available for older releases. `[jev] enabled = false` disables every classifier. The proxy runbook, routes, and deployment history are in `.agents/docs/jev-proxy.md`.
 
 ## Principles
 
