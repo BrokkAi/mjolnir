@@ -909,7 +909,7 @@ test('menus follow capabilities, long press cancellation, right click, keyboard,
   await expect(lockedCard).not.toHaveAttribute('role', 'link');
   await openTrigger.click();
   await expect(openMenu).toBeVisible();
-  await expect(openMenu.getByRole('menuitem')).toHaveText(['Changed files…', 'Ignore notifications', 'Rename', 'Copy session ID', 'Cancel operation', 'Suspend session…']);
+  await expect(openMenu.getByRole('menuitem')).toHaveText(['Changed files…', 'Ignore', 'Rename', 'Copy session ID', 'Cancel operation', 'Suspend session…']);
   await openMenu.getByRole('menuitem', { name: 'Rename' }).focus();
   await page.keyboard.press('ArrowDown');
   expect(await page.evaluate(() => document.activeElement?.dataset.action)).toBe('copy-session-id');
@@ -966,18 +966,18 @@ test('menus follow capabilities, long press cancellation, right click, keyboard,
   await refresh(page, state);
   await expect(openCard.getByRole('button', { name: 'Dismiss notification' })).toHaveCount(0);
   await openTrigger.click();
-  await expect(openMenu.getByRole('menuitem')).toHaveText(['Changed files…', 'Dismiss notification', 'Ignore notifications', 'Copy session ID', 'Cancel operation', 'Suspend session…']);
+  await expect(openMenu.getByRole('menuitem')).toHaveText(['Changed files…', 'Dismiss notification', 'Ignore', 'Copy session ID', 'Cancel operation', 'Suspend session…']);
   await openMenu.getByRole('menuitem', { name: 'Dismiss notification' }).click();
   await expect.poll(() => state.actions.at(-1)).toEqual({ action: 'dismiss-notification', session_id: 'openable', target: { read_through: 10 } });
 
   // Ignoring notifications toggles from the same menu, below Dismiss.
   await openTrigger.click();
-  await openMenu.getByRole('menuitem', { name: 'Ignore notifications' }).click();
+  await openMenu.getByRole('menuitem', { name: 'Ignore' }).click();
   await expect.poll(() => state.actions.at(-1)).toEqual({ action: 'set-session-notifications-ignored', session_id: 'openable', ignored: true });
   menuSession.notifications_ignored = true;
   await refresh(page, state);
   await openTrigger.click();
-  await expect(openMenu.getByRole('menuitem', { name: 'Stop ignoring notifications' })).toBeVisible();
+  await expect(openMenu.getByRole('menuitem', { name: 'Stop ignoring' })).toBeVisible();
 
   async function beginPointer(cardLocator) {
     const box = await cardLocator.boundingBox();

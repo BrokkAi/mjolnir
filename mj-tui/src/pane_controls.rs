@@ -866,7 +866,7 @@ mod tests {
         d.focus_pane(pin);
         d.focus_prompt();
         assert_eq!(
-            d.dispatch_command(crate::actions::CommandId::UnpinSession),
+            d.dispatch_command(crate::actions::CommandId::PinSession),
             DashboardAction::UnpinSession {
                 session_id: "session-1".into()
             }
