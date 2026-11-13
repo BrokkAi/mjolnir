@@ -17,7 +17,7 @@ Mjolnir-managed sessions have fallen behind current stable harness releases. Aft
 - [x] (2026-11-13 09:00Z) Ran focused pin, installer, configuration, generated-file, Python, Node, core, worker, and controller tests.
 - [x] (2026-11-13 08:56Z) Exercised real ACP initialize/version handshakes for all seven ACP harnesses; Codex launched app-server 0.168.0, and OpenCode completed a real two-step tool turn with whole-turn usage.
 - [x] (2026-11-13 09:11Z) Ran workspace Clippy, reviewed the complete diff, and confirmed the Grok fixture changes only its filename and recorded version.
-- [ ] Commit the validated change on `master`, push it, and check the agent-dev image publication workflow.
+- [x] (2026-11-13 09:31Z) Committed and pushed the validated change as `dca598e54`; the agent-dev image workflow `43398690145` succeeded for both architectures and published the multi-arch manifest.
 
 ## Surprises & Discoveries
 
@@ -57,7 +57,9 @@ Mjolnir-managed sessions have fallen behind current stable harness releases. Aft
 
 ## Outcomes & Retrospective
 
-Implementation is complete and reviewed. Core passed 648 unit tests plus 3 Jev scenario tests, controller passed 2,611 tests, and worker passed 837 tests with one unrelated process-title flake that then passed alone. All 15 agent-dev/release Node tests, formatting, workspace Clippy, three live native-install checks, all seven ACP initializations, Codex app-server session creation, and an OpenCode whole-turn usage probe passed. The Claude stripped-credential test is blocked by this container's lack of permission to create its private network namespace. Commit, push, and publication verification remain.
+Implementation is complete, reviewed, committed, pushed, and published. Core passed 648 unit tests plus 3 Jev scenario tests, controller passed 2,611 tests, and worker passed 837 tests with one unrelated process-title flake that then passed alone. All 15 agent-dev/release Node tests, formatting, workspace Clippy, three live native-install checks, all seven ACP initializations, Codex app-server session creation, and an OpenCode whole-turn usage probe passed. The Claude stripped-credential test is blocked by this container's lack of permission to create its private network namespace.
+
+The agent-dev image workflow built amd64 and arm64 and published the multi-arch manifest successfully. Hosted CI runs for the feature commit were cancelled because other agents pushed newer master commits while they ran; the local full suites and workspace Clippy cover the committed feature set. Muse remains intentionally on its last fully supported published adapter/host pair until a new adapter release includes the 1.4.15 surface.
 
 ## Context and Orientation
 
@@ -154,3 +156,5 @@ The public Rust interface remains `mj_core::harness_runtime::{pin, npm_bridge, f
 2026-11-13 09:02Z: Updated progress with checksum, handshake, generated-file, and full crate-test evidence. The only validation failure observed was the unrelated isolated process-title flake, which passed on its required single-test rerun.
 
 2026-11-13 09:11Z: Recorded the completed Clippy run and final diff review, including exact passing suite counts and the one environment-bound Claude test limitation.
+
+2026-11-13 09:32Z: Finalized the plan after confirming the pushed agent-dev image workflow succeeded for both architectures and the multi-arch manifest. Recorded the concurrent-push CI cancellations and remaining Muse adapter-release dependency.
