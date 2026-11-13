@@ -270,6 +270,10 @@ pub struct WorkerLaunchConfig {
         deserialize_with = "deserialize_execution_policy"
     )]
     pub execution_policy: ExecutionPolicy,
+    /// Optional synchronous Brokk Observe guardrails. Present only when the
+    /// selected harness can ask Mjolnir before every policy-eligible tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observe_policy: Option<crate::observe::ObserveEnforcementConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

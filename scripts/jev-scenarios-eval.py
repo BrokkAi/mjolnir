@@ -2,7 +2,7 @@
 """Replay the recorded Jev scenarios against the live model and report.
 
 Reads every fixture in `mj-core/tests/jev-scenarios/`, posts its `evidence` with
-the current bundled questions (`mj-core/src/activity/verdict_questions.json`) to
+the current bundled questions (`services/jev-proxy/src/verdict_questions.json`) to
 TypeSafe directly, three times each, and writes `results.jsonl` plus `report.md`
 under --output. The report compares the model's answers and the resulting
 Mjolnir action with each fixture's `expected`, per category. It never runs in
@@ -35,7 +35,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "mj-core/tests/jev-scenarios"
-QUESTIONS = ROOT / "mj-core/src/activity/verdict_questions.json"
+QUESTIONS = ROOT / "services/jev-proxy/src/verdict_questions.json"
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 
 POLICY = "input-ratio2.5-floor0.5-finished0.8"

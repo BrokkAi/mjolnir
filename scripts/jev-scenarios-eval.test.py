@@ -195,7 +195,7 @@ class Experiments(unittest.TestCase):
 
 class ActionPolicy(unittest.TestCase):
     def test_shared_rust_probability_gate_cases(self):
-        cases = json.loads((module.ROOT / "mj-core/tests/jev-gates.json").read_text())
+        cases = json.loads((module.ROOT / "services/jev-proxy/tests/fixtures/jev-gates.json").read_text())
         for case in cases:
             with self.subTest(case=case["name"]):
                 parsed = module.parse_answers(case["answers"])
@@ -203,7 +203,7 @@ class ActionPolicy(unittest.TestCase):
                 self.assertEqual(module.requires_input(parsed["input"]), case["requires_input"])
 
     def test_malformed_distributions_fail_visibly(self):
-        cases = json.loads((module.ROOT / "mj-core/tests/jev-gates.json").read_text())
+        cases = json.loads((module.ROOT / "services/jev-proxy/tests/fixtures/jev-gates.json").read_text())
         for bad in (None, {}, {"required": 1}, {"required": .5, "none": .2, "redundant_request": .2, "unclear": -.1}):
             answers = json.loads(json.dumps(cases[0]["answers"]))
             answers["input"]["probabilities"] = bad
@@ -211,7 +211,7 @@ class ActionPolicy(unittest.TestCase):
                 module.parse_answers(answers)
 
     def test_confidence_requires_a_bounded_number_like_the_runtime(self):
-        cases = json.loads((module.ROOT / "mj-core/tests/jev-gates.json").read_text())
+        cases = json.loads((module.ROOT / "services/jev-proxy/tests/fixtures/jev-gates.json").read_text())
         for bad in (True, "0.99", None, float("nan"), float("inf"), -.1, 1.1):
             answers = json.loads(json.dumps(cases[0]["answers"]))
             answers["input"]["confidence"] = bad

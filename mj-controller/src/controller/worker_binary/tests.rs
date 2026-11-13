@@ -4,6 +4,20 @@ use super::*;
 use crate::targets::tests::unwrapped_remote_line;
 
 #[test]
+fn observe_enforcement_requires_configured_approvals_even_on_isolated_targets() {
+    for current in [
+        ExecutionPolicy::ConfiguredApprovals,
+        ExecutionPolicy::Unconstrained,
+    ] {
+        assert_eq!(
+            effective_execution_policy(current, true),
+            ExecutionPolicy::ConfiguredApprovals
+        );
+        assert_eq!(effective_execution_policy(current, false), current);
+    }
+}
+
+#[test]
 fn oracle_launch_requires_a_top_level_session_and_an_effective_choice() {
     let mut session = crate::controller::test_support::checkpoint_test_session("primary");
     let mut choices = mj_core::config::SubagentConfig::default();
@@ -4749,6 +4763,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         native_session_id: None,
         project_memory: None,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        observe_policy: None,
     };
 
     // A host of its own, so no other test has claimed this store's collection.
@@ -4891,6 +4906,7 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
         native_session_id: None,
         project_memory: None,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        observe_policy: None,
     };
     let executor = CacheLinkExecutor {
         commands: RefCell::new(Vec::new()),
@@ -5002,6 +5018,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         native_session_id: None,
         project_memory: None,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        observe_policy: None,
     };
     let locator = targets::TargetLocator::LocalBare {
         worker_root: "/worker/session-local".into(),

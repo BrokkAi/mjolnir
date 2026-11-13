@@ -2139,6 +2139,7 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
             mcp_delivery: mj_core::worker_launch::ProjectMemoryMcpDelivery::Acp,
         }),
         execution_policy: mj_core::config::ExecutionPolicy::Unconstrained,
+        observe_policy: None,
     }
     .write(&spec.relay_root.join("launch.json"))
     .unwrap();

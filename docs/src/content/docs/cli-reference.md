@@ -104,6 +104,26 @@ produces the same event identities. Automatic daemon publication, historical
 backfill, and Brokk Observe's broader orchestrator and harness dimensions are
 later milestones.
 
+Set `OBSERVE_ENFORCE=true` on the Mjolnir daemon with `OBSERVE_URL` and
+`OBSERVE_TOKEN` to enable central guardrails. Enforcement currently supports
+DSH only because dsh-acp asks Mjolnir before every command, write, and MCP call.
+Other harnesses may auto-approve tools internally, so Mjolnir refuses their
+sessions rather than claiming protection it cannot provide.
+
+`OBSERVE_TIMEOUT` is the whole-number policy deadline in seconds and defaults
+to 3. A server or network failure selects the harness's one-time allow by
+default; set `OBSERVE_FAIL_CLOSED=true` to select its one-time rejection
+instead. `deny` rejects one call without cancelling the turn, `ask` opens
+Mjolnir's normal permission form, and `warn` is shown in Mjolnir's notices
+before the existing approval behavior continues.
+
+Observe records a runtime decision as enforced only after Mjolnir confirms
+that the permission response was delivered. If that acknowledgement is lost,
+the decision remains visible as a policy match that was not known to have been
+applied. The acknowledgement also records the resulting permission outcome:
+approved, rejected, warned, or cancelled. The Observe token is kept in the
+worker launch configuration and is not added to the harness environment.
+
 ## Authenticate a profile
 
 ```text

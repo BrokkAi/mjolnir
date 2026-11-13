@@ -1880,16 +1880,15 @@ impl DashboardState {
                     None => DashboardAction::None,
                 }
             }
-            CommandId::IgnoreNotifications => {
-                self.command_session()
-                    .map(|session| (session.id.clone(), session.notifications_ignored))
-                    .map_or(DashboardAction::None, |(session_id, ignored)| {
-                        DashboardAction::SetSessionNotificationsIgnored {
-                            session_id,
-                            ignored: !ignored,
-                        }
-                    })
-            }
+            CommandId::IgnoreNotifications => self
+                .command_session()
+                .map(|session| (session.id.clone(), session.notifications_ignored))
+                .map_or(DashboardAction::None, |(session_id, ignored)| {
+                    DashboardAction::SetSessionNotificationsIgnored {
+                        session_id,
+                        ignored: !ignored,
+                    }
+                }),
             CommandId::InterruptTurn => match interrupt_available(self) {
                 Availability::Ready => self
                     .command_session_id()

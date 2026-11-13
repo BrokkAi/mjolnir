@@ -1,7 +1,7 @@
 //! Optional hosted GLiDE classification. Failures leave activity alone.
 use anyhow::{Context, Result, ensure};
 use mj_core::activity::question_locator;
-use mj_core::activity::verdict::{TurnEvidence, request_fits};
+use mj_core::activity::verdict::TurnEvidence;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
@@ -515,6 +515,7 @@ impl VerdictClient {
                         .authorization
                         .clone()
                         .context("missing handback authorization")?,
+                    true,
                     timeout,
                     |history| {
                         let mut evidence = evidence.clone();
@@ -592,10 +593,14 @@ impl VerdictClient {
     }
 
     /// Retry only an explicit size refusal, and only with a strictly smaller body.
+    /// With `keep_instructions`, a refusal that only a history without some of the
+    /// person's instruction text could answer fails instead of judging against
+    /// partial instructions.
     async fn post_glide(
         &self,
         endpoint: reqwest::Url,
         mut history: mj_core::assessment::ContextHistory,
+        keep_instructions: bool,
         timeout: Duration,
         project: impl Fn(&mj_core::assessment::ContextHistory) -> Result<serde_json::Value>,
     ) -> Result<reqwest::Response> {
@@ -618,6 +623,10 @@ impl VerdictClient {
             if is_glide_size_refusal(status, &bytes) {
                 let mut smaller = None;
                 while glide_turn::shrink(&mut history) {
+                    anyhow::ensure!(
+                        !keep_instructions || history.authorization_complete,
+                        "GLiDE refused the request size ({status}); a smaller request would drop the parent's instructions"
+                    );
                     let candidate = serde_json::to_vec(&project(&history)?)?;
                     if candidate.len() < body.len() {
                         smaller = Some(candidate);
@@ -651,6 +660,7 @@ impl VerdictClient {
             .post_glide(
                 endpoint,
                 authorization,
+                false,
                 Duration::from_secs(180),
                 |history| glide_turn::project(evidence, history.clone(), facts, native_agent_count),
             )
@@ -673,35 +683,6 @@ impl VerdictClient {
             );
         }
         Ok(probabilities)
-    }
-}
-
-/// Add the relay owner's authorization history and keep the whole request,
-/// questions included, inside the 64 KiB limit. This is shared by running and
-/// completed-turn checks, and by evidence stored before the questions grew.
-pub(crate) fn bound_authorization(
-    evidence: &mut TurnEvidence,
-    authorization: Option<mj_core::assessment::ContextHistory>,
-) {
-    evidence.authorization = authorization;
-    // Authorization is historical context. Only the turn owner supplies the
-    // current reply; an older question must not become this turn's answer.
-    if evidence.authorization.is_some() {
-        evidence.transcript_summary.clear();
-    }
-    if !request_fits(evidence)
-        && let Some(mut context) = evidence.authorization.take()
-    {
-        let mut probe = evidence.clone();
-        let fits = context.shrink_until(|candidate| {
-            probe.authorization = Some(candidate.clone());
-            request_fits(&probe)
-        });
-        evidence.authorization = fits.then_some(context);
-    }
-    if !request_fits(evidence) {
-        evidence.authorization = None;
-        evidence.transcript_summary.clear();
     }
 }
 
@@ -875,6 +856,78 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn handback_size_refusal_never_shrinks_away_instructions() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut requests = 0;
+            loop {
+                let Ok(Ok((socket, _))) =
+                    tokio::time::timeout(Duration::from_millis(500), listener.accept()).await
+                else {
+                    return requests;
+                };
+                let mut socket = BufReader::new(socket);
+                let mut length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    socket.read_line(&mut line).await.unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                socket.read_exact(&mut vec![0; length]).await.unwrap();
+                requests += 1;
+                let answer = serde_json::json!({"error":"body_too_large"}).to_string();
+                socket.write_all(format!("HTTP/1.1 413 Payload Too Large\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}", answer.len()).as_bytes()).await.unwrap();
+            }
+        });
+        let client = VerdictClient::new(VerdictSource::Hosted { endpoint }).unwrap();
+        let mut completed = evidence();
+        completed.phase = TurnPhase::Replied;
+        // The oldest message is the parent's instruction: the next smaller
+        // request would have to drop it.
+        completed.authorization = Some(ContextHistory {
+            messages: vec![
+                EvidenceMessage {
+                    id: "user:first".into(),
+                    role: "user".into(),
+                    text: "First instruction".into(),
+                },
+                EvidenceMessage {
+                    id: "agent:progress".into(),
+                    role: "assistant".into(),
+                    text: "Progress".into(),
+                },
+                EvidenceMessage {
+                    id: "user:second".into(),
+                    role: "user".into(),
+                    text: "Second instruction".into(),
+                },
+                EvidenceMessage {
+                    id: "agent:report".into(),
+                    role: "assistant".into(),
+                    text: "Report".into(),
+                },
+            ],
+            ..Default::default()
+        });
+        let error = client
+            .ask_handback_logged("isolated", 1, &completed)
+            .await
+            .1
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("drop the parent's instructions"),
+            "{error:#}"
+        );
+        assert_eq!(server.await.unwrap(), 1);
+    }
+
     fn evidence() -> TurnEvidence {
         let context = TurnContext::default();
         context.reset(None, "Implement the requested feature");
@@ -953,67 +1006,6 @@ mod tests {
         // The server accepts one connection; a retry would fail to connect instead.
         assert!(format!("{error:#}").contains("413"), "{error:#}");
         server.await.unwrap();
-    }
-
-    #[test]
-    fn authorization_is_bounded_to_the_shared_wire_limit() {
-        let authorization = ContextHistory {
-            messages: vec![
-                EvidenceMessage {
-                    id: "user:task".into(),
-                    role: "user".into(),
-                    text: "Finish the report and summarize the result.".into(),
-                },
-                EvidenceMessage {
-                    id: "agent:reply".into(),
-                    role: "assistant".into(),
-                    text: "The report is complete.".into(),
-                },
-            ],
-            ..Default::default()
-        };
-        let mut completed = evidence();
-        completed.phase = TurnPhase::Replied;
-        completed.assistant_text_tail = "The report is complete.".into();
-        bound_authorization(&mut completed, Some(authorization.clone()));
-        assert_eq!(completed.authorization, Some(authorization));
-        assert!(completed.transcript_summary.is_empty());
-
-        let mut large = ContextHistory {
-            messages: vec![EvidenceMessage {
-                id: "user:large".into(),
-                role: "user".into(),
-                text: "Do the requested work.".into(),
-            }],
-            ..Default::default()
-        };
-        large.messages.extend((0..255).map(|index| EvidenceMessage {
-            id: format!("{}-{index}", "a".repeat(240)),
-            role: "assistant".into(),
-            text: "done".into(),
-        }));
-        let mut bounded = evidence();
-        bounded.transcript_summary = "duplicate summary".into();
-        bound_authorization(&mut bounded, Some(large));
-        let retained = bounded.authorization.as_ref().unwrap();
-        assert!(retained.assistant_history_omitted);
-        assert_eq!(retained.messages.last().unwrap().role, "assistant");
-        assert!(request_fits(&bounded));
-        assert!(bounded.transcript_summary.is_empty());
-
-        let oversized_users = ContextHistory {
-            messages: vec![EvidenceMessage {
-                id: "user:escaped".into(),
-                role: "user".into(),
-                text: "\n".repeat(32 * 1024),
-            }],
-            ..Default::default()
-        };
-        let mut fallback = evidence();
-        fallback.transcript_summary = "duplicate summary".into();
-        bound_authorization(&mut fallback, Some(oversized_users));
-        assert!(fallback.authorization.is_none());
-        assert!(fallback.transcript_summary.is_empty());
     }
 }
 

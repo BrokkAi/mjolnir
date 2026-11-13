@@ -166,6 +166,24 @@ impl DecisionLog {
     /// Publish the owner's durable state, including later admission or supersession.
     /// Request tasks must not overwrite this record with their process-local outcome.
     pub fn record_assessment(&self, session: &str, assessment: &crate::assessment::TurnAssessment) {
+        let technical = if assessment.glide.is_some() {
+            let questions: Value = serde_json::from_str(crate::activity::eot_glide::QUESTIONS)
+                .expect("bundled GLiDE turn questions are valid JSON");
+            serde_json::json!({
+                "contract": "glide-turn-v1",
+                "assessment": assessment,
+                "questions": questions,
+            })
+        } else {
+            serde_json::json!({
+                "contract": "turn-verdict-v7",
+                "assessment": assessment,
+                "automation_threshold": crate::assessment::AUTOMATION_CONFIDENCE,
+                "required_input_probability": crate::assessment::REQUIRED_INPUT_PROBABILITY,
+                "required_input_ratio": crate::assessment::REQUIRED_INPUT_RATIO,
+                "finished_work_probability": crate::assessment::FINISHED_WORK_PROBABILITY,
+            })
+        };
         self.append(&Decision {
             version: 1,
             id: format!("assessment-{session}-{}", assessment.revision),
@@ -179,7 +197,7 @@ impl DecisionLog {
             action: assessment.reason.replace('_', " "),
             scope: "Whole retained authorization messages and current completion evidence; omitted context is explicit.".into(),
             owner: owner().into(),
-            technical: Some(serde_json::json!({"contract":if assessment.glide.is_some() { "glide-turn-v1" } else { "turn-verdict-v7" }, "assessment":assessment, "questions":crate::activity::verdict::questions(), "automation_threshold":crate::assessment::AUTOMATION_CONFIDENCE, "required_input_probability":crate::assessment::REQUIRED_INPUT_PROBABILITY, "required_input_ratio":crate::assessment::REQUIRED_INPUT_RATIO, "finished_work_probability":crate::assessment::FINISHED_WORK_PROBABILITY})),
+            technical: Some(technical),
         });
     }
 
