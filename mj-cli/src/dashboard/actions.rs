@@ -1942,7 +1942,9 @@ fn start_session_launch_with_repository_preflight(
     match action {
         action @ DashboardAction::CreateSession { .. } => {
             debug_assert!(repository_preflight.is_none());
-            context.dashboard.set_notice("Preparing session launch…");
+            context
+                .dashboard
+                .set_notice(action.annotate_launch_notice("Preparing session launch…".to_owned()));
             let go_save = context.dashboard.remember_go_launch(&action);
             spawn_dashboard_create_session(
                 action,

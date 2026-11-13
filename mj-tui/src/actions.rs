@@ -282,19 +282,31 @@ fn selected_session_ready(dashboard: &DashboardState) -> Availability {
 }
 
 fn dismiss_notification_available(dashboard: &DashboardState) -> Availability {
-    let Some(session) = dashboard.command_session() else {
-        return Availability::Hidden;
-    };
-    // A child's open form is answered in the child, never dismissed here:
-    // Open sub-agent question takes this row's place.
-    if dashboard.waiting_child_of(&session.id).is_some() {
+    match dashboard.command_session() {
+        Some(session) => dismiss_notification_available_for(dashboard, &session.id),
+        None => Availability::Hidden,
+    }
+}
+
+/// [`dismiss_notification_available`] for a named session, so a menu on one
+/// row answers for that row and not for the selected session.
+pub(crate) fn dismiss_notification_available_for(
+    dashboard: &DashboardState,
+    session_id: &str,
+) -> Availability {
+    if !dashboard.state.sessions.contains_key(session_id) {
         return Availability::Hidden;
     }
-    if dashboard.notification_dismissal_pending(&session.id) {
+    // A child's open form is answered in the child, never dismissed here:
+    // Open sub-agent question takes this row's place.
+    if dashboard.waiting_child_of(session_id).is_some() {
+        return Availability::Hidden;
+    }
+    if dashboard.notification_dismissal_pending(session_id) {
         return Availability::Blocked("Dismissing notification");
     }
     if dashboard
-        .notification_dismissal_target(&session.id)
+        .notification_dismissal_target(session_id)
         .is_none()
     {
         return Availability::Blocked("No dismissible notification is active");

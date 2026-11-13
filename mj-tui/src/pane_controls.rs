@@ -1,6 +1,6 @@
 //! Pin placement and pane menus share the dashboard's component event model.
 use super::*;
-use crate::actions::CommandId;
+use crate::actions::{Availability, CommandId};
 use crate::surface_controls::SurfaceControl;
 use crate::tile_layout::PaneId;
 use mj_chat::components::{ChoiceList, ControlKind, Dialog, Interaction, ListActivation};
@@ -32,6 +32,11 @@ enum PaneOperation {
     PreferProfile(String),
     /// Empty `[quota] prefer`.
     ClearLoadBalancing,
+    /// Runs a session command for the session whose row was right-clicked,
+    /// through the same entry point its menu row uses.
+    SessionCommand(String, CommandId),
+    /// Creates a top-level session with this session's settings.
+    NewSessionLike(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,6 +231,74 @@ impl DashboardState {
         }
     }
 
+    /// The right-click menu on a session row. Its entries act on that row's
+    /// session, never on the selected one. A harness-native child has no row
+    /// and no record of its own, so it gets no menu.
+    pub(crate) fn begin_session_row_menu(&mut self, session_id: &str, at: (u16, u16)) {
+        if self.is_native_agent(session_id) || !self.state.sessions.contains_key(session_id) {
+            return;
+        }
+        let entries = vec![
+            (
+                "Dismiss notification".to_owned(),
+                PaneOperation::SessionCommand(
+                    session_id.to_owned(),
+                    CommandId::DismissNotification,
+                ),
+            ),
+            (
+                "Copy session ID".to_owned(),
+                PaneOperation::SessionCommand(session_id.to_owned(), CommandId::CopySessionId),
+            ),
+            (
+                "New session with these settings".to_owned(),
+                PaneOperation::NewSessionLike(session_id.to_owned()),
+            ),
+        ];
+        let first_enabled = entries
+            .iter()
+            .position(|(_, operation)| self.pane_operation_enabled(operation))
+            .unwrap_or(0);
+        self.show_pane_menu("Session", entries, false);
+        if let Some(menu) = self.pane_menu.as_mut() {
+            menu.anchor = Some(Rect::new(at.0, at.1, 1, 1));
+            menu.form.get_mut().set_selected(0, first_enabled);
+        }
+    }
+
+    /// Whether a pane-menu row can run now. Both the drawing and the
+    /// activation ask here, so a row that looks disabled cannot be run from
+    /// the keyboard, a digit or the mouse.
+    fn pane_operation_enabled(&self, operation: &PaneOperation) -> bool {
+        match operation {
+            // Clearing an empty preference list does nothing, so the row says
+            // so by being disabled.
+            PaneOperation::ClearLoadBalancing => !self.config.quota.prefer.is_empty(),
+            PaneOperation::SessionCommand(session_id, CommandId::DismissNotification) => {
+                crate::actions::dismiss_notification_available_for(self, session_id)
+                    == Availability::Ready
+            }
+            PaneOperation::SessionCommand(session_id, _)
+            | PaneOperation::NewSessionLike(session_id) => {
+                self.state.sessions.contains_key(session_id)
+            }
+            _ => true,
+        }
+    }
+
+    /// Runs `id` for `session_id` as its own menu row would: the command acts
+    /// on the named session for exactly this call.
+    fn run_session_command(&mut self, session_id: String, id: CommandId) -> DashboardAction {
+        if !self.state.sessions.contains_key(&session_id) {
+            self.set_notice("This session is no longer available.");
+            return DashboardAction::None;
+        }
+        let saved = self.command_session_override.replace(session_id);
+        let action = self.run_available_command(id);
+        self.command_session_override = saved;
+        action
+    }
+
     pub(crate) fn begin_pin_menu(&mut self, session: String) {
         if !self.state.sessions.contains_key(&session) {
             return;
@@ -385,6 +458,9 @@ impl DashboardState {
         else {
             return DashboardAction::None;
         };
+        if !self.pane_operation_enabled(&operation) {
+            return DashboardAction::None;
+        }
         self.pane_menu = None;
         self.last_row_click = None;
         match operation {
@@ -435,6 +511,10 @@ impl DashboardState {
                     DashboardAction::ClearLoadBalancingPreferences
                 }
             }
+            PaneOperation::SessionCommand(session_id, id) => {
+                self.run_session_command(session_id, id)
+            }
+            PaneOperation::NewSessionLike(session_id) => self.begin_new_session_like(&session_id),
             PaneOperation::Workspace(workspace_id) => {
                 if self.workspace_ids().contains(&workspace_id) {
                     DashboardAction::SelectWorkspace { workspace_id }
@@ -780,15 +860,10 @@ pub(crate) fn render_pane_menu(frame: &mut Frame, area: Rect, dashboard: &Dashbo
             inner,
         );
     } else {
-        // Clearing an empty preference list does nothing, so the row says so
-        // by being disabled.
         let enabled: Vec<bool> = menu
             .entries
             .iter()
-            .map(|(_, operation)| {
-                !matches!(operation, PaneOperation::ClearLoadBalancing)
-                    || !dashboard.config.quota.prefer.is_empty()
-            })
+            .map(|(_, operation)| dashboard.pane_operation_enabled(operation))
             .collect();
         ChoiceList::render_with_rows(
             frame,

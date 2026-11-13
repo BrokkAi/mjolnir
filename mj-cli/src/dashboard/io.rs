@@ -1741,8 +1741,11 @@ impl DashboardContext {
                     );
                 }
                 let notice_name = self.session_notice_name(&session_id);
-                self.dashboard
-                    .set_notice(format!("Launching {notice_name}…"));
+                self.dashboard.set_notice(
+                    registered
+                        .retry_launch
+                        .annotate_launch_notice(format!("Launching {notice_name}…")),
+                );
                 if still_launching {
                     self.lifecycle_operations.insert(
                         session_id,

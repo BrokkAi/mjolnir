@@ -120,15 +120,32 @@ open the session's action menu. The menu groups its actions under dividers:
 - **Organize**: **Rename…**, **Pin…**, and **Unpin**.
 - **Lifecycle**: **Container settings** (container sessions only), **Move…**,
   **Suspend…**, and **Restart**.
-- After a plain divider: **Copy session ID** and **Destroy…**.
+- After a plain divider: **Destroy…**.
+
+A **Copy session ID** button sits in the menu's top right corner.
 
 The menu leaves out an action that does not apply to the session. An action
 that applies but cannot run yet stays in the menu, greyed, with the reason.
 
 **Copy session ID** puts the session's full ID on the clipboard, for commands
 such as `mj wait --session <id>`. The footer confirms the copy with the ID's
-first eight characters. The command palette (`prefix+:`) lists the same action
-under the session's name.
+first eight characters.
+
+Right-clicking a session row in the terminal opens a small menu at the pointer,
+for that row's session and without moving the selection:
+
+- **Dismiss notification**, greyed while the session has nothing to dismiss.
+- **Copy session ID**, the same copy as above.
+- **New session with these settings** starts a new top-level session at once,
+  with no dialog, using the session's profile, runtime, workspace, project,
+  attached directories, delegation and oracle choices, review setting, GitHub
+  and project-memory opt-outs, and container size. It leaves behind the
+  title, conversation, parent link, and any managed worktree, for which it
+  asks for a new one. A model or effort picked inside the session is not
+  copied; the profile supplies them. If the profile or workspace can no longer
+  be used, the new session takes another one and the footer says so. If the
+  runtime or project can no longer be used, the new-session wizard opens
+  instead.
 
 ## Detach and reattach
 

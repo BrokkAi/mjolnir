@@ -225,6 +225,40 @@ const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 /// every release and nobody reads them as a claim about the running version.
 const TEST_VERSION_LABEL: &str = "vX.Y.Z";
 
+/// Settings a launch copies from an existing session because the wizard has
+/// no step for them: "New session with these settings" sets them, and every
+/// wizard launch leaves them at their defaults.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CarriedLaunchSettings {
+    pub no_project_memory: bool,
+    pub no_github_events: bool,
+    pub no_github_credentials: bool,
+    /// What the copy changed because a setting could not apply now, in a
+    /// sentence the launch notices show.
+    pub note: Option<String>,
+}
+
+impl CarriedLaunchSettings {
+    /// `notice` followed by the note, when the copy changed something.
+    pub fn annotate(&self, notice: String) -> String {
+        match &self.note {
+            Some(note) => format!("{notice} {note}"),
+            None => notice,
+        }
+    }
+}
+
+impl DashboardAction {
+    /// `notice` for a launch, followed by what a copied launch changed. Any
+    /// other action leaves it as it is.
+    pub fn annotate_launch_notice(&self, notice: String) -> String {
+        match self {
+            Self::CreateSession { carried, .. } => carried.annotate(notice),
+            _ => notice,
+        }
+    }
+}
+
 /// A side effect requested by the dashboard.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DashboardAction {
@@ -334,6 +368,8 @@ pub enum DashboardAction {
         target_template_id: String,
         additional_mounts: Vec<AdditionalMount>,
         resource_allocation: Option<SessionResourceAllocation>,
+        /// Choices the wizard does not offer, copied from another session.
+        carried: CarriedLaunchSettings,
     },
     /// Resolve all network sources for an isolated session and leave the
     /// creation wizard open until the person reviews that plan.

@@ -1581,6 +1581,7 @@ fn bare_ssh_new_session_selects_target_then_raw_project_without_attachments() {
             target_template_id: "machine".into(),
             additional_mounts: Vec::new(),
             resource_allocation: None,
+            carried: Default::default(),
         }
     );
 }
@@ -1898,6 +1899,7 @@ fn raw_localhost_uses_local_project_history_and_warns_for_kimi() {
             target_template_id: "localhost".into(),
             additional_mounts: Vec::new(),
             resource_allocation: None,
+            carried: Default::default(),
         }
     );
 }
@@ -6445,5 +6447,84 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
             straightforward: None,
             subtle: None
         }
+    );
+}
+
+/// "New session with these settings" on a sub-agent that works in its
+/// parent's managed worktree must start a top-level session that asks for a
+/// worktree of its own in the parent's source directory (never the parent's
+/// worktree path), takes delegation and review from the owning session (the
+/// child's own are fixed by the launch), and replaces a profile that can no
+/// longer be used instead of refusing.
+#[test]
+fn new_session_like_a_child_in_a_managed_worktree_is_top_level_with_its_own_worktree() {
+    let mut parent = legacy_managed_session(running_session());
+    parent.target_template_id = "localhost".into();
+    parent.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
+    parent.review = Some(Box::new(mj_core::config::SessionReview::Off));
+    parent.no_github_credentials = true;
+    let worktree_root = parent.project_directory.clone().unwrap();
+    let mut child = running_session();
+    child.id = "child-session".into();
+    child.target_template_id = "localhost".into();
+    child.project_directory = parent.project_directory.clone();
+    child.managed_worktree = None;
+    child.subagents = Some(mj_core::subagent::SubagentPolicy::None);
+    child.oracle = false;
+    child.review = None;
+    child.no_github_credentials = true;
+    child.last_profile = "retired-profile".into();
+    let relation = mj_core::subagent::SubagentMetadata {
+        kind: mj_core::subagent::SubagentKind::Worker,
+        child_session_id: child.id.clone(),
+        parent_session_id: parent.id.clone(),
+        task_name: "Inspect parser".into(),
+        profile_id: child.last_profile.clone(),
+        model: None,
+        effort: None,
+        working_directory: Default::default(),
+        request_key: "request-1".into(),
+        created_at: child.created_at.clone(),
+        noticed_turn: None,
+        reported_finish: None,
+        handback_tool: false,
+    };
+    let mut dashboard = dashboard_with_session(parent.clone());
+    dashboard
+        .config
+        .targets
+        .insert("localhost".into(), TargetTemplate::LocalBare);
+    let mut state = dashboard.state.clone();
+    state.sessions.insert(child.id.clone(), child.clone());
+    state.subagents.insert(child.id.clone(), relation);
+    dashboard.set_state(state);
+
+    let DashboardAction::CreateSession {
+        project_directory,
+        create_managed_worktree,
+        subagents,
+        review,
+        profile_id,
+        carried,
+        ..
+    } = dashboard.begin_new_session_like(&child.id)
+    else {
+        panic!("the copy creates a session without a dialog");
+    };
+    assert_eq!(project_directory, Some(PathBuf::from("/srv/project")));
+    assert_ne!(project_directory, Some(worktree_root));
+    assert_eq!(create_managed_worktree, Some(true));
+    assert_eq!(subagents, Some(mj_core::subagent::SubagentPolicy::Native));
+    assert_eq!(review, Some(mj_core::config::SessionReview::Off));
+    // The profile the wizard itself would open on.
+    assert_eq!(
+        Some(profile_id.clone()),
+        dashboard.nth_offered_profile(dashboard.default_new_profile_index())
+    );
+    assert!(carried.no_github_credentials);
+    let note = carried.note.expect("the replaced profile is reported");
+    assert!(
+        note.contains("retired-profile") && note.contains(&profile_id),
+        "{note}"
     );
 }
