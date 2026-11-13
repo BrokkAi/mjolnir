@@ -1569,7 +1569,7 @@ test('conversation receipts require a visible focused caught-up conversation and
 
 
 test('notification snapshot retains handled entries below the notification band until a new visit', () => {
-  const context = vm.createContext({ sessionMessageMs: row => row.time });
+  const context = vm.createContext({ sessionMessageMs: row => row.time, dismissedNotifications: new Map() });
   vm.runInContext(sourceBetween('function hasNotification(', '/// Whether a session is a sub-agent'), context);
   vm.runInContext(sourceBetween('class NotificationSnapshot {', '\nfunction notificationRows()'), context);
   const update = (rows, allRows = rows) => JSON.parse(vm.runInContext(`JSON.stringify(notificationSnapshot.update(${JSON.stringify(rows)}, ${JSON.stringify(allRows)}))`, context));
