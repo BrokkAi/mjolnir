@@ -348,6 +348,14 @@ button:disabled {
   text-align: left;
 }
 
+/* The menu's top line reads the session's model, effort, and profile. */
+.session-menu-info {
+  padding: 2px 12px 4px;
+  color: var(--dim);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
 .session-meta {
   gap: 6px;
   color: var(--dim);

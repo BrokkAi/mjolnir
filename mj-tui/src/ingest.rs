@@ -86,6 +86,9 @@ pub(crate) struct SessionDetail {
     pub(crate) projection: MaterializedProjectionCache,
     /// The Sessions row's rendering of the message it shows.
     pub(crate) output_preview: crate::render::OutputPreviewCache,
+    /// The session's current model and effort as its worker reports them.
+    pub(crate) current_model: Option<Arc<str>>,
+    pub(crate) current_effort: Option<Arc<str>>,
 }
 
 #[derive(Debug)]
@@ -1399,6 +1402,17 @@ impl DashboardState {
         }
     }
 
+    /// The session's harness kind, for harness-specific readings of its state.
+    pub fn session_harness_kind(
+        &self,
+        session_id: &str,
+    ) -> Option<mj_core::config::HarnessKind> {
+        self.state
+            .sessions
+            .get(session_id)
+            .map(|record| record.harness_kind)
+    }
+
     /// Record what a session is doing beyond its turn clock, so a row can say
     /// that an idle agent still has a command of its own running.
     pub fn set_session_activity(
@@ -1417,6 +1431,26 @@ impl DashboardState {
                 .get_mut(session_id)
                 .expect("session detail was just inserted")
                 .activity = activity;
+        }
+    }
+
+    /// The session's current model and effort as its worker reports them, for
+    /// the session menu's top line.
+    pub fn set_session_current_config(
+        &mut self,
+        session_id: &str,
+        model: Option<String>,
+        effort: Option<String>,
+    ) {
+        let detail = self
+            .session_details
+            .entry(session_id.to_owned())
+            .or_default();
+        let model = model.map(Arc::from);
+        let effort = effort.map(Arc::from);
+        if detail.current_model != model || detail.current_effort != effort {
+            detail.current_model = model;
+            detail.current_effort = effort;
         }
     }
 
