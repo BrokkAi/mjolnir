@@ -82,14 +82,9 @@ pub fn model_offers<'a>(
             offers[index].subscription_profiles += usize::from(!usage_priced);
         }
     }
-    let models = offers
-        .iter()
-        .map(|offer| offer.choice.clone())
-        .collect::<Vec<_>>();
-    for offer in &mut offers {
-        if model_catalog::model_id(&models, &offer.choice.value) != offer.identity {
-            offer.choice.value = offer.identity.clone();
-        }
+    let choices = model_catalog::merged_choices(offers.iter().map(|offer| offer.choice.clone()));
+    for (offer, choice) in offers.iter_mut().zip(choices) {
+        offer.choice = choice;
     }
     offers
 }

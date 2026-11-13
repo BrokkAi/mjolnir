@@ -202,19 +202,12 @@ where
                         }
                     }
                 }
-                for choice in choices.models {
-                    if !options
-                        .models
-                        .iter()
-                        .any(|existing| existing.value == choice.value)
-                    {
-                        options.models.push(choice);
-                    }
-                }
+                options.models.extend(choices.models);
             }
             Err(error) => options.unavailable.push(format!("{id}: {error:#}")),
         }
     }
+    options.models = mj_core::model_catalog::merged_choices(options.models);
     Ok(options)
 }
 
@@ -744,6 +737,69 @@ mod tests {
     use super::*;
     use mj_core::refusal::Refusal;
     use std::cell::{Cell, RefCell};
+
+    // Hard-won: #1534 review: a first-listed older alias hid the newer profile during admission.
+    #[tokio::test]
+    async fn subagent_options_preserve_versions_sharing_the_same_launch_alias() {
+        let config = crate::server_runtime::profile_catalog::test_config(&[
+            ("a-stale", mj_core::config::HarnessKind::Claude),
+            ("newer", mj_core::config::HarnessKind::Claude),
+        ]);
+        let recorded: BTreeMap<String, Vec<mj_core::acp::SessionConfigChoice>> =
+            serde_json::from_str(include_str!(
+                "../../../mj-core/tests/fixtures/claude-antigravity-models.json"
+            ))
+            .unwrap();
+        let recorded = &recorded;
+        let calls = &RefCell::new(Vec::new());
+        let options = subagent_options_with(
+            &config,
+            "newer",
+            Some("claude-sonnet-5-5".into()),
+            |id, model| async move {
+                calls.borrow_mut().push((id.clone(), model.clone()));
+                let mut models = recorded["claude"].clone();
+                if id == "a-stale" {
+                    models[1].name = "Sonnet 5".into();
+                }
+                let effort = mj_core::acp::SessionConfigChoice {
+                    value: "high".into(),
+                    name: "High".into(),
+                    description: None,
+                };
+                let selected = model.is_some();
+                if let Some(model) = &model {
+                    assert_eq!((id.as_str(), model.as_str()), ("newer", "sonnet"));
+                }
+                Ok(ProfileConfig {
+                    model: model.or_else(|| Some("opus".into())),
+                    models,
+                    efforts: if selected { vec![effort] } else { vec![] },
+                    observed_at: 0,
+                })
+            },
+        )
+        .await
+        .unwrap();
+        options
+            .validate(&mj_core::config::SubagentChoice {
+                model: "claude-sonnet-5-5".into(),
+                effort: Some("high".into()),
+            })
+            .unwrap();
+        assert_eq!(
+            mj_core::model_catalog::model_id(&options.models, "sonnet"),
+            "claude-sonnet-5-5"
+        );
+        assert_eq!(
+            calls
+                .borrow()
+                .iter()
+                .filter(|(_, model)| model.is_some())
+                .count(),
+            1
+        );
+    }
 
     /// A profile's `models` list hides a model from delegation as well as
     /// from pickers: session creation must not accept a sub-agent model that

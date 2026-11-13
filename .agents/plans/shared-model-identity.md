@@ -15,7 +15,9 @@ The configured `sonnet/high` subagent choice must draw from both Claude profiles
 - [x] (2026-11-13) Shared matching and identity grouping with capability settings, reviewer discovery, and autoconfiguration.
 - [x] (2026-11-13) Added recorded-catalog regressions for scoped quota, both launch values, stale versions, context variants, unknown IDs, per-profile counting, and a public API golden.
 - [x] (2026-11-13) Focused regressions passed: 2 controller tests and 6 core tests; reviewed the generated public API golden.
-- [ ] Complete review, full touched-crate suites, and workspace Clippy; Clippy running.
+- [x] (2026-11-13) First workspace Clippy run passed. First review identified raw-value deduplication in both settings projections; added a shared identity-preserving projection and regressions for an older alias sorting first.
+- [x] (2026-11-13) Review correction validated: both controller settings tests and three core identity/settings/autoconfiguration tests passed.
+- [ ] Obtain the second review result, finish full touched-crate suites, and finish final workspace Clippy (both checks running).
 - [ ] Commit, request review, address findings, and push the current branch to origin/master.
 
 ## Surprises & Discoveries
@@ -27,6 +29,10 @@ The public session-start API discarded the selected model and forwarded the orig
 The first focused compile took 7m33s under shared host load. It captured a source snapshot before the pricing adapter's context normalization correction; the existing pricing regression detected exactly that difference. The correction was already on disk, and the next focused run uses the completed implementation.
 
 The second focused run passed all eight selected tests. Its API golden shows HTTP 201 and `model=claude-sonnet-5-5` on Gemini when Claude is exhausted, and `model=sonnet` on Claude when Gemini's Claude pool is exhausted, both with explicit high effort and with omitted effort. Final validation must use the finished tree because a last health-probe ordering correction and deterministic family-fallback tie break were made during this compile.
+
+Both reviewers found that settings still deduplicated by the raw launch value. When an older `sonnet` alias sorts before a newer `sonnet`, it hides the newer identity during explicit-version validation. `model_catalog::merged_choices` now owns identity-preserving projection for both settings paths and review Autoconfigure. It replaces a moving alias for an older version with that explicit identity so every projected choice remains selectable. The intermediate affected-module build was stopped before applying this correction; it is not a validation result.
+
+The review correction passed all five selected tests, including both settings projections and the allow-list control. Projection resolves alias meaning against the original combined catalogs before deduplicating identities, so an explicit spelling appearing first cannot hide a newer alias and accidentally make the older alias current.
 
 ## Decision Log
 
@@ -75,3 +81,7 @@ Initial plan recorded 2026-11-13 after the user approved the shared-identity des
 Updated 2026-11-13 with completed source work, regression coverage, the API follow-up discovery, and ready-profile resolution ordering.
 
 Updated 2026-11-13 with the eight passing focused checks and the reviewed API golden. Workspace Clippy and final full validation remain pending.
+
+Updated 2026-11-13 after review: both settings projections now share identity-preserving model merging; added snapshot and asynchronous admission regressions for the same alias advertising different versions.
+
+Updated 2026-11-13 with five passing review-fix checks. Full core/controller suites and final workspace Clippy are running against the finished source.

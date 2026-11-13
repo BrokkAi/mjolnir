@@ -130,6 +130,28 @@ pub fn resolve(choices: &[SessionConfigChoice], wanted: &str) -> Option<ModelOff
     offer(choices, &model_id(choices, wanted), wanted)
 }
 
+/// Project combined catalogs to one choice per identity. A moving alias
+/// naming an older version becomes that explicit identity, so two profiles'
+/// different versions remain selectable instead of sharing one option value.
+pub fn merged_choices(
+    choices: impl IntoIterator<Item = SessionConfigChoice>,
+) -> Vec<SessionConfigChoice> {
+    let catalogs = choices.into_iter().collect::<Vec<_>>();
+    let mut seen = std::collections::BTreeSet::new();
+    catalogs
+        .iter()
+        .filter(|choice| seen.insert(choice_model_id(choice)))
+        .map(|choice| {
+            let identity = choice_model_id(choice);
+            let mut projected = choice.clone();
+            if model_id(&catalogs, &choice.value) != identity {
+                projected.value = identity;
+            }
+            projected
+        })
+        .collect()
+}
+
 /// Normalize provider qualifiers without losing versions or context requirements.
 pub fn normalize_model(model: &str) -> String {
     let lowercase = model.to_ascii_lowercase();
@@ -207,6 +229,17 @@ mod tests {
         let mut stale = recorded["claude"][1].clone();
         stale.name = "Sonnet 5".into();
         models.push(stale.clone());
+        // Keep the winning moving alias even when a different spelling of
+        // its identity appears before both old and new aliases.
+        let mixed = vec![
+            recorded["antigravity"][2].clone(),
+            stale.clone(),
+            recorded["claude"][1].clone(),
+        ];
+        assert_eq!(
+            model_id(&merged_choices(mixed), "sonnet"),
+            "claude-sonnet-5-5"
+        );
         for reverse in [false, true] {
             if reverse {
                 models.reverse();

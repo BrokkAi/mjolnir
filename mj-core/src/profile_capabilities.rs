@@ -54,7 +54,7 @@ impl ProfileCapabilitiesSnapshot {
                 }
                 CapabilityState::Ready(choices) => {
                     completed = true;
-                    merge_choices(&mut options.models, &choices.models);
+                    options.models.extend(choices.models.iter().cloned());
                     if let Some(offer) = identity.as_deref().and_then(|identity| {
                         model_catalog::offer(&choices.models, identity, model.unwrap_or(identity))
                     }) {
@@ -63,7 +63,7 @@ impl ProfileCapabilitiesSnapshot {
                                 .unavailable
                                 .push(format!("{id}: effort discovery pending")),
                             Some(CapabilityState::Ready(efforts)) => {
-                                merge_choices(&mut options.efforts, efforts)
+                                merge_efforts(&mut options.efforts, efforts)
                             }
                             Some(CapabilityState::Failed(error)) => {
                                 options.unavailable.push(format!("{id}: {error}"))
@@ -73,6 +73,7 @@ impl ProfileCapabilitiesSnapshot {
                 }
             }
         }
+        options.models = model_catalog::merged_choices(options.models);
         completed.then_some(options)
     }
 
@@ -160,7 +161,7 @@ impl ProfileCapabilitiesSnapshot {
     }
 }
 
-fn merge_choices(into: &mut Vec<SessionConfigChoice>, choices: &[SessionConfigChoice]) {
+fn merge_efforts(into: &mut Vec<SessionConfigChoice>, choices: &[SessionConfigChoice]) {
     for choice in choices {
         if !into.iter().any(|existing| existing.value == choice.value) {
             into.push(choice.clone());
@@ -202,14 +203,14 @@ mod tests {
                 }]),
             ),
             (
-                "stale",
+                "a-stale",
                 HarnessKind::Claude,
                 recorded["claude"].clone(),
                 "sonnet",
                 CapabilityState::Pending,
             ),
         ] {
-            if id == "stale" {
+            if id == "a-stale" {
                 models[1].name = "Sonnet 5".into();
             }
             let profile = HarnessProfile::new(kind, format!("/profiles/{id}"));
@@ -240,7 +241,7 @@ mod tests {
             ["claude: effort discovery pending"]
         );
         config.profiles.get_mut("claude").unwrap().enabled = false;
-        config.profiles.get_mut("stale").unwrap().enabled = false;
+        config.profiles.get_mut("a-stale").unwrap().enabled = false;
         let options = snapshot.options(&config, Some("sonnet")).unwrap();
         options
             .validate(&crate::config::SubagentChoice {
@@ -248,6 +249,24 @@ mod tests {
                 effort: Some("high".into()),
             })
             .unwrap();
+        // The older alias sorts first; without identity-preserving merging
+        // it would hide the newer profile when Gemini is disabled.
+        config.profiles.get_mut("claude").unwrap().enabled = true;
+        config.profiles.get_mut("a-stale").unwrap().enabled = true;
+        config.profiles.get_mut("gemini").unwrap().enabled = false;
+        let options = snapshot
+            .options(&config, Some("claude-sonnet-5-5"))
+            .unwrap();
+        options
+            .validate(&crate::config::SubagentChoice {
+                model: "claude-sonnet-5-5".into(),
+                effort: None,
+            })
+            .unwrap();
+        assert_eq!(
+            model_catalog::model_id(&options.models, "sonnet"),
+            "claude-sonnet-5-5"
+        );
     }
 
     fn fixture() -> (Config, ProfileCapabilitiesSnapshot) {
