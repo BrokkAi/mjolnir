@@ -539,7 +539,9 @@ impl DashboardState {
             } else {
                 source.additional_mounts.clone()
             },
-            resource_allocation: source.resource_allocation.clone(),
+            // A sub-agent runs in its owner's container, whose size lives on
+            // the owner's record: the child's own overrides are always empty.
+            resource_allocation: chooser.resource_allocation.clone(),
             carried: crate::CarriedLaunchSettings {
                 no_project_memory: source.no_project_memory,
                 no_github_events: source.no_github_events,
@@ -547,10 +549,10 @@ impl DashboardState {
                 // Container targets only, as in the container editor; the
                 // runtime was checked above, so this is the target's kind.
                 container_cpus: container_target
-                    .then(|| source.container_cpus.clone())
+                    .then(|| chooser.container_cpus.clone())
                     .flatten(),
                 container_memory: container_target
-                    .then(|| source.container_memory.clone())
+                    .then(|| chooser.container_memory.clone())
                     .flatten(),
                 note: (!changes.is_empty()).then(|| changes.join(" ")),
             },

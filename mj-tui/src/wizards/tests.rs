@@ -6565,6 +6565,40 @@ fn new_session_like_a_resized_container_session_carries_its_size_overrides() {
     };
     assert_eq!(carried.container_cpus.as_deref(), Some("3.5"));
     assert_eq!(carried.container_memory.as_deref(), Some("6g"));
+
+    // Hard-won: 6ddd61a06: a sub-agent's copy read the child's own overrides,
+    // which are always empty because it runs in its parent's container.
+    let mut child = running_session();
+    child.id = "resized-child".into();
+    child.project_directory = source.project_directory.clone();
+    child.container_cpus = None;
+    child.container_memory = None;
+    let relation = mj_core::subagent::SubagentMetadata {
+        kind: mj_core::subagent::SubagentKind::Worker,
+        child_session_id: child.id.clone(),
+        parent_session_id: source.id.clone(),
+        task_name: "Inspect parser".into(),
+        profile_id: child.last_profile.clone(),
+        model: None,
+        effort: None,
+        working_directory: Default::default(),
+        request_key: "request-1".into(),
+        created_at: child.created_at.clone(),
+        noticed_turn: None,
+        reported_finish: None,
+        handback_tool: false,
+    };
+    let mut state = dashboard.state.clone();
+    state.sessions.insert(child.id.clone(), child.clone());
+    state.subagents.insert(child.id.clone(), relation);
+    dashboard.set_state(state);
+    let DashboardAction::CreateSession { carried, .. } =
+        dashboard.begin_new_session_like(&child.id)
+    else {
+        panic!("the copy of a sub-agent creates a session without a dialog");
+    };
+    assert_eq!(carried.container_cpus.as_deref(), Some("3.5"));
+    assert_eq!(carried.container_memory.as_deref(), Some("6g"));
 }
 
 /// A copied launch skips the new-session key, so it must wait for the host's
