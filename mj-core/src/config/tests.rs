@@ -103,6 +103,7 @@ fn zai_profile(home: &Path, environment: BTreeMap<String, String>) -> HarnessPro
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         muse_auto_review: None,
+        claude_permission_mode: None,
         aws: None,
         codex_profile: None,
     }
@@ -134,6 +135,7 @@ fn only_a_codex_profile_that_uses_an_api_key_keeps_the_openai_key_variables() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         muse_auto_review: None,
+        claude_permission_mode: None,
         aws: None,
         codex_profile: None,
         ..HarnessProfile::new(kind, home.to_path_buf())
@@ -3264,6 +3266,7 @@ fn native_continuity_follows_the_codex_model_service_not_only_the_harness() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         muse_auto_review: None,
+        claude_permission_mode: None,
         aws: None,
         codex_profile: codex_profile.map(str::to_owned),
         ..HarnessProfile::new(kind, home.to_path_buf())
@@ -3498,6 +3501,7 @@ fn setup_additions_recognizes_equivalent_profile_homes() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             muse_auto_review: None,
+            claude_permission_mode: None,
             aws: None,
             codex_profile: None,
             ..HarnessProfile::new(HarnessKind::Claude, home)

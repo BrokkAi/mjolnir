@@ -405,6 +405,7 @@ fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         native_session_id: None,
         project_memory: None,
         execution_policy: ExecutionPolicy::Unconstrained,
+        claude_permission_mode: Default::default(),
         observe_policy: None,
     }
 }

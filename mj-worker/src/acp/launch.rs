@@ -154,6 +154,9 @@ pub struct LaunchSpec {
     /// idle session reloads once they change. Set when the bridge starts.
     pub imported_logins: Option<super::ImportedLogins>,
     pub execution_policy: ExecutionPolicy,
+    /// The Claude profile's permission mode under configured approvals, from
+    /// the launch config. Read only through `session_enforcement`.
+    pub claude_permission_mode: mj_core::config::ClaudePermissionMode,
     /// Optional central Brokk Observe guardrail client. The permission
     /// handler consults it before any automatic approval.
     pub observe_policy: Option<crate::observe::PolicyClient>,
@@ -268,9 +271,7 @@ pub(super) fn session_request_meta(
     if let Some(model) = spec.startup_model() {
         options.insert("model".to_owned(), serde_json::Value::String(model));
     }
-    if let Some(enabled) = spec
-        .harness
-        .execution_enforcement(spec.execution_policy)
+    if let Some(enabled) = super::session_config::session_enforcement(spec)
         .and_then(mj_core::config::ExecutionEnforcement::session_sandbox)
     {
         options.insert(

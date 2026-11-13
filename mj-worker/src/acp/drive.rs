@@ -104,6 +104,7 @@ where
     let next_elicitation_id = Arc::new(AtomicU64::new(1));
     let managed_subagent = spec.managed_subagent;
     let permission_policy = spec.execution_policy;
+    let permission_enforcement = session_enforcement(&spec);
     let permission_harness = spec.harness;
     let permission_observe = spec.observe_policy.clone();
     let permission_cwd = spec.cwd.clone();
@@ -628,7 +629,7 @@ where
                             let mut handoff_completion = None;
                             let selection = response.map_or_else(
                                 || Ok(PlanPermissionAnswer::Native(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled))),
-                                |response| policy_plan_permission_answer(&request, response.harness_response(), permission_harness, permission_policy),
+                                |response| policy_plan_permission_answer(&request, response.harness_response(), permission_harness, permission_enforcement),
                             ).and_then(|selection| match selection {
                                 PlanPermissionAnswer::Native(answer) => Ok(answer),
                                 PlanPermissionAnswer::ContinueInBypass => {
@@ -689,7 +690,7 @@ where
                     // The worker alone decides which answers this form offers, and
                     // accepts only those (see `permission_choices`).
                     let PermissionAnswers { choices, skip } =
-                        permission_choices(&request, permission_harness, permission_policy);
+                        permission_choices(&request, permission_harness, permission_enforcement);
                     let options: Vec<_> = choices.iter().map(|choice| serde_json::json!({
                         "const": choice.option_id.to_string(), "title": choice.title,
                     })).collect();

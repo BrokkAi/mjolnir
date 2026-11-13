@@ -1320,6 +1320,7 @@ pub(super) fn worker_launch_config_with_checkout(
             native_session_id: session.native_session_id.clone(),
             project_memory: project_memory.clone(),
             execution_policy,
+            claude_permission_mode: profile.approval_choices().claude_permission_mode,
             observe_policy,
         },
         project_memory,
