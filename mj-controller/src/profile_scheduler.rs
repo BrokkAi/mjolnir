@@ -74,9 +74,12 @@ impl AsRef<SubagentCandidate> for SubagentCandidate {
 /// Order candidates for a spawn so that simultaneous spawns spread out
 /// instead of all taking the same profile. Included quota and paid funds each
 /// get a weighted order within their tier; included quota always comes first.
+/// Profiles named in `prefer` (dashboard's load-balancing preference) rank
+/// ahead of the rest, in preference order, while their quota tier allows.
 pub(crate) fn draw_candidates<T: AsRef<SubagentCandidate>>(
     candidates: &mut Vec<T>,
     ranking_anchor: Option<&str>,
+    prefer: &[String],
     model: &str,
     now_seconds: i64,
 ) -> anyhow::Result<()> {
@@ -86,7 +89,7 @@ pub(crate) fn draw_candidates<T: AsRef<SubagentCandidate>>(
         // 53 random bits as a float in (0, 1], so its logarithm is finite.
         units.push(((bits >> 11) + 1) as f64 / (1u64 << 53) as f64);
     }
-    order_by_draw(candidates, ranking_anchor, &units, model, now_seconds);
+    order_by_draw(candidates, ranking_anchor, prefer, &units, model, now_seconds);
     Ok(())
 }
 
@@ -96,11 +99,12 @@ pub(crate) fn draw_candidates<T: AsRef<SubagentCandidate>>(
 pub(crate) fn order_by_draw<T: AsRef<SubagentCandidate>>(
     candidates: &mut Vec<T>,
     ranking_anchor: Option<&str>,
+    prefer: &[String],
     units: &[f64],
     model: &str,
     now_seconds: i64,
 ) {
-    rank_candidates(candidates, ranking_anchor, model, now_seconds);
+    rank_candidates(candidates, ranking_anchor, prefer, model, now_seconds);
     let mut keyed = candidates
         .drain(..)
         .zip(units)
@@ -122,9 +126,22 @@ pub(crate) fn order_by_draw<T: AsRef<SubagentCandidate>>(
                     &projects_short_window_exhaustion(right.1.as_ref(), model, now_seconds),
                 )
             })
+            .then_with(|| {
+                preference_position(left.1.as_ref(), prefer)
+                    .cmp(&preference_position(right.1.as_ref(), prefer))
+            })
             .then_with(|| right.0.total_cmp(&left.0))
     });
     candidates.extend(keyed.into_iter().map(|(_, candidate)| candidate));
+}
+
+/// A candidate's position in the load-balancing preference list, if the
+/// person named it: preferred profiles lead, in list order.
+fn preference_position(candidate: &SubagentCandidate, prefer: &[String]) -> usize {
+    prefer
+        .iter()
+        .position(|id| *id == candidate.profile_id)
+        .unwrap_or(usize::MAX)
 }
 
 /// Order candidates by [`QuotaRank`] tier; within a tier, profiles on course
@@ -135,6 +152,7 @@ pub(crate) fn order_by_draw<T: AsRef<SubagentCandidate>>(
 pub(crate) fn rank_candidates<T: AsRef<SubagentCandidate>>(
     candidates: &mut [T],
     ranking_anchor: Option<&str>,
+    prefer: &[String],
     model: &str,
     now_seconds: i64,
 ) {
@@ -149,6 +167,8 @@ pub(crate) fn rank_candidates<T: AsRef<SubagentCandidate>>(
                 projects_short_window_exhaustion(left, model, now_seconds)
                     .cmp(&projects_short_window_exhaustion(right, model, now_seconds))
             })
+            // A preferred profile leads the profiles quota treats alike.
+            .then_with(|| preference_position(left, prefer).cmp(&preference_position(right, prefer)))
             .then_with(|| left_rank.order(right_rank))
             .then_with(|| {
                 let left_is_anchor = ranking_anchor == Some(left.profile_id.as_str());

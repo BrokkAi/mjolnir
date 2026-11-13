@@ -189,6 +189,9 @@ pub fn hidden_key(path: &[String], value: &Value, key: &str) -> bool {
         ["profiles", _] if matches!(key, "guardian_review_model" | "codex_profile") => {
             value["kind"].as_str() != Some("codex")
         }
+        ["profiles", _] if key == "claude_permission_mode" => {
+            value["kind"].as_str() != Some("claude")
+        }
         ["machines", mj_core::config::LOCAL_MACHINE_ID] => key == "kind",
         // Present only while reviewers still have to be chosen automatically:
         // it is not a setting. Review is on exactly when reviewers exist.

@@ -384,6 +384,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         initial_model: config.initial_model,
         harness: config.harness,
         execution_policy: config.execution_policy,
+        claude_permission_mode: config.claude_permission_mode,
         observe_policy,
         acp_activity,
         step_clock,

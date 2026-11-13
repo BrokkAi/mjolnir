@@ -74,6 +74,10 @@ permission checks (`allowAll` approvals with auto-review off) and disables
 only the sandbox there; a profile with `muse_auto_review = true` keeps the
 review in containers too. With guardian approvals the sandbox
 stays on, even when a profile's `MUSE_SERVE_ARGS` passes `--disable-sandbox`.
+Claude Code's guardian is its Auto mode, where Claude's own classifier
+approves or denies each action; a profile with `claude_permission_mode =
+"manual"` asks you before every action that needs permission instead, and
+`"accept-edits"` asks for everything but file edits.
 Kimi Code cannot preserve approvals. OpenCode asks before tools according to
 its permission rules, but runs every command directly on the host: the project
 states that its permission system is not a sandbox. DSH

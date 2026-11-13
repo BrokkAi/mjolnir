@@ -563,7 +563,7 @@ fn claude_plan_approval_selects_the_deployment_mode_without_clearing_context() {
                     &request,
                     implement(),
                     HarnessKind::Claude,
-                    policy,
+                    HarnessKind::Claude.execution_enforcement(policy),
                 )
                 .unwrap() else {
                     panic!("offered mode must be selected directly");
@@ -589,7 +589,7 @@ fn claude_missing_auto_is_an_error_and_missing_bypass_requires_a_continuation() 
             &request,
             implement(),
             HarnessKind::Claude,
-            ExecutionPolicy::ConfiguredApprovals
+            HarnessKind::Claude.execution_enforcement(ExecutionPolicy::ConfiguredApprovals)
         )
         .err()
         .unwrap()
@@ -601,7 +601,7 @@ fn claude_missing_auto_is_an_error_and_missing_bypass_requires_a_continuation() 
             &request,
             implement(),
             HarnessKind::Claude,
-            ExecutionPolicy::Unconstrained
+            HarnessKind::Claude.execution_enforcement(ExecutionPolicy::Unconstrained)
         )
         .unwrap(),
         PlanPermissionAnswer::ContinueInBypass
@@ -610,7 +610,7 @@ fn claude_missing_auto_is_an_error_and_missing_bypass_requires_a_continuation() 
         &request,
         ElicitationResponse::Decline,
         HarnessKind::Claude,
-        ExecutionPolicy::Unconstrained,
+        HarnessKind::Claude.execution_enforcement(ExecutionPolicy::Unconstrained),
     )
     .unwrap() else {
         panic!("decline is native")
@@ -713,6 +713,7 @@ impl PlanProbe {
             initial_model: None,
             harness,
             execution_policy: policy,
+            claude_permission_mode: Default::default(),
             observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock: StepClock::default(),
@@ -1923,11 +1924,15 @@ fn bridge_exit_plan_request(policy: ExecutionPolicy, plan: bool) -> Value {
 
 fn offered(request: &Value, policy: ExecutionPolicy) -> Vec<(String, String)> {
     let request: RequestPermissionRequest = serde_json::from_value(request.clone()).unwrap();
-    permission_choices(&request, HarnessKind::Claude, policy)
-        .choices
-        .into_iter()
-        .map(|choice| (choice.option_id.to_string(), choice.title))
-        .collect()
+    permission_choices(
+        &request,
+        HarnessKind::Claude,
+        HarnessKind::Claude.execution_enforcement(policy),
+    )
+    .choices
+    .into_iter()
+    .map(|choice| (choice.option_id.to_string(), choice.title))
+    .collect()
 }
 
 fn pairs(expected: &[(&str, &str)]) -> Vec<(String, String)> {

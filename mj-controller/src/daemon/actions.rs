@@ -366,6 +366,28 @@ pub(super) async fn handle_action(
             state.publish_revision();
             Ok(DaemonReply::Done)
         }
+        DaemonAction::SetQuotaPreferences { prefer } => {
+            // Hold the configuration owner through persistence and publication:
+            // an acknowledged save must be visible to the next dashboard.
+            let mut inactivity = state.config_mutation.lock().await;
+            let config = blocking(move || {
+                Config::update(|config| {
+                    config.quota.prefer = prefer;
+                    Ok(())
+                })
+                .map(|(config, ())| config)
+            })
+            .await?;
+            state.configure_inactivity(&mut inactivity, config.advanced.auto_afk_minutes);
+            state
+                .review_config
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone_from(&config.review);
+            state.owner().install_config(config);
+            state.publish_revision();
+            Ok(DaemonReply::Done)
+        }
         DaemonAction::SaveSidebarSize { size } => {
             // Hold the configuration owner through persistence and publication:
             // an acknowledged save must be visible to the next dashboard.

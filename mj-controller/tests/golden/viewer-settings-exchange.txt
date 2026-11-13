@@ -319,6 +319,35 @@
                 "path": [
                   "profiles",
                   "claude",
+                  "claude_permission_mode"
+                ],
+                "label": "Claude permission mode",
+                "help": "How new sessions on runtimes that ask for approvals handle Claude's permissions. Auto: Claude's classifier approves or denies each action. Accept edits: file edits run, everything else asks you. Manual: every action that needs permission asks you. Runtimes that allow all actions always bypass permissions.",
+                "control": "choice",
+                "value": null,
+                "choices": [
+                  {
+                    "value": null,
+                    "label": "Default (Auto)"
+                  },
+                  {
+                    "value": "auto",
+                    "label": "Auto"
+                  },
+                  {
+                    "value": "accept-edits",
+                    "label": "Accept edits"
+                  },
+                  {
+                    "value": "manual",
+                    "label": "Manual"
+                  }
+                ]
+              },
+              {
+                "path": [
+                  "profiles",
+                  "claude",
                   "models"
                 ],
                 "label": "Offered models",

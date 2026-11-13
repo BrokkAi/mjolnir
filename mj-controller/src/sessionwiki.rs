@@ -4790,6 +4790,7 @@ mod tests {
                     guardian_review_model: None,
                     codex_profile: None,
                     muse_auto_review: None,
+                    claude_permission_mode: None,
                     aws: None,
                     ..mj_core::config::HarnessProfile::new(kind, home)
                 },

@@ -526,6 +526,26 @@ pub(crate) fn spawn_setup_save(
     )
 }
 
+pub(crate) fn spawn_quota_preferences_save(
+    prefer: Vec<String>,
+    updates: UnboundedSender<DashboardIoUpdate>,
+    tracker: CriticalOperationTracker,
+) -> JoinHandle<()> {
+    spawn_critical_async(
+        tracker,
+        "saving load-balancing preferences",
+        updates,
+        SAVE_ACK_TIMEOUT,
+        async move {
+            daemon::connect_or_start()
+                .await?
+                .set_quota_preferences(prefer)
+                .await
+        },
+        move |result| DashboardIoUpdate::QuotaPreferencesSaved { result },
+    )
+}
+
 pub(crate) fn spawn_spinner_style_save(
     style: mj_core::config::SpinnerStyle,
     updates: UnboundedSender<DashboardIoUpdate>,
