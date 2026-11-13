@@ -16,8 +16,8 @@ use mj_core::relay::WorkerPhase;
 use super::autocomplete::{config_choice_name, matching_indices};
 use super::{ChatAction, ChatState};
 use crate::components::{
-    AutocompletePopup, ChoiceList, ControlKind, Form, Interaction, ListActivation, PopupSide,
-    TextField,
+    AutocompletePopup, ChoiceList, ComboBox, ControlKind, Form, Interaction, ListActivation,
+    PopupSide, TextField,
 };
 use crate::text_input::TextInput;
 
@@ -491,6 +491,7 @@ pub(super) fn render_config_picker(
         anchor,
         u16::try_from(width).unwrap_or(u16::MAX),
         rows.len().max(1),
+        ComboBox::DEFAULT_MAX_VISIBLE_ROWS,
         &title,
         PopupSide::Above,
     ) else {

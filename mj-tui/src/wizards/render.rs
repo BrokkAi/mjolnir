@@ -1157,6 +1157,7 @@ pub(crate) fn render_review_wizard(
                 enabled,
                 " Values ",
                 PopupSide::Below,
+                ComboBox::DEFAULT_MAX_VISIBLE_ROWS,
                 form,
                 id,
             );
@@ -1310,6 +1311,7 @@ pub(crate) fn render_review_wizard(
             enabled,
             " Values ",
             PopupSide::Below,
+            ComboBox::DEFAULT_MAX_VISIBLE_ROWS,
             form,
             id,
         );
@@ -1399,6 +1401,7 @@ pub(crate) fn render_access_combo<K: Copy + Eq>(
         true,
         " Access ",
         PopupSide::Below,
+        ComboBox::DEFAULT_MAX_VISIBLE_ROWS,
         form,
         id,
     );

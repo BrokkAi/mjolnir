@@ -685,6 +685,7 @@ pub(crate) fn render_review_settings(
             !dialog.saving,
             " values · ↑/↓ select · Tab/Enter accept ",
             PopupSide::Below,
+            ComboBox::DEFAULT_MAX_VISIBLE_ROWS,
             &mut form,
             *id,
         );
@@ -792,6 +793,7 @@ pub(crate) fn render_review_settings(
             !dialog.saving,
             " values · ↑/↓ select · Tab/Enter accept ",
             PopupSide::Below,
+            ComboBox::DEFAULT_MAX_VISIBLE_ROWS,
             &mut form,
             id,
         );

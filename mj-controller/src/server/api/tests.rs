@@ -2897,6 +2897,89 @@ async fn start_without_a_profile_load_balances_with_and_without_explicit_effort(
     }
 }
 
+// Hard-won: #1534: model-first starts forwarded the request alias instead of the selected harness value.
+#[tokio::test]
+async fn model_first_sonnet_alias_uses_the_selected_profiles_launch_value() {
+    let recorded: std::collections::BTreeMap<String, Vec<mj_core::acp::SessionConfigChoice>> =
+        serde_json::from_str(include_str!(
+            "../../../../mj-core/tests/fixtures/claude-antigravity-models.json"
+        ))
+        .unwrap();
+    let mut rendered = String::new();
+    for (claude_left, gemini_left) in [(0, 100), (100, 0)] {
+        for effort in [None, Some("high")] {
+            let mut claude = model_candidate_for_harness(
+                "claude",
+                claude_left,
+                "sonnet",
+                mj_core::config::HarnessKind::Claude,
+            );
+            claude.choices.models = recorded["claude"].clone();
+            let mut gemini = model_candidate_for_harness(
+                "gemini",
+                gemini_left,
+                "claude-sonnet-5-5",
+                mj_core::config::HarnessKind::Antigravity,
+            );
+            gemini.choices.models = recorded["antigravity"].clone();
+            if let CandidateQuota::Subscription { windows, .. } = &mut gemini.quota {
+                windows[0].model_scope = Some("claude,gpt".into());
+            }
+            let backend = Arc::new(FakeBackend {
+                session_model_candidates: Some(SubagentCandidates {
+                    offered: vec![claude, gemini],
+                    unavailable: vec![],
+                }),
+                ..Default::default()
+            });
+            let (app, mut actions, _, _) = api_app(backend.clone(), |snapshot| {
+                for (id, kind) in [("claude", "claude"), ("gemini", "antigravity")] {
+                    snapshot.profiles.push(crate::server::ViewerProfile {
+                        id: id.into(),
+                        harness_kind: kind.into(),
+                        capabilities_key: String::new(),
+                        quota_pools: Vec::new(),
+                        quota: None,
+                    });
+                }
+            });
+            let mut body =
+                serde_json::json!({"bundle_id":"hel", "target_id":"podman", "model":"sonnet"});
+            if let Some(effort) = effort {
+                body["effort"] = effort.into();
+            }
+            let mut response = tokio::spawn(app.oneshot(start_request(body.to_string())));
+            let request = tokio::select! {
+                request = actions.recv() => request.unwrap(),
+                early = &mut response => panic!("start failed before creating a session: {:?}", early.unwrap().unwrap().status()),
+            };
+            let ControllerAction::New { profile_id, .. } = &request.action else {
+                panic!("expected New")
+            };
+            let profile = profile_id.clone();
+            request
+                .reply
+                .send(ActionOutcome::Accepted {
+                    session_id: Some("session-2".into()),
+                    notice: None,
+                })
+                .unwrap();
+            let response = response.await.unwrap().unwrap();
+            let status = response.status();
+            assert_eq!(status, StatusCode::CREATED);
+            let response = json_body(response).await;
+            let followups = backend.followups.lock().unwrap();
+            let followup = &followups[0].1;
+            rendered.push_str(&format!("quota Claude={claude_left}% Gemini-Claude={gemini_left}%, effort={}\nHTTP {}\n{}\nprofile={profile}, model={}, effort={}\n\n", effort.unwrap_or("default"), status.as_u16(), serde_json::to_string_pretty(&response).unwrap(), followup.model.as_deref().unwrap(), followup.effort.as_deref().unwrap_or("default")));
+        }
+    }
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "start-sonnet-model-identity",
+        &rendered,
+    );
+}
+
 #[tokio::test]
 async fn start_without_a_saved_default_selects_a_model_with_an_explicit_target() {
     let backend = Arc::new(FakeBackend {

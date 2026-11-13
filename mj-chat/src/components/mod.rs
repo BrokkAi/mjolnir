@@ -109,7 +109,8 @@ impl PathField {
                 bounds,
                 area,
                 u16::try_from(width).unwrap_or(u16::MAX),
-                candidates.len().min(Self::VISIBLE_ROWS),
+                candidates.len(),
+                Self::VISIBLE_ROWS,
                 title,
                 PopupSide::Below,
             ) else {
@@ -156,6 +157,7 @@ impl PathField {
                 area,
                 u16::try_from(width).unwrap_or(u16::MAX),
                 1,
+                Self::VISIBLE_ROWS,
                 " completing ",
                 PopupSide::Below,
             ) {

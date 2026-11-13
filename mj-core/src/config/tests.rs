@@ -1394,6 +1394,7 @@ fn github_app_configuration_is_optional_and_round_trips() {
     configured.github.watch.interval_seconds = 30;
     configured.github.watch.api_base = "http://127.0.0.1:9411".into();
     configured.github.watch.enabled = false;
+    configured.github.watch.local_inference = true;
     configured.github.watch.use_gpu = false;
     assert!(!configured.github_events_enabled());
     configured.save_to(&path).unwrap();
