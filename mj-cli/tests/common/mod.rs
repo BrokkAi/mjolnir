@@ -15,7 +15,11 @@ use anyhow::{Context, Result, bail};
 /// unwinding, so every test daemon also watches this process and exits with
 /// it. The environment is inherited by the daemon a client spawns.
 pub fn own_test_daemons(command: &mut Command) -> &mut Command {
-    command.env(DAEMON_OWNER_ENV, std::process::id().to_string())
+    // Hard-won: #1524: inherited session identity discarded isolated fixture environments.
+    command
+        .env_remove("MJ_SESSION_ID")
+        .env_remove("MJ_SESSION_BASH_ENV")
+        .env(DAEMON_OWNER_ENV, std::process::id().to_string())
 }
 
 /// The variable [`own_test_daemons`] sets, for launchers other than
