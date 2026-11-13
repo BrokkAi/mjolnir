@@ -343,7 +343,11 @@ fn first_ready(entries: &[PaletteEntry]) -> usize {
         .unwrap_or(0)
 }
 
-fn session_menu_label(dashboard: &DashboardState, palette: &CommandPalette, id: CommandId) -> String {
+fn session_menu_label(
+    dashboard: &DashboardState,
+    palette: &CommandPalette,
+    id: CommandId,
+) -> String {
     let label = match id {
         // Opens a second choice, so it carries the menu's submenu glyph.
         CommandId::ChangeWorkspace => {
@@ -816,9 +820,7 @@ fn palette_lines(dashboard: &DashboardState, palette: &CommandPalette) -> Vec<Pa
                 | CommandId::ChangedFiles
                 | CommandId::DismissNotification
                 | CommandId::IgnoreNotifications => 0,
-                CommandId::RenameSession
-                | CommandId::PinSession
-                | CommandId::ChangeWorkspace => 1,
+                CommandId::RenameSession | CommandId::PinSession | CommandId::ChangeWorkspace => 1,
                 CommandId::ContainerSettings
                 | CommandId::MoveSession
                 | CommandId::SuspendSession
@@ -1351,7 +1353,9 @@ mod tests {
                 PaletteLine::Heading(heading) => format!("[{heading}]"),
                 PaletteLine::Separator => "---".to_owned(),
                 PaletteLine::Blank => String::new(),
-                PaletteLine::Command(index) => session_menu_label(dashboard, palette, palette.entries[index].id),
+                PaletteLine::Command(index) => {
+                    session_menu_label(dashboard, palette, palette.entries[index].id)
+                }
             })
             .collect()
     }
@@ -1735,7 +1739,8 @@ mod tests {
             "keyboard selection after skipping disabled Dismiss",
             selected_command(&dashboard),
         );
-        let down = dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), dismiss));
+        let down =
+            dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), dismiss));
         append_golden_value(&mut output, "disabled Dismiss mouse-down action", down);
         let up = dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), dismiss));
         append_golden_value(&mut output, "disabled Dismiss mouse-up action", up);
@@ -1745,7 +1750,13 @@ mod tests {
             selected_command(&dashboard),
         );
         let lines = drawn(&mut dashboard, 120, 40);
-        append_golden_state(&mut output, "disabled Dismiss remains open", 120, 40, &lines);
+        append_golden_state(
+            &mut output,
+            "disabled Dismiss remains open",
+            120,
+            40,
+            &lines,
+        );
 
         let session = running_session();
         let mut dashboard = dashboard_with_session(session.clone());
