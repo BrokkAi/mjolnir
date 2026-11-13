@@ -278,6 +278,7 @@ fn render_combo(
         dialog.combo.open_id().is_none_or(|id| id == control.id),
         " values · ↑/↓ select · Tab/Enter accept ",
         PopupSide::Below,
+        ComboBox::DEFAULT_MAX_VISIBLE_ROWS,
         form,
         control.id,
     );

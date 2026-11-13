@@ -208,6 +208,47 @@ select Other action: ChangeWorkspace { session_id: "session-1", workspace_id: "o
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
+=== nine workspaces in a six-row list (120x40) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ Workspace default  Workspace w2    ≡ ││                                                                              │
+│ Workspace w3  Workspace w4           ││                                                                              │
+│ Workspace w5  Workspace w6           ││                                                                              │
+│ Workspace w7  Workspace w8           ││                                                                              │
+│ Workspace w9                         ││                                                                              │
+╰──────────────                                                                                                        │
+╭ Sessions ────                                                                                                        │
+│ Create   Open  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│hel ──────────  │  Sub-agents Native                                                                 │                │
+│› · ACP pretty  │  CPU        no CPU data yet                                                        │                │
+│  Idle  podman  │                                                                                    │                │
+│  │ No message  │  Content  ───────────────────────────────────────────────────────────────────────  │                │
+│  │             │  Changed files — The session's target is not running.                    ctrl+b d  │                │
+│                │  Dismiss notification — No dismissible notification is active.                     │                │
+│                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
+│                │  Rename…                                                           ctrl+b shift+t  │                │
+│                │  Pin…                                                                              │                │
+│                │  Unpin — This session is not pinned.                                               │                │
+│                │› Change Workspace ▾                                                                │                │
+│                │  ╭ workspace · ↑/↓ select · Enter choose ╮───────────────────────────────────────  │                │
+│                │  │Workspace default (current)           ▐│                                         │                │
+│                │  │Workspace w2                          ▐│                                         │                │
+│                │  │Workspace w3                          ▐│                         ctrl+b shift+x  │                │
+│                │  │Workspace w4                          ▐│                                         │                │
+│                │  │Workspace w5                          ││ turn is running here or in its sub-…    │  ──────────────╯
+│                │  │Workspace w6                          ││───────────────────────────────────────  │  ──────────────╮
+│                │  ╰───────────────────────────────────────╯                                         │                │
+│                │  Destroy…                                                                          │                │
+│                │Move the selected session, and its sub-agents, to another workspace, after you confi│  ──────────────╯
+│                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ─────── ▁   ▄ ╮
+│                                                                                                                      │
+│                                                                                                        ──────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 first Escape action: None
 === menu after closing workspace list (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
