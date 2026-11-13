@@ -55,6 +55,7 @@ pub enum CommandId {
     RenameSession,
     ChangedFiles,
     DismissNotification,
+    OpenWaitingQuestion,
     IgnoreNotifications,
     ContainerSettings,
     MoveSession,
@@ -284,6 +285,11 @@ fn dismiss_notification_available(dashboard: &DashboardState) -> Availability {
     let Some(session) = dashboard.command_session() else {
         return Availability::Hidden;
     };
+    // A child's open form is answered in the child, never dismissed here:
+    // Open sub-agent question takes this row's place.
+    if dashboard.waiting_child_of(&session.id).is_some() {
+        return Availability::Hidden;
+    }
     if dashboard.notification_dismissal_pending(&session.id) {
         return Availability::Blocked("Dismissing notification");
     }
@@ -294,6 +300,13 @@ fn dismiss_notification_available(dashboard: &DashboardState) -> Availability {
         return Availability::Blocked("No dismissible notification is active");
     }
     Availability::Ready
+}
+
+fn open_waiting_question_available(dashboard: &DashboardState) -> Availability {
+    match dashboard.command_session() {
+        Some(session) if dashboard.waiting_child_of(&session.id).is_some() => Availability::Ready,
+        _ => Availability::Hidden,
+    }
 }
 
 fn ignore_notifications_available(dashboard: &DashboardState) -> Availability {
@@ -996,6 +1009,18 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
         footer_group: FooterGroup::Pane,
         footer_rank: 0,
         available: dismiss_notification_available,
+    },
+    CommandSpec {
+        id: CommandId::OpenWaitingQuestion,
+        label: "Open sub-agent question",
+        description: "Go to the sub-agent whose question or permission request makes this session wait.",
+        scope: Scope::Session,
+        pane_keys: &[],
+        action: None,
+        footer: no_footer,
+        footer_group: FooterGroup::Pane,
+        footer_rank: 0,
+        available: open_waiting_question_available,
     },
     CommandSpec {
         id: CommandId::IgnoreNotifications,
@@ -1841,6 +1866,20 @@ impl DashboardState {
                 }
                 Availability::Hidden => DashboardAction::None,
             },
+            CommandId::OpenWaitingQuestion => {
+                match self
+                    .command_session_id()
+                    .and_then(|session| self.waiting_child_of(session))
+                {
+                    Some(child) => {
+                        // The menu's session was the parent; from here the
+                        // command moves the selection, and Open must read it.
+                        self.command_session_override = None;
+                        self.focus_session_from_cpu_report(&child)
+                    }
+                    None => DashboardAction::None,
+                }
+            }
             CommandId::IgnoreNotifications => self
                 .command_session()
                 .map(|session| (session.id.clone(), session.notifications_ignored))
