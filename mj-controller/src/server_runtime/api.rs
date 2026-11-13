@@ -3436,9 +3436,9 @@ impl SubagentBackend for ApiBackend {
             while let Some((id, result)) = pending.next().await {
                 if !tried.contains(&id)
                     && let Ok(choices) = result
-                    && choices
-                        .iter()
-                        .any(|choice| choice.models.iter().any(|item| item.value == model))
+                    && choices.iter().any(|choice| {
+                        mj_core::model_catalog::resolve(&choice.models, &model).is_some()
+                    })
                 {
                     drop(pending);
                     let mut candidates = self.reviewer_ready_candidates(model).await?;
@@ -3502,10 +3502,12 @@ impl SubagentBackend for ApiBackend {
 
     fn reviewer_ready_candidates(
         &self,
-        model: String,
+        _model: String,
     ) -> BoxFuture<'_, Result<crate::server::api::SubagentCandidates>> {
         Box::pin(async move {
-            let ids = self.profile_catalog.ready_candidates(&model)?;
+            // Remove refused logins before the shared selector resolves the
+            // requested alias once over the remaining ready profiles.
+            let ids = self.profile_catalog.ready_candidates("")?;
             let config = self.profile_catalog.live()?;
             let snapshot = self.profile_catalog.snapshot();
             let rejected = self

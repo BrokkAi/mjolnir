@@ -139,26 +139,38 @@ where
         .map(|(id, _)| id.clone())
         .collect::<Vec<_>>();
     let mut options = mj_core::subagent::SubagentOptions::default();
-    let results = futures::future::join_all(candidates.into_iter().map(|id| {
-        let model = model.clone();
+    let defaults = futures::future::join_all(candidates.into_iter().map(|id| async move {
+        let result = probe(id.clone(), None)
+            .await
+            .map(|choices| choices.restricted_to(&config.profiles[&id].models));
+        (id, result)
+    }))
+    .await;
+    let models = defaults
+        .iter()
+        .filter_map(|(_, result)| result.as_ref().ok())
+        .flat_map(|choices| choices.models.iter().cloned())
+        .collect::<Vec<_>>();
+    let identity = model
+        .as_deref()
+        .map(|model| mj_core::model_catalog::model_id(&models, model));
+    let results = futures::future::join_all(defaults.into_iter().map(|(id, result)| {
+        let identity = identity.as_deref();
+        let model = model.as_deref();
         async move {
             let result = async {
-                // Both probes apply the profile's `models` list, so a hidden
-                // model is never offered or accepted for delegation. The
-                // model-specific probe runs only for a model the list allows.
-                let allowed = &config.profiles[&id].models;
-                let mut choices = probe(id.clone(), None).await?.restricted_to(allowed);
-                if let Some(model) = model
-                    .as_ref()
-                    .filter(|model| choices.models.iter().any(|choice| &choice.value == *model))
-                {
-                    // That probe switches to the requested model, so restrict
-                    // its list with the default as the kept model, as the
-                    // default probe did.
+                let mut choices = result?;
+                if let Some(offer) = identity.and_then(|identity| {
+                    mj_core::model_catalog::offer(
+                        &choices.models,
+                        identity,
+                        model.unwrap_or(identity),
+                    )
+                }) {
                     let default = choices.model.clone();
-                    let mut specific = probe(id.clone(), Some(model.clone())).await?;
+                    let mut specific = probe(id.clone(), Some(offer.value)).await?;
                     let selected = std::mem::replace(&mut specific.model, default);
-                    specific = specific.restricted_to(allowed);
+                    specific = specific.restricted_to(&config.profiles[&id].models);
                     specific.model = selected;
                     choices = specific;
                 }
@@ -172,10 +184,14 @@ where
     for (id, result) in results {
         match result {
             Ok(choices) => {
-                if model
-                    .as_ref()
-                    .is_some_and(|model| choices.models.iter().any(|choice| &choice.value == model))
-                {
+                if identity.as_deref().is_some_and(|identity| {
+                    mj_core::model_catalog::offer(
+                        &choices.models,
+                        identity,
+                        model.as_deref().unwrap_or(identity),
+                    )
+                    .is_some()
+                }) {
                     for choice in choices.efforts {
                         if !options
                             .efforts
@@ -186,19 +202,12 @@ where
                         }
                     }
                 }
-                for choice in choices.models {
-                    if !options
-                        .models
-                        .iter()
-                        .any(|existing| existing.value == choice.value)
-                    {
-                        options.models.push(choice);
-                    }
-                }
+                options.models.extend(choices.models);
             }
             Err(error) => options.unavailable.push(format!("{id}: {error:#}")),
         }
     }
+    options.models = mj_core::model_catalog::merged_choices(options.models);
     Ok(options)
 }
 
@@ -728,6 +737,69 @@ mod tests {
     use super::*;
     use mj_core::refusal::Refusal;
     use std::cell::{Cell, RefCell};
+
+    // Hard-won: #1534 review: a first-listed older alias hid the newer profile during admission.
+    #[tokio::test]
+    async fn subagent_options_preserve_versions_sharing_the_same_launch_alias() {
+        let config = crate::server_runtime::profile_catalog::test_config(&[
+            ("a-stale", mj_core::config::HarnessKind::Claude),
+            ("newer", mj_core::config::HarnessKind::Claude),
+        ]);
+        let recorded: BTreeMap<String, Vec<mj_core::acp::SessionConfigChoice>> =
+            serde_json::from_str(include_str!(
+                "../../../mj-core/tests/fixtures/claude-antigravity-models.json"
+            ))
+            .unwrap();
+        let recorded = &recorded;
+        let calls = &RefCell::new(Vec::new());
+        let options = subagent_options_with(
+            &config,
+            "newer",
+            Some("claude-sonnet-5-5".into()),
+            |id, model| async move {
+                calls.borrow_mut().push((id.clone(), model.clone()));
+                let mut models = recorded["claude"].clone();
+                if id == "a-stale" {
+                    models[1].name = "Sonnet 5".into();
+                }
+                let effort = mj_core::acp::SessionConfigChoice {
+                    value: "high".into(),
+                    name: "High".into(),
+                    description: None,
+                };
+                let selected = model.is_some();
+                if let Some(model) = &model {
+                    assert_eq!((id.as_str(), model.as_str()), ("newer", "sonnet"));
+                }
+                Ok(ProfileConfig {
+                    model: model.or_else(|| Some("opus".into())),
+                    models,
+                    efforts: if selected { vec![effort] } else { vec![] },
+                    observed_at: 0,
+                })
+            },
+        )
+        .await
+        .unwrap();
+        options
+            .validate(&mj_core::config::SubagentChoice {
+                model: "claude-sonnet-5-5".into(),
+                effort: Some("high".into()),
+            })
+            .unwrap();
+        assert_eq!(
+            mj_core::model_catalog::model_id(&options.models, "sonnet"),
+            "claude-sonnet-5-5"
+        );
+        assert_eq!(
+            calls
+                .borrow()
+                .iter()
+                .filter(|(_, model)| model.is_some())
+                .count(),
+            1
+        );
+    }
 
     /// A profile's `models` list hides a model from delegation as well as
     /// from pickers: session creation must not accept a sub-agent model that
