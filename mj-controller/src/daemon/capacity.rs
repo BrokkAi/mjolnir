@@ -847,6 +847,11 @@ mod tests {
         );
         config.save().unwrap();
         let state = crate::daemon::tests::test_runtime_state();
+        state.profile_catalog.get_or_init(|| {
+            crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                tokio_util::sync::CancellationToken::new(),
+            )
+        });
         let target_ids = vec!["podman".into(), "apple".into()];
         let target = crate::targets::DeploymentCapacityTarget {
             id: "local".into(),
