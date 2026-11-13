@@ -2424,12 +2424,15 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
     // column; a store written by an older daemon simply has no timestamp until
     // the next transition. The compatibility floor is unchanged.
     if version < 128 {
-        let add_column =
-            if super::legacy_schema::table_has_column(connection, "operator_away", "changed_at_ms")? {
-                ""
-            } else {
-                "ALTER TABLE operator_away ADD COLUMN changed_at_ms INTEGER;"
-            };
+        let add_column = if super::legacy_schema::table_has_column(
+            connection,
+            "operator_away",
+            "changed_at_ms",
+        )? {
+            ""
+        } else {
+            "ALTER TABLE operator_away ADD COLUMN changed_at_ms INTEGER;"
+        };
         connection.execute_batch(&format!(
             "BEGIN IMMEDIATE;
              {add_column}

@@ -418,7 +418,13 @@ mod tests {
         dashboard.focus_sessions();
         dashboard.dispatch_command(CommandId::ChangeWorkspace);
         let lines = drawn(&mut dashboard, 120, 40);
-        append_golden_state(&mut output, "nine workspaces in a six-row list", 120, 40, &lines);
+        append_golden_state(
+            &mut output,
+            "nine workspaces in a six-row list",
+            120,
+            40,
+            &lines,
+        );
 
         let mut dashboard = dashboard_with_workspaces();
         dashboard.dispatch_command(CommandId::ChangeWorkspace);
