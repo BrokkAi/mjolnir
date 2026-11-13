@@ -20,7 +20,7 @@ following.
 
 | Feature | What is sent | Where it goes | How to turn it off |
 | --- | --- | --- | --- |
-| Jev turn classifier | After a minute of silence in a turn, and after a reply ends: up to 1 KiB of your latest prompt, up to 2 KiB of the latest assistant text, a size-limited transcript summary, tool titles (up to 128 bytes each), the harness name, and counts of background and queued commands. | The public Cloudflare proxy `mj-jev-proxy.eng-admin-a63.workers.dev`, which forwards it to TypeSafe (`api.typesafe.ai`). With `TYPESAFE_API_KEY` set, or a key in `~/.secrets/typesafe_api_key`, it goes straight to `api.typesafe.ai` with your key. | `[jev] enabled = false`, or **Settings → Privacy → Jev (hosted service)**. A blank key does not disable it; it falls back to the proxy. |
+| GLiDE classifiers | The completed-turn verdict sends recent user/assistant conversation and live activity facts; the handback check sends handback evidence; the GitHub item classifier sends item text and relevant session titles; the AFK repeated-question check sends the current question and previously declined questions; the question locator sends the latest user message and candidate assistant replies. | The hosted proxy `https://mj-jev-proxy.eng-admin-a63.workers.dev`, which forwards requests to GLiDE (Fastino). | `[jev] enabled = false`, or **Settings → Privacy → Jev (hosted service)**. |
 | Update check | The installed version's channel is asked for the latest release. No session content is sent. | GitHub Releases, the npm registry, or the Homebrew tap on GitHub. | Set `MJOLNIR_NO_UPDATE_CHECK`. |
 
 One switch stops every Jev request: set `enabled = false` under `[jev]` in
