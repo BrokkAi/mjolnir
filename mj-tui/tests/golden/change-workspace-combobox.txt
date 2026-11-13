@@ -6,9 +6,11 @@
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────                                                                                                        │
 │› · ACP pretty                                                                                                        │
-│  Idle  podman  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
-│  │ No message  │  Sub-agents Native                                                                 │                │
-│  │             │  CPU        no CPU data yet                                                        │                │
+│  Idle  podman  ╭ × ACP pretty name ──────────────────────────────────────────────── Copy session ID ╮                │
+│  │ No message  │                                                                                    │                │
+│  │             │  codex-1                                                                           │                │
+│                │  Sub-agents Native                                                                 │                │
+│                │  CPU        no CPU data yet                                                        │                │
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
@@ -22,15 +24,13 @@
 │                │                                                                                    │                │
 │                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
 │                │  Container settings                                                                │                │
-│                │  Move…                                                                             │                │
-│                │  Suspend…                                                          ctrl+b shift+x  │                │
-│                │  Restart                                                                           │  ──────────────╯
-│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╮
-│                │  Destroy…                                                                          │                │
+│                │  Move…                                                                             │  ──────────────╯
+│                │  Suspend…                                                          ctrl+b shift+x  │  ──────────────╮
+│                │  Restart                                                                           │                │
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │                │
+│                │  Destroy…                                                                          │  ──────────────╯
+│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│  ─────── ▁   ▄ ╮
 │                │                                                                                    │                │
-│                │  ────────────────────────────────────────────────────────────────────────────────  │  ──────────────╯
-│                │  Copy session ID                                                                   │  ─────── ▁   ▄ ╮
-│                │Toggle whether this session raises bell, desktop, and push notifications. Its attent│                │
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ──────────────╯
 │                                                                                                        ─────── ▁   ▄ ╮
 │                                                                                                                      │
@@ -48,9 +48,11 @@ menu popup action: None
 │ Create   Open   Filter: ___________________││                                                                                            │
 │hel ─────────────                                                                                                                         │
 │› · ACP pretty na                                                                                                                         │
-│  Idle  podman  c  ╭ × ACP pretty name ───────────────────────────────────────────────────────────────────────────────╮                   │
-│  │ No messages y  │  Sub-agents Native                                                                               │                   │
-│  │                │  CPU        no CPU data yet                                                                      │                   │
+│  Idle  podman  c  ╭ × ACP pretty name ────────────────────────────────────────────────────────────── Copy session ID ╮                   │
+│  │ No messages y  │                                                                                                  │                   │
+│  │                │  codex-1                                                                                         │                   │
+│                   │  Sub-agents Native                                                                               │                   │
+│                   │  CPU        no CPU data yet                                                                      │                   │
 │                   │                                                                                                  │                   │
 │                   │  Content  ─────────────────────────────────────────────────────────────────────────────────────  │                   │
 │                   │  Changed files — The session's target is not running.                                  ctrl+b d  │                   │
@@ -64,15 +66,13 @@ menu popup action: None
 │                   │  ╭ workspace · ↑/↓ select · Enter choose ╮                                                       │                   │
 │                   │  │Default (current)                      │─────────────────────────────────────────────────────  │                   │
 │                   │  │Other                                  │                                                       │                   │
-│                   │  │Third                                  │                                                       │                   │
-│                   │  ╰───────────────────────────────────────╯                                       ctrl+b shift+x  │                   │
-│                   │  Restart                                                                                         │  ─────────────────╯
-│                   │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-agents.            │  ─────────────────╮
-│                   │  Destroy…                                                                                        │                   │
+│                   │  │Third                                  │                                                       │  ─────────────────╯
+│                   │  ╰───────────────────────────────────────╯                                       ctrl+b shift+x  │  ─────────────────╮
+│                   │  Restart                                                                                         │                   │
+│                   │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-agents.            │                   │
+│                   │  Destroy…                                                                                        │  ─────────────────╯
+│                   │Move the selected session, and its sub-agents, to another workspace, after you confirm.           │  ────────── ▁   ▄ ╮
 │                   │                                                                                                  │                   │
-│                   │  ──────────────────────────────────────────────────────────────────────────────────────────────  │  ─────────────────╯
-│                   │  Copy session ID                                                                                 │  ────────── ▁   ▄ ╮
-│                   │Move the selected session, and its sub-agents, to another workspace, after you confirm.           │                   │
 │                   ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ───────────────────────────────────────────╯  ─────────────────╯
 │                                                                                                                         ────────── ▁   ▄ ╮
 │                                                                                                                                          │
@@ -90,12 +90,14 @@ menu popup action: None
 │ Create   Open   Filter: _____________││                                      │
 │hel ────                                                                      │
 │› · ACP                                                                       │
-│  Idle    ╭ × ACP pretty name ────────────────────────────────────╮           │
-│  │ No m  │  Sub-agents Native                                    │           │
-│  │       │  CPU        no CPU data yet                           │           │
-│          │                                                       │           │
+│  Idle    ╭ × ACP pretty name ─────────────────── Copy session ID ╮           │
+│  │ No m  │                                                       │           │
+│  │       │  codex-1                                              │           │
+│          │  Sub-agents Native                                    │           │
+│          │  CPU        no CPU data yet                           │           │
+│          │                                                       │  conversat│
 │          │  Content  ──────────────────────────────────────────  │           │
-│          │  Changed files — The session's target is …  ctrl+b d  │  conversat│
+│          │  Changed files — The session's target is …  ctrl+b d  │           │
 │          │  Dismiss notification — No dismissible notificati…    │           │
 │          │  Ignore                                               │           │
 │          │                                                       │           │
@@ -106,15 +108,13 @@ menu popup action: None
 │          │  ╭ workspace · ↑/↓ select · Enter choose ╮            │           │
 │          │  │Default (current)                      │──────────  │           │
 │          │  │Other                                  │            │           │
-│          │  │Third                                  │            │           │
-│          │  ╰───────────────────────────────────────╯+b shift+x  │           │
-│          │  Restart                                              │  ─────────╯
-│          │  Interrupt all (parent + sub-agents)… — No turn i…    │  ─────────╮
-│          │  Destroy…                                             │           │
-│          │                                                       │  Enter on │
-╰────────  │  ───────────────────────────────────────────────────  │  ─────────╯
-╭ Targets  │  Copy session ID                                      │  ── ▁   ▄ ╮
-│  Host /  │Move the selected session, and its sub-agents, to anoth│           │
+│          │  │Third                                  │            │  ─────────╯
+│          │  ╰───────────────────────────────────────╯+b shift+x  │  ─────────╮
+│          │  Restart                                              │           │
+│          │  Interrupt all (parent + sub-agents)… — No turn i…    │  Enter on │
+╰────────  │  Destroy…                                             │  ─────────╯
+╭ Targets  │Move the selected session, and its sub-agents, to anoth│  ── ▁   ▄ ╮
+│  Host /  │                                                       │           │
 ╰────────  ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ╯  ─────────╯
 ╭ Profile                                                             ── ▁   ▄ ╮
 │                                                                              │
@@ -216,13 +216,15 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ Workspace w7  Workspace w8           ││                                                                              │
 │ Workspace w9                                                                                                         │
 ╰──────────────                                                                                                        │
-╭ Sessions ────  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
-│ Create   Open  │  Sub-agents Native                                                                 │                │
-│hel ──────────  │  CPU        no CPU data yet                                                        │                │
-│› · ACP pretty  │                                                                                    │                │
-│  Idle  podman  │  Content  ───────────────────────────────────────────────────────────────────────  │                │
-│  │ No message  │  Changed files — The session's target is not running.                    ctrl+b d  │                │
-│  │             │  Dismiss notification — No dismissible notification is active.                     │                │
+╭ Sessions ────  ╭ × ACP pretty name ──────────────────────────────────────────────── Copy session ID ╮                │
+│ Create   Open  │                                                                                    │                │
+│hel ──────────  │  codex-1                                                                           │                │
+│› · ACP pretty  │  Sub-agents Native                                                                 │                │
+│  Idle  podman  │  CPU        no CPU data yet                                                        │                │
+│  │ No message  │                                                                                    │                │
+│  │             │  Content  ───────────────────────────────────────────────────────────────────────  │                │
+│                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
+│                │  Dismiss notification — No dismissible notification is active.                     │                │
 │                │  Ignore                                                                            │                │
 │                │                                                                                    │                │
 │                │  Organize  ──────────────────────────────────────────────────────────────────────  │                │
@@ -232,15 +234,13 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │                │  ╭ workspace · ↑/↓ select · Enter choose ╮                                         │                │
 │                │  │Workspace default (current)           ▐│───────────────────────────────────────  │                │
 │                │  │Workspace w2                          ▐│                                         │                │
-│                │  │Workspace w3                          ▐│                                         │                │
-│                │  │Workspace w4                          ▐│                         ctrl+b shift+x  │                │
-│                │  │Workspace w5                          ││                                         │  ──────────────╯
-│                │  │Workspace w6                          ││ turn is running here or in its sub-…    │  ──────────────╮
-│                │  ╰───────────────────────────────────────╯                                         │                │
+│                │  │Workspace w3                          ▐│                                         │  ──────────────╯
+│                │  │Workspace w4                          ▐│                         ctrl+b shift+x  │  ──────────────╮
+│                │  │Workspace w5                          ││                                         │                │
+│                │  │Workspace w6                          ││ turn is running here or in its sub-…    │                │
+│                │  ╰───────────────────────────────────────╯                                         │  ──────────────╯
+│                │Move the selected session, and its sub-agents, to another workspace, after you confi│  ─────── ▁   ▄ ╮
 │                │                                                                                    │                │
-│                │  ────────────────────────────────────────────────────────────────────────────────  │  ──────────────╯
-│                │  Copy session ID                                                                   │  ─────── ▁   ▄ ╮
-│                │Move the selected session, and its sub-agents, to another workspace, after you confi│                │
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ──────────────╯
 │                                                                                                        ─────── ▁   ▄ ╮
 │                                                                                                                      │
@@ -258,9 +258,11 @@ first Escape action: None
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────                                                                                                        │
 │› · ACP pretty                                                                                                        │
-│  Idle  podman  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
-│  │ No message  │  Sub-agents Native                                                                 │                │
-│  │             │  CPU        no CPU data yet                                                        │                │
+│  Idle  podman  ╭ × ACP pretty name ──────────────────────────────────────────────── Copy session ID ╮                │
+│  │ No message  │                                                                                    │                │
+│  │             │  codex-1                                                                           │                │
+│                │  Sub-agents Native                                                                 │                │
+│                │  CPU        no CPU data yet                                                        │                │
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │
@@ -274,15 +276,13 @@ first Escape action: None
 │                │                                                                                    │                │
 │                │  Lifecycle  ─────────────────────────────────────────────────────────────────────  │                │
 │                │  Container settings                                                                │                │
-│                │  Move…                                                                             │                │
-│                │  Suspend…                                                          ctrl+b shift+x  │                │
-│                │  Restart                                                                           │  ──────────────╯
-│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │  ──────────────╮
-│                │  Destroy…                                                                          │                │
+│                │  Move…                                                                             │  ──────────────╯
+│                │  Suspend…                                                          ctrl+b shift+x  │  ──────────────╮
+│                │  Restart                                                                           │                │
+│                │  Interrupt all (parent + sub-agents)… — No turn is running here or in its sub-…    │                │
+│                │  Destroy…                                                                          │  ──────────────╯
+│                │Move the selected session, and its sub-agents, to another workspace, after you confi│  ─────── ▁   ▄ ╮
 │                │                                                                                    │                │
-│                │  ────────────────────────────────────────────────────────────────────────────────  │  ──────────────╯
-│                │  Copy session ID                                                                   │  ─────── ▁   ▄ ╮
-│                │Move the selected session, and its sub-agents, to another workspace, after you confi│                │
 │                ╰ ↑↓ browse · Click/Enter runs · Tab moves · Esc closes ─────────────────────────────╯  ──────────────╯
 │                                                                                                        ─────── ▁   ▄ ╮
 │                                                                                                                      │

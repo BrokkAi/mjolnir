@@ -1794,13 +1794,18 @@ function markNotificationDismissal(control, session) {
 
 function updateSessionMenu(card, session) {
   const actions = sessionMenuActions(session);
-  // Labels carry state too ("Ignore notifications" flips when it applies),
-  // so a label-only change must rebuild the same-length menu.
-  const signature = actions.map(([label, , name]) => `${name}=${label}`).join('|');
+  // The bare top line reads the session's model, effort, and profile.
+  const options = session.config_options || [];
+  const current = key => options.find(option => option.key === key)?.current;
+  const info = [current('model'), current('effort'), session.profile_id].filter(Boolean).join(' · ');
+  // Labels carry state too ("Ignore" flips when it applies), so a label-only
+  // change must rebuild the same-length menu.
+  const signature = [info, ...actions.map(([label, , name]) => `${name}=${label}`)].join('|');
   const menuChanged = card._sessionMenuSignature !== signature;
   if (menuChanged) {
     const activeAction = card._menu?.ownerDocument?.activeElement?.dataset?.action;
     card._menu.replaceChildren(
+      ...(info ? [el('div', 'session-menu-info', info)] : []),
       ...actions.map(([label, className, actionName]) => {
         const control = action(label, className, {
           action: actionName,
