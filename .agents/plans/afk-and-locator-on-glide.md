@@ -18,7 +18,7 @@ After this change both run on GLiDE through the hosted proxy, each is measured o
 - [x] (2026-11-13) Milestone 2: locator variants on tuning; froze V0 argmax; held-out gate PASS (see Outcomes).
 - [ ] Milestone 3: AFK evaluation corpus (real form pairs plus constructed variants) and a Jev baseline.
 - [ ] Milestone 4: AFK GLiDE wording and threshold on tuning; freeze; confirm on held-out.
-- [ ] Milestone 5: proxy routes, worker clients, AFK decision log; tests.
+- [ ] Milestone 5: proxy routes, worker clients, AFK decision log; tests. Locator half done 2026-11-13 (route `/v1/question-locator-glide`, `locate_question`, frozen-question and parser tests, `jev-proxy.md`); AFK half open.
 - [ ] Milestone 6: remove the dead Jev client code from the worker (and controller, if any remains).
 - [ ] Milestone 7: full validation, proxy deployment, commit, review, push.
 
@@ -54,6 +54,9 @@ After this change both run on GLiDE through the hosted proxy, each is measured o
 - Decision: no client-side byte caps on the GLiDE requests and the provider's read timeout. The proxy accepts up to its existing GLiDE body bound (`GLIDE_BODY_BYTES`, 256 KiB, from Fastino's 65,536-token limit at 4 bytes per token). The locator shrinks its per-reply budget and retries only when the proxy or provider refuses the size (HTTP 413 `body_too_large`, or Fastino HTTP 400 `input_too_long`), as the completed-turn client already does. The AFK check keeps its existing rule of no truncation: an oversized request fails and the question is held for the person. Client timeout 180 seconds, from Fastino's guidance to set read timeouts above 170 seconds (same as the completed-turn client). The locator's per-reply text budget and reply count are evaluation parameters, chosen in Milestone 2, not caps.
   Rationale: repository rule against speculative caps; same choices as the completed-turn port.
   Date/Author: 2026-11-13, parent session.
+- Decision: the locator has no refusal-and-shrink retry. A proxy or provider size refusal (HTTP 413 `body_too_large`, Fastino 400 `input_too_long`) is reported as a failure like any other error: the decision record is `failed` and no target is stored. This supersedes the "shrinks its per-reply budget and retries only when the proxy or provider refuses the size" sentence of the no-caps decision above, for the locator only (the AFK check keeps its no-truncation rule). The decision record keeps its fields with contract `question-locator-glide-v1`.
+  Rationale: the state builder (`question_locator::build`) already shrinks the state to at most 60 KiB, about a quarter of the 256 KiB bound, and the evaluation used exactly those states, so a refusal cannot be caused by the request size; a retry path would be unreachable code. The worker always calls the hosted route, with the 180-second timeout of the completed-turn client.
+  Date/Author: 2026-11-13, parent session; recorded by the Milestone 5 locator implementation.
 - Decision: the AFK check gains a decision-log record per classification (same `mj_core::jev::DecisionLog` used by the locator).
   Rationale: there is no production evidence today; future calibration needs it. The record holds the same redacted request that is sent.
   Date/Author: 2026-11-13, parent session.

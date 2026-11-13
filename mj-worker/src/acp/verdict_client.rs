@@ -322,17 +322,18 @@ impl VerdictClient {
             );
         }
     }
+    /// Ask GLiDE which reply holds the open question. The frozen rule picks the
+    /// most probable of the replies and `none` (`question_locator::parse`).
+    ///
+    /// The state builder keeps the request far below the proxy's body bound, so an
+    /// explicit size refusal is a failure like any other: no retry, no target stored.
     pub(crate) async fn locate_question(
         &self,
         session: &str,
         request: &question_locator::Request,
     ) -> Result<Option<usize>> {
         let count = request.state.replies.len();
-        let direct_questions = match &self.source {
-            VerdictSource::Direct { .. } => Some(question_locator::questions(count)),
-            VerdictSource::Hosted { .. } => None,
-        };
-        let body = mj_core::jev::request_body(&request.state, direct_questions);
+        let body = mj_core::jev::request_body(&request.state, None);
         let diagnostic = self.log.as_ref().map(|log| {
             log.start(
                 session,
@@ -344,36 +345,43 @@ impl VerdictClient {
         if let Some(log) = &diagnostic {
             log.update(
                 None,
-                serde_json::json!({"request":body,"contract":"question-locator-v1"}),
+                serde_json::json!({"request":body,"contract":"question-locator-glide-v1"}),
             );
         }
         let result = async {
-            let http = match &self.source {
-                VerdictSource::Direct { key, endpoint } => {
-                    self.client.post(endpoint).bearer_auth(key)
-                }
+            // GLiDE is hosted even when the unrelated Jev source is Direct.
+            let endpoint = match &self.source {
                 VerdictSource::Hosted { endpoint } => {
-                    let mut url =
-                        reqwest::Url::parse(endpoint).context("parse locator proxy URL")?;
-                    url.set_path("/v1/question-locator");
-                    self.client.post(url)
+                    reqwest::Url::parse(endpoint)?.join("/v1/question-locator-glide")?
                 }
+                VerdictSource::Direct { .. } => reqwest::Url::parse(
+                    "https://mj-jev-proxy.eng-admin-a63.workers.dev/v1/question-locator-glide",
+                )?,
             };
-            let response = http
+            // Fastino: "set your client read timeout above 170 seconds"
+            // https://docs.fastino.ai/troubleshooting/retries (supersedes older 300s notes).
+            let response = self
+                .client
+                .post(endpoint)
+                .timeout(Duration::from_secs(180))
                 .json(&body)
                 .send()
                 .await
-                .context("request question locator")?
-                .error_for_status()
-                .context("question locator HTTP status")?;
+                .context("request question locator")?;
+            let status = response.status();
             let bytes = response.bytes().await.context("read question locator")?;
             ensure!(
                 bytes.len() <= 64 * 1024,
                 "question locator response exceeds byte limit"
             );
+            ensure!(
+                status.is_success(),
+                "question locator HTTP {status}: {}",
+                String::from_utf8_lossy(&bytes)
+            );
             let answer: serde_json::Value =
                 serde_json::from_slice(&bytes).context("decode locator JSON")?;
-            let index = question_locator::parse(&answer, count)?;
+            let index = question_locator::parse(&answer["probabilities"], count)?;
             if let Some(log) = &diagnostic {
                 log.update(
                     None,
@@ -387,7 +395,7 @@ impl VerdictClient {
             match &result {
                 Ok(Some(_)) => log.finish(
                     "located",
-                    "Jev selected a reply for the current-assessment check.",
+                    "GLiDE selected a reply for the current-assessment check.",
                 ),
                 Ok(None) => log.finish("unchanged", "No open request was located."),
                 Err(error) => {
@@ -925,6 +933,62 @@ mod tests {
         )
     }
 
+    /// A hosted-source server for one request; returns the request path and body.
+    async fn hosted_server(
+        body: String,
+    ) -> (
+        VerdictClient,
+        tokio::task::JoinHandle<(String, serde_json::Value)>,
+    ) {
+        hosted_server_with_status("200 OK", body).await
+    }
+
+    async fn hosted_server_with_status(
+        status: &'static str,
+        body: String,
+    ) -> (
+        VerdictClient,
+        tokio::task::JoinHandle<(String, serde_json::Value)>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = BufReader::new(socket);
+            let mut request_line = String::new();
+            socket.read_line(&mut request_line).await.unwrap();
+            let path = request_line.split_whitespace().nth(1).unwrap().to_owned();
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                socket.read_line(&mut line).await.unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse::<usize>().unwrap();
+                }
+            }
+            let mut request = vec![0; length];
+            socket.read_exact(&mut request).await.unwrap();
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            (path, serde_json::from_slice(&request).unwrap())
+        });
+        (
+            VerdictClient::new(VerdictSource::Hosted { endpoint }).unwrap(),
+            task,
+        )
+    }
+
     // Hard-won: dc4c34617: a client-side byte cap made long turns permanently unclassifiable
     #[tokio::test]
     async fn glide_handback_large_requests_shrink_only_after_size_refusal() {
@@ -1042,13 +1106,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn locator_direct_transport_sends_redacted_state_and_shared_question() {
+    async fn locator_sends_redacted_state_alone_to_the_hosted_glide_route() {
         const TOKEN: &str = "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789";
-        let reply = serde_json::json!({"answers":{"request_reply":{
-            "type":"choice", "choice":"r1", "probabilities":{"r0":0.2,"r1":0.7,"none":0.1}
-        }}})
-        .to_string();
-        let (client, server) = server(reply).await;
+        let reply = serde_json::json!({"probabilities":{"r0":0.2,"r1":0.7,"none":0.1}}).to_string();
+        let (client, server) = hosted_server(reply).await;
         let context = ContextHistory {
             messages: vec![
                 EvidenceMessage {
@@ -1074,17 +1135,43 @@ mod tests {
             client.locate_question("session", &request).await.unwrap(),
             Some(1)
         );
-        let sent = server.await.unwrap();
+        let (path, sent) = server.await.unwrap();
+        assert_eq!(path, "/v1/question-locator-glide");
         assert!(!sent.to_string().contains(TOKEN), "{sent}");
         assert_eq!(
-            sent["state"]["replies"][0]["text"],
+            sent["replies"][0]["text"],
             "Pushed with GH_TOKEN=[redacted]"
         );
         assert_eq!(
-            sent["state"]["replies"][1],
+            sent["replies"][1],
             serde_json::to_value(&request.state.replies[1]).unwrap()
         );
-        assert_eq!(sent["questions"], question_locator::questions(2));
+        // The hosted proxy owns the question; the request is the state alone.
+        assert_eq!(sent.as_object().unwrap().len(), 2, "{sent}");
+    }
+
+    #[tokio::test]
+    async fn locator_size_refusal_is_a_failure_without_a_retry() {
+        let refusal = serde_json::json!({"error":"body_too_large"}).to_string();
+        let (client, server) = hosted_server_with_status("413 Payload Too Large", refusal).await;
+        let context = ContextHistory {
+            messages: ["a", "b"]
+                .iter()
+                .map(|id| EvidenceMessage {
+                    id: format!("agent:{id}"),
+                    role: "assistant".into(),
+                    text: "Choose?".into(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let error = client
+            .locate_question("session", &question_locator::build(&context))
+            .await
+            .unwrap_err();
+        // The server accepts one connection; a retry would fail to connect instead.
+        assert!(format!("{error:#}").contains("413"), "{error:#}");
+        server.await.unwrap();
     }
 
     #[tokio::test]
