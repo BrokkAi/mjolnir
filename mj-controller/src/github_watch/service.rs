@@ -78,13 +78,9 @@ fn is_github_events_disabled(error: &anyhow::Error) -> bool {
 
 trait GithubClassifier: Send + Sync {
     fn classify<'a>(&'a self, evidence: &'a GithubItemEvidence) -> ClassifyFuture<'a>;
-    fn set_use_gpu(&self, _: bool) {}
 }
 
 impl GithubClassifier for crate::github_relevance::Classifier {
-    fn set_use_gpu(&self, enabled: bool) {
-        self.set_use_gpu(enabled);
-    }
     fn classify<'a>(&'a self, evidence: &'a GithubItemEvidence) -> ClassifyFuture<'a> {
         Box::pin(self.classify(evidence))
     }
@@ -99,38 +95,26 @@ pub(crate) async fn run(state: Arc<RuntimeState>, stop: CancellationToken) -> Re
             state.push_public_notice("", text);
         }
     }));
-    let owner_notices = notices.clone();
-    let student = Arc::new(crate::github_student::Student::new(
-        mj_core::config::data_dir(),
-        state.controller_projection().config.github.watch.use_gpu,
-        Arc::new(move |notice| owner_notices.student_notice(notice)),
-    ));
-    let result = run_with_student(state, stop, student.clone(), notices).await;
-    let shutdown = student.shutdown().await;
+    let mut student = None;
+    let result = run_poll_loop(state, stop, &mut student, notices).await;
+    let shutdown = match student {
+        Some(student) => student.shutdown().await,
+        None => Ok(()),
+    };
     if let Err(error) = &shutdown {
         tracing::warn!(%error, "GitHub student shutdown failed");
     }
     result.and(shutdown)
 }
 
-async fn run_with_student(
+async fn run_poll_loop(
     state: Arc<RuntimeState>,
     stop: CancellationToken,
-    student: Arc<dyn crate::github_relevance::StudentOwner>,
+    student: &mut Option<Arc<crate::github_student::Student>>,
     notices: Arc<crate::github_relevance::Notices>,
-) -> Result<()> {
-    let classifier = crate::github_relevance::Classifier::new(student, notices);
-    run_with_classifier(state, stop, Arc::new(classifier)).await
-}
-
-async fn run_with_classifier(
-    state: Arc<RuntimeState>,
-    stop: CancellationToken,
-    classifier: Arc<dyn GithubClassifier>,
 ) -> Result<()> {
     loop {
         let projection = state.controller_projection();
-        classifier.set_use_gpu(projection.config.github.watch.use_gpu);
         let mailboxes_enabled = projection.config.github_events_enabled();
         let config = projection.config.github.watch;
         let delay = if mailboxes_enabled {
@@ -146,11 +130,34 @@ async fn run_with_classifier(
             return Ok(());
         }
         let projection = state.controller_projection();
-        classifier.set_use_gpu(projection.config.github.watch.use_gpu);
-        if !projection.config.github_events_enabled() {
+        let mailboxes_enabled = projection.config.github_events_enabled();
+        let config = projection.config.github.watch;
+        if !config.local_inference
+            && let Some(previous) = student.take()
+        {
+            previous.shutdown().await?;
+        }
+        if !mailboxes_enabled {
             continue;
         }
-        let config = projection.config.github.watch;
+        if config.local_inference {
+            let local = student.get_or_insert_with(|| {
+                let notices = notices.clone();
+                Arc::new(crate::github_student::Student::new(
+                    mj_core::config::data_dir(),
+                    config.use_gpu,
+                    Arc::new(move |notice| notices.student_notice(notice)),
+                ))
+            });
+            local.set_use_gpu(config.use_gpu);
+        }
+        let classifier: Arc<dyn GithubClassifier> =
+            Arc::new(crate::github_relevance::Classifier::new(
+                student.as_ref().map(|student| {
+                    student.clone() as Arc<dyn crate::github_relevance::StudentOwner>
+                }),
+                notices.clone(),
+            ));
         let sessions_by_repo = sessions_by_github_repo(&projection.state);
         let watched_repositories =
             tokio::task::spawn_blocking(crate::database::load_github_watched_repositories)
