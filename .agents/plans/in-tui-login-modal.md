@@ -26,7 +26,7 @@ inside that modal.
   opaque modal and that fragmented harness output is still preserved.
 - [x] Run formatting, focused tests, full touched-crate tests, and workspace
   Clippy; review the final diff.
-- [ ] Commit only task-owned files on the current branch and push to
+- [x] Commit only task-owned files on the current branch and push to
   `origin/master`.
 
 ## Surprises & Discoveries
@@ -101,7 +101,8 @@ dashboard around the modal.
 Validation completed with all features: 586 TUI tests, 251 CLI unit tests, 22
 daemon-startup integrations, and the remaining CLI integration suites pass.
 `cargo fmt --all -- --check`, `git diff --check`, and workspace
-`cargo clippy --all-targets -- -D warnings` pass. Commit and push remain.
+`cargo clippy --all-targets -- -D warnings` pass. Implementation commit
+`816afd679` was merged with upstream and pushed to `origin/master`.
 
 ## Context and Orientation
 
