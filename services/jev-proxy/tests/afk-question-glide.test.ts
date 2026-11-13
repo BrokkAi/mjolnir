@@ -26,10 +26,10 @@ function upstream(t: TestContext, handler: typeof fetch) {
 }
 
 test("AFK GLiDE question is the frozen research file", () => {
-  // SHA256SUMS in /mnt/optane/tmp/glide-afk-locator-20261113/afk/glide/FROZEN/
+  // SHA256SUMS in /mnt/optane/tmp/glide-afk-locator-20261113/afk/glide/FROZEN-v2/
   const bytes = readFileSync(new URL("../../../mj-worker/src/acp/afk_question_glide.json", import.meta.url));
   assert.equal(createHash("sha256").update(bytes).digest("hex"),
-    "7f1505ed08567a795af673300dafa9f22352cdc987081b8378d9a63ebcb12098");
+    "82a99d261302bb1013e79896a9faf57dfce3f607382d65994f52f785a29e9a4b");
 });
 
 test("AFK GLiDE sends the frozen question and returns probabilities", async t => {

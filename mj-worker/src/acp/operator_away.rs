@@ -42,7 +42,10 @@ impl OperatorAwayState {
     }
 }
 
-/// Retain answer constraints, excluding transient identity and secret defaults.
+/// Retain answer constraints, excluding transient identity, secret defaults and
+/// the required flag. The user ruled (2026-11-13) that a form differing only by
+/// required versus optional repeats the earlier question, so the flag never
+/// reaches the classifier and cannot make two forms differ.
 fn question_evidence(question: &ElicitationRequest) -> serde_json::Value {
     let mut evidence = serde_json::to_value(question).expect("elicitation serializes");
     evidence
@@ -55,6 +58,10 @@ fn question_evidence(question: &ElicitationRequest) -> serde_json::Value {
         .iter_mut()
         .zip(&question.fields)
     {
+        field
+            .as_object_mut()
+            .expect("elicitation field is an object")
+            .remove("required");
         if question.field_is_secret(original) {
             field
                 .as_object_mut()
@@ -604,7 +611,7 @@ mod tests {
 
     // Hard-won: #1489 review: evidence lost constraints and leaked secret defaults/choices.
     #[tokio::test]
-    async fn afk_question_evidence_preserves_changed_selection_and_required_constraints() {
+    async fn afk_question_evidence_preserves_changed_selection_without_the_required_flag() {
         let classifier = Classifier::new().await;
         let owner = OperatorAway::default();
         let pending = owner.pending_for_bridge_with_source(Some(classifier.source.clone()), None);
@@ -681,15 +688,21 @@ mod tests {
             evidence["current_question"]["fields"][0]["kind"],
             "multi_select"
         );
-        assert_eq!(evidence["current_question"]["fields"][0]["required"], true);
+        // Required versus optional alone is a repeat (user rule, 2026-11-13).
+        assert!(
+            evidence["current_question"]["fields"][0]
+                .get("required")
+                .is_none()
+        );
         assert_eq!(evidence["current_question"]["fields"][0]["min_items"], 1);
         assert_eq!(
             evidence["previous_questions"][0]["fields"][0]["kind"],
             "single_select"
         );
-        assert_eq!(
-            evidence["previous_questions"][0]["fields"][0]["required"],
-            false
+        assert!(
+            evidence["previous_questions"][0]["fields"][0]
+                .get("required")
+                .is_none()
         );
         classifier.respond(stream, "different").await;
         assert!(matches!(
