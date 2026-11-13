@@ -40,7 +40,9 @@ pub(crate) struct GithubItemWatch {
     pub owner: String,
     pub repo: String,
     pub number: i64,
-    pub creator_session_id: String,
+    /// `None` for a watch kept for interested sessions only: a PR another
+    /// account opened, or one whose creating session is gone.
+    pub creator_session_id: Option<String>,
     pub kind: String,
     pub title: String,
     pub url: String,
@@ -51,6 +53,19 @@ pub(crate) struct GithubItemWatch {
     pub review_comments_id: i64,
     pub processed_at: String,
     pub recorded_updated_at: Option<String>,
+    /// The latest lifecycle event the timeline committed for this item.
+    pub lifecycle: Option<RecordedLifecycle>,
+}
+
+/// A lifecycle event as recorded on its watch, so a session that is classified
+/// after the event was committed can still be told. `body_json` is a serialized
+/// `MailboxEventBody` addressed to the creator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecordedLifecycle {
+    pub key: String,
+    pub body_json: String,
+    pub author: Option<String>,
+    pub at: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -300,7 +315,8 @@ pub(crate) fn load_github_watches(owner: &str, repo: &str) -> Result<Vec<GithubI
     let connection = open_reader(&database_path())?;
     let mut statement = connection.prepare(
         "SELECT w.owner, w.repo, w.number, w.creator_session_id, w.kind, w.title, w.url, w.created_at,
-                w.timeline_at, w.timeline_id, w.review_comments_at, w.review_comments_id, w.processed_at, s.updated_at
+                w.timeline_at, w.timeline_id, w.review_comments_at, w.review_comments_id, w.processed_at, s.updated_at,
+                w.lifecycle_event_key, w.lifecycle_event_json, w.lifecycle_author, w.lifecycle_at
          FROM github_watch_items w LEFT JOIN github_seen_items s
            ON w.owner=s.owner AND w.repo=s.repo AND w.number=s.number
          WHERE w.owner=?1 AND w.repo=?2 ORDER BY w.number",
@@ -322,10 +338,32 @@ pub(crate) fn load_github_watches(owner: &str, repo: &str) -> Result<Vec<GithubI
                 review_comments_id: row.get(11)?,
                 processed_at: row.get(12)?,
                 recorded_updated_at: row.get(13)?,
+                lifecycle: recorded_lifecycle(
+                    row.get(14)?,
+                    row.get(15)?,
+                    row.get(16)?,
+                    row.get(17)?,
+                ),
             })
         })?
         .map(|row| row.map_err(Into::into))
         .collect()
+}
+
+/// The four columns are written together; a row with a key but no body or
+/// time carries no event.
+fn recorded_lifecycle(
+    key: Option<String>,
+    body_json: Option<String>,
+    author: Option<String>,
+    at: Option<String>,
+) -> Option<RecordedLifecycle> {
+    Some(RecordedLifecycle {
+        key: key?,
+        body_json: body_json?,
+        author,
+        at: at?,
+    })
 }
 
 fn enqueue_github_event(

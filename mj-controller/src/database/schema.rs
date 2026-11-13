@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 126;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 130;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2464,6 +2464,13 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
              COMMIT;"
         ))?;
     }
+    // Breaking: `github_watch_items.creator_session_id` may be NULL, which an
+    // older daemon decodes as a string and fails on; and interested-session
+    // lifecycle rows in `mailbox_outbox.event_json` carry a `recipient` field
+    // that an older daemon refuses with `deny_unknown_fields`.
+    if version < 130 {
+        migrate_github_watch_followers(connection)?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -2482,6 +2489,113 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
             SCHEMA_VERSION
         );
     }
+    Ok(())
+}
+
+/// Trigger body that removes a gone session's rows. `gone` is `OLD` or `NEW`.
+///
+/// A watch the session created keeps going with no creator while another live
+/// session is interested in the item, and a creator-less watch the session was
+/// following is deleted with its last follower. The classification rows are
+/// deleted last because the follower tests read them.
+fn gone_session_rows_sql(gone: &str) -> String {
+    let id = format!("{gone}.session_id");
+    let other_live_follower = format!(
+        "EXISTS (SELECT 1 FROM github_watch_classifications c
+                     JOIN sessions s ON s.session_id = c.session_id
+                     WHERE c.owner = github_watch_items.owner
+                       AND c.repo = github_watch_items.repo
+                       AND c.number = github_watch_items.number
+                       AND c.interested = 1 AND c.created = 0
+                       AND c.session_id <> {id}
+                       AND s.state <> 'destroyed-with-data-loss')"
+    );
+    format!(
+        "DELETE FROM mailbox_outbox WHERE target_session_id = {id};
+             DELETE FROM github_watch_items
+                 WHERE (creator_session_id = {id}
+                        OR (creator_session_id IS NULL
+                            AND EXISTS (SELECT 1 FROM github_watch_classifications f
+                                        WHERE f.owner = github_watch_items.owner
+                                          AND f.repo = github_watch_items.repo
+                                          AND f.number = github_watch_items.number
+                                          AND f.session_id = {id})))
+                   AND NOT {other_live_follower};
+             UPDATE github_watch_items SET creator_session_id = NULL WHERE creator_session_id = {id};
+             DELETE FROM github_watch_classifications WHERE session_id = {id};
+             DELETE FROM github_watch_classification_failures WHERE session_id = {id};"
+    )
+}
+
+/// Migration 130: a PR watch may have no creator, and records its latest
+/// lifecycle event.
+///
+/// A watch row now exists for every PR with at least one interested session,
+/// including PRs another account opened (merge batches). SQLite cannot drop
+/// `NOT NULL`, so the table is rebuilt with a nullable `creator_session_id` and
+/// four `lifecycle_*` columns: the most recent lifecycle event's base key,
+/// serialized `MailboxEventBody` (recipient `Creator`), causing GitHub login and
+/// timestamp. A session that is classified after the event was committed reads
+/// them to be told. The session-row triggers name this table, and SQLite refuses
+/// to rename a table while a trigger names a missing one, so they are dropped
+/// first and recreated afterwards. Revision 121's rule changes in one way: a
+/// watch loses its creator, and is deleted only when no live interested
+/// session remains.
+fn migrate_github_watch_followers(connection: &Connection) -> Result<()> {
+    let transaction = connection.unchecked_transaction()?;
+    transaction.execute_batch(&format!(
+        "DROP TRIGGER IF EXISTS session_rows_deleted;
+         DROP TRIGGER IF EXISTS session_rows_destroyed;
+         DROP TRIGGER IF EXISTS github_watch_items_live_creator;
+         CREATE TABLE github_watch_items_v130 (
+             owner TEXT NOT NULL,
+             repo TEXT NOT NULL,
+             number INTEGER NOT NULL,
+             creator_session_id TEXT,
+             kind TEXT NOT NULL CHECK(kind IN ('issue', 'pull_request')),
+             title TEXT NOT NULL,
+             url TEXT NOT NULL,
+             created_at TEXT NOT NULL,
+             timeline_at TEXT NOT NULL DEFAULT '',
+             timeline_id INTEGER NOT NULL DEFAULT 0,
+             review_comments_at TEXT NOT NULL DEFAULT '',
+             review_comments_id INTEGER NOT NULL DEFAULT 0,
+             processed_at TEXT NOT NULL DEFAULT '',
+             lifecycle_event_key TEXT,
+             lifecycle_event_json TEXT CHECK(lifecycle_event_json IS NULL OR json_valid(lifecycle_event_json)),
+             lifecycle_author TEXT,
+             lifecycle_at TEXT,
+             PRIMARY KEY(owner, repo, number)
+         ) STRICT;
+         INSERT INTO github_watch_items_v130(owner, repo, number, creator_session_id, kind,
+                 title, url, created_at, timeline_at, timeline_id, review_comments_at,
+                 review_comments_id, processed_at)
+             SELECT owner, repo, number, creator_session_id, kind, title, url, created_at,
+                    timeline_at, timeline_id, review_comments_at, review_comments_id, processed_at
+             FROM github_watch_items;
+         DROP TABLE github_watch_items;
+         ALTER TABLE github_watch_items_v130 RENAME TO github_watch_items;
+         CREATE TRIGGER session_rows_deleted AFTER DELETE ON sessions BEGIN
+             {deleted}
+         END;
+         CREATE TRIGGER session_rows_destroyed
+             AFTER UPDATE OF state ON sessions
+             WHEN NEW.state = 'destroyed-with-data-loss' BEGIN
+             {destroyed}
+         END;
+         CREATE TRIGGER github_watch_items_live_creator
+             BEFORE INSERT ON github_watch_items
+             WHEN NEW.creator_session_id IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM sessions WHERE session_id = NEW.creator_session_id AND state <> 'destroyed-with-data-loss')
+             BEGIN SELECT RAISE(IGNORE); END;
+         UPDATE schema_compatibility SET minimum_compatible_version = 130 WHERE singleton = 1;
+         INSERT INTO schema_migrations(version, applied_at)
+             VALUES (130, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+         PRAGMA user_version = 130;",
+        deleted = gone_session_rows_sql("OLD"),
+        destroyed = gone_session_rows_sql("NEW"),
+    ))?;
+    transaction.commit()?;
     Ok(())
 }
 
@@ -4100,6 +4214,164 @@ mod reader_tests {
         assert_eq!(state.revision, SCHEMA_VERSION);
         assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         assert!(state.ensure_supported_by(84).is_err());
+        // Revision 130 rebuilt the table: the watch kept its creator and
+        // cursors, and the recorded lifecycle event starts empty.
+        let lifecycle: (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = writer
+            .query_row(
+                "SELECT lifecycle_event_key, lifecycle_event_json, lifecycle_author, lifecycle_at
+                 FROM github_watch_items",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(lifecycle, (None, None, None, None));
+    }
+
+    /// Revision 130 is breaking. Build a store at revision 129 with a watch, its
+    /// triggers and queued mail, migrate it, and check what survives and what an
+    /// older build is told.
+    #[test]
+    fn watch_followers_migration_keeps_rows_and_refuses_older_builds() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("watch-followers.sqlite3");
+        drop(open_writer(&path).unwrap());
+        for id in ["creator", "follower"] {
+            save_session_to(&path, &super::super::tests::session(id, "project")).unwrap();
+        }
+        // Rebuild the table as revision 129 had it: a creator is required, and
+        // there are no lifecycle columns. Rewinding the ledger makes the next
+        // open apply revision 130.
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "DROP TRIGGER session_rows_deleted;
+                 DROP TRIGGER session_rows_destroyed;
+                 DROP TRIGGER github_watch_items_live_creator;
+                 DROP TABLE github_watch_items;
+                 CREATE TABLE github_watch_items (
+                     owner TEXT NOT NULL, repo TEXT NOT NULL, number INTEGER NOT NULL,
+                     creator_session_id TEXT NOT NULL,
+                     kind TEXT NOT NULL CHECK(kind IN ('issue', 'pull_request')),
+                     title TEXT NOT NULL, url TEXT NOT NULL, created_at TEXT NOT NULL,
+                     timeline_at TEXT NOT NULL DEFAULT '', timeline_id INTEGER NOT NULL DEFAULT 0,
+                     review_comments_at TEXT NOT NULL DEFAULT '', review_comments_id INTEGER NOT NULL DEFAULT 0,
+                     processed_at TEXT NOT NULL DEFAULT '',
+                     PRIMARY KEY(owner, repo, number)
+                 ) STRICT;
+                 CREATE TRIGGER session_rows_deleted AFTER DELETE ON sessions BEGIN
+                     DELETE FROM mailbox_outbox WHERE target_session_id = OLD.session_id;
+                     DELETE FROM github_watch_items WHERE creator_session_id = OLD.session_id;
+                     DELETE FROM github_watch_classifications WHERE session_id = OLD.session_id;
+                     DELETE FROM github_watch_classification_failures WHERE session_id = OLD.session_id;
+                 END;
+                 CREATE TRIGGER session_rows_destroyed
+                     AFTER UPDATE OF state ON sessions
+                     WHEN NEW.state = 'destroyed-with-data-loss' BEGIN
+                     DELETE FROM mailbox_outbox WHERE target_session_id = NEW.session_id;
+                     DELETE FROM github_watch_items WHERE creator_session_id = NEW.session_id;
+                     DELETE FROM github_watch_classifications WHERE session_id = NEW.session_id;
+                     DELETE FROM github_watch_classification_failures WHERE session_id = NEW.session_id;
+                 END;
+                 CREATE TRIGGER github_watch_items_live_creator
+                     BEFORE INSERT ON github_watch_items
+                     WHEN NOT EXISTS (SELECT 1 FROM sessions WHERE session_id = NEW.creator_session_id AND state <> 'destroyed-with-data-loss')
+                     BEGIN SELECT RAISE(IGNORE); END;
+                 INSERT INTO github_watch_items(owner,repo,number,creator_session_id,kind,title,url,created_at,
+                         timeline_at,timeline_id,review_comments_at,review_comments_id,processed_at)
+                     VALUES ('acme','repo',7,'creator','pull_request','kept','https://example.com/7','c',
+                         't1',11,'r1',12,'p1');
+                 INSERT INTO github_watch_classifications(owner,repo,number,session_id,kind,title,url,created_at,interested,created)
+                     VALUES ('acme','repo',7,'follower','pull_request','kept','https://example.com/7','c',1,0);
+                 INSERT INTO mailbox_outbox(event_key,target_session_id,event_json,wake,created_at)
+                     VALUES ('queued','creator','{}',1,'c');
+                 DELETE FROM schema_migrations WHERE version = 130;
+                 UPDATE schema_compatibility SET minimum_compatible_version = 126;
+                 PRAGMA user_version = 129;",
+            )
+            .unwrap();
+        drop(connection);
+        forget_verified_schema(&path);
+
+        let writer = open_writer(&path).unwrap();
+        let state = read_schema_state(&writer).unwrap();
+        assert_eq!(state.revision, 130);
+        assert_eq!(state.minimum_compatible, Some(130));
+        // A revision-129 build must refuse to read or write the store.
+        assert!(state.ensure_supported_by(129).is_err());
+        let kept: (String, String, i64, String, i64, String, Option<String>) = writer
+            .query_row(
+                "SELECT creator_session_id, timeline_at, timeline_id, review_comments_at,
+                        review_comments_id, processed_at, lifecycle_event_key
+                 FROM github_watch_items WHERE number = 7",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            kept,
+            (
+                "creator".into(),
+                "t1".into(),
+                11,
+                "r1".into(),
+                12,
+                "p1".into(),
+                None
+            )
+        );
+        for (table, expected) in [("mailbox_outbox", 1), ("github_watch_classifications", 1)] {
+            assert_eq!(
+                writer
+                    .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                expected,
+                "{table}"
+            );
+        }
+        // The rebuilt table accepts a watch with no creator, and its triggers
+        // work: the follower keeps the watch alive when the creator goes.
+        writer
+            .execute(
+                "INSERT INTO github_watch_items(owner,repo,number,creator_session_id,kind,title,url,created_at)
+                 VALUES ('acme','repo',8,NULL,'pull_request','batch','u','c')",
+                [],
+            )
+            .unwrap();
+        writer
+            .execute("DELETE FROM sessions WHERE session_id = 'creator'", [])
+            .unwrap();
+        let creators: Vec<(i64, Option<String>)> = writer
+            .prepare("SELECT number, creator_session_id FROM github_watch_items ORDER BY number")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(creators, vec![(7, None), (8, None)]);
+        assert_eq!(
+            writer
+                .query_row("SELECT count(*) FROM mailbox_outbox", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "mail addressed to the deleted creator goes with it"
+        );
     }
 
     #[test]

@@ -281,8 +281,8 @@ async fn poll_repository(
         .map(|session| session.id.as_str())
         .or_else(|| {
             watches
-                .first()
-                .map(|watch| watch.creator_session_id.as_str())
+                .iter()
+                .find_map(|watch| watch.creator_session_id.as_deref())
         })
         .context("GitHub repository has neither a live session nor a creator watch")?;
     let controller = tokio::task::spawn_blocking(crate::controller::Controller::load)
@@ -877,6 +877,11 @@ async fn poll_item_timeline(
             )));
         }
     };
+    // Fan-out to interested sessions arrives with the next milestone; no
+    // watch without a creator exists before it.
+    let Some(creator) = watch.creator_session_id.clone() else {
+        return Ok(());
+    };
     let mapped = map_item_activity(&watch, &entries, &comments, merged_at.as_deref())?;
     let mut outbox = Vec::new();
     let mut turn_windows = BTreeMap::new();
@@ -892,7 +897,7 @@ async fn poll_item_timeline(
             login.as_deref(),
             event.author.as_deref(),
             Some(&event.timestamp),
-            &watch.creator_session_id,
+            &creator,
             &mut turn_windows,
         )
         .await
@@ -901,7 +906,7 @@ async fn poll_item_timeline(
         }
         outbox.push(mailbox_outbox_row(
             event.key,
-            watch.creator_session_id.clone(),
+            creator.clone(),
             event.body,
             true,
             timestamp_millis(&event.timestamp)
@@ -3419,7 +3424,7 @@ mod tests {
         assert_eq!(
             watches
                 .iter()
-                .map(|watch| (watch.number, watch.creator_session_id.as_str()))
+                .map(|watch| (watch.number, watch.creator_session_id.as_deref().unwrap()))
                 .collect::<Vec<_>>(),
             vec![(1, "opener")],
             "the opening call claims item 1; another account's batch has no creator"
@@ -3458,7 +3463,7 @@ mod tests {
                 owner: "brokkai".into(),
                 repo: "bifrost-dev".into(),
                 number: item.number,
-                creator_session_id: "dry-run".into(),
+                creator_session_id: Some("dry-run".into()),
                 kind: item.kind,
                 title: item.title,
                 url: item.url,
@@ -3469,6 +3474,7 @@ mod tests {
                 review_comments_id: 0,
                 processed_at: String::new(),
                 recorded_updated_at: Some(item.updated_at),
+                lifecycle: None,
             };
             let comments = captured["review_comments"]
                 .as_array()

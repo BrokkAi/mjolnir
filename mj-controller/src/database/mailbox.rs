@@ -613,6 +613,101 @@ mod tests {
         }
     }
 
+    /// Revision 130: a watch outlives its creator while a live session is
+    /// interested in the item, and goes with its last follower.
+    #[test]
+    fn a_watch_outlives_its_creator_while_a_live_session_is_interested() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("mj.sqlite3");
+        for id in ["creator", "creator-alone", "follower", "second", "idle"] {
+            save_session_to(&path, &super::super::tests::session(id, "project")).unwrap();
+        }
+        let connection = open(&path).unwrap();
+        let watch = |number: i64, creator: Option<&str>| {
+            connection
+                .execute(
+                    "INSERT INTO github_watch_items(owner, repo, number, creator_session_id, kind,
+                         title, url, created_at, timeline_at, timeline_id, review_comments_at,
+                         review_comments_id, processed_at)
+                     VALUES ('acme', 'repo', ?1, ?2, 'pull_request', 't', 'u', 'c', 'c', 0, 'c', 0, 'c')",
+                    params![number, creator],
+                )
+                .unwrap();
+        };
+        let classify = |number: i64, session: &str, created: bool| {
+            connection
+                .execute(
+                    "INSERT INTO github_watch_classifications(owner, repo, number, session_id,
+                         kind, title, url, created_at, interested, created)
+                     VALUES ('acme', 'repo', ?1, ?2, 'pull_request', 't', 'u', 'c', 1, ?3)",
+                    params![number, session, created],
+                )
+                .unwrap();
+        };
+        let creator_of = |number: i64| -> Option<Option<String>> {
+            connection
+                .query_row(
+                    "SELECT creator_session_id FROM github_watch_items WHERE number = ?1",
+                    [number],
+                    |row| row.get(0),
+                )
+                .optional()
+                .unwrap()
+        };
+        // 1: a creator and a follower. 2: a creator and nobody else.
+        // 3: no creator, two followers. 4: no creator, one follower.
+        watch(1, Some("creator"));
+        classify(1, "creator", true);
+        classify(1, "follower", false);
+        watch(2, Some("creator-alone"));
+        classify(2, "creator-alone", true);
+        watch(3, None);
+        classify(3, "follower", false);
+        classify(3, "second", false);
+        watch(4, None);
+        classify(4, "second", false);
+
+        // Deleted: the follower keeps watch 1; watch 2 has no one left.
+        connection
+            .execute("DELETE FROM sessions WHERE session_id = 'creator'", [])
+            .unwrap();
+        assert_eq!(creator_of(1), Some(None));
+        connection
+            .execute(
+                "UPDATE sessions SET state = 'destroyed-with-data-loss' WHERE session_id = 'creator-alone'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(creator_of(2), None);
+
+        // Destroyed: a creator-less watch stays while one follower is left and
+        // goes with the last one.
+        connection
+            .execute(
+                "UPDATE sessions SET state = 'destroyed-with-data-loss' WHERE session_id = 'second'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            creator_of(3),
+            Some(None),
+            "the other follower is still live"
+        );
+        assert_eq!(creator_of(4), None, "its only follower is gone");
+        connection
+            .execute("DELETE FROM sessions WHERE session_id = 'follower'", [])
+            .unwrap();
+        assert_eq!(creator_of(1), None);
+        assert_eq!(creator_of(3), None);
+
+        // A watch with no creator can still be inserted; one for a creator
+        // that is gone cannot.
+        watch(5, None);
+        watch(6, Some("creator"));
+        assert_eq!(creator_of(5), Some(None));
+        assert_eq!(creator_of(6), None);
+    }
+
     #[test]
     fn clear_mailbox_commits_with_projection_and_replay_preserves_newer_events() {
         let root = tempfile::tempdir().unwrap();
