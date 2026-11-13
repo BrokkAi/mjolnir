@@ -15,6 +15,11 @@ pub trait SubagentBackend: Send + Sync {
         Box::pin(async { anyhow::bail!("sub-agent configuration unavailable") })
     }
 
+    /// The dashboard's load-balancing preference order, from `[quota] prefer`.
+    fn quota_preferences(&self) -> BoxFuture<'_, AnyResult<Vec<String>>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
     /// Cheap token for this session's durable wait inputs. Backends without
     /// a committed publication leave filtering to the detailed observation.
     fn wait_revision(&self, _session_id: &str) -> AnyResult<Option<u64>> {

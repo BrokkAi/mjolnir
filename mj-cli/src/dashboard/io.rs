@@ -172,6 +172,9 @@ pub(crate) enum DashboardIoUpdate {
         ignored: bool,
         result: std::result::Result<(), String>,
     },
+    QuotaPreferencesSaved {
+        result: std::result::Result<(), String>,
+    },
     ChangeWorkspace {
         session_id: String,
         workspace_name: String,
@@ -1104,6 +1107,12 @@ impl DashboardContext {
                         "Could not {} notifications: {error}",
                         if ignored { "ignore" } else { "unignore" }
                     ));
+                }
+            }
+            DashboardIoUpdate::QuotaPreferencesSaved { result } => {
+                if let Err(error) = result {
+                    self.dashboard
+                        .set_notice(format!("Could not save load-balancing preferences: {error}"));
                 }
             }
             DashboardIoUpdate::ChangeWorkspace {
