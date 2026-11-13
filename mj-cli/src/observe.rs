@@ -147,16 +147,14 @@ async fn fetch_transcript(client: &ApiClient, session_id: &str) -> Result<Transc
         let page_execution = page.execution;
         latest = latest.max(page.latest_seq);
         let next = page.next_after_seq;
-        let advanced = next > after;
-        let mut added = false;
         for item in page.items {
             if seen.insert((item.position, item.stable_id.clone())) {
                 items.push(item);
-                added = true;
             }
         }
+        let has_next = page_has_next(after, next, latest);
         after = after.max(next);
-        if !added || !advanced || next >= latest {
+        if !has_next {
             break page_execution;
         }
     };
@@ -167,6 +165,10 @@ async fn fetch_transcript(client: &ApiClient, session_id: &str) -> Result<Transc
         execution,
         items,
     })
+}
+
+fn page_has_next(after: u64, next: u64, latest: u64) -> bool {
+    next > after && next < latest
 }
 
 fn observe_session(session: &ApiSession) -> ObserveSession {
@@ -234,5 +236,13 @@ mod tests {
         let encoded = serde_json::to_string(&status).unwrap();
         assert!(encoded.contains("\"token_configured\":true"));
         assert!(!encoded.contains("OBSERVE_TOKEN="));
+    }
+
+    #[test]
+    fn transcript_paging_continues_through_a_tie_only_page() {
+        assert!(page_has_next(500, 750, 1_000));
+        assert!(!page_has_next(500, 500, 1_000));
+        assert!(!page_has_next(750, 1_000, 1_000));
+        assert!(!page_has_next(750, 500, 1_000));
     }
 }

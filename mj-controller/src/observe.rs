@@ -94,7 +94,7 @@ pub fn envelopes_for_transcript(
     let mut turn_activity = started_at;
     for item in items {
         let timestamp = item.created_at_ms.max(0);
-        last_activity = last_activity.max(timestamp);
+        last_activity = last_activity.max(timestamp.max(item.last_changed_at_ms.max(0)));
         match &item.body {
             TranscriptBody::User { .. } if auxiliary_user_item(&item.stable_id) => {}
             TranscriptBody::User { .. } => {
@@ -148,10 +148,7 @@ pub fn envelopes_for_transcript(
     }
     emit_turn_end(&mut envelopes, session, &mut pending_agent, turn_activity);
 
-    if matches!(
-        transcript.execution,
-        MaterializedExecutionState::Closing | MaterializedExecutionState::Closed
-    ) {
+    if transcript.execution == MaterializedExecutionState::Closed {
         envelopes.push(envelope(
             session,
             last_activity,
@@ -161,11 +158,7 @@ pub fn envelopes_for_transcript(
             json!({
                 "hook_event_name": "SessionEnd",
                 "session_id": session.id,
-                "reason": match transcript.execution {
-                    MaterializedExecutionState::Closing => "mjolnir-closing",
-                    MaterializedExecutionState::Closed => "mjolnir-stopped",
-                    _ => unreachable!("matched closing or closed"),
-                },
+                "reason": "mjolnir-stopped",
                 "cwd": session.cwd,
             }),
         ));
@@ -633,6 +626,28 @@ mod tests {
         let envelopes = envelopes_for_transcript(&session(), &transcript).unwrap();
         assert_eq!(envelopes.len(), 1);
         assert_eq!(envelopes[0].event["hook_event_name"], "SessionStart");
+    }
+
+    #[test]
+    fn closing_is_not_published_as_a_finished_session() {
+        let transcript = TranscriptResponse {
+            next_after_seq: 1,
+            session_id: "session-1".into(),
+            latest_seq: 1,
+            execution: MaterializedExecutionState::Closing,
+            items: vec![item(
+                1,
+                TranscriptBody::User {
+                    content: vec![json!({"type": "text", "text": "hello"})],
+                },
+            )],
+        };
+        let envelopes = envelopes_for_transcript(&session(), &transcript).unwrap();
+        assert!(
+            envelopes
+                .iter()
+                .all(|envelope| envelope.event["hook_event_name"] != "SessionEnd")
+        );
     }
 
     #[test]
