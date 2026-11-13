@@ -17,8 +17,11 @@ The configured `sonnet/high` subagent choice must draw from both Claude profiles
 - [x] (2026-11-13) Focused regressions passed: 2 controller tests and 6 core tests; reviewed the generated public API golden.
 - [x] (2026-11-13) First workspace Clippy run passed. First review identified raw-value deduplication in both settings projections; added a shared identity-preserving projection and regressions for an older alias sorting first.
 - [x] (2026-11-13) Review correction validated: both controller settings tests and three core identity/settings/autoconfiguration tests passed.
-- [ ] Obtain the second review result, finish full touched-crate suites, and finish final workspace Clippy (both checks running).
-- [ ] Commit, request review, address findings, and push the current branch to origin/master.
+- [x] (2026-11-13) Second review completed; declined the requested family-latest policy change because a listed alias must retain its advertised meaning, including for recorded usage pricing. Review override and baseline accepted at `d967e5de6`.
+- [x] (2026-11-13) Final workspace Clippy passed. Full core/controller suites completed: 2,626 controller tests and 655 core tests passed immediately; one known timer failure and one fake Node ETXTBSY failure each passed in the targeted rerun. The three Jev integration tests passed; existing ignored cases remain ignored.
+- [x] (2026-11-13) Formatting passed for all 17 changed Rust files and the diff passed whitespace checks.
+- [x] (2026-11-13) Implementation and review corrections committed on the current master branch; upstream merged without conflicts.
+- [x] (2026-11-13) Prepared the final validation record for publication with the reviewed implementation. The last upstream merge contains only the independently completed Change Workspace dropdown adjustment; no implementation conflicts occurred.
 
 ## Surprises & Discoveries
 
@@ -34,6 +37,8 @@ Both reviewers found that settings still deduplicated by the raw launch value. W
 
 The review correction passed all five selected tests, including both settings projections and the allow-list control. Projection resolves alias meaning against the original combined catalogs before deduplicating identities, so an explicit spelling appearing first cannot hide a newer alias and accidentally make the older alias current.
 
+The initial full-suite build was rejected by mbx because build-script inputs changed while the revision was being committed. It ran no tests and is not a test failure. Retrying after all commits and compiler activity settled completed the suites. The full run found two already documented intermittent failures: continuation `timed-other-lifecycle: no recovery request within 3 s`, and fake Node installation `Text file busy (os error 26)`. Only those tests were rerun; both passed. No cache configuration or target layout was changed.
+
 ## Decision Log
 
 Decision: Keep one general catalog module and retain a separate pricing adapter that calls it. Rationale: interpretation belongs to the advertised catalog; price availability must not determine selection. Date: 2026-11-13.
@@ -42,9 +47,11 @@ Decision: Resolve an alias once against the combined available catalogs, choosin
 
 Decision: Preserve raw advertised launch values and existing storage and wire formats. Rationale: launch and effort probes must speak each harness's vocabulary; no migration or daemon installation is needed to deliver the source change. Date: 2026-11-13.
 
+Decision: A listed alias is interpreted from its advertised name; a different newer explicit family offer does not redefine it. When multiple profiles advertise the alias, resolve its newest reported meaning once. Only when no profile advertises it does family inference choose the newest offered family version. Rationale: model identity and recorded usage must agree about what the harness actually ran; an independent family-latest selection policy would require a different user choice. The second review requested that policy change; the finding was declined and the override was accepted. Date: 2026-11-13.
+
 ## Outcomes & Retrospective
 
-Implementation and validation pending. No live settings or installation will be changed by this work.
+Implementation and validation are complete. `sonnet/high` can select both a native Claude alias and Antigravity's equivalent explicit Sonnet ID, scoring each against the correct model-scoped quota and forwarding its own launch value. Settings, reviews, and usage use the same catalog interpretation. Distinct versions, explicit context requirements, unknown IDs, and per-profile capacity counts are preserved. No live configuration, daemon, or installation was changed. The implementation is ready for publication through the repository's normal Git workflow.
 
 ## Context and Orientation
 
@@ -85,3 +92,5 @@ Updated 2026-11-13 with the eight passing focused checks and the reviewed API go
 Updated 2026-11-13 after review: both settings projections now share identity-preserving model merging; added snapshot and asynchronous admission regressions for the same alias advertising different versions.
 
 Updated 2026-11-13 with five passing review-fix checks. Full core/controller suites and final workspace Clippy are running against the finished source.
+
+Updated 2026-11-13 with final validation, the two successful isolated reruns, the accepted review policy decision, and implementation outcomes. No implementation work remains.
