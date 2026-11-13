@@ -91,13 +91,14 @@ pub fn envelopes_for_transcript(
 
     let mut pending_agent: Option<(String, i64, u64)> = None;
     let mut last_activity = started_at;
+    let mut turn_activity = started_at;
     for item in items {
         let timestamp = item.created_at_ms.max(0);
         last_activity = last_activity.max(timestamp);
         match &item.body {
             TranscriptBody::User { .. } if auxiliary_user_item(&item.stable_id) => {}
             TranscriptBody::User { .. } => {
-                emit_turn_end(&mut envelopes, session, &mut pending_agent, last_activity);
+                emit_turn_end(&mut envelopes, session, &mut pending_agent, turn_activity);
                 envelopes.push(envelope(
                     session,
                     timestamp,
@@ -113,6 +114,7 @@ pub fn envelopes_for_transcript(
                         "stable_id": item.stable_id,
                     }),
                 ));
+                turn_activity = timestamp;
             }
             TranscriptBody::Agent { .. } if !item.text.trim().is_empty() => {
                 pending_agent = Some((
@@ -125,13 +127,16 @@ pub fn envelopes_for_transcript(
                 call,
                 terminal_outputs,
                 ..
-            } => emit_tool(
-                &mut envelopes,
-                session,
-                item,
-                call.value(),
-                terminal_outputs,
-            )?,
+            } => {
+                emit_tool(
+                    &mut envelopes,
+                    session,
+                    item,
+                    call.value(),
+                    terminal_outputs,
+                )?;
+                turn_activity = turn_activity.max(item.last_changed_at_ms.max(timestamp));
+            }
             TranscriptBody::Message { .. }
             | TranscriptBody::Thought { .. }
             | TranscriptBody::Plan { .. }
@@ -141,7 +146,7 @@ pub fn envelopes_for_transcript(
             | TranscriptBody::Agent { .. } => {}
         }
     }
-    emit_turn_end(&mut envelopes, session, &mut pending_agent, last_activity);
+    emit_turn_end(&mut envelopes, session, &mut pending_agent, turn_activity);
 
     if matches!(
         transcript.execution,
@@ -375,18 +380,6 @@ impl ObserveSpool {
         let digest = mj_core::hex::lower_hex(digest);
         let name = format!("{:020}-{digest}.json", envelope.meta.ts.max(0));
         let path = self.root.join(name);
-        if path.exists() {
-            let existing = fs::read(&path)
-                .with_context(|| format!("read existing Observe spool {}", path.display()))?;
-            if existing == line.as_bytes() {
-                return Ok(path);
-            }
-            bail!(
-                "Observe spool collision at {} for a different envelope",
-                path.display()
-            );
-        }
-
         let mut nonce = [0_u8; 8];
         getrandom::fill(&mut nonce).context("generate Observe spool temporary name")?;
         let temporary = self
@@ -679,6 +672,12 @@ mod tests {
                 .count(),
             2
         );
+        let stops = envelopes
+            .iter()
+            .filter(|envelope| envelope.event["hook_event_name"] == "Stop")
+            .map(|envelope| envelope.meta.ts)
+            .collect::<Vec<_>>();
+        assert_eq!(stops, [1_102, 1_104]);
     }
 
     #[test]
