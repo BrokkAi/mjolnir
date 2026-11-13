@@ -55,7 +55,7 @@ fn on_dedicated_thread<T: Send>(work: impl FnOnce() -> Result<T> + Send) -> Resu
 }
 
 mod launch;
-pub(in crate::controller) use launch::WorkerFilePreparation;
+pub(in crate::controller) use launch::{LaunchHistory, WorkerFilePreparation};
 mod staging;
 pub(super) use staging::*;
 mod project_memory;
