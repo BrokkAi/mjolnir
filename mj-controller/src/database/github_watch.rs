@@ -1001,6 +1001,27 @@ pub(crate) fn seed_github_test_turns(
     })
 }
 
+/// A session with interest in one of the repository's watched items, to take a
+/// GitHub credential from when no live session or creator can supply one.
+pub(crate) fn first_github_watch_interested_session(
+    owner: &str,
+    repo: &str,
+) -> Result<Option<String>> {
+    let connection = open_reader(&database_path())?;
+    connection
+        .query_row(
+            "SELECT c.session_id FROM github_watch_items w
+             JOIN github_watch_classifications c
+               ON c.owner=w.owner AND c.repo=w.repo AND c.number=w.number
+             WHERE w.owner=?1 AND w.repo=?2 AND c.interested=1 AND c.created=0
+             ORDER BY c.session_id LIMIT 1",
+            params![owner, repo],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
 pub(crate) fn load_github_watched_repositories() -> Result<Vec<(String, String)>> {
     let connection = open_reader(&database_path())?;
     let mut statement = connection

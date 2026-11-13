@@ -276,25 +276,37 @@ async fn poll_repository(
     if sessions.is_empty() && watches.is_empty() {
         return Ok(());
     }
-    // A watch without a creator cannot supply a token: its sessions are
-    // interested ones, which are live sessions or no longer exist.
-    let Some(token_session) = sessions
+    // Any session the repository's items are polled for can lend its
+    // credential: a live session, a watch's creator, or an interested session
+    // of a watch. Interested sessions that are stopped keep their watches, so
+    // a merge must still be read while no session of the repository is live.
+    let token_session = match sessions
         .first()
-        .map(|session| session.id.as_str())
+        .map(|session| session.id.clone())
         .or_else(|| {
             watches
                 .iter()
-                .find_map(|watch| watch.creator_session_id.as_deref())
-        })
-    else {
-        tracing::debug!(%owner, %repo, "GitHub repository has no live session or creator watch to take a credential from; skipping");
+                .find_map(|watch| watch.creator_session_id.clone())
+        }) {
+        Some(session) => Some(session),
+        None => {
+            blocking_db({
+                let owner = owner.to_owned();
+                let repo = repo.to_owned();
+                move || crate::database::first_github_watch_interested_session(&owner, &repo)
+            })
+            .await?
+        }
+    };
+    let Some(token_session) = token_session else {
+        tracing::debug!(%owner, %repo, "GitHub repository has no session to take a credential from; skipping");
         return Ok(());
     };
     let controller = tokio::task::spawn_blocking(crate::controller::Controller::load)
         .await
         .context("load controller for GitHub watch credentials")??;
     let token = controller
-        .github_token_for_session(token_session)
+        .github_token_for_session(&token_session)
         .await
         .context("resolve GitHub watch credential")?;
     let api = GithubApi::new_with_control(&config.api_base, token, control)?;

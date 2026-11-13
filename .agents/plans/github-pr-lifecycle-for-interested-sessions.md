@@ -84,6 +84,11 @@ It is enabled by default, with no setting. You can see it working by opening a P
   Date/Author: 2026-11-13, implementer of Milestones 2 and 3.
 
 
+- Decision: an interested session can supply the polling credential when no live session or creator can.
+  Rationale: a second review found that a repository whose only watches were creator-less was skipped whenever no session in it was live. Stopped interested sessions, which keep their watches, then missed merges. Creators already lend their credential while stopped.
+  Date/Author: 2026-11-13, parent agent.
+
+
 ## Outcomes & Retrospective
 
 None yet.
@@ -170,7 +175,7 @@ Change `commit_github_timeline` to take the mapped events instead of finished ou
 
 In `poll_item_timeline`, when the watch has no creator, skip the `pulls/{n}/comments` read and map only lifecycle events. The `pulls/{n}` merge-time read stays, because the merge decision needs it.
 
-In `poll_repository`, choose the credential from the first live session, or else from the first watch that has a creator. If there is neither, skip the repository and log at debug level. A creator-less watch cannot supply a token.
+In `poll_repository`, choose the credential from the first live session, or else from the first watch that has a creator, or else from an interested session of one of the repository's watches (`first_github_watch_interested_session`). If there is none, skip the repository and log at debug level. Interested sessions that are stopped keep their classifications and watches, so without the last fallback a merge would go unread while no session of the repository is live.
 
 **Milestone 4: measurement.** This is described under Validation and Acceptance. It needs no code in the repository.
 
