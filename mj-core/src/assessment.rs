@@ -347,6 +347,13 @@ pub struct InferredQuestion {
     pub completed_ordinal: u64,
 }
 
+/// A request remains open across agent-only turns until the person responds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenRequest {
+    pub question: InferredQuestion,
+    pub question_message: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnAssessment {
     #[serde(default, skip_serializing_if = "Option::is_none")]

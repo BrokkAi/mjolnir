@@ -38,12 +38,8 @@ pub(crate) fn apply_session_activity(
         session_id,
         view.snapshot
             .as_ref()
-            .and_then(|snapshot| snapshot.operational.assessment.as_ref())
-            .filter(|assessment| {
-                view.attention == mj_core::attention::SessionAttention::NeedsInput
-                    && assessment.current()
-            })
-            .and_then(|assessment| assessment.question_message.clone()),
+            .filter(|_| view.attention == mj_core::attention::SessionAttention::NeedsInput)
+            .and_then(|snapshot| snapshot.operational.question_message().map(str::to_owned)),
     );
     dashboard.set_session_connectivity(session_id, view.connected);
 }
@@ -228,6 +224,7 @@ mod tests {
     ) -> RelayOperationalState {
         RelayOperationalState {
             assessment: None,
+            open_request: None,
             assessment_context: None,
             turn_completion: None,
             continuation: Default::default(),
@@ -353,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn activity_projection_keeps_only_current_await_input_target() {
+    fn activity_projection_retains_open_request_target_across_later_assessments() {
         use mj_core::activity::verdict::CompletionEvidence;
         use mj_core::assessment::{Action, Status, TurnAssessment};
 
@@ -371,17 +368,31 @@ mod tests {
         assessment.status = Status::Assessed;
         assessment.action = Some(Action::AwaitInput);
         assessment.question_message = Some("agent:msg_1".into());
+        operational.open_request = Some(mj_core::assessment::OpenRequest {
+            question: assessment.inferred_question().unwrap(),
+            question_message: assessment.question_message.clone(),
+        });
         operational.assessment = Some(std::sync::Arc::new(assessment.clone()));
         let mut view = managed_view(operational, true);
         view.attention = mj_core::attention::SessionAttention::NeedsInput;
         apply_session_activity(&mut dashboard, "session-1", &view);
         assert_eq!(dashboard.question_message("session-1"), Some("agent:msg_1"));
 
-        assessment.status = Status::Superseded;
-        assessment.reason = "question_dismissed".into();
-        view.attention = mj_core::attention::SessionAttention::Idle;
+        assessment.turn_id = "later-turn".into();
+        assessment.completed_ordinal = 2;
+        assessment.action = Some(Action::Finished);
+        assessment.question_message = None;
         view.snapshot.as_mut().unwrap().operational.assessment =
             Some(std::sync::Arc::new(assessment));
+        apply_session_activity(&mut dashboard, "session-1", &view);
+        assert_eq!(dashboard.question_message("session-1"), Some("agent:msg_1"));
+
+        view.attention = mj_core::attention::SessionAttention::Working;
+        apply_session_activity(&mut dashboard, "session-1", &view);
+        assert_eq!(dashboard.question_message("session-1"), None);
+
+        view.attention = mj_core::attention::SessionAttention::Idle;
+        view.snapshot.as_mut().unwrap().operational.open_request = None;
         apply_session_activity(&mut dashboard, "session-1", &view);
         assert_eq!(dashboard.question_message("session-1"), None);
     }

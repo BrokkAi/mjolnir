@@ -428,8 +428,8 @@ pub type TailKey = (u64, String);
 /// changed rather than the whole tail.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionTail {
-    /// Daemon-local fact retained before trimming items or clearing the header
-    /// transcript. Clients consume served attention, not this watermark.
+    /// Latest person-authored transcript position, retained before trimming items
+    /// or clearing the header. Clients consume served attention, not this watermark.
     pub latest_user_position: Option<u64>,
     /// The session's projection without its transcript.
     pub header: MaterializedSession,
@@ -442,7 +442,7 @@ impl SessionTail {
     /// what `materialized.transcript` already leaves out.
     pub fn of(materialized: &MaterializedSession, window: &ProjectionWindow, limit: usize) -> Self {
         let mut tail = Self {
-            latest_user_position: materialized.latest_user_position(),
+            latest_user_position: materialized.latest_person_position(),
             header: transcript_header(materialized),
             window: window.clone(),
             items: SnapshotMap::new(),
@@ -461,7 +461,7 @@ impl SessionTail {
         window: &ProjectionWindow,
         limit: usize,
     ) {
-        self.latest_user_position = materialized.latest_user_position();
+        self.latest_user_position = materialized.latest_person_position();
         let start = materialized.transcript.len().saturating_sub(limit);
         // The daemon calls this for every view it publishes, so it walks the
         // held items and the published ones side by side in key order, and

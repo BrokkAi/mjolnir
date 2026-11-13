@@ -48,7 +48,6 @@ pub(crate) struct SessionOperationDisplay {
 pub(crate) struct SessionDetail {
     pub(crate) materialized_applied_event_ordinal: Option<u64>,
     pub(crate) current_turn_started_at: Option<u64>,
-    pub(crate) awaiting_input: bool,
     pub(crate) question_message: Option<String>,
     pub(crate) notification_dismissal: Option<NotificationDismissalState>,
     pub(crate) last_activity_at_ms: Option<u64>,
@@ -243,7 +242,6 @@ pub struct PreparedMaterializedSessionDetail {
     pub(crate) session_id: String,
     pub(crate) applied_event_ordinal: u64,
     pub(crate) current_turn_started_at: Option<u64>,
-    pub(crate) awaiting_input: bool,
     pub(crate) last_activity_at_ms: Option<u64>,
     pub(crate) last_agent_message: Option<Arc<str>>,
     pub(crate) last_user_message: Option<Arc<str>>,
@@ -330,11 +328,10 @@ impl PreparedMaterializedSessionDetail {
         Self::from_assessed_materialized(session, None, viewed_through_event_ordinal, previous)
     }
 
-    /// Keep the worker's verdict paired with the projection it describes, so
-    /// delayed background projections cannot attach it to a different turn.
+    /// Build transcript detail; semantic attention is served separately by the daemon.
     pub fn from_assessed_materialized(
         session: MaterializedSession,
-        assessment: Option<&mj_core::assessment::TurnAssessment>,
+        _assessment: Option<&mj_core::assessment::TurnAssessment>,
         viewed_through_event_ordinal: u64,
         previous: MaterializedProjectionCache,
     ) -> Self {
@@ -447,8 +444,6 @@ impl PreparedMaterializedSessionDetail {
                 created_at_ms: prompt.queued_at_ms,
             })
             .collect();
-        let unanswered_input = session.unanswered_input_outcome(assessment, None);
-        let awaiting_input = unanswered_input.is_some();
         let pending_elicitations = session.pending_elicitations.clone();
         let session_id = session.session_id.clone();
         let applied_event_ordinal = session.applied_event_ordinal;
@@ -466,7 +461,6 @@ impl PreparedMaterializedSessionDetail {
             session_id,
             applied_event_ordinal,
             current_turn_started_at,
-            awaiting_input,
             last_activity_at_ms,
             last_agent_message: last_agent_message
                 .as_ref()
@@ -1235,7 +1229,6 @@ impl DashboardState {
         }
         detail.materialized_applied_event_ordinal = Some(prepared.applied_event_ordinal);
         detail.current_turn_started_at = prepared.current_turn_started_at;
-        detail.awaiting_input = prepared.awaiting_input;
         if matches!(&detail.notification_dismissal,
             Some(NotificationDismissalState::Accepted { ordinal, .. }) if prepared.applied_event_ordinal >= *ordinal)
         {

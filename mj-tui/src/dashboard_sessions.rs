@@ -749,9 +749,14 @@ impl DashboardState {
     /// question the agent asked in that turn.
     fn has_unfinished_turn(&self, session_id: &str) -> bool {
         self.own_turn_is_running(session_id)
-            || self.session_details.get(session_id).is_some_and(|detail| {
-                !detail.pending_elicitations.is_empty() || detail.awaiting_input
-            })
+            || matches!(
+                self.notification_dismissals.get(session_id),
+                Some(mj_core::attention::NotificationDismissal::Question(_))
+            )
+            || self
+                .session_details
+                .get(session_id)
+                .is_some_and(|detail| !detail.pending_elicitations.is_empty())
     }
 
     /// What Interrupt all stops for `root`: every session in its Mjolnir
@@ -825,9 +830,14 @@ impl DashboardState {
     /// parent itself is not, so a person is taken to that form.
     pub(crate) fn waiting_child_of(&self, parent_id: &str) -> Option<String> {
         if self.attention_level(parent_id) != AttentionLevel::Waiting
-            || self.session_details.get(parent_id).is_some_and(|detail| {
-                !detail.pending_elicitations.is_empty() || detail.awaiting_input
-            })
+            || matches!(
+                self.notification_dismissals.get(parent_id),
+                Some(mj_core::attention::NotificationDismissal::Question(_))
+            )
+            || self
+                .session_details
+                .get(parent_id)
+                .is_some_and(|detail| !detail.pending_elicitations.is_empty())
         {
             return None;
         }

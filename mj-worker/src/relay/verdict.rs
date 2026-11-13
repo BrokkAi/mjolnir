@@ -108,13 +108,13 @@ fn glide_attention(
 
 impl DurableRelay {
     pub(crate) fn classifies_turns(&self) -> bool {
-        !self.managed_subagent
+        !self.snapshot.managed_subagent
     }
 
     /// Persist suppression so replaying controllers and older assessment readers
     /// never wait for a child classification. Keep the shared event format.
     pub(super) fn suppress_child_assessment(&mut self) -> Result<()> {
-        if self.managed_subagent {
+        if self.snapshot.managed_subagent {
             self.replied_verdict = RepliedVerdictState::default();
             if let Some(mut assessment) = self
                 .snapshot
@@ -368,7 +368,7 @@ impl DurableRelay {
 
     #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn store_question_target(&mut self, revision: u64, stable_id: &str) -> Result<bool> {
-        let Some(mut assessment) = self.snapshot.assessment.as_deref().cloned().filter(|a| {
+        let Some(assessment) = self.snapshot.assessment.as_deref().cloned().filter(|a| {
             a.revision == revision
                 && a.current()
                 && a.action == Some(mj_core::assessment::Action::AwaitInput)
@@ -376,8 +376,13 @@ impl DurableRelay {
         }) else {
             return Ok(false);
         };
-        assessment.question_message = Some(stable_id.to_owned());
-        self.store_assessment(assessment)?;
+        self.record_observation(RelayObservation::QuestionTargetUpdated {
+            question: mj_core::assessment::InferredQuestion {
+                turn_id: assessment.turn_id,
+                completed_ordinal: assessment.completed_ordinal,
+            },
+            question_message: stable_id.to_owned(),
+        })?;
         Ok(true)
     }
 
@@ -1048,6 +1053,24 @@ mod tests {
                 assert!(relay.operational_state().is_quiet());
                 assert!(!relay.snapshot.assessment.as_ref().unwrap().current());
             }
+            submit_relay(&mut relay, "required-turn", prompt("Choose the next step"));
+            relay.claim_pending_commands(true).unwrap();
+            relay
+                .record_command_completed(
+                    "required-turn",
+                    RelayCommandOutcome::Prompt {
+                        work_facts: None,
+                        diagnostic: None,
+                        usage: None,
+                        stop_reason: mj_core::acp::AWAITING_INPUT_STOP_REASON.into(),
+                    },
+                )
+                .unwrap();
+            assert_eq!(relay.snapshot.open_request().is_some(), !managed);
+            drop(relay);
+            let relay = DurableRelay::open(temp.path(), "child-verdict-test", "test").unwrap();
+            assert_eq!(relay.snapshot.managed_subagent, managed);
+            assert_eq!(relay.snapshot.open_request().is_some(), !managed);
         }
         // An old worker's durable pending assessment is superseded on launch.
         let temp = tempfile::tempdir().unwrap();
@@ -1422,6 +1445,162 @@ mod settled_task_tests {
     }
 
     #[test]
+    fn person_input_frontier_fences_late_assessments_and_locators_across_replay() {
+        use crate::relay::test_support::{finish_prompt, prompt, submit_relay};
+        use mj_core::assessment::{Action, Failure, Input, Judgment, Status, Verdict, Work};
+        let required = || Verdict {
+            failure: Judgment {
+                choice: Failure::None,
+                confidence: 1.0,
+                probabilities: Default::default(),
+            },
+            input: Judgment {
+                choice: Input::Required,
+                confidence: 1.0,
+                probabilities: [("required".into(), 1.0)].into(),
+            },
+            work: Judgment {
+                choice: Work::Waiting,
+                confidence: 1.0,
+                probabilities: Default::default(),
+            },
+            background: None,
+            reply: None,
+        };
+        for form_answer in [true, false] {
+            for replay_before_late in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let mut relay = claude_relay(dir.path());
+                relay.set_acp_ready(true);
+                submit_relay(&mut relay, "original-person", prompt("Choose the format"));
+                relay.claim_pending_commands(true).unwrap();
+                finish_prompt(&mut relay, "original-person");
+                let mut assessment = (**relay.snapshot.assessment.as_ref().unwrap()).clone();
+                assessment.status = Status::Assessed;
+                assessment.action = Some(Action::AwaitInput);
+                let revision = assessment.revision;
+                if form_answer {
+                    relay.store_assessment(assessment.clone()).unwrap();
+                    relay
+                        .record_observation(RelayObservation::ElicitationResolved {
+                            elicitation_id: "human-form".into(),
+                            action: "accept".into(),
+                            reply: Some("Old format".into()),
+                        })
+                        .unwrap();
+                } else {
+                    submit_relay(&mut relay, "new-person-input", prompt("Use the old format"));
+                }
+                let frontier = relay.snapshot.person_input_through;
+                assert!(frontier > assessment.completed_ordinal);
+                assert!(relay.snapshot.open_request().is_none());
+                if replay_before_late {
+                    drop(relay);
+                    std::fs::remove_file(dir.path().join(RELAY_STATE_FILE)).unwrap();
+                    relay = claude_relay(dir.path());
+                    assert_eq!(relay.snapshot.person_input_through, frontier);
+                }
+                if form_answer {
+                    // Both a late assessment and a locator may still be recorded,
+                    // but neither can publish a completion preceding the person's input.
+                    relay.store_assessment(assessment).unwrap();
+                    assert!(
+                        relay
+                            .store_question_target(revision, "agent:original")
+                            .unwrap()
+                    );
+                    assert_eq!(
+                        relay
+                            .snapshot
+                            .request
+                            .as_ref()
+                            .unwrap()
+                            .question_message
+                            .as_deref(),
+                        Some("agent:original")
+                    );
+                } else {
+                    assert_eq!(
+                        relay.apply_turn_assessment(revision, required()).unwrap(),
+                        "stale_turn"
+                    );
+                }
+                assert!(relay.snapshot.open_request().is_none());
+                assert!(relay.operational_state().open_request.is_none());
+                drop(relay);
+                std::fs::remove_file(dir.path().join(RELAY_STATE_FILE)).unwrap();
+                let relay = claude_relay(dir.path());
+                assert_eq!(relay.snapshot.person_input_through, frontier);
+                assert!(relay.operational_state().open_request.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn open_request_survives_agent_only_completion_replay_and_original_dismissal() {
+        use crate::relay::test_support::{finish_prompt, prompt, submit_relay};
+        use mj_core::assessment::{Action, Status};
+        let dir = tempfile::tempdir().unwrap();
+        let mut relay = claude_relay(dir.path());
+        relay.set_acp_ready(true);
+        submit_relay(&mut relay, "person-command", prompt("Choose a target"));
+        relay.claim_pending_commands(true).unwrap();
+        finish_prompt(&mut relay, "person-command");
+        let mut assessment = (**relay.snapshot.assessment.as_ref().unwrap()).clone();
+        assessment.status = Status::Assessed;
+        assessment.action = Some(Action::AwaitInput);
+        relay.store_assessment(assessment).unwrap();
+        let revision = relay.snapshot.assessment.as_ref().unwrap().revision;
+        assert!(
+            relay
+                .store_question_target(revision, "agent:original-question")
+                .unwrap()
+        );
+        let request = relay.snapshot.open_request().cloned().unwrap();
+        assert_eq!(
+            request.question_message.as_deref(),
+            Some("agent:original-question")
+        );
+        let generated = mj_core::continuation::GeneratedPrompt::SessionMessageTurn;
+        let id = generated.command_id("follow-up");
+        submit_relay(&mut relay, &id, prompt("An agent-only follow-up"));
+        relay.claim_pending_commands(true).unwrap();
+        finish_prompt(&mut relay, &id);
+        assert_eq!(relay.snapshot.open_request(), Some(&request));
+        drop(relay);
+        let mut relay = claude_relay(dir.path());
+        assert_eq!(relay.snapshot.open_request(), Some(&request));
+        submit_relay(
+            &mut relay,
+            "dismiss-original",
+            RelayCommand::DismissQuestion {
+                question: request.question,
+            },
+        );
+        assert!(relay.snapshot.open_request().is_none());
+        drop(relay);
+        let mut relay = claude_relay(dir.path());
+        assert!(relay.snapshot.open_request().is_none());
+        relay.set_acp_ready(true);
+        submit_relay(
+            &mut relay,
+            "fresh-user-turn",
+            prompt("Ask another question"),
+        );
+        relay.claim_pending_commands(true).unwrap();
+        finish_prompt(&mut relay, "fresh-user-turn");
+        let mut assessment = (**relay.snapshot.assessment.as_ref().unwrap()).clone();
+        assessment.status = Status::Assessed;
+        assessment.action = Some(Action::AwaitInput);
+        relay.store_assessment(assessment).unwrap();
+        assert!(relay.snapshot.open_request().is_some());
+        submit_relay(&mut relay, "person-answer", prompt("Keep the old format"));
+        assert!(relay.snapshot.open_request().is_none());
+        drop(relay);
+        assert!(claude_relay(dir.path()).snapshot.open_request().is_none());
+    }
+
+    #[test]
     fn dismissed_questions_survive_journal_replay_and_reject_stale_requests() {
         use crate::relay::test_support::{finish_prompt, prompt, relay_request, submit_relay};
         use mj_core::assessment::{Failure, Input, Judgment, Verdict, Work};
@@ -1471,14 +1650,7 @@ mod settled_task_tests {
             question: question.clone(),
         };
         let accepted = submit_relay(&mut relay, "dismiss-first", command.clone());
-        assert!(
-            relay
-                .snapshot
-                .assessment
-                .as_ref()
-                .unwrap()
-                .question_dismissed()
-        );
+        assert!(relay.snapshot.open_request().is_none());
         assert_eq!(
             submit_relay(&mut relay, "dismiss-first", command.clone()),
             accepted
@@ -1492,10 +1664,9 @@ mod settled_task_tests {
             context,
             "dismissal grants no new authorization"
         );
-        assert_eq!(
-            relay.apply_turn_assessment(revision, required()).unwrap(),
-            "stale_turn"
-        );
+        // Late classification can finish without reopening the answered request.
+        relay.apply_turn_assessment(revision, required()).unwrap();
+        assert!(relay.operational_state().open_request.is_none());
 
         // Force reconstruction from the journal, rather than merely reading
         // the latest snapshot, to exercise serialization and replay together.
@@ -1503,14 +1674,7 @@ mod settled_task_tests {
         std::fs::remove_file(dir.path().join(RELAY_STATE_FILE)).unwrap();
         let mut relay = claude_relay(dir.path());
         relay.set_acp_ready(true);
-        assert!(
-            relay
-                .snapshot
-                .assessment
-                .as_ref()
-                .unwrap()
-                .question_dismissed()
-        );
+        assert!(relay.snapshot.open_request().is_none());
         relay.prepare_pending_assessment().unwrap();
         assert!(relay.pending_replied_verdict().is_none());
         assert_eq!(

@@ -1486,6 +1486,7 @@ mod tests {
         fn observed() -> RelayOperationalState {
             RelayOperationalState {
                 assessment: None,
+                open_request: None,
                 assessment_context: None,
                 turn_completion: None,
                 continuation: Default::default(),

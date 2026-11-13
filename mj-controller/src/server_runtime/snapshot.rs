@@ -815,10 +815,7 @@ pub(super) fn viewer_snapshot_selected(
                     )
                 })
             && session.operation.is_none();
-        session.question_message = question_message(
-            live.and_then(|state| state.assessment.as_deref()),
-            &activity_state,
-        );
+        session.question_message = question_message(live, session.attention);
         session.activity_state = Some(activity_state);
         let facts = live.map(|state| {
             mj_core::acp::AcpSessionFacts::from_operational(
@@ -978,71 +975,60 @@ pub(super) fn viewer_snapshot_selected(
 }
 
 fn question_message(
-    assessment: Option<&mj_core::assessment::TurnAssessment>,
-    activity_state: &mj_core::activity::ActivityState,
+    live: Option<&mj_core::relay::RelayOperationalState>,
+    attention: mj_core::attention::SessionAttention,
 ) -> Option<String> {
-    assessment
-        .filter(|assessment| {
-            assessment.inferred_question().is_some()
-                && matches!(
-                    activity_state,
-                    mj_core::activity::ActivityState::Idle { .. }
-                )
-        })
-        .and_then(|assessment| assessment.question_message.clone())
+    if attention != mj_core::attention::SessionAttention::NeedsInput {
+        return None;
+    }
+    live?.question_message().map(str::to_owned)
 }
 
 #[cfg(test)]
 mod question_message_tests {
     use super::question_message;
 
-    fn assessment(
-        status: mj_core::assessment::Status,
-        action: mj_core::assessment::Action,
-    ) -> mj_core::assessment::TurnAssessment {
-        let mut assessment = mj_core::assessment::TurnAssessment::pending(
-            "turn-1".into(),
+    #[test]
+    fn legacy_unknown_request_and_current_empty_request_are_distinct() {
+        use mj_core::assessment::{Action, Status, TurnAssessment};
+        use mj_core::attention::SessionAttention;
+        let mut live =
+            mj_core::relay::RelaySnapshot::new("compatibility".into()).operational_state();
+        let mut assessment = TurnAssessment::pending(
+            "turn".into(),
             1,
             1,
             mj_core::activity::verdict::CompletionEvidence::bounded("EndTurn", None),
         );
-        assessment.status = status;
-        assessment.action = Some(action);
-        assessment.question_message = Some("agent:msg_question".into());
-        assessment
-    }
-
-    #[test]
-    fn question_message_requires_current_await_input_and_idle_activity() {
-        let idle = mj_core::activity::ActivityState::Idle { since_ms: None };
-        let current = assessment(
-            mj_core::assessment::Status::Assessed,
-            mj_core::assessment::Action::AwaitInput,
+        assessment.status = Status::Assessed;
+        assessment.action = Some(Action::AwaitInput);
+        assessment.question_message = Some("agent:legacy".into());
+        live.assessment = Some(std::sync::Arc::new(assessment));
+        live.relay_protocol_version = Some(mj_core::relay::RELAY_OPEN_REQUEST_PROTOCOL - 1);
+        assert_eq!(
+            question_message(Some(&live), SessionAttention::NeedsInput).as_deref(),
+            Some("agent:legacy")
+        );
+        live.relay_protocol_version = Some(mj_core::relay::RELAY_OPEN_REQUEST_PROTOCOL);
+        assert_eq!(
+            question_message(Some(&live), SessionAttention::NeedsInput),
+            None
+        );
+        live.open_request = Some(mj_core::assessment::OpenRequest {
+            question: mj_core::assessment::InferredQuestion {
+                turn_id: "older".into(),
+                completed_ordinal: 0,
+            },
+            question_message: Some("agent:original".into()),
+        });
+        assert_eq!(
+            question_message(Some(&live), SessionAttention::NeedsInput).as_deref(),
+            Some("agent:original")
         );
         assert_eq!(
-            question_message(Some(&current), &idle).as_deref(),
-            Some("agent:msg_question")
+            question_message(Some(&live), SessionAttention::Working),
+            None
         );
-
-        let dismissed = assessment(
-            mj_core::assessment::Status::Superseded,
-            mj_core::assessment::Action::AwaitInput,
-        );
-        let mut dismissed = dismissed;
-        dismissed.reason = "question_dismissed".into();
-        assert_eq!(question_message(Some(&dismissed), &idle), None);
-
-        let finished = assessment(
-            mj_core::assessment::Status::Assessed,
-            mj_core::assessment::Action::Finished,
-        );
-        assert_eq!(question_message(Some(&finished), &idle), None);
-
-        let busy = mj_core::activity::ActivityState::Turn {
-            started_at_ms: None,
-            last_activity_at_ms: None,
-        };
-        assert_eq!(question_message(Some(&current), &busy), None);
     }
 }
 

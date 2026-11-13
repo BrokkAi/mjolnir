@@ -92,6 +92,41 @@ pub(super) fn update(previous: &RuntimeProjection, next: &mut RuntimeProjection)
         } else {
             next.metadata.unread_frontiers.remove(&id);
         }
+        if let Some(request) = next
+            .sessions
+            .get(&id)
+            .and_then(|view| view.operational.as_deref())
+            .and_then(|live| live.open_request.as_ref())
+        {
+            let work = request_hold(next, &id);
+            let held = states.get(&id) == Some(&SessionAttention::Working)
+                && semantic_question(next, &id).is_some()
+                && !work.is_empty();
+            let was_held = previous.metadata.session_attention.get(&id)
+                == Some(&SessionAttention::Working)
+                && previous
+                    .sessions
+                    .get(&id)
+                    .and_then(|view| view.operational.as_deref())
+                    .and_then(|live| live.open_request.as_ref())
+                    .map(|request| &request.question)
+                    == Some(&request.question)
+                && !request_hold(previous, &id).is_empty();
+            if held && !was_held {
+                tracing::info!(session_id = %id, asked_at_ordinal = request.question.completed_ordinal, ?work, "holding open request");
+            } else if states.get(&id) == Some(&SessionAttention::NeedsInput)
+                && previous.metadata.session_attention.get(&id) == Some(&SessionAttention::Working)
+                && previous
+                    .sessions
+                    .get(&id)
+                    .and_then(|view| view.operational.as_deref())
+                    .and_then(|live| live.open_request.as_ref())
+                    .map(|request| &request.question)
+                    == Some(&request.question)
+            {
+                tracing::info!(session_id = %id, asked_at_ordinal = request.question.completed_ordinal, work = ?waiting_on_own_work(previous, &id), "releasing open request");
+            }
+        }
         let target = targets.get(&id).cloned();
         if let Some(target) = target {
             if next.metadata.notification_dismissals.get(&id) != Some(&target) {
@@ -121,6 +156,90 @@ fn unread_frontier(runtime: &RuntimeProjection, id: &str) -> Option<u64> {
     (frontier > runtime.records.get(id)?.viewed_through_event_ordinal).then_some(frontier)
 }
 
+/// The request owner is the worker. Pre-64 workers retain the latest-turn rule;
+/// remove that compatibility branch when relay protocols below 64 are retired.
+fn semantic_question(
+    runtime: &RuntimeProjection,
+    id: &str,
+) -> Option<mj_core::assessment::InferredQuestion> {
+    let live = runtime.sessions.get(id)?.operational.as_deref()?;
+    let tail = runtime.transcripts.get(id)?;
+    if !live.activity_state().is_idle() {
+        return None;
+    }
+    if live
+        .relay_protocol_version
+        .is_some_and(|version| version >= mj_core::relay::RELAY_OPEN_REQUEST_PROTOCOL)
+    {
+        let request = live.open_request.as_ref()?;
+        if tail.header.active_turn.is_some()
+            || !tail.header.queued_prompts.is_empty()
+            || tail
+                .latest_user_position
+                .is_some_and(|position| position > request.question.completed_ordinal)
+        {
+            return None;
+        }
+        Some(request.question.clone())
+    } else {
+        let assessment = live.assessment.as_deref();
+        let outcome = tail
+            .header
+            .unanswered_input_outcome(assessment, tail.latest_user_position)?;
+        Some(mj_core::assessment::InferredQuestion {
+            turn_id: outcome.command_id.clone(),
+            completed_ordinal: outcome.completed_ordinal,
+        })
+    }
+}
+
+fn request_hold(runtime: &RuntimeProjection, id: &str) -> Vec<&'static str> {
+    if runtime.subagents.contains_key(id)
+        || !runtime
+            .records
+            .get(id)
+            .is_some_and(|record| record.harness_kind.has_reliable_background_inventory())
+    {
+        return vec![];
+    }
+    waiting_on_own_work(runtime, id)
+}
+
+fn waiting_on_own_work(runtime: &RuntimeProjection, id: &str) -> Vec<&'static str> {
+    let Some(live) = runtime
+        .sessions
+        .get(id)
+        .and_then(|view| view.operational.as_deref())
+    else {
+        return vec![];
+    };
+    let mut work = vec![];
+    if runtime.subagents.iter().any(|(child, metadata)| {
+        metadata.parent_session_id == id
+            && runtime
+                .sessions
+                .get(child)
+                .and_then(|view| view.operational.as_deref())
+                .is_some_and(|child| {
+                    child.active_prompt.is_some()
+                        || child.harness_turn.is_some()
+                        || !child.queued_prompts.is_empty()
+                })
+    }) {
+        work.push("managed child");
+    }
+    if live.native_agent_count > 0 {
+        work.push("native agent");
+    }
+    if !live.background_commands.is_empty() && live.background_needed == Some(true) {
+        work.push("background command");
+    }
+    if mj_core::activity::turn_imminent(&live.facts(), mj_core::clock::epoch_millis()) {
+        work.push("imminent turn");
+    }
+    work
+}
+
 fn dismissal(
     runtime: &RuntimeProjection,
     id: &str,
@@ -131,10 +250,9 @@ fn dismissal(
         return unread_frontier(runtime, id).map(NotificationDismissal::ReadThrough);
     }
     let live = runtime.sessions.get(id)?.operational.as_deref()?;
-    let assessment = live.assessment.as_deref()?;
     match attention {
         SessionAttention::Important => Some(NotificationDismissal::ReadThrough(
-            assessment.completed_ordinal,
+            live.assessment.as_deref()?.completed_ordinal,
         )),
         SessionAttention::NeedsInput
             if live.relay_protocol_version.is_some_and(|version| {
@@ -149,14 +267,21 @@ fn dismissal(
             {
                 return None;
             }
-            let outcome = tail
-                .header
-                .unanswered_input_outcome(Some(assessment), tail.latest_user_position)?;
-            assessment
-                .applies_to(outcome)
-                .then(|| assessment.inferred_question())
-                .flatten()
-                .map(NotificationDismissal::Question)
+            let question = semantic_question(runtime, id)?;
+            // Pre-64 workers can dismiss only the current inferred assessment.
+            if live
+                .relay_protocol_version
+                .is_some_and(|version| version < mj_core::relay::RELAY_OPEN_REQUEST_PROTOCOL)
+                && live
+                    .assessment
+                    .as_ref()
+                    .and_then(|assessment| assessment.inferred_question())
+                    .as_ref()
+                    != Some(&question)
+            {
+                return None;
+            }
+            Some(NotificationDismissal::Question(question))
         }
         _ => None,
     }
@@ -312,17 +437,13 @@ fn project_states(
                     _ => Working,
                 }
             } else if let Some(live) = live {
+                if semantic_question(runtime, id).is_some() {
+                    let held = !request_hold(runtime, id).is_empty();
+                    return (id.clone(), if held { Working } else { NeedsInput });
+                }
                 let activity = live.activity_state();
                 if activity.is_idle() {
                     let tail = runtime.transcripts.get(id);
-                    let assessment = live.assessment.as_deref();
-                    if tail.is_some_and(|tail| {
-                        tail.header
-                            .unanswered_input_outcome(assessment, tail.latest_user_position)
-                            .is_some()
-                    }) {
-                        return (id.clone(), NeedsInput);
-                    }
                     match live.assessment.as_deref().filter(|assessment| {
                         tail.and_then(|tail| tail.header.last_turn_outcome.as_ref())
                             .is_some_and(|outcome| assessment.applies_to(outcome))
@@ -376,6 +497,143 @@ fn project_states(
 mod tests {
     use super::*;
     use mj_core::state::{MaterializedSession, ProjectionWindow, SessionState};
+
+    #[test]
+    fn open_request_releases_when_only_the_managed_child_changes() {
+        use mj_core::assessment::{InferredQuestion, OpenRequest};
+        use mj_core::config::HarnessKind;
+        use mj_core::relay::{HarnessTurn, RELAY_PROTOCOL_VERSION, RelaySnapshot};
+        let mut next = runtime();
+        let mut config = (*next.metadata.config).clone();
+        for (id, kind) in [("claude", HarnessKind::Claude), ("kimi", HarnessKind::Kimi)] {
+            config.profiles.insert(
+                id.into(),
+                mj_core::config::HarnessProfile::new(kind, std::path::PathBuf::new()),
+            );
+        }
+        next.metadata.config = config.into();
+        next.records.get_mut("parent").unwrap().harness_kind = HarnessKind::Claude;
+        next.records.get_mut("parent").unwrap().last_profile = "claude".into();
+        next.subagents.insert(
+            "child".into(),
+            mj_core::subagent::SubagentMetadata {
+                kind: Default::default(),
+                child_session_id: "child".into(),
+                parent_session_id: "parent".into(),
+                task_name: String::new(),
+                profile_id: String::new(),
+                model: None,
+                effort: None,
+                working_directory: Default::default(),
+                request_key: String::new(),
+                created_at: String::new(),
+                noticed_turn: None,
+                reported_finish: None,
+                handback_tool: false,
+            },
+        );
+        let mut parent = RelaySnapshot::new("parent".into()).operational_state();
+        parent.relay_protocol_version = Some(RELAY_PROTOCOL_VERSION);
+        parent.open_request = Some(OpenRequest {
+            question: InferredQuestion {
+                turn_id: "original".into(),
+                completed_ordinal: 10,
+            },
+            question_message: None,
+        });
+        next.sessions.get_mut("parent").unwrap().operational = Some(parent.into());
+        let mut materialized = MaterializedSession::empty("parent");
+        materialized
+            .transcript
+            .push(std::sync::Arc::new(mj_core::state::TranscriptItem {
+                stable_id: "user:session-message-turn-background".into(),
+                position: 20,
+                latest_content_event_ordinal: None,
+                created_at_ms: 20,
+                last_changed_at_ms: 20,
+                body: mj_core::state::TranscriptBody::User {
+                    content: vec![
+                        serde_json::json!({"type":"text","text":"An agent-only follow-up"}),
+                    ],
+                },
+            }));
+        next.transcripts.insert(
+            "parent".into(),
+            mj_client::runtime_feed::SessionTail::of(
+                &materialized,
+                &ProjectionWindow::of(&materialized),
+                0,
+            ),
+        );
+        let mut child = RelaySnapshot::new("child".into()).operational_state();
+        child.harness_turn = Some(HarnessTurn { started_at_ms: 1 });
+        next.sessions.get_mut("child").unwrap().operational = Some(child.clone().into());
+        update(&RuntimeProjection::default(), &mut next);
+        assert_eq!(
+            next.metadata.session_attention["parent"],
+            SessionAttention::Working
+        );
+        next.transcripts
+            .get_mut("parent")
+            .unwrap()
+            .header
+            .pending_elicitations
+            .push(mj_core::elicitation::ElicitationRequest {
+                id: "form".into(),
+                message: "A question now".into(),
+                title: None,
+                description: None,
+                fields: vec![],
+                tool_permission: None,
+            });
+        assert_eq!(project(&next)["parent"], SessionAttention::NeedsInput);
+        next.transcripts
+            .get_mut("parent")
+            .unwrap()
+            .header
+            .pending_elicitations
+            .clear();
+        next.records.get_mut("parent").unwrap().harness_kind = HarnessKind::Kimi;
+        next.records.get_mut("parent").unwrap().last_profile = "kimi".into();
+        assert_eq!(project(&next)["parent"], SessionAttention::NeedsInput);
+        next.records.get_mut("parent").unwrap().harness_kind = HarnessKind::Claude;
+        next.records.get_mut("parent").unwrap().last_profile = "claude".into();
+        let previous = next.clone();
+        child.harness_turn = None;
+        next.sessions.get_mut("child").unwrap().operational = Some(child.into());
+        update(&previous, &mut next);
+        assert_eq!(
+            next.metadata.session_attention["parent"],
+            SessionAttention::NeedsInput
+        );
+        assert!(
+            matches!(next.metadata.notification_dismissals.get("parent"), Some(mj_core::attention::NotificationDismissal::Question(question)) if question.completed_ordinal == 10)
+        );
+        let original = next.sessions["parent"].operational.clone().unwrap();
+        let mut with_background = (*original).clone();
+        with_background
+            .background_commands
+            .push(mj_core::relay::BackgroundCommand {
+                id: "build".into(),
+                started_at_ms: 1,
+                command: "build".into(),
+                can_stop: true,
+            });
+        with_background.background_needed = Some(true);
+        next.sessions.get_mut("parent").unwrap().operational = Some(with_background.into());
+        assert!(matches!(
+            next.sessions["parent"]
+                .operational
+                .as_ref()
+                .unwrap()
+                .activity_state(),
+            mj_core::activity::ActivityState::Background { .. }
+        ));
+        assert_eq!(project(&next)["parent"], SessionAttention::Working);
+        next.records.get_mut("parent").unwrap().harness_kind = HarnessKind::Kimi;
+        next.records.get_mut("parent").unwrap().last_profile = "kimi".into();
+        assert_eq!(project(&next)["parent"], SessionAttention::Working);
+    }
 
     #[test]
     fn native_forms_promote_the_owner_and_finished_children_are_idle() {

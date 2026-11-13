@@ -332,6 +332,7 @@ fn managed_view(session: MaterializedSession) -> ManagedSessionView {
             subagent_queue_error: None,
             operational: mj_core::relay::RelayOperationalState {
                 assessment: None,
+                open_request: None,
                 assessment_context: None,
                 turn_completion: None,
                 continuation: Default::default(),

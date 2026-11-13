@@ -635,6 +635,8 @@ pub struct RelayOperationalState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assessment: Option<Arc<crate::assessment::TurnAssessment>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_request: Option<crate::assessment::OpenRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assessment_context: Option<Arc<crate::assessment::ContextHistory>>,
     /// The latest prompt's completion identity; see `TurnCompletion`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -801,6 +803,23 @@ pub struct RelayOperationalState {
 }
 
 impl RelayOperationalState {
+    /// The original question target, with compatibility for pre-64 workers.
+    pub fn question_message(&self) -> Option<&str> {
+        if self
+            .relay_protocol_version
+            .is_some_and(|version| version >= super::RELAY_OPEN_REQUEST_PROTOCOL)
+        {
+            self.open_request
+                .as_ref()
+                .and_then(|request| request.question_message.as_deref())
+        } else {
+            self.assessment
+                .as_deref()
+                .filter(|assessment| assessment.inferred_question().is_some())
+                .and_then(|assessment| assessment.question_message.as_deref())
+        }
+    }
+
     /// Reuse unchanged payloads after decoding a new worker response.
     pub fn share_unchanged_fields(&mut self, previous: &Self) {
         if self.assessment == previous.assessment {
@@ -1095,6 +1114,13 @@ pub struct MailboxHookSteering {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum RelayObservation {
+    QuestionTargetUpdated {
+        question: crate::assessment::InferredQuestion,
+        question_message: String,
+    },
+    ManagedSubagentConfigured {
+        managed: bool,
+    },
     HandbackCheckStarted {
         assignment_id: String,
     },
@@ -1482,6 +1508,11 @@ pub struct HandbackChecks {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RelaySnapshot {
+    /// Final reply of the latest completed turn, retained for its late assessment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_reply_message: Option<String>,
+    #[serde(default)]
+    pub managed_subagent: bool,
     #[serde(default)]
     pub handback_checks: HandbackChecks,
     /// Survives queue removal and receipt GC, fencing reminders for older turns.
@@ -1491,6 +1522,12 @@ pub struct RelaySnapshot {
     pub assessment_questions: std::collections::BTreeSet<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assessment: Option<Arc<crate::assessment::TurnAssessment>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Latest input-requiring completion, retained after the person responds.
+    pub request: Option<crate::assessment::OpenRequest>,
+    #[serde(default)]
+    /// Journal ordinal of the latest person input; only snapshot apply advances it.
+    pub person_input_through: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assessment_context: Option<Arc<crate::assessment::ContextHistory>>,
     /// The latest prompt's completion identity; see `TurnCompletion`.
@@ -1654,7 +1691,11 @@ impl RelaySnapshot {
         Self {
             handback_checks: Default::default(),
             assessment_questions: Default::default(),
+            completed_reply_message: None,
+            managed_subagent: false,
             assessment: None,
+            request: None,
+            person_input_through: 0,
             assessment_context: Some(Default::default()),
             latest_prompt_accepted_ordinal: None,
             turn_completion: None,
@@ -1738,9 +1779,17 @@ impl RelaySnapshot {
             .flatten()
     }
 
+    /// Semantic input is derived from the request and the person's durable frontier.
+    pub fn open_request(&self) -> Option<&crate::assessment::OpenRequest> {
+        self.request.as_ref().filter(|request| {
+            !self.managed_subagent && request.question.completed_ordinal > self.person_input_through
+        })
+    }
+
     pub fn operational_state(&self) -> RelayOperationalState {
         RelayOperationalState {
             assessment: self.assessment.clone(),
+            open_request: self.open_request().cloned(),
             assessment_context: self.assessment_context.clone(),
             turn_completion: self.turn_completion.clone(),
             continuation: self.continuation.clone(),

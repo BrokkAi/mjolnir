@@ -280,7 +280,6 @@ pub struct DurableRelay {
     /// long build was failed as if the harness had died (#1020).
     foreground_tools: mj_core::activity::ToolsInFlight,
     turn_context: mj_transcript::turn_context::TurnContext,
-    managed_subagent: bool,
     verdict_harness: Option<mj_core::config::HarnessKind>,
     #[cfg_attr(not(unix), allow(dead_code))] // The worker control runtime is Unix-only.
     pub(crate) authentication_login_path: Option<PathBuf>,
@@ -612,7 +611,6 @@ impl DurableRelay {
             background_work: BackgroundWorkPolicy::default(),
             foreground_tools: mj_core::activity::ToolsInFlight::default(),
             turn_context: Default::default(),
-            managed_subagent: false,
             verdict_harness: None,
             authentication_login_path: None,
             login_identity: Default::default(),
@@ -1113,7 +1111,9 @@ impl DurableRelay {
     /// Launch metadata owns this fact, including older environment-only launches.
     #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn set_managed_subagent(&mut self, managed: bool) -> Result<()> {
-        self.managed_subagent = managed;
+        if self.snapshot.managed_subagent != managed {
+            self.record_observation(RelayObservation::ManagedSubagentConfigured { managed })?;
+        }
         self.suppress_child_assessment()
     }
 
