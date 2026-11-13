@@ -5,7 +5,7 @@ use mj_client::session::ViewError;
 
 const START_DEADLINE: Duration = Duration::from_secs(30 * 60);
 const INPUT_POLL: Duration = Duration::from_millis(250);
-const MIN_SESSION_ID_PREFIX_LENGTH: usize = 8;
+const MIN_SESSION_ID_PREFIX_LENGTH: usize = mj_core::state::SHORT_ID_LEN;
 use mj_core::subagent::{SubagentToolAction, SubagentToolRequest};
 
 pub(super) enum SubagentInputDelivery {
