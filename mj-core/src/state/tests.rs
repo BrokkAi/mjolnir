@@ -329,6 +329,7 @@ fn sample_state() -> State {
         viewed_through_event_ordinal: 0,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
         last_checkpoint_error: None,
         checkpoint: Some(Box::new(CheckpointMetadata {
             archive_path: PathBuf::from("sessions/0123456789abcdef.hel.zip"),

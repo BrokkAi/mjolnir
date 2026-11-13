@@ -1157,8 +1157,8 @@ pub struct DashboardState {
     /// reported, for [`DashboardState::notification_events`].
     pub(crate) attention_episodes: BTreeMap<String, crate::notify::AttentionEpisode>,
     pub(crate) attention_navigation: Option<dashboard_sessions::AttentionNavigation>,
-    pub(crate) viewed_failures: BTreeMap<String, crate::notify::ViewedFailure>,
-    pub(crate) drawn_failures: BTreeMap<String, crate::notify::ViewedFailure>,
+    pub(crate) resume_notification_target: Option<String>,
+    pub(crate) rendered_failure_dismissals: BTreeSet<String>,
     /// The pane, row index, and time of the most recent left click on a
     /// session row, so the next click can be recognized as a double click.
     last_row_click: Option<(Focus, usize, Instant)>,
@@ -1422,8 +1422,8 @@ impl DashboardState {
             collapsed_project_keys: Default::default(),
             attention_episodes: BTreeMap::new(),
             attention_navigation: None,
-            viewed_failures: BTreeMap::new(),
-            drawn_failures: BTreeMap::new(),
+            resume_notification_target: None,
+            rendered_failure_dismissals: BTreeSet::new(),
             last_row_click: None,
             mode: Mode::Dashboard,
             pending_welcome: None,

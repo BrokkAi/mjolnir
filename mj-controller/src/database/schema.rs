@@ -2471,6 +2471,34 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
     if version < 130 {
         migrate_github_watch_followers(connection)?;
     }
+    // Compatible: older writers preserve this nullable receipt through explicit
+    // column lists. Different failures mismatch the receipt. The trigger also
+    // invalidates a receipt when state/error changes, including older writers.
+    if version < 131 {
+        let add_column = if super::legacy_schema::table_has_column(
+            connection,
+            "sessions",
+            "dismissed_failure_json",
+        )? {
+            ""
+        } else {
+            "ALTER TABLE sessions ADD COLUMN dismissed_failure_json TEXT;"
+        };
+        connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             {add_column}
+             CREATE TRIGGER IF NOT EXISTS clear_dismissed_failure
+             AFTER UPDATE OF state, last_error ON sessions
+             WHEN NEW.state IS NOT OLD.state OR NEW.last_error IS NOT OLD.last_error
+             BEGIN
+                 UPDATE sessions SET dismissed_failure_json = NULL WHERE session_id = NEW.session_id;
+             END;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (131, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 131;
+             COMMIT;"
+        ))?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -4302,7 +4330,7 @@ mod reader_tests {
                             ('acme','repo',11,'follower','pull_request','not interested','https://example.com/11','c',0,0);
                  INSERT INTO mailbox_outbox(event_key,target_session_id,event_json,wake,created_at)
                      VALUES ('queued','creator','{}',1,'c');
-                 DELETE FROM schema_migrations WHERE version = 130;
+                 DELETE FROM schema_migrations WHERE version >= 130;
                  UPDATE schema_compatibility SET minimum_compatible_version = 126;
                  PRAGMA user_version = 129;",
             )
@@ -4312,7 +4340,7 @@ mod reader_tests {
 
         let writer = open_writer(&path).unwrap();
         let state = read_schema_state(&writer).unwrap();
-        assert_eq!(state.revision, 130);
+        assert_eq!(state.revision, SCHEMA_VERSION);
         assert_eq!(state.minimum_compatible, Some(130));
         // A revision-129 build must refuse to read or write the store.
         assert!(state.ensure_supported_by(129).is_err());
@@ -4661,6 +4689,12 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
+        if version < 131
+            && legacy_schema::table_has_column(&connection, "sessions", "dismissed_failure_json")
+                .unwrap()
+        {
+            connection.execute_batch("DROP TRIGGER IF EXISTS clear_dismissed_failure; ALTER TABLE sessions DROP COLUMN dismissed_failure_json;").unwrap();
+        }
         if version < 129
             && legacy_schema::table_has_column(&connection, "sessions", "notifications_ignored")
                 .unwrap()
@@ -5191,6 +5225,50 @@ mod reader_tests {
         }
         let encoded = serde_json::to_value(&event).unwrap();
         assert!(serde_json::from_value::<LegacyInputEvent>(encoded["data"].clone()).is_err());
+    }
+
+    #[test]
+    fn compatible_failure_receipts_are_invalidated_by_failure_writers() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let mut record = super::super::tests::session("failure", "project");
+        record.state = mj_core::state::SessionState::Stopped;
+        record.last_error = Some("resume failed".into());
+        save_session_to(&path, &record).unwrap();
+        stamp_schema_version(&path, 130);
+        let connection = open_writer(&path).unwrap();
+        assert_eq!(
+            read_schema_state(&connection).unwrap().minimum_compatible,
+            Some(MINIMUM_COMPATIBLE_VERSION)
+        );
+        let receipt =
+            serde_json::to_string(&mj_core::attention::FailureIdentity::of(&record).unwrap())
+                .unwrap();
+        connection
+            .execute(
+                "UPDATE sessions SET dismissed_failure_json=?1 WHERE session_id='failure'",
+                [&receipt],
+            )
+            .unwrap();
+        // The real upsert names state/error even when only unrelated fields
+        // change; it must preserve the receipt for that same failure.
+        record.title = "renamed".into();
+        record.draft_input = "draft".into();
+        save_session_to(&path, &record).unwrap();
+        assert_eq!(
+            super::super::load_state_from(&path).unwrap().sessions["failure"].dismissed_failure,
+            mj_core::attention::FailureIdentity::of(&record)
+        );
+        // A retry passes through a different state before failing identically.
+        record.state = mj_core::state::SessionState::Provisioning;
+        save_session_to(&path, &record).unwrap();
+        record.state = mj_core::state::SessionState::Stopped;
+        save_session_to(&path, &record).unwrap();
+        assert!(
+            super::super::load_state_from(&path).unwrap().sessions["failure"]
+                .dismissed_failure
+                .is_none()
+        );
     }
 
     #[test]

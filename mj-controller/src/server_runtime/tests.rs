@@ -2065,6 +2065,7 @@ fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
         viewed_through_event_ordinal,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
         last_checkpoint_error: None,
         checkpoint: None,
     }

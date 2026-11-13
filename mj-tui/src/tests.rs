@@ -2351,54 +2351,52 @@ fn viewing_one_failure_reveals_the_five_unread_sessions_without_relabeling_them(
         "a terminal-too-small warning does not show the failure"
     );
 
+    let identity =
+        mj_core::attention::FailureIdentity::of(&dashboard.state.sessions["failed"]).unwrap();
+    dashboard.set_notification_dismissals(
+        [(
+            "failed".into(),
+            mj_core::attention::NotificationDismissal::Failure(identity.clone()),
+        )]
+        .into_iter()
+        .collect(),
+    );
     let screen = drawn(&mut dashboard, 140, 40).join("\n");
     assert!(screen.contains("worker stopped unexpectedly"), "{screen}");
     dashboard.acknowledge_render();
+    let actions = dashboard.take_drawn_failure_dismissals();
+    assert!(
+        matches!(actions.as_slice(), [DashboardAction::DismissNotification { session_id, target: mj_core::attention::NotificationDismissal::Failure(failure) }] if session_id == "failed" && failure == &identity)
+    );
+    assert_eq!(
+        dashboard.workspace_attention_summary("default"),
+        Some((AttentionLevel::Failed, 1)),
+        "only the daemon changes the alert"
+    );
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &["failed"],
+        mj_core::attention::SessionAttention::Inactive,
+    );
+    dashboard.set_notification_dismissals(Default::default());
     assert_eq!(
         dashboard.workspace_attention_summary("default"),
         Some((AttentionLevel::Unread, 5))
     );
-    assert_eq!(
-        dashboard.attention_badge_summary(),
-        Some((AttentionLevel::Unread, 5))
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &["failed"],
+        mj_core::attention::SessionAttention::Failed,
     );
-    assert_eq!(
-        dashboard.attention_level("failed"),
-        AttentionLevel::Failed,
-        "reading a failure does not fix the failed session"
-    );
-
-    dashboard.set_state(dashboard.state.clone());
     assert_eq!(
         dashboard.workspace_attention_summary("default"),
-        Some((AttentionLevel::Unread, 5)),
-        "refreshing unchanged state must not resurrect the notice"
-    );
-    let mut state = dashboard.state.clone();
-    state.sessions.get_mut("failed").unwrap().last_error = Some("a different failure".into());
-    dashboard.set_state(state);
-    assert_eq!(
-        dashboard.workspace_attention_summary("default"),
-        Some((AttentionLevel::Failed, 1)),
-        "a new error needs attention again"
-    );
-    drawn(&mut dashboard, 140, 40);
-    dashboard.acknowledge_render();
-    let mut state = dashboard.state.clone();
-    state.sessions.get_mut("failed").unwrap().state = SessionState::Running;
-    dashboard.set_state(state.clone());
-    state.sessions.get_mut("failed").unwrap().state = SessionState::Error;
-    dashboard.set_state(state);
-    assert_eq!(
-        dashboard.workspace_attention_summary("default"),
-        Some((AttentionLevel::Failed, 1)),
-        "a later failure after recovery is a new episode even with the same text"
+        Some((AttentionLevel::Failed, 1))
     );
 }
 
 // Hard-won: bed9102: terminal failures inflated badges and queued an unopenable session.
 #[test]
-fn a_session_without_a_row_is_not_counted_by_the_badge_or_the_queue() {
+fn a_stopped_notification_is_counted_and_reachable_in_the_resume_dialog() {
     let mut dashboard = dashboard_with_attention_mix();
     dashboard.set_active_workspace(Some("default".into()));
     assert_eq!(
@@ -2406,9 +2404,12 @@ fn a_session_without_a_row_is_not_counted_by_the_badge_or_the_queue() {
         Some((AttentionLevel::Waiting, 1))
     );
 
-    // A data-loss session is a terminal failure the Sessions pane never lists;
-    // the tab badge and the attention queue must not point at it either.
-    for state in [SessionState::DestroyedWithDataLoss, SessionState::Lost] {
+    // The live Sessions pane excludes these records; notifications still reach them.
+    for state in [
+        SessionState::Stopped,
+        SessionState::DestroyedWithDataLoss,
+        SessionState::Lost,
+    ] {
         dashboard.state.sessions.get_mut("quiet").unwrap().state = state;
         crate::test_support::serve_attention(
             &mut dashboard,
@@ -2425,16 +2426,49 @@ fn a_session_without_a_row_is_not_counted_by_the_badge_or_the_queue() {
         );
         assert_eq!(
             dashboard.workspace_attention_summary("default"),
-            Some((AttentionLevel::Waiting, 1)),
-            "{state:?} must not turn the badge red or raise its count"
+            Some((AttentionLevel::Failed, 1)),
+            "{state:?} needs a person"
         );
         assert!(
-            !dashboard
+            dashboard
                 .attention_queue()
                 .iter()
                 .any(|entry| entry.session_id == "quiet"),
-            "{state:?} must not be in the attention queue"
+            "{state:?} belongs in the attention queue"
         );
+        dashboard.select_active_session("asks");
+        assert!(matches!(
+            dashboard.step_attention(-1),
+            DashboardAction::OpenResumeDialog
+        ));
+        dashboard.show_resume_dialog(1, vec![]);
+        assert_eq!(dashboard.resume_command_session_id(), Some("quiet"));
+        let record = dashboard.state.sessions.get_mut("quiet").unwrap();
+        record.last_error = Some("resume failed".into());
+        let failure = mj_core::attention::FailureIdentity::of(record).unwrap();
+        dashboard.set_notification_dismissals(
+            [(
+                "quiet".into(),
+                mj_core::attention::NotificationDismissal::Failure(failure.clone()),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        dashboard.rebuild_resume_rows();
+        let screen = drawn(&mut dashboard, 140, 40).join("\n");
+        assert!(screen.contains("d: dismiss notification"), "{screen}");
+        let action = dashboard.handle_resume_dialog_event(Event::Key(key(KeyCode::Char('d'))));
+        assert!(
+            matches!(&action, DashboardAction::DismissNotification { session_id, .. } if session_id == "quiet"),
+            "{state:?}: {action:?}"
+        );
+        dashboard.notification_dismissal_finished(
+            "quiet",
+            mj_core::attention::NotificationDismissal::Failure(failure),
+            Ok(0),
+        );
+        dashboard.set_notification_dismissals(Default::default());
+        dashboard.mode = Mode::Dashboard;
     }
 
     // An error state still has a row, so it still counts.

@@ -547,6 +547,18 @@ impl DashboardState {
             mj_core::attention::NotificationDismissal,
         >,
     ) {
+        for (id, detail) in self.session_details.iter_mut() {
+            if let Some(NotificationDismissalState::Accepted { target, .. }) =
+                &detail.notification_dismissal
+                && matches!(
+                    target,
+                    mj_core::attention::NotificationDismissal::Failure(_)
+                )
+                && targets.get(id) != Some(target)
+            {
+                detail.notification_dismissal = None;
+            }
+        }
         self.notification_dismissals = targets;
     }
     pub fn set_session_attention(
@@ -682,18 +694,10 @@ impl DashboardState {
                         rows.remove(child);
                         self.session_details.remove(child);
                         self.project_sources.remove(child);
-                        self.viewed_failures.remove(child);
                     }
                 }
                 self.session_details.remove(id);
                 self.project_sources.remove(id);
-            }
-            if self
-                .viewed_failures
-                .get(id)
-                .is_some_and(|seen| record.as_ref().is_none_or(|record| !seen.matches(record)))
-            {
-                self.viewed_failures.remove(id);
             }
         }
         state.sessions = rows;
@@ -1242,7 +1246,7 @@ impl DashboardState {
         detail.current_turn_started_at = prepared.current_turn_started_at;
         detail.legacy_awaiting_input = prepared.legacy_awaiting_input;
         if matches!(&detail.notification_dismissal,
-            Some(NotificationDismissalState::Accepted { ordinal, .. }) if prepared.applied_event_ordinal >= *ordinal)
+            Some(NotificationDismissalState::Accepted { target: mj_core::attention::NotificationDismissal::Question(_), ordinal }) if prepared.applied_event_ordinal >= *ordinal)
         {
             detail.notification_dismissal = None;
         }
@@ -1323,16 +1327,35 @@ impl DashboardState {
     }
 
     pub(crate) fn begin_dismiss_notification(&mut self) -> crate::DashboardAction {
-        let Some(session_id) = self.command_session_id().map(str::to_owned) else {
+        let Some(session_id) = self
+            .resume_command_session_id()
+            .or_else(|| self.command_session_id())
+            .map(str::to_owned)
+        else {
             return crate::DashboardAction::None;
         };
-        let Some(target) = self.notification_dismissal_target(&session_id) else {
-            return crate::DashboardAction::None;
-        };
-        let detail = self.session_details.entry(session_id.clone()).or_default();
+        self.begin_dismiss_notification_for(&session_id)
+            .unwrap_or(crate::DashboardAction::None)
+    }
+
+    pub(crate) fn begin_dismiss_notification_for(
+        &mut self,
+        session_id: &str,
+    ) -> Option<crate::DashboardAction> {
+        if self.notification_dismissal_pending(session_id) {
+            return None;
+        }
+        let target = self.notification_dismissal_target(session_id)?;
+        let detail = self
+            .session_details
+            .entry(session_id.to_owned())
+            .or_default();
         detail.notification_dismissal =
             Some(NotificationDismissalState::Submitting(target.clone()));
-        crate::DashboardAction::DismissNotification { session_id, target }
+        Some(crate::DashboardAction::DismissNotification {
+            session_id: session_id.to_owned(),
+            target,
+        })
     }
 
     pub fn notification_dismissal_finished(
@@ -1357,6 +1380,13 @@ impl DashboardState {
         match result {
             Ok(ordinal) => {
                 if matches!(
+                    target,
+                    mj_core::attention::NotificationDismissal::Failure(_)
+                ) {
+                    detail.notification_dismissal = (self.notification_dismissals.get(session_id)
+                        == Some(&target))
+                    .then_some(NotificationDismissalState::Accepted { target, ordinal });
+                } else if matches!(
                     target,
                     mj_core::attention::NotificationDismissal::ReadThrough(_)
                 ) {

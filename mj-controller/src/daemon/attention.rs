@@ -248,6 +248,31 @@ fn waiting_on_own_work(runtime: &RuntimeProjection, id: &str) -> Vec<&'static st
     work
 }
 
+fn current_condition_failure(runtime: &RuntimeProjection, id: &str) -> bool {
+    runtime.records.get(id).is_some_and(|record| {
+        record
+            .configuration_issue(&runtime.metadata.config)
+            .is_some()
+    }) || runtime.sessions.get(id).is_some_and(|view| {
+        matches!(
+            view.error,
+            Some(
+                mj_client::session::ViewError::TargetMissing(_)
+                    | mj_client::session::ViewError::ProjectionIntegrity(_)
+            )
+        )
+    })
+}
+
+fn failed_review(review: Option<&mj_client::review::RuntimeReviewView>) -> bool {
+    review.is_some_and(|review| {
+        matches!(
+            review.phase,
+            TurnReviewPhase::Verdict(ReviewVerdict::Failed { .. })
+        )
+    })
+}
+
 fn dismissal(
     runtime: &RuntimeProjection,
     id: &str,
@@ -256,6 +281,23 @@ fn dismissal(
     use mj_core::attention::NotificationDismissal;
     if attention == SessionAttention::Unread {
         return unread_frontier(runtime, id).map(NotificationDismissal::ReadThrough);
+    }
+    if attention == SessionAttention::Failed {
+        // Configuration, view and review failures are current conditions, not
+        // recorded lifecycle failures. Their owners resolve them.
+        let record = runtime.records.get(id)?;
+        if current_condition_failure(runtime, id)
+            || failed_review(
+                runtime
+                    .metadata
+                    .reviews
+                    .iter()
+                    .find(|review| review.session_id == id),
+            )
+        {
+            return None;
+        }
+        return mj_core::attention::FailureIdentity::of(record).map(NotificationDismissal::Failure);
     }
     let live = runtime.sessions.get(id)?.operational.as_deref()?;
     match attention {
@@ -387,26 +429,14 @@ fn project_states(
             let review = reviews.get(id.as_str()).copied();
             let transitioning =
                 record.state.transition_kind().is_some() || lifecycles.contains(id.as_str());
-            let state = if record
-                .configuration_issue(&runtime.metadata.config)
-                .is_some()
-                || record.last_error.is_some()
-                || matches!(
-                    record.state,
-                    mj_core::state::SessionState::Lost
-                        | mj_core::state::SessionState::Error
-                        | mj_core::state::SessionState::DestroyedWithDataLoss
-                )
-                || view.is_some_and(|view| {
-                    matches!(
-                        view.error,
-                        Some(
-                            mj_client::session::ViewError::TargetMissing(_)
-                                | mj_client::session::ViewError::ProjectionIntegrity(_)
-                        )
-                    )
-                }) {
+            let state = if current_condition_failure(runtime, id) {
                 Failed
+            } else if let Some(failure) = mj_core::attention::FailureIdentity::of(record) {
+                if record.dismissed_failure.as_ref() == Some(&failure) && !failed_review(review) {
+                    Inactive
+                } else {
+                    Failed
+                }
             } else if transitioning || record.state == mj_core::state::SessionState::Checkpointing {
                 Working
             } else if !record.state.is_active() {
@@ -427,12 +457,7 @@ fn project_states(
                 })
             {
                 Unreachable
-            } else if review.is_some_and(|review| {
-                matches!(
-                    review.phase,
-                    TurnReviewPhase::Verdict(ReviewVerdict::Failed { .. })
-                )
-            }) {
+            } else if failed_review(review) {
                 Failed
             } else if questions.contains(id) {
                 NeedsInput
@@ -1320,11 +1345,30 @@ mod tests {
     #[test]
     fn attention_failure_is_distinct_from_connection_loss_and_reviews_override_questions() {
         let mut runtime = runtime();
+        {
+            let record = runtime.records.get_mut("parent").unwrap();
+            record.state = SessionState::Stopped;
+            record.last_error = Some("resume failed: operation cancelled".into());
+        }
+        assert_eq!(project(&runtime)["parent"], SessionAttention::Failed);
+        let target = dismissal(&runtime, "parent", SessionAttention::Failed).unwrap();
+        let mj_core::attention::NotificationDismissal::Failure(failure) = target else {
+            panic!("expected recorded failure")
+        };
+        runtime.records.get_mut("parent").unwrap().dismissed_failure = Some(failure);
+        assert_eq!(project(&runtime)["parent"], SessionAttention::Inactive);
+        runtime.records.get_mut("parent").unwrap().last_error =
+            Some("another resume failure".into());
+        assert_eq!(project(&runtime)["parent"], SessionAttention::Failed);
+        runtime.records.get_mut("parent").unwrap().dismissed_failure = None;
+        runtime.records.get_mut("parent").unwrap().last_error = None;
+        runtime.records.get_mut("parent").unwrap().state = SessionState::Running;
         let normal = project(&runtime)["parent"];
         let mut config = (*runtime.metadata.config).clone();
         let profile = config.profiles.remove("codex").unwrap();
         runtime.metadata.config = config.clone().into();
         assert_eq!(project(&runtime)["parent"], SessionAttention::Failed);
+        assert!(dismissal(&runtime, "parent", SessionAttention::Failed).is_none());
         config.profiles.insert("codex".into(), profile);
         runtime.metadata.config = config.into();
         assert_eq!(project(&runtime)["parent"], normal);
@@ -1352,6 +1396,14 @@ mod tests {
         assert_eq!(project(&runtime)["parent"], SessionAttention::Idle);
         runtime.metadata.reviews[0].phase = TurnReviewPhase::CapturingDelta;
         assert_eq!(project(&runtime)["parent"], SessionAttention::Working);
+        runtime.metadata.reviews[0].phase = TurnReviewPhase::Verdict(ReviewVerdict::Failed {
+            reason: "new review failed".into(),
+        });
+        let record = runtime.records.get_mut("parent").unwrap();
+        record.last_error = Some("old lifecycle error".into());
+        record.dismissed_failure = mj_core::attention::FailureIdentity::of(record);
+        assert_eq!(project(&runtime)["parent"], SessionAttention::Failed);
+        assert!(dismissal(&runtime, "parent", SessionAttention::Failed).is_none());
     }
 
     #[test]
