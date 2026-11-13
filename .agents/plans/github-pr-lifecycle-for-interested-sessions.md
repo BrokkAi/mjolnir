@@ -15,13 +15,13 @@ After this change:
 - the creator's notices are unchanged;
 - PRs opened by another account, including `mergemarshall[bot]` merge batches, are covered.
 
-It is enabled by default, with no setting. You can see it working by opening a PR in a watched repository, letting a second session be told about it, merging the PR, and watching the second session's next turn begin with "PR owner/repo#N "title", which you were told about as possibly related to your work, was merged by …". The effect is then measured from the store after a week (Milestone 4).
+It is enabled by default, with no setting. You can see it working by opening a PR in a watched repository, letting a second session be told about it, merging the PR, and watching the second session's next turn begin with "PR owner/repo#N "title" was merged by …" (the creator's notice says "Your PR …"). The effect is then measured from the store after a week (Milestone 4).
 
 
 ## Progress
 
 - [x] (2026-11-13 16:40Z) Offline study, code map and design. The map is in this plan's Context section.
-- [ ] Milestone 1: the wire shape and rendering for interested recipients, the protocol gate, and the general downgrade for older workers.
+- [x] (2026-11-13 17:24Z) Milestone 1: added interested-recipient lifecycle wire/rendering, protocol 65 gating, generic older-worker downgrade, and golden/regression coverage; targeted tests, `cargo check --all-targets`, and Clippy passed.
 - [ ] Milestone 2: the next schema migration, 130 at the time of writing (breaking): watches without a creator, and the recorded latest lifecycle event.
 - [ ] Milestone 3: fan-out inside the commit transactions; watches for interested-only PRs; credential selection; tests.
 - [ ] Milestone 4: measurement after one week enabled.
@@ -63,6 +63,11 @@ It is enabled by default, with no setting. You can see it working by opening a P
 - Decision: when a creator session is destroyed, its watch row stays if interested sessions remain, with `creator_session_id` set to NULL. Otherwise the row is deleted, as today.
   Rationale: today destroying the creator deletes the watch, which would silently stop lifecycle notices to everyone else.
   Date/Author: 2026-11-13, parent agent.
+
+
+- Decision: the interested wording is plain: "PR {reference} \"{title}\" was merged by …", and the transcript line is "PR {reference} was merged by …". It does not explain why the session is being told.
+  Rationale: Jonathan asked to drop "which you were told about as possibly related to your work" as noise. Leaving out "Your" is enough to show the PR is not the session's own.
+  Date/Author: 2026-11-13, Jonathan.
 
 
 ## Outcomes & Retrospective
@@ -107,8 +112,8 @@ Define `pub enum LifecycleRecipient { #[default] Creator, Interested }` with `#[
 
 In `describe_mailbox_event`, `Interested` renders as:
 
-- agent text: `PR {reference} "{title}", which you were told about as possibly related to your work, was merged{by_clause}.`, with "was closed without merging" and "was reopened" for the other changes;
-- transcript line: `Followed PR {reference} was merged{by_clause}.`, and so on.
+- agent text: `PR {reference} "{title}" was merged{by_clause}.`, with "was closed without merging" and "was reopened" for the other changes;
+- transcript line: `PR {reference} was merged{by_clause}.`, and so on.
 
 `Creator` text is unchanged.
 
@@ -196,7 +201,7 @@ These tests must fail before the change and pass after it:
 3. Merge the PR.
 4. Prompt session B.
 
-B's next turn must start with the interested wording, and A must be woken with "Your PR … was merged".
+B's next turn must start with "PR … was merged by …", and A must be woken with "Your PR … was merged".
 
 **Measurement**, after one week enabled on the live install. Read-only SQL with `mode=ro` and `PRAGMA query_only=1`:
 - Deliveries per day: `SELECT count(*) FROM mailbox_outbox WHERE wake=0 AND event_json LIKE '%"recipient":"interested"%' AND created_at >= ?`. Filter by `target_session_id` first, because pattern scans over the whole table are slow.

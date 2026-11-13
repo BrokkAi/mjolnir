@@ -1159,6 +1159,7 @@ fn map_timeline(
                             number: watch.number as u64,
                             title: watch.title.clone(),
                             actor: actor.clone(),
+                            recipient: mj_core::mailbox::LifecycleRecipient::Creator,
                             repo: repo.clone(),
                         },
                         Some(actor),
