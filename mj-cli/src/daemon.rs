@@ -588,14 +588,19 @@ fn configure_host_daemon_environment(command: &mut std::process::Command) -> Res
             environment.remove(name);
         }
         command.env_clear().envs(environment);
-        for name in ["MJ_CONFIG_DIR", "MJ_DATA_DIR", "MJ_INSTANCE"] {
-            if let Some(value) = std::env::var_os(name) {
-                command.env(name, value);
-            }
-        }
     }
-    // The instance owns this directory, unlike a disposable session checkout.
-    command.current_dir(data_dir());
+    // Resolve against the client's cwd before the child changes directory.
+    // config_dir/data_dir own override and named-instance precedence.
+    command.env(
+        "MJ_CONFIG_DIR",
+        std::path::absolute(mj_core::config::config_dir())?,
+    );
+    let data = std::path::absolute(data_dir())?;
+    command.env("MJ_DATA_DIR", &data);
+    if let Some(instance) = std::env::var_os("MJ_INSTANCE") {
+        command.env("MJ_INSTANCE", instance);
+    }
+    command.current_dir(data);
     Ok(())
 }
 
@@ -2230,10 +2235,16 @@ mod tests {
                 .filter_map(|line| line.split_once('='))
                 .collect();
             for name in ["MJ_CONFIG_DIR", "MJ_DATA_DIR", "MJ_INSTANCE"] {
-                assert_eq!(
-                    environment.get(name).copied(),
-                    Some(std::env::var(name).unwrap().as_str())
-                );
+                let expected = if name == "MJ_INSTANCE" {
+                    std::env::var(name).unwrap()
+                } else {
+                    std::path::absolute(std::env::var_os(name).unwrap())
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .to_owned()
+                };
+                assert_eq!(environment.get(name).copied(), Some(expected.as_str()));
             }
             if mode == "session" {
                 for name in [
@@ -2250,17 +2261,22 @@ mod tests {
             } else {
                 assert_eq!(environment.get("CODEX_HOME"), Some(&"/user/custom-codex"));
             }
-            assert_eq!(command.get_current_dir(), Some(data_dir().as_path()));
+            assert_eq!(
+                command.get_current_dir(),
+                Some(std::path::absolute(data_dir()).unwrap().as_path())
+            );
             return;
         }
         let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("data")).unwrap();
         for mode in ["session", "ordinary"] {
             let mut command = std::process::Command::new(std::env::current_exe().unwrap());
             command
                 .args(["--exact", TEST])
                 .env(CHILD, mode)
-                .env("MJ_CONFIG_DIR", directory.path())
-                .env("MJ_DATA_DIR", directory.path())
+                .current_dir(directory.path())
+                .env("MJ_CONFIG_DIR", "config")
+                .env("MJ_DATA_DIR", "data")
                 .env("MJ_INSTANCE", "1524-daemon-env")
                 .env_remove("MJ_SESSION_ID")
                 .env_remove("MJ_SESSION_BASH_ENV")
