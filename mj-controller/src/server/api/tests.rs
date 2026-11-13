@@ -5511,10 +5511,10 @@ async fn suspension_rejects_destruction_flags_and_removed_routes() {
     }
 }
 
-/// Mjolnir's automatic continuation starts a new command. A session wait
+/// A quota check starts a new command. A session wait
 /// follows it; a wait on the turn before it answers, and names it as `next`.
 #[tokio::test]
-async fn only_the_session_wait_follows_automatic_continuation() {
+async fn only_the_session_wait_follows_the_quota_check() {
     let observation = WaitObservation {
         activity: mj_core::activity::ActivityState::CheckingQuota,
         execution: MaterializedExecutionState::Idle,

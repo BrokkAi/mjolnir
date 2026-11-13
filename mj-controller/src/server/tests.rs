@@ -5058,10 +5058,7 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
             serde_json::json!({"path": ["profiles", "claude"]}),
         ),
         root(),
-        (
-            "/api/settings/page",
-            serde_json::json!({"path": ["phone"]}),
-        ),
+        ("/api/settings/page", serde_json::json!({"path": ["phone"]})),
         (
             "/api/settings/edit",
             serde_json::json!({"page": ["phone"], "edit": {"kind": "toggle", "path": ["phone", "enabled"]}}),

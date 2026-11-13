@@ -175,11 +175,7 @@ async fn a_worker_quota_assessment_schedules_recovery_whatever_the_spent_allowan
         }),
     };
     let cancellation = CancellationToken::new();
-    let (mut updates, task) = spawn_in(
-        environment,
-        remote.updates,
-        cancellation.clone(),
-    );
+    let (mut updates, task) = spawn_in(environment, remote.updates, cancellation.clone());
     remote
         .publisher
         .publish("one".into(), view("one", false))
@@ -296,11 +292,7 @@ async fn recovered_deadlines_wait_resume_or_clear_without_reclassification() {
             quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected refresh") })),
         };
         let cancellation = CancellationToken::new();
-        let (mut updates, task) = spawn_in(
-            environment,
-            remote.updates,
-            cancellation.clone(),
-        );
+        let (mut updates, task) = spawn_in(environment, remote.updates, cancellation.clone());
         let mut recovered = view("one", true);
         let deadline = match case {
             "unknown" | "moving" | "moved" => None,
@@ -390,11 +382,7 @@ async fn a_due_recovery_that_cannot_be_submitted_says_which_fact_refused_it() {
         quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected refresh") })),
     };
     let cancellation = CancellationToken::new();
-    let (mut updates, task) = spawn_in(
-        environment,
-        remote.updates,
-        cancellation.clone(),
-    );
+    let (mut updates, task) = spawn_in(environment, remote.updates, cancellation.clone());
     let mut stuck = view("one", true);
     let recovery = recovery_for(&stuck, Some(mj_core::clock::epoch_millis() - 1));
     let operational = &mut stuck.snapshot.as_mut().unwrap().operational;
@@ -592,11 +580,7 @@ async fn a_due_recovery_resumes_a_usage_limited_goal_and_leaves_a_spent_budget_a
             quota: Arc::new(|_, _| Box::pin(async { anyhow::bail!("unexpected refresh") })),
         };
         let cancellation = CancellationToken::new();
-        let (mut updates, task) = spawn_in(
-            environment,
-            remote.updates,
-            cancellation.clone(),
-        );
+        let (mut updates, task) = spawn_in(environment, remote.updates, cancellation.clone());
         let mut recovered = view("one", true);
         let recovery = recovery_for(&recovered, Some(mj_core::clock::epoch_millis() - 1));
         let operational = &mut recovered.snapshot.as_mut().unwrap().operational;

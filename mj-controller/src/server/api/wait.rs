@@ -393,12 +393,11 @@ pub(super) fn build_observation(
                 snapshot.materialized.last_activity_at_ms(),
             )
         };
-        // The daemon's continuation check is published as the session's
+        // The daemon's quota check is published as the session's
         // activity on top of the worker's, and that is the state the
         // dashboard shows. The actor's own view never carries it.
         if observation.activity.is_idle()
-            && session.activity_state
-                == Some(mj_core::activity::ActivityState::CheckingQuota)
+            && session.activity_state == Some(mj_core::activity::ActivityState::CheckingQuota)
         {
             observation.activity = mj_core::activity::ActivityState::CheckingQuota;
         }

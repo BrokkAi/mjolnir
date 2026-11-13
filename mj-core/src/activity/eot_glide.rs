@@ -102,12 +102,7 @@ mod tests {
             serde_json::from_str(include_str!("eot_glide_fresh_sample.json")).unwrap();
         for case in cases.as_array().unwrap() {
             let expected: Action = serde_json::from_value(case["expected"].clone()).unwrap();
-            assert_eq!(
-                action(&case["answers"]),
-                expected,
-                "{}",
-                case["index"]
-            );
+            assert_eq!(action(&case["answers"]), expected, "{}", case["index"]);
             assert_eq!(
                 background_needed(&case["answers"], case["has_background"].as_bool().unwrap()),
                 serde_json::from_value::<Option<bool>>(case["background_needed"].clone()).unwrap()
