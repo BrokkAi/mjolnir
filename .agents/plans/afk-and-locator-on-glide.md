@@ -18,8 +18,8 @@ After this change both run on GLiDE through the hosted proxy, each is measured o
 - [x] (2026-11-13) Milestone 2: locator variants on tuning; froze V0 argmax; held-out gate PASS (see Outcomes).
 - [ ] Milestone 3: AFK evaluation corpus (real form pairs plus constructed variants) and a Jev baseline.
 - [ ] Milestone 4: AFK GLiDE wording and threshold on tuning; freeze; confirm on held-out.
-- [ ] Milestone 5: proxy routes, worker clients, AFK decision log; tests. Locator half done 2026-11-13 (route `/v1/question-locator-glide`, `locate_question`, frozen-question and parser tests, `jev-proxy.md`). AFK half done 2026-11-13 (route `/v1/afk-question-glide`, `same_afk_question`, decision record).
-- [ ] Milestone 6: remove the dead Jev client code from the worker (and controller, if any remains).
+- [x] (2026-11-13) Milestone 5: proxy routes, worker clients, AFK decision log; tests. Locator half done 2026-11-13 (route `/v1/question-locator-glide`, `locate_question`, frozen-question and parser tests, `jev-proxy.md`). AFK half done 2026-11-13 (route `/v1/afk-question-glide`, `same_afk_question`, decision record).
+- [x] (2026-11-13) Milestone 6, worker and core: removed the worker's TypeSafe direct transport (`VerdictSource` is now `Hosted` or `Disabled`), the v7 request path (`ask`, `ask_logged`, `ask_logged_for`, `HOSTED_VERDICT_ENDPOINT`) and `apply_turn_assessment`, and deleted `mj-core/tests/jev_scenarios.rs`; the relay tests that fed it Jev verdicts now apply recorded GLiDE answers (`test_support::glide_answer`). Kept: `jev-gates.json` (read by `assessment.rs` and the proxy test), the scenario fixtures, `bound_authorization` (the handback check uses it), and every stored type. Controller leftovers (`mj-controller/src/continuation.rs`, key forwarding in `launch.rs`) are open for the parent.
 - [ ] Milestone 7: full validation, proxy deployment, commit, review, push.
 
 ## Surprises & Discoveries

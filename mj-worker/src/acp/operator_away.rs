@@ -99,13 +99,7 @@ impl OperatorAway {
 
     #[cfg(test)]
     pub(super) fn pending_for_bridge(&self) -> PendingElicitations {
-        self.pending_for_bridge_with_source(
-            Some(VerdictSource::Direct {
-                key: String::new(),
-                endpoint: String::new(),
-            }),
-            None,
-        )
+        self.pending_for_bridge_with_source(Some(VerdictSource::Disabled), None)
     }
 
     pub(super) fn pending_for_bridge_with_source(
@@ -252,7 +246,7 @@ impl PendingElicitations {
                                 .same_afk_question(&session, &question, &history)
                                 .await
                         }
-                        None => Err(anyhow!("Jev is disabled or unavailable")),
+                        None => Err(anyhow!("the classifier is disabled or unavailable")),
                     }
                 };
                 let verdict = tokio::select! {

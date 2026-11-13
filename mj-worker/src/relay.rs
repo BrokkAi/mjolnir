@@ -1594,6 +1594,29 @@ pub(crate) mod test_support {
 
     pub(crate) const SESSION: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
 
+    /// A recorded GLiDE answer whose frozen rule gives `expected` (`await_input`,
+    /// `finished`, `wait`, `retry_provider`, `recover_quota` or `uncertain`).
+    /// `background` replaces the leftover-process distribution `[needed, unneeded,
+    /// unclear]` when a test needs a particular quiet judgment.
+    pub(crate) fn glide_answer(
+        expected: &str,
+        background: Option<[f64; 3]>,
+    ) -> mj_core::activity::eot_glide::types::Probabilities {
+        let samples = crate::acp::verdict_client::glide_turn::test_samples();
+        let mut answer = samples
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|sample| sample["expected"] == expected)
+            .unwrap_or_else(|| panic!("no recorded GLiDE answer for {expected}"))
+            .clone();
+        if let Some([needed, unneeded, unclear]) = background {
+            answer["answers"]["background"]["probabilities"] =
+                serde_json::json!({"needed":needed,"unneeded":unneeded,"unclear":unclear});
+        }
+        crate::acp::verdict_client::glide_turn::Probabilities::parse(&answer).unwrap()
+    }
+
     pub(crate) fn relay_request(request_id: &str, request: RelayRequest) -> RelayRequestEnvelope {
         RelayRequestEnvelope {
             request_id: request_id.to_owned(),
