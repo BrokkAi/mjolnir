@@ -313,3 +313,48 @@ fn incomplete_assignment_evidence_delivers_unchecked_without_spending_the_check(
     );
     assert!(!relay.snapshot.handback_checks.checked.contains(assignment));
 }
+
+#[test]
+fn handback_instructions_beyond_the_old_jev_request_budget_are_checked() {
+    use mj_core::continuation::EvidenceMessage;
+    let root = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(root.path(), SESSION, "test").unwrap();
+    relay.set_turn_verdict_harness(HarnessKind::Codex);
+    relay
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+    submit_relay(
+        &mut relay,
+        "subagent-spawn-large",
+        prompt("Implement and validate the requested change."),
+    );
+    relay.claim_pending_commands(true).unwrap();
+    // A full user budget of newlines: 32 KiB of text, about 60 KiB once JSON
+    // escapes it, so the old Jev request limit refused it with the questions.
+    relay
+        .snapshot
+        .handback_checks
+        .context
+        .as_mut()
+        .unwrap()
+        .messages
+        .extend((0..6).map(|i| EvidenceMessage {
+            id: format!("user:extra{i}"),
+            role: "user".into(),
+            text: "\n".repeat(5000),
+        }));
+    let (_, _, evidence) = relay
+        .prepare_handback_check("Done.")
+        .unwrap()
+        .expect("whole instructions are checked however large");
+    let context = evidence.authorization.unwrap();
+    assert!(context.authorization_complete);
+    assert_eq!(
+        context.messages.iter().filter(|m| m.role == "user").count(),
+        7
+    );
+    // The v7 questions took about 12 KB of the old 64 KiB request.
+    assert!(serde_json::to_vec(&context).unwrap().len() > 52 * 1024);
+}

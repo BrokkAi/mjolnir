@@ -385,6 +385,42 @@ pub(super) fn allow_permission_response(
         })
 }
 
+/// Reject only this tool call. A persistent `reject_always` option is never
+/// selected on the user's behalf.
+pub(super) fn reject_permission_response(
+    request: &RequestPermissionRequest,
+) -> Option<RequestPermissionResponse> {
+    request
+        .options
+        .iter()
+        .find(|option| option.kind == PermissionOptionKind::RejectOnce)
+        .map(|option| {
+            RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
+                SelectedPermissionOutcome::new(option.option_id.clone()),
+            ))
+        })
+}
+
+/// The outcome to record after Mjolnir delivered a permission response.
+pub(super) fn permission_response_outcome(
+    request: &RequestPermissionRequest,
+    response: &RequestPermissionResponse,
+) -> &'static str {
+    let RequestPermissionOutcome::Selected(selected) = &response.outcome else {
+        return "cancelled";
+    };
+    match request
+        .options
+        .iter()
+        .find(|option| option.option_id == selected.option_id)
+        .map(|option| option.kind)
+    {
+        Some(PermissionOptionKind::AllowOnce | PermissionOptionKind::AllowAlways) => "approved",
+        Some(PermissionOptionKind::RejectOnce | PermissionOptionKind::RejectAlways) => "rejected",
+        _ => "cancelled",
+    }
+}
+
 /// Authorize only an execute tool with a single literal gh invocation. Titles
 /// and display summaries are never evidence of what will execute.
 pub(super) fn gh_permission_response(
@@ -620,4 +656,57 @@ pub(super) fn resolve_pending_elicitation(
     response: ElicitationResponse,
 ) -> std::result::Result<(), String> {
     pending.resolve(elicitation_id, response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_client_protocol::v1::schema::{
+        PermissionOption, PermissionOptionKind, ToolCallUpdate, ToolCallUpdateFields,
+    };
+
+    #[test]
+    fn observe_denial_selects_only_a_one_time_rejection() {
+        let request = RequestPermissionRequest::new(
+            "session",
+            ToolCallUpdate::new("call", ToolCallUpdateFields::new().title("Run command")),
+            vec![
+                PermissionOption::new("allow_once", "Allow once", PermissionOptionKind::AllowOnce),
+                PermissionOption::new(
+                    "reject_always",
+                    "Reject always",
+                    PermissionOptionKind::RejectAlways,
+                ),
+                PermissionOption::new(
+                    "reject_once",
+                    "Reject once",
+                    PermissionOptionKind::RejectOnce,
+                ),
+            ],
+        );
+        let response = reject_permission_response(&request).unwrap();
+        assert_eq!(permission_response_outcome(&request, &response), "rejected");
+        assert_eq!(
+            serde_json::to_value(response).unwrap()["outcome"]["optionId"],
+            "reject_once"
+        );
+        assert_eq!(
+            permission_response_outcome(
+                &request,
+                &RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled),
+            ),
+            "cancelled"
+        );
+
+        let always_only = RequestPermissionRequest::new(
+            "session",
+            ToolCallUpdate::new("call", ToolCallUpdateFields::default()),
+            vec![PermissionOption::new(
+                "reject_always",
+                "Reject always",
+                PermissionOptionKind::RejectAlways,
+            )],
+        );
+        assert!(reject_permission_response(&always_only).is_none());
+    }
 }

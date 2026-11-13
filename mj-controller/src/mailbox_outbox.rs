@@ -471,10 +471,7 @@ fn prepare_review_or_report(event: &mut mj_core::mailbox::MailboxEvent, protocol
         // Render here so their final result includes this daemon's closeout;
         // keep the structured durable row and its retry identity unchanged.
         mj_core::mailbox::MailboxEventBody::ReviewVerdict { .. } => true,
-        mj_core::mailbox::MailboxEventBody::SubagentFinished { .. } => {
-            protocol < event.body.minimum_relay_protocol()
-        }
-        _ => false,
+        _ => protocol < event.body.minimum_relay_protocol(),
     };
     if render {
         event.body = mj_core::mailbox::MailboxEventBody::PlainText {
@@ -552,6 +549,34 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn interested_lifecycle_downgrades_only_for_protocol_64_workers() {
+        let event = mj_core::mailbox::MailboxEvent {
+            key: "github:acme/repo#1:merged:session-1".into(),
+            source: "github".into(),
+            wake: false,
+            created_at_ms: 1,
+            body: mj_core::mailbox::MailboxEventBody::GithubPullRequestLifecycle {
+                change: mj_core::mailbox::MailboxPullRequestChange::Merged,
+                number: 1,
+                title: "A feature".into(),
+                actor: "alice".into(),
+                recipient: mj_core::mailbox::LifecycleRecipient::Interested,
+                repo: Some("acme/repo".into()),
+            },
+        };
+        let mut old_worker = event.clone();
+        super::prepare_review_or_report(&mut old_worker, 64);
+        let mj_core::mailbox::MailboxEventBody::PlainText { text } = old_worker.body else {
+            panic!("protocol 64 worker should receive a rendered plain-text event");
+        };
+        assert_eq!(text, "PR acme/repo#1 \"A feature\" was merged by alice.");
+
+        let mut current_worker = event.clone();
+        super::prepare_review_or_report(&mut current_worker, 65);
+        assert_eq!(current_worker, event);
+    }
+
     // Hard-won: 60adf13fe: a worker before protocol 54 headed a report about a failed message to a running child "finished".
     #[test]
     fn a_child_report_that_is_not_a_finish_reaches_older_workers_as_text() {

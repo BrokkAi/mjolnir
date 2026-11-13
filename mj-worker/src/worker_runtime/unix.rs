@@ -327,6 +327,11 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         &session_environment,
         &mut additional_directories,
     );
+    let observe_policy = config
+        .observe_policy
+        .clone()
+        .map(|policy| crate::observe::PolicyClient::new(policy, config.session_id.clone()))
+        .transpose()?;
     let acp_spec = LaunchSpec {
         operator_away,
         imported_logins: None,
@@ -379,6 +384,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         initial_model: config.initial_model,
         harness: config.harness,
         execution_policy: config.execution_policy,
+        observe_policy,
         acp_activity,
         step_clock,
         tools_in_flight,

@@ -822,6 +822,10 @@ impl JevConfig {
 pub struct QuotaConfig {
     #[serde(skip_serializing_if = "QuotaRuntimeChoice::is_default")]
     pub runtime: QuotaRuntimeChoice,
+    /// Profiles chosen in the dashboard to win load balancing when their
+    /// quota allows, most preferred first. `[quota] prefer = [...]`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub prefer: Vec<String>,
 }
 
 impl QuotaConfig {

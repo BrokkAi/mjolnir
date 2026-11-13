@@ -45,6 +45,28 @@ pub(crate) fn apply_session_activity(
             .is_some_and(|snapshot| snapshot.operational.supports_open_request()),
     );
     dashboard.set_session_connectivity(session_id, view.connected);
+    // The session menu's top line reads the current model and effort.
+    let facts = match (
+        view.snapshot.as_ref(),
+        dashboard.session_harness_kind(session_id),
+    ) {
+        (Some(snapshot), Some(harness)) => Some(mj_core::acp::AcpSessionFacts::from_operational(
+            harness,
+            &snapshot.operational.config,
+            &snapshot.operational.config_options,
+            snapshot.operational.modes.as_ref(),
+        )),
+        _ => None,
+    };
+    dashboard.set_session_current_config(
+        session_id,
+        facts
+            .as_ref()
+            .and_then(|facts| facts.current_model().map(str::to_owned)),
+        facts
+            .as_ref()
+            .and_then(|facts| facts.current_effort().map(str::to_owned)),
+    );
 }
 
 /// Apply one worker report and hand the open conversations the sub-agent

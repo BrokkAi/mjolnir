@@ -28,6 +28,10 @@ enum PaneOperation {
     /// An informational row in the read-only capacity dropdown.
     Information,
     Workspace(String),
+    /// Move a profile to the front of `[quota] prefer`.
+    PreferProfile(String),
+    /// Empty `[quota] prefer`.
+    ClearLoadBalancing,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,6 +205,24 @@ impl DashboardState {
             .map(|area| Rect::new(area.x + 1, area.y, 1, 1));
         if let Some(menu) = self.pane_menu.as_mut() {
             menu.anchor = anchor;
+        }
+    }
+
+    /// The right-click menu on a Quota profile row: load-balancing preference.
+    pub(crate) fn begin_quota_row_menu(&mut self, profile_id: &str, at: (u16, u16)) {
+        let entries = vec![
+            (
+                format!("Prefer {profile_id} in load balancing"),
+                PaneOperation::PreferProfile(profile_id.to_owned()),
+            ),
+            (
+                "Clear load balancing preferences".to_owned(),
+                PaneOperation::ClearLoadBalancing,
+            ),
+        ];
+        self.show_pane_menu("Load balancing", entries, false);
+        if let Some(menu) = self.pane_menu.as_mut() {
+            menu.anchor = Some(Rect::new(at.0, at.1, 1, 1));
         }
     }
 
@@ -403,6 +425,16 @@ impl DashboardState {
             PaneOperation::Close(pane) => DashboardAction::ClosePane { pane },
             PaneOperation::Command(id) => self.run_available_command(id),
             PaneOperation::Information => DashboardAction::None,
+            PaneOperation::PreferProfile(profile_id) => {
+                DashboardAction::PreferLoadBalancingProfile { profile_id }
+            }
+            PaneOperation::ClearLoadBalancing => {
+                if self.config.quota.prefer.is_empty() {
+                    DashboardAction::None
+                } else {
+                    DashboardAction::ClearLoadBalancingPreferences
+                }
+            }
             PaneOperation::Workspace(workspace_id) => {
                 if self.workspace_ids().contains(&workspace_id) {
                     DashboardAction::SelectWorkspace { workspace_id }
@@ -748,13 +780,23 @@ pub(crate) fn render_pane_menu(frame: &mut Frame, area: Rect, dashboard: &Dashbo
             inner,
         );
     } else {
+        // Clearing an empty preference list does nothing, so the row says so
+        // by being disabled.
+        let enabled: Vec<bool> = menu
+            .entries
+            .iter()
+            .map(|(_, operation)| {
+                !matches!(operation, PaneOperation::ClearLoadBalancing)
+                    || !dashboard.config.quota.prefer.is_empty()
+            })
+            .collect();
         ChoiceList::render_with_rows(
             frame,
             inner,
             &items,
             selected,
             &(0..items.len()).map(Some).collect::<Vec<_>>(),
-            &vec![true; items.len()],
+            &enabled,
             &mut form,
             0,
         );
@@ -792,6 +834,83 @@ mod tests {
         assert_eq!(d.browse_pane(), browse);
         assert_eq!(d.pane_session(pin), Some("session-1"));
         assert_eq!(d.pin_id("session-1"), Some(0));
+    }
+
+    /// Right-clicking a Quota profile row offers Prefer and Clear; Clear is
+    /// disabled while no preference is set.
+    #[test]
+    fn quota_row_right_click_offers_load_balancing_preference_and_clear() {
+        let mut d = dashboard_with_session(running_session());
+        let _ = drawn(&mut d, 140, 40);
+        let (profile, at) = {
+            let areas = d.quota_row_areas.borrow();
+            let (id, area) = areas
+                .iter()
+                .find(|(id, _)| id == "codex-1")
+                .expect("codex-1 row")
+                .clone();
+            (id, (area.x + 1, area.y))
+        };
+        assert_eq!(
+            d.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Right), at)),
+            DashboardAction::None
+        );
+        {
+            let menu = d.pane_menu.as_ref().expect("the row's menu opened");
+            let labels: Vec<&str> =
+                menu.entries.iter().map(|(label, _)| label.as_str()).collect();
+            assert_eq!(
+                labels,
+                [
+                    "Prefer codex-1 in load balancing",
+                    "Clear load balancing preferences"
+                ]
+            );
+        }
+        assert_eq!(
+            d.handle_pane_menu_event(Event::Key(key(KeyCode::Enter))),
+            DashboardAction::PreferLoadBalancingProfile {
+                profile_id: "codex-1".into()
+            }
+        );
+        // With nothing preferred, Clear is disabled: clicking it keeps the menu.
+        d.begin_quota_row_menu(&profile, at);
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal
+            .draw(|frame| render_pane_menu(frame, frame.area(), &d))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..40)
+            .map(|y| {
+                (0..140)
+                    .map(|x| buffer[(x, y)].symbol().to_owned())
+                    .collect()
+            })
+            .collect();
+        let clear_y = rows
+            .iter()
+            .position(|row| row.contains("Clear load balancing preferences"))
+            .expect("Clear row") as u16;
+        let clear_x = rows[usize::from(clear_y)].find("Clear").unwrap() as u16;
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            assert_eq!(
+                d.handle_pane_menu_event(Event::Mouse(mouse_at(kind, (clear_x, clear_y)))),
+                DashboardAction::None,
+                "Clear with no preference set"
+            );
+        }
+        assert!(d.pane_menu.is_some(), "the menu stayed open");
+        // With a preference set, Clear empties it.
+        d.config.quota.prefer = vec!["codex-1".into()];
+        d.begin_quota_row_menu(&profile, at);
+        d.handle_pane_menu_event(Event::Key(key(KeyCode::Down)));
+        assert_eq!(
+            d.handle_pane_menu_event(Event::Key(key(KeyCode::Enter))),
+            DashboardAction::ClearLoadBalancingPreferences
+        );
     }
 
     /// Launch campaign finding D-10: the empty-pane chooser opens in the

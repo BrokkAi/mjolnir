@@ -154,6 +154,9 @@ pub struct LaunchSpec {
     /// idle session reloads once they change. Set when the bridge starts.
     pub imported_logins: Option<super::ImportedLogins>,
     pub execution_policy: ExecutionPolicy,
+    /// Optional central Brokk Observe guardrail client. The permission
+    /// handler consults it before any automatic approval.
+    pub observe_policy: Option<crate::observe::PolicyClient>,
     pub acp_activity: AcpActivityClock,
     /// When the step the agent is on began. Marked from the same handlers as
     /// `acp_activity`, but only where a new step actually starts.

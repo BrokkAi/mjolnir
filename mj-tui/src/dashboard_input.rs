@@ -226,6 +226,18 @@ impl DashboardState {
         if mouse.kind == MouseEventKind::Down(MouseButton::Right)
             && matches!(self.mode, Mode::Dashboard)
         {
+            // A right-clicked profile row offers its load-balancing menu.
+            let quota_hit = self
+                .quota_row_areas
+                .borrow()
+                .iter()
+                .find(|(_, row)| row.contains((mouse.column, mouse.row).into()))
+                .map(|(id, _)| id.clone());
+            if let Some(profile_id) = quota_hit {
+                self.begin_quota_row_menu(&profile_id, (mouse.column, mouse.row));
+                self.record_event_handled();
+                return DashboardAction::None;
+            }
             // A right-clicked session row opens that session's menu, the way
             // right-clicking a web session card does.
             if let Some((index, _)) = self

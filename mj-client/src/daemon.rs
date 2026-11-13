@@ -734,6 +734,9 @@ pub enum DaemonAction {
     SaveSpinnerStyle {
         style: mj_core::config::SpinnerStyle,
     },
+    SetQuotaPreferences {
+        prefer: Vec<String>,
+    },
     TestTarget {
         target_id: String,
     },
@@ -2450,6 +2453,17 @@ impl DaemonClient {
         match self.request(DaemonAction::SaveSidebarSize { size }).await? {
             DaemonReply::Done => Ok(()),
             reply => bail!("unexpected sidebar-size save reply {reply:?}"),
+        }
+    }
+
+    /// Write the load-balancing preference order, most preferred first.
+    pub async fn set_quota_preferences(&mut self, prefer: Vec<String>) -> Result<()> {
+        match self
+            .request(DaemonAction::SetQuotaPreferences { prefer })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected quota-preference save reply {reply:?}"),
         }
     }
 

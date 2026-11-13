@@ -148,7 +148,9 @@ pub const RELAY_GLIDE_TURN_PROTOCOL: u32 = 62;
 pub const RELAY_ATTENTION_PROTOCOL: u32 = 63;
 /// Worker-owned unanswered prose requests.
 pub const RELAY_OPEN_REQUEST_PROTOCOL: u32 = 64;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_OPEN_REQUEST_PROTOCOL;
+/// Structured lifecycle notices for sessions following a pull request.
+pub const RELAY_FOLLOWED_LIFECYCLE_PROTOCOL: u32 = 65;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_FOLLOWED_LIFECYCLE_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 
