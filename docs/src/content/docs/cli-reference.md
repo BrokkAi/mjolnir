@@ -332,6 +332,7 @@ mj put-file --session <id> --path <workspace-relative path> [--overwrite] [--jso
 mj elicitations --session <id> [--json]
 mj respond --session <id> --elicitation <id> [<response JSON>|-] [--response-file <path>]
 mj models --profile <id> [--model <name> | --unrestricted] [--json]
+mj quota [--profile <id>] [--refresh] [--json]
 mj set-config --session <id> [--key <key> --value <value>] [--json]
 mj ui pane (sessions | targets | profiles) (minimized | standard | maximized) [--json]
 mj ui show <session-id> [--right | --below] [--json]
@@ -450,6 +451,12 @@ mj new --workspace eval --bundle product --target builder \
   include known per-million-token rates; subscription and unknown billing modes
   are labeled without per-token prices. JSON includes a `billing` field and a
   `price` object or `null` for each model.
+- `mj quota` prints the daemon's latest quota reading for every enabled profile,
+  or one with `--profile`: billing mode, each reported window with what remains
+  and its reset, and how long ago the value was fetched. A profile whose quota
+  cannot be read says why. `--refresh` asks the daemon to probe again and waits
+  for the fresh cycle before printing. JSON carries each profile's full report
+  for scripts that back off before a profile runs out.
 - `mj set-config` applies user-settable session settings the harness advertises,
   such as the model or effort. The target permission policy owns permission
   settings; use plan mode to enter or leave Plan.
