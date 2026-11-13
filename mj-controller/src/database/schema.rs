@@ -2538,7 +2538,11 @@ fn gone_session_rows_sql(gone: &str) -> String {
 /// timestamp. A session that is classified after the event was committed reads
 /// them to be told. The session-row triggers name this table, and SQLite refuses
 /// to rename a table while a trigger names a missing one, so they are dropped
-/// first and recreated afterwards. Revision 121's rule changes in one way: a
+/// first and recreated afterwards. Every PR that already has an interested
+/// session and no watch gets a creator-less one, whose cursors start at the
+/// second of the migration (GitHub's timestamps have no finer precision, and an
+/// event in that second must still compare as not earlier), so a PR a session was told about before the upgrade reports what
+/// happens next without replaying its history. Revision 121's rule changes in one way: a
 /// watch loses its creator, and is deleted only when no live interested
 /// session remains.
 fn migrate_github_watch_followers(connection: &Connection) -> Result<()> {
@@ -2588,6 +2592,17 @@ fn migrate_github_watch_followers(connection: &Connection) -> Result<()> {
              WHEN NEW.creator_session_id IS NOT NULL
               AND NOT EXISTS (SELECT 1 FROM sessions WHERE session_id = NEW.creator_session_id AND state <> 'destroyed-with-data-loss')
              BEGIN SELECT RAISE(IGNORE); END;
+         INSERT INTO github_watch_items(owner, repo, number, creator_session_id, kind, title, url,
+                 created_at, timeline_at, timeline_id, review_comments_at, review_comments_id, processed_at)
+             SELECT owner, repo, number, NULL, kind, title, url, MIN(created_at),
+                    strftime('%Y-%m-%dT%H:%M:%SZ','now'), 0,
+                    strftime('%Y-%m-%dT%H:%M:%SZ','now'), 0,
+                    strftime('%Y-%m-%dT%H:%M:%SZ','now')
+             FROM github_watch_classifications c
+             WHERE kind = 'pull_request' AND interested = 1 AND created = 0
+               AND NOT EXISTS (SELECT 1 FROM github_watch_items w
+                               WHERE w.owner = c.owner AND w.repo = c.repo AND w.number = c.number)
+             GROUP BY owner, repo, number;
          UPDATE schema_compatibility SET minimum_compatible_version = 130 WHERE singleton = 1;
          INSERT INTO schema_migrations(version, applied_at)
              VALUES (130, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
@@ -4287,6 +4302,10 @@ mod reader_tests {
                          't1',11,'r1',12,'p1');
                  INSERT INTO github_watch_classifications(owner,repo,number,session_id,kind,title,url,created_at,interested,created)
                      VALUES ('acme','repo',7,'follower','pull_request','kept','https://example.com/7','c',1,0);
+                 INSERT INTO github_watch_classifications(owner,repo,number,session_id,kind,title,url,created_at,interested,created)
+                     VALUES ('acme','repo',9,'follower','pull_request','batch','https://example.com/9','2020-01-01T00:00:00Z',1,0),
+                            ('acme','repo',10,'follower','issue','not a PR','https://example.com/10','c',1,0),
+                            ('acme','repo',11,'follower','pull_request','not interested','https://example.com/11','c',0,0);
                  INSERT INTO mailbox_outbox(event_key,target_session_id,event_json,wake,created_at)
                      VALUES ('queued','creator','{}',1,'c');
                  DELETE FROM schema_migrations WHERE version = 130;
@@ -4334,7 +4353,25 @@ mod reader_tests {
                 None
             )
         );
-        for (table, expected) in [("mailbox_outbox", 1), ("github_watch_classifications", 1)] {
+        // A PR a session was told about before the upgrade is watched from the
+        // migration on, with no creator; an issue or an uninterested pair is not.
+        let backfilled: Vec<(i64, Option<String>, String, bool)> = writer
+            .prepare(
+                "SELECT number, creator_session_id, created_at, timeline_at > '2026'
+                 FROM github_watch_items WHERE number <> 7 ORDER BY number",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            backfilled,
+            vec![(9, None, "2020-01-01T00:00:00Z".to_owned(), true)]
+        );
+        for (table, expected) in [("mailbox_outbox", 1), ("github_watch_classifications", 4)] {
             assert_eq!(
                 writer
                     .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
@@ -4363,7 +4400,7 @@ mod reader_tests {
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap();
-        assert_eq!(creators, vec![(7, None), (8, None)]);
+        assert_eq!(creators, vec![(7, None), (8, None), (9, None)]);
         assert_eq!(
             writer
                 .query_row("SELECT count(*) FROM mailbox_outbox", [], |row| row

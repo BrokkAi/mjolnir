@@ -22,8 +22,8 @@ It is enabled by default, with no setting. You can see it working by opening a P
 
 - [x] (2026-11-13 16:40Z) Offline study, code map and design. The map is in this plan's Context section.
 - [x] (2026-11-13 17:24Z) Milestone 1: added interested-recipient lifecycle wire/rendering, protocol 65 gating, generic older-worker downgrade, and golden/regression coverage; targeted tests, `cargo check --all-targets`, and Clippy passed.
-- [ ] Milestone 2: the next schema migration, 130 at the time of writing (breaking): watches without a creator, and the recorded latest lifecycle event.
-- [ ] Milestone 3: fan-out inside the commit transactions; watches for interested-only PRs; credential selection; tests.
+- [x] (2026-11-13) Milestone 2: schema revision 130 (breaking): watches without a creator, and the recorded latest lifecycle event. `migrate_github_watch_followers` in `schema.rs`; tests `watch_followers_migration_keeps_rows_and_refuses_older_builds` and `a_watch_outlives_its_creator_while_a_live_session_is_interested`.
+- [x] (2026-11-13) Milestone 3: fan-out inside the commit transactions (`commit_github_timeline`, `commit_github_item_classification`), interested-only watches, credential selection and the creator-less comments skip. Tests: the extended `watcher_filters_lifecycle_activity_by_actor_and_creator_turn` and `watcher_reports_a_close_at_the_merge_time_as_a_merge`, and the commit-order test `an_interested_session_is_told_of_a_merge_in_any_commit_order`.
 - [ ] Milestone 4: measurement after one week enabled.
 
 
@@ -35,7 +35,10 @@ It is enabled by default, with no setting. You can see it working by opening a P
 - Observation: the outbox key is the primary key, and GitHub inserts ignore conflicts. A recipient that shared the creator's key would silently receive nothing.
   Evidence: `enqueue_github_event` uses `INSERT ... ON CONFLICT(event_key) DO NOTHING`.
 - Observation: classification and timeline polling run concurrently (`tokio::join!` in `mj-controller/src/github_watch/service.rs`). A session classified after the merge was committed would never be told. Batch PRs merge within minutes of opening, so this is common, not rare.
-
+- Observation: SQLite refuses `ALTER TABLE ... RENAME` while a trigger on another table names a table that no longer exists. The migration therefore drops the two `sessions` triggers before rebuilding `github_watch_items` and recreates them afterwards.
+- Observation: a creator-less watch has no creator whose destruction removes it, so without a rule it would be polled for ever once its last interested session was destroyed.- Observation: a creator can attach to a creator-less watch (its classification arrives after an interested session's) while a poll that skipped the review-comment read for that watch is in flight. Recording that poll's progress would skip the comments the creator is owed.
+  Evidence: `commit_github_timeline` reads the creator from the row; the test `an_interested_session_is_told_of_a_merge_in_any_commit_order` covers it. The commit now leaves progress unrecorded in that case, so the next poll redoes the read; outbox keys make the repeat harmless.
+- Observation: the classification commit needs the credential login for the own-activity filter on the recorded event, so `GithubItemClassification` gained `credential_login`.
 
 ## Decision Log
 
@@ -63,11 +66,22 @@ It is enabled by default, with no setting. You can see it working by opening a P
 - Decision: when a creator session is destroyed, its watch row stays if interested sessions remain, with `creator_session_id` set to NULL. Otherwise the row is deleted, as today.
   Rationale: today destroying the creator deletes the watch, which would silently stop lifecycle notices to everyone else.
   Date/Author: 2026-11-13, parent agent.
+- Decision: the migration-130 triggers also delete a creator-less watch when its last live interested session is deleted or destroyed.
+  Rationale: the plan's rule keeps a watch while live interested sessions remain; the same rule must end a creator-less watch with its last follower. Otherwise it is polled with no recipient.
+  Date/Author: 2026-11-13, implementer of Milestones 2 and 3 (consistent with the plan's rule; not a design change).- Decision: migration 130 also creates a creator-less watch for every PR that already has a live interested session and no watch, with cursors at the migration time.
+  Rationale: the classifier never revisits a classified pair, so without it a PR a session was told about before the upgrade is never polled. Cursors at the migration, as migration 85 did, report what happens next without replaying history or reading every old PR's timeline at once. (Review finding.)
+  Date/Author: 2026-11-13, implementer of Milestones 2 and 3; flagged to the parent in the report.
+- Decision: when a creator attaches to a creator-less watch, the watch's cursors go back to the item's creation.
+  Rationale: what the watch read without a creator skipped review comments and discarded creator-only timeline events. The creator is owed the whole timeline, as a creator watch starting at the item's creation reads it. Interested sessions' rows have their own keys, so nothing is delivered twice. (Review finding.)
+  Date/Author: 2026-11-13, implementer of Milestones 2 and 3.
 
 
 - Decision: the interested wording is plain: "PR {reference} \"{title}\" was merged by …", and the transcript line is "PR {reference} was merged by …". It does not explain why the session is being told.
   Rationale: Jonathan asked to drop "which you were told about as possibly related to your work" as noise. Leaving out "Your" is enough to show the PR is not the session's own.
   Date/Author: 2026-11-13, Jonathan.
+- Decision: `commit_github_timeline` records progress only if the row's creator equals the creator its poll was planned for, and only if the row's cursors still equal the poll's snapshot (compare-and-set). Backfilled cursors are truncated to the second.
+  Rationale: a creator that attaches or is replaced during a poll, or after a poll, rewinds the cursors for a full read, and a stale poll must not undo that. GitHub's timestamps have one-second precision, so a cursor with milliseconds could compare later than an event in the same second. (Review findings.)
+  Date/Author: 2026-11-13, implementer of Milestones 2 and 3.
 
 
 ## Outcomes & Retrospective
@@ -190,7 +204,7 @@ These tests must fail before the change and pass after it:
 
 1. Extend `watcher_filters_lifecycle_activity_by_actor_and_creator_turn` with an interested session for the same item. The outbox must hold the creator's rows unchanged (same keys, `wake=1`). It must also hold one row per lifecycle event for the interested session, with key `…:{session}`, `wake=0` and `"recipient":"interested"`, and no comment or review rows for it. The interested session's own merge made during its own turn must be filtered for it but still delivered to the creator.
 2. Extend `watcher_reports_a_close_at_the_merge_time_as_a_merge` with a `mergemarshall[bot]` batch PR that has no creator and two interested sessions. After a `closed` entry at the `merged_at` time, both receive one `merged` row each. No `pulls/{n}/comments` request is made for that item; assert this on the fake server's request log.
-3. A tricky-condition test, marked `// Hard-won: <this commit>: a session classified after the merge was committed was never told`. Commit a timeline poll that merges the PR, then commit a classification for a new interested session. The new session must receive exactly one `merged` row, with the recorded key. Run the reverse order too: classification committed between the poll's network fetch and its commit. That session must also receive exactly one row.
+3. A tricky-condition test, `an_interested_session_is_told_of_a_merge_in_any_commit_order`. It carries no Hard-won marker, because AGENTS.md keeps that marker for defects found after the code was believed done, and this race was handled in the design. Commit a timeline poll that merges the PR, then commit a classification for a new interested session. The new session must receive exactly one `merged` row, with the recorded key. Run the reverse order too: classification committed between the poll's network fetch and its commit. That session must also receive exactly one row.
 4. A migration test, beside `github_timeline_migration_resets_progress_and_keeps_watches`. Build an isolated store at the previous revision with watch rows, triggers and outbox rows, then migrate it. Rows and creators must be preserved, the new columns must be NULL, `minimum_compatible_version` must equal the new revision, and a check from the previous revision must refuse the store. Extend `rows_of_a_gone_session_cannot_outlive_it`: destroying a creator that has interested sessions leaves the watch with a NULL creator; destroying one with no interested sessions deletes it.
 5. A downgrade test in `mailbox_outbox.rs`. A protocol-64 worker receives an interested lifecycle row as `PlainText` with the new wording; a protocol-65 worker receives the structured body.
 6. Goldens: `mailbox-events.txt` and `mailbox-delivery-transcript.txt` show the new interested lines, with creator lines unchanged.
@@ -256,3 +270,5 @@ No new crates or dependencies.
 
 
 Revision note (2026-11-13): first version, written after the code map. Jonathan then approved the breaking migration, and the Decision Log records it. After master moved (schema 129, relay protocol 64), the plan uses the next numbers, 130 and 65, and says to take them at merge time.
+
+Revision note (2026-11-13, integration): the plan asked for a Hard-won marker on the commit-order test. That contradicts AGENTS.md, which keeps the marker for defects found after code was believed done, so the marker was removed.

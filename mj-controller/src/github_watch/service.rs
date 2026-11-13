@@ -276,7 +276,9 @@ async fn poll_repository(
     if sessions.is_empty() && watches.is_empty() {
         return Ok(());
     }
-    let token_session = sessions
+    // A watch without a creator cannot supply a token: its sessions are
+    // interested ones, which are live sessions or no longer exist.
+    let Some(token_session) = sessions
         .first()
         .map(|session| session.id.as_str())
         .or_else(|| {
@@ -284,7 +286,10 @@ async fn poll_repository(
                 .iter()
                 .find_map(|watch| watch.creator_session_id.as_deref())
         })
-        .context("GitHub repository has neither a live session nor a creator watch")?;
+    else {
+        tracing::debug!(%owner, %repo, "GitHub repository has no live session or creator watch to take a credential from; skipping");
+        return Ok(());
+    };
     let controller = tokio::task::spawn_blocking(crate::controller::Controller::load)
         .await
         .context("load controller for GitHub watch credentials")??;
@@ -690,6 +695,7 @@ async fn classify_for_session(
         created_at: item.created_at,
         interested,
         created,
+        credential_login: credential_login.map(str::to_owned),
     };
     blocking_db(move || {
         crate::database::commit_github_item_classification(classification, event).map(|_| ())
@@ -836,7 +842,9 @@ async fn poll_item_timeline(
         } else {
             None
         };
-        let comments = if watch.kind == "pull_request" {
+        // Only a creator is told about review comments, so a watch kept for
+        // interested sessions does not pay for the read.
+        let comments = if watch.kind == "pull_request" && watch.creator_session_id.is_some() {
             // Use the stored cursor, before either source advances it.
             api.array_pages(
                 &format!(
@@ -877,42 +885,10 @@ async fn poll_item_timeline(
             )));
         }
     };
-    // Fan-out to interested sessions arrives with the next milestone; no
-    // watch without a creator exists before it.
-    let Some(creator) = watch.creator_session_id.clone() else {
-        return Ok(());
-    };
     let mapped = map_item_activity(&watch, &entries, &comments, merged_at.as_deref())?;
-    let mut outbox = Vec::new();
-    let mut turn_windows = BTreeMap::new();
     let mut login = None;
     if mapped.events.iter().any(|event| event.author.is_some()) {
         login = api.credential_login().await?;
-    }
-    for event in mapped.events {
-        api.control.check_enabled()?;
-        // The session already knows what it did. Delivering its own GitHub
-        // activity, even without a wake, echoes that activity into its context.
-        if authored_during_session_turn(
-            login.as_deref(),
-            event.author.as_deref(),
-            Some(&event.timestamp),
-            &creator,
-            &mut turn_windows,
-        )
-        .await
-        {
-            continue;
-        }
-        outbox.push(mailbox_outbox_row(
-            event.key,
-            creator.clone(),
-            event.body,
-            true,
-            timestamp_millis(&event.timestamp)
-                .context("invalid GitHub timeline timestamp")?
-                .max(0) as u64,
-        )?);
     }
     api.control.check_enabled()?;
     blocking_db(move || {
@@ -925,21 +901,15 @@ async fn poll_item_timeline(
                 review_comments_id: mapped.review_comments_id,
                 processed_at,
             },
-            outbox,
+            mapped.events,
+            login,
         )
     })
     .await
 }
 
-struct TimelineEvent {
-    key: String,
-    timestamp: String,
-    author: Option<String>,
-    body: MailboxEventBody,
-}
-
 struct TimelineMapping {
-    events: Vec<TimelineEvent>,
+    events: Vec<crate::database::MappedGithubEvent>,
     cursor_at: String,
     cursor_id: i64,
     review_comments_at: String,
@@ -1101,7 +1071,7 @@ fn map_timeline(
                 MAILBOX_COMMENT_BODY_LIMIT,
             )
             .to_owned();
-            let (suffix, body, filter_author) = match event_type {
+            let (suffix, body, filter_author, lifecycle) = match event_type {
                 "commented" => (
                     "comment",
                     MailboxEventBody::GithubComment {
@@ -1113,6 +1083,7 @@ fn map_timeline(
                         repo: repo.clone(),
                     },
                     Some(author.clone()),
+                    false,
                 ),
                 "reviewed" => (
                     "review",
@@ -1126,6 +1097,7 @@ fn map_timeline(
                         repo: repo.clone(),
                     },
                     Some(author.clone()),
+                    false,
                 ),
                 "line-commented" => (
                     "review-comment",
@@ -1138,6 +1110,7 @@ fn map_timeline(
                         repo: repo.clone(),
                     },
                     Some(author.clone()),
+                    false,
                 ),
                 "merged" | "closed" | "reopened" if watch.kind == "pull_request" => {
                     if event_type == "closed" && merged {
@@ -1168,11 +1141,12 @@ fn map_timeline(
                             repo: repo.clone(),
                         },
                         Some(actor),
+                        true,
                     )
                 }
                 _ => continue,
             };
-            result.events.push(TimelineEvent {
+            result.events.push(crate::database::MappedGithubEvent {
                 key: format!(
                     "github:{}/{}#{}:{suffix}:{id}",
                     watch.owner, watch.repo, watch.number
@@ -1180,92 +1154,11 @@ fn map_timeline(
                 timestamp: timestamp.to_owned(),
                 author: filter_author,
                 body,
+                lifecycle,
             });
         }
     }
     Ok(result)
-}
-
-async fn authored_during_session_turn(
-    credential_login: Option<&str>,
-    author_login: Option<&str>,
-    created_at: Option<&str>,
-    session_id: &str,
-    turn_windows_by_session: &mut BTreeMap<
-        String,
-        Option<Vec<crate::database::GithubSessionTurnWindow>>,
-    >,
-) -> bool {
-    let Some((credential_login, author_login)) = credential_login.zip(author_login) else {
-        return false;
-    };
-    if !credential_login.eq_ignore_ascii_case(author_login) {
-        return false;
-    }
-    let Some(created_at_ms) = created_at.and_then(timestamp_millis) else {
-        return false;
-    };
-    let created_at_ms = floor_to_second(created_at_ms);
-    if !turn_windows_by_session.contains_key(session_id) {
-        let owned_session_id = session_id.to_owned();
-        let loaded = blocking_db(move || {
-            crate::database::load_github_session_turn_windows(&owned_session_id)
-        })
-        .await;
-        let windows = match loaded {
-            Ok(windows) => Some(windows),
-            Err(error) => {
-                tracing::warn!(
-                    %session_id,
-                    error = %format!("{error:#}"),
-                    "could not read transcript turn windows for GitHub activity; delivering it"
-                );
-                None
-            }
-        };
-        turn_windows_by_session.insert(session_id.to_owned(), windows);
-    }
-    turn_windows_by_session
-        .get(session_id)
-        .and_then(Option::as_ref)
-        .is_some_and(|windows| {
-            windows.iter().any(|window| {
-                created_at_ms >= floor_to_second(window.started_at_ms)
-                    && window.completed_at_ms.is_none_or(|completed_at_ms| {
-                        created_at_ms < ceil_to_second(completed_at_ms)
-                    })
-            })
-        })
-}
-
-fn floor_to_second(timestamp_ms: i64) -> i64 {
-    timestamp_ms.div_euclid(1_000) * 1_000
-}
-
-fn ceil_to_second(timestamp_ms: i64) -> i64 {
-    let floor = floor_to_second(timestamp_ms);
-    if floor == timestamp_ms {
-        timestamp_ms
-    } else {
-        floor + 1_000
-    }
-}
-
-fn mailbox_outbox_row(
-    key: String,
-    target_session_id: String,
-    body: MailboxEventBody,
-    wake: bool,
-    created_at_ms: u64,
-) -> Result<(String, String, String, bool)> {
-    let event = MailboxEvent {
-        key: key.clone(),
-        source: "github".into(),
-        wake,
-        created_at_ms,
-        body,
-    };
-    Ok((key, target_session_id, serde_json::to_string(&event)?, wake))
 }
 
 fn parse_github_item(value: &Value) -> Option<crate::database::GithubSeenItem> {
@@ -2101,6 +1994,7 @@ mod tests {
             created_at: created_at.into(),
             interested: true,
             created: true,
+            credential_login: None,
         }
     }
 
@@ -2817,6 +2711,18 @@ mod tests {
             (start + chrono::Duration::seconds(20)).timestamp_millis(),
         )
         .unwrap();
+        // A second session was told about every PR. It was working at 8 to
+        // 12 s, and its own turn ends long before its next one starts.
+        let mut follower = crate::database::test_session("follower", "project");
+        follower.created_at = cursor.watch_started_at.clone();
+        crate::database::save_session(&follower).unwrap();
+        crate::database::seed_github_test_turns(
+            "follower",
+            (start + chrono::Duration::seconds(8)).timestamp_millis(),
+            (start + chrono::Duration::seconds(12)).timestamp_millis(),
+            (start + chrono::Duration::seconds(1000)).timestamp_millis(),
+        )
+        .unwrap();
 
         let fake = FakeGithub::default();
         {
@@ -2828,6 +2734,10 @@ mod tests {
                     None,
                 )
                 .unwrap();
+                let mut interested = watch_classification(number, &at(1));
+                interested.session_id = "follower".into();
+                interested.created = false;
+                crate::database::commit_github_item_classification(interested, None).unwrap();
                 let mut item =
                     github_item(number as u64, number as u64, "synthetic PR", at(1), true);
                 item["updated_at"] = json!(at(40));
@@ -2842,8 +2752,14 @@ mod tests {
                 .insert(23, vec![lifecycle("reopened", 2301, 25, "watcher-bot")]);
             data.timelines
                 .insert(24, vec![lifecycle("closed", 2401, 10, "watcher-bot")]);
-            data.timelines
-                .insert(25, vec![lifecycle("closed", 2501, 25, "another-user")]);
+            // A comment is for the creator only.
+            data.timelines.insert(
+                25,
+                vec![
+                    lifecycle("closed", 2501, 25, "another-user"),
+                    json!({"event":"commented","id":2502,"created_at":at(26),"user":{"login":"another-user"},"body":"thanks"}),
+                ],
+            );
             // Some GitHub installations expose a merge only as a close entry.
             data.timelines
                 .insert(26, vec![lifecycle("closed", 2601, 25, "watcher-bot")]);
@@ -2864,19 +2780,48 @@ mod tests {
         )
         .await
         .unwrap();
-        let mut keys = crate::database::pending_mailbox_events(100)
-            .unwrap()
-            .into_iter()
-            .map(|row| row.event_key)
-            .collect::<Vec<_>>();
-        keys.sort();
+        let rows = crate::database::pending_mailbox_events(100).unwrap();
+        let rows_for = |session: &str| {
+            let mut rows = rows
+                .iter()
+                .filter(|row| row.target_session_id == session)
+                .map(|row| {
+                    let event: MailboxEvent = serde_json::from_str(&row.event_json).unwrap();
+                    (row.event_key.clone(), event.wake)
+                })
+                .collect::<Vec<_>>();
+            rows.sort();
+            rows
+        };
+        assert!(
+            rows.iter().all(|row| {
+                row.event_json.contains("\"recipient\":\"interested\"")
+                    == (row.target_session_id == "follower")
+            }),
+            "only the interested session's rows carry the recipient"
+        );
         assert_eq!(
-            keys,
+            rows_for("creator"),
             vec![
-                "github:acme/repo#24:closed:2401",
-                "github:acme/repo#25:closed:2501",
+                ("github:acme/repo#24:closed:2401".to_owned(), true),
+                ("github:acme/repo#25:closed:2501".to_owned(), true),
+                ("github:acme/repo#25:comment:2502".to_owned(), true),
             ],
             "same-account actions in the creator turn, including a close mapped as merged, are suppressed; outside-turn and other-account actions are delivered"
+        );
+        assert_eq!(
+            rows_for("follower"),
+            vec![
+                ("github:acme/repo#21:closed:2101:follower".to_owned(), false),
+                ("github:acme/repo#22:merged:2201:follower".to_owned(), false),
+                (
+                    "github:acme/repo#23:reopened:2301:follower".to_owned(),
+                    false
+                ),
+                ("github:acme/repo#25:closed:2501:follower".to_owned(), false),
+                ("github:acme/repo#26:merged:2601:follower".to_owned(), false),
+            ],
+            "an interested session gets lifecycle events only, queued, minus its own action at 10 s during its own turn, which the creator still gets"
         );
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
@@ -2937,6 +2882,22 @@ mod tests {
                 json!({"event":"merged","id":306,"created_at":at(7),"actor":{"login":"merger"}}),
                 closed(307, 7),
             ]);
+            // A merge batch another account opened: no creator, two interested
+            // sessions. It is watched for them, and its review comments, which
+            // only a creator is told about, are not read.
+            for session in ["batch-a", "batch-b"] {
+                crate::database::save_session(&crate::database::test_session(session, "project"))
+                    .unwrap();
+                let mut classification = watch_classification(15, &at(1));
+                classification.session_id = session.into();
+                classification.created = false;
+                crate::database::commit_github_item_classification(classification, None).unwrap();
+            }
+            let mut item = github_item(15, 15, "Merge batch", at(1), true);
+            item["updated_at"] = json!(at(30));
+            data.items.push(item);
+            data.timelines.insert(15, vec![closed(308, 6)]);
+            data.pulls.insert(15, json!({"merged_at": at(5)}));
         }
         let (api, server) = start_fake_github(fake.clone()).await;
         poll_repository_with_context(
@@ -2952,6 +2913,7 @@ mod tests {
         let rows = crate::database::pending_mailbox_events(100).unwrap();
         let mut changes = rows
             .iter()
+            .filter(|row| row.target_session_id == "creator")
             .map(|row| {
                 let event: MailboxEvent = serde_json::from_str(&row.event_json).unwrap();
                 let MailboxEventBody::GithubPullRequestLifecycle { change, actor, .. } = event.body
@@ -2999,9 +2961,317 @@ mod tests {
         );
         let mut read = fake.data.lock().await.pull_requests.clone();
         read.sort_unstable();
-        assert_eq!(read, vec![11, 12, 13]);
+        assert_eq!(read, vec![11, 12, 13, 15]);
+        assert!(
+            fake.data
+                .lock()
+                .await
+                .comment_queries
+                .iter()
+                .all(|(number, _)| *number != 15),
+            "a watch with no creator reads no review comments"
+        );
+        let mut batch = rows
+            .iter()
+            .filter(|row| row.target_session_id != "creator")
+            .map(|row| {
+                let event: MailboxEvent = serde_json::from_str(&row.event_json).unwrap();
+                let MailboxEventBody::GithubPullRequestLifecycle { change, .. } = event.body else {
+                    panic!("unexpected event {}", row.event_key);
+                };
+                (
+                    row.target_session_id.clone(),
+                    row.event_key.clone(),
+                    change,
+                    event.wake,
+                )
+            })
+            .collect::<Vec<_>>();
+        batch.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            batch,
+            vec![
+                (
+                    "batch-a".to_owned(),
+                    "github:acme/repo#15:merged:308:batch-a".to_owned(),
+                    MailboxPullRequestChange::Merged,
+                    false
+                ),
+                (
+                    "batch-b".to_owned(),
+                    "github:acme/repo#15:merged:308:batch-b".to_owned(),
+                    MailboxPullRequestChange::Merged,
+                    false
+                ),
+            ]
+        );
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    /// The poll's commit and a classification commit run in either order, or
+    /// the classification lands between the poll's fetch and its commit. In
+    /// every order the interested session gets exactly one row, and replaying
+    /// either commit adds none.
+    #[tokio::test]
+    async fn an_interested_session_is_told_of_a_merge_in_any_commit_order() {
+        if !run_isolated_child("an_interested_session_is_told_of_a_merge_in_any_commit_order") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let start = Utc::now();
+        let at = |seconds| {
+            (start + chrono::Duration::seconds(seconds)).to_rfc3339_opts(SecondsFormat::Secs, true)
+        };
+        for id in ["creator", "creator2", "gone", "late", "between", "own"] {
+            let mut session = crate::database::test_session(id, "project");
+            session.created_at = at(0);
+            crate::database::save_session(&session).unwrap();
+        }
+        // The "own" session was working when the merge happened, using the
+        // shared account.
+        crate::database::seed_github_test_turns(
+            "own",
+            (start + chrono::Duration::seconds(8)).timestamp_millis(),
+            (start + chrono::Duration::seconds(12)).timestamp_millis(),
+            (start + chrono::Duration::seconds(1000)).timestamp_millis(),
+        )
+        .unwrap();
+        let interested = |number, session: &str, login: Option<&str>| {
+            let mut classification = watch_classification(number, &at(1));
+            classification.session_id = session.into();
+            classification.created = false;
+            classification.credential_login = login.map(str::to_owned);
+            classification
+        };
+        let merged = |number: i64, id: i64| crate::database::MappedGithubEvent {
+            key: format!("github:acme/repo#{number}:merged:{id}"),
+            body: MailboxEventBody::GithubPullRequestLifecycle {
+                change: MailboxPullRequestChange::Merged,
+                number: number as u64,
+                title: "synthetic PR".into(),
+                actor: "watcher-bot".into(),
+                recipient: mj_core::mailbox::LifecycleRecipient::Creator,
+                repo: Some("acme/repo".into()),
+            },
+            author: Some("watcher-bot".into()),
+            timestamp: at(10),
+            lifecycle: true,
+        };
+        let progress = || crate::database::GithubItemProgress {
+            timeline_at: at(10),
+            timeline_id: 1,
+            review_comments_at: at(1),
+            review_comments_id: 0,
+            processed_at: at(20),
+        };
+        for number in [41, 42, 43] {
+            crate::database::commit_github_item_classification(
+                watch_classification(number, &at(1)),
+                None,
+            )
+            .unwrap();
+        }
+        let load = |number: i64| {
+            crate::database::load_github_watches("acme", "repo")
+                .unwrap()
+                .into_iter()
+                .find(|watch| watch.number == number)
+                .unwrap()
+        };
+        let keys_for = |session: &str| {
+            let mut keys = crate::database::pending_mailbox_events(100)
+                .unwrap()
+                .into_iter()
+                .filter(|row| row.target_session_id == session)
+                .map(|row| row.event_key)
+                .collect::<Vec<_>>();
+            keys.sort();
+            keys
+        };
+
+        // The poll commits the merge first; a session is classified afterwards.
+        crate::database::commit_github_timeline(
+            load(41),
+            progress(),
+            vec![merged(41, 4101)],
+            Some("watcher-bot".into()),
+        )
+        .unwrap();
+        crate::database::commit_github_item_classification(
+            interested(41, "late", Some("watcher-bot")),
+            Some((
+                "github:acme/repo#41:interest:late".into(),
+                serde_json::to_string(&MailboxEvent {
+                    key: "github:acme/repo#41:interest:late".into(),
+                    source: "github".into(),
+                    wake: false,
+                    created_at_ms: 1,
+                    body: MailboxEventBody::PlainText { text: "new".into() },
+                })
+                .unwrap(),
+                false,
+            )),
+        )
+        .unwrap();
+        // It hears of the PR before it hears the PR merged.
+        let delivery_order = crate::database::pending_mailbox_events(100)
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.target_session_id == "late")
+            .map(|row| row.event_key)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            delivery_order,
+            vec![
+                "github:acme/repo#41:interest:late",
+                "github:acme/repo#41:merged:4101:late"
+            ]
+        );
+        // The classification lands between the poll's fetch and its commit,
+        // which is built from the snapshot taken before it.
+        let snapshot = load(42);
+        crate::database::commit_github_item_classification(
+            interested(42, "between", Some("watcher-bot")),
+            None,
+        )
+        .unwrap();
+        crate::database::commit_github_timeline(
+            snapshot,
+            progress(),
+            vec![merged(42, 4201)],
+            Some("watcher-bot".into()),
+        )
+        .unwrap();
+        // The session that merged it itself, in its own turn, is not told.
+        crate::database::commit_github_timeline(
+            load(43),
+            progress(),
+            vec![merged(43, 4301)],
+            Some("watcher-bot".into()),
+        )
+        .unwrap();
+        crate::database::commit_github_item_classification(
+            interested(43, "own", Some("watcher-bot")),
+            None,
+        )
+        .unwrap();
+
+        // A watch kept for interested sessions gains its creator while a poll,
+        // which did not read review comments for it, is in flight: that poll
+        // must not record progress past the comments the creator is owed.
+        crate::database::commit_github_item_classification(interested(44, "late", None), None)
+            .unwrap();
+        let snapshot = load(44);
+        assert_eq!(snapshot.creator_session_id, None);
+        crate::database::commit_github_item_classification(watch_classification(44, &at(1)), None)
+            .unwrap();
+        crate::database::commit_github_timeline(snapshot, progress(), vec![], None).unwrap();
+        let attached = load(44);
+        assert_eq!(attached.creator_session_id.as_deref(), Some("creator"));
+        assert_eq!(attached.processed_at, at(1), "the poll is redone");
+
+        // The creator attaches after a poll already committed progress read
+        // without it: the creator is owed everything since the item's creation.
+        crate::database::commit_github_item_classification(interested(45, "late", None), None)
+            .unwrap();
+        crate::database::commit_github_timeline(load(45), progress(), vec![], None).unwrap();
+        assert_eq!(load(45).processed_at, at(20));
+        crate::database::commit_github_item_classification(watch_classification(45, &at(1)), None)
+            .unwrap();
+        let rewound = load(45);
+        assert_eq!(rewound.creator_session_id.as_deref(), Some("creator"));
+        assert_eq!(
+            (
+                rewound.timeline_at.as_str(),
+                rewound.timeline_id,
+                rewound.review_comments_at.as_str(),
+                rewound.processed_at.as_str()
+            ),
+            (at(1).as_str(), 0, at(1).as_str(), at(1).as_str())
+        );
+
+        // The creator changes while a poll is in flight. One destroyed and
+        // replaced by another: the new creator is owed a full read.
+        let mut first = watch_classification(46, &at(1));
+        first.session_id = "gone".into();
+        crate::database::commit_github_item_classification(first, None).unwrap();
+        crate::database::commit_github_item_classification(interested(46, "late", None), None)
+            .unwrap();
+        let snapshot = load(46);
+        crate::database::delete_session("gone").unwrap();
+        let mut replacement = watch_classification(46, &at(1));
+        replacement.session_id = "creator2".into();
+        crate::database::commit_github_item_classification(replacement, None).unwrap();
+        crate::database::commit_github_timeline(snapshot, progress(), vec![], None).unwrap();
+        assert_eq!(load(46).creator_session_id.as_deref(), Some("creator2"));
+        assert_eq!(
+            load(46).processed_at,
+            at(1),
+            "the replacement is owed a full read"
+        );
+        // A creator attached after a poll's progress was recorded and was then
+        // destroyed: the watch has no creator again, but its cursors were
+        // rewound, and a poll built before the rewind must not undo that.
+        crate::database::commit_github_item_classification(interested(47, "late", None), None)
+            .unwrap();
+        crate::database::commit_github_timeline(load(47), progress(), vec![], None).unwrap();
+        let snapshot = load(47);
+        assert_eq!(snapshot.processed_at, at(20));
+        let mut attached = watch_classification(47, &at(1));
+        attached.session_id = "creator2".into();
+        crate::database::commit_github_item_classification(attached, None).unwrap();
+        crate::database::delete_session("creator2").unwrap();
+        assert_eq!(load(47).creator_session_id, None);
+        crate::database::commit_github_timeline(snapshot, progress(), vec![], None).unwrap();
+        assert_eq!(load(47).processed_at, at(1), "the rewind stands");
+
+        // Replays change nothing.
+        for number in [41, 42, 43] {
+            crate::database::commit_github_timeline(
+                load(number),
+                progress(),
+                vec![merged(number, number * 100 + 1)],
+                Some("watcher-bot".into()),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            keys_for("late"),
+            vec![
+                "github:acme/repo#41:interest:late",
+                "github:acme/repo#41:merged:4101:late"
+            ]
+        );
+        assert_eq!(
+            keys_for("between"),
+            vec!["github:acme/repo#42:merged:4201:between"]
+        );
+        assert_eq!(keys_for("own"), Vec::<String>::new());
+        assert_eq!(
+            keys_for("creator"),
+            vec![
+                "github:acme/repo#41:merged:4101",
+                "github:acme/repo#42:merged:4201",
+                "github:acme/repo#43:merged:4301",
+            ],
+            "the creator gets each merge exactly once"
+        );
+        for row in crate::database::pending_mailbox_events(100)
+            .unwrap()
+            .into_iter()
+            .filter(|row| !row.event_key.contains(":interest:"))
+        {
+            let event: MailboxEvent = serde_json::from_str(&row.event_json).unwrap();
+            let interested = row.target_session_id != "creator";
+            assert_eq!(event.wake, !interested, "{}", row.event_key);
+            assert_eq!(
+                row.event_json.contains("\"recipient\":\"interested\""),
+                interested,
+                "{}",
+                row.event_key
+            );
+        }
     }
 
     // Hard-won: review f2c1683: equality at the processed second suppressed later activity.
@@ -3424,10 +3694,10 @@ mod tests {
         assert_eq!(
             watches
                 .iter()
-                .map(|watch| (watch.number, watch.creator_session_id.as_deref().unwrap()))
+                .map(|watch| (watch.number, watch.creator_session_id.as_deref()))
                 .collect::<Vec<_>>(),
-            vec![(1, "opener")],
-            "the opening call claims item 1; another account's batch has no creator"
+            vec![(1, Some("opener")), (2, None)],
+            "the opening call claims item 1; another account's batch is watched for its interested sessions, with no creator"
         );
         let mut interest = crate::database::pending_mailbox_events(1000)
             .unwrap()

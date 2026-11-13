@@ -1,6 +1,7 @@
 //! Durable cursors, classifications, and creator watches for GitHub polling.
 
 use super::*;
+use mj_core::mailbox::{LifecycleRecipient, MailboxEvent, MailboxEventBody};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GithubRepoCursor {
@@ -33,6 +34,9 @@ pub(crate) struct GithubItemClassification {
     pub created_at: String,
     pub interested: bool,
     pub created: bool,
+    /// The login of the account the daemon polls with, for the own-activity
+    /// filter on the item's recorded lifecycle event.
+    pub credential_login: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -251,6 +255,7 @@ pub(crate) fn commit_github_item_classification(
     let has_event = event.is_some();
     let inserted = submit_database_write("commit_github_item_classification", move |connection| {
         let tx = connection.transaction()?;
+        let mut enqueued_lifecycle = false;
         let inserted = tx.execute(
             "INSERT INTO github_watch_classifications(owner, repo, number, session_id,
                     kind, title, url, created_at, interested, created)
@@ -273,14 +278,36 @@ pub(crate) fn commit_github_item_classification(
             params![classification.owner, classification.repo, classification.number, classification.session_id])?;
         if inserted == 0 {
             tx.commit()?;
-            return Ok(false);
+            return Ok((false, false));
+        }
+        // The open notice goes first: the outbox delivers in creation order, and
+        // a recorded merge must not reach the session before it hears of the PR.
+        if let Some((event_key, event_json, wake)) = event {
+            enqueue_github_event(
+                &tx,
+                &event_key,
+                &classification.session_id,
+                &event_json,
+                wake,
+            )?;
         }
         if classification.created {
+            // A watch kept for interested sessions gains its creator here. What
+            // the watch read while it had none was read for interested sessions
+            // only, with no review comments, so the creator is owed the whole
+            // timeline: the cursors go back to the item's creation. The
+            // interested sessions' rows have their own keys, so nothing is
+            // delivered twice.
             tx.execute(
                 "INSERT INTO github_watch_items(owner, repo, number, creator_session_id,
                         kind, title, url, created_at, timeline_at, timeline_id, review_comments_at, review_comments_id, processed_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, 0, ?8, 0, ?8)
-                 ON CONFLICT(owner, repo, number) DO NOTHING",
+                 ON CONFLICT(owner, repo, number) DO UPDATE
+                    SET creator_session_id = excluded.creator_session_id,
+                        timeline_at = excluded.timeline_at, timeline_id = 0,
+                        review_comments_at = excluded.review_comments_at, review_comments_id = 0,
+                        processed_at = excluded.processed_at
+                    WHERE github_watch_items.creator_session_id IS NULL",
                 params![
                     classification.owner,
                     classification.repo,
@@ -292,20 +319,74 @@ pub(crate) fn commit_github_item_classification(
                     classification.created_at
                 ],
             )?;
-        }
-        if let Some((event_key, event_json, wake)) = event {
-            enqueue_github_event(
-                &tx,
-                &event_key,
-                &classification.session_id,
-                &event_json,
-                wake,
+        } else if classification.interested && classification.kind == "pull_request" {
+            // Every PR with an interested session is watched, so its merge
+            // reaches that session. The watch starts at the PR's creation, so
+            // its first poll reads the whole timeline.
+            tx.execute(
+                "INSERT INTO github_watch_items(owner, repo, number, creator_session_id,
+                        kind, title, url, created_at, timeline_at, timeline_id, review_comments_at, review_comments_id, processed_at)
+                 VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?7, 0, ?7, 0, ?7)
+                 ON CONFLICT(owner, repo, number) DO NOTHING",
+                params![
+                    classification.owner,
+                    classification.repo,
+                    classification.number,
+                    classification.kind,
+                    classification.title,
+                    classification.url,
+                    classification.created_at
+                ],
             )?;
+            // The timeline commit that recorded the latest lifecycle event may
+            // already have run. SQLite orders the two write transactions, so
+            // either that commit saw this classification and delivered the
+            // event, or this one sees the recorded event and delivers it.
+            let recorded = tx
+                .query_row(
+                    "SELECT lifecycle_event_key, lifecycle_event_json, lifecycle_author, lifecycle_at
+                     FROM github_watch_items WHERE owner=?1 AND repo=?2 AND number=?3",
+                    params![classification.owner, classification.repo, classification.number],
+                    |row| {
+                        Ok(recorded_lifecycle(
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                        ))
+                    },
+                )
+                .optional()?
+                .flatten();
+            if let Some(recorded) = recorded {
+                let mut windows = TurnWindows::new();
+                if !authored_during_session_turn(
+                    &tx,
+                    &mut windows,
+                    classification.credential_login.as_deref(),
+                    recorded.author.as_deref(),
+                    Some(&recorded.at),
+                    &classification.session_id,
+                ) {
+                    let body: MailboxEventBody = serde_json::from_str(&recorded.body_json)
+                        .context("decode the recorded GitHub lifecycle event")?;
+                    let key = interested_event_key(&recorded.key, &classification.session_id);
+                    let json = github_mailbox_event_json(
+                        &key,
+                        interested_lifecycle_body(body),
+                        false,
+                        &recorded.at,
+                    )?;
+                    enqueued_lifecycle =
+                        enqueue_github_event(&tx, &key, &classification.session_id, &json, false)?;
+                }
+            }
         }
         tx.commit()?;
-        Ok(true)
+        Ok((true, enqueued_lifecycle))
     })?;
-    if inserted && has_event {
+    let (inserted, enqueued_lifecycle) = inserted;
+    if inserted && (has_event || enqueued_lifecycle) {
         crate::mailbox_outbox::notify_mailbox_outbox_changed();
     }
     Ok(inserted)
@@ -366,19 +447,146 @@ fn recorded_lifecycle(
     })
 }
 
+/// Whether a row was stored. A key already present, and a target that is gone,
+/// store nothing.
 fn enqueue_github_event(
     tx: &rusqlite::Transaction<'_>,
     key: &str,
     target: &str,
     json: &str,
     wake: bool,
-) -> Result<()> {
-    tx.execute(
+) -> Result<bool> {
+    Ok(tx.execute(
         "INSERT INTO mailbox_outbox(event_key, target_session_id, event_json, wake, unpark, created_at)
          VALUES (?1, ?2, ?3, ?4, 0, ?5) ON CONFLICT(event_key) DO NOTHING",
         params![key, target, json, wake, Utc::now().to_rfc3339()],
-    )?;
-    Ok(())
+    )? > 0)
+}
+
+/// The outbox key of an interested session's copy of a lifecycle event. It
+/// differs from the creator's key, which is the primary key and would
+/// otherwise make one of the two inserts a silent no-op.
+fn interested_event_key(base_key: &str, session_id: &str) -> String {
+    format!("{base_key}:{session_id}")
+}
+
+fn github_mailbox_event_json(
+    key: &str,
+    body: MailboxEventBody,
+    wake: bool,
+    timestamp: &str,
+) -> Result<String> {
+    let created_at_ms = chrono::DateTime::parse_from_rfc3339(timestamp)
+        .context("invalid GitHub timeline timestamp")?
+        .timestamp_millis()
+        .max(0) as u64;
+    Ok(serde_json::to_string(&MailboxEvent {
+        key: key.to_owned(),
+        source: "github".into(),
+        wake,
+        created_at_ms,
+        body,
+    })?)
+}
+
+/// A lifecycle body as an interested session receives it: the same change,
+/// worded so it does not claim the PR is theirs. Other bodies pass through.
+fn interested_lifecycle_body(body: MailboxEventBody) -> MailboxEventBody {
+    match body {
+        MailboxEventBody::GithubPullRequestLifecycle {
+            change,
+            number,
+            title,
+            actor,
+            repo,
+            ..
+        } => MailboxEventBody::GithubPullRequestLifecycle {
+            change,
+            number,
+            title,
+            actor,
+            recipient: LifecycleRecipient::Interested,
+            repo,
+        },
+        other => other,
+    }
+}
+
+/// An event mapped from a timeline read, before recipients are known.
+pub(crate) struct MappedGithubEvent {
+    /// The creator's outbox key, and the base of every interested session's.
+    pub key: String,
+    pub body: MailboxEventBody,
+    /// The GitHub login that caused it, for the own-activity filter.
+    pub author: Option<String>,
+    pub timestamp: String,
+    /// Merged, closed or reopened: also delivered to interested sessions.
+    pub lifecycle: bool,
+}
+
+type TurnWindows = BTreeMap<String, Option<Vec<GithubSessionTurnWindow>>>;
+
+/// Whether `session_id` itself caused a GitHub action: the action's author is
+/// the shared credential's account, and it happened during one of the
+/// session's turns. The session already knows what it did, so delivering it,
+/// even without a wake, would echo it into its context. Runs inside the write
+/// transaction that decides delivery. A session whose turns cannot be read gets
+/// the event.
+fn authored_during_session_turn(
+    tx: &rusqlite::Transaction<'_>,
+    windows_by_session: &mut TurnWindows,
+    credential_login: Option<&str>,
+    author_login: Option<&str>,
+    created_at: Option<&str>,
+    session_id: &str,
+) -> bool {
+    let Some((credential_login, author_login)) = credential_login.zip(author_login) else {
+        return false;
+    };
+    if !credential_login.eq_ignore_ascii_case(author_login) {
+        return false;
+    }
+    let Some(created_at_ms) = created_at
+        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+        .map(|at| at.timestamp_millis())
+    else {
+        return false;
+    };
+    let created_at_ms = floor_to_second(created_at_ms);
+    let windows = windows_by_session
+        .entry(session_id.to_owned())
+        .or_insert_with(|| match session_turn_windows(tx, session_id) {
+            Ok(windows) => Some(windows),
+            Err(error) => {
+                tracing::warn!(
+                    %session_id,
+                    error = %format!("{error:#}"),
+                    "could not read transcript turn windows for GitHub activity; delivering it"
+                );
+                None
+            }
+        });
+    windows.as_ref().is_some_and(|windows| {
+        windows.iter().any(|window| {
+            created_at_ms >= floor_to_second(window.started_at_ms)
+                && window
+                    .completed_at_ms
+                    .is_none_or(|completed_at_ms| created_at_ms < ceil_to_second(completed_at_ms))
+        })
+    })
+}
+
+fn floor_to_second(timestamp_ms: i64) -> i64 {
+    timestamp_ms.div_euclid(1_000) * 1_000
+}
+
+fn ceil_to_second(timestamp_ms: i64) -> i64 {
+    let floor = floor_to_second(timestamp_ms);
+    if floor == timestamp_ms {
+        timestamp_ms
+    } else {
+        floor + 1_000
+    }
 }
 
 pub(crate) struct GithubItemProgress {
@@ -391,38 +599,165 @@ pub(crate) struct GithubItemProgress {
 
 /// Only this item's progress advances with its events. A failure cannot roll
 /// back a feed page or another item's deliveries.
+///
+/// This transaction owns the decision of who is told. It reads the item's
+/// recipients and applies the own-activity filter against the same snapshot
+/// that it writes, so a session classified before it runs is a recipient, and
+/// one classified after it reads the lifecycle event recorded here (see
+/// `commit_github_item_classification`). Neither order loses a notice.
 pub(crate) fn commit_github_timeline(
     watch: GithubItemWatch,
     progress: GithubItemProgress,
-    events: Vec<(String, String, String, bool)>,
+    events: Vec<MappedGithubEvent>,
+    credential_login: Option<String>,
 ) -> Result<()> {
-    let has_events = !events.is_empty();
-    submit_database_write("commit_github_timeline", move |connection| {
+    let enqueued = submit_database_write("commit_github_timeline", move |connection| {
         let tx = connection.transaction()?;
-        for (key, target, json, wake) in events {
-            enqueue_github_event(&tx, &key, &target, &json, wake)?;
+        let mut enqueued = false;
+        // The row, not the caller's snapshot, says who the creator is now.
+        let creator = tx
+            .query_row(
+                "SELECT creator_session_id FROM github_watch_items WHERE owner=?1 AND repo=?2 AND number=?3",
+                params![watch.owner, watch.repo, watch.number],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        // No row: the last session that cared about the item is gone.
+        let mut advance = false;
+        if let Some(creator) = creator {
+            // The poll was planned for the creator it saw. If the creator changed
+            // since, whether one attached to a creator-less watch (so review
+            // comments were not read) or another replaced a destroyed one (so
+            // the cursors were rewound), the new creator is owed a full read:
+            // leave the progress where it is and let the next poll redo it.
+            advance = creator == watch.creator_session_id;
+            let interested = {
+                let mut statement = tx.prepare(
+                    "SELECT session_id FROM github_watch_classifications
+                     WHERE owner=?1 AND repo=?2 AND number=?3 AND interested=1 AND created=0
+                     ORDER BY session_id",
+                )?;
+                statement
+                    .query_map(params![watch.owner, watch.repo, watch.number], |row| {
+                        row.get::<_, String>(0)
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            let mut windows = TurnWindows::new();
+            for event in &events {
+                if let Some(creator) = &creator
+                    && !authored_during_session_turn(
+                        &tx,
+                        &mut windows,
+                        credential_login.as_deref(),
+                        event.author.as_deref(),
+                        Some(&event.timestamp),
+                        creator,
+                    )
+                {
+                    let json = github_mailbox_event_json(
+                        &event.key,
+                        event.body.clone(),
+                        true,
+                        &event.timestamp,
+                    )?;
+                    enqueued |= enqueue_github_event(&tx, &event.key, creator, &json, true)?;
+                }
+                if !event.lifecycle {
+                    continue;
+                }
+                for session in interested.iter().filter(|s| Some(*s) != creator.as_ref()) {
+                    if authored_during_session_turn(
+                        &tx,
+                        &mut windows,
+                        credential_login.as_deref(),
+                        event.author.as_deref(),
+                        Some(&event.timestamp),
+                        session,
+                    ) {
+                        continue;
+                    }
+                    let key = interested_event_key(&event.key, session);
+                    let json = github_mailbox_event_json(
+                        &key,
+                        interested_lifecycle_body(event.body.clone()),
+                        false,
+                        &event.timestamp,
+                    )?;
+                    enqueued |= enqueue_github_event(&tx, &key, session, &json, false)?;
+                }
+            }
+            // The latest lifecycle event, delivered or filtered, is what a
+            // session classified later is told.
+            let latest = events
+                .iter()
+                .filter(|event| event.lifecycle)
+                .filter_map(|event| {
+                    chrono::DateTime::parse_from_rfc3339(&event.timestamp)
+                        .ok()
+                        .map(|at| (at, event))
+                })
+                .max_by_key(|(at, _)| *at);
+            if let Some((_, event)) = latest {
+                tx.execute(
+                    "UPDATE github_watch_items
+                     SET lifecycle_event_key=?4, lifecycle_event_json=?5, lifecycle_author=?6, lifecycle_at=?7
+                     WHERE owner=?1 AND repo=?2 AND number=?3
+                       AND (lifecycle_at IS NULL OR julianday(lifecycle_at) <= julianday(?7))",
+                    params![
+                        watch.owner,
+                        watch.repo,
+                        watch.number,
+                        event.key,
+                        serde_json::to_string(&event.body)?,
+                        event.author,
+                        event.timestamp
+                    ],
+                )?;
+            }
         }
-        tx.execute(
-            "UPDATE github_watch_items SET timeline_at=?4, timeline_id=?5, review_comments_at=?6, review_comments_id=?7, processed_at=?8
-             WHERE owner=?1 AND repo=?2 AND number=?3",
-            params![
-                watch.owner,
-                watch.repo,
-                watch.number,
-                progress.timeline_at,
-                progress.timeline_id,
-                progress.review_comments_at,
-                progress.review_comments_id,
-                progress.processed_at
-            ],
-        )?;
+        if advance {
+            tx.execute(
+                "UPDATE github_watch_items SET timeline_at=?4, timeline_id=?5, review_comments_at=?6, review_comments_id=?7, processed_at=?8
+                 WHERE owner=?1 AND repo=?2 AND number=?3
+                   AND timeline_at=?9 AND timeline_id=?10 AND review_comments_at=?11
+                   AND review_comments_id=?12 AND processed_at=?13",
+                params![
+                    watch.owner,
+                    watch.repo,
+                    watch.number,
+                    progress.timeline_at,
+                    progress.timeline_id,
+                    progress.review_comments_at,
+                    progress.review_comments_id,
+                    progress.processed_at,
+                    watch.timeline_at,
+                    watch.timeline_id,
+                    watch.review_comments_at,
+                    watch.review_comments_id,
+                    watch.processed_at
+                ],
+            )?;
+        }
         tx.commit()?;
-        Ok(())
+        Ok(enqueued)
     })?;
-    if has_events {
+    if enqueued {
         crate::mailbox_outbox::notify_mailbox_outbox_changed();
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(super) fn load_github_session_turn_windows_from(
+    path: &Path,
+    session_id: &str,
+) -> Result<Vec<GithubSessionTurnWindow>> {
+    let mut connection = open_reader(path)?;
+    let tx = connection.transaction()?;
+    let windows = session_turn_windows(&tx, session_id)?;
+    tx.commit()?;
+    Ok(windows)
 }
 
 /// Reconstruct turn intervals from the same persisted start and completion
@@ -430,18 +765,10 @@ pub(crate) fn commit_github_timeline(
 /// when the materialized projection still names it as the active turn.
 /// Turns the harness starts on its own have neither fact; see
 /// [`harness_turn_windows`].
-pub(crate) fn load_github_session_turn_windows(
+fn session_turn_windows(
+    tx: &rusqlite::Transaction<'_>,
     session_id: &str,
 ) -> Result<Vec<GithubSessionTurnWindow>> {
-    load_github_session_turn_windows_from(&database_path(), session_id)
-}
-
-pub(super) fn load_github_session_turn_windows_from(
-    path: &Path,
-    session_id: &str,
-) -> Result<Vec<GithubSessionTurnWindow>> {
-    let mut connection = open_reader(path)?;
-    let tx = connection.transaction()?;
     let bodies = {
         let mut statement = tx.prepare(
             "SELECT body FROM api_events
@@ -498,12 +825,11 @@ pub(super) fn load_github_session_turn_windows_from(
         });
     }
     windows.extend(harness_turn_windows(
-        &tx,
+        tx,
         session_id,
         &prompt_turn_starts,
         harness_turn_running,
     )?);
-    tx.commit()?;
     Ok(windows)
 }
 
