@@ -105,6 +105,8 @@ where
     let managed_subagent = spec.managed_subagent;
     let permission_policy = spec.execution_policy;
     let permission_harness = spec.harness;
+    let permission_observe = spec.observe_policy.clone();
+    let permission_cwd = spec.cwd.clone();
     let permission_owned_mcp = OwnedMcpApprovals::for_launch(&spec);
     let plan_implementation_slot = PlanImplementationSlot::default();
     let permission_implementation_slot = plan_implementation_slot.clone();
@@ -331,281 +333,468 @@ where
             agent_client_protocol::on_receive_notification!(),
         )
         .on_receive_request(
-            async move |request: RequestPermissionRequest, responder, _cx| {
-                permission_activity.mark();
-                if !permission_parent_router.lock().expect("native agent router poisoned").is_child(&request.session_id.to_string()) {
-                    permission_parent_context.mark_parent_activity();
-                }
-                permission_output_count.mark();
-                permission_step_clock.begin_client_work();
-                let plan_permission = is_plan_permission(&request);
-                let claude_plan_approval = is_claude_plan_approval(&request, permission_harness);
-                // The worker's policy owns tool approval, including provider
-                // asks that survive full-access mode. Plans still need consent.
-                if permission_policy.is_unconstrained()
-                    && !plan_permission
-                    && !claude_plan_approval
-                {
-                    let Some(response) = allow_permission_response(&request) else {
-                        let message = format!(
-                            "{} requested tool permission in YOLO mode without offering an allow response (session {}, tool {}).",
-                            permission_harness.display_name(), request.session_id, request.tool_call.tool_call_id,
+            async move |request: RequestPermissionRequest, responder, cx| {
+                let permission_activity = permission_activity.clone();
+                let permission_parent_router = permission_parent_router.clone();
+                let permission_parent_context = permission_parent_context.clone();
+                let permission_output_count = permission_output_count.clone();
+                let permission_step_clock = permission_step_clock.clone();
+                let permission_events = permission_events.clone();
+                let permission_native_agents = permission_native_agents.clone();
+                let permission_implementation_slot = permission_implementation_slot.clone();
+                let permission_elicitations = permission_elicitations.clone();
+                let permission_review_ids = permission_review_ids.clone();
+                let permission_owned_mcp = permission_owned_mcp.clone();
+                let permission_tool_content = permission_tool_content.clone();
+                let permission_observe = permission_observe.clone();
+                let permission_cwd = permission_cwd.clone();
+                cx.spawn(async move {
+                    permission_activity.mark();
+                    if !permission_parent_router.lock().expect("native agent router poisoned").is_child(&request.session_id.to_string()) {
+                        permission_parent_context.mark_parent_activity();
+                    }
+                    permission_output_count.mark();
+                    permission_step_clock.begin_client_work();
+                    let plan_permission = is_plan_permission(&request);
+                    let claude_plan_approval = is_claude_plan_approval(&request, permission_harness);
+                    let tool_input =
+                        permission_tool_input(&request.tool_call, &permission_tool_content);
+                    let policy_tool_kind = request
+                        .tool_call
+                        .fields
+                        .kind
+                        .and_then(|kind| serde_json::to_value(kind).ok())
+                        .and_then(|value| value.as_str().map(str::to_owned));
+                    let mut observe_ask_reason = None;
+                    let mut observe_ask_acknowledgement = None;
+                    let mut observe_failure_allows = false;
+                    if !plan_permission
+                        && !claude_plan_approval
+                        && let Some(observe) = &permission_observe
+                    {
+                        let title = request
+                            .tool_call
+                            .fields
+                            .title
+                            .as_deref()
+                            .unwrap_or("tool");
+                        let native_session_id = request.session_id.to_string();
+                        let policy_tool_call_id = request.tool_call.tool_call_id.to_string();
+                        let policy_cwd = permission_cwd.to_string_lossy().into_owned();
+                        let check = observe.check(
+                            observe
+                                .evaluate(crate::observe::PolicyTool {
+                                    native_session_id: &native_session_id,
+                                    harness: permission_harness,
+                                    tool_call_id: &policy_tool_call_id,
+                                    tool_title: title,
+                                    tool_kind: policy_tool_kind.as_deref(),
+                                    tool_input: tool_input.as_ref(),
+                                    cwd: &policy_cwd,
+                                })
+                                .await,
+                            &native_session_id,
+                            &policy_tool_call_id,
                         );
-                        permission_events
-                            .send(RuntimeEvent::Warning {
-                                message: message.clone(),
-                            })
-                            .await
-                            .map_err(|_| relay_event_channel_error())?;
-                        return responder.respond_with_error(
-                            agent_client_protocol::Error::invalid_params().data(serde_json::Value::String(message)),
+                        let mut acknowledgement = check.acknowledgement;
+                        match check.disposition {
+                            crate::observe::PolicyDisposition::Continue => {}
+                            crate::observe::PolicyDisposition::Deny(reason) => {
+                                let Some(response) = reject_permission_response(&request) else {
+                                    let message = format!(
+                                        "Brokk Observe denied tool {} but the harness offered no one-time rejection (session {}, tool {}).",
+                                        title, request.session_id, request.tool_call.tool_call_id,
+                                    );
+                                    permission_events
+                                        .send(RuntimeEvent::Warning {
+                                            message: message.clone(),
+                                        })
+                                        .await
+                                        .map_err(|_| relay_event_channel_error())?;
+                                    return responder.respond_with_error(
+                                        agent_client_protocol::Error::invalid_params()
+                                            .data(serde_json::Value::String(message)),
+                                    );
+                                };
+                                permission_events
+                                    .send(RuntimeEvent::Warning {
+                                        message: format!("Brokk Observe denied {title}: {reason}"),
+                                    })
+                                    .await
+                                    .map_err(|_| relay_event_channel_error())?;
+                                let result = responder.respond(response);
+                                if result.is_ok() {
+                                    observe.acknowledge_applied(
+                                        acknowledgement.take(),
+                                        policy_tool_call_id,
+                                    );
+                                }
+                                return result;
+                            }
+                            crate::observe::PolicyDisposition::Ask(reason) => {
+                                observe_ask_reason = Some(reason);
+                                observe_ask_acknowledgement = acknowledgement.take();
+                            }
+                            crate::observe::PolicyDisposition::Warn(reason) => {
+                                permission_events
+                                    .send(RuntimeEvent::Warning {
+                                        message: reason,
+                                    })
+                                    .await
+                                    .map_err(|_| relay_event_channel_error())?;
+                                observe.acknowledge_applied(
+                                    acknowledgement.take(),
+                                    policy_tool_call_id,
+                                );
+                            }
+                            crate::observe::PolicyDisposition::Unavailable { reason, deny } if deny => {
+                                let reason = format!(
+                                    "Brokk Observe policy unavailable and fail-closed is enabled: {reason}"
+                                );
+                                let Some(response) = reject_permission_response(&request) else {
+                                    return responder.respond_with_error(
+                                        agent_client_protocol::Error::invalid_params().data(
+                                            serde_json::Value::String(reason),
+                                        ),
+                                    );
+                                };
+                                permission_events
+                                    .send(RuntimeEvent::Warning {
+                                        message: reason,
+                                    })
+                                    .await
+                                    .map_err(|_| relay_event_channel_error())?;
+                                return responder.respond(response);
+                            }
+                            crate::observe::PolicyDisposition::Unavailable { reason, .. } => {
+                                permission_events
+                                    .send(RuntimeEvent::Warning {
+                                        message: format!(
+                                            "Brokk Observe policy unavailable; allowing the call because fail-closed is disabled: {reason}"
+                                        ),
+                                    })
+                                    .await
+                                    .map_err(|_| relay_event_channel_error())?;
+                                observe_failure_allows = true;
+                            }
+                        }
+                    }
+                    if observe_failure_allows {
+                        let Some(response) = allow_permission_response(&request) else {
+                            let message = format!(
+                                "Brokk Observe failed open, but {} offered no one-time allow response (session {}, tool {}).",
+                                permission_harness.display_name(),
+                                request.session_id,
+                                request.tool_call.tool_call_id,
+                            );
+                            permission_events
+                                .send(RuntimeEvent::Warning {
+                                    message: message.clone(),
+                                })
+                                .await
+                                .map_err(|_| relay_event_channel_error())?;
+                            return responder.respond_with_error(
+                                agent_client_protocol::Error::invalid_params()
+                                    .data(serde_json::Value::String(message)),
+                            );
+                        };
+                        return responder.respond(response);
+                    }
+                    // The worker's policy owns tool approval, including provider
+                    // asks that survive full-access mode. Plans still need consent.
+                    if permission_policy.is_unconstrained()
+                        && !plan_permission
+                        && !claude_plan_approval
+                        && observe_ask_reason.is_none()
+                    {
+                        let Some(response) = allow_permission_response(&request) else {
+                            let message = format!(
+                                "{} requested tool permission in YOLO mode without offering an allow response (session {}, tool {}).",
+                                permission_harness.display_name(), request.session_id, request.tool_call.tool_call_id,
+                            );
+                            permission_events
+                                .send(RuntimeEvent::Warning {
+                                    message: message.clone(),
+                                })
+                                .await
+                                .map_err(|_| relay_event_channel_error())?;
+                            return responder.respond_with_error(
+                                agent_client_protocol::Error::invalid_params().data(serde_json::Value::String(message)),
+                            );
+                        };
+                        tracing::debug!(
+                            harness = %permission_harness.display_name(),
+                            session_id = %request.session_id,
+                            tool_call_id = %request.tool_call.tool_call_id,
+                            selected_option = ?response.outcome,
+                            "automatically approved tool permission in YOLO mode"
                         );
-                    };
-                    tracing::debug!(
-                        harness = %permission_harness.display_name(),
-                        session_id = %request.session_id,
-                        tool_call_id = %request.tool_call.tool_call_id,
-                        selected_option = ?response.outcome,
-                        "automatically approved tool permission in YOLO mode"
-                    );
-                    return responder.respond(response);
-                }
-                if let Some(response) = permission_owned_mcp.response(&request) {
-                    tracing::debug!(
-                        harness = %permission_harness.display_name(),
-                        session_id = %request.session_id,
-                        tool_call_id = %request.tool_call.tool_call_id,
-                        selected_option = ?response.outcome,
-                        "automatically approved a Mjolnir-owned MCP tool"
-                    );
-                    return responder.respond(response);
-                }
-                if !plan_permission && !claude_plan_approval
-                    && let Some(response) = gh_permission_response(
-                        &request,
-                        permission_tool_input(&request.tool_call, &permission_tool_content).as_ref(),
-                    )
-                {
-                    tracing::debug!(
-                        harness = %permission_harness.display_name(),
-                        session_id = %request.session_id,
-                        tool_call_id = %request.tool_call.tool_call_id,
-                        selected_option = ?response.outcome,
-                        "automatically approved a gh invocation"
-                    );
-                    return responder.respond(response);
-                }
-                // Preserve Muse's Guardian forms; YOLO plans use plan review.
-                let prefer_form_over_plan_review = permission_harness == HarnessKind::Muse
-                    && !permission_policy.is_unconstrained();
-                let native_child = permission_native_agents.lock().expect("native agent router poisoned")
-                    .is_child(&request.session_id.to_string());
-                if !native_child && !prefer_form_over_plan_review && plan_permission {
-                    let id = format!(
-                        "plan-review-{}",
-                        permission_review_ids.fetch_add(1, Ordering::Relaxed)
-                    );
-                    let value = serde_json::to_value(&request)
-                        .map_err(|_| agent_client_protocol::Error::internal_error())?;
-                    let review = normalized_plan_review(id.clone(), &value);
-                    let approved_plan = plan_review_proposal(&review).unwrap_or_default().to_owned();
-                    let implementation = permission_implementation_slot
-                        .lock().expect("plan implementation lock poisoned").clone();
-                    let answer_rx = permission_elicitations.register(review.clone(), String::new(), AwayRequest::Plan);
-                    let pending = permission_elicitations.clone();
-                    let events = permission_events.clone();
-                    let cancellation = responder.cancellation();
-                    tokio::spawn(async move {
-                        if events
-                            .send(RuntimeEvent::ElicitationRequested { request: review.clone() })
-                            .await
-                            .is_err()
+                        return responder.respond(response);
+                    }
+                    if observe_ask_reason.is_none() {
+                        if let Some(response) = permission_owned_mcp.response(&request) {
+                            tracing::debug!(
+                                harness = %permission_harness.display_name(),
+                                session_id = %request.session_id,
+                                tool_call_id = %request.tool_call.tool_call_id,
+                                selected_option = ?response.outcome,
+                                "automatically approved a Mjolnir-owned MCP tool"
+                            );
+                            return responder.respond(response);
+                        }
+                        if !plan_permission
+                            && !claude_plan_approval
+                            && let Some(response) = gh_permission_response(
+                                &request,
+                                permission_tool_input(
+                                    &request.tool_call,
+                                    &permission_tool_content,
+                                )
+                                .as_ref(),
+                            )
                         {
-                            pending.remove(&id);
-                            if let Err(error) =
-                                responder.respond_with_error(relay_event_channel_error())
+                            tracing::debug!(
+                                harness = %permission_harness.display_name(),
+                                session_id = %request.session_id,
+                                tool_call_id = %request.tool_call.tool_call_id,
+                                selected_option = ?response.outcome,
+                                "automatically approved a gh invocation"
+                            );
+                            return responder.respond(response);
+                        }
+                    }
+                    // Preserve Muse's Guardian forms; YOLO plans use plan review.
+                    let prefer_form_over_plan_review = permission_harness == HarnessKind::Muse
+                        && !permission_policy.is_unconstrained();
+                    let native_child = permission_native_agents.lock().expect("native agent router poisoned")
+                        .is_child(&request.session_id.to_string());
+                    if !native_child && !prefer_form_over_plan_review && plan_permission {
+                        let id = format!(
+                            "plan-review-{}",
+                            permission_review_ids.fetch_add(1, Ordering::Relaxed)
+                        );
+                        let value = serde_json::to_value(&request)
+                            .map_err(|_| agent_client_protocol::Error::internal_error())?;
+                        let review = normalized_plan_review(id.clone(), &value);
+                        let approved_plan = plan_review_proposal(&review).unwrap_or_default().to_owned();
+                        let implementation = permission_implementation_slot
+                            .lock().expect("plan implementation lock poisoned").clone();
+                        let answer_rx = permission_elicitations.register(review.clone(), String::new(), AwayRequest::Plan);
+                        let pending = permission_elicitations.clone();
+                        let events = permission_events.clone();
+                        let cancellation = responder.cancellation();
+                        tokio::spawn(async move {
+                            if events
+                                .send(RuntimeEvent::ElicitationRequested { request: review.clone() })
+                                .await
+                                .is_err()
+                            {
+                                pending.remove(&id);
+                                if let Err(error) =
+                                    responder.respond_with_error(relay_event_channel_error())
+                                {
+                                    tracing::debug!(
+                                        %id,
+                                        operation = "permission_request",
+                                        %error,
+                                        "could not report a stopped relay coordinator to ACP"
+                                    );
+                                }
+                                return;
+                            }
+                            let response = await_elicitation_response(
+                                &pending, &id, answer_rx, cancellation.cancelled(),
+                            ).await;
+                            let action = response
+                                .as_ref()
+                                .map_or("cancel", PendingAnswer::action_name)
+                                .to_owned();
+                            if let Err(error) = events
+                                .send(RuntimeEvent::ElicitationResolved {
+                                    elicitation_id: id.clone(),
+                                    action,
+                                    reply: response.as_ref().and_then(PendingAnswer::human).map(|response| review.reply_text(response)),
+                                })
+                                .await
                             {
                                 tracing::debug!(
                                     %id,
-                                    operation = "permission_request",
+                                    operation = "elicitation_resolved",
                                     %error,
-                                    "could not report a stopped relay coordinator to ACP"
+                                    "could not report permission response to relay coordinator"
                                 );
                             }
-                            return;
-                        }
-                        let response = await_elicitation_response(
-                            &pending, &id, answer_rx, cancellation.cancelled(),
-                        ).await;
-                        let action = response
-                            .as_ref()
-                            .map_or("cancel", PendingAnswer::action_name)
-                            .to_owned();
-                        if let Err(error) = events
-                            .send(RuntimeEvent::ElicitationResolved {
-                                elicitation_id: id.clone(),
-                                action,
-                                reply: response.as_ref().and_then(PendingAnswer::human).map(|response| review.reply_text(response)),
-                            })
-                            .await
-                        {
-                            tracing::debug!(
-                                %id,
-                                operation = "elicitation_resolved",
-                                %error,
-                                "could not report permission response to relay coordinator"
-                            );
-                        }
-                        let response = if cancellation.is_cancelled() { None } else { response };
-                        let mut handoff_completion = None;
-                        let selection = response.map_or_else(
-                            || Ok(PlanPermissionAnswer::Native(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled))),
-                            |response| policy_plan_permission_answer(&request, response.harness_response(), permission_harness, permission_policy),
-                        ).and_then(|selection| match selection {
-                            PlanPermissionAnswer::Native(answer) => Ok(answer),
-                            PlanPermissionAnswer::ContinueInBypass => {
-                                let (completion, permission_sent) = oneshot::channel();
-                                implementation.as_ref()
-                                    .ok_or_else(|| anyhow!("Cannot resume the approved plan without an active prompt; select bypassPermissions and submit the implementation instruction."))?
-                                    .send(PlanImplementation { plan: approved_plan, permission_sent })
-                                    .map_err(|_| anyhow!("Plan implementation was cancelled because its prompt is no longer active."))?;
-                                handoff_completion = Some(completion);
-                                Ok(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled))
+                            let response = if cancellation.is_cancelled() { None } else { response };
+                            let mut handoff_completion = None;
+                            let selection = response.map_or_else(
+                                || Ok(PlanPermissionAnswer::Native(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled))),
+                                |response| policy_plan_permission_answer(&request, response.harness_response(), permission_harness, permission_policy),
+                            ).and_then(|selection| match selection {
+                                PlanPermissionAnswer::Native(answer) => Ok(answer),
+                                PlanPermissionAnswer::ContinueInBypass => {
+                                    let (completion, permission_sent) = oneshot::channel();
+                                    implementation.as_ref()
+                                        .ok_or_else(|| anyhow!("Cannot resume the approved plan without an active prompt; select bypassPermissions and submit the implementation instruction."))?
+                                        .send(PlanImplementation { plan: approved_plan, permission_sent })
+                                        .map_err(|_| anyhow!("Plan implementation was cancelled because its prompt is no longer active."))?;
+                                    handoff_completion = Some(completion);
+                                    Ok(RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled))
+                                }
+                            });
+                            let answer = match selection {
+                                Ok(answer) => answer,
+                                Err(error) => {
+                                    if events.send(RuntimeEvent::Warning { message: format!("{error:#}") }).await.is_err() {
+                                        tracing::debug!(%error, "could not report failed plan implementation");
+                                    }
+                                    RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
+                                }
+                            };
+                            let result = responder.respond(answer);
+                            if let Some(completion) = handoff_completion
+                                && completion.send(result.is_ok()).is_err()
+                            {
+                                tracing::debug!(%id, "plan implementation stopped before the permission response was delivered");
+                            }
+                            if let Err(error) = result {
+                                tracing::debug!(
+                                    %id,
+                                    operation = "permission_response",
+                                    %error,
+                                    "ACP permission responder was already closed"
+                                );
                             }
                         });
-                        let answer = match selection {
-                            Ok(answer) => answer,
-                            Err(error) => {
-                                if events.send(RuntimeEvent::Warning { message: format!("{error:#}") }).await.is_err() {
-                                    tracing::debug!(%error, "could not report failed plan implementation");
-                                }
-                                RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
-                            }
+                        return Ok(());
+                    }
+                    // A permission request that is_plan_permission() did not classify
+                    // is shown as a generic permission form below. Log its raw shape
+                    // so an agent whose request form we do not yet recognize stays
+                    // diagnosable from worker.log.
+                    match serde_json::to_value(&request) {
+                        Ok(raw) => tracing::debug!(
+                            target: "acp::plan_diag",
+                            operation = "unclassified_permission_request",
+                            request = %raw,
+                            "permission request not classified as a plan review; raw payload follows"
+                        ),
+                        Err(error) => tracing::debug!(
+                            target: "acp::plan_diag",
+                            operation = "unclassified_permission_request",
+                            %error,
+                            "permission request not classified as a plan review and could not be serialized"
+                        ),
+                    }
+                    let id = format!("{TOOL_PERMISSION_ID_PREFIX}{}", permission_review_ids.fetch_add(1, Ordering::Relaxed));
+                    // The worker alone decides which answers this form offers, and
+                    // accepts only those (see `permission_choices`).
+                    let PermissionAnswers { choices, skip } =
+                        permission_choices(&request, permission_harness, permission_policy);
+                    let options: Vec<_> = choices.iter().map(|choice| serde_json::json!({
+                        "const": choice.option_id.to_string(), "title": choice.title,
+                    })).collect();
+                    // Prefer the tool call's own title so the card reads like the
+                    // action being approved; fall back to the raw payload when a
+                    // harness sends no title.
+                    let mut message = match request
+                        .tool_call
+                        .fields
+                        .title
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|title| !title.is_empty())
+                    {
+                        Some(title) => permission_title_with_command(
+                            title,
+                            permission_tool_input(&request.tool_call, &permission_tool_content)
+                                .as_ref(),
+                        ),
+                        None => serde_json::to_string_pretty(&request.tool_call)
+                            .map_err(|_| agent_client_protocol::Error::internal_error())?,
+                    };
+                    if permission_native_agents.lock().expect("native agent router poisoned").is_child(&request.session_id.to_string()) {
+                        message = format!("Native agent {}: {message}", request.session_id);
+                    }
+                    if let Some(reason) = &observe_ask_reason {
+                        message = format!("Brokk Observe requires approval.\n{reason}\n\n{message}");
+                    }
+                    let mut form = ElicitationRequest::from_acp_params(id.clone(), serde_json::json!({
+                        "mode": "form", "sessionId": request.session_id.to_string(),
+                        "message": format!(
+                            "{} requests permission:\n{message}",
+                            permission_harness.display_name()
+                        ),
+                        "requestedSchema": {"type":"object", "required":["choice"], "properties":{
+                            "choice":{"type":"string", "title":"Permission", "oneOf":options}
+                        }}
+                    })).map_err(|_| agent_client_protocol::Error::invalid_params())?;
+                    form.tool_permission = Some(ToolPermissionForm { skip: skip.is_some() });
+                    let identity = if plan_permission || claude_plan_approval {
+                        AwayRequest::Plan
+                    } else {
+                        away_permission_identity(&request, permission_tool_input(&request.tool_call, &permission_tool_content))
+                    };
+                    let answer_rx = permission_elicitations.register(form.clone(), if native_child { request.session_id.to_string() } else { String::new() }, identity);
+                    let pending = permission_elicitations.clone();
+                    let events = permission_events.clone();
+                    let observe = permission_observe.clone();
+                    let mut observe_acknowledgement = observe_ask_acknowledgement;
+                    let policy_tool_call_id = request.tool_call.tool_call_id.to_string();
+                    let cancellation = responder.cancellation();
+                    tokio::spawn(async move {
+                        let response = if events.send(RuntimeEvent::ElicitationRequested { request: form.clone() }).await.is_ok() {
+                            await_elicitation_response(&pending, &id, answer_rx, cancellation.cancelled()).await
+                        } else {
+                            pending.remove(&id);
+                            None
                         };
+                        // ACP keeps `cancelled` for a cancelled turn. Skip is a
+                        // rejection of this call alone, so it selects the
+                        // request's one-time rejection. Cancel reaches here only
+                        // after the prompt loop cancelled the turn, or when no
+                        // turn is running.
+                        let selected = match &response {
+                            _ if cancellation.is_cancelled() => None,
+                            Some(PendingAnswer::Human(ElicitationResponse::Accept { content })) => match content.get("choice") {
+                                Some(ElicitationValue::String(value)) => choices.iter()
+                                    .find(|choice| choice.option_id.to_string() == *value)
+                                    .map(|choice| choice.option_id.clone()),
+                                _ => None,
+                            },
+                            Some(PendingAnswer::Human(ElicitationResponse::Decline) | PendingAnswer::OperatorAway) => skip,
+                            Some(PendingAnswer::Human(ElicitationResponse::Cancel)) | None => None,
+                        };
+                        let outcome = selected.map_or(RequestPermissionOutcome::Cancelled, |option_id|
+                            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)));
+                        let answer = if matches!(response, Some(PendingAnswer::OperatorAway)) && (plan_permission || claude_plan_approval) {
+                            permission_plan_response(&request, ElicitationResponse::Decline)
+                        } else { RequestPermissionResponse::new(outcome) };
+                        let permission_outcome = permission_response_outcome(&request, &answer);
                         let result = responder.respond(answer);
-                        if let Some(completion) = handoff_completion
-                            && completion.send(result.is_ok()).is_err()
+                        if result.is_ok()
+                            && let Some(observe) = observe
                         {
-                            tracing::debug!(%id, "plan implementation stopped before the permission response was delivered");
-                        }
-                        if let Err(error) = result {
-                            tracing::debug!(
-                                %id,
-                                operation = "permission_response",
-                                %error,
-                                "ACP permission responder was already closed"
+                            if let Some(acknowledgement) = &mut observe_acknowledgement {
+                                acknowledgement.record_outcome(permission_outcome);
+                            }
+                            observe.acknowledge_applied(
+                                observe_acknowledgement,
+                                policy_tool_call_id,
                             );
                         }
+                        if let Err(error) = result {
+                            tracing::debug!(%error, "harness permission responder closed");
+                        }
+                        if let Err(error) = events.send(RuntimeEvent::ElicitationResolved {
+                            elicitation_id: id,
+                            action: response.as_ref().map_or("cancel", PendingAnswer::action_name).into(),
+                            reply: response.as_ref().and_then(PendingAnswer::human).map(|response| form.reply_text(response)),
+                        }).await {
+                            tracing::debug!(%error, "harness permission result receiver closed");
+                        }
                     });
-                    return Ok(());
-                }
-                // A permission request that is_plan_permission() did not classify
-                // is shown as a generic permission form below. Log its raw shape
-                // so an agent whose request form we do not yet recognize stays
-                // diagnosable from worker.log.
-                match serde_json::to_value(&request) {
-                    Ok(raw) => tracing::debug!(
-                        target: "acp::plan_diag",
-                        operation = "unclassified_permission_request",
-                        request = %raw,
-                        "permission request not classified as a plan review; raw payload follows"
-                    ),
-                    Err(error) => tracing::debug!(
-                        target: "acp::plan_diag",
-                        operation = "unclassified_permission_request",
-                        %error,
-                        "permission request not classified as a plan review and could not be serialized"
-                    ),
-                }
-                let id = format!("{TOOL_PERMISSION_ID_PREFIX}{}", permission_review_ids.fetch_add(1, Ordering::Relaxed));
-                // The worker alone decides which answers this form offers, and
-                // accepts only those (see `permission_choices`).
-                let PermissionAnswers { choices, skip } =
-                    permission_choices(&request, permission_harness, permission_policy);
-                let options: Vec<_> = choices.iter().map(|choice| serde_json::json!({
-                    "const": choice.option_id.to_string(), "title": choice.title,
-                })).collect();
-                // Prefer the tool call's own title so the card reads like the
-                // action being approved; fall back to the raw payload when a
-                // harness sends no title.
-                let mut message = match request
-                    .tool_call
-                    .fields
-                    .title
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|title| !title.is_empty())
-                {
-                    Some(title) => permission_title_with_command(
-                        title,
-                        permission_tool_input(&request.tool_call, &permission_tool_content)
-                            .as_ref(),
-                    ),
-                    None => serde_json::to_string_pretty(&request.tool_call)
-                        .map_err(|_| agent_client_protocol::Error::internal_error())?,
-                };
-                if permission_native_agents.lock().expect("native agent router poisoned").is_child(&request.session_id.to_string()) {
-                    message = format!("Native agent {}: {message}", request.session_id);
-                }
-                let mut form = ElicitationRequest::from_acp_params(id.clone(), serde_json::json!({
-                    "mode": "form", "sessionId": request.session_id.to_string(),
-                    "message": format!(
-                        "{} requests permission:\n{message}",
-                        permission_harness.display_name()
-                    ),
-                    "requestedSchema": {"type":"object", "required":["choice"], "properties":{
-                        "choice":{"type":"string", "title":"Permission", "oneOf":options}
-                    }}
-                })).map_err(|_| agent_client_protocol::Error::invalid_params())?;
-                form.tool_permission = Some(ToolPermissionForm { skip: skip.is_some() });
-                let identity = if plan_permission || claude_plan_approval {
-                    AwayRequest::Plan
-                } else {
-                    away_permission_identity(&request, permission_tool_input(&request.tool_call, &permission_tool_content))
-                };
-                let answer_rx = permission_elicitations.register(form.clone(), if native_child { request.session_id.to_string() } else { String::new() }, identity);
-                let pending = permission_elicitations.clone();
-                let events = permission_events.clone();
-                let cancellation = responder.cancellation();
-                tokio::spawn(async move {
-                    let response = if events.send(RuntimeEvent::ElicitationRequested { request: form.clone() }).await.is_ok() {
-                        await_elicitation_response(&pending, &id, answer_rx, cancellation.cancelled()).await
-                    } else {
-                        pending.remove(&id);
-                        None
-                    };
-                    // ACP keeps `cancelled` for a cancelled turn. Skip is a
-                    // rejection of this call alone, so it selects the
-                    // request's one-time rejection. Cancel reaches here only
-                    // after the prompt loop cancelled the turn, or when no
-                    // turn is running.
-                    let selected = match &response {
-                        _ if cancellation.is_cancelled() => None,
-                        Some(PendingAnswer::Human(ElicitationResponse::Accept { content })) => match content.get("choice") {
-                            Some(ElicitationValue::String(value)) => choices.iter()
-                                .find(|choice| choice.option_id.to_string() == *value)
-                                .map(|choice| choice.option_id.clone()),
-                            _ => None,
-                        },
-                        Some(PendingAnswer::Human(ElicitationResponse::Decline) | PendingAnswer::OperatorAway) => skip,
-                        Some(PendingAnswer::Human(ElicitationResponse::Cancel)) | None => None,
-                    };
-                    let outcome = selected.map_or(RequestPermissionOutcome::Cancelled, |option_id|
-                        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)));
-                    let answer = if matches!(response, Some(PendingAnswer::OperatorAway)) && (plan_permission || claude_plan_approval) {
-                        permission_plan_response(&request, ElicitationResponse::Decline)
-                    } else { RequestPermissionResponse::new(outcome) };
-                    if let Err(error) = responder.respond(answer) {
-                        tracing::debug!(%error, "harness permission responder closed");
-                    }
-                    if let Err(error) = events.send(RuntimeEvent::ElicitationResolved {
-                        elicitation_id: id,
-                        action: response.as_ref().map_or("cancel", PendingAnswer::action_name).into(),
-                        reply: response.as_ref().and_then(PendingAnswer::human).map(|response| form.reply_text(response)),
-                    }).await {
-                        tracing::debug!(%error, "harness permission result receiver closed");
-                    }
-                });
+                    Ok(())
+                })?;
                 Ok(())
             },
             agent_client_protocol::on_receive_request!(),

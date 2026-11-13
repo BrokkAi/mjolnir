@@ -11,6 +11,7 @@ use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::Digest;
+use std::fmt;
 
 use crate::hex::lower_hex;
 
@@ -18,6 +19,99 @@ use crate::hex::lower_hex;
 pub const OBSERVE_ENVELOPE_VERSION: u8 = 1;
 /// The collector name visible to Brokk Observe.
 pub const OBSERVE_COLLECTOR: &str = "mjolnir";
+const DEFAULT_POLICY_TIMEOUT_SECS: u64 = 3;
+
+/// Configuration for synchronous Brokk Observe policy decisions.
+///
+/// The bearer token stays in the worker launch configuration. It is never
+/// added to the harness environment.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObserveEnforcementConfig {
+    pub url: String,
+    pub token: String,
+    #[serde(default = "default_policy_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default)]
+    pub fail_closed: bool,
+}
+
+impl fmt::Debug for ObserveEnforcementConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ObserveEnforcementConfig")
+            .field("url", &self.url)
+            .field("token", &"[REDACTED]")
+            .field("timeout_ms", &self.timeout_ms)
+            .field("fail_closed", &self.fail_closed)
+            .finish()
+    }
+}
+
+const fn default_policy_timeout_ms() -> u64 {
+    DEFAULT_POLICY_TIMEOUT_SECS * 1_000
+}
+
+impl ObserveEnforcementConfig {
+    /// Read the same variables the Phase 1 collector and vendor plugin use.
+    /// Enforcement is absent unless `OBSERVE_ENFORCE` is true.
+    pub fn from_environment() -> Result<Option<Self>> {
+        if !environment_true("OBSERVE_ENFORCE") {
+            return Ok(None);
+        }
+        let url = std::env::var("OBSERVE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("OBSERVE_ENFORCE=true requires OBSERVE_URL"))?;
+        let parsed =
+            url::Url::parse(&url).map_err(|error| anyhow::anyhow!("parse OBSERVE_URL: {error}"))?;
+        ensure!(
+            matches!(parsed.scheme(), "http" | "https"),
+            "OBSERVE_URL must use http or https"
+        );
+        let token = std::env::var("OBSERVE_TOKEN")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("OBSERVE_ENFORCE=true requires OBSERVE_TOKEN"))?;
+        let timeout_ms = match std::env::var("OBSERVE_TIMEOUT") {
+            Ok(value) => {
+                let seconds = value.parse::<u64>().map_err(|_| {
+                    anyhow::anyhow!("OBSERVE_TIMEOUT must be a positive whole number of seconds")
+                })?;
+                ensure!(seconds > 0, "OBSERVE_TIMEOUT must be at least one second");
+                seconds * 1_000
+            }
+            Err(_) => default_policy_timeout_ms(),
+        };
+        Ok(Some(Self {
+            url: url.trim_end_matches('/').to_owned(),
+            token,
+            timeout_ms,
+            fail_closed: environment_true("OBSERVE_FAIL_CLOSED"),
+        }))
+    }
+
+    /// The only harness that currently asks Mjolnir before every command,
+    /// write, and MCP call. Other harnesses may auto-approve tools inside
+    /// their own sandbox, which leaves no pre-execution veto for Mjolnir.
+    pub fn supports_harness(self, harness: crate::config::HarnessKind) -> Result<Self> {
+        ensure!(
+            harness == crate::config::HarnessKind::Dsh,
+            "Observe enforcement currently supports DSH only; {} does not expose a pre-execution permission request for every tool",
+            harness.display_name()
+        );
+        Ok(self)
+    }
+}
+
+fn environment_true(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
 
 /// One event sent from Mjolnir to Brokk Observe.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -177,6 +271,39 @@ pub fn event_id(session_id: &str, position: u64, kind: &str, ordinal: u8) -> Str
     format!("mj-{position}-{digest}")
 }
 
+/// Stable identity for the policy question about one ACP tool call.
+///
+/// The native session is part of the identity because a harness can run
+/// native child sessions under one Mjolnir session, and their tool-call ids
+/// occupy separate namespaces.
+pub fn tool_call_event_id(session_id: &str, native_session_id: &str, tool_call_id: &str) -> String {
+    let digest = lower_hex(sha2::Sha256::digest(
+        format!("mjolnir-observe-policy-v1\0{session_id}\0{native_session_id}\0{tool_call_id}")
+            .as_bytes(),
+    ));
+    format!("mj-policy-{digest}")
+}
+
+/// Normalize ACP's portable tool categories to the names Observe's existing
+/// detectors and policies understand.
+pub fn canonical_tool_name(kind: &str, title: &str) -> String {
+    match kind {
+        "execute" => "Bash".into(),
+        "read" => "Read".into(),
+        "edit" => {
+            if title.to_ascii_lowercase().contains("write") {
+                "Write".into()
+            } else {
+                "Edit".into()
+            }
+        }
+        "fetch" => "WebFetch".into(),
+        "search" => "Grep".into(),
+        other if title.is_empty() => other.into(),
+        _ => title.into(),
+    }
+}
+
 /// Create the `SessionStart` payload shared by every harness.
 pub fn session_start_event(
     session_id: &str,
@@ -235,6 +362,23 @@ mod tests {
     }
 
     #[test]
+    fn policy_ids_distinguish_native_children_with_the_same_tool_call_id() {
+        let parent = tool_call_event_id("logical", "native-parent", "call-1");
+        assert_eq!(
+            parent,
+            tool_call_event_id("logical", "native-parent", "call-1")
+        );
+        assert_ne!(
+            parent,
+            tool_call_event_id("logical", "native-child", "call-1")
+        );
+        assert_ne!(
+            parent,
+            tool_call_event_id("other-logical", "native-parent", "call-1")
+        );
+    }
+
+    #[test]
     fn validation_rejects_missing_keys() {
         let mut value = envelope();
         value.meta.event_id.clear();
@@ -255,5 +399,41 @@ mod tests {
                 .to_string()
                 .contains("session_id")
         );
+    }
+
+    #[test]
+    fn enforcement_is_limited_to_harnesses_with_a_complete_permission_gate() {
+        let config = ObserveEnforcementConfig {
+            url: "https://observe.example".into(),
+            token: "token".into(),
+            timeout_ms: 3_000,
+            fail_closed: true,
+        };
+        assert!(
+            config
+                .clone()
+                .supports_harness(crate::config::HarnessKind::Dsh)
+                .is_ok()
+        );
+        for harness in [
+            crate::config::HarnessKind::Codex,
+            crate::config::HarnessKind::Claude,
+            crate::config::HarnessKind::Kimi,
+            crate::config::HarnessKind::Grok,
+            crate::config::HarnessKind::Muse,
+            crate::config::HarnessKind::OpenCode,
+            crate::config::HarnessKind::Antigravity,
+        ] {
+            let error = config
+                .clone()
+                .supports_harness(harness)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("supports DSH only"), "{harness:?}: {error}");
+            assert!(
+                error.contains(harness.display_name()),
+                "{harness:?}: {error}"
+            );
+        }
     }
 }
