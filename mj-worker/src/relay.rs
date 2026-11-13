@@ -280,7 +280,6 @@ pub struct DurableRelay {
     /// long build was failed as if the harness had died (#1020).
     foreground_tools: mj_core::activity::ToolsInFlight,
     turn_context: mj_transcript::turn_context::TurnContext,
-    managed_subagent: bool,
     verdict_harness: Option<mj_core::config::HarnessKind>,
     #[cfg_attr(not(unix), allow(dead_code))] // The worker control runtime is Unix-only.
     pub(crate) authentication_login_path: Option<PathBuf>,
@@ -422,8 +421,11 @@ impl DurableRelay {
             }
             // Upgrade an older snapshot in place. The stored frontier digests
             // stay valid — each is recomputed with the formula matching the
-            // record's format — so only the schema marker advances; the next
-            // persist writes it back at the current version.
+            // record's format. Seed newly owned state before advancing the
+            // schema marker; the next persist writes the current version.
+            if snapshot.format_version < 23 {
+                seed_legacy_open_request(&mut snapshot);
+            }
             if snapshot.format_version < 24
                 && let Some(turn) = snapshot.harness_turn.as_mut()
             {
@@ -462,6 +464,12 @@ impl DurableRelay {
                     snapshot.continuation = state.continuation;
                     snapshot.capacity_retry = state.capacity_retry;
                     snapshot.turn_completion = state.turn_completion;
+                    if let Some(open) = state.open_request {
+                        snapshot.request = open.request;
+                        snapshot.person_input_through = open.person_input_through;
+                    } else {
+                        seed_legacy_open_request(&mut snapshot);
+                    }
                 }
                 snapshot.latest_ordinal = restored.event_frontier;
                 snapshot.latest_digest = restored.event_frontier_digest.clone();
@@ -618,7 +626,6 @@ impl DurableRelay {
             background_work: BackgroundWorkPolicy::default(),
             foreground_tools: mj_core::activity::ToolsInFlight::default(),
             turn_context: Default::default(),
-            managed_subagent: false,
             verdict_harness: None,
             authentication_login_path: None,
             login_identity: Default::default(),
@@ -1119,7 +1126,9 @@ impl DurableRelay {
     /// Launch metadata owns this fact, including older environment-only launches.
     #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn set_managed_subagent(&mut self, managed: bool) -> Result<()> {
-        self.managed_subagent = managed;
+        if self.snapshot.managed_subagent != managed {
+            self.record_observation(RelayObservation::ManagedSubagentConfigured { managed })?;
+        }
         self.suppress_child_assessment()
     }
 
@@ -1776,3 +1785,34 @@ mod continuation_tests;
 
 #[cfg(test)]
 mod handback_tests;
+
+/// Seed once at the legacy persisted-format boundary, never during publication.
+fn seed_legacy_open_request(snapshot: &mut RelaySnapshot) {
+    let Some(assessment) = snapshot.assessment.as_deref() else {
+        return;
+    };
+    if assessment.question_dismissed() {
+        return;
+    }
+    let question = assessment.inferred_question().or_else(|| {
+        (mj_core::state::classify_prompt_completion(&assessment.completion.stop_reason)
+            == mj_core::state::PromptCompletion::InputRequired)
+            .then(|| mj_core::assessment::InferredQuestion {
+                turn_id: assessment.turn_id.clone(),
+                completed_ordinal: assessment.completed_ordinal,
+            })
+    });
+    if let Some(question) = question {
+        snapshot.person_input_through = snapshot
+            .latest_prompt_accepted_ordinal
+            .filter(|ordinal| *ordinal > question.completed_ordinal)
+            .unwrap_or(0);
+        snapshot.request = Some(mj_core::assessment::OpenRequest {
+            question,
+            question_message: assessment
+                .question_message
+                .clone()
+                .or_else(|| snapshot.completed_reply_message.clone()),
+        });
+    }
+}

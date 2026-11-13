@@ -213,6 +213,8 @@ enum Command {
     Ui(ui_command::UiArgs),
     /// Discover available models and efforts for a profile.
     Models(api_commands::ModelsArgs),
+    /// Show each profile's remaining quota as the daemon last read it.
+    Quota(api_commands::QuotaArgs),
     /// Apply a session configuration setting.
     SetConfig(api_commands::SetConfigArgs),
     /// Removed; kept so the old name says what replaced it.
@@ -900,6 +902,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::GithubToken(_)) => "github-token",
         Some(Command::Ui(_)) => "ui",
         Some(Command::Models(_)) => "models",
+        Some(Command::Quota(_)) => "quota",
         Some(Command::SetConfig(_)) => "set-config",
         Some(Command::Close(_)) => "close",
         Some(Command::CancelTurn(_)) => "cancel-turn",
@@ -1236,6 +1239,9 @@ async fn run_command(
             .map(|()| DashboardExit::Normal),
         Some(Command::Ui(args)) => ui_command::ui(args).await.map(|()| DashboardExit::Normal),
         Some(Command::Models(args)) => api_commands::models(args)
+            .await
+            .map(|()| DashboardExit::Normal),
+        Some(Command::Quota(args)) => api_commands::quota(args)
             .await
             .map(|()| DashboardExit::Normal),
         Some(Command::SetConfig(args)) => api_commands::set_config(args)

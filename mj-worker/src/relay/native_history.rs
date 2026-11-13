@@ -136,7 +136,8 @@ impl NativeHistoryEvidence {
             | RelayObservation::HarnessTurnStarted { .. }
             | RelayObservation::PermissionAutoApproved { .. }
             | RelayObservation::ElicitationRequested { .. } => self.used = true,
-            RelayObservation::NativeAgent { .. }
+            RelayObservation::ManagedSubagentConfigured { .. }
+            | RelayObservation::NativeAgent { .. }
             | RelayObservation::AgentInitialized { .. }
             | RelayObservation::SessionConfigured { .. }
             | RelayObservation::SessionModesConfigured { .. }
@@ -159,6 +160,7 @@ impl NativeHistoryEvidence {
             | RelayObservation::MailboxEventsDelivered { .. }
             | RelayObservation::Closing
             | RelayObservation::HandbackCheckStarted { .. }
+            | RelayObservation::QuestionTargetUpdated { .. }
             | RelayObservation::TurnAssessmentUpdated { .. }
             | RelayObservation::Closed => {}
         }

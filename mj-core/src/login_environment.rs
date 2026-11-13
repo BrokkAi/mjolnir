@@ -340,14 +340,20 @@ impl Account {
                     CStr::from_ptr(entry.pw_shell).to_str()?.to_owned(),
                 )
             };
+            let shell = if shell.is_empty() {
+                std::path::PathBuf::from("/bin/sh")
+            } else {
+                std::path::PathBuf::from(shell)
+            };
+            // Let a subprocess fixture substitute a deliberately slow shell.
+            #[cfg(feature = "test-hooks")]
+            let shell = std::env::var_os("MJ_TEST_ACCOUNT_SHELL")
+                .map(std::path::PathBuf::from)
+                .unwrap_or(shell);
             return Ok(Self {
                 user,
                 home: home.into(),
-                shell: if shell.is_empty() {
-                    "/bin/sh".into()
-                } else {
-                    shell.into()
-                },
+                shell,
             });
         }
     }

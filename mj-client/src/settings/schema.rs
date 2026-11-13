@@ -911,7 +911,7 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
             "Add an SSH host or EC2 launch template; saving one adds its runtimes. Its runtimes share its build cache settings."
         }
         "targets" => {
-            "Add a runtime and choose its machine, or use Detect runtimes to find what every machine can run."
+            "Add a runtime and choose its machine, or use Detect runtimes to probe every machine. Add SSH hosts under Machines."
         }
         "machine" => "Which machine this runtime runs on.",
         "phone" => {

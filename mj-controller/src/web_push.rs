@@ -265,11 +265,22 @@ fn episodes(runtime: &mj_client::runtime_feed::RuntimeProjection) -> Vec<(String
                         question = form.question_text();
                     }
                 }
-                if tail.header.pending_elicitations.is_empty()
-                    && source == id
-                    && let Some(outcome) = &tail.header.last_turn_outcome
-                {
-                    identities.push(format!("{source}:turn:{}", outcome.completed_ordinal));
+                if tail.header.pending_elicitations.is_empty() && source == id {
+                    let ordinal = runtime
+                        .sessions
+                        .get(id)
+                        .and_then(|view| view.operational.as_deref())
+                        .and_then(|live| live.open_request.as_ref())
+                        .map(|request| request.question.completed_ordinal)
+                        .or_else(|| {
+                            tail.header
+                                .last_turn_outcome
+                                .as_ref()
+                                .map(|outcome| outcome.completed_ordinal)
+                        });
+                    if let Some(ordinal) = ordinal {
+                        identities.push(format!("{source}:turn:{ordinal}"));
+                    }
                 }
             }
             for (source, native) in &runtime.native_agents {
@@ -307,28 +318,24 @@ fn episodes(runtime: &mj_client::runtime_feed::RuntimeProjection) -> Vec<(String
                     }
                 }
             }
-            let question_chunks = runtime
-                .sessions
-                .get(id)
-                .and_then(|view| view.operational.as_deref())
-                .and_then(|live| live.assessment.as_deref())
-                .and_then(|assessment| assessment.question_message.as_deref())
-                .and_then(|message| {
-                    runtime
-                        .transcripts
-                        .get(id)?
-                        .items
-                        .values()
-                        .find(|item| item.stable_id == message)
-                })
-                .and_then(|item| match &item.body {
-                    mj_core::state::TranscriptBody::Agent { chunks, .. } => Some(chunks),
-                    _ => None,
-                });
-            if question.is_empty()
-                && let Some(chunks) = question_chunks
-            {
-                question = mj_core::transcript::materialized_chunks_text(chunks);
+            if question.is_empty() {
+                question = runtime
+                    .sessions
+                    .get(id)
+                    .and_then(|view| view.operational.as_deref())
+                    .and_then(|live| live.question_message())
+                    .and_then(|message| {
+                        mj_core::transcript::materialized_agent_message_text(
+                            runtime
+                                .transcripts
+                                .get(id)?
+                                .items
+                                .values()
+                                .map(AsRef::as_ref),
+                            message,
+                        )
+                    })
+                    .unwrap_or_default();
             }
             let body = if *attention == SessionAttention::NeedsInput {
                 phone_line(&question, "Needs your input")
@@ -493,6 +500,88 @@ mod tests {
     fn decode(value: &str) -> Vec<u8> {
         B64.decode(value).unwrap()
     }
+    #[test]
+    fn released_open_request_uses_original_episode_and_question_after_later_turns() {
+        use mj_core::assessment::{InferredQuestion, OpenRequest};
+        use mj_core::attention::SessionAttention;
+        use mj_core::state::{
+            MaterializedSession, MaterializedTurnOutcome, ProjectionWindow, TranscriptBody,
+            TranscriptItem, TurnOutcomeKind,
+        };
+        let mut runtime = mj_client::runtime_feed::RuntimeProjection::default();
+        runtime.records.insert(
+            "s".into(),
+            crate::daemon::tests::runtime_test_session(
+                "s",
+                "workspace",
+                mj_core::state::SessionState::Running,
+            ),
+        );
+        let mut live = mj_core::relay::RelaySnapshot::new("s".into()).operational_state();
+        live.relay_protocol_version = Some(mj_core::relay::RELAY_PROTOCOL_VERSION);
+        live.open_request = Some(OpenRequest {
+            question: InferredQuestion {
+                turn_id: "original".into(),
+                completed_ordinal: 10,
+            },
+            question_message: Some("agent:original".into()),
+        });
+        let mut view = mj_client::daemon::RuntimeSessionView::from_managed(
+            "s".into(),
+            mj_client::session::ManagedSessionView::default(),
+        );
+        view.operational = Some(live.into());
+        runtime.sessions.insert("s".into(), view);
+        runtime
+            .metadata
+            .session_attention
+            .insert("s".into(), SessionAttention::Working);
+        assert!(episodes(&runtime).is_empty());
+        let mut materialized = MaterializedSession::empty("s");
+        materialized.transcript.push(std::sync::Arc::new(TranscriptItem {
+            stable_id: "agent:original".into(), position: 9, latest_content_event_ordinal: None,
+            created_at_ms: 9, last_changed_at_ms: 9,
+            body: TranscriptBody::Agent { chunks: vec![serde_json::json!({"content":{"type":"text","text":"Keep the old format?"}})], streaming: false },
+        }));
+        runtime
+            .metadata
+            .session_attention
+            .insert("s".into(), SessionAttention::NeedsInput);
+        let mut identity = None;
+        for ordinal in [20, 30] {
+            materialized.last_turn_outcome = Some(MaterializedTurnOutcome {
+                answered_through: None,
+                diagnostic: None,
+                usage: None,
+                command_id: format!("later-{ordinal}"),
+                accepted_ordinal: None,
+                turn_start_position: None,
+                completed_ordinal: ordinal,
+                completed_at_ms: ordinal as i64,
+                outcome: TurnOutcomeKind::Completed {
+                    stop_reason: "EndTurn".into(),
+                },
+                work_facts: None,
+            });
+            runtime.transcripts.insert(
+                "s".into(),
+                mj_client::runtime_feed::SessionTail::of(
+                    &materialized,
+                    &ProjectionWindow::of(&materialized),
+                    10,
+                ),
+            );
+            let notices = episodes(&runtime);
+            assert_eq!(notices.len(), 1);
+            assert_eq!(notices[0].2.body, "Keep the old format?");
+            assert!(notices[0].1.contains("s:turn:10"));
+            if let Some(identity) = &identity {
+                assert_eq!(&notices[0].1, identity);
+            }
+            identity = Some(notices[0].1.clone());
+        }
+    }
+
     // Hard-won: e91f61f8e: a second reviewer question reused the delivered episode.
     #[test]
     fn a_new_review_question_starts_a_new_push_episode() {

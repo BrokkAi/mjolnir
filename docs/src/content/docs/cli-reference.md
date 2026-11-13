@@ -204,7 +204,7 @@ the matching task choice for this session; each unspecified type uses its global
 choice. Either override implies Mjolnir. The matching
 `--subagent-*-effort` flag requires its model flag. Omitted policy retains
 the session's override. `--subagents none` removes delegation tools entirely;
-it needs a Claude, Codex, DSH, or OpenCode session. A retry of a sealed
+every session accepts it. A retry of a sealed
 Move retains its recorded policy; an explicit different policy is refused.
 
 `--oracle enabled|disabled` turns the session's oracle on or off, and
@@ -332,6 +332,7 @@ mj put-file --session <id> --path <workspace-relative path> [--overwrite] [--jso
 mj elicitations --session <id> [--json]
 mj respond --session <id> --elicitation <id> [<response JSON>|-] [--response-file <path>]
 mj models --profile <id> [--model <name> | --unrestricted] [--json]
+mj quota [--profile <id>] [--refresh] [--json]
 mj set-config --session <id> [--key <key> --value <value>] [--json]
 mj ui pane (sessions | targets | profiles) (minimized | standard | maximized) [--json]
 mj ui show <session-id> [--right | --below] [--json]
@@ -378,8 +379,8 @@ mj new --workspace eval --bundle product --target builder \
   the request fails.
 - `mj new --subagents native|mjolnir|none` selects delegation. Omitted defaults to
   Native, or to None for a DSH profile. DSH has no sub-agents of its own, so it
-  refuses `native` and accepts `mjolnir` or `none`. `none` gives the session no delegation tools, native or Mjolnir; it
-  needs a Claude, Codex, DSH, or OpenCode profile. Mjolnir requires a Claude, Codex, DSH, or OpenCode parent and a straightforward
+  refuses `native` and accepts `mjolnir` or `none`. `none` gives the session no delegation tools, native or Mjolnir; every
+  profile accepts it. Mjolnir requires a Claude, Codex, DSH, or OpenCode parent and a straightforward
   choice in `[subagents.straightforward]` or a session override. The subtle
   choice in `[subagents.subtle]` is optional. Configure global defaults in
   config.toml or TUI Settings → Sub-agents.
@@ -450,6 +451,12 @@ mj new --workspace eval --bundle product --target builder \
   include known per-million-token rates; subscription and unknown billing modes
   are labeled without per-token prices. JSON includes a `billing` field and a
   `price` object or `null` for each model.
+- `mj quota` prints the daemon's latest quota reading for every enabled profile,
+  or one with `--profile`: billing mode, each reported window with what remains
+  and its reset, and how long ago the value was fetched. A profile whose quota
+  cannot be read says why. `--refresh` asks the daemon to probe again and waits
+  for the fresh cycle before printing. JSON carries each profile's full report
+  for scripts that back off before a profile runs out.
 - `mj set-config` applies user-settable session settings the harness advertises,
   such as the model or effort. The target permission policy owns permission
   settings; use plan mode to enter or leave Plan.

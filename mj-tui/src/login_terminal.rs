@@ -1,10 +1,15 @@
 //! Login terminal rendering and terminal keyboard encoding.
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use mj_chat::modal::centered_rect_percent;
+use mj_chat::theme;
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout},
-    widgets::{Block, Paragraph, Wrap},
+    layout::{Constraint, Layout, Rect},
+    widgets::{Clear, Paragraph, Wrap},
 };
+
+const LOGIN_MODAL_WIDTH_PERCENT: u16 = 90;
+const LOGIN_MODAL_HEIGHT_PERCENT: u16 = 80;
 
 #[derive(Default)]
 struct Replies(Vec<u8>);
@@ -31,7 +36,7 @@ impl vt100::Callbacks for Replies {
     }
 }
 
-/// A terminal pane owns emulation; the caller owns its disposable connection.
+/// A terminal modal owns emulation; the caller owns its disposable connection.
 pub struct LoginPane {
     parser: vt100::Parser<Replies>,
     profile: String,
@@ -52,9 +57,18 @@ impl LoginPane {
     }
     /// The bordered pane reserves three footer lines for status and controls.
     pub fn terminal_size(width: u16, height: u16) -> (u16, u16) {
+        let modal = Self::modal_area(Rect::new(0, 0, width, height));
         (
-            width.saturating_sub(2).max(1),
-            height.saturating_sub(5).max(1),
+            modal.width.saturating_sub(2).max(1),
+            modal.height.saturating_sub(5).max(1),
+        )
+    }
+    /// The opaque dialog that contains the emulated harness terminal.
+    pub fn modal_area(screen: Rect) -> Rect {
+        centered_rect_percent(
+            LOGIN_MODAL_WIDTH_PERCENT,
+            LOGIN_MODAL_HEIGHT_PERCENT,
+            screen,
         )
     }
     pub fn resize(&mut self, cols: u16, rows: u16) {
@@ -139,10 +153,12 @@ impl LoginPane {
         }
         Some(bytes)
     }
-    pub fn render(&self, frame: &mut Frame<'_>) {
-        let block = Block::bordered().title(format!(" Login · {} ", self.profile));
-        let inner = block.inner(frame.area());
-        frame.render_widget(block, frame.area());
+    pub fn render(&self, frame: &mut Frame<'_>, screen: Rect) {
+        let popup = Self::modal_area(screen);
+        frame.render_widget(Clear, popup);
+        let block = theme::modal().title(format!(" Sign in · {} ", self.profile));
+        let inner = block.inner(popup);
+        frame.render_widget(block, popup);
         let areas = Layout::vertical([
             Constraint::Min(1),
             Constraint::Length(2),
@@ -154,27 +170,48 @@ impl LoginPane {
             areas[0],
         );
         frame.render_widget(
-            Paragraph::new(self.status.as_str()).wrap(Wrap { trim: false }),
+            Paragraph::new(self.status.as_str())
+                .style(theme::muted())
+                .wrap(Wrap { trim: false }),
             areas[1],
         );
-        frame.render_widget(Paragraph::new("Ctrl+] closes · Ctrl+Q quits"), areas[2]);
+        frame.render_widget(
+            Paragraph::new("Ctrl+] cancels · Ctrl+Q quits").style(theme::muted()),
+            areas[2],
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui::{Terminal, backend::TestBackend, text::Line, widgets::Paragraph};
+
+    fn render(terminal: &mut Terminal<TestBackend>, pane: &LoginPane) -> String {
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let backdrop = (0..area.height)
+                    .map(|row| {
+                        Line::raw(format!(
+                            "dashboard row {row:02} {}",
+                            "─".repeat(usize::from(area.width).saturating_sub(18))
+                        ))
+                    })
+                    .collect::<Vec<_>>();
+                frame.render_widget(Paragraph::new(backdrop).style(theme::base()), area);
+                pane.render(frame, area);
+            })
+            .unwrap();
+        crate::test_support::buffer_lines(terminal.backend().buffer()).join("\n")
+    }
+
     #[test]
     fn login_terminal_rendering_preserves_fragmented_ansi_and_reports_completion() {
         let mut terminal = Terminal::new(TestBackend::new(76, 12)).unwrap();
         let (cols, rows) = LoginPane::terminal_size(76, 12);
         let mut pane = LoginPane::new("fixture", cols, rows);
-        let mut rendered = String::new();
-        terminal.draw(|frame| pane.render(frame)).unwrap();
-        rendered
-            .push_str(&crate::test_support::buffer_lines(terminal.backend().buffer()).join("\n"));
-        rendered.push_str("\n\n");
+        let mut rendered = vec![render(&mut terminal, &pane)];
         pane.status("Signed in. Enter returns to Settings.");
         for chunk in [
             b"Open https://example.test/login\r\n\x1b[3".as_slice(),
@@ -183,14 +220,13 @@ mod tests {
         ] {
             pane.output(chunk);
         }
-        terminal.draw(|frame| pane.render(frame)).unwrap();
-        rendered
-            .push_str(&crate::test_support::buffer_lines(terminal.backend().buffer()).join("\n"));
-        rendered.push_str("\n\n");
+        rendered.push(render(&mut terminal, &pane));
         pane.status("The daemon connection ended during login or harness preparation; retry Login. Enter returns to Settings.");
-        terminal.draw(|frame| pane.render(frame)).unwrap();
-        rendered
-            .push_str(&crate::test_support::buffer_lines(terminal.backend().buffer()).join("\n"));
-        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "login-terminal", &rendered);
+        rendered.push(render(&mut terminal, &pane));
+        mj_core::golden::assert_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "login-terminal",
+            &rendered.join("\n\n"),
+        );
     }
 }

@@ -48,8 +48,11 @@ pub(crate) struct SessionOperationDisplay {
 pub(crate) struct SessionDetail {
     pub(crate) materialized_applied_event_ordinal: Option<u64>,
     pub(crate) current_turn_started_at: Option<u64>,
-    pub(crate) awaiting_input: bool,
     pub(crate) question_message: Option<String>,
+    pub(crate) supports_open_request: bool,
+    /// The latest-turn rule, used only for workers before relay protocol 64,
+    /// whose questions may have no daemon dismissal target.
+    pub(crate) legacy_awaiting_input: bool,
     pub(crate) notification_dismissal: Option<NotificationDismissalState>,
     pub(crate) last_activity_at_ms: Option<u64>,
     pub(crate) last_agent_message: Option<Arc<str>>,
@@ -243,7 +246,7 @@ pub struct PreparedMaterializedSessionDetail {
     pub(crate) session_id: String,
     pub(crate) applied_event_ordinal: u64,
     pub(crate) current_turn_started_at: Option<u64>,
-    pub(crate) awaiting_input: bool,
+    pub(crate) legacy_awaiting_input: bool,
     pub(crate) last_activity_at_ms: Option<u64>,
     pub(crate) last_agent_message: Option<Arc<str>>,
     pub(crate) last_user_message: Option<Arc<str>>,
@@ -330,8 +333,8 @@ impl PreparedMaterializedSessionDetail {
         Self::from_assessed_materialized(session, None, viewed_through_event_ordinal, previous)
     }
 
-    /// Keep the worker's verdict paired with the projection it describes, so
-    /// delayed background projections cannot attach it to a different turn.
+    /// Build transcript detail; semantic attention is served separately by the
+    /// daemon, except the latest-turn rule kept for pre-64 workers.
     pub fn from_assessed_materialized(
         session: MaterializedSession,
         assessment: Option<&mj_core::assessment::TurnAssessment>,
@@ -447,8 +450,7 @@ impl PreparedMaterializedSessionDetail {
                 created_at_ms: prompt.queued_at_ms,
             })
             .collect();
-        let unanswered_input = session.unanswered_input_outcome(assessment, None);
-        let awaiting_input = unanswered_input.is_some();
+        let legacy_awaiting_input = session.unanswered_input_outcome(assessment, None).is_some();
         let pending_elicitations = session.pending_elicitations.clone();
         let session_id = session.session_id.clone();
         let applied_event_ordinal = session.applied_event_ordinal;
@@ -466,7 +468,7 @@ impl PreparedMaterializedSessionDetail {
             session_id,
             applied_event_ordinal,
             current_turn_started_at,
-            awaiting_input,
+            legacy_awaiting_input,
             last_activity_at_ms,
             last_agent_message: last_agent_message
                 .as_ref()
@@ -1235,7 +1237,7 @@ impl DashboardState {
         }
         detail.materialized_applied_event_ordinal = Some(prepared.applied_event_ordinal);
         detail.current_turn_started_at = prepared.current_turn_started_at;
-        detail.awaiting_input = prepared.awaiting_input;
+        detail.legacy_awaiting_input = prepared.legacy_awaiting_input;
         if matches!(&detail.notification_dismissal,
             Some(NotificationDismissalState::Accepted { ordinal, .. }) if prepared.applied_event_ordinal >= *ordinal)
         {
@@ -1419,11 +1421,18 @@ impl DashboardState {
     }
 
     /// The current open question target, if the worker located one.
-    pub fn set_question_message(&mut self, session_id: &str, target: Option<String>) {
-        self.session_details
+    pub fn set_question_message(
+        &mut self,
+        session_id: &str,
+        target: Option<String>,
+        supports_open_request: bool,
+    ) {
+        let detail = self
+            .session_details
             .entry(session_id.to_owned())
-            .or_default()
-            .question_message = target;
+            .or_default();
+        detail.question_message = target;
+        detail.supports_open_request = supports_open_request;
     }
 
     pub fn question_message(&self, session_id: &str) -> Option<&str> {

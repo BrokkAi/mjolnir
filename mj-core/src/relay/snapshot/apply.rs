@@ -13,7 +13,9 @@ use super::*;
 /// fails if the two ever disagree.
 pub fn observation_changes_state(observation: &RelayObservation) -> bool {
     match observation {
-        RelayObservation::HandbackCheckStarted { .. }
+        RelayObservation::QuestionTargetUpdated { .. }
+        | RelayObservation::ManagedSubagentConfigured { .. }
+        | RelayObservation::HandbackCheckStarted { .. }
         | RelayObservation::TurnAssessmentUpdated { .. }
         | RelayObservation::SteeringUnconfirmed { .. }
         | RelayObservation::AgentInitialized { .. }
@@ -220,6 +222,27 @@ fn complete_hook_steering(
 pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Result<()> {
     validate_relay_event(snapshot.latest_ordinal, &snapshot.latest_digest, event)?;
     match &event.observation {
+        RelayObservation::ManagedSubagentConfigured { managed } => {
+            snapshot.managed_subagent = *managed;
+        }
+        RelayObservation::QuestionTargetUpdated {
+            question,
+            question_message,
+        } => {
+            if let Some(request) = snapshot
+                .request
+                .as_mut()
+                .filter(|request| request.question == *question)
+            {
+                request.question_message = Some(question_message.clone());
+            }
+            if let Some(assessment) = snapshot.assessment.as_mut().filter(|assessment| {
+                assessment.turn_id == question.turn_id
+                    && assessment.completed_ordinal == question.completed_ordinal
+            }) {
+                Arc::make_mut(assessment).question_message = Some(question_message.clone());
+            }
+        }
         RelayObservation::HandbackCheckStarted { assignment_id } => {
             snapshot
                 .handback_checks
@@ -256,6 +279,17 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             {
                 // Only consecutive provider refusals share a retry backoff.
                 snapshot.capacity_retry = None;
+            }
+            if !snapshot.managed_subagent
+                && let Some(question) = assessment.inferred_question()
+            {
+                snapshot.request = Some(crate::assessment::OpenRequest {
+                    question,
+                    question_message: assessment
+                        .question_message
+                        .clone()
+                        .or_else(|| snapshot.completed_reply_message.clone()),
+                });
             }
             snapshot.retry_assessment = None;
             snapshot.assessment = Some(std::sync::Arc::new((**assessment).clone()));
@@ -413,6 +447,7 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                             .join("\n"),
                     ) =>
                 {
+                    snapshot.person_input_through = event.ordinal;
                     snapshot.continuation = crate::continuation::ContinuationState {
                         user_command_id: Some(command_id.clone()),
                         suppressed: crate::acp::context_command(prompt).is_some(),
@@ -452,17 +487,10 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                     }
                 }
                 RelayCommand::DismissQuestion { question } => {
-                    let assessment = snapshot
-                        .assessment
-                        .as_mut()
-                        .filter(|a| a.inferred_question().as_ref() == Some(question))
-                        .ok_or_else(|| {
-                            anyhow!("dismissed question no longer matches the completed turn")
-                        })?;
-                    let assessment = Arc::make_mut(assessment);
-                    assessment.status = crate::assessment::Status::Superseded;
-                    assessment.reason = "question_dismissed".into();
-                    assessment.retry_at_ms = None;
+                    if snapshot.open_request().map(|request| &request.question) != Some(question) {
+                        bail!("dismissed question no longer matches the open request");
+                    }
+                    snapshot.person_input_through = event.ordinal;
                 }
                 RelayCommand::SeedAssessmentContext { context, .. } => {
                     snapshot.assessment_context = Some(Arc::new((**context).clone()));
@@ -1373,6 +1401,11 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             if let Some(turn) = autonomous_turn
                 && !*prompt_in_flight
             {
+                snapshot.completed_reply_message = snapshot
+                    .assessment_context
+                    .as_ref()
+                    .and_then(|context| context.open_assistant_id.as_deref())
+                    .and_then(crate::activity::question_locator::transcript_stable_id);
                 // Physical completion does not depend on a retained user command.
                 // Missing authorization gates nudges, never provider assessment.
                 snapshot.assessment = Some(std::sync::Arc::new(
@@ -1936,8 +1969,15 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
         RelayObservation::ElicitationRequested { request } => {
             snapshot.assessment_questions.insert(request.id.clone());
         }
-        RelayObservation::ElicitationResolved { elicitation_id, .. } => {
+        RelayObservation::ElicitationResolved {
+            elicitation_id,
+            reply,
+            ..
+        } => {
             snapshot.assessment_questions.remove(elicitation_id);
+            if reply.is_some() {
+                snapshot.person_input_through = event.ordinal;
+            }
         }
         RelayObservation::ElicitationsCleared => {
             snapshot.assessment_questions.clear();
@@ -1964,6 +2004,11 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
                 },
             ..
         } => {
+            snapshot.completed_reply_message = snapshot
+                .assessment_context
+                .as_ref()
+                .and_then(|context| context.open_assistant_id.as_deref())
+                .and_then(crate::activity::question_locator::transcript_stable_id);
             let mut a = TurnAssessment::pending(
                 command_id.clone(),
                 event.ordinal,
@@ -1977,6 +2022,18 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
             ) {
                 a.status = Status::Superseded;
                 a.reason = "explicit_handoff_or_cancellation".into();
+            }
+            if !snapshot.managed_subagent
+                && crate::state::classify_prompt_completion(stop_reason)
+                    == crate::state::PromptCompletion::InputRequired
+            {
+                snapshot.request = Some(crate::assessment::OpenRequest {
+                    question: crate::assessment::InferredQuestion {
+                        turn_id: command_id.clone(),
+                        completed_ordinal: event.ordinal,
+                    },
+                    question_message: snapshot.completed_reply_message.clone(),
+                });
             }
             snapshot.assessment = Some(std::sync::Arc::new(a));
             if let Some(context) = &mut snapshot.assessment_context {
@@ -1997,6 +2054,10 @@ fn apply_assessment_context(snapshot: &mut RelaySnapshot, event: &RelayEvent) {
         } => {
             snapshot.assessment_context = Some(Default::default());
             snapshot.assessment = None;
+            // The conversation that held any open request is gone, so fence it
+            // like person input; a fresh conversation inherits no question.
+            snapshot.person_input_through = event.ordinal;
+            snapshot.completed_reply_message = None;
         }
         RelayObservation::CommandQueued {
             command_id,
@@ -2078,4 +2139,64 @@ fn begin_delivered_message_turn(
     continuation.harness_turn = None;
     continuation.quota_suppressed = false;
     continuation.quota_recovery = None;
+}
+
+#[cfg(test)]
+mod open_request_tests {
+    use super::*;
+
+    #[test]
+    fn automatic_form_resolution_preserves_request_but_person_answer_clears_it() {
+        let mut snapshot = RelaySnapshot::new("forms".into());
+        snapshot.request = Some(crate::assessment::OpenRequest {
+            question: crate::assessment::InferredQuestion {
+                turn_id: "original".into(),
+                completed_ordinal: 1,
+            },
+            question_message: None,
+        });
+        for reply in [None, Some("Use the old format".into())] {
+            let human = reply.is_some();
+            let mut event = RelayEvent {
+                format: RELAY_EVENT_FORMAT_V2,
+                ordinal: snapshot.latest_ordinal + 1,
+                previous_digest: String::new(),
+                digest: String::new(),
+                recorded_at_ms: 1,
+                command_id: None,
+                observation: RelayObservation::ElicitationResolved {
+                    elicitation_id: "form".into(),
+                    action: "accept".into(),
+                    reply,
+                },
+            };
+            event.digest = relay_event_digest(&event).unwrap();
+            apply_relay_event(&mut snapshot, &event).unwrap();
+            assert_eq!(snapshot.open_request().is_none(), human);
+        }
+    }
+
+    #[test]
+    fn legacy_snapshot_without_request_and_retained_request_round_trip() {
+        let mut snapshot = RelaySnapshot::new("compatibility".into());
+        let mut legacy = serde_json::to_value(&snapshot).unwrap();
+        legacy.as_object_mut().unwrap().remove("request");
+        legacy.as_object_mut().unwrap().remove("managed_subagent");
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("person_input_through");
+        let restored: RelaySnapshot = serde_json::from_value(legacy).unwrap();
+        assert!(restored.open_request().is_none());
+        snapshot.request = Some(crate::assessment::OpenRequest {
+            question: crate::assessment::InferredQuestion {
+                turn_id: "earlier-turn".into(),
+                completed_ordinal: 7,
+            },
+            question_message: Some("agent:question".into()),
+        });
+        let restored: RelaySnapshot =
+            serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        assert_eq!(restored.open_request(), snapshot.open_request());
+    }
 }

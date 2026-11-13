@@ -2266,6 +2266,24 @@ mod tests {
             (spec(CommandId::InterruptAll).available)(&dashboard),
             Availability::Blocked("no turn is running here or in its sub-agents")
         );
+        // A pre-64 worker's question may have no daemon dismissal target; its
+        // latest-turn rule still makes the turn unfinished. A protocol-64
+        // worker's question counts only through the daemon's identity.
+        let child = dashboard.session_details.get_mut("child-session").unwrap();
+        child.legacy_awaiting_input = true;
+        assert_eq!(
+            (spec(CommandId::InterruptAll).available)(&dashboard),
+            Availability::Ready
+        );
+        let child = dashboard.session_details.get_mut("child-session").unwrap();
+        child.supports_open_request = true;
+        assert_eq!(
+            (spec(CommandId::InterruptAll).available)(&dashboard),
+            Availability::Blocked("no turn is running here or in its sub-agents")
+        );
+        dashboard
+            .session_details
+            .insert("child-session".into(), Default::default());
 
         crate::test_support::set_working(&mut dashboard, "child-session");
         assert_eq!(

@@ -417,6 +417,21 @@ impl MaterializedSession {
             .max()
     }
 
+    /// Latest prompt written by the person, excluding generated wake messages.
+    pub fn latest_person_position(&self) -> Option<u64> {
+        self.transcript
+            .iter()
+            .filter(|item| match &item.body {
+                TranscriptBody::User { content } => crate::continuation::is_user_authored_message(
+                    Some(&item.stable_id),
+                    &crate::transcript::materialized_content_text(content),
+                ),
+                _ => false,
+            })
+            .map(|item| item.position)
+            .max()
+    }
+
     /// The latest input-requiring outcome, unless work or a later user item
     /// has already answered it. A transcript-free header supplies the user
     /// position retained from its original publication; full sessions use None.

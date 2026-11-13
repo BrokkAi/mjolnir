@@ -558,6 +558,7 @@ fn a_checkpoint_seed_preserves_pending_assessment_and_full_authorization() {
     );
     relay.prepare_pending_assessment().unwrap();
     let state = mj_core::assessment::Checkpoint {
+        open_request: None,
         version: 1,
         context: relay.snapshot.assessment_context.as_deref().cloned(),
         assessment: relay.snapshot.assessment.as_deref().cloned(),

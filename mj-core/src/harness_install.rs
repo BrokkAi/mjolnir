@@ -163,9 +163,10 @@ impl Located {
 /// where a harness comes from; sessions, the model-discovery probe, `mj login`
 /// and quota checks all ask it.
 ///
-/// `environment` is already resolved: the caller merged the account's login
-/// environment into it, so this never starts a login shell. `command` and
-/// `args` are the launch the controller described. A command
+/// `environment` is already resolved: worker callers include the account's
+/// login environment, while interactive login callers pass their terminal
+/// environment. This function never starts a login shell. `command` and `args`
+/// are the launch the controller described. A command
 /// that is not Mjolnir's built-in launch ([`crate::harness_runtime::fallback_launch`]
 /// or a bare npm bridge name) is the profile's own and is kept as given.
 ///

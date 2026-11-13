@@ -1125,6 +1125,11 @@ impl HarnessKind {
         )
     }
 
+    /// Claude and Codex publish background inventory through the pinned AIR bridge.
+    pub const fn has_reliable_background_inventory(self) -> bool {
+        matches!(self, Self::Claude | Self::Codex)
+    }
+
     /// Whether the harness has sub-agents of its own, which the Native
     /// delegation choice keeps. dsh-acp has none, so Native would do nothing
     /// for DSH and is not offered there.

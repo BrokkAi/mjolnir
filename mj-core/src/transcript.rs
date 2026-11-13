@@ -1105,6 +1105,18 @@ pub fn message_item_id(event_key: &str) -> String {
     format!("message:{event_key}")
 }
 
+/// Recover an assistant message by its stable transcript identity.
+pub fn materialized_agent_message_text<'a>(
+    mut items: impl Iterator<Item = &'a TranscriptItem>,
+    stable_id: &str,
+) -> Option<String> {
+    let item = items.find(|item| item.stable_id == stable_id)?;
+    match &item.body {
+        TranscriptBody::Agent { chunks, .. } => Some(materialized_chunks_text(chunks)),
+        _ => None,
+    }
+}
+
 pub fn materialized_chunks_text(chunks: &[serde_json::Value]) -> String {
     chunks
         .iter()
