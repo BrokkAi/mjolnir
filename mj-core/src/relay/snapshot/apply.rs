@@ -1346,10 +1346,9 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
             }
             // Codex also reports native starts inside our own prompts; only a
             // start with no prompt in flight is a turn of the harness's own.
-            snapshot.continuation.autonomous_turn_started =
-                snapshot.active_prompt.is_none().then_some(event.ordinal);
             snapshot.activity_turn_started_at_ms = Some(*started_at_ms);
             snapshot.harness_turn = Some(StoredHarnessTurn {
+                autonomous: snapshot.active_prompt.is_none(),
                 started_at_ms: *started_at_ms,
                 first_ordinal: event.ordinal,
             });
@@ -1371,7 +1370,6 @@ pub fn apply_relay_event(snapshot: &mut RelaySnapshot, event: &RelayEvent) -> Re
                 });
             }
             let autonomous_turn = snapshot.autonomous_harness_turn();
-            snapshot.continuation.autonomous_turn_started = None;
             if let Some(turn) = autonomous_turn
                 && !*prompt_in_flight
             {

@@ -181,7 +181,8 @@ pub const RELAY_EVENT_DIGEST_DOMAIN_V2: &[u8] = b"hel-relay-event-v2\0";
 // Revision 20 is breaking: terminal receipts no longer carry execution payloads.
 // Revision 21 is breaking: older readers cannot preserve DismissQuestion commands.
 // Revision 22 is breaking: older writers cannot preserve handback check admission.
-pub const RELAY_STATE_VERSION: u32 = 22;
+// Revision 24 is breaking: open turns own their autonomous fact; older readers reject the new field.
+pub const RELAY_STATE_VERSION: u32 = 24;
 /// The relay snapshot inside a worker root. Teardown and restore name it from
 /// here rather than repeating the literal.
 pub const RELAY_STATE_FILE: &str = "relay-state.json";

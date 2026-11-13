@@ -424,6 +424,12 @@ impl DurableRelay {
             // stay valid — each is recomputed with the formula matching the
             // record's format — so only the schema marker advances; the next
             // persist writes it back at the current version.
+            if snapshot.format_version < 24
+                && let Some(turn) = snapshot.harness_turn.as_mut()
+            {
+                turn.autonomous =
+                    snapshot.continuation.autonomous_turn_started == Some(turn.first_ordinal);
+            }
             snapshot.format_version = RELAY_STATE_VERSION;
             // Older snapshots can still identify a live turn, even though
             // they did not retain its start through subsequent background work.
@@ -1407,7 +1413,7 @@ impl DurableRelay {
         )
     }
 
-    /// The announced task owns this turn's completion, including after a stop.
+    /// The announced task owns completion unless an unanswered user stop overrides it.
     fn announced_harness_turn(&self) -> bool {
         self.snapshot.harness_turn.is_some_and(|turn| {
             self.air_tasks
@@ -1423,7 +1429,7 @@ impl DurableRelay {
     /// [`HARNESS_TURN_STOP_GRACE`]. The snapshot owns the stop: a journal
     /// event records it, so it is the same on every path and after a restart.
     pub fn unanswered_harness_turn_stop(&self) -> Option<u64> {
-        if self.harness_turns != HarnessTurnPolicy::ClaudeAdapter || self.announced_harness_turn() {
+        if self.harness_turns != HarnessTurnPolicy::ClaudeAdapter {
             return None;
         }
         let turn = self.snapshot.autonomous_harness_turn()?;
@@ -1434,9 +1440,8 @@ impl DurableRelay {
     }
 
     /// End the harness turn a stop was applied to, if it is still open. A
-    /// cycle Claude Code was running would have sent its result by now; a
-    /// turn that is still open was opened for output no cycle produced, and
-    /// nothing else would ever end it. Returns whether a turn was ended.
+    /// user stop overrides even an announced task that never reports its end.
+    /// Returns whether a turn was ended.
     pub fn end_unanswered_harness_turn_stop(&mut self, first_ordinal: u64) -> Result<bool> {
         if self.unanswered_harness_turn_stop() != Some(first_ordinal) {
             return Ok(false);
@@ -1468,6 +1473,7 @@ impl DurableRelay {
     }
 
     fn settle_harness_turn(&mut self, origin: Option<String>, stop_reason: &str) -> Result<()> {
+        let settled_ordinal = self.snapshot.harness_turn.map(|turn| turn.first_ordinal);
         self.append_relay_event(
             None,
             RelayObservation::HarnessTurnSettled {
@@ -1498,6 +1504,17 @@ impl DurableRelay {
                 prompt_in_flight: self.snapshot.active_prompt.is_some(),
             },
         )?;
+        // Settlement and detachment share the relay owner lock. Keep task IDs
+        // as tombstones so late terminal updates cannot claim a successor.
+        // Late output may open an unannounced turn after its raw result; a
+        // fresh Stop still ends that turn through the same grace fallback.
+        for entry in self.air_tasks.values_mut() {
+            if let background::AirTaskState::Turn(ordinal) = &mut entry.state
+                && *ordinal == settled_ordinal
+            {
+                *ordinal = None;
+            }
+        }
         self.finish_turn_activity()?;
         Ok(())
     }
