@@ -420,6 +420,8 @@ impl DashboardState {
             ));
         }
         let raw_project = is_bare_project_target(&self.config.targets[&target_template_id]);
+        let container_target =
+            mj_core::config::is_container_target(&self.config.targets[&target_template_id]);
         // The checkout, not the record's path, names the project: a managed
         // worktree's own path is the source's, and a sub-agent works in its
         // owner's checkout.
@@ -496,6 +498,28 @@ impl DashboardState {
             &policy,
             chooser.oracle,
         );
+        // The launch starts at once, so a choice the refresh could not keep is
+        // reported, like the profile and workspace above. Native shown as None
+        // for a harness without sub-agents of its own is not a change.
+        let kept_policy = delegation.shown(&policy);
+        if delegation.selected() != kept_policy {
+            let reason = delegation
+                .unavailable_reason()
+                .map(|reason| format!(" ({})", reason.trim_end_matches('.')))
+                .unwrap_or_default();
+            changes.push(format!(
+                "Sub-agents: {} is not available{reason}, so this session uses {}.",
+                delegation.policy_label(&policy),
+                delegation.policy_label(&delegation.selected()),
+            ));
+        }
+        if chooser.oracle && !delegation.oracle_available() {
+            changes.push(
+                "Oracle is not available (no oracle model is configured), so this session \
+                 starts without it."
+                    .to_owned(),
+            );
+        }
         Ok(DashboardAction::CreateSession {
             remember_container_size: false,
             subagents: Some(delegation.selected()),
@@ -520,6 +544,14 @@ impl DashboardState {
                 no_project_memory: source.no_project_memory,
                 no_github_events: source.no_github_events,
                 no_github_credentials: source.no_github_credentials,
+                // Container targets only, as in the container editor; the
+                // runtime was checked above, so this is the target's kind.
+                container_cpus: container_target
+                    .then(|| source.container_cpus.clone())
+                    .flatten(),
+                container_memory: container_target
+                    .then(|| source.container_memory.clone())
+                    .flatten(),
                 note: (!changes.is_empty()).then(|| changes.join(" ")),
             },
         })

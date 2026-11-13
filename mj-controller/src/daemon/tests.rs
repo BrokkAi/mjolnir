@@ -6276,6 +6276,8 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
             target_template_id: "localhost".into(),
             additional_mounts: Vec::new(),
             resource_allocation: None,
+            container_cpus: None,
+            container_memory: None,
             title: title.into(),
             session_title_override: None,
         })

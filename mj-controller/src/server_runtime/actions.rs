@@ -242,6 +242,8 @@ pub(super) async fn apply_phone_action(
                         target_template_id: target_id,
                         additional_mounts,
                         resource_allocation: resource_allocation.map(|allocation| *allocation),
+                        container_cpus: None,
+                        container_memory: None,
                         title,
                         session_title_override,
                     },

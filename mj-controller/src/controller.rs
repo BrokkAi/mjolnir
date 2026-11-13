@@ -611,6 +611,10 @@ pub struct SessionLaunchOptions {
     pub workspace_id: String,
     pub additional_mounts: Vec<AdditionalMount>,
     pub resource_allocation: Option<SessionResourceAllocation>,
+    /// Per-session container size overrides, stored as the record's
+    /// `container_cpus` and `container_memory`; container targets only.
+    pub container_cpus: Option<String>,
+    pub container_memory: Option<String>,
     pub project_directory: Option<PathBuf>,
     pub session_title_override: Option<String>,
 }
@@ -929,6 +933,8 @@ impl Controller {
             workspace_id,
             additional_mounts,
             resource_allocation,
+            container_cpus,
+            container_memory,
             project_directory,
             session_title_override,
         } = options;
@@ -1067,6 +1073,15 @@ impl Controller {
             (bundle_id.to_owned(), None)
         };
         validate_resource_allocation(template, resource_allocation.as_ref())?;
+        // The editor stores a cleared field as no override; a copy of its
+        // value must read the same.
+        let container_cpus = container_cpus.filter(|value| !value.trim().is_empty());
+        let container_memory = container_memory.filter(|value| !value.trim().is_empty());
+        if (container_cpus.is_some() || container_memory.is_some())
+            && !mj_core::config::is_container_target(template)
+        {
+            bail!("container size overrides apply to container targets only");
+        }
         let selected_container_size =
             selected_host_container_size(template, resource_allocation.as_ref())
                 .filter(|_| remember_container_size);
@@ -1109,8 +1124,8 @@ impl Controller {
             publication: None,
             subagents: Some(subagents),
             archived: false,
-            container_cpus: None,
-            container_memory: None,
+            container_cpus,
+            container_memory,
             // Recorded for every new session, container-backed or not, so a
             // later move into a container already knows the path its checkout
             // will occupy. Only sessions that predate per-session container

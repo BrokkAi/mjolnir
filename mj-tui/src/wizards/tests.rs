@@ -6460,7 +6460,13 @@ fn create_delegation_tracks_config_availability_without_overwriting_explicit_cho
 fn new_session_like_a_child_in_a_managed_worktree_is_top_level_with_its_own_worktree() {
     let mut parent = legacy_managed_session(running_session());
     parent.target_template_id = "localhost".into();
-    parent.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
+    // Mjolnir delegation with no sub-agent model configured, and an oracle
+    // with no oracle model: the copy cannot keep either.
+    parent.subagents = Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+        straightforward: None,
+        subtle: None,
+    });
+    parent.oracle = true;
     parent.review = Some(Box::new(mj_core::config::SessionReview::Off));
     parent.no_github_credentials = true;
     let worktree_root = parent.project_directory.clone().unwrap();
@@ -6473,6 +6479,8 @@ fn new_session_like_a_child_in_a_managed_worktree_is_top_level_with_its_own_work
     child.oracle = false;
     child.review = None;
     child.no_github_credentials = true;
+    // Size overrides are a container's; a bare runtime has none to carry.
+    child.container_cpus = Some("2".into());
     child.last_profile = "retired-profile".into();
     let relation = mj_core::subagent::SubagentMetadata {
         kind: mj_core::subagent::SubagentKind::Worker,
@@ -6522,11 +6530,41 @@ fn new_session_like_a_child_in_a_managed_worktree_is_top_level_with_its_own_work
         dashboard.nth_offered_profile(dashboard.default_new_profile_index())
     );
     assert!(carried.no_github_credentials);
+    assert_eq!(carried.container_cpus, None);
     let note = carried.note.expect("the replaced profile is reported");
     assert!(
         note.contains("retired-profile") && note.contains(&profile_id),
         "{note}"
     );
+    assert!(
+        note.contains("Sub-agents: Mjolnir is not available")
+            && note.contains("so this session uses Native."),
+        "{note}"
+    );
+    assert!(
+        note.contains("Oracle is not available") && note.contains("starts without it."),
+        "{note}"
+    );
+}
+
+/// "New session with these settings" must carry the source's container size
+/// overrides as stored: they win over the allocation when the container is
+/// created, so a copy without them starts at a different size.
+// Hard-won: d2d6ebb14: the copy kept the allocation but dropped container_cpus and container_memory.
+#[test]
+fn new_session_like_a_resized_container_session_carries_its_size_overrides() {
+    let mut source = running_session();
+    source.container_cpus = Some("3.5".into());
+    source.container_memory = Some("6g".into());
+    let mut dashboard = dashboard_with_session(source.clone());
+
+    let DashboardAction::CreateSession { carried, .. } =
+        dashboard.begin_new_session_like(&source.id)
+    else {
+        panic!("the copy creates a session without a dialog");
+    };
+    assert_eq!(carried.container_cpus.as_deref(), Some("3.5"));
+    assert_eq!(carried.container_memory.as_deref(), Some("6g"));
 }
 
 /// A copied launch skips the new-session key, so it must wait for the host's

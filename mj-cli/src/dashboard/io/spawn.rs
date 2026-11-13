@@ -1353,6 +1353,8 @@ pub(crate) fn spawn_dashboard_create_session(
                         // Local changes are never part of isolated creation;
                         // the compatibility field is intentionally ignored.
                         resource_allocation,
+                        container_cpus: carried.container_cpus,
+                        container_memory: carried.container_memory,
                         title,
                         session_title_override: None,
                     })
