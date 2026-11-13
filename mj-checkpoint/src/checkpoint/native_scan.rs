@@ -137,7 +137,16 @@ pub(super) fn collect_native_artifacts_cached(
         collect_claude_memory_artifacts(home, session_id, &mut output)?;
     }
     output.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
-    ensure!(allow_empty || !output.is_empty(), NO_SESSION_ARTIFACTS);
+    // agy's `brain` files only support the conversation, which lives in its
+    // database; agy loads a conversation without one and fails at the next
+    // prompt, so the files alone are no history.
+    let holds_conversation = match harness {
+        HarnessKind::Antigravity => output
+            .iter()
+            .any(|artifact| is_sqlite_native_database(harness, &artifact.relative_path)),
+        _ => !output.is_empty(),
+    };
+    ensure!(allow_empty || holds_conversation, NO_SESSION_ARTIFACTS);
     let total = output
         .iter()
         .try_fold(0_u64, |total, artifact| {

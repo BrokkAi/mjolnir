@@ -571,6 +571,16 @@ fn an_antigravity_checkpoint_keeps_the_live_conversation_and_follows_the_workspa
         format!("{error:#}").contains("two different sets of workspaces"),
         "{error:#}"
     );
+
+    // Without its database, the conversation's `brain` files are no history.
+    fs::remove_file(&database).unwrap();
+    let mut without_database = spec.clone();
+    without_database.output_path = temp.path().join("worker/no-database.hel.zip");
+    let error = export_checkpoint(&without_database).unwrap_err();
+    assert!(
+        format!("{error:#}").contains(NO_SESSION_ARTIFACTS),
+        "{error:#}"
+    );
 }
 
 /// R4-5: a Codex session whose only turn failed at the usage limit, followed
