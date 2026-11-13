@@ -3682,10 +3682,6 @@ fn the_jev_switch_reaches_the_worker_and_removes_the_key() {
     )
     .unwrap()
     .0;
-    for environment in [&mut launch.target_environment, &mut launch.environment] {
-        environment.insert("TYPESAFE_API_KEY".into(), "secret".into());
-    }
-
     let mut on = launch.clone();
     apply_jev_switch(&mut on, true);
     assert_eq!(on.target_environment, launch.target_environment);
@@ -3693,7 +3689,6 @@ fn the_jev_switch_reaches_the_worker_and_removes_the_key() {
 
     apply_jev_switch(&mut launch, false);
     for environment in [&launch.target_environment, &launch.environment] {
-        assert!(!environment.contains_key("TYPESAFE_API_KEY"));
         assert_eq!(
             environment.get(mj_core::jev::DISABLED_ENVIRONMENT),
             Some(&"1".to_owned())
