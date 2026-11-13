@@ -17,7 +17,6 @@ pub const ROOT_GROUPS: &[(&str, &[&str])] = &[
         "Sessions",
         &[
             "review",
-            "continuation",
             "subagents",
             "quota",
             "sessionwiki",

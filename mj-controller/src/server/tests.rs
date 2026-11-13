@@ -5060,6 +5060,15 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
         root(),
         (
             "/api/settings/page",
+            serde_json::json!({"path": ["phone"]}),
+        ),
+        (
+            "/api/settings/edit",
+            serde_json::json!({"page": ["phone"], "edit": {"kind": "toggle", "path": ["phone", "enabled"]}}),
+        ),
+        root(),
+        (
+            "/api/settings/page",
             serde_json::json!({"path": ["subagents"]}),
         ),
         (
@@ -5122,6 +5131,7 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
     assert!(saved.contains(SECRET), "{saved}");
     assert!(saved.contains(RUNTIME_SECRET), "{saved}");
     let saved = Config::load_from(&path).unwrap();
+    assert!(!saved.phone.enabled);
     assert_eq!(
         serde_json::to_value(&saved.subagents).unwrap()["straightforward"]["model"],
         "opus"

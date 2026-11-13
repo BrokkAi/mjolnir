@@ -12,7 +12,7 @@ After this change, mj never sends an automatic "continue" prompt for ordinary un
 
 - [x] (2026-11-13) Milestone 1: worker and core: remove the GLiDE Continue switch, the worker `continuation_enabled` flag and its environment variable, keep legacy decoding.
 - [x] (2026-11-13) Milestone 2: daemon (also removed `ContinuationConfig` and the `Config.continuation` field with the legacy `[continuation]` decoder, because core could not compile otherwise): remove the automatic-continuation decider and submit path; keep quota recovery, the seed job, the update feed and the review observer.
-- [ ] Milestone 3: configuration, settings UI, goldens, docs, shipped skill, e2e scripts, AGENTS.md.
+- [x] (2026-11-13) Milestone 3: configuration, settings UI, goldens, docs, shipped skill, e2e scripts, AGENTS.md.
 - [ ] Milestone 4: proxy: keep serving the old routes, move their question files into the proxy package.
 - [ ] Full validation, commit, review, push; close #1304 and #1532.
 
@@ -64,6 +64,9 @@ After this change, mj never sends an automatic "continue" prompt for ordinary un
 - Decision (milestone 2 deviations, implementer): `legacy_quiet` stays in the daemon because `quota_schedulable` and `quota_resume_blockers` still use it for workers older than relay protocol 23, so a stored recovery on such a worker can still be resumed; only automatic-continuation uses went. `incomplete_and_oversized_evidence_is_rejected` in `mj-core/src/continuation.rs` stays (minus its `quota_message` field), because it is the only test of `ContinuationEvidence::validate` limits, which the GLiDE and handback paths still use. The three `mj-controller` evidence tests (authorization across exchanges, newest user window, generated input excluded) moved to `mj-transcript/src/authorization.rs`, which owns `evidence()`, instead of being deleted. `Phase::Checking` was renamed `Phase::Resolving` (it now only resolves a quota reset deadline). A quota assessment no longer goes through a classify task: admission spawns the quota preparation directly.
   Date/Author: 2026-11-13, implementer.
 - Decision: `a_self_started_turn_that_hits_the_quota_schedules_recovery_against_itself` now asserts that workers on protocol 24 and 22 are not scheduled (the accepted loss of legacy-worker quota recovery) and that a protocol-25 worker's `RecoverQuota` assessment schedules the recovery; `quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff` and `handoff_defers_a_quota_assessment_without_consuming_its_trigger` drive the same worker-assessment path, which satisfies the parent's requirement that a test cover a worker `RecoverQuota` assessment leading to a scheduled recovery.
+  Date/Author: 2026-11-13, implementer.
+
+- Decision (milestone 3, implementer): the settings golden exchange and the web settings e2e used the Continuation page as the page that is opened, edited and kept across a notification navigation (Hard-won 7a50f9da7). They now use the Web Access (`phone`) page and its `Enabled` toggle, because the exchange must still contain one page edit. `scripts/jev-continuation-eval.py` was deleted. The Privacy help now reads "Sends turn text to a hosted classifier; quota recovery needs it. Off stops both; sessions follow on resume or restart." (it has to fit two rows, and tests require the words "resume or restart"). `docs/src/content/docs/sessions.md` has a "Quota recovery" section in place of "Automatic continuation".
   Date/Author: 2026-11-13, implementer.
 
 ## Outcomes & Retrospective

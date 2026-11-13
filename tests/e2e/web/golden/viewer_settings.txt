@@ -25,8 +25,6 @@ Host
 SESSIONS
 Code Review
 Off
-Continuation
-On · 3 continuations plus quota recovery
 Sub-agents
 Up to 6 at once
 Quota checks
@@ -98,9 +96,9 @@ control Context budget (bytes): "" (text, placeholder "262144 (256 KiB)")
 layout: {"overflowsSideways":false,"savebar":false,"saveEnabled":false,"menu":"Settings","hash":"#settings/profiles/claude"}
 === an accepted edit leaves the draft unsaved (390x844) ===
 Settings
-Continuation
+Web Access
 
-Continue an unfinished request up to three times per message, and resume a session after its quota resets.
+Web access changes take effect when the background server next starts. Remote access requires a certificate and key.
 
 Notifications on this device
 
@@ -111,13 +109,21 @@ Enable notifications on this device Disable notifications Send test notification
 Use an HTTPS address. On iOS 16.4 or later, add Mjolnir to the Home Screen and open it there first.
 
 Enabled
+Listen address and port
+Detect Tailscale
+TLS certificate file
+TLS private key file
 
 Unsaved changes. Save writes them to the configuration file.
 
 Discard
 Save
 control Enabled: unchecked
-layout: {"overflowsSideways":false,"savebar":true,"saveEnabled":true,"menu":"Settings (unsaved)","hash":"#settings/continuation"}
+control Listen address and port: "127.0.0.1:3765" (text, placeholder "Not set")
+control Detect Tailscale: checked
+control TLS certificate file: "" (text, placeholder "None (HTTP only)")
+control TLS private key file: "" (text, placeholder "None (HTTP only)")
+layout: {"overflowsSideways":false,"savebar":true,"saveEnabled":true,"menu":"Settings (unsaved)","hash":"#settings/phone"}
 === a refused edit keeps what was typed beside the reason (390x844) ===
 Settings
 Sub-agents

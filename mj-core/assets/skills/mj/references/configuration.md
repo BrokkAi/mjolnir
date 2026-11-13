@@ -83,8 +83,7 @@ also accepted when reading and is saved under `[github.watch] enabled`.
 | `advanced` | table | no | default `[advanced]` values | Optional terminal display settings. |
 | `notify` | table | no | default `[notify]` values | How the terminal dashboard reports sessions that need you. |
 | `review` | table | no | default `[review]` values | Reviewer settings for push review. |
-| `continuation` | table | no | enabled | Automatic continuation of already-requested unfinished work; also requires Jev. |
-| `jev` | table | no | enabled | Hosted turn classification, continuation checks, and semantic help search. |
+| `jev` | table | no | enabled | Hosted turn classification and the quota recovery that depends on it. |
 | `daemon` | table | no | runs on the host | Where the daemon runs: on this computer or in a Podman or Docker container. |
 | `sessionwiki` | table | no | default `[sessionwiki]` values | Full-text session index and automatic archiving. |
 | `keys` | table | no | default `[keys]` values | The prefix key and every command's key bindings. |
@@ -411,11 +410,11 @@ enabled = false
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `enabled` | boolean | no | `true` | `false` stops every request to the hosted Jev service: turn classification, automatic continuation, and semantic help search. |
+| `enabled` | boolean | no | `true` | `false` stops every request to the hosted Jev service: turn classification and quota recovery. |
 
-Jev reads recent conversation text to answer three questions: whether a
-silent turn is waiting for you, whether a finished reply left work undone,
-and which help rows match what you typed. [Security
+Jev reads recent conversation text to answer two questions: whether a
+silent turn is waiting for you, and whether a finished reply needs you or
+hit a quota limit. [Security
 boundaries](/security/#what-leaves-this-machine-by-default) lists exactly what
 each request sends and where.
 
@@ -425,8 +424,8 @@ With `enabled = false`:
   turn that goes quiet while the agent waits for an answer stays **Working**
   until the harness reports the end of the turn, and after a reply the
   session's state follows the harness's own background-task reports.
-- Automatic continuation does not run, whatever `[continuation]` says.
-- The help filter matches text only and shows no related shortcuts.
+- Quota recovery does not run: a session stopped by a quota limit is not
+  resumed after the reset.
 
 Workers read the switch when they start, so a running session follows the
 new value after it is next resumed or restarted. In the terminal the switch
@@ -471,23 +470,6 @@ item transaction. A failed item does not block delivery for other items. Failed
 classifications retry with a delay that grows from one minute to one hour; new
 work is classified before retries. Notices always include the repository name. Comments and reviews
 written by the token owner during that session's turn do not wake it.
-
-## Automatic continuation `[continuation]`
-
-```toml
-[continuation]
-enabled = false
-```
-
-| Field | TOML type | Required | Default | Validation and behavior |
-| --- | --- | --- | --- | --- |
-| `enabled` | boolean | no | `true` | Allows Jev to check ended turns and continue work already requested by the user. Requires `[jev] enabled = true`. |
-
-There are at most three automatic continuations between user messages. New
-input or an interrupt cancels a pending check; continuation never supplies
-missing approval or answers a question. See [Automatic
-continuation](/sessions/#automatic-continuation) for background work, goals,
-quota recovery, and the text sent to the classifier.
 
 ## Session index `[sessionwiki]`
 
