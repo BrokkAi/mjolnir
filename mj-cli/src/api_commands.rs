@@ -2647,6 +2647,225 @@ fn render_models(
     }
     Ok(lines.join("\n"))
 }
+
+#[derive(Debug, Args)]
+pub(crate) struct QuotaArgs {
+    /// Show only this profile; default lists every enabled profile.
+    #[arg(long)]
+    profile: Option<String>,
+    /// Ask the daemon to probe again, and wait for the fresh cycle's readings.
+    #[arg(long)]
+    refresh: bool,
+    /// Print the response as JSON instead of text.
+    #[arg(long)]
+    json: bool,
+}
+
+/// How long `mj quota --refresh` waits for the cycle it asked for before
+/// printing what the daemon already has. Quota probes launch each profile's
+/// agent, so a fresh cycle can take a while on a loaded host.
+const QUOTA_REFRESH_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+pub(crate) async fn quota(args: QuotaArgs) -> Result<()> {
+    use mj_client::runtime_feed::RuntimeFrame;
+    let mut daemon = crate::daemon::connect_or_start().await?;
+    let mj_client::runtime_feed::RuntimeFrame::Snapshot {
+        cursor: first,
+        projection,
+    } = daemon.runtime_changes(None, false).await?
+    else {
+        bail!("daemon did not return a runtime snapshot for quota reports");
+    };
+    let mut cursor = Some(first);
+    let mut metadata = projection.metadata;
+    if args.refresh {
+        // The daemon coalesces this with any probe already running; the
+        // cycle count advancing past the request's is the refresh done.
+        let pending = metadata.quotas.cycles;
+        daemon.refresh_quota().await?;
+        let deadline = std::time::Instant::now() + QUOTA_REFRESH_WAIT;
+        while metadata.quotas.cycles <= pending {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            // The wait elapsed without a new cycle: print what the daemon has.
+            let Ok(frame) =
+                tokio::time::timeout(remaining, daemon.runtime_changes(cursor.clone(), true)).await
+            else {
+                break;
+            };
+            match frame? {
+                RuntimeFrame::Snapshot {
+                    cursor: next,
+                    projection,
+                } => {
+                    cursor = Some(next);
+                    metadata = projection.metadata;
+                }
+                RuntimeFrame::Delta {
+                    cursor: next,
+                    changes,
+                    ..
+                } => {
+                    cursor = Some(next);
+                    if let Some(changed) = changes.metadata {
+                        metadata = changed;
+                    }
+                }
+                RuntimeFrame::ResetRequired => cursor = None,
+            }
+        }
+    }
+    let rendered = render_quota(&metadata, args.profile.as_deref(), args.json)?;
+    println!("{rendered}");
+    Ok(())
+}
+
+/// One profile's row for `mj quota`, or the reason its quota cannot be read.
+fn quota_row(
+    id: &str,
+    profile: &mj_core::config::HarnessProfile,
+    snapshot: &mj_client::quota::QuotaSnapshot,
+    now: u64,
+) -> (String, serde_json::Value) {
+    use mj_client::quota::{ProfileQuota, QuotaBilling};
+    let report = snapshot.reports.get(id);
+    let billing = ProfileQuota::billing_for(profile.kind, report);
+    let billing_label = match billing {
+        QuotaBilling::Usage => "usage",
+        QuotaBilling::Subscription => "subscription",
+        QuotaBilling::Unknown => "unknown",
+    };
+    let probing = snapshot.probing.contains(id);
+    let mut entry = serde_json::json!({
+        "profile": id,
+        "harness": profile.kind.id(),
+        "billing": billing_label,
+        "probing": probing,
+        "report": report,
+    });
+    // The quota text, and the reason a missing or failed reading shows.
+    let status = match report {
+        None if probing => "probing now".to_owned(),
+        None => "no quota report yet".to_owned(),
+        Some(report) => {
+            if let Some(error) = report.error_label() {
+                let held = report
+                    .rate_limit_label(now)
+                    .map(|label| format!(" ({label})"))
+                    .unwrap_or_default();
+                format!("error: {error}{held}")
+            } else if let Some(label) = report.windowless_label() {
+                label.to_owned()
+            } else {
+                report
+                    .windows
+                    .iter()
+                    .map(|window| {
+                        let usage = match (window.remaining_percent, window.used, window.limit) {
+                            (Some(remaining), _, _) => format!("{remaining}% left"),
+                            (_, Some(used), Some(limit)) => format!("{used}/{limit} used"),
+                            _ => "available".to_owned(),
+                        };
+                        let reset =
+                            window.reset_display(now, report.banked_resets_for_window(window));
+                        if reset.is_empty() {
+                            format!("{} {usage}", window.label)
+                        } else {
+                            format!("{} {usage}, resets {reset}", window.label)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            }
+        }
+    };
+    let credits = match report.and_then(|report| report.paid_credits.as_ref()) {
+        Some(mj_client::quota::PaidCredits::Limited(balance)) => format!("credits ${balance} left"),
+        Some(mj_client::quota::PaidCredits::Unlimited) => "unlimited credits".into(),
+        Some(mj_client::quota::PaidCredits::Available) => "credits available".into(),
+        None => String::new(),
+    };
+    let status = [status, credits]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    entry["detail"] = serde_json::Value::String(status.clone());
+    let mut text = format!(
+        "{id} ({}, {billing_label}): {status}",
+        profile.kind.display_name()
+    );
+    if let Some(report) = report {
+        text.push_str(&format!(
+            " · checked {} ago",
+            quota_age(now, report.refreshed_at_epoch_seconds)
+        ));
+    }
+    (text, entry)
+}
+
+/// A compact age for a reading: `45s`, `4m`, `2h`, `3d`.
+fn quota_age(now: u64, epoch_seconds: u64) -> String {
+    let age = now.saturating_sub(epoch_seconds);
+    if age < 60 {
+        format!("{age}s")
+    } else if age < 3600 {
+        format!("{}m", age / 60)
+    } else if age < 24 * 3600 {
+        format!("{}h", age / 3600)
+    } else {
+        format!("{}d", age / (24 * 3600))
+    }
+}
+
+fn render_quota(
+    metadata: &mj_client::runtime_feed::RuntimeMetadata,
+    only: Option<&str>,
+    json: bool,
+) -> Result<String> {
+    render_quota_at(metadata, only, json, mj_core::clock::epoch_seconds())
+}
+
+fn render_quota_at(
+    metadata: &mj_client::runtime_feed::RuntimeMetadata,
+    only: Option<&str>,
+    json: bool,
+    now: u64,
+) -> Result<String> {
+    let config = metadata.installed_config();
+    let mut rows = Vec::new();
+    for (id, profile) in &config.profiles {
+        if !profile.enabled {
+            continue;
+        }
+        if only.is_some_and(|wanted| wanted != id) {
+            continue;
+        }
+        rows.push(quota_row(id, profile, &metadata.quotas, now));
+    }
+    if let Some(wanted) = only
+        && rows.is_empty()
+    {
+        bail!("no enabled profile {wanted:?}");
+    }
+    if json {
+        let value = serde_json::json!({
+            "cycles": metadata.quotas.cycles,
+            "profiles": rows.iter().map(|(_, entry)| entry.clone()).collect::<Vec<_>>(),
+        });
+        return serde_json::to_string_pretty(&value).context("serialize quota reports");
+    }
+    if rows.is_empty() {
+        return Ok("no enabled profiles".to_owned());
+    }
+    Ok(rows
+        .iter()
+        .map(|(text, _)| text.clone())
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
 pub(crate) async fn set_config(args: SetConfigArgs) -> Result<()> {
     let client = ApiClient::connect().await?;
     let session = match (args.key, args.value) {
@@ -4340,5 +4559,136 @@ mod tests {
             output.push_str(&render_models(&choices, billing, true).unwrap());
         }
         mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "api-models", &output);
+    }
+
+    #[test]
+    fn api_quota_matches_cli_golden() {
+        use mj_client::quota::{PaidCredits, ProfileQuota, QuotaSnapshot, QuotaWindow};
+        use mj_core::config::{HarnessKind, HarnessProfile};
+        let now = 1_800_000_000u64;
+        let window = |label: &str,
+                      remaining: Option<u8>,
+                      used: Option<i64>,
+                      limit: Option<i64>,
+                      resets_in: Option<u64>| QuotaWindow {
+            label: label.into(),
+            remaining_percent: remaining,
+            duration_seconds: None,
+            model_scope: None,
+            used,
+            limit,
+            resets: None,
+            resets_at_epoch_seconds: resets_in.map(|delta| (now + delta) as i64),
+        };
+        let report = |profile: &str,
+                      harness: HarnessKind,
+                      windows: Vec<QuotaWindow>,
+                      extra: Option<&str>,
+                      error: Option<&str>,
+                      age: u64| ProfileQuota {
+            paid_credits: None,
+            monthly_price_usd: None,
+            banked_resets: None,
+            profile_id: profile.into(),
+            harness,
+            windows,
+            extra: extra.map(str::to_owned),
+            error: error.map(str::to_owned),
+            refreshed_at_epoch_seconds: now - age,
+            rate_limited_until_epoch_seconds: None,
+        };
+        let mut config = mj_core::config::Config::default();
+        for (id, kind, enabled) in [
+            ("claude", HarnessKind::Claude, true),
+            ("codex", HarnessKind::Codex, true),
+            ("kimi", HarnessKind::Kimi, true),
+            ("muse", HarnessKind::Muse, true),
+            ("opencode", HarnessKind::OpenCode, true),
+            ("dsh", HarnessKind::Dsh, false),
+        ] {
+            config.profiles.insert(
+                id.into(),
+                HarnessProfile {
+                    enabled,
+                    ..HarnessProfile::new(kind, format!("/home/agent/.{id}"))
+                },
+            );
+        }
+        let mut claude = report(
+            "claude",
+            HarnessKind::Claude,
+            vec![
+                window("5H", Some(62), None, None, Some(2 * 3600 + 41 * 60)),
+                window(
+                    "Week",
+                    None,
+                    Some(340),
+                    Some(500),
+                    Some(3 * 24 * 3600 + 4 * 3600),
+                ),
+            ],
+            None,
+            None,
+            240,
+        );
+        claude.monthly_price_usd = Some(100);
+        let mut codex = report(
+            "codex",
+            HarnessKind::Codex,
+            vec![],
+            Some(mj_client::quota::API_LABEL),
+            None,
+            60,
+        );
+        codex.paid_credits = PaidCredits::limited(43.2);
+        let kimi = report(
+            "kimi",
+            HarnessKind::Kimi,
+            vec![],
+            Some(mj_client::quota::NOT_REPORTED_LABEL),
+            None,
+            30,
+        );
+        let mut grok_profile = HarnessProfile::new(HarnessKind::Grok, "/home/agent/.grok");
+        grok_profile.enabled = true;
+        config.profiles.insert("grok".into(), grok_profile);
+        let grok = report(
+            "grok",
+            HarnessKind::Grok,
+            vec![],
+            None,
+            Some("login expired"),
+            600,
+        );
+        let snapshot = QuotaSnapshot {
+            reports: [
+                ("claude".to_owned(), claude),
+                ("codex".to_owned(), codex),
+                ("kimi".to_owned(), kimi),
+                ("grok".to_owned(), grok),
+            ]
+            .into_iter()
+            .collect(),
+            probing: ["opencode".to_owned()].into_iter().collect(),
+            cycles: 7,
+        };
+        let metadata = mj_client::runtime_feed::RuntimeMetadata {
+            config: config.into(),
+            quotas: snapshot.into(),
+            ..Default::default()
+        };
+        let mut output = String::from("=== mj quota text ===\n");
+        output.push_str(&render_quota_at(&metadata, None, false, now).unwrap());
+        output.push_str("\n=== mj quota --profile claude ===\n");
+        output.push_str(&render_quota_at(&metadata, Some("claude"), false, now).unwrap());
+        output.push_str("\n=== mj quota --json ===\n");
+        output.push_str(&render_quota_at(&metadata, None, true, now).unwrap());
+        output.push_str("\n=== mj quota --profile missing ===\n");
+        output.push_str(
+            &render_quota_at(&metadata, Some("missing"), false, now)
+                .unwrap_err()
+                .to_string(),
+        );
+        mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "api-quota", &output);
     }
 }

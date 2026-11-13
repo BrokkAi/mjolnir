@@ -70,6 +70,8 @@ fn session_record(id: &str) -> SessionRecord {
 fn operational(session_id: &str) -> RelayOperationalState {
     RelayOperationalState {
         assessment: None,
+        open_request: None,
+        person_input_through: 0,
         assessment_context: None,
         turn_completion: None,
         continuation: Default::default(),

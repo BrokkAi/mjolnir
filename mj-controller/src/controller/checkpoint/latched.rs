@@ -519,6 +519,12 @@ impl Controller {
         {
             canonical_session.assessment_state =
                 Some(serde_json::to_value(mj_core::assessment::Checkpoint {
+                    open_request: barrier.operational.relay_protocol_version
+                        .filter(|v| *v >= mj_core::relay::RELAY_OPEN_REQUEST_PROTOCOL)
+                        .map(|_| mj_core::assessment::CheckpointOpenRequest {
+                            request: barrier.operational.open_request.clone(),
+                            person_input_through: barrier.operational.person_input_through,
+                        }),
                     version: 1,
                     context: barrier.operational.assessment_context.as_deref().cloned(),
                     assessment: barrier.operational.assessment.as_deref().cloned(),

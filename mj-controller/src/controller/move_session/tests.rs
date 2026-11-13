@@ -557,7 +557,12 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
             mj_core::state::MoveSelection {
                 oracle: None,
                 oracle_choice: None,
-                subagents: Some(mj_core::subagent::SubagentPolicy::None),
+                // None is accepted on every harness (#1284); Mjolnir still
+                // needs the destination's delegation tools.
+                subagents: Some(mj_core::subagent::SubagentPolicy::Mjolnir {
+                    straightforward: None,
+                    subtle: None,
+                }),
                 workspace: Default::default(),
                 clear_resource_allocation: false,
                 session_id: session_id.into(),

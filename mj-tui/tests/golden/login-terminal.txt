@@ -1,38 +1,38 @@
-┌ Login · fixture ─────────────────────────────────────────────────────────┐
-│█                                                                         │
-│                                                                          │
-│                                                                          │
-│                                                                          │
-│                                                                          │
-│                                                                          │
-│                                                                          │
-│Connecting to the daemon…                                                 │
-│                                                                          │
-│Ctrl+] closes · Ctrl+Q quits                                              │
-└──────────────────────────────────────────────────────────────────────────┘
+dashboard row 00 ──────────────────────────────────────────────────────────
+dashboard row 01 ──────────────────────────────────────────────────────────
+dash╭ Sign in · fixture ───────────────────────────────────────────────╮───
+dash│█                                                                 │───
+dash│                                                                  │───
+dash│                                                                  │───
+dash│Connecting to the daemon…                                         │───
+dash│                                                                  │───
+dash│Ctrl+] cancels · Ctrl+Q quits                                     │───
+dash╰──────────────────────────────────────────────────────────────────╯───
+dashboard row 10 ──────────────────────────────────────────────────────────
+dashboard row 11 ──────────────────────────────────────────────────────────
 
-┌ Login · fixture ─────────────────────────────────────────────────────────┐
-│Open https://example.test/login                                           │
-│Code: ✓                                                                   │
-│Saved credentials.█                                                       │
-│                                                                          │
-│                                                                          │
-│                                                                          │
-│                                                                          │
-│Signed in. Enter returns to Settings.                                     │
-│                                                                          │
-│Ctrl+] closes · Ctrl+Q quits                                              │
-└──────────────────────────────────────────────────────────────────────────┘
+dashboard row 00 ──────────────────────────────────────────────────────────
+dashboard row 01 ──────────────────────────────────────────────────────────
+dash╭ Sign in · fixture ───────────────────────────────────────────────╮───
+dash│Open https://example.test/login                                   │───
+dash│Code: ✓                                                           │───
+dash│Saved credentials.█                                               │───
+dash│Signed in. Enter returns to Settings.                             │───
+dash│                                                                  │───
+dash│Ctrl+] cancels · Ctrl+Q quits                                     │───
+dash╰──────────────────────────────────────────────────────────────────╯───
+dashboard row 10 ──────────────────────────────────────────────────────────
+dashboard row 11 ──────────────────────────────────────────────────────────
 
-┌ Login · fixture ─────────────────────────────────────────────────────────┐
-│Open https://example.test/login                                           │
-│Code: ✓                                                                   │
-│Saved credentials.█                                                       │
-│                                                                          │
-│                                                                          │
-│                                                                          │
-│                                                                          │
-│The daemon connection ended during login or harness preparation; retry    │
-│Login. Enter returns to Settings.                                         │
-│Ctrl+] closes · Ctrl+Q quits                                              │
-└──────────────────────────────────────────────────────────────────────────┘
+dashboard row 00 ──────────────────────────────────────────────────────────
+dashboard row 01 ──────────────────────────────────────────────────────────
+dash╭ Sign in · fixture ───────────────────────────────────────────────╮───
+dash│Open https://example.test/login                                   │───
+dash│Code: ✓                                                           │───
+dash│Saved credentials.█                                               │───
+dash│The daemon connection ended during login or harness preparation;  │───
+dash│retry Login. Enter returns to Settings.                           │───
+dash│Ctrl+] cancels · Ctrl+Q quits                                     │───
+dash╰──────────────────────────────────────────────────────────────────╯───
+dashboard row 10 ──────────────────────────────────────────────────────────
+dashboard row 11 ──────────────────────────────────────────────────────────

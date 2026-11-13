@@ -3702,6 +3702,8 @@ pub(super) fn ready_startup_view() -> ManagedSessionView {
     let materialized = mj_core::state::MaterializedSession::empty("session-1");
     let operational = mj_core::relay::RelayOperationalState {
         assessment: None,
+        open_request: None,
+        person_input_through: 0,
         assessment_context: None,
         turn_completion: None,
         continuation: Default::default(),

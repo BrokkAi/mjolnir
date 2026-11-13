@@ -925,8 +925,10 @@ pub(super) fn project_observation(
             close_streams(index, mutation, event.recorded_at_ms);
             mutation.execution = Some(MaterializedExecutionState::Closed);
         }
-        RelayObservation::RetryAssessmentStarted { .. }
+        RelayObservation::ManagedSubagentConfigured { .. }
+        | RelayObservation::RetryAssessmentStarted { .. }
         | RelayObservation::HandbackCheckStarted { .. }
+        | RelayObservation::QuestionTargetUpdated { .. }
         | RelayObservation::TurnAssessmentUpdated { .. }
         | RelayObservation::RetryAssessmentResolved { .. } => {}
     }

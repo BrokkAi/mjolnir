@@ -25,10 +25,12 @@ ACP-capable harnesses.
 - [x] Wire `mj login` to prefer ACP and fall back to the CLI.
 - [x] Cover discovery, method selection, terminal execution, and fallback with tests.
 - [x] Update the login documentation.
-- [x] Add a **Sign in** action to Settings → Profiles that hands the terminal
-  to the same flow and resumes the dashboard.
+- [x] Add a **Sign in** action to Settings → Profiles that runs the same flow in
+  a dashboard modal.
 - [x] Show each saved profile's sign-in status in the profiles list, read off
   the event loop when Settings opens and after a login.
+- [x] Use the ambient terminal/daemon environment for interactive sign-in
+  instead of starting the account login shell before every attempt.
 - [x] Run formatting, focused tests, full tests, and Clippy.
 - [x] Review the branch in two independent rounds, fix the findings, re-merge
   `origin/master`, and revalidate.
@@ -61,6 +63,10 @@ ACP-capable harnesses.
   handoff must release the stream before the child owns stdin.
 - Headless Codex cannot show the browser for `chat-gpt`; it needs a clear
   refusal or an exported API key.
+- Raising the account login-shell probe from 10 seconds to the 240-second
+  worker-startup budget prevented false failures, but interactive sign-in paid
+  that shell startup before every attempt even though the CLI fallback already
+  used the ambient terminal environment.
 
 ## Decision Log
 
@@ -87,19 +93,29 @@ ACP-capable harnesses.
 - Decision: leave the existing credential verification in place. ACP login is a
   different way to write the same profile credential file or database.
 - Decision: expose the same flow from Settings → Profiles as **Sign in**, not
-  only from the CLI. The dashboard hands the terminal to `mj login` for the
-  selected profile, then resumes and reports the result in the dialog. The
-  action is limited to profiles already in the saved configuration because
-  `mj login --profile` reads that file. Rationale: the visual Settings surface
-  is the primary way people manage profiles.
+  only from the CLI. The dashboard displays the selected profile's sign-in in
+  a modal over the live dashboard, reports the result in the Settings dialog,
+  and leaves the enclosing TUI active. The action is limited to profiles
+  already in the saved configuration because `mj login --profile` reads that
+  file. Rationale: the visual Settings surface is the primary way people manage
+  profiles.
 - Decision: an own nested home (the person's `~/.config/opencode` or Muse home)
   signs in through the installed CLI, not the pinned bridge. Rationale: the
   pinned OpenCode needs `XDG_CONFIG_HOME` and could migrate a database Mjolnir
   does not own.
-- Decision: run the interactive child on `spawn_blocking`, restore the terminal
-  on every path, and drop the event stream before the child. Rationale: the
-  dashboard must not be left cooked, on the primary screen, with no input
-  source when a spawn fails.
+- Decision: run the interactive login in a daemon-owned pseudo-terminal and
+  render that terminal inside a centered dashboard modal. Size the remote PTY
+  from the modal interior and keep input on the dashboard event loop, forwarded
+  through a supervised background connection. Rationale: the dashboard must
+  remain a TUI throughout sign-in, while harnesses still receive a real terminal
+  in every daemon placement.
+- Decision: build the interactive login environment from the ambient terminal
+  or daemon environment plus profile overrides; do not start the account login
+  shell from the sign-in path. Rationale: the command-line fallback already
+  inherits that same ambient environment, while worker sessions still use the
+  login-shell probe once to establish their isolated toolchain environment.
+  Repeating the probe for sign-in adds no new fact and can delay every attempt
+  by the shell's full startup time.
 - Decision: order status reads with a generation that config changes also bump;
   reuse the setup authentication predicate so OpenCode environment keys, Claude
   tokens and the macOS Keychain agree with doctor.
@@ -120,12 +136,15 @@ command no longer needs the daemon or database; it loads configuration directly,
 so a fresh machine can sign in before its first session.
 
 Settings → Profiles → **Sign in** runs the same flow for the selected saved
-profile. The dashboard releases the alternate screen and raw mode, drops its
-event stream so the child owns input, runs `mj login`, then re-enters and
-reports the result in the dialog. Each saved profile also shows its sign-in
-status (`signed in`, `signed out`, `credential expired`, or the API-key/no-login
-case); the status is read off the event loop when Settings opens and again
-after a login.
+profile in a centered modal over the live dashboard. The daemon owns the
+pseudo-terminal, the dashboard forwards terminal input from its supervised
+connection task, and the modal reports the result before returning to Settings.
+ACP and command-line sign-in both inherit the ambient terminal or daemon
+environment, with profile overrides applied last; sign-in no longer waits for
+the account's interactive login shell before opening the harness.
+Each saved profile also shows its sign-in status (`signed in`, `signed out`,
+`credential expired`, or the API-key/no-login case); the status is read off the
+event loop when Settings opens and again after a login.
 
 Validation: the focused suite has eight cases: six drive a scripted ACP bridge
 (terminal command with the profile environment and method env, `authenticate`,

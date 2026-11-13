@@ -54,6 +54,8 @@ pub(crate) enum SetupControl {
     DetectProfiles,
     DetectRuntimes,
     DetectionResults,
+    /// From Runtimes to the Machines page, where SSH hosts are added.
+    OpenMachines,
     ManagedSetup,
     ManagedContinue,
     SignIn,

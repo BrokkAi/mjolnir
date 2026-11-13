@@ -3794,11 +3794,13 @@ fn a_claude_harness_turn_settles_on_its_result_and_not_on_the_origin_marker() {
 }
 
 /// Stop while Claude Code works on its own after a background task sends
-/// `session/cancel`; the announced task's terminal update ends the turn. With
-/// nothing running, or during a Codex goal turn, Stop is still refused.
+/// `session/cancel`; an unanswered Stop ends even an announced turn after
+/// the grace period. With nothing running, or during a Codex goal turn,
+/// Stop is still refused.
 // Hard-won: 4c379acf: Stop was unavailable while Claude ran a cycle started by a completed background task.
+// Hard-won: #1530: an announced Claude turn whose task never ended ignored Stop and blocked the queue for hours.
 #[test]
-fn stop_during_a_claude_harness_turn_waits_for_its_announced_task_to_end() {
+fn unanswered_stop_ends_an_announced_claude_turn_and_releases_its_task() {
     let refused = |relay: &mut DurableRelay, command_id: &str| {
         let response = relay.handle(relay_request(
             &format!("request-{command_id}"),
@@ -3823,6 +3825,7 @@ fn stop_during_a_claude_harness_turn_waits_for_its_announced_task_to_end() {
         .apply_claude_task_fixture("silent-turn".into(), true, true, false, false)
         .unwrap();
     assert!(relay.operational_state().harness_turn.is_some());
+    submit_relay(&mut relay, "queued-prompt", prompt("next"));
     submit_relay(&mut relay, "cancel-harness-turn", RelayCommand::Cancel);
     let claimed = relay.claim_pending_commands(true).unwrap();
     assert_eq!(claimed.len(), 1);
@@ -3832,21 +3835,97 @@ fn stop_during_a_claude_harness_turn_waits_for_its_announced_task_to_end() {
         .unwrap();
     assert!(
         relay.operational_state().harness_turn.is_some(),
-        "the turn runs until the announced task ends"
+        "the applied stop waits for its grace period"
     );
     let ordinal = relay.snapshot.harness_turn.unwrap().first_ordinal;
-    assert!(relay.unanswered_harness_turn_stop().is_none());
-    assert!(!relay.end_unanswered_harness_turn_stop(ordinal).unwrap());
-    relay
-        .claude_turn_result(&cycle_result("task-notification"))
-        .unwrap();
-    assert_eq!(relay.snapshot.harness_turn.unwrap().first_ordinal, ordinal);
-    relay
-        .apply_claude_task_fixture("silent-turn".into(), false, false, false, false)
-        .unwrap();
+    assert_eq!(relay.unanswered_harness_turn_stop(), Some(ordinal));
+    assert!(relay.end_unanswered_harness_turn_stop(ordinal).unwrap());
+    assert_eq!(relay.turn_task_ordinal("silent-turn"), None);
+    assert!(
+        relay.snapshot.assessment.is_some(),
+        "queued work must not erase the autonomous turn assessment"
+    );
     let state = relay.operational_state();
     assert!(state.harness_turn.is_none());
     assert_eq!(state.execution, RelayExecutionState::Idle);
+    assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+    relay
+        .claude_turn_result(&cycle_result("task-notification"))
+        .unwrap();
+    relay
+        .apply_claude_task_fixture("silent-turn".into(), false, false, false, false)
+        .unwrap();
+    assert!(relay.snapshot.active_prompt.is_some());
+    relay
+        .record_command_completed(
+            "queued-prompt",
+            RelayCommandOutcome::Prompt {
+                work_facts: None,
+                stop_reason: "end_turn".into(),
+                usage: None,
+                diagnostic: None,
+            },
+        )
+        .unwrap();
+    // A raw result can precede trailing output. The detached task must not
+    // settle the new turn, but another Stop must still be able to end it.
+    relay
+        .claude_turn_result(&cycle_result("task-notification"))
+        .unwrap();
+    relay
+        .record_session_update(agent_text_chunk("late output"))
+        .unwrap();
+    let late_ordinal = relay.snapshot.harness_turn.unwrap().first_ordinal;
+    assert_ne!(late_ordinal, ordinal);
+    relay
+        .apply_claude_task_fixture("silent-turn".into(), false, false, false, false)
+        .unwrap();
+    assert_eq!(
+        relay.snapshot.harness_turn.unwrap().first_ordinal,
+        late_ordinal
+    );
+    submit_relay(&mut relay, "stop-late-output", RelayCommand::Cancel);
+    assert_eq!(relay.claim_pending_commands(true).unwrap().len(), 1);
+    relay
+        .record_command_completed("stop-late-output", RelayCommandOutcome::Cancelled)
+        .unwrap();
+    assert_eq!(relay.unanswered_harness_turn_stop(), Some(late_ordinal));
+    assert!(
+        relay
+            .end_unanswered_harness_turn_stop(late_ordinal)
+            .unwrap()
+    );
+
+    // Announced ownership is process-local; replay retains the applied stop.
+    let replay_temp = tempfile::tempdir().unwrap();
+    let mut replay = claude_relay(replay_temp.path());
+    replay
+        .apply_claude_task_fixture("lost-task".into(), true, true, false, false)
+        .unwrap();
+    submit_relay(&mut replay, "stop-before-restart", RelayCommand::Cancel);
+    replay.claim_pending_commands(true).unwrap();
+    replay
+        .record_command_completed("stop-before-restart", RelayCommandOutcome::Cancelled)
+        .unwrap();
+    let stopped = replay.unanswered_harness_turn_stop().unwrap();
+    drop(replay);
+    // A pre-revision-24 snapshot has only the legacy continuation field.
+    let state_path = replay_temp.path().join(mj_core::relay::RELAY_STATE_FILE);
+    let mut legacy: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    legacy["harness_turn"]
+        .as_object_mut()
+        .unwrap()
+        .remove("autonomous");
+    legacy["format_version"] = serde_json::json!(22);
+    legacy["continuation"]["autonomous_turn_started"] = serde_json::json!(stopped);
+    std::fs::write(&state_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    let mut replay = claude_relay(replay_temp.path());
+    assert_eq!(replay.unanswered_harness_turn_stop(), Some(stopped));
+    assert!(replay.end_unanswered_harness_turn_stop(stopped).unwrap());
+    drop(replay);
+    let replay = claude_relay(replay_temp.path());
+    assert!(replay.snapshot.harness_turn.is_none());
 
     let codex = tempfile::tempdir().unwrap();
     let mut codex = DurableRelay::open(codex.path(), SESSION, "1.0.0").unwrap();
@@ -6194,6 +6273,49 @@ fn clearable_relay(root: &Path) -> DurableRelay {
     relay
 }
 
+// The conversation that held an open request is discarded by /clear, so the
+// request must not reappear as a question in the fresh conversation.
+#[test]
+fn clear_fences_an_open_request_across_reopen() {
+    use mj_core::assessment::{Action, Status};
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = clearable_relay(temp.path());
+    relay.set_acp_ready(true);
+    submit_relay(&mut relay, "ask-turn", prompt("Choose the format"));
+    relay.claim_pending_commands(true).unwrap();
+    finish_prompt(&mut relay, "ask-turn");
+    let mut assessment = (**relay.snapshot.assessment.as_ref().unwrap()).clone();
+    assessment.status = Status::Assessed;
+    assessment.action = Some(Action::AwaitInput);
+    relay
+        .record_observation(RelayObservation::TurnAssessmentUpdated {
+            assessment: Box::new(assessment),
+        })
+        .unwrap();
+    assert!(relay.snapshot.open_request().is_some());
+    submit_relay(
+        &mut relay,
+        "clear-request",
+        RelayCommand::Prompt {
+            prompt: vec![ContentBlock::from("/clear")],
+        },
+    );
+    relay.claim_pending_commands(true).unwrap();
+    relay
+        .record_command_completed(
+            "clear-request",
+            RelayCommandOutcome::ContextCleared {
+                native_session_id: "replacement".into(),
+                memory: None,
+            },
+        )
+        .unwrap();
+    assert!(relay.snapshot.open_request().is_none());
+    drop(relay);
+    let relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    assert!(relay.snapshot.open_request().is_none());
+}
+
 #[test]
 fn clear_changes_only_native_context_and_is_idempotent_across_reopen() {
     let temp = tempfile::tempdir().unwrap();
@@ -8271,4 +8393,109 @@ fn readiness_and_the_instant_the_scan_reads_cannot_disagree() {
     relay.clear_acp_readiness();
     assert!(!relay.is_acp_ready());
     assert_eq!(clock.load(std::sync::atomic::Ordering::Acquire), 0);
+}
+
+#[test]
+fn legacy_snapshot_open_request_upgrade_and_checkpoint_restore() {
+    use mj_core::assessment::{Action, Checkpoint, CheckpointOpenRequest, Status, TurnAssessment};
+    for (dismissed, later_prompt, input_required) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (false, false, true),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let relay = DurableRelay::open(root.path(), SESSION, "test").unwrap();
+        let mut snapshot = relay.snapshot.clone();
+        drop(relay);
+        let mut assessment = TurnAssessment::pending(
+            "legacy-turn".into(),
+            10,
+            0,
+            mj_core::activity::verdict::CompletionEvidence::bounded(
+                if input_required {
+                    "AwaitingInput"
+                } else {
+                    "EndTurn"
+                },
+                None,
+            ),
+        );
+        assessment.action = (!input_required).then_some(Action::AwaitInput);
+        assessment.question_message = Some("original-question".into());
+        if dismissed {
+            assessment.status = Status::Superseded;
+            assessment.reason = "question_dismissed".into();
+        }
+        snapshot.assessment = Some(Arc::new(assessment.clone()));
+        snapshot.latest_prompt_accepted_ordinal = later_prompt.then_some(11);
+        let mut value = serde_json::to_value(&snapshot).unwrap();
+        value["format_version"] = serde_json::json!(22);
+        for field in ["request", "person_input_through"] {
+            value.as_object_mut().unwrap().remove(field);
+        }
+        fs::write(
+            root.path().join(RELAY_STATE_FILE),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+        let upgraded = DurableRelay::open(root.path(), SESSION, "test").unwrap();
+        assert_eq!(
+            upgraded.snapshot.open_request().is_some(),
+            !dismissed && !later_prompt
+        );
+        assert_eq!(
+            upgraded.snapshot.person_input_through,
+            if later_prompt { 11 } else { 0 }
+        );
+        // Both modern exact-empty and exact-open checkpoint envelopes survive restoration.
+        let state = Checkpoint {
+            version: 1,
+            context: None,
+            assessment: Some(assessment),
+            continuation: Default::default(),
+            capacity_retry: None,
+            turn_completion: None,
+            open_request: Some(CheckpointOpenRequest {
+                request: upgraded.snapshot.open_request().cloned(),
+                person_input_through: upgraded.snapshot.person_input_through,
+            }),
+        };
+        for legacy in [false, true] {
+            let destination = tempfile::tempdir().unwrap();
+            let mut encoded = serde_json::to_value(&state).unwrap();
+            if legacy {
+                encoded.as_object_mut().unwrap().remove("open_request");
+            }
+            fs::write(
+                mj_core::relay::restored_relay_seed_path(destination.path()),
+                serde_json::to_vec(&serde_json::json!({"event_frontier": 20,
+                    "event_frontier_digest": "a".repeat(64), "assessment_state": encoded}))
+                .unwrap(),
+            )
+            .unwrap();
+            let restored = DurableRelay::open(destination.path(), SESSION, "test").unwrap();
+            assert_eq!(
+                restored.snapshot.open_request().is_some(),
+                !dismissed && (legacy || !later_prompt)
+            );
+            if !legacy {
+                assert_eq!(
+                    restored.snapshot.person_input_through,
+                    state.open_request.as_ref().unwrap().person_input_through
+                );
+            }
+        }
+        // Current snapshots are exact even if their assessment still says AwaitInput.
+        let mut current = snapshot;
+        current.request = None;
+        fs::write(
+            root.path().join(RELAY_STATE_FILE),
+            serde_json::to_vec(&current).unwrap(),
+        )
+        .unwrap();
+        drop(upgraded);
+        let current = DurableRelay::open(root.path(), SESSION, "test").unwrap();
+        assert!(current.snapshot.open_request().is_none());
+    }
 }

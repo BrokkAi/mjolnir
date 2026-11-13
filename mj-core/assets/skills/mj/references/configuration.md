@@ -585,8 +585,8 @@ optional effort must be offered by an enabled profile. Each effort flag requires
 its matching model flag; `adaptive` and combining an override with `native` or
 `none` are rejected. Omitted effort uses the harness default. The retired
 `--subagent-model` and `--subagent-effort` flags fail with guidance to use the
-four per-type flags. `none` (CLI only) gives a Claude, Codex, DSH, or OpenCode session no
-delegation tools.
+four per-type flags. `none` (CLI only) gives a session no
+delegation tools, whatever its harness.
 
 `mj new` and `mj move` take `--oracle enabled|disabled` and `--subagent-oracle M`
 (with optional `--subagent-oracle-effort E`, which requires the model and rejects

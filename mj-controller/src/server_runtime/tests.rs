@@ -708,6 +708,8 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
     controller.state.sessions.insert(record.id.clone(), record);
     let operational = RelayOperationalState {
         assessment: None,
+        open_request: None,
+        person_input_through: 0,
         assessment_context: None,
         turn_completion: None,
         continuation: Default::default(),

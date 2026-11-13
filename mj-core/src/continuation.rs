@@ -51,9 +51,9 @@ pub struct ContinuationState {
     pub quota_suppressed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_recovery: Option<QuotaRecovery>,
-    /// Start ordinal of the turn the harness has open on its own, while no
-    /// prompt of ours was in flight when it began.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Legacy pre-revision-24 snapshot field; only used during snapshot upgrade.
+    /// The open StoredHarnessTurn now owns this fact.
+    #[serde(default, skip_serializing)]
     pub autonomous_turn_started: Option<u64>,
     /// The self-started turn that `completed_command_id` names, once it ends.
     #[serde(default, skip_serializing_if = "Option::is_none")]

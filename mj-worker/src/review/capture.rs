@@ -143,7 +143,7 @@ pub fn capture_pushable_commits(
         filters.push(format!("--contains={boundary}"));
     }
     let eligible = reviewed_refs(runner, root, &filters)?;
-    if let Some(commit) = furthest_reviewed_ancestor(runner, root, &eligible)? {
+    if let Some(commit) = select_reviewed_ancestor(runner, root, &eligible)? {
         base = PushBase::ReviewPoint { commit };
     }
     // Reviewed work merged with newer default-branch history: diff from Git's
@@ -160,7 +160,7 @@ pub fn capture_pushable_commits(
             root,
             &[format!("--merged={head}"), format!("--no-merged={mb}")],
         )?;
-        if let Some(reviewed) = furthest_reviewed_ancestor(runner, root, &eligible)? {
+        if let Some(reviewed) = select_reviewed_ancestor(runner, root, &eligible)? {
             let reviewed = reviewed.as_str();
             let version = checked_git_text(runner, root, &["version"])?;
             let found = mj_core::local_git::parse_git_version(&version);
@@ -435,44 +435,92 @@ pub fn set_review_base(
         "commit {commit} was never reviewed or overridden in {}; call request_review first, then call set_review_baseline once the verdict is clean or you have overridden it",
         root.display()
     );
-    mj_checkpoint::archive::record_reviewed_tree(runner, root, &tree, &commit)?;
+    record_review_base(runner, root, &tree, &commit)?;
     Ok((commit, tree))
 }
 
+/// Records a clean review or an accepted explicit baseline in one transaction.
+pub fn record_review_base(
+    runner: &dyn GitCommandRunner,
+    root: &Path,
+    tree: &str,
+    commit: &str,
+) -> Result<()> {
+    let selected = worktree_review_base_ref(runner, root)?;
+    let output = runner.run(
+        root,
+        &GitCommand {
+            arguments: ["update-ref", "--stdin"].map(Into::into).to_vec(),
+            stdin: format!("update refs/mj/reviewed/{tree} {commit}\nupdate {selected} {commit}\n")
+                .into_bytes(),
+            env: Vec::new(),
+        },
+    )?;
+    anyhow::ensure!(
+        output.status == 0,
+        "set the review base: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+fn worktree_review_base_ref(runner: &dyn GitCommandRunner, root: &Path) -> Result<String> {
+    Ok(mj_checkpoint::archive::push_review_base_ref(
+        &session_start_scope(runner, root)?,
+    ))
+}
+
+struct ReviewedRefs {
+    commits: Vec<String>,
+    selected: Option<String>,
+}
+
 /// Reviewed commits under `refs/mj/reviewed/` that match the given
-/// `for-each-ref` filters, such as `--merged=<head>`.
+/// `for-each-ref` filters, including this worktree's selected base.
 fn reviewed_refs(
     runner: &dyn GitCommandRunner,
     root: &Path,
     filters: &[String],
-) -> Result<Vec<String>> {
-    let mut args = vec!["for-each-ref", "--format=%(objectname)"];
+) -> Result<ReviewedRefs> {
+    let selected = worktree_review_base_ref(runner, root)?;
+    let mut args = vec!["for-each-ref", "--format=%(objectname) %(refname)"];
     args.extend(filters.iter().map(String::as_str));
     args.push("refs/mj/reviewed/");
-    Ok(checked_git_text(runner, root, &args)?
-        .lines()
-        .map(str::to_owned)
-        .collect())
+    args.push(&selected);
+    let mut refs = ReviewedRefs {
+        commits: Vec::new(),
+        selected: None,
+    };
+    for line in checked_git_text(runner, root, &args)?.lines() {
+        let (commit, name) = line
+            .split_once(' ')
+            .context("read the reviewed ref's name")?;
+        refs.commits.push(commit.to_owned());
+        if name == selected {
+            refs.selected = Some(commit.to_owned());
+        }
+    }
+    Ok(refs)
 }
 
-/// The candidate that every other candidate is an ancestor of, found in one
-/// graph traversal. Several independent tips have no single review base.
-fn furthest_reviewed_ancestor(
+/// Advance when every candidate leads to one reviewed commit. When reviewed
+/// histories are incomparable, retain the worktree's eligible selected base.
+fn select_reviewed_ancestor(
     runner: &dyn GitCommandRunner,
     root: &Path,
-    candidates: &[String],
+    candidates: &ReviewedRefs,
 ) -> Result<Option<String>> {
-    if candidates.is_empty() {
+    if candidates.commits.is_empty() {
         return Ok(None);
     }
     let mut args = vec!["merge-base", "--independent"];
-    args.extend(candidates.iter().map(String::as_str));
+    args.extend(candidates.commits.iter().map(String::as_str));
     let tips = checked_git_text(runner, root, &args)?;
     let mut tips = tips.lines();
-    Ok(match (tips.next(), tips.next()) {
-        (Some(tip), None) => Some(tip.to_owned()),
-        _ => None,
-    })
+    if let (Some(tip), None) = (tips.next(), tips.next()) {
+        return Ok(Some(tip.to_owned()));
+    }
+    Ok(candidates.selected.clone())
 }
 
 pub fn later_review_base(
@@ -495,7 +543,9 @@ pub fn later_review_base(
         root,
         &[format!("--contains={commit}"), format!("--merged={head}")],
     )?;
-    let Some(candidate) = later.into_iter().find(|candidate| *candidate != commit) else {
+    let Some(candidate) =
+        select_reviewed_ancestor(runner, root, &later)?.filter(|candidate| *candidate != commit)
+    else {
         return Ok(None);
     };
     let tree = checked_git_text(
@@ -721,7 +771,7 @@ pub fn review_start_head(
     }
     // An earlier review of HEAD's history bounds the work that follows it.
     let reviewed = reviewed_refs(runner, root, &[format!("--merged={head}")])?;
-    if let Some(reviewed) = furthest_reviewed_ancestor(runner, root, &reviewed)? {
+    if let Some(reviewed) = select_reviewed_ancestor(runner, root, &reviewed)? {
         return Ok(Some(reviewed));
     }
     ensure_session_start_head(runner, root, session)?;
@@ -1057,6 +1107,23 @@ pub(super) mod push_tests {
                 == 1
         );
 
+        // A rejected explicit-ref write must not promote an overridden tree.
+        git(&root, &["update-ref", "refs/mj/push-base", &reviewed]);
+        let error = set_review_base(&SystemGit, &root, &overridden).unwrap_err();
+        assert!(error.to_string().contains("set the review base"), "{error}");
+        assert_eq!(
+            git(
+                &root,
+                &[
+                    "for-each-ref",
+                    "--format=%(objectname)",
+                    "refs/mj/reviewed/"
+                ]
+            ),
+            reviewed
+        );
+        git(&root, &["update-ref", "-d", "refs/mj/push-base"]);
+
         // Any revision works: HEAD~1 is the overridden commit. It becomes a
         // review point and the next capture starts there.
         assert_eq!(
@@ -1267,6 +1334,7 @@ pub(super) mod push_tests {
         let reviewed = commit(&root, "reviewed");
         let tree = git(&root, &["rev-parse", "HEAD^{tree}"]);
         record_reviewed_tree(&SystemGit, &root, &tree, &reviewed).unwrap();
+        set_review_base(&SystemGit, &root, &reviewed).unwrap();
 
         git(&root, &["checkout", "-q", "main"]);
         std::fs::write(root.join("upstream-only"), "upstream\n").unwrap();

@@ -171,10 +171,6 @@ impl DashboardContext {
     /// terminal output. That is why the loop does not track which mutations
     /// were visible; it only paces how often background changes are drawn.
     pub(crate) fn draw(&mut self) -> Result<()> {
-        if let Some(login) = &self.login {
-            self.drawn_chat_sessions.clear();
-            return self.terminal.draw(|frame| login.render(frame));
-        }
         if let Some(splash) = &self.splash {
             if !splash.finished() {
                 // Nothing behind the splash has been seen, so nothing is
@@ -192,9 +188,11 @@ impl DashboardContext {
             opening_chat_sessions,
             selection,
             selection_text,
+            login,
             ..
         } = self;
         let transcript_selected = selection.active_surface() == Some(SurfaceId::Transcript);
+        let login_open = login.is_some();
         // The renderer decides which pane draws which conversation and reports
         // back what it drew; that list is what the read receipts follow.
         let mut drawn = Vec::new();
@@ -209,9 +207,19 @@ impl DashboardContext {
                 opening_chat_sessions,
                 transcript_selected,
             );
-            *selection_text = draw_selection(frame, selection, dashboard.frame_surfaces());
+            *selection_text = if login_open {
+                None
+            } else {
+                draw_selection(frame, selection, dashboard.frame_surfaces())
+            };
+            if let Some(login) = login.as_ref() {
+                let area = frame.area();
+                login.render(frame, area);
+            }
         })?;
-        self.drawn_chat_sessions = drawn;
+        // The modal obscures its center while leaving the dashboard visible
+        // around it. Do not advance read receipts for a covered conversation.
+        self.drawn_chat_sessions = if login_open { Vec::new() } else { drawn };
         self.dashboard.acknowledge_render();
         if let Some(chat) = self.visible_chat() {
             chat.acknowledge_render();

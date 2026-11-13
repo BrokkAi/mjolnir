@@ -146,7 +146,9 @@ pub const RELAY_HANDBACK_CHECK_PROTOCOL: u32 = 61;
 pub const RELAY_GLIDE_TURN_PROTOCOL: u32 = 62;
 /// Optional assessment attention hint, independent of scheduling action.
 pub const RELAY_ATTENTION_PROTOCOL: u32 = 63;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_ATTENTION_PROTOCOL;
+/// Worker-owned unanswered prose requests.
+pub const RELAY_OPEN_REQUEST_PROTOCOL: u32 = 64;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_OPEN_REQUEST_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 
@@ -181,7 +183,10 @@ pub const RELAY_EVENT_DIGEST_DOMAIN_V2: &[u8] = b"hel-relay-event-v2\0";
 // Revision 20 is breaking: terminal receipts no longer carry execution payloads.
 // Revision 21 is breaking: older readers cannot preserve DismissQuestion commands.
 // Revision 22 is breaking: older writers cannot preserve handback check admission.
-pub const RELAY_STATE_VERSION: u32 = 22;
+// Revision 23 is breaking: older writers lose requests and the person-input frontier,
+// and cannot replay child ownership or question-target observations.
+// Revision 24 is breaking: open turns own their autonomous fact; older readers reject the new field.
+pub const RELAY_STATE_VERSION: u32 = 24;
 /// The relay snapshot inside a worker root. Teardown and restore name it from
 /// here rather than repeating the literal.
 pub const RELAY_STATE_FILE: &str = "relay-state.json";
