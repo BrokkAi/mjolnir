@@ -266,55 +266,6 @@ impl Verdict {
                         && *winner + PROBABILITY_EPSILON >= REQUIRED_INPUT_RATIO * runner_up
                 })
     }
-
-    pub fn action(&self, authorization_complete: bool) -> Action {
-        // A confident quota stop always recovers, whatever the input answer:
-        // question detection is unreliable, and the resume prompt tells the
-        // agent to ask again and stop if a decision is still open.
-        if self.failure.choice == Failure::Quota && self.failure.confidence >= AUTOMATION_CONFIDENCE
-        {
-            return Action::RecoverQuota;
-        }
-        if self.requires_input() {
-            return Action::AwaitInput;
-        }
-
-        if self.failure.confidence >= AUTOMATION_CONFIDENCE {
-            match self.failure.choice {
-                Failure::TransientProvider => return Action::RetryProvider,
-                Failure::Other => return Action::AwaitInput,
-                _ => {}
-            }
-        }
-        // Unknown failures must not become ordinary nudges.
-        if self.failure.choice != Failure::None || self.failure.confidence < AUTOMATION_CONFIDENCE {
-            return Action::Uncertain;
-        }
-        if authorization_complete
-            && self.work.choice == Work::AuthorizedUnfinished
-            && self.work.confidence >= AUTOMATION_CONFIDENCE
-            && matches!(self.input.choice, Input::None | Input::RedundantRequest)
-            && self.input.confidence >= AUTOMATION_CONFIDENCE
-        {
-            return Action::Continue;
-        }
-        if self.input.choice == Input::None && self.input.confidence >= 0.85 {
-            return match self.work.choice {
-                Work::Finished
-                    if self
-                        .work
-                        .probabilities
-                        .get("finished")
-                        .is_some_and(|p| *p + PROBABILITY_EPSILON >= FINISHED_WORK_PROBABILITY) =>
-                {
-                    Action::Finished
-                }
-                Work::Waiting if self.work.confidence >= 0.85 => Action::Wait,
-                _ => Action::Uncertain,
-            };
-        }
-        Action::Uncertain
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -792,105 +743,6 @@ mod tests {
             reply: None,
         }
     }
-    fn scored(failure: (Failure, f32), input: (Input, f32), work: (Work, f32)) -> Verdict {
-        Verdict {
-            failure: Judgment {
-                choice: failure.0,
-                confidence: failure.1,
-                probabilities: Default::default(),
-            },
-            input: Judgment {
-                choice: input.0,
-                confidence: input.1,
-                probabilities: [(
-                    serde_json::to_value(input.0)
-                        .unwrap()
-                        .as_str()
-                        .unwrap()
-                        .to_owned(),
-                    1.0,
-                )]
-                .into(),
-            },
-            work: Judgment {
-                choice: work.0,
-                confidence: work.1,
-                probabilities: [(
-                    serde_json::to_value(work.0)
-                        .unwrap()
-                        .as_str()
-                        .unwrap()
-                        .to_owned(),
-                    1.0,
-                )]
-                .into(),
-            },
-            background: None,
-            reply: None,
-        }
-    }
-
-    #[test]
-    fn probability_gates_agree_across_running_and_completed_turns() {
-        use crate::activity::verdict::{Decision, TurnPhase, TurnVerdict, decide};
-        let cases: Vec<Value> =
-            serde_json::from_str(include_str!("../tests/jev-gates.json")).unwrap();
-        for case in cases {
-            let verdict = TurnVerdict::parse(&case).unwrap();
-            let assessment = verdict.assessment.as_ref().unwrap();
-            let expected: Action = serde_json::from_value(case["action"].clone()).unwrap();
-            let complete = case["authorization_complete"].as_bool().unwrap();
-            assert_eq!(assessment.action(complete), expected, "{}", case["name"]);
-            let required = case["requires_input"].as_bool().unwrap();
-            assert_eq!(assessment.requires_input(), required, "{}", case["name"]);
-            assert_eq!(
-                decide(TurnPhase::Running, &verdict),
-                if required {
-                    Decision::AwaitingInput
-                } else {
-                    Decision::KeepCurrent
-                },
-                "{}",
-                case["name"]
-            );
-            let replied = match assessment.action(false) {
-                Action::AwaitInput => Decision::AwaitingInput,
-                Action::Finished => Decision::InferIdle,
-                Action::Wait => Decision::ExpectContinuation,
-                _ => Decision::KeepCurrent,
-            };
-            assert_eq!(
-                decide(TurnPhase::Replied, &verdict),
-                replied,
-                "{}",
-                case["name"]
-            );
-            let stored = serde_json::to_value(assessment).unwrap();
-            let restored: Verdict = serde_json::from_value(stored).unwrap();
-            assert_eq!(&restored, assessment);
-            assert_eq!(restored.action(complete), expected);
-        }
-
-        // Preserve the cases that were unique in the older decision table.
-        assert_eq!(
-            scored(
-                (Failure::None, 0.99),
-                (Input::RedundantRequest, 0.99),
-                (Work::Finished, 0.99)
-            )
-            .action(false),
-            Action::Uncertain
-        );
-        for failure in [(Failure::Unclear, 0.5), (Failure::Other, 0.6)] {
-            for work in [Work::Finished, Work::AuthorizedUnfinished] {
-                assert_eq!(
-                    scored(failure, (Input::None, 0.99), (work, 0.99)).action(true),
-                    Action::Uncertain,
-                    "{failure:?} {work:?}"
-                );
-            }
-        }
-    }
 
     #[test]
     fn old_saved_assessments_keep_their_action_without_inventing_probabilities() {
@@ -918,7 +770,6 @@ mod tests {
         assert!(!restored.needs_classification(0));
         let judgment = restored.verdict.unwrap();
         assert!(!judgment.requires_input());
-        assert_eq!(judgment.action(true), Action::Uncertain);
     }
 
     #[test]
@@ -963,54 +814,6 @@ mod tests {
             "closing": 0.8, "continuing": 0.2
         });
         assert!(Verdict::parse(&answers).is_err());
-    }
-
-    #[test]
-    fn provider_recovery_is_independent_of_uncertain_remaining_work() {
-        let mut v = verdict(Failure::TransientProvider, Input::Unclear, Work::Unclear);
-        v.failure.confidence = 0.91;
-        v.input.confidence = 0.32;
-        v.work.confidence = 0.24;
-        assert_eq!(v.action(false), Action::RetryProvider);
-        v.failure.confidence = 0.89;
-        assert_eq!(v.action(true), Action::Uncertain);
-        v.failure = Judgment {
-            choice: Failure::Quota,
-            confidence: 0.99,
-            probabilities: Default::default(),
-        };
-        assert_eq!(v.action(false), Action::RecoverQuota);
-    }
-    #[test]
-    fn continuation_requires_complete_authorization_and_no_real_question() {
-        for input in [Input::None, Input::RedundantRequest] {
-            let v = verdict(Failure::None, input, Work::AuthorizedUnfinished);
-            assert_eq!(v.action(true), Action::Continue);
-            assert_eq!(v.action(false), Action::Uncertain);
-        }
-        assert_eq!(
-            verdict(Failure::None, Input::Required, Work::AuthorizedUnfinished).action(true),
-            Action::AwaitInput
-        );
-        assert_eq!(
-            verdict(Failure::Other, Input::None, Work::AuthorizedUnfinished).action(true),
-            Action::AwaitInput
-        );
-    }
-    // Hard-won: 8cecc1c: a detected question beat a confident quota stop, so the session never resumed after the reset.
-    #[test]
-    fn explicit_user_handoff_blocks_provider_retry_but_not_quota_recovery() {
-        assert_eq!(
-            verdict(Failure::TransientProvider, Input::Required, Work::Unclear).action(false),
-            Action::AwaitInput
-        );
-        assert_eq!(
-            verdict(Failure::Quota, Input::Required, Work::Unclear).action(true),
-            Action::RecoverQuota
-        );
-        let mut low = verdict(Failure::Quota, Input::Required, Work::Unclear);
-        low.failure.confidence = 0.89;
-        assert_eq!(low.action(true), Action::AwaitInput);
     }
 
     #[test]

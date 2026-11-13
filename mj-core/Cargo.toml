@@ -13,7 +13,6 @@ include = [
     "src/**/*.rs",
     "tests/fixtures/*.sh",
     "tests/fixtures/claude-antigravity-models.json",
-    "tests/jev-gates.json",
     # Turn-classifier questions shared with the hosted proxy.
     "src/activity/verdict_questions.json",
     "src/activity/question_locator.json",

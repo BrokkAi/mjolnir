@@ -426,7 +426,7 @@ test("v5 and v6 accept the whole-message authorization history and bound it", as
 
 test("v6 preserves gate evidence and rejects malformed distributions while v5 stays frozen", async (t) => {
   const { readFile } = await import("node:fs/promises");
-  const cases = JSON.parse(await readFile(new URL("../../../mj-core/tests/jev-gates.json", import.meta.url), "utf8"));
+  const cases = JSON.parse(await readFile(new URL("./fixtures/jev-gates.json", import.meta.url), "utf8"));
   const { recent_tools: _recent, ...ordinary } = base;
   const state = { ...ordinary, phase: "running", transcript_summary: "Choose a destination." };
   let result = { answers: cases[0].answers, diagnostic: "private upstream detail" };
