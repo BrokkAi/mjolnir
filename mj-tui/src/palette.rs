@@ -76,6 +76,8 @@ pub(crate) enum PaletteControl {
     Run,
     /// The combobox anchored on the "Change workspace" row.
     Workspace,
+    /// The copy chip at a session menu's top right.
+    CopySessionId,
 }
 
 impl CommandPalette {
@@ -127,6 +129,7 @@ impl CommandPalette {
 const SESSION_MENU_COMMANDS: &[CommandId] = &[
     CommandId::ChangedFiles,
     CommandId::DismissNotification,
+    CommandId::OpenWaitingQuestion,
     CommandId::IgnoreNotifications,
     CommandId::RenameSession,
     CommandId::PinSession,
@@ -138,7 +141,6 @@ const SESSION_MENU_COMMANDS: &[CommandId] = &[
     CommandId::UpgradeContainer,
     CommandId::InterruptAll,
     CommandId::DestroySession,
-    CommandId::CopySessionId,
 ];
 
 /// The menu of a harness-native child. Its parent's harness owns it, and
@@ -173,6 +175,17 @@ fn session_menu_entries(dashboard: &DashboardState) -> Vec<PaletteEntry> {
 /// container settings it carries into its next container.
 fn session_facts(dashboard: &DashboardState, session: &SessionRecord) -> Vec<Line<'static>> {
     let mut facts = Vec::new();
+    // The bare top line reads like the session row's info: no field labels.
+    let detail = dashboard.session_details.get(&session.id);
+    let mut top: Vec<&str> = Vec::new();
+    if let Some(model) = detail.and_then(|detail| detail.current_model.as_deref()) {
+        top.push(model);
+    }
+    if let Some(effort) = detail.and_then(|detail| detail.current_effort.as_deref()) {
+        top.push(effort);
+    }
+    top.push(&session.last_profile);
+    facts.push(Line::raw(top.join(" · ")));
     let fact = |label: &str, value: String| {
         Line::from(vec![
             Span::styled(format!("{label:<11}"), theme::muted()),
@@ -374,6 +387,18 @@ fn session_menu_label(dashboard: &DashboardState, palette: &CommandPalette, id: 
             } else {
                 "Pin…".to_owned()
             };
+        }
+        // Names the child the row's own status line names.
+        CommandId::OpenWaitingQuestion => {
+            return match palette
+                .session_id
+                .as_deref()
+                .and_then(|id| dashboard.waiting_child_kind(id))
+            {
+                Some(mj_core::subagent::SubagentKind::Reviewer) => "Open reviewer question",
+                _ => "Open sub-agent question",
+            }
+            .to_owned();
         }
         CommandId::OpenSession => "Open",
         CommandId::RenameSession => "Rename…",
@@ -737,6 +762,13 @@ impl DashboardState {
         };
         match interaction {
             Some(Interaction::Cancel) => self.cancel_modal(),
+            Some(Interaction::Activate(PaletteControl::CopySessionId)) => {
+                let session_id = palette.session_id.clone();
+                self.mode = Mode::Dashboard;
+                return session_id.map_or(DashboardAction::None, |session_id| {
+                    DashboardAction::CopySessionId { session_id }
+                });
+            }
             Some(Interaction::Edit(PaletteControl::Query, edit)) => {
                 TextField::apply(&mut palette.query, edit);
                 self.rebuild_palette_entries();
@@ -815,6 +847,7 @@ fn palette_lines(dashboard: &DashboardState, palette: &CommandPalette) -> Vec<Pa
                 CommandId::OpenSession
                 | CommandId::ChangedFiles
                 | CommandId::DismissNotification
+                | CommandId::OpenWaitingQuestion
                 | CommandId::IgnoreNotifications => 0,
                 CommandId::RenameSession
                 | CommandId::PinSession
@@ -826,7 +859,6 @@ fn palette_lines(dashboard: &DashboardState, palette: &CommandPalette) -> Vec<Pa
                 | CommandId::UpgradeContainer
                 | CommandId::InterruptAll
                 | CommandId::DestroySession => 2,
-                CommandId::CopySessionId => 3,
                 _ => continue,
             };
             if section != Some(next) {
@@ -837,8 +869,7 @@ fn palette_lines(dashboard: &DashboardState, palette: &CommandPalette) -> Vec<Pa
                 match next {
                     0 => lines.push(PaletteLine::Heading("Content".to_owned())),
                     1 => lines.push(PaletteLine::Heading("Organize".to_owned())),
-                    2 => lines.push(PaletteLine::Heading("Lifecycle".to_owned())),
-                    _ => lines.push(PaletteLine::Separator),
+                    _ => lines.push(PaletteLine::Heading("Lifecycle".to_owned())),
                 }
                 section = Some(next);
             }
@@ -889,7 +920,7 @@ pub(crate) fn render_palette(
     let facts_height = if facts.is_empty() { 0 } else { facts.len() + 1 };
     // The popup grows with the complete list. The shared modal helper clamps
     // it to the usable terminal bounds when the list cannot fit.
-    let extra_height = facts_height + if palette.session_only { 3 } else { 5 };
+    let extra_height = facts_height + if palette.session_only { 5 } else { 5 };
     let popup_height =
         u16::try_from(lines.len().saturating_add(extra_height).max(5)).unwrap_or(u16::MAX);
     let popup = centered_modal(frame, surfaces, 72, popup_height, area);
@@ -897,9 +928,12 @@ pub(crate) fn render_palette(
     let rows = if palette.session_only {
         Layout::default()
             .direction(Direction::Vertical)
+            // One blank row of margin at the top and at the bottom.
             .constraints([
+                Constraint::Length(1),
                 Constraint::Length(u16::try_from(facts_height).unwrap_or(u16::MAX)),
                 Constraint::Min(1),
+                Constraint::Length(1),
                 Constraint::Length(1),
             ])
             .split(inner)
@@ -914,14 +948,17 @@ pub(crate) fn render_palette(
             ])
             .split(inner)
     };
-    let list_row = rows[1];
-    let description_row = rows[2];
+    let (list_row, description_row) = if palette.session_only {
+        (rows[2], rows[3])
+    } else {
+        (rows[1], rows[2])
+    };
     if !facts.is_empty() {
         let facts_row = Rect::new(
-            rows[0].x.saturating_add(2),
-            rows[0].y,
-            rows[0].width.saturating_sub(2),
-            rows[0].height.saturating_sub(1),
+            rows[1].x.saturating_add(2),
+            rows[1].y,
+            rows[1].width.saturating_sub(2),
+            rows[1].height.saturating_sub(1),
         );
         frame.render_widget(Paragraph::new(facts), facts_row);
     }
@@ -940,7 +977,37 @@ pub(crate) fn render_palette(
         true,
     );
     let mut outer = theme::modal().title(title);
-    if !palette.session_only {
+    if palette.session_only {
+        // The session id copies from a chip on the menu's top border, at the
+        // right. It leaves the command list to lifecycle and content work.
+        let label = " Copy session ID ";
+        let width = u16::try_from(label.len()).unwrap_or(u16::MAX);
+        let enabled = matches!(
+            (spec(CommandId::CopySessionId).available)(dashboard),
+            Availability::Ready
+        );
+        form.register(
+            PaletteControl::CopySessionId,
+            ControlKind::Button,
+            Rect::new(
+                popup.right().saturating_sub(width + 1),
+                popup.y,
+                width.min(popup.width.saturating_sub(4)),
+                1,
+            ),
+            enabled,
+        );
+        let chip_style = if !enabled {
+            theme::muted().patch(theme::raised())
+        } else if form.is_focused(PaletteControl::CopySessionId)
+            || form.is_armed(PaletteControl::CopySessionId)
+        {
+            theme::focus_control()
+        } else {
+            theme::actionable_chip()
+        };
+        outer = outer.title(Line::styled(label, chip_style).right_aligned());
+    } else {
         outer = outer.title(
             Line::styled(
                 format!(
@@ -1354,6 +1421,23 @@ mod tests {
                 PaletteLine::Command(index) => session_menu_label(dashboard, palette, palette.entries[index].id),
             })
             .collect()
+    }
+
+    /// The menu opens with the session's model, effort, and profile as one
+    /// bare line above the labeled facts.
+    #[test]
+    fn the_session_menu_opens_with_model_effort_and_profile() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.set_session_current_config(
+            "session-1",
+            Some("gpt-6.1-sol".to_owned()),
+            Some("high".to_owned()),
+        );
+        dashboard.dispatch_command(CommandId::SessionActions);
+        let lines = drawn(&mut dashboard, 120, 40);
+        let info = point(&lines, "gpt-6.1-sol · high · codex-1");
+        let content = point(&lines, "Content");
+        assert!(info.1 < content.1, "the info line sits above the sections");
     }
 
     /// The menu's Ignore row is one option that says which way it flips.
@@ -1977,6 +2061,35 @@ mod tests {
             crate::dashboard_sessions::AttentionLevel::Idle
         );
         append_golden_value(&mut output, "unread dismissed", dashboard.notice());
+
+        // A parent marked only by its sub-agent's open form has nothing of
+        // its own to dismiss; the row in Dismiss's place goes to the child.
+        let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
+        crate::test_support::set_working(&mut dashboard, &parent);
+        crate::test_support::set_working(&mut dashboard, "child-session");
+        dashboard
+            .session_details
+            .get_mut("child-session")
+            .unwrap()
+            .pending_elicitations = vec![crate::test_support::question("child-session")];
+        crate::test_support::serve_attention(
+            &mut dashboard,
+            &[&parent, "child-session"],
+            mj_core::attention::SessionAttention::NeedsInput,
+        );
+        dashboard.focus_sessions();
+        dashboard.begin_session_palette();
+        let lines = drawn(&mut dashboard, 120, 40);
+        append_golden_state(&mut output, "sub-agent question menu", 120, 40, &lines);
+        let open = point(&lines, "Open sub-agent question");
+        dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), open));
+        let action = dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), open));
+        append_golden_value(&mut output, "open sub-agent question action", action);
+        append_golden_value(
+            &mut output,
+            "selected after opening the sub-agent question",
+            dashboard.selected_session_id(),
+        );
 
         mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "session-action-menu", &output);
     }
