@@ -23,6 +23,19 @@ pub(crate) fn is_turn_control_command(command: &mj_core::relay::RelayCommand) ->
 // this public action's Rust construction shape inline; boxing would change it.
 #[allow(clippy::large_enum_variant)]
 pub enum ControllerAction {
+    PushSubscribe {
+        subscription: crate::web_push::Subscription,
+    },
+    PushRenew {
+        old_endpoint: String,
+        subscription: crate::web_push::Subscription,
+    },
+    PushUnsubscribe {
+        endpoint: String,
+    },
+    PushTest {
+        endpoint: String,
+    },
     DismissNotification {
         session_id: String,
         target: mj_core::attention::NotificationDismissal,

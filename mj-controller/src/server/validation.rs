@@ -763,7 +763,16 @@ fn validate_action_against(
                 ));
             }
         }
-        ControllerAction::RecordOperatorActivity | ControllerAction::SetOperatorAway { .. } => {}
+        ControllerAction::PushSubscribe { subscription }
+        | ControllerAction::PushRenew { subscription, .. } => {
+            subscription
+                .validate()
+                .map_err(|_| ApiError::bad_request("invalid Web Push subscription"))?;
+        }
+        ControllerAction::PushUnsubscribe { .. }
+        | ControllerAction::PushTest { .. }
+        | ControllerAction::RecordOperatorActivity
+        | ControllerAction::SetOperatorAway { .. } => {}
         ControllerAction::RefreshQuota { profile_id } => {
             validate_public_id(profile_id)?;
             require_profile(snapshot, profile_id)?;

@@ -532,3 +532,26 @@ async fn save_draft_settings(
     .await
     .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
 }
+
+/// VAPID public material only; the private key never leaves the data directory.
+pub(super) async fn push_key() -> Result<Json<Value>, ApiError> {
+    crate::web_push::blocking(|| {
+        Ok(serde_json::json!({"public_key": crate::web_push::Vapid::load()?.public()}))
+    })
+    .await
+    .map(Json)
+    .map_err(unreadable)
+}
+
+#[derive(Deserialize)]
+pub(super) struct PushDeviceQuery {
+    endpoint: String,
+}
+pub(super) async fn push_device_status(
+    Query(query): Query<PushDeviceQuery>,
+) -> Result<Json<Value>, ApiError> {
+    crate::web_push::blocking(move || crate::database::push_device_status(query.endpoint))
+        .await
+        .map(Json)
+        .map_err(unreadable)
+}

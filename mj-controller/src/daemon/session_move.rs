@@ -207,11 +207,18 @@ impl RuntimeState {
         } else {
             None
         };
+        let catalog = self
+            .profile_catalog
+            .get()
+            .expect("catalog installed before serving")
+            .clone();
         let mut preparation = blocking(move || {
             let controller = Controller::load()?;
-            mj_core::runtime::block_on(
-                controller.prepare_move_session_controlled(selection, &ProcessExecutor),
-            )?
+            mj_core::runtime::block_on(controller.prepare_move_session_controlled(
+                &catalog,
+                selection,
+                &ProcessExecutor,
+            ))?
         })
         .await?;
         preparation.source_unavailable = source_active
@@ -383,6 +390,7 @@ impl RuntimeState {
             },
             Some(acceptance),
             move |state, session_id, cancelled| async move {
+                let catalog = state.profile_catalog.get().expect("catalog installed before serving").clone();
                 let _capacity_lease = capacity_lease;
                 let result = state
                     .clone()
@@ -392,6 +400,7 @@ impl RuntimeState {
                         |mut controller, executor, manager| async move {
                             controller
                                 .move_session_managed_controlled_with_admission(
+                                    &catalog,
                                     request, quota_move, &executor, &manager,
                                     move || { accepted.send_replace(Some(Ok(()))); },
                                 )
@@ -963,13 +972,19 @@ impl RuntimeState {
             manager.clone(),
             &recovery.observer(),
         );
-        Arc::new(RuntimeState::new_with_controller_loader(
+        let state = Arc::new(RuntimeState::new_with_controller_loader(
             manager,
             controller,
             recovery.observer(),
             upgrades.observer(),
             Vec::new(),
             Controller::load,
-        ))
+        ));
+        state.profile_catalog.get_or_init(|| {
+            crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                tokio_util::sync::CancellationToken::new(),
+            )
+        });
+        state
     }
 }

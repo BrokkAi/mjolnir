@@ -2412,6 +2412,13 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
         remove_harness_constraints(connection)?;
     }
 
+    // Compatible: standalone push tables are neither read nor rewritten by older
+    // controllers. No stored session JSON or existing constraints change.
+    // Provisional revision: assign the final number when merging this lane.
+    if version < 127 {
+        connection.execute_batch(concat!("BEGIN IMMEDIATE;", include_str!("web_push.sql"),
+            "INSERT INTO schema_migrations(version,applied_at) VALUES (127,strftime('%Y-%m-%dT%H:%M:%fZ','now')); PRAGMA user_version=127; COMMIT;"))?;
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)

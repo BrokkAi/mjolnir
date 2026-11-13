@@ -679,6 +679,10 @@ impl ProfileCatalog {
     /// `config` selects under one lock. A Settings draft uses this same path
     /// without becoming the live configuration.
     pub(crate) fn ensure(self: &Arc<Self>, config: &Config) {
+        self.ensure_profiles(config, true);
+    }
+
+    fn ensure_profiles(self: &Arc<Self>, config: &Config, refresh_live: bool) {
         let config = Arc::new(config.clone());
         let mut started = Vec::new();
         {
@@ -696,7 +700,7 @@ impl ProfileCatalog {
                 // keeping its entries; reads below never serve them either.
                 let live = profile.kind == HarnessKind::Muse;
                 if let Some(definition) = inner.definitions.get_mut(&identity) {
-                    if !live && !definition.cancellation.is_cancelled() {
+                    if (!live || !refresh_live) && !definition.cancellation.is_cancelled() {
                         // Keep successful entries and the in-flight attempt.
                         // A failed owner's next retry uses refreshed credentials.
                         let models_changed = definition
@@ -1511,26 +1515,53 @@ impl ProfileCatalog {
                 .fetch_live(&key, key.1.clone(), cancellation, &mut revisions)
                 .await;
         }
+        self.fetch_settled(config, id, key.1).await
+    }
+
+    // Admission checks configured choices against the warm owner, including Muse.
+    async fn fetch_settled(
+        self: &Arc<Self>,
+        config: &Config,
+        id: &str,
+        model: Option<String>,
+    ) -> Result<ProfileConfig> {
+        let profile = config.enabled_profile(id).context("profile unavailable")?;
+        let identity = profile.capabilities_key(id);
+        // Claim and reuse under the same lock, so concurrent first readers
+        // cannot replace each other's Muse owner. Only warm passes refresh it.
+        self.ensure_profiles(config, false);
+        let key = (identity, model);
+        let mut revisions = self.revisions.subscribe();
         loop {
             // Subscribe before inspecting ownership, so completion cannot be
             // missed. Readers never drive or publish the supervisor's future.
-            let (entry, started) = {
+            let (entry, started, cancellation) = {
                 let mut inner = self.lock();
+                if self.cancellation.is_cancelled() {
+                    bail!("profile discovery cancelled by daemon shutdown");
+                }
+                let cancellation = inner
+                    .definitions
+                    .get(&key.0)
+                    .filter(|definition| !definition.cancellation.is_cancelled())
+                    .context("profile definition retired")?
+                    .cancellation
+                    .clone();
                 let default = inner
                     .entries
                     .get(&(key.0.clone(), None))
                     .cloned()
                     .expect("default claimed by ensure");
                 if key.1.is_some() && !matches!(default, Entry::Ready(_)) {
-                    (default, None)
+                    (default, None, cancellation)
                 } else if let Some(entry) = inner.entries.get(&key) {
-                    (entry.clone(), None)
+                    (entry.clone(), None, cancellation)
                 } else {
                     let attempt = self.attempt(&inner.definitions[&key.0], key.1.clone());
                     let entry = Entry::Pending(attempt.clone());
                     inner.publication = None;
                     inner.entries.insert(key.clone(), entry.clone());
-                    (entry, Some(attempt))
+                    (entry, Some(attempt), cancellation)
                 }
             };
             if let Some(attempt) = started {
@@ -1547,7 +1578,9 @@ impl ProfileCatalog {
             tokio::select! {
                 biased;
                 _ = self.cancellation.cancelled() => bail!("profile discovery cancelled by daemon shutdown"),
-                _ = cancellation.cancelled() => bail!("profile definition retired"),
+                // A warm pass can replace this identity while we wait.
+                // Rejoin its current owner under the lock on the next iteration.
+                _ = cancellation.cancelled() => {},
                 result = revisions.changed() => { result.context("profile capability publisher stopped")?; }
             }
         }
@@ -1729,6 +1762,46 @@ impl ProfileCatalog {
             .await
             .into_iter()
             .collect()
+    }
+
+    pub(crate) async fn admission_options(
+        self: &Arc<Self>,
+        config: &Config,
+        parent: &str,
+        models: std::collections::BTreeSet<String>,
+    ) -> Result<std::collections::BTreeMap<String, mj_core::subagent::SubagentOptions>> {
+        config
+            .enabled_profile(parent)
+            .context("parent profile unavailable")?;
+        let defaults = join_all(config.enabled_profiles().map(|(id, _)| async move {
+            (id.to_owned(), self.fetch_settled(config, id, None).await)
+        }))
+        .await
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+        let results = join_all(models.into_iter().map(|model| {
+            let defaults = &defaults;
+            async move {
+                let options = crate::controller::profile_config::subagent_options_with(
+                    config,
+                    parent,
+                    Some(model.clone()),
+                    |id, selected| async move {
+                        if selected.is_none() {
+                            return defaults[&id]
+                                .as_ref()
+                                .cloned()
+                                .map_err(|error| anyhow::anyhow!("{error:#}"));
+                        }
+                        self.fetch_settled(config, &id, selected).await
+                    },
+                )
+                .await?;
+                Ok::<_, anyhow::Error>((model, options))
+            }
+        }))
+        .await;
+        results.into_iter().collect()
     }
 
     pub(crate) async fn options_for(
@@ -4143,6 +4216,70 @@ mod tests {
         catalog.sync_now(&config).await;
         assert_eq!(snapshot_models(&catalog), ["p-model", "m1", "m2", "m3"]);
     }
+    // Hard-won: 9d1f70d2b: refreshing Muse retired an admission waiter.
+    #[tokio::test]
+    async fn admission_follows_a_replaced_pending_muse_owner() {
+        let probes = calls();
+        let (started, mut starts) = tokio::sync::mpsc::unbounded_channel();
+        let (release, gate) = tokio::sync::watch::channel(false);
+        let catalog = ProfileCatalog::with_probe(gated_probe(probes.clone(), started, gate));
+        let mut config = test_config(&[("parent", HarnessKind::Codex), ("p", HarnessKind::Muse)]);
+        config.subagents.straightforward = Some(mj_core::config::SubagentChoice {
+            model: "p-model".into(),
+            effort: None,
+        });
+        let policy = mj_core::subagent::SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None,
+        };
+        catalog.sync(&config);
+        let validation = crate::controller::profile_config::validate_session_subagent_policy(
+            &catalog, &config, "parent", &policy,
+        );
+        tokio::pin!(validation);
+        assert!(futures::poll!(&mut validation).is_pending());
+        for _ in 0..2 {
+            starts.recv().await.unwrap();
+        }
+        catalog.sync(&config);
+        assert_eq!(starts.recv().await.unwrap(), "p");
+        // The waiter must join the replacement before either probe completes.
+        assert!(futures::poll!(&mut validation).is_pending());
+        release.send_replace(true);
+        validation.await.unwrap();
+        assert_eq!(probes.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn admission_shares_pending_muse_warmup_and_retains_its_result() {
+        let probes = calls();
+        let catalog = ProfileCatalog::with_probe(counting_probe(probes.clone()));
+        let mut config = test_config(&[("parent", HarnessKind::Codex), ("p", HarnessKind::Muse)]);
+        let choice = mj_core::config::SubagentChoice {
+            model: "p-model".into(),
+            effort: None,
+        };
+        config.subagents.straightforward = Some(choice.clone());
+        config.subagents.subtle = Some(choice);
+        catalog.sync(&config);
+        let policy = mj_core::subagent::SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None,
+        };
+        for _ in 0..2 {
+            crate::controller::profile_config::validate_session_subagent_policy(
+                &catalog, &config, "parent", &policy,
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            probes.load(Ordering::SeqCst),
+            2,
+            "one startup probe per profile across both validations"
+        );
+    }
+
     // Hard-won: dfbb210a5: restricted Muse reads restarted default discovery.
     #[tokio::test]
     async fn restricted_live_model_read_reuses_cached_default() {

@@ -75,6 +75,8 @@ declare -A allowed=(
   [libpthread.so.0]=1
   [libdl.so.2]=1
   [librt.so.1]=1
+  # Part of glibc; before 2.34 it holds openpty, which login terminals use.
+  [libutil.so.1]=1
   [libgcc_s.so.1]=1
   ["$loader"]=1
 )

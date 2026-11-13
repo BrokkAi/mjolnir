@@ -113,9 +113,80 @@ pub fn bootstrap() -> Result<Environment> {
     anyhow::bail!("target login environment requires a Unix account")
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub fn discover() -> Result<Environment> {
     anyhow::bail!("target login environment requires a Unix account")
+}
+
+/// Ask Windows to build the account's registry-backed environment, including
+/// expanded values and the combined system/user PATH. Never inherit the
+/// caller's session overlay (bInherit = FALSE).
+/// https://learn.microsoft.com/windows/win32/api/userenv/nf-userenv-createenvironmentblock
+#[cfg(windows)]
+pub fn discover() -> Result<Environment> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::{
+        Security::{TOKEN_DUPLICATE, TOKEN_QUERY},
+        System::{
+            Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock},
+            Threading::{GetCurrentProcess, OpenProcessToken},
+        },
+    };
+
+    let mut token = std::ptr::null_mut();
+    // SAFETY: token points to writable handle storage; the pseudo process
+    // handle is valid for this process. Success transfers token ownership.
+    if unsafe {
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_QUERY | TOKEN_DUPLICATE,
+            &mut token,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error()).context("open account environment token");
+    }
+    // SAFETY: OpenProcessToken returned a new owned handle.
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    let mut block = std::ptr::null_mut();
+    // SAFETY: the token remains live and block is writable output storage.
+    if unsafe { CreateEnvironmentBlock(&mut block, token.as_raw_handle(), 0) } == 0 {
+        return Err(std::io::Error::last_os_error()).context("build account environment");
+    }
+    struct Block(*mut std::ffi::c_void);
+    impl Drop for Block {
+        fn drop(&mut self) {
+            // SAFETY: this allocation came from CreateEnvironmentBlock and
+            // has not been released or modified.
+            if unsafe { DestroyEnvironmentBlock(self.0) } == 0 {
+                tracing::warn!(error = %std::io::Error::last_os_error(), "release account environment");
+            }
+        }
+    }
+    let block = Block(block);
+    let mut environment = Environment::new();
+    let mut entry = block.0.cast::<u16>();
+    // SAFETY: Windows returns a double-NUL terminated sequence of NUL
+    // terminated UTF-16 entries. The allocation remains live through parsing.
+    unsafe {
+        while *entry != 0 {
+            let mut length = 0;
+            while *entry.add(length) != 0 {
+                length += 1;
+            }
+            let text = String::from_utf16(std::slice::from_raw_parts(entry, length))
+                .context("account environment is not valid UTF-16")?;
+            // Windows drive-current-directory entries start with '=' and
+            // belong to the process, not the account environment.
+            if let Some((name, value)) = text.split_once('=')
+                && !name.is_empty()
+            {
+                environment.insert(name.to_owned(), value.to_owned());
+            }
+            entry = entry.add(length + 1);
+        }
+    }
+    Ok(environment)
 }
 
 /// How long the login-shell probe may run. The probe reproduces everything a

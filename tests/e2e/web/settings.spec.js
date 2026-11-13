@@ -14,7 +14,7 @@ const EXCHANGE = JSON.parse(fs.readFileSync(
   'utf8',
 ));
 const WORKSPACE_ID = 'workspace-settings';
-const ASSETS = new Set(['viewer.html', 'viewer.js', 'viewer.css', 'markdown.js', 'tool-output.js', 'manifest.webmanifest']);
+const ASSETS = new Set(['viewer.html', 'push-sync.js', 'viewer.js', 'viewer.css', 'markdown.js', 'tool-output.js', 'manifest.webmanifest']);
 
 test.use({ serviceWorkers: 'block' });
 
@@ -145,6 +145,22 @@ test('golden_viewer_settings', async ({ page }) => {
   await expect(page.locator('#settings-savebar')).toBeVisible();
   await capture('an accepted edit leaves the draft unsaved');
 
+  const draftEnabled = await page.getByLabel('Enabled').isChecked();
+  // Hard-won: 7a50f9da7: notification navigation reloaded away unsaved Settings.
+  await page.evaluate(() => {
+    window.notificationDraftMarker = 'same document';
+    navigator.serviceWorker.dispatchEvent(new MessageEvent('message', {
+      origin: location.origin,
+      data: { type: 'mj-notification-open', url: `${location.origin}/` },
+    }));
+  });
+  await expect(page).toHaveURL(new RegExp(`#workspace/${WORKSPACE_ID}$`));
+  await page.evaluate(() => { location.hash = '#settings/continuation'; });
+  await expect(page.locator('#settings-savebar')).toBeVisible();
+  expect(await page.getByLabel('Enabled').isChecked()).toBe(draftEnabled);
+  expect(await page.evaluate(() => window.notificationDraftMarker)).toBe('same document');
+
+
   await page.locator('#back').click();
   await page.locator('.settings-link', { hasText: 'Sub-agents' }).click();
   const limit = page.getByLabel('Maximum concurrent children');
@@ -190,4 +206,216 @@ test('golden_viewer_settings', async ({ page }) => {
   // Every recorded request was made, in the recorded order.
   expect(state.requests).toEqual(EXCHANGE.map(({ uri, request }) => ({ uri, request })));
   assertGolden('viewer_settings', output.join('\n'));
+});
+
+test('device notification enrollment starts from a tap and supports test and unsubscribe', async ({ page }) => {
+  await mount(page);
+  await page.addInitScript(() => {
+    let subscription = null;
+    window.pushPermissionTaps = 0;
+    window.pushShownNotifications = [];
+    window.pushClosedNotifications = [];
+    window.Notification = class {
+      static permission = 'default';
+      static requestPermission() { window.pushPermissionTaps += 1; this.permission = 'granted'; return Promise.resolve('granted'); }
+    };
+    window.PushManager = class {};
+    const registration = {
+      active: {},
+      getNotifications: async () => window.pushShownNotifications.map(data => ({ data, close: () => window.pushClosedNotifications.push(data.label) })),
+      pushManager: {
+        getSubscription: async () => subscription,
+        subscribe: async () => {
+          subscription = {
+            endpoint: 'https://push.example/device',
+            toJSON: () => ({ endpoint: 'https://push.example/device', keys: { p256dh: 'public', auth: 'secret' } }),
+            unsubscribe: async () => { subscription = null; return true; },
+          };
+          return subscription;
+        },
+      },
+    };
+    Object.defineProperty(navigator, 'serviceWorker', { value: Object.assign(new EventTarget(), { register: async () => registration, getRegistration: async () => registration }) });
+  });
+  const actions = [];
+  await page.route('**/api/push/status?*', route => route.fulfill({ json: { subscribed: true, error: null } }));
+  await page.route('**/api/push/key', route => route.fulfill({ json: { public_key: 'BA' } }));
+  let rejectUnsubscribe = true;
+  await page.route('**/api/actions', route => {
+    const action = route.request().postDataJSON();
+    actions.push(action);
+    if (action.action === 'push-unsubscribe' && rejectUnsubscribe) {
+      rejectUnsubscribe = false;
+      return route.fulfill({ status: 503, json: { error: 'Device removal failed; try again' } });
+    }
+    return route.fulfill({ json: { accepted: true } });
+  });
+  await page.goto('https://viewer.test/#settings');
+  await expect(page.locator('#device-notification-state')).toContainText('Not enabled');
+  expect(await page.evaluate(() => window.pushPermissionTaps)).toBe(0);
+  await page.locator('#device-notification-enable').click();
+  await expect(page.locator('#device-notification-state')).toHaveText('Enabled on this device');
+  expect(await page.evaluate(() => window.pushPermissionTaps)).toBe(1);
+  await page.locator('#device-notification-test').click();
+  await expect(page.locator('#device-notification-state')).toHaveText('Test notification requested');
+  // Hard-won: 82e2bb311: failed server removal lost the native endpoint needed to retry.
+  await page.locator('#device-notification-disable').click();
+  await expect(page.locator('#device-notification-state')).toContainText('Notification sync failed');
+  await page.locator('#device-notification-disable').click();
+  await expect(page.locator('#device-notification-state')).toContainText('Not enabled');
+  expect(actions.map(action => action.action)).toEqual(['push-subscribe', 'push-test', 'push-unsubscribe', 'push-unsubscribe']);
+  let attentionRevision = 100;
+  const states = { unknown: 'unknown', unreachable: 'unreachable', failed: 'failed', idle: 'idle', working: 'working' };
+  await page.route('**/api/snapshot', route => {
+    const next = snapshot();
+    next.revision = attentionRevision;
+    next.sessions = Object.entries(states).map(([id, attention]) => ({ id, title: id, workspace_id: WORKSPACE_ID, attention, active: true, is_idle: true, capabilities: {}, detail: false }));
+    return route.fulfill({ json: viewerWireSnapshot(next) });
+  });
+  // Hard-won: c146a8a89: focus removed notifications for unavailable questions.
+  await page.evaluate(() => {
+    window.pushShownNotifications = [
+      { label: 'unknown', session_id: 'unknown' }, { label: 'unreachable', session_id: 'unreachable' },
+      { label: 'failed', session_id: 'failed' }, { label: 'idle', session_id: 'idle' },
+      { label: 'working', session_id: 'working' },
+      { label: 'newer-card', session_id: 'idle', episode: 'idle:2', observed_revision: 200 },
+    ];
+    window.pushShownNotifications = window.pushShownNotifications.map(data => ({ episode: 'existing:1', observed_revision: 50, ...data }));
+    window.dispatchEvent(new Event('focus'));
+  });
+  await expect.poll(() => page.evaluate(() => [...new Set(window.pushClosedNotifications)].sort())).toEqual(['idle', 'working']);
+  // Hard-won: 6eb0ad808: a stale Idle response withdrew a newer episode's card.
+  expect(await page.evaluate(() => window.pushClosedNotifications.includes('newer-card'))).toBe(false);
+  attentionRevision = 201;
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await expect.poll(() => page.evaluate(() => window.pushClosedNotifications.includes('newer-card'))).toBe(true);
+
+});
+
+// Hard-won: 7a50f9da7: notification clicks reloaded existing viewer drafts.
+test('service worker push displays and clicks route an existing window to the conversation', async ({ page }) => {
+  await page.goto('about:blank');
+  const source = fs.readFileSync(path.join(WEB_ROOT, 'service-worker.js'), 'utf8').replace("importScripts('/push-sync.js');", '');
+  const result = await page.evaluate(async source => {
+    const listeners = {};
+    const calls = [];
+    const self = {
+      location: { origin: 'https://viewer.test' },
+      addEventListener: (name, callback) => { listeners[name] = callback; },
+      registration: {
+        showNotification: async (title, options) => { calls.push(['show', title, options]); },
+        pushManager: { getSubscription: async () => currentSubscription },
+      },
+      clients: {
+        matchAll: async () => [{ url: 'https://viewer.test/', postMessage: message => calls.push(['route', message]), focus: async () => calls.push(['focus']) }],
+        openWindow: async url => calls.push(['open', url]),
+      },
+    };
+    let currentSubscription = { toJSON: () => ({ endpoint: 'https://push.example/new', keys: { p256dh: 'key', auth: 'auth' } }) };
+    const fetch = async (url, options) => { calls.push(['subscription', url, options.credentials, JSON.parse(options.body)]); return { ok: true }; };
+    new Function('self', 'fetch', 'MjPush', source)(self, fetch, { reconcile: async () => {} });
+    let pending;
+    listeners.push({ data: { json: () => ({ title: 'Build', body: 'Which option?', tag: 'session', session_id: 'session', episode: 'session:2', observed_revision: 200, url: '/#conversation/session' }) }, waitUntil: promise => { pending = promise; } });
+    await pending;
+    listeners.notificationclick({ notification: { data: { url: '/#conversation/session' }, close: () => calls.push(['close']) }, waitUntil: promise => { pending = promise; } });
+    await pending;
+    return calls;
+  }, source);
+  expect(result).toEqual([
+    ['show', 'Build', { body: 'Which option?', renotify: true, tag: 'session', data: { url: '/#conversation/session', session_id: 'session', episode: 'session:2', observed_revision: 200 } }],
+    ['close'], ['route', { type: 'mj-notification-open', url: 'https://viewer.test/#conversation/session' }], ['focus'],
+  ]);
+});
+
+// Hard-won: 437e04dc6: expiry and failed rotation lost enrollment until manual Enable.
+test('device reconcile retries expiry and rotation and shares disable intent across contexts', async ({ page }) => {
+  await mount(page);
+  await page.addInitScript(() => {
+    window.Notification = class {
+      static permission = 'default';
+      static requestPermission() { this.permission = 'granted'; localStorage.setItem('permission', 'granted'); return Promise.resolve('granted'); }
+    };
+    Notification.permission = localStorage.getItem('permission') || 'default';
+    window.PushManager = class {};
+    const manager = {
+      getSubscription: async () => {
+        const endpoint = localStorage.getItem('native');
+        return endpoint ? { endpoint, toJSON: () => ({ endpoint, keys: { p256dh: 'key', auth: 'auth' } }), unsubscribe: async () => { localStorage.removeItem('native'); return true; } } : null;
+      },
+      subscribe: async () => { localStorage.setItem('native', 'https://push.example/recreated'); return manager.getSubscription(); },
+    };
+    window.registration = { active: {}, pushManager: manager, getNotifications: async () => [] };
+    Object.defineProperty(navigator, 'serviceWorker', { value: Object.assign(new EventTarget(), { register: async () => registration, getRegistration: async () => registration }) });
+  });
+  const actions = [];
+  let failRenew = false;
+  await page.route('**/api/push/key', route => route.fulfill({ json: { public_key: 'BA' } }));
+  await page.route('**/api/push/status?*', route => route.fulfill({ json: { subscribed: true } }));
+  await page.route('**/api/actions', route => {
+    const action = route.request().postDataJSON(); actions.push(action);
+    return route.fulfill({ status: failRenew ? 401 : 200, json: { accepted: !failRenew } });
+  });
+  await page.goto('https://viewer.test/');
+  await expect(page.locator('#notification-offer')).toBeVisible();
+  await page.locator('#notification-offer-enable').click();
+  await expect(page.locator('#notification-offer')).toBeHidden();
+  const workerSource = fs.readFileSync(path.join(WEB_ROOT, 'service-worker.js'), 'utf8').replace("importScripts('/push-sync.js');", '');
+  await page.evaluate(async source => {
+    localStorage.removeItem('native');
+    const listeners = {};
+    const self = { addEventListener: (name, listener) => listeners[name] = listener, registration };
+    new Function('self', source)(self);
+    let pending;
+    listeners.pushsubscriptionchange({ oldSubscription: { endpoint: 'https://push.example/expired' }, waitUntil: promise => pending = promise });
+    await pending;
+  }, workerSource);
+  expect(actions.some(a => a.action === 'push-renew' && a.old_endpoint.endsWith('/expired'))).toBe(true);
+  failRenew = true;
+  await page.evaluate(async () => {
+    localStorage.setItem('native', 'https://push.example/rotated');
+    await MjPush.reconcile(registration).catch(() => {});
+  });
+  failRenew = false;
+  await page.reload();
+  await expect.poll(() => actions.filter(a => a.action === 'push-renew' && a.subscription.endpoint.endsWith('/rotated')).length).toBe(2);
+  // Another JS context reads the same IndexedDB flag; it cannot recreate after Disable.
+  await page.evaluate(async () => {
+    await MjPush.setEnabled(false, registration);
+  });
+  const frame = await page.evaluateHandle(() => { const node = document.createElement('iframe'); document.body.append(node); return node; });
+  const other = await (await frame.asElement().contentFrame());
+  await other.evaluate(fs.readFileSync(path.join(WEB_ROOT, 'push-sync.js'), 'utf8'));
+  await other.evaluate(async () => { window.Notification = class { static permission = 'granted'; }; await MjPush.reconcile(parent.registration); });
+  expect(await page.evaluate(() => localStorage.getItem('native'))).toBeNull();
+  await page.evaluate(async () => {
+    await MjPush.setEnabled(true, registration);
+    Notification.permission = 'denied';
+    await MjPush.reconcile(registration);
+  });
+  expect(actions.at(-1).action).toBe('push-unsubscribe');
+  expect(await page.evaluate(() => localStorage.getItem('native'))).toBeNull();
+});
+
+test('notification offer dismissal persists and iOS tabs show the install hint', async ({ page }) => {
+  await mount(page);
+  await page.addInitScript(() => {
+    window.Notification = class { static permission = 'default'; };
+    window.PushManager = class {};
+  });
+  await page.goto('https://viewer.test/');
+  await expect(page.locator('#notification-offer')).toBeVisible();
+  await page.locator('#notification-offer-dismiss').click();
+  await expect(page.locator('#notification-offer')).toBeHidden();
+  await page.reload();
+  await expect(page.locator('#notification-offer')).toBeHidden();
+  await page.evaluate(() => new Promise(resolve => { const request = indexedDB.deleteDatabase('mj-notifications'); request.onsuccess = resolve; }));
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'userAgent', { value: 'iPhone Safari' });
+    window.matchMedia = () => ({ matches: false, addEventListener() {} });
+  });
+  await page.reload();
+  await expect(page.locator('#notification-offer')).toContainText('Add Mjolnir to your Home Screen');
+  await expect(page.locator('#notification-offer-enable')).toBeHidden();
+  await page.evaluate(() => { Notification.permission = 'denied'; window.dispatchEvent(new Event('focus')); });
+  await expect(page.locator('#notification-offer')).toBeHidden();
 });

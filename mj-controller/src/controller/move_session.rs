@@ -1050,8 +1050,9 @@ impl Controller {
         validate_preserved_configuration(profile_id, &accepted, &choices)
     }
 
-    pub async fn prepare_move_session_controlled(
+    pub(crate) async fn prepare_move_session_controlled(
         &self,
+        catalog: &std::sync::Arc<crate::server_runtime::profile_catalog::ProfileCatalog>,
         mut selection: MoveSelection,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<MovePreparation> {
@@ -1206,6 +1207,7 @@ impl Controller {
             || policy != source.subagents.clone().unwrap_or_default()
         {
             super::profile_config::validate_session_subagent_policy(
+                catalog,
                 &self.config,
                 profile_id,
                 &policy,
@@ -1351,27 +1353,10 @@ impl Controller {
         })
     }
 
-    /// Called with one daemon lifecycle and recovery reservation already held.
-    pub async fn move_session_managed_controlled(
-        &mut self,
-        request: MoveSessionRequest,
-        quota_move: Option<(String, mj_core::state::QuotaMoveContinuation)>,
-        executor: &(impl CommandExecutor + Sync),
-        manager: &SessionManagerControl,
-    ) -> Result<MoveOutcome> {
-        self.move_session_managed_controlled_with_admission(
-            request,
-            quota_move,
-            executor,
-            manager,
-            || {},
-        )
-        .await
-    }
-
     /// Publish acceptance only after the existing Move intent is committed.
     pub(crate) async fn move_session_managed_controlled_with_admission(
         &mut self,
+        catalog: &std::sync::Arc<crate::server_runtime::profile_catalog::ProfileCatalog>,
         request: MoveSessionRequest,
         quota_move: Option<(String, mj_core::state::QuotaMoveContinuation)>,
         executor: &(impl CommandExecutor + Sync),
@@ -1389,7 +1374,7 @@ impl Controller {
                 ProvisionStageGuard::new(executor, ProvisionStage::Verifying);
             let mut checked = {
                 let _timing = MovePhaseTimer::new(&id, "preflight destination checks");
-                self.prepare_move_session_controlled(prepared.selection.clone(), executor)
+                self.prepare_move_session_controlled( catalog, prepared.selection.clone(), executor)
                     .await?
             };
             // Destination checks can outlast a turn. Confirm against the relay

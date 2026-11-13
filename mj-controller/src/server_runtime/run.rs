@@ -1289,7 +1289,9 @@ pub(crate) async fn run_server(
                     if let Some(session_id) = &session_id {
                         action_sessions.insert(action_id, session_id.clone());
                     }
-                    let admission_reply = if matches!(action, ControllerAction::Suspend { .. } | ControllerAction::Move { .. }) {
+                    let admission_reply = if matches!(action, ControllerAction::Suspend { .. } | ControllerAction::Move { .. }
+                        | ControllerAction::PushSubscribe { .. } | ControllerAction::PushRenew { .. }
+                        | ControllerAction::PushUnsubscribe { .. } | ControllerAction::PushTest { .. }) {
                         Some(reply)
                     } else {
                         action_replies.accept(action_id, &action, reply);

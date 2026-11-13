@@ -12,8 +12,43 @@ pub(crate) async fn query(
     home: &Path,
     environment: &HashMap<String, String>,
 ) -> Result<Vec<QuotaWindow>> {
-    let environment = environment.clone().into_iter().collect::<BTreeMap<_, _>>();
-    let program = mj_core::program_path::antigravity_program(&environment).await?;
+    // Resolve the runtime from the daemon's environment before HOME is replaced
+    // for the disposable login. Profile overrides retain their usual precedence.
+    let mut inherited = std::env::vars_os()
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+        .collect::<BTreeMap<_, _>>();
+    inherited.extend(environment.clone());
+    let mut environment = inherited;
+    HarnessKind::Antigravity.configure_home_environment(home, &mut environment);
+    #[cfg(unix)]
+    let located = {
+        let policy = mj_core::config::ExecutionPolicy::ConfiguredApprovals;
+        let (command, args) =
+            mj_core::harness_runtime::fallback_launch(HarnessKind::Antigravity, policy);
+        mj_core::harness_install::locate(
+            mj_core::placement::local_harness_runtime(),
+            HarnessKind::Antigravity,
+            policy,
+            Path::new(&command),
+            &args,
+            &environment,
+        )
+        .await
+        .context("prepare Antigravity quota CLI")?
+    };
+    // Retain Located until capture completes: its lease protects the running CLI.
+    #[cfg(unix)]
+    let program = {
+        environment.extend(located.environment.clone());
+        located
+            .cli_entrypoint
+            .as_ref()
+            .context("Antigravity quota CLI was not resolved")?
+    };
+    #[cfg(not(unix))]
+    let program = mj_core::program_path::find_antigravity_program(&environment)
+        .await?
+        .context("Antigravity requires agy installed on this target")?;
     let source = harness_authentication_marker(HarnessKind::Antigravity, home);
     let staged = tokio::task::spawn_blocking(move || -> Result<tempfile::TempDir> {
         let staged = tempfile::tempdir().context("stage Antigravity quota login")?;
@@ -219,11 +254,20 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires host-installed agy and a copied MJ_ANTIGRAVITY_TEST_HOME login"]
+    #[ignore = "downloads pinned agy and needs a copied MJ_ANTIGRAVITY_TEST_HOME login"]
     async fn installed_antigravity_usage_reads_both_subscription_pools_without_a_turn() {
         let home =
             std::env::var_os("MJ_ANTIGRAVITY_TEST_HOME").expect("set a copied credential home");
-        let windows = query(Path::new(&home), &HashMap::new()).await.unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let windows = query(
+            Path::new(&home),
+            &HashMap::from([(
+                "XDG_CACHE_HOME".into(),
+                cache.path().to_string_lossy().into_owned(),
+            )]),
+        )
+        .await
+        .unwrap();
         for pool in AntigravityQuotaPool::ALL {
             let scoped = windows
                 .iter()

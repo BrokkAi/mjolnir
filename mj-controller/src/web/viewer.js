@@ -895,6 +895,7 @@ function renderSettingsSavebar() {
 }
 
 function renderSettings() {
+  refreshDeviceNotifications();
   renderSettingsSavebar();
   settingsError.replaceChildren();
   if (settingsState.error) {
@@ -6319,6 +6320,7 @@ function presentSnapshot(detailChangedIds = []) {
       route = parseRoute(hash);
     }
   }
+  withdrawResolvedNotifications();
   discardQueuedOperatorActivityIfDisabled();
   activitySignalFailed = false;
   signedOut = false;
@@ -9032,6 +9034,7 @@ document.querySelector('#login-form').onsubmit = async e => {
       body: JSON.stringify({ code: document.querySelector('#code').value }),
     });
     document.querySelector('#login-error').textContent = '';
+    reconcileDeviceNotifications();
     await restoreRoute();
   } catch (err) {
     document.querySelector('#login-error').textContent = err.message;
@@ -9981,9 +9984,148 @@ document.addEventListener('visibilitychange', () => {
 // tick.
 window.setInterval(updateSessionClocks, 1000);
 if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', event => {
+    if (event.origin !== location.origin || event.data?.type !== 'mj-notification-open') return;
+    try {
+      const target = new URL(event.data.url, location.href);
+      if (target.origin !== location.origin || target.pathname !== '/') return;
+      // Normal routing saves conversation drafts and retains Settings drafts.
+      navigate(parseRoute(target.hash));
+    } catch (error) { console.warn('Could not open notification route', error); }
+  });
   // A registration that fails means the application is not installable, and
   // nothing more. Left uncaught it is an unhandled rejection, which is exactly
   // the page error the reliability suite refuses to see.
   navigator.serviceWorker.register('/service-worker.js').catch(() => {});
 }
 restoreRoute();
+
+// Permission must be requested synchronously from the person's tap (iOS).
+const notificationState = document.querySelector('#device-notification-state');
+const notificationEnable = document.querySelector('#device-notification-enable');
+const notificationDisable = document.querySelector('#device-notification-disable');
+const notificationTest = document.querySelector('#device-notification-test');
+function pushSupported() {
+  return window.isSecureContext && 'Notification' in window && 'serviceWorker' in navigator && 'PushManager' in window;
+}
+async function pushRegistration() {
+  const registration = await navigator.serviceWorker.getRegistration();
+  if (!registration?.active) throw new Error('The app is preparing notifications. Reload and try again.');
+  return registration;
+}
+let notificationSyncPending = 0;
+let notificationSyncError = '';
+async function syncDeviceNotifications(work) {
+  notificationSyncPending += 1;
+  notificationState.textContent = 'Syncing notifications…';
+  notificationEnable.disabled = notificationDisable.disabled = notificationTest.disabled = true;
+  try { await work(); notificationSyncError = ''; }
+  catch (error) { notificationSyncError = error.message; throw error; }
+  finally { notificationSyncPending -= 1; }
+}
+async function refreshDeviceNotifications() {
+  if (notificationSyncPending) return;
+  if (notificationSyncError) {
+    notificationState.textContent = notificationSyncError;
+    notificationEnable.disabled = notificationDisable.disabled = false;
+    notificationTest.disabled = true;
+    return;
+  }
+  if (!pushSupported()) {
+    notificationState.textContent = 'Notifications need a supported browser and HTTPS. On iOS, open the Home Screen app.';
+    notificationEnable.disabled = notificationDisable.disabled = notificationTest.disabled = true;
+    return;
+  }
+  try {
+    const subscription = await (await pushRegistration()).pushManager.getSubscription();
+    const status = subscription ? await request(`/api/push/status?endpoint=${encodeURIComponent(subscription.endpoint)}`) : null;
+    notificationState.textContent = status?.error ? `Notification delivery: ${status.error}` : status?.subscribed ? 'Enabled on this device' : `Not enabled (permission: ${Notification.permission})`;
+    notificationEnable.disabled = !!status?.subscribed && !status?.error;
+    notificationDisable.disabled = notificationTest.disabled = !subscription;
+  } catch (error) { notificationState.textContent = error.message; }
+}
+notificationEnable.onclick = async () => {
+  notificationState.textContent = 'Syncing notifications…';
+  try {
+    const permission = await Notification.requestPermission();
+    if (permission !== 'granted') throw new Error('Notification permission was not granted. Allow it in this browser’s site settings to enable notifications.');
+    await syncDeviceNotifications(async () => MjPush.setEnabled(true, await pushRegistration()));
+    await refreshNotificationOffer();
+    await refreshDeviceNotifications();
+  } catch (error) { notificationSyncError = error.message; await refreshDeviceNotifications(); }
+};
+notificationDisable.onclick = async () => {
+  try {
+    await syncDeviceNotifications(async () => MjPush.setEnabled(false, await pushRegistration()));
+    await refreshDeviceNotifications();
+  } catch (error) { await refreshDeviceNotifications(); }
+};
+notificationTest.onclick = async () => {
+  try {
+    const subscription = await (await pushRegistration()).pushManager.getSubscription();
+    if (!subscription) throw new Error('Enable notifications first.');
+    await request('/api/actions', { method: 'POST', body: JSON.stringify({ action: 'push-test', endpoint: subscription.endpoint }) });
+    notificationState.textContent = 'Test notification requested';
+  } catch (error) { notificationState.textContent = error.message; }
+};
+async function withdrawResolvedNotifications() {
+  if (!pushSupported() || !snapshot) return;
+  try {
+    const registration = await pushRegistration();
+    const notifications = await registration.getNotifications();
+    for (const notification of notifications) {
+      const id = notification.data?.session_id;
+      const session = id && sessionById(id);
+      // Sender and viewer revisions share the daemon's monotonic allocator.
+      // An older/equal snapshot cannot resolve this episode, even if it says Idle.
+      // A different actionable or unavailable attention kind is not resolution.
+      const data = notification.data;
+      if (!data?.episode || !data.observed_revision || snapshot.revision <= data.observed_revision) continue;
+      if (id && (!session || ['idle', 'working', 'inactive', 'unread'].includes(session.attention))) notification.close();
+    }
+  } catch (error) { console.warn('Could not refresh shown notifications', error); }
+}
+let notificationAttentionRefresh;
+function refreshNotificationAttention() {
+  // A suspended phone may have an old row saying Idle when a new push arrives.
+  // Fetch current owner state before deciding which shown cards to withdraw.
+  if (!notificationAttentionRefresh) {
+    notificationAttentionRefresh = refresh().finally(() => { notificationAttentionRefresh = undefined; });
+  }
+}
+window.addEventListener('focus', () => { reconcileDeviceNotifications(); refreshNotificationAttention(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { reconcileDeviceNotifications(); refreshNotificationAttention(); } });
+refreshDeviceNotifications();
+
+async function reconcileDeviceNotifications() {
+  if (!pushSupported()) return;
+  notificationState.textContent = 'Syncing notifications…';
+  try {
+    await syncDeviceNotifications(async () => MjPush.reconcile(await pushRegistration()));
+    await refreshDeviceNotifications();
+  } catch (error) { await refreshDeviceNotifications(); }
+}
+reconcileDeviceNotifications();
+
+async function refreshNotificationOffer() {
+  const offer = document.querySelector('#notification-offer');
+  try {
+    const iosTab = /iPad|iPhone|iPod/.test(navigator.userAgent) && !matchMedia('(display-mode: standalone)').matches && !navigator.standalone;
+    const state = await MjPush.state();
+    const permitted = !('Notification' in window) || Notification.permission === 'default';
+    offer.hidden = !window.isSecureContext || state.enabled || state.dismissed || !permitted || (!iosTab && !pushSupported());
+    document.querySelector('#notification-offer-text').textContent = iosTab ? 'Add Mjolnir to your Home Screen to get notifications' : 'Get notified on this device when a session needs you';
+    document.querySelector('#notification-offer-enable').hidden = iosTab;
+  } catch (error) { console.warn('Could not read notification preference', error); }
+}
+document.querySelector('#notification-offer-enable').onclick = async () => {
+  // Calling this directly keeps the permission request inside the tap gesture.
+  await notificationEnable.onclick();
+  document.querySelector('#notification-offer-error').textContent = notificationState.textContent.startsWith('Enabled') ? '' : notificationState.textContent;
+};
+document.querySelector('#notification-offer-dismiss').onclick = async () => {
+  try { await MjPush.dismiss(); await refreshNotificationOffer(); }
+  catch (error) { document.querySelector('#notification-offer-error').textContent = error.message; }
+};
+refreshNotificationOffer();
+window.addEventListener('focus', refreshNotificationOffer);
