@@ -1866,20 +1866,33 @@ fn query_rows_from(
         sessionwiki::index::search_with_roles(connection, query, search_limit, None, None, roles)
             .context("search the SessionWiki index")?;
     let mut rows = Vec::with_capacity(hits.len().min(limit));
+    let mut found = BTreeSet::new();
+    // A pasted session id names the session itself, so it ranks above the
+    // sessions that merely mention that id in their messages.
+    for row in id_like(connection, query)? {
+        if rows.len() >= limit {
+            break;
+        }
+        if top_level::is_child(&row, ownership, cache)? {
+            continue;
+        }
+        found.insert(row.session_id.clone());
+        rows.push(wiki_row(row, None, live));
+    }
     for hit in hits {
         if rows.len() >= limit {
             break;
         }
-        if top_level::is_child(&hit.row, ownership, cache)? {
+        if found.contains(&hit.row.session_id) || top_level::is_child(&hit.row, ownership, cache)? {
             continue;
         }
+        found.insert(hit.row.session_id.clone());
         rows.push(wiki_row(hit.row, Some(hit.snippet), live));
     }
     // SessionWiki searches message text alone, so a session known by a title
     // or a project that is never said out loud would be unfindable. Those
     // matches follow the full-text ones rather than displacing them.
     if rows.len() < limit {
-        let mut found: BTreeSet<String> = rows.iter().map(|row| row.id.clone()).collect();
         for row in named_like(connection, query)? {
             if rows.len() >= limit {
                 break;
@@ -2027,6 +2040,26 @@ fn fill_session_tags(connection: &rusqlite::Connection, rows: &mut [WikiRow]) ->
 /// also loads a preview, summary and tags for every row, none of which title
 /// matching needs.
 const NAME_SCAN_LIMIT: usize = 2_000;
+
+/// Indexed sessions whose id starts with the query, when the query reads as a
+/// pasted id: hexadecimal digits and dashes only (dashes for a harness's own
+/// UUID), and at least as long as the id prefix Mjolnir shows. The length
+/// keeps short hex words such as "face" or "added" from reading as ids.
+/// SessionWiki's `resolve` matches Mjolnir and other tools' short ids as well
+/// as Codex and Claude native ids.
+fn id_like(
+    connection: &rusqlite::Connection,
+    query: &str,
+) -> Result<Vec<sessionwiki::index::SessionRow>> {
+    let hex_digits = query.chars().filter(char::is_ascii_hexdigit).count();
+    let only_id_characters = query
+        .chars()
+        .all(|character| character.is_ascii_hexdigit() || character == '-');
+    if !only_id_characters || hex_digits < mj_core::state::SHORT_ID_LEN {
+        return Ok(Vec::new());
+    }
+    sessionwiki::index::resolve(connection, query).context("look up a pasted session id")
+}
 
 /// Indexed sessions whose title or project contains the query, ignoring case.
 fn named_like(
@@ -3390,7 +3423,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bundle_session_is_indexed_and_searchable_by_its_primary_repository() {
+    fn a_bundle_session_is_indexed_and_searchable_by_its_primary_repository_and_id() {
         let _held = tags::testing::lock();
         let (_index_dir, mut connection) = tags::testing::isolated_index();
         let directory = tempfile::tempdir().unwrap();
@@ -3415,6 +3448,15 @@ mod tests {
                 .iter()
                 .any(|row| row.id == session_id),
             "the indexed bundle session is found by its repository name"
+        );
+        let pasted = session_id[..mj_core::state::SHORT_ID_LEN].to_uppercase();
+        assert_eq!(
+            query_rows_for_test(&pasted, 10, false)
+                .unwrap()
+                .first()
+                .map(|row| row.id.as_str()),
+            Some(session_id),
+            "a pasted session id prefix finds the session first"
         );
     }
 
@@ -4223,6 +4265,22 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        // A pasted native id finds a top-level session and hides a child, as
+        // every other way of naming a child does.
+        let by_id = |id: &str| -> Vec<String> {
+            query_rows_with_snapshot_for_test(id, 10, false, &ownership)
+                .unwrap()
+                .into_iter()
+                .map(|row| row.id)
+                .collect()
+        };
+        assert_eq!(
+            by_id("00000000-0000-4000-8000-000000000001"),
+            [ids_for_paths[0].clone()]
+        );
+        for child in &child_native_ids {
+            assert!(by_id(child).is_empty(), "child {child} must stay hidden");
+        }
 
         let search_sessions = mj_core::history::HistoryRequest {
             request_id: "test-search".into(),
