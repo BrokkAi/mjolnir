@@ -78,9 +78,11 @@ pub async fn validate_session_subagent_policy(
         .enabled_profile(profile_id)
         .context("parent profile unavailable")?
         .kind;
-    if !kind.supports_delegation_tools() && !policy.is_native() {
+    // None asks for no Mjolnir sub-agents at all, so any harness accepts it;
+    // only a Mjolnir policy needs the delegation tools.
+    if !kind.supports_delegation_tools() && policy.uses_mjolnir() {
         return Err(refuse(format!(
-            "{} sessions use their harness's own delegation; Mjolnir sub-agents and the None choice need a Claude, Codex, DSH, or OpenCode profile",
+            "{} sessions use their harness's own delegation; Mjolnir sub-agents need a Claude, Codex, DSH, or OpenCode profile",
             kind.display_name()
         )));
     }
@@ -1616,6 +1618,7 @@ mod tests {
             mj_core::config::HarnessKind::Dsh,
             mj_core::config::HarnessKind::OpenCode,
             mj_core::config::HarnessKind::Grok,
+            mj_core::config::HarnessKind::Muse,
         ] {
             let mut config = Config::default();
             config.profiles.insert(
@@ -1658,6 +1661,15 @@ mod tests {
                         .contains("Claude, Codex, DSH, or OpenCode")
                 );
             }
+            // None asks for no Mjolnir sub-agents at all; every harness
+            // accepts it, including one without delegation tools (#1284).
+            validate_session_subagent_policy(
+                &config,
+                "parent",
+                &mj_core::subagent::SubagentPolicy::None,
+            )
+            .await
+            .unwrap();
             // Native keeps a harness's own sub-agents; DSH has none, so an
             // explicit Native is refused with the two choices it offers.
             let native = validate_session_subagent_policy(

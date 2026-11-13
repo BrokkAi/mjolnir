@@ -204,7 +204,7 @@ the matching task choice for this session; each unspecified type uses its global
 choice. Either override implies Mjolnir. The matching
 `--subagent-*-effort` flag requires its model flag. Omitted policy retains
 the session's override. `--subagents none` removes delegation tools entirely;
-it needs a Claude, Codex, DSH, or OpenCode session. A retry of a sealed
+every session accepts it. A retry of a sealed
 Move retains its recorded policy; an explicit different policy is refused.
 
 `--oracle enabled|disabled` turns the session's oracle on or off, and
@@ -378,8 +378,8 @@ mj new --workspace eval --bundle product --target builder \
   the request fails.
 - `mj new --subagents native|mjolnir|none` selects delegation. Omitted defaults to
   Native, or to None for a DSH profile. DSH has no sub-agents of its own, so it
-  refuses `native` and accepts `mjolnir` or `none`. `none` gives the session no delegation tools, native or Mjolnir; it
-  needs a Claude, Codex, DSH, or OpenCode profile. Mjolnir requires a Claude, Codex, DSH, or OpenCode parent and a straightforward
+  refuses `native` and accepts `mjolnir` or `none`. `none` gives the session no delegation tools, native or Mjolnir; every
+  profile accepts it. Mjolnir requires a Claude, Codex, DSH, or OpenCode parent and a straightforward
   choice in `[subagents.straightforward]` or a session override. The subtle
   choice in `[subagents.subtle]` is optional. Configure global defaults in
   config.toml or TUI Settings → Sub-agents.
