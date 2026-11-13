@@ -1637,6 +1637,35 @@ fn clicks_on_different_rows_do_not_count_as_a_double_click() {
     );
 }
 
+/// Right-clicking a session row opens that row's session menu, the way the
+/// web card's right-click does, without moving the selection.
+#[test]
+fn right_click_on_a_session_row_opens_its_menu() {
+    let mut dashboard = dashboard_with_conversations(3);
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("draw row hitboxes");
+    let second_row = dashboard
+        .session_row_areas
+        .get(1)
+        .map(|(_, area)| *area)
+        .expect("second row has a hitbox");
+    let target = dashboard.session_menu_ids[1].clone();
+    let selected = dashboard.selected_visible_index();
+    let action = dashboard.handle_mouse(mouse_at_row(
+        MouseEventKind::Down(MouseButton::Right),
+        second_row,
+        0,
+    ));
+    assert_eq!(action, DashboardAction::None);
+    let Mode::Palette(palette) = &dashboard.mode else {
+        panic!("the right-clicked row's menu opened");
+    };
+    assert_eq!(palette.menu_session_id(), Some(target.as_str()));
+    assert_eq!(dashboard.selected_visible_index(), selected);
+}
+
 /// A dashboard with `count` running sessions, each carrying a numbered
 /// conversation long enough to scroll.
 fn dashboard_with_conversations(count: usize) -> DashboardState {

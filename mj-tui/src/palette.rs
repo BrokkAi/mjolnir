@@ -79,6 +79,12 @@ pub(crate) enum PaletteControl {
 }
 
 impl CommandPalette {
+    /// The session a session menu serves, for tests outside this module.
+    #[cfg(test)]
+    pub(crate) fn menu_session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+
     fn prepare(&self) {
         let mut form = self.form.borrow_mut();
         form.begin_update();

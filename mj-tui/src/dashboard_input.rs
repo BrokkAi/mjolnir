@@ -225,11 +225,25 @@ impl DashboardState {
         }
         if mouse.kind == MouseEventKind::Down(MouseButton::Right)
             && matches!(self.mode, Mode::Dashboard)
-            && let Some(pane) = self.chat_region_contains(mouse.column, mouse.row)
         {
-            self.begin_pane_menu(pane);
-            self.record_event_handled();
-            return DashboardAction::None;
+            // A right-clicked session row opens that session's menu, the way
+            // right-clicking a web session card does.
+            if let Some((index, _)) = self
+                .session_row_areas
+                .iter()
+                .find(|(_, row)| row.contains((mouse.column, mouse.row).into()))
+                && let Some(id) = self.session_menu_ids.get(*index).cloned()
+                && self.state.sessions.contains_key(&id)
+            {
+                self.begin_session_palette_for(&id);
+                self.record_event_handled();
+                return DashboardAction::None;
+            }
+            if let Some(pane) = self.chat_region_contains(mouse.column, mouse.row) {
+                self.begin_pane_menu(pane);
+                self.record_event_handled();
+                return DashboardAction::None;
+            }
         }
         if self.component_modal_open() {
             return self.handle_component_event(crossterm::event::Event::Mouse(mouse));
