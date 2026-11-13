@@ -41,8 +41,7 @@ enum Ec2Command {
 
 #[derive(Clone, Debug, Default, Args)]
 struct AwsArgs {
-    /// AWS region. Create infers it from --zone; others use the AWS default
-    /// or the saved provisioning record when selecting a local host.
+    /// AWS region. Omitted uses the saved host's region or the AWS default.
     #[arg(long)]
     region: Option<String>,
     /// AWS CLI credential profile (independent of an mj harness profile).
@@ -52,19 +51,37 @@ struct AwsArgs {
 
 #[derive(Debug, Args)]
 struct CreateArgs {
-    /// EC2 instance type, for example c8id.16xlarge.
-    instance_type: String,
+    /// Instance types in preference order (comma-separated). Also accepts --type.
+    #[arg(
+        value_delimiter = ',',
+        required_unless_present = "types",
+        conflicts_with = "types"
+    )]
+    instance_type: Vec<String>,
+    /// Instance types in preference order; repeat or separate with commas.
+    #[arg(
+        long = "type",
+        value_delimiter = ',',
+        required_unless_present = "instance_type"
+    )]
+    types: Vec<String>,
     /// Host runtime to install. Nitro hosts run workloads in isolated microVMs.
     #[arg(long, value_enum, default_value_t = Ec2Runtime::Podman)]
     runtime: Ec2Runtime,
-    /// Availability zone, for example us-east-1a.
+    /// Zones in preference order; repeat or separate with commas.
+    /// Listed regions without explicit zones try all available ordinary zones.
+    #[arg(long, value_delimiter = ',', required_unless_present = "region")]
+    zone: Vec<String>,
+    /// Regions in preference order; repeat or separate with commas.
+    /// Omitted infers regions from --zone. Tries regions, then types, then zones.
+    #[arg(long, value_delimiter = ',')]
+    region: Vec<String>,
+    /// AWS CLI credential profile (independent of an mj harness profile).
     #[arg(long)]
-    zone: String,
+    aws_profile: Option<String>,
     /// Machine and target name. Omitted generates a unique name.
     #[arg(long)]
     name: Option<String>,
-    #[command(flatten)]
-    aws: AwsArgs,
     /// Public subnet in the selected zone. Omitted uses its default subnet.
     #[arg(long)]
     subnet: Option<String>,
@@ -132,9 +149,99 @@ struct Record {
     aws_profile: Option<String>,
     #[serde(default)]
     instance_id: Option<String>,
+    #[serde(default)]
+    state: RecordState,
+    #[serde(default)]
+    attempts: Vec<Attempt>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum RecordState {
+    Preparing,
+    // Older records may already own resources even without a saved instance ID.
+    #[default]
+    Active,
+    CleanedUp,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct Attempt {
+    region: String,
+    zone: Option<String>,
+    instance_type: Option<String>,
+    outcome: String,
+    reason: Option<String>,
+}
+
+#[derive(Debug)]
+struct AwsFailure {
+    service: String,
+    operation: String,
+    code: Option<String>,
+    message: String,
+}
+
+impl std::fmt::Display for AwsFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "aws {} {}: {}",
+            self.service, self.operation, self.message
+        )
+    }
+}
+
+impl std::error::Error for AwsFailure {}
+
+#[derive(Debug)]
+struct PlacementUnavailable(String);
+
+impl std::fmt::Display for PlacementUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for PlacementUnavailable {}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Refusal {
+    Placement,
+    Region,
+}
+
+fn refusal(error: &anyhow::Error) -> Option<Refusal> {
+    if error.is::<PlacementUnavailable>() {
+        return Some(Refusal::Placement);
+    }
+    let failure = error.downcast_ref::<AwsFailure>()?;
+    if failure.service != "ec2" {
+        return None;
+    }
+    match failure.code.as_deref()? {
+        "OptInRequired" => Some(Refusal::Region),
+        "VcpuLimitExceeded" | "InstanceLimitExceeded" if failure.operation == "run-instances" => {
+            Some(Refusal::Region)
+        }
+        "InsufficientInstanceCapacity" if failure.operation == "run-instances" => {
+            Some(Refusal::Placement)
+        }
+        "Unsupported" | "InvalidParameterValue" if failure.operation == "run-instances" => {
+            let message = failure.message.to_ascii_lowercase();
+            (message.contains("instance type")
+                && (message.contains("availability zone") || message.contains("region")))
+            .then_some(Refusal::Placement)
+        }
+        _ => None,
+    }
 }
 
 impl Record {
+    fn matches_selector(&self, host: &str) -> bool {
+        self.target == host || self.operation == host || self.instance_id.as_deref() == Some(host)
+    }
+
     fn directory(&self, root: &Path) -> Result<PathBuf> {
         ensure!(
             self.operation.len() == 32 && self.operation.bytes().all(|b| b.is_ascii_hexdigit()),
@@ -185,8 +292,28 @@ impl Cloud {
             .args(operation)
             .arg("--cli-input-json")
             .arg(request.to_string());
-        let output = checked(&mut command, &[])
+        let output = run_with_input(&mut command, &[])
             .with_context(|| format!("aws {service} {}", operation.join(" ")))?;
+        if !output.status.success() {
+            let message = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            // The AWS CLI's service-error format is stable; an unrecognized
+            // response (including a lost acknowledgement) never permits retry.
+            let code = String::from_utf8_lossy(&output.stderr)
+                .split_once("An error occurred (")
+                .and_then(|(_, rest)| rest.split_once(") when calling "))
+                .map(|(code, _)| code.to_owned());
+            return Err(AwsFailure {
+                service: service.into(),
+                operation: operation.join(" "),
+                code,
+                message: format!("{}: {}", output.status, message.trim()),
+            }
+            .into());
+        }
         if output.stdout.iter().all(u8::is_ascii_whitespace) {
             return Ok(Value::Null);
         }
@@ -291,76 +418,365 @@ pub(crate) async fn run(args: Ec2Args) -> Result<()> {
     .context("EC2 provisioning task failed")?
 }
 
-fn create(args: CreateArgs, root: &Path) -> Result<()> {
+fn region_for_zone(zone: &str) -> Result<String> {
+    // Also handles GovCloud and Local Zones such as us-west-2-lax-1a.
+    let parts: Vec<_> = zone.split('-').collect();
+    let end = parts
+        .iter()
+        .position(|part| part.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        .context("cannot infer region from --zone")?;
+    let number = parts[end].trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    Ok(format!("{}-{number}", parts[..end].join("-")))
+}
+
+fn new_record(
+    target: &str,
+    region: &str,
+    profile: &Option<String>,
+    attempts: &[Attempt],
+) -> Result<Record> {
     let mut random = [0u8; 16];
     getrandom::fill(&mut random).map_err(|e| anyhow::anyhow!("generate EC2 operation ID: {e}"))?;
-    let operation = mj_core::hex::lower_hex(random);
+    Ok(Record {
+        operation: mj_core::hex::lower_hex(random),
+        target: target.into(),
+        region: region.into(),
+        account: String::new(),
+        aws_profile: profile.clone(),
+        instance_id: None,
+        state: RecordState::Preparing,
+        attempts: attempts.to_vec(),
+    })
+}
+
+fn save_attempt(record: &Record, root: &Path) -> Result<()> {
+    let directory = record.directory(root)?;
+    fs::create_dir_all(&directory)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
+    }
+    record.save(root)?;
+    // A completed cleanup owns no keys or cloud resources. Supersede its
+    // history only after the replacement has been saved under the target lock.
+    for old in records(root)? {
+        if old.target == record.target
+            && old.operation != record.operation
+            && old.state == RecordState::CleanedUp
+        {
+            fs::remove_dir_all(old.directory(root)?)?;
+        }
+    }
+    Ok(())
+}
+
+fn regions_and_zones(args: &CreateArgs) -> Result<Vec<(String, Vec<String>)>> {
+    let mut locations: Vec<(String, Vec<String>)> = Vec::new();
+    for region in &args.region {
+        if !locations.iter().any(|(name, _)| name == region) {
+            locations.push((region.clone(), Vec::new()));
+        }
+    }
+    for zone in &args.zone {
+        let region = region_for_zone(zone)?;
+        if !args.region.is_empty() {
+            ensure!(
+                args.region.contains(&region),
+                "zone {zone} is outside the requested regions"
+            );
+        }
+        let index = match locations.iter().position(|(name, _)| name == &region) {
+            Some(index) => index,
+            None => {
+                locations.push((region, Vec::new()));
+                locations.len() - 1
+            }
+        };
+        if !locations[index].1.contains(zone) {
+            locations[index].1.push(zone.clone());
+        }
+    }
+    ensure!(!locations.is_empty(), "pass --zone or --region");
+    if args.subnet.is_some() {
+        ensure!(
+            locations.len() == 1 && locations[0].1.len() == 1,
+            "--subnet requires exactly one --zone in one region"
+        );
+    }
+    Ok(locations)
+}
+
+fn available_zones(cloud: &Cloud) -> Result<Vec<String>> {
+    let response = cloud.ec2(
+        "describe-availability-zones",
+        json!({"Filters":[
+            {"Name":"zone-type","Values":["availability-zone"]},
+            {"Name":"state","Values":["available"]}
+        ]}),
+    )?;
+    let mut zones: Vec<String> = response["AvailabilityZones"]
+        .as_array()
+        .context("AWS returned no AvailabilityZones")?
+        .iter()
+        .map(|zone| {
+            zone["ZoneName"]
+                .as_str()
+                .map(str::to_owned)
+                .context("availability zone has no name")
+        })
+        .collect::<Result<_>>()?;
+    zones.sort();
+    zones.dedup();
+    ensure!(!zones.is_empty(), "AWS returned no available zones");
+    Ok(zones)
+}
+
+struct Placement<'a> {
+    instance_type: &'a str,
+    zone: &'a str,
+}
+
+fn create(args: CreateArgs, root: &Path) -> Result<()> {
+    let locations = regions_and_zones(&args)?;
+    ensure!(
+        args.runtime != Ec2Runtime::Nitro || !args.zfs_cache,
+        "--zfs-cache is not available for Nitro hosts"
+    );
+    let initial = new_record("", &locations[0].0, &args.aws_profile, &[])?;
     let target = args
         .name
         .clone()
-        .unwrap_or_else(|| format!("ec2-{}", &operation[..8]));
+        .unwrap_or_else(|| format!("ec2-{}", &initial.operation[..8]));
     validate_id("machine", &target)?;
     ensure!(target != "local", "local is reserved for this computer");
-    let region = match &args.aws.region {
-        Some(region) => region.clone(),
-        None => {
-            // AWS region names end at their numeric component; this also
-            // handles GovCloud regions and zones such as us-west-2-lax-1a.
-            let parts: Vec<_> = args.zone.split('-').collect();
-            let end = parts
-                .iter()
-                .position(|part| part.chars().next().is_some_and(|c| c.is_ascii_digit()))
-                .context("cannot infer region from --zone; pass --region")?;
-            let number = parts[end].trim_end_matches(|c: char| c.is_ascii_alphabetic());
-            let mut region = parts[..end].join("-");
-            region.push('-');
-            region.push_str(number);
-            region
-        }
-    };
-    let cloud = Cloud::new(AwsArgs {
-        region: Some(region.clone()),
-        aws_profile: args.aws.aws_profile.clone(),
-    });
     fs::create_dir_all(root)?;
-    // One owner serializes creates and destroys of this local target. Never
-    // hold the shared config lock across cloud or network operations.
-    let _lock = lock_target(root, &target)?;
+    // One owner serializes the entire request, including refusal cleanup.
+    let mut lock = Some(lock_target(root, &target)?);
     let config = Config::load()?;
     ensure!(
         !config.machines.contains_key(&target) && !config.targets.contains_key(&target),
         "machine or target {target:?} already exists"
     );
     ensure!(
-        !records(root)?.iter().any(|r| r.target == target),
+        !records(root)?
+            .iter()
+            .any(|record| record.target == target && record.state != RecordState::CleanedUp),
         "an earlier create for {target:?} remains; use mj ec2 list, then destroy its operation before retrying"
     );
-    ensure!(
-        !cloud
-            .instances()?
-            .iter()
-            .any(|i| tag(i, "mj:target").as_deref() == Some(&target)
-                && i["State"]["Name"] != "terminated"),
-        "managed EC2 host {target:?} already exists in {region}"
-    );
+    let types = if args.types.is_empty() {
+        &args.instance_type
+    } else {
+        &args.types
+    };
+    let mut attempts = Vec::new();
+    for (region, requested_zones) in locations {
+        let cloud = Cloud::new(AwsArgs {
+            region: Some(region.clone()),
+            aws_profile: args.aws_profile.clone(),
+        });
+        let region_setup = (|| -> Result<Vec<String>> {
+            ensure!(
+                !cloud
+                    .instances()?
+                    .iter()
+                    .any(
+                        |instance| tag(instance, "mj:target").as_deref() == Some(&target)
+                            && instance["State"]["Name"] != "terminated"
+                    ),
+                "managed EC2 host {target:?} already exists in {region}"
+            );
+            if requested_zones.is_empty() {
+                available_zones(&cloud)
+            } else {
+                Ok(requested_zones)
+            }
+        })();
+        let zones = match region_setup {
+            Ok(zones) => zones,
+            Err(error) => {
+                let skip = refusal(&error) == Some(Refusal::Region);
+                attempts.push(Attempt {
+                    region: region.clone(),
+                    zone: None,
+                    instance_type: None,
+                    outcome: if skip { "skipped_region" } else { "failed" }.into(),
+                    reason: Some(format!("{error:#}")),
+                });
+                let mut record = new_record(&target, &region, &args.aws_profile, &attempts)?;
+                record.state = RecordState::CleanedUp;
+                save_attempt(&record, root)?;
+                report_attempts(&attempts[attempts.len() - 1..]);
+                if skip {
+                    continue;
+                }
+                return Err(error);
+            }
+        };
+        'types: for instance_type in types {
+            for zone in &zones {
+                attempts.push(Attempt {
+                    region: region.clone(),
+                    zone: Some(zone.clone()),
+                    instance_type: Some(instance_type.clone()),
+                    outcome: "provisioning".into(),
+                    reason: None,
+                });
+                let mut record = new_record(&target, &region, &args.aws_profile, &attempts)?;
+                save_attempt(&record, root)?;
+                eprintln!("Trying {instance_type} in {zone} ({region}).");
+                let result = create_attempt(
+                    &args,
+                    &Placement {
+                        instance_type,
+                        zone,
+                    },
+                    &cloud,
+                    &mut record,
+                    root,
+                    &mut lock,
+                );
+                match result {
+                    Ok(mut host) => {
+                        // create_attempt saves the success before releasing its lock.
+                        host["attempts"] = serde_json::to_value(&record.attempts)?;
+                        if args.json {
+                            println!("{}", serde_json::to_string_pretty(&host)?);
+                        } else {
+                            println!(
+                                "Created {} ({}) at {} in {} ({instance_type}, {region}).\n{} target: {}\n{}",
+                                record.target,
+                                text_field(&host, "instance_id"),
+                                text_field(&host, "public_ip"),
+                                zone,
+                                args.runtime.label(),
+                                record.target,
+                                cleanup_command(&record)
+                            );
+                            report_attempts_to_stdout(&record.attempts);
+                        }
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        let advance = if record.instance_id.is_none() {
+                            refusal(&error)
+                        } else {
+                            None
+                        };
+                        let last = record.attempts.last_mut().expect("current attempt");
+                        last.outcome = if advance == Some(Refusal::Region) {
+                            "skipped_region"
+                        } else {
+                            "failed"
+                        }
+                        .into();
+                        last.reason = Some(format!("{error:#}"));
+                        record.save(root)?;
+                        report_attempts(&record.attempts[record.attempts.len() - 1..]);
+                        if let Some(advance) = advance {
+                            if record.state == RecordState::Active {
+                                cleanup_record(&cloud, &record, root).with_context(|| {
+                                    format!(
+                                        "refusal cleanup failed; {}; no further launches attempted",
+                                        cleanup_command(&record)
+                                    )
+                                })?;
+                            } else {
+                                fs::remove_dir_all(record.directory(root)?)?;
+                            }
+                            record.state = RecordState::CleanedUp;
+                            save_attempt(&record, root)?;
+                            attempts = record.attempts;
+                            if advance == Refusal::Region {
+                                break 'types;
+                            }
+                        } else {
+                            return Err(error).with_context(|| {
+                                format!(
+                                    "provisioning resources were retained for inspection; {}",
+                                    cleanup_command(&record)
+                                )
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    report_attempts(&attempts);
+    bail!(
+        "no requested EC2 placement succeeded; all refused attempts were cleaned up (history: {})",
+        crate::mj_command("ec2 list")
+    )
+}
+
+fn attempt_text(attempt: &Attempt) -> String {
+    format!(
+        "{} / {} / {}: {}{}",
+        attempt.region,
+        attempt.instance_type.as_deref().unwrap_or("-"),
+        attempt.zone.as_deref().unwrap_or("-"),
+        attempt.outcome,
+        attempt
+            .reason
+            .as_ref()
+            .map(|reason| format!(" — {reason}"))
+            .unwrap_or_default()
+    )
+}
+
+fn report_attempts(attempts: &[Attempt]) {
+    for attempt in attempts {
+        eprintln!("{}", attempt_text(attempt));
+    }
+}
+
+fn report_attempts_to_stdout(attempts: &[Attempt]) {
+    for attempt in attempts {
+        println!("  {}", attempt_text(attempt));
+    }
+}
+
+fn create_attempt(
+    args: &CreateArgs,
+    placement: &Placement<'_>,
+    cloud: &Cloud,
+    record: &mut Record,
+    root: &Path,
+    lock: &mut Option<mj_core::file_lock::FileLock>,
+) -> Result<Value> {
+    let offerings = cloud.ec2(
+        "describe-instance-type-offerings",
+        json!({"LocationType":"availability-zone","Filters":[
+            {"Name":"instance-type","Values":[placement.instance_type]},
+            {"Name":"location","Values":[placement.zone]}
+        ]}),
+    )?;
+    if offerings["InstanceTypeOfferings"]
+        .as_array()
+        .context("AWS returned no InstanceTypeOfferings")?
+        .is_empty()
+    {
+        return Err(PlacementUnavailable(format!(
+            "{} is not offered in {}",
+            placement.instance_type, placement.zone
+        ))
+        .into());
+    }
     let info = cloud.ec2(
         "describe-instance-types",
-        json!({"InstanceTypes":[args.instance_type]}),
+        json!({"InstanceTypes":[placement.instance_type]}),
     )?;
     let instance_type = info["InstanceTypes"]
         .as_array()
         .and_then(|v| v.first())
         .context("AWS returned no instance type")?;
-    if args.runtime == Ec2Runtime::Nitro {
-        ensure!(
-            instance_type["NitroEnclavesSupport"] == "supported",
-            "{} does not support Nitro Enclaves; choose an EC2 instance type whose describe-instance-types response has NitroEnclavesSupport=\"supported\"",
-            args.instance_type
-        );
-        ensure!(
-            !args.zfs_cache,
-            "--zfs-cache is not available for Nitro hosts"
-        );
+    if args.runtime == Ec2Runtime::Nitro && instance_type["NitroEnclavesSupport"] != "supported" {
+        return Err(PlacementUnavailable(format!(
+            "{} does not support Nitro Enclaves",
+            placement.instance_type
+        ))
+        .into());
     }
     let architecture = instance_type["ProcessorInfo"]["SupportedArchitectures"]
         .as_array()
@@ -372,42 +788,42 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
     } else {
         bail!("instance type does not support Ubuntu amd64 or arm64")
     };
-    let local_nvme = instance_type["InstanceStorageInfo"]["TotalSizeInGB"]
-        .as_u64()
-        .is_some_and(|size| size > 0)
+    let local_nvme = args.runtime == Ec2Runtime::Podman
+        && instance_type["InstanceStorageInfo"]["TotalSizeInGB"]
+            .as_u64()
+            .is_some_and(|size| size > 0)
         && instance_type["InstanceStorageInfo"]["NvmeSupport"]
             .as_str()
             .is_some_and(|support| support != "unsupported");
-    if args.zfs_cache {
-        ensure!(
-            instance_type["InstanceStorageInfo"]["TotalSizeInGB"]
-                .as_u64()
-                .is_some_and(|n| n > 0),
-            "{} has no local SSDs for --zfs-cache",
-            args.instance_type
-        );
-        ensure!(
-            instance_type["InstanceStorageInfo"]["NvmeSupport"]
-                .as_str()
-                .is_some_and(|v| v != "unsupported"),
-            "--zfs-cache requires local NVMe instance storage"
-        );
+    if args.zfs_cache && !local_nvme {
+        return Err(PlacementUnavailable(format!(
+            "{} has no local NVMe instance storage for --zfs-cache",
+            placement.instance_type
+        ))
+        .into());
     }
     let subnet = if let Some(subnet) = &args.subnet {
         cloud.ec2("describe-subnets", json!({"SubnetIds":[subnet]}))?
     } else {
-        cloud.ec2("describe-subnets", json!({"Filters":[{"Name":"availability-zone","Values":[args.zone]},{"Name":"default-for-az","Values":["true"]}]}))?
+        cloud.ec2("describe-subnets", json!({"Filters":[{"Name":"availability-zone","Values":[placement.zone]},{"Name":"default-for-az","Values":["true"]}]}))?
     };
     let subnets = subnet["Subnets"]
         .as_array()
         .context("AWS returned no Subnets")?;
+    if subnets.is_empty() && args.subnet.is_none() {
+        return Err(PlacementUnavailable(format!(
+            "{} has no default subnet; trying the next placement",
+            placement.zone
+        ))
+        .into());
+    }
     ensure!(
         subnets.len() == 1,
         "no unique default subnet in {}; pass --subnet",
-        args.zone
+        placement.zone
     );
     ensure!(
-        subnets[0]["AvailabilityZone"] == args.zone,
+        subnets[0]["AvailabilityZone"] == placement.zone,
         "--subnet is outside --zone"
     );
     let subnet_id = subnets[0]["SubnetId"]
@@ -464,296 +880,260 @@ fn create(args: CreateArgs, root: &Path) -> Result<()> {
         .as_str()
         .context("AWS identity has no account ID")?
         .to_owned();
-    let mut record = Record {
-        account,
-        operation,
-        target,
-        region,
-        aws_profile: args.aws.aws_profile.clone(),
-        instance_id: None,
-    };
-    let directory = record.directory(root)?;
-    fs::create_dir(&directory)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
-    }
+    record.account = account;
+    record.state = RecordState::Active;
     record.save(root)?;
+    let directory = record.directory(root)?;
     eprintln!(
         "Creating {}. Recovery/cleanup: {}",
         record.target,
-        cleanup_command(&record)
+        cleanup_command(record)
     );
-    let result = (|| -> Result<Value> {
-        let key = directory.join("id_ed25519");
-        checked(
-            Command::new("ssh-keygen")
-                .args(["-q", "-t", "ed25519", "-N", "", "-f"])
-                .arg(&key),
+    let key = directory.join("id_ed25519");
+    checked(
+        Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(&key),
+        &[],
+    )?;
+    let key_name = format!("mj-ec2-{}", record.operation);
+    cloud.ec2("import-key-pair", json!({"KeyName":key_name,"PublicKeyMaterial":base64::engine::general_purpose::STANDARD.encode(fs::read(directory.join("id_ed25519.pub"))?),"TagSpecifications":[tags(record,"key-pair")]}))?;
+    let group = cloud.ec2("create-security-group", json!({"GroupName":key_name,"Description":format!("Mjolnir {} host {}", if args.runtime == Ec2Runtime::Nitro { "Nitro" } else { "Podman" },record.target),"VpcId":vpc,"TagSpecifications":[tags(record,"security-group")]}))?;
+    let group_id = group["GroupId"]
+        .as_str()
+        .context("AWS returned no security group ID")?;
+    cloud.ec2("authorize-security-group-ingress", json!({"GroupId":group_id,"IpPermissions":[{"IpProtocol":"tcp","FromPort":22,"ToPort":22,"IpRanges":[{"CidrIp":cidr}]}]}))?;
+    let bootstrap = match args.runtime {
+        Ec2Runtime::Podman => bootstrap(local_nvme),
+        Ec2Runtime::Nitro => nitro_bootstrap(ami_arch),
+    };
+    let mut ebs = json!({
+        "VolumeSize": args.disk_gib,
+        "VolumeType": "gp3",
+        "Encrypted": true,
+        "DeleteOnTermination": true,
+    });
+    // AWS owns gp3 limits and the size/IOPS/throughput ratios, including
+    // regional differences; omitted performance settings use its defaults.
+    if let Some(mbps) = args.disk_mbps {
+        ebs["Throughput"] = mbps.into();
+    }
+    if let Some(iops) = args.disk_iops {
+        ebs["Iops"] = iops.into();
+    }
+    let mut launch_request = json!({
+        "ImageId":ami,"InstanceType":placement.instance_type,"MinCount":1,"MaxCount":1,
+        "KeyName":key_name,"ClientToken":record.operation,"Placement":{"AvailabilityZone":placement.zone},
+        "NetworkInterfaces":[{"DeviceIndex":0,"SubnetId":subnet_id,"Groups":[group_id],"AssociatePublicIpAddress":true,"DeleteOnTermination":true}],
+        "BlockDeviceMappings":[{"DeviceName":root_device,"Ebs":ebs}],
+        "MetadataOptions":{"HttpTokens":"required","HttpEndpoint":"enabled"},
+        "UserData":base64::engine::general_purpose::STANDARD.encode(bootstrap),
+        "TagSpecifications":[tags(record,"instance"),tags(record,"volume")]
+    });
+    if args.runtime == Ec2Runtime::Nitro {
+        launch_request["EnclaveOptions"] = json!({"Enabled":true});
+    }
+    let launched = cloud.ec2("run-instances", launch_request)?;
+    let id = launched["Instances"][0]["InstanceId"]
+        .as_str()
+        .context("AWS launch response has no instance ID")?
+        .to_owned();
+    record.instance_id = Some(id.clone());
+    record.save(root)?;
+    eprintln!("Launched {id}; waiting for EC2 status checks and cloud-init.");
+    cloud.call(
+        "ec2",
+        &["wait", "instance-status-ok"],
+        json!({"InstanceIds":[id]}),
+    )?;
+    let live = cloud.ec2("describe-instances", json!({"InstanceIds":[id]}))?;
+    let host = live["Reservations"][0]["Instances"][0]["PublicIpAddress"]
+        .as_str()
+        .context("instance has no public IPv4; use a public subnet")?;
+    let ssh = if args.runtime == Ec2Runtime::Nitro {
+        connection_for_user(record, root, host, "ec2-user")?
+    } else {
+        connection(record, root, host)?
+    };
+    mj_controller::controller::wait_for_ec2_ssh(
+        &mj_controller::targets::ProcessExecutor,
+        &(&ssh).into(),
+    )?;
+    // A failed bootstrap reports its own log rather than a later symptom.
+    const CLOUD_INIT_WAIT: &str = "cloud-init status --wait; status=$?; if [ \"$status\" -ne 0 ]; then sudo tail -100 /var/log/cloud-init-output.log >&2; exit \"$status\"; fi";
+    let verify_command = if args.runtime == Ec2Runtime::Nitro {
+        // The bootstrap puts the enclave memory pool on the kernel command
+        // line; it takes effect at the next boot. The reboot is issued here,
+        // not by the bootstrap, so the wait can tell the new boot from the
+        // old one instead of racing the shutdown.
+        let output = checked(
+            &mut ssh_command(
+                &ssh,
+                &format!("{CLOUD_INIT_WAIT}; cat /proc/sys/kernel/random/boot_id"),
+            ),
             &[],
         )?;
-        let key_name = format!("mj-ec2-{}", record.operation);
-        cloud.ec2("import-key-pair", json!({"KeyName":key_name,"PublicKeyMaterial":base64::engine::general_purpose::STANDARD.encode(fs::read(directory.join("id_ed25519.pub"))?),"TagSpecifications":[tags(&record,"key-pair")]}))?;
-        let group = cloud.ec2("create-security-group", json!({"GroupName":key_name,"Description":format!("Mjolnir {} host {}", if args.runtime == Ec2Runtime::Nitro { "Nitro" } else { "Podman" },record.target),"VpcId":vpc,"TagSpecifications":[tags(&record,"security-group")]}))?;
-        let group_id = group["GroupId"]
-            .as_str()
-            .context("AWS returned no security group ID")?;
-        cloud.ec2("authorize-security-group-ingress", json!({"GroupId":group_id,"IpPermissions":[{"IpProtocol":"tcp","FromPort":22,"ToPort":22,"IpRanges":[{"CidrIp":cidr}]}]}))?;
-        let bootstrap = match args.runtime {
-            Ec2Runtime::Podman => bootstrap(local_nvme),
-            Ec2Runtime::Nitro => nitro_bootstrap(ami_arch),
-        };
-        let mut ebs = json!({
-            "VolumeSize": args.disk_gib,
-            "VolumeType": "gp3",
-            "Encrypted": true,
-            "DeleteOnTermination": true,
-        });
-        // AWS owns gp3 limits and the size/IOPS/throughput ratios, including
-        // regional differences; omitted performance settings use its defaults.
-        if let Some(mbps) = args.disk_mbps {
-            ebs["Throughput"] = mbps.into();
-        }
-        if let Some(iops) = args.disk_iops {
-            ebs["Iops"] = iops.into();
-        }
-        let mut launch_request = json!({
-            "ImageId":ami,"InstanceType":args.instance_type,"MinCount":1,"MaxCount":1,
-            "KeyName":key_name,"ClientToken":record.operation,"Placement":{"AvailabilityZone":args.zone},
-            "NetworkInterfaces":[{"DeviceIndex":0,"SubnetId":subnet_id,"Groups":[group_id],"AssociatePublicIpAddress":true,"DeleteOnTermination":true}],
-            "BlockDeviceMappings":[{"DeviceName":root_device,"Ebs":ebs}],
-            "MetadataOptions":{"HttpTokens":"required","HttpEndpoint":"enabled"},
-            "UserData":base64::engine::general_purpose::STANDARD.encode(bootstrap),
-            "TagSpecifications":[tags(&record,"instance"),tags(&record,"volume")]
-        });
-        if args.runtime == Ec2Runtime::Nitro {
-            launch_request["EnclaveOptions"] = json!({"Enabled":true});
-        }
-        let launched = cloud.ec2("run-instances", launch_request)?;
-        let id = launched["Instances"][0]["InstanceId"]
-            .as_str()
-            .context("AWS launch response has no instance ID")?
-            .to_owned();
-        record.instance_id = Some(id.clone());
-        record.save(root)?;
-        eprintln!("Launched {id}; waiting for EC2 status checks and cloud-init.");
-        cloud.call(
-            "ec2",
-            &["wait", "instance-status-ok"],
-            json!({"InstanceIds":[id]}),
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let boot_id = stdout
+            .lines()
+            .last()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .context("the host did not report its boot ID")?;
+        checked(
+            &mut ssh_command(&ssh, "sudo systemctl --no-block reboot"),
+            &[],
         )?;
-        let live = cloud.ec2("describe-instances", json!({"InstanceIds":[id]}))?;
-        let host = live["Reservations"][0]["Instances"][0]["PublicIpAddress"]
-            .as_str()
-            .context("instance has no public IPv4; use a public subnet")?;
-        let ssh = if args.runtime == Ec2Runtime::Nitro {
-            connection_for_user(&record, root, host, "ec2-user")?
-        } else {
-            connection(&record, root, host)?
-        };
-        mj_controller::controller::wait_for_ec2_ssh(
+        eprintln!("Rebooting {id} to reserve the Nitro Enclaves memory pool.");
+        mj_controller::controller::wait_for_ec2_reboot(
             &mj_controller::targets::ProcessExecutor,
             &(&ssh).into(),
+            boot_id,
         )?;
-        // A failed bootstrap reports its own log rather than a later symptom.
-        const CLOUD_INIT_WAIT: &str = "cloud-init status --wait; status=$?; if [ \"$status\" -ne 0 ]; then sudo tail -100 /var/log/cloud-init-output.log >&2; exit \"$status\"; fi";
-        let verify_command = if args.runtime == Ec2Runtime::Nitro {
-            // The bootstrap puts the enclave memory pool on the kernel command
-            // line; it takes effect at the next boot. The reboot is issued here,
-            // not by the bootstrap, so the wait can tell the new boot from the
-            // old one instead of racing the shutdown.
-            let output = checked(
-                &mut ssh_command(
-                    &ssh,
-                    &format!("{CLOUD_INIT_WAIT}; cat /proc/sys/kernel/random/boot_id"),
-                ),
-                &[],
-            )?;
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let boot_id = stdout
-                .lines()
-                .last()
-                .map(str::trim)
-                .filter(|id| !id.is_empty())
-                .context("the host did not report its boot ID")?;
-            checked(
-                &mut ssh_command(&ssh, "sudo systemctl --no-block reboot"),
-                &[],
-            )?;
-            eprintln!("Rebooting {id} to reserve the Nitro Enclaves memory pool.");
-            mj_controller::controller::wait_for_ec2_reboot(
-                &mj_controller::targets::ProcessExecutor,
-                &(&ssh).into(),
-                boot_id,
-            )?;
-            "set -eu; version=$(uname -r | cut -d- -f1); printf '%s\\n' \"$version\" | awk -F. '{ if (($1*1000000+$2*1000+$3) < (6*1000000+18*1000+51)) exit 1 }' || { echo 'Nitro host kernel must be at least 6.18.51' >&2; exit 1; }; sudo dmesg | grep -F 'nitro_enclaves: CMA pool' || { echo 'Nitro Enclaves CMA pool was not initialized' >&2; exit 1; }".to_owned()
-        } else {
-            format!("{CLOUD_INIT_WAIT}; podman info --format '{{{{.Host.Security.Rootless}}}}'")
-        };
-        let output = checked(&mut ssh_command(&ssh, &verify_command), &[])?;
-        if args.runtime == Ec2Runtime::Podman {
-            ensure!(
-                String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .any(|line| line.trim() == "true"),
-                "Podman did not report rootless operation"
-            );
-        }
-        // Attach the persistent address after cloud-init's package downloads
-        // finish, before publishing a host that can accept session launches.
-        let address = cloud.ec2(
-            "allocate-address",
-            json!({
-                "Domain":"vpc", "TagSpecifications":[tags(&record,"elastic-ip")]
-            }),
-        )?;
-        let allocation = address["AllocationId"]
-            .as_str()
-            .context("AWS returned no Elastic IP allocation ID")?;
-        let host = address["PublicIp"]
-            .as_str()
-            .context("AWS returned no Elastic IP address")?;
-        cloud.ec2(
-            "associate-address",
-            json!({"InstanceId":id,"AllocationId":allocation}),
-        )?;
-        let ssh = if args.runtime == Ec2Runtime::Nitro {
-            connection_for_user(&record, root, host, "ec2-user")?
-        } else {
-            connection(&record, root, host)?
-        };
-        mj_controller::controller::wait_for_ec2_ssh(
-            &mj_controller::targets::ProcessExecutor,
-            &(&ssh).into(),
-        )?;
-        let cache = local_nvme.then(|| TargetBuildCache {
-            directory: Some(CACHE_DIRECTORY.into()),
-            ..Default::default()
-        });
-        let machine = Machine::Ssh {
-            ssh: ssh.clone(),
-            workspace_prefix: mj_core::config::DEFAULT_WORKSPACE_PREFIX.into(),
-            build_cache: cache,
-        };
-        if local_nvme && args.runtime == Ec2Runtime::Podman {
-            eprintln!("Installing mj's pinned mbx on the new host.");
-            mj_controller::controller::install_mbx(
-                &machine,
-                &mj_controller::targets::ProcessExecutor,
-            )?;
-        }
-        let image = mj_core::config::DEFAULT_CONTAINER_IMAGE;
-        Config::update(|config| {
-            ensure!(
-                !config.machines.contains_key(&record.target)
-                    && !config.targets.contains_key(&record.target),
-                "machine or target {:?} was added concurrently; the VM is retained",
-                record.target
-            );
-            config
-                .machines
-                .insert(record.target.clone(), machine.clone());
-            let container = ContainerTemplate {
-                image: image.into(),
-                pull_policy: Default::default(),
-                platform: Some(platform.into()),
-                cpus: None,
-                memory: None,
-                environment: Default::default(),
-                workspace_storage: Default::default(),
-                build_cache: None,
-            };
-            let ssh = ssh.clone();
-            config.targets.insert(
-                record.target.clone(),
-                match args.runtime {
-                    Ec2Runtime::Podman => TargetTemplate::SshPodman { ssh, container },
-                    Ec2Runtime::Nitro => TargetTemplate::SshNitro { ssh, container },
-                },
-            );
-            // A configured disabled kind suppresses runtime discovery, so a
-            // Podman or Nitro host never acquires a second, usable bare target.
-            let raw = mj_core::config::unique_config_id(
-                &config.targets,
-                &format!("{}-raw", record.target.chars().take(60).collect::<String>()),
-            );
-            let Machine::Ssh {
-                ssh,
-                workspace_prefix,
-                ..
-            } = &machine
-            else {
-                unreachable!("new EC2 hosts are SSH machines")
-            };
-            config.targets.insert(
-                raw.clone(),
-                TargetTemplate::SshBare {
-                    ssh: ssh.clone(),
-                    workspace_prefix: workspace_prefix.clone(),
-                    permissions: mj_core::config::PermissionMode::Guardian,
-                },
-            );
-            config.disabled_targets.insert(raw);
-            Ok(())
-        })?;
-        // Provisioning is complete. Image warming owns only its image gate,
-        // so destroying the registered host never waits for this download.
-        drop(_lock);
-        eprintln!(
-            "Registered {} target {}. Preloading {image}.",
-            args.runtime.label(),
-            record.target
-        );
-        let image_host = match args.runtime {
-            Ec2Runtime::Podman => mj_core::targets::ImageHost::SshPodman((&ssh).into()),
-            Ec2Runtime::Nitro => mj_core::targets::ImageHost::SshNitro((&ssh).into()),
-        };
-        let preload = mj_core::targets::image_refresh(
-            image_host,
-            image,
-            Some(platform),
-            mj_core::config::ImagePullPolicy::Missing,
-        )
-        .context("prepare EC2 dev image preload")
-        .and_then(|refresh| {
-            mj_controller::pollers::refresh_host_image(
-                &refresh,
-                &mj_controller::targets::ProcessExecutor,
-                &|_| {},
-            )
-            .map(|_| ())
-        });
-        if let Err(error) = preload {
-            eprintln!(
-                "Warning: dev image predownload failed: {error:#}\nThe host is registered; the background image refresher can retry."
-            );
-        }
-        Ok(
-            json!({"instance_id":id,"target":record.target,"region":record.region,"zone":args.zone,"instance_type":args.instance_type,"public_ip":host,"zfs_cache":args.zfs_cache,"operation":record.operation}),
-        )
-    })();
-    let host = result.with_context(|| {
-        format!(
-            "provisioning resources were retained for inspection; {}",
-            cleanup_command(&record)
-        )
-    })?;
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&host)?);
+        "set -eu; version=$(uname -r | cut -d- -f1); printf '%s\\n' \"$version\" | awk -F. '{ if (($1*1000000+$2*1000+$3) < (6*1000000+18*1000+51)) exit 1 }' || { echo 'Nitro host kernel must be at least 6.18.51' >&2; exit 1; }; sudo dmesg | grep -F 'nitro_enclaves: CMA pool' || { echo 'Nitro Enclaves CMA pool was not initialized' >&2; exit 1; }".to_owned()
     } else {
-        println!(
-            "Created {} ({}) at {} in {}.\n{} target: {}\n{}",
-            record.target,
-            host["instance_id"].as_str().unwrap_or_default(),
-            host["public_ip"].as_str().unwrap_or_default(),
-            args.zone,
-            args.runtime.label(),
-            record.target,
-            cleanup_command(&record)
+        format!("{CLOUD_INIT_WAIT}; podman info --format '{{{{.Host.Security.Rootless}}}}'")
+    };
+    let output = checked(&mut ssh_command(&ssh, &verify_command), &[])?;
+    if args.runtime == Ec2Runtime::Podman {
+        ensure!(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line.trim() == "true"),
+            "Podman did not report rootless operation"
         );
     }
-    Ok(())
+    // Attach the persistent address after cloud-init's package downloads
+    // finish, before publishing a host that can accept session launches.
+    let address = cloud.ec2(
+        "allocate-address",
+        json!({
+            "Domain":"vpc", "TagSpecifications":[tags(record,"elastic-ip")]
+        }),
+    )?;
+    let allocation = address["AllocationId"]
+        .as_str()
+        .context("AWS returned no Elastic IP allocation ID")?;
+    let host = address["PublicIp"]
+        .as_str()
+        .context("AWS returned no Elastic IP address")?;
+    cloud.ec2(
+        "associate-address",
+        json!({"InstanceId":id,"AllocationId":allocation}),
+    )?;
+    let ssh = if args.runtime == Ec2Runtime::Nitro {
+        connection_for_user(record, root, host, "ec2-user")?
+    } else {
+        connection(record, root, host)?
+    };
+    mj_controller::controller::wait_for_ec2_ssh(
+        &mj_controller::targets::ProcessExecutor,
+        &(&ssh).into(),
+    )?;
+    let cache = local_nvme.then(|| TargetBuildCache {
+        directory: Some(CACHE_DIRECTORY.into()),
+        ..Default::default()
+    });
+    let machine = Machine::Ssh {
+        ssh: ssh.clone(),
+        workspace_prefix: mj_core::config::DEFAULT_WORKSPACE_PREFIX.into(),
+        build_cache: cache,
+    };
+    if local_nvme && args.runtime == Ec2Runtime::Podman {
+        eprintln!("Installing mj's pinned mbx on the new host.");
+        mj_controller::controller::install_mbx(&machine, &mj_controller::targets::ProcessExecutor)?;
+    }
+    let image = mj_core::config::DEFAULT_CONTAINER_IMAGE;
+    Config::update(|config| {
+        ensure!(
+            !config.machines.contains_key(&record.target)
+                && !config.targets.contains_key(&record.target),
+            "machine or target {:?} was added concurrently; the VM is retained",
+            record.target
+        );
+        config
+            .machines
+            .insert(record.target.clone(), machine.clone());
+        let container = ContainerTemplate {
+            image: image.into(),
+            pull_policy: Default::default(),
+            platform: Some(platform.into()),
+            cpus: None,
+            memory: None,
+            environment: Default::default(),
+            workspace_storage: Default::default(),
+            build_cache: None,
+        };
+        let ssh = ssh.clone();
+        config.targets.insert(
+            record.target.clone(),
+            match args.runtime {
+                Ec2Runtime::Podman => TargetTemplate::SshPodman { ssh, container },
+                Ec2Runtime::Nitro => TargetTemplate::SshNitro { ssh, container },
+            },
+        );
+        // A configured disabled kind suppresses runtime discovery, so a
+        // Podman or Nitro host never acquires a second, usable bare target.
+        let raw = mj_core::config::unique_config_id(
+            &config.targets,
+            &format!("{}-raw", record.target.chars().take(60).collect::<String>()),
+        );
+        let Machine::Ssh {
+            ssh,
+            workspace_prefix,
+            ..
+        } = &machine
+        else {
+            unreachable!("new EC2 hosts are SSH machines")
+        };
+        config.targets.insert(
+            raw.clone(),
+            TargetTemplate::SshBare {
+                ssh: ssh.clone(),
+                workspace_prefix: workspace_prefix.clone(),
+                permissions: mj_core::config::PermissionMode::Guardian,
+            },
+        );
+        config.disabled_targets.insert(raw);
+        Ok(())
+    })?;
+    // Provisioning is complete. Image warming owns only its image gate,
+    // so destroying the registered host never waits for this download.
+    record.attempts.last_mut().expect("current attempt").outcome = "created".into();
+    record.save(root)?;
+    drop(lock.take());
+    eprintln!(
+        "Registered {} target {}. Preloading {image}.",
+        args.runtime.label(),
+        record.target
+    );
+    let image_host = match args.runtime {
+        Ec2Runtime::Podman => mj_core::targets::ImageHost::SshPodman((&ssh).into()),
+        Ec2Runtime::Nitro => mj_core::targets::ImageHost::SshNitro((&ssh).into()),
+    };
+    let preload = mj_core::targets::image_refresh(
+        image_host,
+        image,
+        Some(platform),
+        mj_core::config::ImagePullPolicy::Missing,
+    )
+    .context("prepare EC2 dev image preload")
+    .and_then(|refresh| {
+        mj_controller::pollers::refresh_host_image(
+            &refresh,
+            &mj_controller::targets::ProcessExecutor,
+            &|_| {},
+        )
+        .map(|_| ())
+    });
+    if let Err(error) = preload {
+        eprintln!(
+            "Warning: dev image predownload failed: {error:#}\nThe host is registered; the background image refresher can retry."
+        );
+    }
+    Ok(
+        json!({"instance_id":id,"target":record.target,"region":record.region,"zone":placement.zone,"instance_type":placement.instance_type,"public_ip":host,"zfs_cache":local_nvme,"operation":record.operation}),
+    )
 }
 
 fn cleanup_command(record: &Record) -> String {
@@ -829,7 +1209,7 @@ fn ssh_command(ssh: &SshConnection, script: &str) -> Command {
     command
 }
 
-fn list(args: ListArgs, root: &Path) -> Result<()> {
+fn inventory(args: &ListArgs, root: &Path) -> Result<(Vec<Value>, bool)> {
     let saved = records(root)?;
     let mut regions = std::collections::BTreeSet::new();
     if let Some(region) = &args.aws.region {
@@ -838,6 +1218,12 @@ fn list(args: ListArgs, root: &Path) -> Result<()> {
         for record in &saved {
             if record.aws_profile == args.aws.aws_profile {
                 regions.insert(Some(record.region.clone()));
+                regions.extend(
+                    record
+                        .attempts
+                        .iter()
+                        .map(|attempt| Some(attempt.region.clone())),
+                );
             }
         }
         if regions.is_empty() {
@@ -845,13 +1231,26 @@ fn list(args: ListArgs, root: &Path) -> Result<()> {
         }
     }
     let mut rows = Vec::new();
+    let mut complete = true;
     for region in regions {
         let cloud = Cloud::new(AwsArgs {
             region: region.clone(),
             ..args.aws.clone()
         });
-        for instance in cloud.instances()? {
-            rows.push(json!({"instance_id":instance["InstanceId"],"target":tag(&instance,"mj:target"),"operation":tag(&instance,"mj:operation"),"state":instance["State"]["Name"],"instance_type":instance["InstanceType"],"zone":instance["Placement"]["AvailabilityZone"],"public_ip":instance["PublicIpAddress"],"region":region}));
+        match cloud.instances() {
+            Ok(instances) => {
+                for instance in instances {
+                    rows.push(json!({"instance_id":instance["InstanceId"],"target":tag(&instance,"mj:target"),"operation":tag(&instance,"mj:operation"),"state":instance["State"]["Name"],"instance_type":instance["InstanceType"],"zone":instance["Placement"]["AvailabilityZone"],"public_ip":instance["PublicIpAddress"],"region":region}));
+                }
+            }
+            Err(error) => {
+                // A region not opted in must not hide hosts in other regions.
+                // Other inventory errors remain visible and fail the command.
+                if refusal(&error) != Some(Refusal::Region) {
+                    complete = false;
+                }
+                rows.push(json!({"region":region,"state":"inventory unavailable","error":format!("{error:#}")}));
+            }
         }
     }
     for record in saved {
@@ -864,27 +1263,52 @@ fn list(args: ListArgs, root: &Path) -> Result<()> {
         {
             continue;
         }
-        if !rows.iter().any(|row| row["operation"] == record.operation) {
-            rows.push(json!({"instance_id":record.instance_id,"target":record.target,"operation":record.operation,"state":"incomplete or no longer in AWS inventory","region":record.region}));
-        }
+        let index = if let Some(index) = rows
+            .iter()
+            .position(|row| row["operation"] == record.operation)
+        {
+            index
+        } else {
+            rows.push(json!({"instance_id":record.instance_id,"target":record.target,"operation":record.operation,"state": if record.state == RecordState::CleanedUp { "attempts cleaned up" } else { "incomplete or no longer in AWS inventory" },"region":record.region}));
+            rows.len() - 1
+        };
+        rows[index]["attempts"] = serde_json::to_value(&record.attempts)?;
     }
+    Ok((rows, complete))
+}
+
+fn list(args: ListArgs, root: &Path) -> Result<()> {
+    let (rows, complete) = inventory(&args, root)?;
     if args.json {
         println!("{}", serde_json::to_string_pretty(&rows)?);
     } else {
-        println!("TARGET\tINSTANCE\tTYPE\tZONE\tSTATE\tPUBLIC IP\tOPERATION");
-        for row in rows {
+        println!("TARGET\tINSTANCE\tTYPE\tZONE\tREGION\tSTATE\tPUBLIC IP\tOPERATION");
+        for row in &rows {
             println!(
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                text_field(&row, "target"),
-                text_field(&row, "instance_id"),
-                text_field(&row, "instance_type"),
-                text_field(&row, "zone"),
-                text_field(&row, "state"),
-                text_field(&row, "public_ip"),
-                text_field(&row, "operation")
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                text_field(row, "target"),
+                text_field(row, "instance_id"),
+                text_field(row, "instance_type"),
+                text_field(row, "zone"),
+                text_field(row, "region"),
+                text_field(row, "state"),
+                text_field(row, "public_ip"),
+                text_field(row, "operation")
             );
+            if let Some(error) = row["error"].as_str() {
+                println!("  {error}");
+            }
+            if let Some(attempts) = row["attempts"].as_array() {
+                for attempt in attempts {
+                    println!("  {}", attempt_text(&Attempt::deserialize(attempt)?));
+                }
+            }
         }
     }
+    ensure!(
+        complete,
+        "some regions could not be inventoried; see inventory errors above"
+    );
     Ok(())
 }
 
@@ -892,22 +1316,101 @@ fn text_field<'a>(value: &'a Value, key: &str) -> &'a str {
     value[key].as_str().unwrap_or("-")
 }
 
-fn destroy(args: DestroyArgs, root: &Path) -> Result<()> {
-    let saved: Vec<_> = records(root)?
+fn find_record(root: &Path, host: &str) -> Result<Option<Record>> {
+    let mut matches = records(root)?
         .into_iter()
-        .filter(|r| {
-            r.target == args.host
-                || r.operation == args.host
-                || r.instance_id.as_deref() == Some(&args.host)
+        .filter(|record| record.matches_selector(host));
+    let record = matches.next();
+    ensure!(
+        matches.next().is_none(),
+        "multiple provisioning records match {host}; use an operation ID"
+    );
+    Ok(record)
+}
+
+struct HostLocation {
+    target: String,
+    // Needed only for managed hosts without a local record. Local discovery
+    // retains no record snapshot across the wait for the target lock.
+    instance: Option<Value>,
+}
+
+fn locate_host(args: &DestroyArgs, root: &Path) -> Result<HostLocation> {
+    let mut matches = records(root)?
+        .into_iter()
+        .filter(|record| record.matches_selector(&args.host));
+    if let Some(record) = matches.next() {
+        // Saving a replacement can briefly expose both history and its new
+        // operation. Discovery needs only their common lock name.
+        ensure!(
+            matches.all(|other| other.target == record.target),
+            "multiple targets match {}; use an operation ID",
+            args.host
+        );
+        return Ok(HostLocation {
+            target: record.target,
+            instance: None,
+        });
+    }
+    let cloud = Cloud::new(args.aws.clone());
+    let instances = cloud.instances()?;
+    let matches: Vec<_> = instances
+        .iter()
+        .filter(|instance| {
+            instance["InstanceId"] == args.host
+                || tag(instance, "mj:target").as_deref() == Some(&args.host)
+                || tag(instance, "mj:operation").as_deref() == Some(&args.host)
         })
         .collect();
+    let live: Vec<_> = matches
+        .iter()
+        .copied()
+        .filter(|instance| instance["State"]["Name"] != "terminated")
+        .collect();
+    let matches = if live.is_empty() { matches } else { live };
     ensure!(
-        saved.len() <= 1,
-        "multiple provisioning records match {}; use an operation ID",
+        matches.len() <= 1,
+        "multiple VMs match {}; use an instance or operation ID",
         args.host
     );
+    let instance = matches.first().context(format!(
+        "no mj-managed host or local provisioning operation matches {:?}",
+        args.host
+    ))?;
+    Ok(HostLocation {
+        target: tag(instance, "mj:target").context("managed instance has no target tag")?,
+        instance: Some((*instance).clone()),
+    })
+}
+
+fn destroy(args: DestroyArgs, root: &Path) -> Result<()> {
+    let location = locate_host(&args, root)?;
+    destroy_located(args, root, location)
+}
+
+fn destroy_located(args: DestroyArgs, root: &Path, location: HostLocation) -> Result<()> {
+    // Only the owner of this lock chooses which operation the selector means.
+    // A capacity search can replace its record while destroy waits for it.
+    let _lock = lock_target(root, &location.target)?;
+    let saved = find_record(root, &args.host)?;
+    ensure!(
+        saved.is_some() || location.instance.is_some(),
+        "provisioning operation {:?} no longer exists",
+        args.host
+    );
+    if let Some(record) = &saved {
+        ensure!(
+            record.target == location.target,
+            "EC2 selector changed targets while waiting for its lock"
+        );
+        if record.state != RecordState::Active {
+            fs::remove_dir_all(record.directory(root)?)?;
+            println!("Destroyed {}.", record.target);
+            return Ok(());
+        }
+    }
     let mut cloud = Cloud::new(args.aws.clone());
-    if let Some(record) = saved.first() {
+    if let Some(record) = &saved {
         if cloud.options.region.is_none() {
             cloud.options.region = Some(record.region.clone());
         }
@@ -920,46 +1423,26 @@ fn destroy(args: DestroyArgs, root: &Path) -> Result<()> {
             "AWS region/profile differs from the saved host; use the recorded region/profile"
         );
     }
-    let instances = cloud.instances()?;
-    let matches: Vec<_> = instances
-        .iter()
-        .filter(|i| {
-            if let Some(record) = saved.first() {
-                return tag(i, "mj:operation").as_deref() == Some(&record.operation);
-            }
-            i["InstanceId"] == args.host
-                || tag(i, "mj:target").as_deref() == Some(&args.host)
-                || tag(i, "mj:operation").as_deref() == Some(&args.host)
-        })
-        .collect();
-    let live: Vec<_> = matches
-        .iter()
-        .copied()
-        .filter(|i| i["State"]["Name"] != "terminated")
-        .collect();
-    let matches = if live.is_empty() { matches } else { live };
-    ensure!(
-        matches.len() <= 1,
-        "multiple VMs match {}; use an instance or operation ID",
-        args.host
-    );
     let identity = cloud.call("sts", &["get-caller-identity"], json!({}))?;
     let account = identity["Account"]
         .as_str()
         .context("AWS identity has no account ID")?;
-    let record = if let Some(record) = saved.first() {
+    let record = if let Some(record) = saved {
         ensure!(
             record.account == account,
             "AWS account {account} differs from the host's account {}; select its original credentials",
             record.account
         );
-        record.clone()
-    } else if let Some(instance) = matches.first() {
+        record
+    } else {
+        let instance = location
+            .instance
+            .context("managed host disappeared before teardown")?;
         Record {
             account: account.to_owned(),
-            operation: tag(instance, "mj:operation")
+            operation: tag(&instance, "mj:operation")
                 .context("managed instance has no operation tag")?,
-            target: tag(instance, "mj:target").context("managed instance has no target tag")?,
+            target: location.target,
             region: cloud
                 .options
                 .region
@@ -967,20 +1450,18 @@ fn destroy(args: DestroyArgs, root: &Path) -> Result<()> {
                 .context("pass --region when destroying a host with no local record")?,
             aws_profile: cloud.options.aws_profile.clone(),
             instance_id: instance["InstanceId"].as_str().map(str::to_owned),
+            state: RecordState::Active,
+            attempts: Vec::new(),
         }
-    } else {
-        bail!(
-            "no mj-managed host or local provisioning operation matches {:?}",
-            args.host
-        )
     };
+    cleanup_record(&cloud, &record, root)?;
+    println!("Destroyed {}.", record.target);
+    Ok(())
+}
+
+// Caller owns the target lock. Keys/config disappear only after cloud cleanup.
+fn cleanup_record(cloud: &Cloud, record: &Record, root: &Path) -> Result<()> {
     let directory = record.directory(root)?;
-    let _lock = lock_target(root, &record.target)?;
-    let record = if directory.join("resources.json").is_file() {
-        serde_json::from_slice::<Record>(&fs::read(directory.join("resources.json"))?)?
-    } else {
-        record
-    };
     let instances = cloud.instances()?;
     let matches: Vec<_> = instances
         .iter()
@@ -1059,12 +1540,11 @@ fn destroy(args: DestroyArgs, root: &Path) -> Result<()> {
     {
         cloud.ec2("delete-key-pair", json!({"KeyPairId":key["KeyPairId"]}))?;
     }
-    remove_configuration(&record, root, &config_path())?;
+    remove_configuration(record, root, &config_path())?;
     if directory.exists() {
         fs::remove_dir_all(&directory)
             .with_context(|| format!("remove local EC2 keys {}", directory.display()))?;
     }
-    println!("Destroyed {}.", record.target);
     Ok(())
 }
 
@@ -1176,10 +1656,20 @@ op = args[pos+1]
 if op == 'wait': op += ' ' + args[pos+2]
 request = json.loads(args[args.index('--cli-input-json')+1])
 with (root/'calls').open('a') as out: out.write(json.dumps({'operation':op,'request':request,'args':args})+'\n')
-assert args[args.index('--region')+1] == 'us-east-1'
+region = args[args.index('--region')+1]
+resources = root/region if (root/'multi-region').exists() else root
+resources.mkdir(exist_ok=True)
+if not (root/'multi-region').exists(): assert region == 'us-east-1'
+if (root/'errors.json').exists():
+    for error in json.loads((root/'errors.json').read_text()):
+        if error['operation'] != op: continue
+        if error.get('region', region) != region: continue
+        if error.get('instance_type', request.get('InstanceType')) != request.get('InstanceType'): continue
+        if error.get('zone', request.get('Placement',{}).get('AvailabilityZone')) != request.get('Placement',{}).get('AvailabilityZone'): continue
+        sys.exit('An error occurred ('+error['code']+') when calling the '+op+' operation: '+error['message'])
 assert args[args.index('--cli-binary-format')+1] == 'base64'
 response = {}
-state = root/'instance.json'
+state = resources/'instance.json'
 if op == 'get-caller-identity': response = {'Account':(root/'account').read_text() if (root/'account').exists() else '123456789012'}
 elif op == 'describe-instances':
     instance = json.loads(state.read_text()) if state.exists() else None
@@ -1190,13 +1680,21 @@ elif op == 'describe-instances':
         next(t for t in old['Tags'] if t['Key']=='mj:operation')['Value']='f'*32
         instances.append(old)
     response = {'Reservations':[{'Instances':instances}] if instances else [], 'Padding':'x'*70000}
+elif op == 'describe-availability-zones':
+    response = {'AvailabilityZones':[{'ZoneName':region+'b'}, {'ZoneName':region+'a'}]}
+elif op == 'describe-instance-type-offerings':
+    filters = {f['Name']:f['Values'][0] for f in request['Filters']}
+    absent = json.loads((root/'unoffered.json').read_text()) if (root/'unoffered.json').exists() else []
+    response = {'InstanceTypeOfferings':[] if [region, filters['instance-type'], filters['location']] in absent else [{'InstanceType':filters['instance-type'], 'Location':filters['location']}]}
 elif op == 'describe-instance-types':
     kind = {'ProcessorInfo':{'SupportedArchitectures':['x86_64']}}
     if (root/'nitro').exists(): kind['NitroEnclavesSupport'] = 'supported'
     if (root/'nvme').exists(): kind['InstanceStorageInfo'] = {'TotalSizeInGB':3800,'NvmeSupport':'required'}
     response = {'InstanceTypes':[kind]}
 elif op == 'describe-subnets':
-    response = {'Subnets':[{'SubnetId':'subnet-test','VpcId':'vpc-test','AvailabilityZone':'us-east-1a'}]}
+    zone = next((f['Values'][0] for f in request.get('Filters',[]) if f['Name']=='availability-zone'), region+'a')
+    missing = json.loads((root/'missing-subnets.json').read_text()) if (root/'missing-subnets.json').exists() else []
+    response = {'Subnets':[] if zone in missing else [{'SubnetId':'subnet-test','VpcId':'vpc-test','AvailabilityZone':zone}]}
 elif op == 'get-parameter':
     if (root/'nitro').exists(): assert request['Name'] == '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.18-x86_64'
     else: assert request['Name'] == '/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id'
@@ -1206,10 +1704,11 @@ elif op == 'describe-images':
     response = {'Images':[{'RootDeviceName':'/dev/sda1'}]}
 elif op == 'import-key-pair':
     import base64
+    assert not (resources/'key.json').exists() and not (resources/'group.json').exists(), 'previous attempt was not cleaned before retry'
     assert base64.b64decode(request['PublicKeyMaterial']).startswith(b'ssh-ed25519 ')
-    (root/'key.json').write_text(json.dumps({'KeyPairId':'key-test','Tags':request['TagSpecifications'][0]['Tags']}))
+    (resources/'key.json').write_text(json.dumps({'KeyPairId':'key-test','Tags':request['TagSpecifications'][0]['Tags']}))
 elif op == 'create-security-group':
-    (root/'group.json').write_text(json.dumps({'GroupId':'sg-test','Tags':request['TagSpecifications'][0]['Tags']}))
+    (resources/'group.json').write_text(json.dumps({'GroupId':'sg-test','Tags':request['TagSpecifications'][0]['Tags']}))
     response = {'GroupId':'sg-test'}
 elif op == 'run-instances':
     assert request['MinCount'] == request['MaxCount'] == 1
@@ -1247,34 +1746,35 @@ elif op == 'run-instances':
         assert 'Requires=mj-ec2-cache.service' in bootstrap
     else:
         assert '/mnt/nvme/podman' not in bootstrap
-    if (root/'fail-launch').exists(): sys.exit('InsufficientInstanceCapacity')
+    if (root/'fail-launch').exists(): sys.exit('An error occurred (InsufficientInstanceCapacity) when calling the RunInstances operation: capacity unavailable')
     tags = next(t['Tags'] for t in request['TagSpecifications'] if t['ResourceType']=='instance')
     assert next(t['Value'] for t in tags if t['Key']=='mj:operation') == request['ClientToken']
     instance = {'InstanceId':'i-test','State':{'Name':'running'},'Placement':request['Placement'],'InstanceType':request['InstanceType'],'PublicIpAddress':'192.0.2.1','Tags':tags}
     state.write_text(json.dumps(instance))
+    if (root/'lost-launch-response').exists(): sys.exit('connection lost after launch; InsufficientInstanceCapacity in unrelated diagnostic')
     response = {'Instances':[instance]}
 elif op == 'allocate-address':
     response = {'AllocationId':'eipalloc-test','PublicIp':'192.0.2.7','Tags':request['TagSpecifications'][0]['Tags']}
-    (root/'address.json').write_text(json.dumps(response))
+    (resources/'address.json').write_text(json.dumps(response))
 elif op == 'associate-address':
-    address=json.loads((root/'address.json').read_text());address['AssociationId']='eipassoc-test';(root/'address.json').write_text(json.dumps(address))
+    address=json.loads((resources/'address.json').read_text());address['AssociationId']='eipassoc-test';(resources/'address.json').write_text(json.dumps(address))
 elif op == 'describe-addresses':
-    response={'Addresses':[json.loads((root/'address.json').read_text())] if (root/'address.json').exists() else []}
+    response={'Addresses':[json.loads((resources/'address.json').read_text())] if (resources/'address.json').exists() else []}
 elif op == 'disassociate-address':
-    address=json.loads((root/'address.json').read_text());address.pop('AssociationId');(root/'address.json').write_text(json.dumps(address))
-elif op == 'release-address': (root/'address.json').unlink()
+    address=json.loads((resources/'address.json').read_text());address.pop('AssociationId');(resources/'address.json').write_text(json.dumps(address))
+elif op == 'release-address': (resources/'address.json').unlink()
 elif op == 'terminate-instances':
     if (root/'fail-terminate').exists(): sys.exit('termination refused')
     assert request['InstanceIds'] == ['i-test']
     instance = json.loads(state.read_text()); instance['State']['Name']='terminated'; state.write_text(json.dumps(instance))
 elif op == 'describe-security-groups':
     assert any(f['Name']=='tag:mj:operation' for f in request['Filters'])
-    response = {'SecurityGroups':[json.loads((root/'group.json').read_text())] if (root/'group.json').exists() else []}
+    response = {'SecurityGroups':[json.loads((resources/'group.json').read_text())] if (resources/'group.json').exists() else []}
 elif op == 'describe-key-pairs':
     assert any(f['Name']=='tag:mj:operation' for f in request['Filters'])
-    response = {'KeyPairs':[json.loads((root/'key.json').read_text())] if (root/'key.json').exists() else []}
-elif op == 'delete-security-group': (root/'group.json').unlink()
-elif op == 'delete-key-pair': (root/'key.json').unlink()
+    response = {'KeyPairs':[json.loads((resources/'key.json').read_text())] if (resources/'key.json').exists() else []}
+elif op == 'delete-security-group': (resources/'group.json').unlink()
+elif op == 'delete-key-pair': (resources/'key.json').unlink()
 elif op not in ('authorize-security-group-ingress','wait instance-status-ok','wait instance-terminated'):
     sys.exit('unexpected AWS operation: '+op)
 print(json.dumps(response))
@@ -1317,8 +1817,12 @@ else:
 "#;
 
     fn fixture_child(name: &str, expected_warning: Option<&str>) -> bool {
+        fixture_output(name, expected_warning).is_some()
+    }
+
+    fn fixture_output(name: &str, expected_warning: Option<&str>) -> Option<Output> {
         if std::env::var_os("MJ_EC2_FIXTURE_CHILD").is_some() {
-            return false;
+            return None;
         }
         use std::os::unix::fs::PermissionsExt;
         let directory = tempfile::tempdir().unwrap();
@@ -1366,16 +1870,18 @@ else:
                     .contains("registry refused the image download")
             );
         }
-        true
+        Some(output)
     }
 
     fn create_args() -> CreateArgs {
         CreateArgs {
-            instance_type: "c8id.16xlarge".into(),
+            instance_type: vec!["c8id.16xlarge".into()],
+            types: Vec::new(),
             runtime: Ec2Runtime::Podman,
-            zone: "us-east-1a".into(),
+            zone: vec!["us-east-1a".into()],
+            region: Vec::new(),
+            aws_profile: None,
             name: Some("builder".into()),
-            aws: AwsArgs::default(),
             subnet: None,
             ssh_cidr: Some("192.0.2.3/32".into()),
             disk_gib: 200,
@@ -1383,6 +1889,327 @@ else:
             disk_iops: None,
             zfs_cache: false,
             json: true,
+        }
+    }
+
+    #[test]
+    fn capacity_preferences_clean_refusals_skip_regions_and_preserve_inventory_history() {
+        if let Some(output) = fixture_output(
+            "ec2::tests::capacity_preferences_clean_refusals_skip_regions_and_preserve_inventory_history",
+            None,
+        ) {
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            let start = stdout.find('{').expect("JSON create result");
+            let host = serde_json::Deserializer::from_str(&stdout[start..])
+                .into_iter::<Value>()
+                .next()
+                .unwrap()
+                .unwrap();
+            assert_eq!(host["region"], "us-west-2");
+            assert_eq!(host["zone"], "us-west-2b");
+            assert_eq!(host["instance_type"], "m8id.8xlarge");
+            assert_eq!(host["zfs_cache"], false);
+            assert_eq!(host["attempts"].as_array().unwrap().len(), 10);
+            assert!(stdout.contains("VcpuLimitExceeded") && stdout.contains("OptInRequired"));
+            return;
+        }
+        let fixture = PathBuf::from(std::env::var_os("MJ_EC2_FIXTURE_CHILD").unwrap());
+        let bin = fixture.join("bin");
+        let root = config_dir().join("ec2");
+        fs::write(bin.join("multi-region"), "").unwrap();
+        // Hard-won: #1523: a deleted default subnet stopped the region-only search.
+        fs::write(
+            bin.join("missing-subnets.json"),
+            r#"["us-west-1a","us-west-1b"]"#,
+        )
+        .unwrap();
+        fs::write(bin.join("errors.json"), serde_json::to_vec(&json!([
+            {"operation":"run-instances","region":"us-east-1","code":"VcpuLimitExceeded","message":"On-Demand Standard vCPU quota exceeded"},
+            {"operation":"describe-instances","region":"us-east-2","code":"OptInRequired","message":"Region is not opted in"},
+            {"operation":"run-instances","region":"us-west-2","instance_type":"c8id.16xlarge","zone":"us-west-2a","code":"InsufficientInstanceCapacity","message":"No capacity; suggested zones are hints"},
+            {"operation":"run-instances","region":"us-west-2","instance_type":"c8id.16xlarge","zone":"us-west-2b","code":"Unsupported","message":"The requested instance type is not supported in this availability zone"}
+        ])).unwrap()).unwrap();
+        fs::write(
+            bin.join("unoffered.json"),
+            r#"[["us-west-2","m8id.8xlarge","us-west-2a"]]"#,
+        )
+        .unwrap();
+        let cli = crate::Cli::try_parse_from([
+            "mj",
+            "--instance",
+            "ec2-fixture",
+            "ec2",
+            "create",
+            "--type",
+            "c8id.16xlarge,m8id.8xlarge",
+            "--zone",
+            "us-east-1b",
+            "--zone",
+            "us-east-1a",
+            "--region",
+            "us-east-1,us-east-2,us-west-1",
+            "--region",
+            "us-west-2",
+            "--name",
+            "builder",
+            "--ssh-cidr",
+            "192.0.2.3/32",
+            "--json",
+        ])
+        .unwrap();
+        let Some(crate::Command::Ec2(Ec2Args {
+            command: Ec2Command::Create(args),
+        })) = cli.command
+        else {
+            panic!("expected EC2 create command");
+        };
+        create(args, &root).unwrap();
+        let record = records(&root).unwrap().pop().unwrap();
+        assert_eq!(record.region, "us-west-2");
+        assert_eq!(record.attempts.len(), 10);
+        assert_eq!(record.attempts[0].outcome, "skipped_region");
+        assert_eq!(record.attempts[1].outcome, "skipped_region");
+        assert_eq!(record.attempts.last().unwrap().outcome, "created");
+        let calls: Vec<Value> = fs::read_to_string(bin.join("calls"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let launches: Vec<_> = calls
+            .iter()
+            .filter(|call| call["operation"] == "run-instances")
+            .collect();
+        assert!(record.attempts[2..6].iter().all(|attempt| {
+            attempt
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("no default subnet")
+        }));
+        assert!(!calls.iter().any(|call| {
+            call["operation"] == "import-key-pair"
+                && call["args"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|arg| arg == "us-west-1")
+        }));
+        let placements: Vec<_> = launches
+            .iter()
+            .map(|call| {
+                (
+                    call["request"]["InstanceType"].as_str().unwrap(),
+                    call["request"]["Placement"]["AvailabilityZone"]
+                        .as_str()
+                        .unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            placements,
+            [
+                ("c8id.16xlarge", "us-east-1b"),
+                ("c8id.16xlarge", "us-west-2a"),
+                ("c8id.16xlarge", "us-west-2b"),
+                ("m8id.8xlarge", "us-west-2b"),
+            ]
+        );
+        let tokens: std::collections::BTreeSet<_> = launches
+            .iter()
+            .map(|call| call["request"]["ClientToken"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            tokens.len(),
+            launches.len(),
+            "different requests must never reuse AWS client tokens"
+        );
+        let (rows, complete) = inventory(
+            &ListArgs {
+                aws: AwsArgs::default(),
+                json: true,
+            },
+            &root,
+        )
+        .unwrap();
+        assert!(
+            complete,
+            "an explicitly disabled region does not hide usable inventory"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row["region"] == "us-east-2" && row["error"].is_string())
+        );
+        let winner = rows
+            .iter()
+            .find(|row| row["instance_id"] == "i-test")
+            .unwrap();
+        assert_eq!(winner["region"], "us-west-2");
+        assert_eq!(winner["attempts"].as_array().unwrap().len(), 10);
+        list(
+            ListArgs {
+                aws: AwsArgs::default(),
+                json: false,
+            },
+            &root,
+        )
+        .unwrap();
+        destroy(
+            DestroyArgs {
+                host: "builder".into(),
+                aws: AwsArgs::default(),
+            },
+            &root,
+        )
+        .unwrap();
+        for region in ["us-east-1", "us-east-2", "us-west-1", "us-west-2"] {
+            assert!(!bin.join(region).join("key.json").exists());
+            assert!(!bin.join(region).join("group.json").exists());
+        }
+    }
+
+    // Hard-won: #1523: destroy kept a superseded candidate record across its lock wait.
+    #[test]
+    fn destroy_resolves_a_replaced_target_record_after_taking_ownership() {
+        if fixture_child(
+            "ec2::tests::destroy_resolves_a_replaced_target_record_after_taking_ownership",
+            None,
+        ) {
+            return;
+        }
+        let fixture = PathBuf::from(std::env::var_os("MJ_EC2_FIXTURE_CHILD").unwrap());
+        let bin = fixture.join("bin");
+        let root = config_dir().join("ec2");
+        fs::write(bin.join("fail-launch"), "").unwrap();
+        create(create_args(), &root).unwrap_err();
+        let superseded = records(&root).unwrap().pop().unwrap();
+        let args = DestroyArgs {
+            host: "builder".into(),
+            aws: AwsArgs::default(),
+        };
+        let location = locate_host(&args, &root).unwrap();
+        let old_operation = DestroyArgs {
+            host: superseded.operation.clone(),
+            aws: AwsArgs::default(),
+        };
+        let old_location = locate_host(&old_operation, &root).unwrap();
+        // Drive the exact stale ordering: discovery, replacement under the
+        // create lock, then destroy's ownership and current-record selection.
+        fs::remove_file(bin.join("fail-launch")).unwrap();
+        create(create_args(), &root).unwrap();
+        assert!(!superseded.directory(&root).unwrap().exists());
+        let current = records(&root).unwrap().pop().unwrap();
+        assert_ne!(current.operation, superseded.operation);
+        let error = destroy_located(old_operation, &root, old_location).unwrap_err();
+        assert!(error.to_string().contains("no longer exists"));
+        assert!(Config::load().unwrap().targets.contains_key("builder"));
+        destroy_located(args, &root, location).unwrap();
+        assert!(records(&root).unwrap().is_empty());
+        assert!(!Config::load().unwrap().targets.contains_key("builder"));
+        let instance: Value =
+            serde_json::from_slice(&fs::read(bin.join("instance.json")).unwrap()).unwrap();
+        assert_eq!(instance["State"]["Name"], "terminated");
+        assert!(!current.directory(&root).unwrap().exists());
+        assert!(!bin.join("key.json").exists() && !bin.join("group.json").exists());
+    }
+
+    #[test]
+    fn cleanup_failure_stops_capacity_fallback_and_retains_recovery_keys() {
+        if fixture_child(
+            "ec2::tests::cleanup_failure_stops_capacity_fallback_and_retains_recovery_keys",
+            None,
+        ) {
+            return;
+        }
+        let fixture = PathBuf::from(std::env::var_os("MJ_EC2_FIXTURE_CHILD").unwrap());
+        let bin = fixture.join("bin");
+        let root = config_dir().join("ec2");
+        fs::write(bin.join("errors.json"), serde_json::to_vec(&json!([
+            {"operation":"run-instances","code":"InsufficientInstanceCapacity","message":"No capacity"},
+            {"operation":"delete-security-group","code":"UnauthorizedOperation","message":"Cleanup refused"}
+        ])).unwrap()).unwrap();
+        let mut args = create_args();
+        args.zone.push("us-east-1b".into());
+        let error = create(args, &root).unwrap_err();
+        assert!(format!("{error:#}").contains("refusal cleanup failed"));
+        let record = records(&root).unwrap().pop().unwrap();
+        assert_eq!(record.state, RecordState::Active);
+        assert!(format!("{error:#}").contains(&record.operation));
+        assert!(record.directory(&root).unwrap().join("id_ed25519").exists());
+        assert!(bin.join("key.json").exists() && bin.join("group.json").exists());
+        let calls = fs::read_to_string(bin.join("calls")).unwrap();
+        assert_eq!(
+            calls
+                .lines()
+                .filter(
+                    |line| serde_json::from_str::<Value>(line).unwrap()["operation"]
+                        == "run-instances"
+                )
+                .count(),
+            1
+        );
+        fs::remove_file(bin.join("errors.json")).unwrap();
+        destroy(
+            DestroyArgs {
+                host: record.operation,
+                aws: AwsArgs::default(),
+            },
+            &root,
+        )
+        .unwrap();
+        assert!(records(&root).unwrap().is_empty());
+    }
+
+    #[test]
+    fn uncertain_launch_and_errors_after_acceptance_never_launch_another_candidate() {
+        if fixture_child(
+            "ec2::tests::uncertain_launch_and_errors_after_acceptance_never_launch_another_candidate",
+            None,
+        ) {
+            return;
+        }
+        let fixture = PathBuf::from(std::env::var_os("MJ_EC2_FIXTURE_CHILD").unwrap());
+        let bin = fixture.join("bin");
+        let root = config_dir().join("ec2");
+        for uncertain in [true, false] {
+            if uncertain {
+                fs::write(bin.join("lost-launch-response"), "").unwrap();
+            } else {
+                fs::write(bin.join("errors.json"), r#"[{"operation":"wait instance-status-ok","code":"InsufficientInstanceCapacity","message":"An error after the launch was accepted"}]"#).unwrap();
+            }
+            let mut args = create_args();
+            args.zone.push("us-east-1b".into());
+            let error = create(args, &root).unwrap_err();
+            assert!(format!("{error:#}").contains("retained for inspection"));
+            let record = records(&root).unwrap().pop().unwrap();
+            assert_eq!(record.instance_id.is_none(), uncertain);
+            assert!(record.directory(&root).unwrap().join("id_ed25519").exists());
+            let calls: Vec<Value> = fs::read_to_string(bin.join("calls"))
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|call| call["operation"] == "run-instances")
+                    .count(),
+                if uncertain { 1 } else { 2 }
+            );
+            fs::remove_file(bin.join(if uncertain {
+                "lost-launch-response"
+            } else {
+                "errors.json"
+            }))
+            .unwrap();
+            destroy(
+                DestroyArgs {
+                    host: record.operation,
+                    aws: AwsArgs::default(),
+                },
+                &root,
+            )
+            .unwrap();
+            assert!(records(&root).unwrap().is_empty());
         }
     }
 
@@ -1444,6 +2271,14 @@ else:
         );
 
         let record = records(&root).unwrap().pop().unwrap();
+        let mut legacy = serde_json::to_value(&record).unwrap();
+        legacy.as_object_mut().unwrap().remove("state");
+        legacy.as_object_mut().unwrap().remove("attempts");
+        fs::write(
+            record.directory(&root).unwrap().join("resources.json"),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
         // Hard-won: #1481: a terminated VM with the same target blocked teardown.
         fs::write(bin.join("historical"), "").unwrap();
         let before = Config::load().unwrap();
@@ -1598,9 +2433,9 @@ else:
     }
 
     #[test]
-    fn refused_launch_remains_discoverable_and_can_be_cleaned_without_an_instance() {
+    fn refused_launch_is_cleaned_and_history_does_not_block_another_create() {
         if fixture_child(
-            "ec2::tests::refused_launch_remains_discoverable_and_can_be_cleaned_without_an_instance",
+            "ec2::tests::refused_launch_is_cleaned_and_history_does_not_block_another_create",
             None,
         ) {
             return;
@@ -1611,9 +2446,22 @@ else:
         fs::write(bin.join("nvme"), "").unwrap();
         fs::write(bin.join("fail-launch"), "").unwrap();
         let error = create(create_args(), &root).unwrap_err();
-        assert!(format!("{error:#}").contains("InsufficientInstanceCapacity"));
+        assert!(format!("{error:#}").contains("all refused attempts were cleaned up"));
         let record = records(&root).unwrap().pop().unwrap();
-        assert!(format!("{error:#}").contains(&record.operation));
+        assert_eq!(record.state, RecordState::CleanedUp);
+        assert!(
+            record.attempts[0]
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("InsufficientInstanceCapacity")
+        );
+        assert!(!record.directory(&root).unwrap().join("id_ed25519").exists());
+        assert!(!bin.join("key.json").exists() && !bin.join("group.json").exists());
+        // The history survives, but does not force a manual destroy before retry.
+        create(create_args(), &root).unwrap_err();
+        assert_eq!(records(&root).unwrap().len(), 1);
+        let record = records(&root).unwrap().pop().unwrap();
         assert!(!Config::load().unwrap().targets.contains_key("builder"));
         destroy(
             DestroyArgs {
