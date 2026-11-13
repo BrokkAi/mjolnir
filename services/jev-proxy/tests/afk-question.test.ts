@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import proxy from "../src/index.ts";
-import questions from "../../../mj-worker/src/acp/afk_question.json" with { type: "json" };
+import questions from "../src/afk_question.json" with { type: "json" };
 
 const state = {
   current_question: { message: "", title: "Who owns #11482 and who owns #10941?",

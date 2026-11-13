@@ -3682,10 +3682,6 @@ fn the_jev_switch_reaches_the_worker_and_removes_the_key() {
     )
     .unwrap()
     .0;
-    for environment in [&mut launch.target_environment, &mut launch.environment] {
-        environment.insert("TYPESAFE_API_KEY".into(), "secret".into());
-    }
-
     let mut on = launch.clone();
     apply_jev_switch(&mut on, true);
     assert_eq!(on.target_environment, launch.target_environment);
@@ -3693,21 +3689,8 @@ fn the_jev_switch_reaches_the_worker_and_removes_the_key() {
 
     apply_jev_switch(&mut launch, false);
     for environment in [&launch.target_environment, &launch.environment] {
-        assert!(!environment.contains_key("TYPESAFE_API_KEY"));
         assert_eq!(
             environment.get(mj_core::jev::DISABLED_ENVIRONMENT),
-            Some(&"1".to_owned())
-        );
-    }
-
-    // The continuation switch travels the same way, and only when off.
-    let mut continuing = launch.clone();
-    super::launch::apply_continuation_switch(&mut continuing, true);
-    assert_eq!(continuing.environment, launch.environment);
-    super::launch::apply_continuation_switch(&mut launch, false);
-    for environment in [&launch.target_environment, &launch.environment] {
-        assert_eq!(
-            environment.get(mj_core::jev::CONTINUATION_DISABLED_ENVIRONMENT),
             Some(&"1".to_owned())
         );
     }

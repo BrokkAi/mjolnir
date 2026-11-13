@@ -526,10 +526,7 @@ for line in sys.stdin:
                 step_clock: Default::default(),
                 tools_in_flight: Default::default(),
                 turn_context: Default::default(),
-                verdict: Some(crate::acp::VerdictSource::Direct {
-                    key: String::new(),
-                    endpoint: String::new(),
-                }),
+                verdict: Some(crate::acp::VerdictSource::Disabled),
                 stall_policy: None,
             };
             let (tx, rx) = mpsc::channel(8);
@@ -702,10 +699,7 @@ for line in sys.stdin:
                     step_clock: Default::default(),
                     tools_in_flight: Default::default(),
                     turn_context: Default::default(),
-                    verdict: Some(crate::acp::VerdictSource::Direct {
-                        key: String::new(),
-                        endpoint: String::new(),
-                    }),
+                    verdict: Some(crate::acp::VerdictSource::Disabled),
                     stall_policy: None,
                 };
                 let (tx, rx) = mpsc::channel(8);

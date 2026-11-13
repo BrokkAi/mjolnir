@@ -95,7 +95,7 @@ where
     let elicitation_events = events.clone();
     let pending_elicitations = spec
         .operator_away
-        .pending_for_bridge_with_source(spec.verdict.clone());
+        .pending_for_bridge_with_source(spec.verdict.clone(), Some(spec.turn_context.clone()));
     let handler_elicitations = pending_elicitations.clone();
     let permission_elicitations = pending_elicitations.clone();
     let permission_review_ids = Arc::new(AtomicU64::new(1));

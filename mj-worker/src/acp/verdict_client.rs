@@ -1,9 +1,7 @@
-//! Optional, bounded TypeSafe turn classification. Failures leave activity alone.
+//! Optional hosted GLiDE classification. Failures leave activity alone.
 use anyhow::{Context, Result, ensure};
 use mj_core::activity::question_locator;
-use mj_core::activity::verdict::{TurnEvidence, api_key, request_fits};
-#[cfg(test)]
-use mj_core::activity::verdict::{TurnVerdict, questions};
+use mj_core::activity::verdict::{TurnEvidence, request_fits};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
@@ -18,57 +16,35 @@ fn is_glide_size_refusal(status: reqwest::StatusCode, body: &[u8]) -> bool {
             && body["error"]["code"] == "input_too_long")
 }
 
-/// The Unix worker is the only production caller of the classifier client;
-/// these items stay compiled on Windows alongside the shared source type.
+/// The hosted classifier proxy. It holds the provider keys, so every classifier
+/// request goes through it.
 #[cfg_attr(not(unix), allow(dead_code))]
-const HOSTED_VERDICT_ENDPOINT: &str =
-    "https://mj-jev-proxy.eng-admin-a63.workers.dev/v7/turn-verdict";
-#[cfg_attr(not(unix), allow(dead_code))]
-const TYPESAFE_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
+const HOSTED_PROXY: &str = "https://mj-jev-proxy.eng-admin-a63.workers.dev";
 
 #[derive(Clone)]
 pub enum VerdictSource {
-    /// An explicit blank key disables classification for isolated tests.
-    Direct {
-        key: String,
-        endpoint: String,
-    },
-    Hosted {
-        endpoint: String,
-    },
-}
-
-impl VerdictSource {
-    #[cfg_attr(not(unix), allow(dead_code))]
-    fn for_key(key: Option<String>) -> Self {
-        match key {
-            Some(key) => Self::Direct {
-                key,
-                endpoint: TYPESAFE_ENDPOINT.into(),
-            },
-            None => Self::Hosted {
-                endpoint: HOSTED_VERDICT_ENDPOINT.into(),
-            },
-        }
-    }
+    /// The proxy at `endpoint`; routes are joined onto its origin.
+    Hosted { endpoint: String },
+    /// Classification is off for this launch; used by isolated tests.
+    Disabled,
 }
 
 impl std::fmt::Debug for VerdictSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (name, endpoint) = match self {
-            Self::Direct { endpoint, .. } => ("Direct", endpoint),
-            Self::Hosted { endpoint } => ("Hosted", endpoint),
-        };
-        f.debug_struct(name)
-            .field("endpoint", endpoint)
-            .finish_non_exhaustive()
+        match self {
+            Self::Hosted { endpoint } => f
+                .debug_struct("Hosted")
+                .field("endpoint", endpoint)
+                .finish_non_exhaustive(),
+            Self::Disabled => f.write_str("Disabled"),
+        }
     }
 }
 
 #[derive(Clone)]
 #[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) struct VerdictClient {
-    source: VerdictSource,
+    endpoint: String,
     client: reqwest::Client,
     log: Option<mj_core::jev::DecisionLog>,
 }
@@ -184,9 +160,19 @@ impl Drop for VerdictAttempt {
 
 #[cfg_attr(not(unix), allow(dead_code))]
 impl VerdictClient {
-    /// Compare complete forms; the proxy's documented body ceiling is 64 KiB.
+    /// The proxy URL for a GLiDE route. GLiDE is always hosted: the Fastino key
+    /// exists only as the proxy's secret.
+    fn hosted_glide_url(&self, route: &str) -> Result<reqwest::Url> {
+        Ok(reqwest::Url::parse(&self.endpoint)?.join(route)?)
+    }
+
+    /// Compare complete forms. Returns true when `current_question` repeats earlier
+    /// ones (hold it for the person) and false when GLiDE finds a new decision
+    /// (decline it for now). The request has no size cap and no truncation: an
+    /// oversized request or any other failure is an error and the question is held.
     pub(crate) async fn same_afk_question(
         &self,
+        session: &str,
         current_question: &serde_json::Value,
         previous_questions: &[serde_json::Value],
     ) -> Result<bool> {
@@ -218,85 +204,100 @@ impl VerdictClient {
             anonymize_secret_choices(form, &mut labels);
         }
         mj_core::redact::redact_json_strings_distinct(&mut state, &mut labels);
-        let questions = match &self.source {
-            VerdictSource::Direct { .. } => {
-                Some(serde_json::from_str(include_str!("afk_question.json"))?)
+        let body = mj_core::jev::request_body(&state, None);
+        let diagnostic = self.log.as_ref().map(|log| {
+            let attempt = log.start(
+                session,
+                "activity",
+                "Does this question repeat one already declined while away?",
+                "The question the agent just asked and the earlier questions declined for the same agent.",
+            );
+            attempt.update(
+                None,
+                serde_json::json!({"request":body,"contract":"afk-question-glide-v1"}),
+            );
+            attempt
+        });
+        let result = self.afk_probabilities(&body).await;
+        if let Some(attempt) = &diagnostic {
+            match &result {
+                Ok((same, different)) => {
+                    let new = different > same;
+                    attempt.update(
+                        None,
+                        serde_json::json!({"probabilities":{"same":same,"different":different}}),
+                    );
+                    if new {
+                        attempt.finish(
+                            "declined_new",
+                            "Classified as a new decision; the worker declines it unless the state changed first.",
+                        );
+                    } else {
+                        attempt.finish("held_repeat", "Held the question for the person.");
+                    }
+                }
+                Err(error) => {
+                    attempt.update(None, serde_json::json!({"error":format!("{error:#}")}));
+                    attempt.finish(
+                        "failed",
+                        "The check failed; the question is held for the person.",
+                    );
+                }
             }
-            VerdictSource::Hosted { .. } => None,
-        };
-        let body = serde_json::to_vec(&mj_core::jev::request_body(&state, questions))?;
-        ensure!(
-            body.len() <= 64 * 1024,
-            "AFK question evidence exceeds Jev body limit"
-        );
-        let http = match &self.source {
-            VerdictSource::Direct { key, endpoint } => self.client.post(endpoint).bearer_auth(key),
-            VerdictSource::Hosted { endpoint } => {
-                let mut url =
-                    reqwest::Url::parse(endpoint).context("parse AFK question proxy URL")?;
-                url.set_path("/v1/afk-question-verdict");
-                self.client.post(url)
-            }
-        };
-        let response = http
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body)
+        }
+        // A tie does not establish a new decision: the frozen rule is `different`
+        // only when its probability is strictly higher.
+        result.map(|(same, different)| different <= same)
+    }
+
+    /// POST the redacted state to the hosted route and return `(same, different)`.
+    async fn afk_probabilities(&self, body: &serde_json::Value) -> Result<(f64, f64)> {
+        // Fastino: "set your client read timeout above 170 seconds"
+        // https://docs.fastino.ai/troubleshooting/retries (supersedes older 300s notes).
+        let response = self
+            .client
+            .post(self.hosted_glide_url("/v1/afk-question-glide")?)
+            .timeout(Duration::from_secs(180))
+            .json(body)
             .send()
             .await
-            .context("classify AFK question")?
-            .error_for_status()
-            .context("AFK question HTTP status")?;
+            .context("classify AFK question")?;
+        let status = response.status();
         let bytes = response
             .bytes()
             .await
             .context("read AFK question verdict")?;
         ensure!(
             bytes.len() <= 64 * 1024,
-            "AFK question verdict exceeds Jev body limit"
+            "AFK question verdict exceeds proxy response bound"
+        );
+        ensure!(
+            status.is_success(),
+            "AFK question HTTP {status}: {}",
+            String::from_utf8_lossy(&bytes)
         );
         let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-        let answer = value.get("answers").map_or(&value, |v| &v["same_question"]);
-        let choice = answer["choice"]
-            .as_str()
-            .context("missing AFK question choice")?;
-        ensure!(
-            matches!(choice, "same" | "different"),
-            "invalid AFK question choice"
-        );
-        if let Some(kind) = answer.get("type") {
-            ensure!(kind == "choice", "invalid AFK question answer type");
-        }
-        let confidence = answer["confidence"]
-            .as_f64()
-            .context("missing AFK question confidence")?;
-        ensure!(
-            (0.0..=1.0).contains(&confidence),
-            "invalid AFK question confidence"
-        );
-        let scores = answer["probabilities"]
+        let scores = value["probabilities"]
             .as_object()
             .context("missing AFK question distribution")?;
         ensure!(scores.len() == 2, "invalid AFK question distribution");
-        let same = scores
-            .get("same")
-            .and_then(serde_json::Value::as_f64)
-            .context("missing same probability")?;
-        let different = scores
-            .get("different")
-            .and_then(serde_json::Value::as_f64)
-            .context("missing different probability")?;
+        let probability = |label: &str| -> Result<f64> {
+            let p = scores
+                .get(label)
+                .and_then(serde_json::Value::as_f64)
+                .with_context(|| format!("missing {label} probability"))?;
+            ensure!(
+                p.is_finite() && (0.0..=1.0).contains(&p),
+                "invalid AFK question probabilities"
+            );
+            Ok(p)
+        };
+        let (same, different) = (probability("same")?, probability("different")?);
         ensure!(
-            (0.0..=1.0).contains(&same)
-                && (0.0..=1.0).contains(&different)
-                && (same + different - 1.0).abs() <= 0.01 + 1e-12,
+            (same + different - 1.0).abs() <= 0.03,
             "invalid AFK question probabilities"
         );
-        ensure!(
-            (if choice == "same" { same } else { different }) + 1e-12 >= same.max(different),
-            "AFK question choice is not a probability winner"
-        );
-        // A tie does not establish a new decision; keep the existing behavior.
-        Ok(choice == "same" || different <= same)
+        Ok((same, different))
     }
 
     pub(crate) fn log_single_question(
@@ -322,17 +323,18 @@ impl VerdictClient {
             );
         }
     }
+    /// Ask GLiDE which reply holds the open question. The frozen rule picks the
+    /// most probable of the replies and `none` (`question_locator::parse`).
+    ///
+    /// The state builder keeps the request far below the proxy's body bound, so an
+    /// explicit size refusal is a failure like any other: no retry, no target stored.
     pub(crate) async fn locate_question(
         &self,
         session: &str,
         request: &question_locator::Request,
     ) -> Result<Option<usize>> {
         let count = request.state.replies.len();
-        let direct_questions = match &self.source {
-            VerdictSource::Direct { .. } => Some(question_locator::questions(count)),
-            VerdictSource::Hosted { .. } => None,
-        };
-        let body = mj_core::jev::request_body(&request.state, direct_questions);
+        let body = mj_core::jev::request_body(&request.state, None);
         let diagnostic = self.log.as_ref().map(|log| {
             log.start(
                 session,
@@ -344,36 +346,35 @@ impl VerdictClient {
         if let Some(log) = &diagnostic {
             log.update(
                 None,
-                serde_json::json!({"request":body,"contract":"question-locator-v1"}),
+                serde_json::json!({"request":body,"contract":"question-locator-glide-v1"}),
             );
         }
         let result = async {
-            let http = match &self.source {
-                VerdictSource::Direct { key, endpoint } => {
-                    self.client.post(endpoint).bearer_auth(key)
-                }
-                VerdictSource::Hosted { endpoint } => {
-                    let mut url =
-                        reqwest::Url::parse(endpoint).context("parse locator proxy URL")?;
-                    url.set_path("/v1/question-locator");
-                    self.client.post(url)
-                }
-            };
-            let response = http
+            let endpoint = self.hosted_glide_url("/v1/question-locator-glide")?;
+            // Fastino: "set your client read timeout above 170 seconds"
+            // https://docs.fastino.ai/troubleshooting/retries (supersedes older 300s notes).
+            let response = self
+                .client
+                .post(endpoint)
+                .timeout(Duration::from_secs(180))
                 .json(&body)
                 .send()
                 .await
-                .context("request question locator")?
-                .error_for_status()
-                .context("question locator HTTP status")?;
+                .context("request question locator")?;
+            let status = response.status();
             let bytes = response.bytes().await.context("read question locator")?;
             ensure!(
                 bytes.len() <= 64 * 1024,
                 "question locator response exceeds byte limit"
             );
+            ensure!(
+                status.is_success(),
+                "question locator HTTP {status}: {}",
+                String::from_utf8_lossy(&bytes)
+            );
             let answer: serde_json::Value =
                 serde_json::from_slice(&bytes).context("decode locator JSON")?;
-            let index = question_locator::parse(&answer, count)?;
+            let index = question_locator::parse(&answer["probabilities"], count)?;
             if let Some(log) = &diagnostic {
                 log.update(
                     None,
@@ -387,7 +388,7 @@ impl VerdictClient {
             match &result {
                 Ok(Some(_)) => log.finish(
                     "located",
-                    "Jev selected a reply for the current-assessment check.",
+                    "GLiDE selected a reply for the current-assessment check.",
                 ),
                 Ok(None) => log.finish("unchanged", "No open request was located."),
                 Err(error) => {
@@ -424,9 +425,11 @@ impl VerdictClient {
             tracing::info!(target: "mj_jev", outcome = "disabled", reason = "jev_switch_off", "Jev classifier disabled");
             return None;
         }
-        let source = source.unwrap_or_else(|| VerdictSource::for_key(api_key()));
-        if matches!(&source, VerdictSource::Direct { key, .. } if key.trim().is_empty()) {
-            tracing::info!(target: "mj_jev", outcome = "disabled", reason = "explicit_blank_key", "Jev classifier disabled");
+        let source = source.unwrap_or_else(|| VerdictSource::Hosted {
+            endpoint: HOSTED_PROXY.into(),
+        });
+        if matches!(source, VerdictSource::Disabled) {
+            tracing::info!(target: "mj_jev", outcome = "disabled", reason = "explicit_disabled_source", "Jev classifier disabled");
             return None;
         }
         match Self::new(source) {
@@ -439,6 +442,9 @@ impl VerdictClient {
     }
 
     pub(crate) fn new(source: VerdictSource) -> Result<Self> {
+        let VerdictSource::Hosted { endpoint } = source else {
+            anyhow::bail!("classification is disabled for this source");
+        };
         // Library callers may not pass through the standalone worker entry point.
         let _ = rustls::crypto::ring::default_provider().install_default();
         let client = reqwest::Client::builder()
@@ -447,7 +453,7 @@ impl VerdictClient {
             .build()
             .context("create turn classifier HTTP client")?;
         Ok(Self {
-            source,
+            endpoint,
             client,
             log: None,
         })
@@ -456,30 +462,6 @@ impl VerdictClient {
     pub(crate) fn with_log(mut self, log: Option<mj_core::jev::DecisionLog>) -> Self {
         self.log = log;
         self
-    }
-
-    #[cfg(test)]
-    fn request_body(
-        &self,
-        evidence: &TurnEvidence,
-        question_set: &serde_json::Value,
-    ) -> serde_json::Value {
-        let direct_questions = match self.source {
-            VerdictSource::Direct { .. } => Some(question_set.clone()),
-            VerdictSource::Hosted { .. } => None,
-        };
-        mj_core::jev::request_body(evidence, direct_questions)
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn ask_logged(
-        &self,
-        session: &str,
-        generation: u64,
-        evidence: &TurnEvidence,
-    ) -> (VerdictAttempt, Result<TurnVerdict>) {
-        self.ask_logged_for(session, generation, evidence, questions())
-            .await
     }
 
     pub(crate) async fn ask_handback_logged(
@@ -525,21 +507,10 @@ impl VerdictClient {
         // Fresh 268-case GLiDE latency: p50 1.1s / p95 2.8s; 5s admits nearly all normal calls.
         let timeout = Duration::from_secs(5);
         let result = tokio::time::timeout(timeout, async {
-            // Explicit endpoints support isolated proxy fixtures; no provider key leaves the worker.
-            let endpoint = match &self.source {
-                VerdictSource::Direct { endpoint, .. } if cfg!(test) => endpoint.clone(),
-                VerdictSource::Direct { .. } => {
-                    HOSTED_VERDICT_ENDPOINT.replace("/v7/turn-verdict", "/v1/handback-verdict")
-                }
-                VerdictSource::Hosted { endpoint } => {
-                    let mut url = reqwest::Url::parse(endpoint)?;
-                    url.set_path("/v1/handback-verdict");
-                    url.to_string()
-                }
-            };
+            let endpoint = self.hosted_glide_url("/v1/handback-verdict")?;
             let response = self
                 .post_glide(
-                    reqwest::Url::parse(&endpoint)?,
+                    endpoint,
                     evidence
                         .authorization
                         .clone()
@@ -568,82 +539,6 @@ impl VerdictClient {
                     serde_json::json!({"error":format!("{error:#}")}),
                 ),
             }
-        }
-        (attempt, result)
-    }
-
-    #[cfg(test)]
-    async fn ask_logged_for(
-        &self,
-        session: &str,
-        generation: u64,
-        evidence: &TurnEvidence,
-        question_set: serde_json::Value,
-    ) -> (VerdictAttempt, Result<TurnVerdict>) {
-        // Completed-turn diagnostics belong to the durable relay owner. A
-        // request can finish after its turn was superseded or its action admitted.
-        let diagnostic = self
-            .log
-            .as_ref()
-            .filter(|_| evidence.phase == mj_core::activity::verdict::TurnPhase::Running)
-            .map(|log| {
-                log.start(
-                    session,
-                    "activity",
-                    "Does the running turn require user input?",
-                    "Current conversation and live runtime facts.",
-                )
-            });
-        if let Some(diagnostic) = &diagnostic {
-            diagnostic.update(None, serde_json::json!({"request":self.request_body(evidence, &question_set), "contract":"turn-verdict-v7", "questions":question_set, "model":"jev-latest", "confidence_threshold":mj_core::activity::verdict::ACT_CONFIDENCE, "no_input_threshold":mj_core::activity::verdict::NO_INPUT_CONFIDENCE, "required_input_probability":mj_core::assessment::REQUIRED_INPUT_PROBABILITY, "required_input_ratio":mj_core::assessment::REQUIRED_INPUT_RATIO, "finished_work_probability":mj_core::assessment::FINISHED_WORK_PROBABILITY, "stale_failure_probability":mj_core::activity::verdict::STALE_FAILURE_PROBABILITY, "stale_reply_probability":mj_core::activity::verdict::STALE_REPLY_PROBABILITY, "stale_finished_silence_s":mj_core::activity::verdict::STALE_FINISHED_SILENCE.as_secs(), "server_retry_threshold":mj_core::activity::verdict::SERVER_RETRY_CONFIDENCE, "generation":generation, "source":if matches!(self.source, VerdictSource::Direct { .. }) { "direct" } else { "hosted" }}));
-        }
-        let mut attempt = VerdictAttempt {
-            diagnostic,
-            decision: None,
-            uncertain: false,
-            id: NEXT_REQUEST.fetch_add(1, Ordering::Relaxed),
-            session: session.into(),
-            generation,
-            phase: evidence.phase,
-            started: std::time::Instant::now(),
-            finished: false,
-            dispatch: tracing::dispatcher::get_default(Clone::clone),
-        };
-        let source = match self.source {
-            VerdictSource::Direct { .. } => "direct",
-            VerdictSource::Hosted { .. } => "hosted",
-        };
-        tracing::info!(target: "mj_jev", request_id = attempt.id, session, generation,
-            phase = ?evidence.phase, harness = ?evidence.harness, source,
-            summary_bytes = evidence.transcript_summary.len(),
-            active_tools = evidence.tools_in_flight.len(),
-            "Jev classification requested");
-        let result = self.ask(evidence, &question_set).await;
-        if let Some(diagnostic) = &attempt.diagnostic {
-            match &result {
-                Ok(answer) => {
-                    attempt.decision =
-                        Some(mj_core::activity::verdict::decide(evidence.phase, answer));
-                    attempt.uncertain = answer
-                        .assessment
-                        .as_ref()
-                        .is_some_and(|v| v.action(false) == mj_core::assessment::Action::Uncertain);
-                    diagnostic.update(Some("Jev assessed user input need, remaining work, and transient server failures independently."), serde_json::json!({"result": {"work_state":format!("{:?}", answer.work_state), "work_state_confidence":answer.work_state_confidence, "needs_user_input":answer.needs_user_input, "retryable_server_error":answer.retryable_server_error,"assessment":answer.assessment}, "proposed_decision":format!("{:?}", attempt.decision.unwrap())}));
-                }
-                Err(error) => diagnostic.update(
-                    Some("No usable Jev answer."),
-                    serde_json::json!({"error":format!("{error:#}")}),
-                ),
-            }
-        }
-        match &result {
-            Ok(answer) => tracing::info!(target: "mj_jev", request_id = attempt.id, session,
-                generation, phase = ?evidence.phase, verdict = ?answer.work_state,
-                confidence = %answer.work_state_confidence, needs_user_input = %answer.needs_user_input,
-                decision = ?mj_core::activity::verdict::decide(evidence.phase, answer),
-                elapsed_ms = attempt.started.elapsed().as_millis() as u64, "Jev classification received"),
-            Err(error) => tracing::warn!(target: "mj_jev", request_id = attempt.id, session,
-                generation, phase = ?evidence.phase, error = %format!("{error:#}"), "Jev classification failed"),
         }
         (attempt, result)
     }
@@ -682,7 +577,7 @@ impl VerdictClient {
             let body = glide_turn::project(evidence, history.clone(), facts, native)?;
             if let Some(log) = &attempt.diagnostic { log.update(None, serde_json::json!({"request":body,"contract":"glide-turn-v1"})); }
             let answer = self.ask_glide_turn(evidence, history, facts, native).await?;
-            if let Some(log) = &attempt.diagnostic { log.update(None, serde_json::json!({"probabilities":answer,"action":mj_core::activity::eot_glide::action(&serde_json::to_value(&answer)?, evidence.authorization.as_ref().is_some_and(|h| h.authorization_complete && !h.final_reply_omitted))})); }
+            if let Some(log) = &attempt.diagnostic { log.update(None, serde_json::json!({"probabilities":answer,"action":mj_core::activity::eot_glide::action(&serde_json::to_value(&answer)?)})); }
             Ok(answer)
         }.await;
         match &result {
@@ -749,15 +644,7 @@ impl VerdictClient {
         facts: &mj_core::activity::ActivityFacts,
         native_agent_count: usize,
     ) -> Result<glide_turn::Probabilities> {
-        // GLiDE is hosted even when the unrelated locator uses a Direct source.
-        let endpoint = match &self.source {
-            VerdictSource::Hosted { endpoint } => {
-                reqwest::Url::parse(endpoint)?.join("/v1/glide-turn-verdict")?
-            }
-            VerdictSource::Direct { .. } => reqwest::Url::parse(
-                "https://mj-jev-proxy.eng-admin-a63.workers.dev/v1/glide-turn-verdict",
-            )?,
-        };
+        let endpoint = self.hosted_glide_url("/v1/glide-turn-verdict")?;
         // Fastino: "set your client read timeout above 170 seconds"
         // https://docs.fastino.ai/troubleshooting/retries (supersedes older 300s notes).
         let mut response = self
@@ -786,60 +673,6 @@ impl VerdictClient {
             );
         }
         Ok(probabilities)
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn ask(
-        &self,
-        evidence: &TurnEvidence,
-        question_set: &serde_json::Value,
-    ) -> Result<TurnVerdict> {
-        const MAX_RESPONSE_BYTES: usize = 64 * 1024;
-        // Both sources are held to the direct shape: the proxy adds the same
-        // questions before it calls TypeSafe.
-        ensure!(
-            request_fits(evidence),
-            "turn evidence exceeds request byte limit"
-        );
-        let request = match &self.source {
-            VerdictSource::Direct { key, endpoint } => self
-                .client
-                .post(endpoint)
-                .bearer_auth(key)
-                .json(&self.request_body(evidence, question_set)),
-            VerdictSource::Hosted { endpoint } => self
-                .client
-                .post(endpoint)
-                .json(&self.request_body(evidence, question_set)),
-        };
-        let mut response = request
-            .send()
-            .await
-            .context("request turn verdict")?
-            .error_for_status()
-            .context("turn verdict HTTP status")?;
-        ensure!(
-            response
-                .content_length()
-                .is_none_or(|length| length <= MAX_RESPONSE_BYTES as u64),
-            "turn verdict response exceeds byte limit"
-        );
-        let mut body = Vec::new();
-        while let Some(chunk) = response.chunk().await.context("read turn verdict")? {
-            ensure!(
-                body.len().saturating_add(chunk.len()) <= MAX_RESPONSE_BYTES,
-                "turn verdict response exceeds byte limit"
-            );
-            body.extend_from_slice(&chunk);
-        }
-        let verdict = TurnVerdict::parse(
-            &serde_json::from_slice(&body).context("decode turn verdict JSON")?,
-        )?;
-        ensure!(
-            verdict.assessment.is_some(),
-            "missing unified turn assessment"
-        );
-        Ok(verdict)
     }
 }
 
@@ -875,20 +708,38 @@ pub(crate) fn bound_authorization(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mj_core::activity::verdict::{TurnPhase, WorkState};
+    use mj_core::activity::verdict::TurnPhase;
     use mj_core::assessment::ContextHistory;
     use mj_core::continuation::EvidenceMessage;
     use mj_transcript::turn_context::TurnContext;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
-    async fn server(body: String) -> (VerdictClient, tokio::task::JoinHandle<serde_json::Value>) {
+    /// A hosted-source server for one request; returns the request path and body.
+    async fn hosted_server(
+        body: String,
+    ) -> (
+        VerdictClient,
+        tokio::task::JoinHandle<(String, serde_json::Value)>,
+    ) {
+        hosted_server_with_status("200 OK", body).await
+    }
+
+    async fn hosted_server_with_status(
+        status: &'static str,
+        body: String,
+    ) -> (
+        VerdictClient,
+        tokio::task::JoinHandle<(String, serde_json::Value)>,
+    ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
             let mut socket = BufReader::new(socket);
+            let mut request_line = String::new();
+            socket.read_line(&mut request_line).await.unwrap();
+            let path = request_line.split_whitespace().nth(1).unwrap().to_owned();
             let mut length = 0;
-            let mut authorized = false;
             loop {
                 let mut line = String::new();
                 socket.read_line(&mut line).await.unwrap();
@@ -898,29 +749,23 @@ mod tests {
                 if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
                     length = value.trim().parse::<usize>().unwrap();
                 }
-                authorized |= line.trim() == "authorization: Bearer test-key";
             }
-            assert!(authorized);
             let mut request = vec![0; length];
             socket.read_exact(&mut request).await.unwrap();
             socket
                 .write_all(
                     format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
                     )
                     .as_bytes(),
                 )
                 .await
                 .unwrap();
-            serde_json::from_slice(&request).unwrap()
+            (path, serde_json::from_slice(&request).unwrap())
         });
         (
-            VerdictClient::new(VerdictSource::Direct {
-                key: "test-key".into(),
-                endpoint,
-            })
-            .unwrap(),
+            VerdictClient::new(VerdictSource::Hosted { endpoint }).unwrap(),
             task,
         )
     }
@@ -1042,13 +887,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn locator_direct_transport_sends_redacted_state_and_shared_question() {
+    async fn locator_sends_redacted_state_alone_to_the_hosted_glide_route() {
         const TOKEN: &str = "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789";
-        let reply = serde_json::json!({"answers":{"request_reply":{
-            "type":"choice", "choice":"r1", "probabilities":{"r0":0.2,"r1":0.7,"none":0.1}
-        }}})
-        .to_string();
-        let (client, server) = server(reply).await;
+        let reply = serde_json::json!({"probabilities":{"r0":0.2,"r1":0.7,"none":0.1}}).to_string();
+        let (client, server) = hosted_server(reply).await;
         let context = ContextHistory {
             messages: vec![
                 EvidenceMessage {
@@ -1074,22 +916,47 @@ mod tests {
             client.locate_question("session", &request).await.unwrap(),
             Some(1)
         );
-        let sent = server.await.unwrap();
+        let (path, sent) = server.await.unwrap();
+        assert_eq!(path, "/v1/question-locator-glide");
         assert!(!sent.to_string().contains(TOKEN), "{sent}");
         assert_eq!(
-            sent["state"]["replies"][0]["text"],
+            sent["replies"][0]["text"],
             "Pushed with GH_TOKEN=[redacted]"
         );
         assert_eq!(
-            sent["state"]["replies"][1],
+            sent["replies"][1],
             serde_json::to_value(&request.state.replies[1]).unwrap()
         );
-        assert_eq!(sent["questions"], question_locator::questions(2));
+        // The hosted proxy owns the question; the request is the state alone.
+        assert_eq!(sent.as_object().unwrap().len(), 2, "{sent}");
     }
 
     #[tokio::test]
-    async fn completed_verdict_sends_authorization_and_applies_shared_wire_budget() {
-        let (client, server) = server(response("user")).await;
+    async fn locator_size_refusal_is_a_failure_without_a_retry() {
+        let refusal = serde_json::json!({"error":"body_too_large"}).to_string();
+        let (client, server) = hosted_server_with_status("413 Payload Too Large", refusal).await;
+        let context = ContextHistory {
+            messages: ["a", "b"]
+                .iter()
+                .map(|id| EvidenceMessage {
+                    id: format!("agent:{id}"),
+                    role: "assistant".into(),
+                    text: "Choose?".into(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let error = client
+            .locate_question("session", &question_locator::build(&context))
+            .await
+            .unwrap_err();
+        // The server accepts one connection; a retry would fail to connect instead.
+        assert!(format!("{error:#}").contains("413"), "{error:#}");
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn authorization_is_bounded_to_the_shared_wire_limit() {
         let authorization = ContextHistory {
             messages: vec![
                 EvidenceMessage {
@@ -1109,19 +976,8 @@ mod tests {
         completed.phase = TurnPhase::Replied;
         completed.assistant_text_tail = "The report is complete.".into();
         bound_authorization(&mut completed, Some(authorization.clone()));
-        let (mut attempt, answer) = client.ask_logged("isolated", 1, &completed).await;
-        answer.unwrap();
-        attempt.finish("applied", "user_input_required");
-        let request = server.await.unwrap();
-        assert_eq!(
-            request["state"]["authorization"],
-            serde_json::to_value(&authorization).unwrap()
-        );
-        assert_eq!(request["state"]["transcript_summary"], "");
-        assert_eq!(
-            request["state"]["assistant_text_tail"],
-            "The report is complete."
-        );
+        assert_eq!(completed.authorization, Some(authorization));
+        assert!(completed.transcript_summary.is_empty());
 
         let mut large = ContextHistory {
             messages: vec![EvidenceMessage {
@@ -1158,187 +1014,6 @@ mod tests {
         bound_authorization(&mut fallback, Some(oversized_users));
         assert!(fallback.authorization.is_none());
         assert!(fallback.transcript_summary.is_empty());
-    }
-
-    #[tokio::test]
-    async fn decision_log_records_submitted_body_and_application_without_credentials() {
-        let directory = tempfile::tempdir().unwrap();
-        let log = mj_core::jev::DecisionLog::open(directory.path().into()).unwrap();
-        let (client, server) = server(response("user")).await;
-        let client = client.with_log(Some(log));
-        let mut evidence = evidence();
-        evidence.transcript_summary =
-            "User: résumé 🛠\nAssistant: tests remain [earlier history omitted]".into();
-        evidence.background_commands = 2;
-        let (mut attempt, answer) = client.ask_logged("isolated", 42, &evidence).await;
-        assert!(answer.is_ok());
-        let submitted = server.await.unwrap();
-        let id = attempt.diagnostic.as_ref().unwrap().id();
-        attempt.finish("discarded", "activity_or_generation_changed");
-        let page = mj_core::jev::read(directory.path(), "isolated", Some(&id)).unwrap();
-        assert_eq!(
-            page.decisions[0].technical.as_ref().unwrap()["request"],
-            submitted
-        );
-        assert_eq!(page.decisions[0].status, "stale");
-        let technical = page.decisions[0].technical.as_ref().unwrap();
-        assert_eq!(technical["applied_decision"], serde_json::Value::Null);
-        assert_eq!(technical["outcome"], "discarded");
-        assert_eq!(technical["reason"], "activity_or_generation_changed");
-        let text = serde_json::to_string(&page).unwrap();
-        assert!(!text.contains("Bearer"));
-        assert!(!text.contains("fake-key"));
-        assert!(
-            mj_core::jev::read(directory.path(), "isolated", None)
-                .unwrap()
-                .decisions[0]
-                .technical
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn applied_log_records_both_assessments_thresholds_and_actual_decision() {
-        let directory = tempfile::tempdir().unwrap();
-        let log = mj_core::jev::DecisionLog::open(directory.path().into()).unwrap();
-        let (client, server) = server(response("user")).await;
-        let client = client.with_log(Some(log));
-        let (mut attempt, result) = client.ask_logged("synthetic", 7, &evidence()).await;
-        assert_eq!(
-            mj_core::activity::verdict::decide(TurnPhase::Running, &result.unwrap()),
-            mj_core::activity::verdict::Decision::AwaitingInput
-        );
-        let id = attempt.diagnostic.as_ref().unwrap().id();
-        attempt.finish("applied", "awaiting_input");
-        server.await.unwrap();
-        let page = mj_core::jev::read(directory.path(), "synthetic", Some(&id)).unwrap();
-        let record = &page.decisions[0];
-        assert_eq!(record.status, "applied");
-        let technical = record.technical.as_ref().unwrap();
-        assert_eq!(technical["contract"], "turn-verdict-v7");
-        assert_eq!(
-            technical["confidence_threshold"],
-            serde_json::json!(mj_core::activity::verdict::ACT_CONFIDENCE)
-        );
-        assert_eq!(
-            technical["no_input_threshold"],
-            serde_json::json!(mj_core::activity::verdict::NO_INPUT_CONFIDENCE)
-        );
-        assert_eq!(technical["required_input_probability"], 0.5);
-        assert_eq!(technical["required_input_ratio"], 2.5);
-        assert_eq!(technical["finished_work_probability"], 0.8);
-        assert_eq!(
-            technical["result"]["assessment"]["input"]["probabilities"]["required"],
-            0.5
-        );
-        let scores = technical["result"].as_object().unwrap();
-        assert_eq!(scores.len(), 5);
-        assert_eq!(scores["work_state"], "BackgroundWork");
-        assert_eq!(
-            scores["work_state_confidence"].as_f64().unwrap() as f32,
-            0.95
-        );
-        assert_eq!(scores["needs_user_input"].as_f64().unwrap() as f32, 0.42);
-        assert_eq!(technical["proposed_decision"], "AwaitingInput");
-        assert_eq!(technical["applied_decision"], "AwaitingInput");
-        assert_eq!(technical["outcome"], "applied");
-        assert_eq!(technical["reason"], "awaiting_input");
-    }
-
-    /// The hosted proxy is a third party. Provider errors echo the key that
-    /// failed, and agents put tokens on command lines; neither may reach it.
-    #[tokio::test]
-    async fn hosted_requests_send_only_redacted_evidence_without_authorization() {
-        const PROVIDER_KEY: &str = "sk-proj-Q2xhdWRlQ29kZVRlc3RLZXkxMjM0NTY3";
-        const INLINE_TOKEN: &str = "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789";
-        const BACKGROUND_ID: &str = "0f1e2d3c4b5a69788796a5b4c3d2e1f0";
-        let mut secret_bearing = evidence();
-        secret_bearing.phase = TurnPhase::Replied;
-        secret_bearing.completion = Some(mj_core::activity::verdict::CompletionEvidence::bounded(
-            "Refusal",
-            Some(&mj_core::diagnostic::TurnDiagnostic {
-                message: format!("401 Unauthorized: Incorrect API key provided: {PROVIDER_KEY}"),
-                code: None,
-                http_status: Some(401),
-                reset_at: None,
-                login_fingerprint: None,
-            }),
-        ));
-        secret_bearing.background = vec![mj_core::activity::verdict::BackgroundEvidence {
-            id: BACKGROUND_ID.into(),
-            command: format!(
-                "curl -H 'Authorization: Bearer {INLINE_TOKEN}' https://api.example.com"
-            ),
-            started_s_ago: 30,
-        }];
-        for status in [200, 429, 502] {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let endpoint = format!("http://{}/v7/turn-verdict", listener.local_addr().unwrap());
-            let server = tokio::spawn(async move {
-                let (socket, _) = listener.accept().await.unwrap();
-                let mut socket = BufReader::new(socket);
-                let mut length = 0;
-                loop {
-                    let mut line = String::new();
-                    socket.read_line(&mut line).await.unwrap();
-                    assert!(!line.to_ascii_lowercase().starts_with("authorization:"));
-                    if line == "\r\n" {
-                        break;
-                    }
-                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                        length = value.trim().parse::<usize>().unwrap();
-                    }
-                }
-                let mut request = vec![0; length];
-                socket.read_exact(&mut request).await.unwrap();
-                let raw = String::from_utf8(request).unwrap();
-                assert!(!raw.contains(PROVIDER_KEY), "{raw}");
-                assert!(!raw.contains(INLINE_TOKEN), "{raw}");
-                let request: serde_json::Value = serde_json::from_str(&raw).unwrap();
-                assert_eq!(
-                    request["completion"]["diagnostic"]["message"],
-                    "401 Unauthorized: Incorrect API key provided: [redacted]"
-                );
-                assert_eq!(
-                    request["background"][0]["command"],
-                    "curl -H 'Authorization: Bearer [redacted]' https://api.example.com"
-                );
-                assert_eq!(request["background"][0]["id"], BACKGROUND_ID);
-                assert_eq!(request["user_prompt_tail"], evidence().user_prompt_tail);
-                let body = response("background_work");
-                socket.write_all(format!("HTTP/1.1 {status} Result\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
-            });
-            let client = VerdictClient::new(VerdictSource::Hosted { endpoint }).unwrap();
-            let result = client.ask(&secret_bearing, &questions()).await;
-            assert_eq!(result.is_ok(), status == 200);
-            if let Ok(verdict) = result {
-                assert_eq!(verdict.work_state, WorkState::BackgroundWork);
-            }
-            server.await.unwrap();
-        }
-    }
-
-    #[tokio::test]
-    async fn oversized_classifier_body_is_rejected() {
-        let (client, server) = server(" ".repeat(128 * 1024)).await;
-        let error = client.ask(&evidence(), &questions()).await.unwrap_err();
-        assert!(error.to_string().contains("exceeds byte limit"));
-        server.await.unwrap();
-    }
-
-    fn response(choice: &str) -> String {
-        let work = if choice == "user" || choice == "background_work" {
-            "waiting"
-        } else {
-            choice
-        };
-        let input = if choice == "user" { "required" } else { "none" };
-        serde_json::json!({"answers": {
-            "work": {"type":"choice","choice":work,"confidence":0.95, "probabilities": {"finished": if work == "finished" { 1.0 } else { 0.0 }, "authorized_unfinished": if work == "authorized_unfinished" { 1.0 } else { 0.0 }, "waiting": if work == "waiting" { 1.0 } else { 0.0 }, "unclear": if work == "unclear" { 1.0 } else { 0.0 }}},
-            "input": {"type":"choice","choice":input,"confidence":if choice == "user" { 0.42 } else { 0.99 }, "probabilities": {"none": if input == "none" { 1.0 } else { 0.2 }, "redundant_request": if input == "required" { 0.2 } else { 0.0 }, "required": if input == "required" { 0.5 } else { 0.0 }, "unclear": if input == "required" { 0.1 } else { 0.0 }}},
-            "failure": {"type":"choice","choice":"none","confidence":0.99, "probabilities": {"none": 1.0, "transient_provider": 0.0, "quota": 0.0, "other": 0.0, "unclear": 0.0}}
-        }})
-        .to_string()
     }
 }
 

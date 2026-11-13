@@ -536,8 +536,7 @@ fn ask_once_without_a_classifier() {
         .build()
         .unwrap();
     runtime.block_on(async {
-        let client = VerdictClient::new(VerdictSource::Direct {
-            key: "k".into(),
+        let client = VerdictClient::new(VerdictSource::Hosted {
             endpoint: "http://127.0.0.1:1".into(),
         })
         .unwrap();
@@ -556,7 +555,9 @@ fn ask_once_without_a_classifier() {
             user_prompt_tail: String::new(),
             assistant_text_tail: String::new(),
         };
-        let _ = client.ask_logged("s", 1, &evidence).await;
+        let _ = client
+            .ask_glide_logged("s", 1, &evidence, &Default::default(), 0)
+            .await;
     });
 }
 
@@ -580,5 +581,5 @@ fn scoped_log_capture_keeps_a_callsite_first_reached_without_a_subscriber() {
         .unwrap();
     tracing::dispatcher::with_default(&dispatch, ask_once_without_a_classifier);
     let log = std::fs::read_to_string(&log_path).unwrap();
-    assert!(log.contains("Jev classification requested"), "{log}");
+    assert!(log.contains("GLiDE classification requested"), "{log}");
 }

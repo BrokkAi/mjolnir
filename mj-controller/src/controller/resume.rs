@@ -814,6 +814,7 @@ impl Controller {
                     &worker_root,
                     syncing,
                     super::worker_binary::WorkerFilePreparation::RefreshProfile,
+                    super::worker_binary::LaunchHistory::Restored(canonical_session),
                 )?;
                 let seed = mj_checkpoint::checkpoint::relay_seed_for_restore(
                     canonical_session,
@@ -864,6 +865,7 @@ impl Controller {
                             backend_ref,
                             worker_root_ref,
                             syncing,
+                            super::worker_binary::LaunchHistory::Restored(canonical_session),
                         )?;
                         super::provisioning::install_inherited_git_settings(
                             syncing,

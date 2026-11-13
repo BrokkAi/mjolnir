@@ -7,8 +7,8 @@ pub const QUESTIONS: &str = include_str!("eot_glide_questions.json");
 // FROZEN/rule.json, glide-eot-research-20261112-v4, fresh development fit,
 // except the input cut, the demote ceiling and the attention question below.
 /// The needs-input cut. The user's rules (2026-11-12): a 3% false-alert
-/// budget, and a redundant permission ask counts as needing the user while
-/// automatic Continue is off (revisit if Continue is enabled). Fitted on the
+/// budget, and a redundant permission ask counts as needing the user (automatic
+/// continuation was removed, #1532). Fitted on the
 /// input study's tuning sessions for 2% false ? without agent-driven sessions
 /// (/mnt/optane/tmp/eot-input-study-v2-20261112). With the demote rule:
 /// needs input shown ? 92.1% (cross-fit 90.7%, held-out 96.9%), false ?
@@ -29,14 +29,11 @@ pub const FAILURE_FLOOR: f64 = 0.90;
 pub const FINISHED_CATEGORICAL: f64 = 0.9162209700222781;
 pub const WAITING_WORK_WINNER: f64 = 0.40;
 pub const SAFE_INPUT_NONE: f64 = 0.85;
-pub const CONTINUE_FLOOR: f64 = 0.90;
 pub const BACKGROUND_FLOOR: f64 = 0.90;
-/// Intentionally abstain until live outcomes justify automatic continuation.
-pub const ENABLE_AUTOMATIC_CONTINUE: bool = false;
 
 /// Apply the frozen rule to validated provider answers. Missing probabilities
 /// abstain; callers must validate distributions at the provider boundary.
-pub fn action(answers: &Value, authorization_complete: bool) -> Action {
+pub fn action(answers: &Value) -> Action {
     let p = |axis: &str, name: &str| answers[axis]["probabilities"][name].as_f64().unwrap_or(0.0);
     if p("failure", "quota") >= FAILURE_FLOOR {
         return Action::RecoverQuota;
@@ -57,19 +54,11 @@ pub fn action(answers: &Value, authorization_complete: bool) -> Action {
         return Action::AwaitInput;
     }
     let safe = p("failure", "none") >= FAILURE_FLOOR;
-    let continuation = safe
-        && p("input", "none").max(p("input", "redundant_request")) >= CONTINUE_FLOOR
-        && p("turn_state", "continue").min(p("work", "authorized_unfinished")) >= CONTINUE_FLOOR
-        && authorization_complete;
-    // Continue has precedence over Finished and Wait in the frozen rule;
-    // disabling it must abstain rather than expose a lower-priority action.
-    if continuation {
-        return if ENABLE_AUTOMATIC_CONTINUE {
-            Action::Continue
-        } else {
-            Action::Uncertain
-        };
-    }
+    // The frozen rule once chose Continue here. Automatic continuation was
+    // removed (#1532) and the branch with it: whenever its condition held,
+    // `turn_state.continue` >= .90 left `finished` below FINISHED_CATEGORICAL
+    // and `work.authorized_unfinished` >= .90 left `waiting` below
+    // WAITING_WORK_WINNER, so the rule already fell through to Uncertain.
     if safe && p("input", "none") >= SAFE_INPUT_NONE {
         if p("turn_state", "finished") >= FINISHED_CATEGORICAL {
             return Action::Finished;
@@ -108,20 +97,12 @@ pub fn background_needed(answers: &Value, has_background: bool) -> Option<bool> 
 mod tests {
     use super::*;
     #[test]
-    fn frozen_fresh_test_probabilities_match_research_with_continue_abstention() {
+    fn frozen_fresh_test_probabilities_match_research() {
         let cases: Value =
             serde_json::from_str(include_str!("eot_glide_fresh_sample.json")).unwrap();
         for case in cases.as_array().unwrap() {
             let expected: Action = serde_json::from_value(case["expected"].clone()).unwrap();
-            assert_eq!(
-                action(
-                    &case["answers"],
-                    case["authorization_complete"].as_bool().unwrap()
-                ),
-                expected,
-                "{}",
-                case["index"]
-            );
+            assert_eq!(action(&case["answers"]), expected, "{}", case["index"]);
             assert_eq!(
                 background_needed(&case["answers"], case["has_background"].as_bool().unwrap()),
                 serde_json::from_value::<Option<bool>>(case["background_needed"].clone()).unwrap()
@@ -144,13 +125,13 @@ mod tests {
             .clone();
         answers["input"]["probabilities"]["required"] = 0.3.into();
         // A proxy that predates the attention question must not demote.
-        assert_eq!(action(&answers, true), Action::AwaitInput);
+        assert_eq!(action(&answers), Action::AwaitInput);
         answers["attention"] = serde_json::json!({"probabilities": {
             "needs_input": 0.1, "important": 0.8, "redundant_request": 0.0,
             "none": 0.1, "unclear": 0.0
         }});
-        assert_ne!(action(&answers, true), Action::AwaitInput);
+        assert_ne!(action(&answers), Action::AwaitInput);
         answers["input"]["probabilities"]["required"] = 0.6.into();
-        assert_eq!(action(&answers, true), Action::AwaitInput);
+        assert_eq!(action(&answers), Action::AwaitInput);
     }
 }

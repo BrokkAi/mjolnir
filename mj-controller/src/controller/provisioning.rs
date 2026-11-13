@@ -444,7 +444,13 @@ impl Controller {
             Ok((backend, worker_root)) => {
                 let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
                 let prepared = self
-                    .prepare_worker_files(session_id, &backend, &worker_root, syncing)
+                    .prepare_worker_files(
+                        session_id,
+                        &backend,
+                        &worker_root,
+                        syncing,
+                        super::worker_binary::LaunchHistory::Stored,
+                    )
                     .and_then(|()| self.prepare_subagent_report_dir(session_id, &backend, syncing));
                 let result = match prepared {
                     Ok(()) => {
@@ -1038,6 +1044,7 @@ impl Controller {
             &worker_root,
             syncing,
             super::worker_binary::WorkerFilePreparation::Install,
+            super::worker_binary::LaunchHistory::Stored,
         )?;
         install_attached_resources(&self.state, session_id, &backend, &worker_root, syncing)?;
         Ok(PreparedWorkerPayload {

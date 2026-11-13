@@ -322,6 +322,8 @@ impl Verdict {
 pub enum Action {
     RetryProvider,
     RecoverQuota,
+    /// Legacy: decoded from stored assessments; no longer produced by the
+    /// GLiDE rule, and nothing acts on it.
     Continue,
     AwaitInput,
     Finished,
@@ -711,7 +713,6 @@ impl ContextHistory {
         crate::continuation::ContinuationEvidence {
             messages: self.messages.clone(),
             assistant_history_omitted: self.assistant_history_omitted,
-            quota_message: None,
         }
     }
 }

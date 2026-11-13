@@ -238,7 +238,6 @@ pub(crate) fn config() -> Config {
         phone: Default::default(),
         daemon: Default::default(),
         github: Default::default(),
-        continuation: Default::default(),
         review: Default::default(),
         sessionwiki: Default::default(),
         legacy_startup: (),

@@ -101,30 +101,29 @@ static WORDING: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
     serde_json::from_str(include_str!("question_locator.json")).expect("bundled locator wording")
 });
 
+/// The frozen V0 question: the shared instructions with plain-string criteria.
+/// The hosted proxy builds the same object, so the worker sends only the state.
 pub fn questions(count: usize) -> Value {
     let mut criteria = serde_json::Map::new();
     for i in 0..count {
         criteria.insert(
             format!("r{i}"),
-            json!({"what":format!("Reply {i} (replies[{i}]) contains the open request.")}),
+            json!(format!(
+                "Reply {i} (replies[{i}]) contains the open request."
+            )),
         );
     }
-    criteria.insert("none".into(), json!({"what":WORDING["none"]}));
+    criteria.insert("none".into(), WORDING["none"].clone());
     json!({"request_reply":{"type":"choice","instructions":WORDING["instructions"],"criteria":criteria}})
 }
 
-/// Accept either the direct TypeSafe envelope or the proxy's answer object.
-pub fn parse(response: &Value, count: usize) -> Result<Option<usize>> {
-    let answer = response
-        .get("answers")
-        .map_or(response, |v| &v["request_reply"]);
-    if let Some(kind) = answer.get("type") {
-        ensure!(kind == "choice", "invalid locator answer type");
-    }
-    let choice = answer["choice"]
-        .as_str()
-        .context("missing locator choice")?;
-    let probabilities = answer["probabilities"]
+/// Apply the frozen rule to GLiDE's `probabilities` for the labels `r0..r(count-1)` and `none`.
+///
+/// The choice is the argmax. A tie among replies goes to the newest, and `none` wins only
+/// when it is strictly higher than the best reply, exactly as the evaluation script scored
+/// it. `none` returns no index.
+pub fn parse(probabilities: &Value, count: usize) -> Result<Option<usize>> {
+    let probabilities = probabilities
         .as_object()
         .context("missing locator probabilities")?;
     ensure!(
@@ -132,40 +131,31 @@ pub fn parse(response: &Value, count: usize) -> Result<Option<usize>> {
         "incomplete locator probabilities"
     );
     let mut sum = 0.0;
-    let mut winner = None;
+    let mut best: Option<(f64, usize)> = None;
+    let mut none = 0.0;
     for (key, value) in probabilities {
-        let valid = key == "none"
-            || key
-                .strip_prefix('r')
-                .and_then(|s| s.parse::<usize>().ok())
-                .is_some_and(|i| i < count && format!("r{i}") == *key);
-        ensure!(valid, "invalid locator probability key");
         let p = value.as_f64().context("invalid locator probability")?;
         ensure!(
             p.is_finite() && (0.0..=1.0).contains(&p),
             "invalid locator probability"
         );
         sum += p;
-        if key == choice {
-            winner = Some(p);
+        if key == "none" {
+            none = p;
+            continue;
+        }
+        let index = key
+            .strip_prefix('r')
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|i| *i < count && format!("r{i}") == *key)
+            .context("invalid locator probability key")?;
+        if best.is_none_or(|top| (p, index) > top) {
+            best = Some((p, index));
         }
     }
-    ensure!(
-        (sum - 1.0).abs() <= 0.005 * (count + 1) as f64 + 1e-12,
-        "invalid locator distribution"
-    );
-    let winner = winner.context("unknown locator choice")?;
-    ensure!(
-        probabilities
-            .values()
-            .all(|p| winner + 1e-12 >= p.as_f64().unwrap_or(2.0)),
-        "locator choice is not a probability winner"
-    );
-    if choice == "none" {
-        Ok(None)
-    } else {
-        Ok(Some(choice[1..].parse()?))
-    }
+    ensure!((sum - 1.0).abs() <= 0.03, "invalid locator distribution");
+    let (top, index) = best.context("no locator reply probabilities")?;
+    Ok((none <= top).then_some(index))
 }
 
 #[cfg(test)]
@@ -238,32 +228,68 @@ mod tests {
     }
 
     #[test]
-    fn questions_and_probability_winner_are_consistent() {
-        for n in [1, 32] {
-            assert_eq!(
-                questions(n)["request_reply"]["criteria"]
-                    .as_object()
-                    .unwrap()
-                    .len(),
-                n + 1
-            );
+    fn shipped_question_equals_the_evaluated_question() {
+        // The held-out evaluation sent exactly this object for three replies
+        // (/mnt/optane/tmp/glide-afk-locator-20261113/locator/glide/FROZEN/).
+        let evaluated: Value =
+            serde_json::from_str(include_str!("question_locator_glide_example_n3.json")).unwrap();
+        assert_eq!(questions(3), evaluated);
+        assert_eq!(
+            questions(32)["request_reply"]["criteria"]
+                .as_object()
+                .unwrap()
+                .len(),
+            33
+        );
+    }
+
+    #[test]
+    fn frozen_rule_applies_to_recorded_glide_probabilities() {
+        // Real GLiDE answers from the evaluation: the newest reply, `none`, and an older reply.
+        let cases = [
+            (
+                json!({"r0":0.000844,"r1":0.000432,"r2":0.000856,"r3":0.908273,"none":0.089595}),
+                4,
+                Some(3),
+            ),
+            (
+                json!({"r0":0.000108,"r1":0.000107,"r2":0.000113,"r3":0.000131,"r4":0.001922,"none":0.997619}),
+                5,
+                None,
+            ),
+            (
+                json!({"r0":0.010342,"r1":0.000115,"r2":0.00025,"r3":0.011042,"r4":0.974786,"r5":0.000364,"none":0.003101}),
+                6,
+                Some(4),
+            ),
+        ];
+        for (probabilities, count, expected) in cases {
+            assert_eq!(parse(&probabilities, count).unwrap(), expected);
         }
-        let answer = json!({"choice":"r0","probabilities":{"r0":0.6,"none":0.4}});
-        assert_eq!(parse(&answer, 1).unwrap(), Some(0));
-        assert!(
-            parse(
-                &json!({"choice":"none","probabilities":{"r0":0.6,"none":0.4}}),
-                1
-            )
-            .is_err()
-        );
-        assert!(
-            parse(
-                &json!({"choice":"r1","probabilities":{"r0":0.6,"none":0.4}}),
-                1
-            )
-            .is_err()
-        );
+    }
+
+    #[test]
+    fn ties_go_to_the_newest_reply_and_none_needs_a_strictly_higher_score() {
+        let tied_replies = json!({"r0":0.4,"r1":0.4,"none":0.2});
+        assert_eq!(parse(&tied_replies, 2).unwrap(), Some(1));
+        let tied_with_none = json!({"r0":0.5,"r1":0.0,"none":0.5});
+        assert_eq!(parse(&tied_with_none, 2).unwrap(), Some(0));
+    }
+
+    #[test]
+    fn malformed_probability_objects_are_refused() {
+        for (probabilities, count) in [
+            (json!({"r0":0.6,"none":0.4}), 2),
+            (json!({"r0":0.6,"r1":0.4}), 1),
+            (json!({"r0":0.6,"r2":0.1,"none":0.3}), 2),
+            (json!({"r0":0.6,"r01":0.1,"none":0.3}), 2),
+            (json!({"r0":1.2,"r1":-0.1,"none":-0.1}), 2),
+            (json!({"r0":0.6,"r1":0.3,"none":"0.1"}), 2),
+            (json!({"r0":0.6,"r1":0.3,"none":0.2}), 2),
+            (json!([0.6, 0.4]), 1),
+        ] {
+            assert!(parse(&probabilities, count).is_err(), "{probabilities}");
+        }
     }
 
     #[test]
