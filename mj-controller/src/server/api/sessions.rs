@@ -16,6 +16,12 @@ pub(super) async fn list_sessions(
     State(state): State<ServerState>,
     Query(query): Query<SessionListQuery>,
 ) -> Result<Json<SessionListResponse>, ApiFailure> {
+    let login_errors = state
+        .subagent
+        .as_ref()
+        .map(|backend| backend.profile_login_errors())
+        .transpose()?
+        .unwrap_or_default();
     let snapshot = state.snapshot_rx.borrow();
     Ok(Json(SessionListResponse {
         sessions: snapshot
@@ -28,7 +34,11 @@ pub(super) async fn list_sessions(
                         .as_ref()
                         .is_none_or(|id| &session.workspace_id == id)
             })
-            .map(ApiSession::from)
+            .map(|record| {
+                let mut session = ApiSession::from(record);
+                session.profile_login_error = login_errors.get(&session.profile_id).cloned();
+                session
+            })
             .collect(),
     }))
 }
@@ -43,6 +53,7 @@ pub(super) async fn get_session(
         (ApiSession::from(record), record.execution_enforcement)
     };
     if let Ok(backend) = backend(&state) {
+        session.profile_login_error = backend.profile_login_errors()?.remove(&session.profile_id);
         if let Some(turn) = backend.turn_state(session_id.clone()).await? {
             session.last_turn_diagnostic = turn
                 .last_turn_outcome
