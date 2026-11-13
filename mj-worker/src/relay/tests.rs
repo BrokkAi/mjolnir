@@ -8272,3 +8272,108 @@ fn readiness_and_the_instant_the_scan_reads_cannot_disagree() {
     assert!(!relay.is_acp_ready());
     assert_eq!(clock.load(std::sync::atomic::Ordering::Acquire), 0);
 }
+
+#[test]
+fn legacy_snapshot_open_request_upgrade_and_checkpoint_restore() {
+    use mj_core::assessment::{Action, Checkpoint, CheckpointOpenRequest, Status, TurnAssessment};
+    for (dismissed, later_prompt, input_required) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (false, false, true),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let relay = DurableRelay::open(root.path(), SESSION, "test").unwrap();
+        let mut snapshot = relay.snapshot.clone();
+        drop(relay);
+        let mut assessment = TurnAssessment::pending(
+            "legacy-turn".into(),
+            10,
+            0,
+            mj_core::activity::verdict::CompletionEvidence::bounded(
+                if input_required {
+                    "AwaitingInput"
+                } else {
+                    "EndTurn"
+                },
+                None,
+            ),
+        );
+        assessment.action = (!input_required).then_some(Action::AwaitInput);
+        assessment.question_message = Some("original-question".into());
+        if dismissed {
+            assessment.status = Status::Superseded;
+            assessment.reason = "question_dismissed".into();
+        }
+        snapshot.assessment = Some(Arc::new(assessment.clone()));
+        snapshot.latest_prompt_accepted_ordinal = later_prompt.then_some(11);
+        let mut value = serde_json::to_value(&snapshot).unwrap();
+        value["format_version"] = serde_json::json!(22);
+        for field in ["request", "person_input_through"] {
+            value.as_object_mut().unwrap().remove(field);
+        }
+        fs::write(
+            root.path().join(RELAY_STATE_FILE),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+        let upgraded = DurableRelay::open(root.path(), SESSION, "test").unwrap();
+        assert_eq!(
+            upgraded.snapshot.open_request().is_some(),
+            !dismissed && !later_prompt
+        );
+        assert_eq!(
+            upgraded.snapshot.person_input_through,
+            if later_prompt { 11 } else { 0 }
+        );
+        // Both modern exact-empty and exact-open checkpoint envelopes survive restoration.
+        let state = Checkpoint {
+            version: 1,
+            context: None,
+            assessment: Some(assessment),
+            continuation: Default::default(),
+            capacity_retry: None,
+            turn_completion: None,
+            open_request: Some(CheckpointOpenRequest {
+                request: upgraded.snapshot.open_request().cloned(),
+                person_input_through: upgraded.snapshot.person_input_through,
+            }),
+        };
+        for legacy in [false, true] {
+            let destination = tempfile::tempdir().unwrap();
+            let mut encoded = serde_json::to_value(&state).unwrap();
+            if legacy {
+                encoded.as_object_mut().unwrap().remove("open_request");
+            }
+            fs::write(
+                mj_core::relay::restored_relay_seed_path(destination.path()),
+                serde_json::to_vec(&serde_json::json!({"event_frontier": 20,
+                    "event_frontier_digest": "a".repeat(64), "assessment_state": encoded}))
+                .unwrap(),
+            )
+            .unwrap();
+            let restored = DurableRelay::open(destination.path(), SESSION, "test").unwrap();
+            assert_eq!(
+                restored.snapshot.open_request().is_some(),
+                !dismissed && (legacy || !later_prompt)
+            );
+            if !legacy {
+                assert_eq!(
+                    restored.snapshot.person_input_through,
+                    state.open_request.as_ref().unwrap().person_input_through
+                );
+            }
+        }
+        // Current snapshots are exact even if their assessment still says AwaitInput.
+        let mut current = snapshot;
+        current.request = None;
+        fs::write(
+            root.path().join(RELAY_STATE_FILE),
+            serde_json::to_vec(&current).unwrap(),
+        )
+        .unwrap();
+        drop(upgraded);
+        let current = DurableRelay::open(root.path(), SESSION, "test").unwrap();
+        assert!(current.snapshot.open_request().is_none());
+    }
+}

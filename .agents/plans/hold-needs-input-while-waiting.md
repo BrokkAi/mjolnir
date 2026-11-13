@@ -18,6 +18,8 @@ To see it working: in an isolated instance, run a Claude or Codex session that s
 
 ## Progress
 
+- [x] Review follow-up: shared legacy snapshot/checkpoint seeding and exact checkpoint envelope implemented. Core snapshot/open_request filters: 11 passed; worker upgrade/restore filters: seven passed; touched-crate Clippy with warnings denied, formatting and whitespace checks passed. No commit.
+
 - [x] (2026-11-13) Milestone 1, study: does an agent settle its own held question before the user replies? Concluded: almost never (about 2%); the resolution check is dropped by user decision. Evidence and numbers in Outcomes.
 - [x] (2026-11-13) Parent settled dismissal identity: retain the original InferredQuestion in OpenRequest; implementation resumed.
 - [x] (2026-11-13) Milestone 2 (durable frontier and late-update/replay regressions pass): the worker owns the open request (set by a needs-input turn, kept across agent-only turns, cleared only by the user).
@@ -29,6 +31,8 @@ To see it working: in an isolated instance, run a Claude or Codex session that s
 
 
 ## Surprises & Discoveries
+
+Review follow-up: `DurableRelay::open_with_harness` (`mj-worker/src/relay.rs`) is the shared startup/checkpoint-seed load point. Existing snapshots are decoded there before their private schema marker advances. Legacy harness InputRequired can be recovered from `assessment.completion.stop_reason` plus the assessment turn id/completion ordinal; no inference from a rendered reply is needed. Checkpoint export receives only `RelayOperationalState`; the parent decided to add only `person_input_through` there and export derived `open_request` plus that frontier. Restoring a retained request that was already fenced is unnecessary: the frontier still fences every late update.
 
 - Resolution (2026-11-13): the parent chose a durable `person_input_through` frontier. The snapshot now retains `request`; person prompts, human form answers and DismissQuestion advance the frontier, and `open_request()` derives publication from the completion ordinal comparison. Dismissal no longer invalidates the assessment. Locator writes are now explicit `QuestionTargetUpdated` observations: they only fill a retained request with the same InferredQuestion, and cannot create one. This observation is necessary because a full TurnAssessmentUpdated otherwise conflated a semantic verdict with a locator result; older full assessment observations still replay normally, with the frontier fencing their published effect.
 - Validation environment (2026-11-13): an elevated loopback bind succeeded before the new targeted run. All new cargo invocations use escalated execution outside the sandbox. The CLI directory's Cargo package is `brokk-mjolnir`; final validation includes it plus core, worker, controller, tui, client, chat and transcript. Live acceptance is explicitly deferred to the parent by the latest instruction.
@@ -73,6 +77,9 @@ To see it working: in an isolated instance, run a Claude or Codex session that s
 - Decision: a durable, worker-owned person-input frontier fences every question source. The snapshot keeps `person_input_through` (the journal ordinal of the latest person input: a prompt from the person, a human form answer, or DismissQuestion), advanced in snapshot apply from those events, so replaying an old journal derives it with no special case. The snapshot also keeps the latest request raised by an input-requiring completion (set or replaced by an AwaitInput assessment or a harness InputRequired completion, with the question locator only filling `question_message` on a request of the same identity). The published open request is a function of the two: that request when its `completed_ordinal` is greater than `person_input_through`, otherwise none. Person input only advances the frontier; nothing "clears" or "re-sets" the request.
   Rationale: the implementation child found that a late assessment or question-locator update for a completion the person had already answered reopened the request (a human form answer cleared it; a later TurnAssessmentUpdated for the same completion set it again). The same happens when a person types before the slow end-of-turn verdict arrives. Assessment invalidation would need ordering rules for every late update and for old journals; a monotone frontier makes the reopening unrepresentable, because no update about a completion at or before the frontier can produce an open request in any order. This is a race found while implementing, before the code was believed done, so its test is a tricky-condition test without a Hard-won marker.
   Date/Author: 2026-11-13 / parent session.
+- Decision: existing state carries the open request across upgrades and checkpoints. A relay snapshot stored before state version 23, and a checkpoint without the new field, are seeded once by one shared helper from the legacy facts: an undismissed current AwaitInput assessment (or a harness InputRequired stop recorded in its completion) becomes the request, and the frontier is set to `latest_prompt_accepted_ordinal` when that prompt came after the completion, reproducing the old latest-turn rule. Checkpoints carry `open_request: Option<CheckpointOpenRequest { request, person_input_through }>`; absent means older (seed), present is exact (including empty). The worker publishes `person_input_through` only for export; restore sets the request to the exported derived open request and the frontier to the exported frontier, which is behaviorally lossless because the frontier alone fences every late update for an earlier completion.
+  Rationale: both pre-push reviewers found that an upgraded worker or a restored checkpoint would otherwise load `request: None` and drop a pending `?`, against the upgrade and checkpoint-fidelity rules. A single optional field keeps `Checkpoint.version` at 1, so an older worker ignores it and keeps today's behavior.
+  Date/Author: 2026-11-13 / parent session, from review.
 - Decision: the open request keeps the full `InferredQuestion` identity (turn id plus completed ordinal), not the ordinal alone; dismissal is validated against the open request instead of the latest assessment.
   Rationale: the existing dismissal payload, daemon action and worker validation already use `InferredQuestion`; keeping it avoids a wire-shape change and a legacy branch. Only the validation's reference point moves, which the latch requires anyway (the implementation child found this, 2026-11-13).
   Date/Author: 2026-11-13 / parent session.
@@ -88,6 +95,8 @@ To see it working: in an isolated instance, run a Claude or Codex session that s
 
 
 ## Outcomes & Retrospective
+
+Persistence review follow-up: pre-23 worker snapshots and legacy checkpoint seeds preserve unanswered legacy questions through one load-boundary helper. New checkpoint export/restore preserves derived open request and frontier exactly. The real-load regression covers dismissed, later-prompt fenced, harness InputRequired, legacy checkpoints and current exact-empty snapshots. Focused checks pass (11 core, seven worker); Clippy passes for core, worker, controller, chat and CLI. Logs are `review-upgrade-{core,worker,clippy,fmt}.log` in the report directory.
 
 Activity-gate review follow-up (2026-11-13): restored the existing Idle activity gate for both worker protocol paths while retaining header and person-position guards. Kimi's no-hold case now uses a running managed child; with the child finished, explicit Background activity remains Working for Claude and Kimi. The person-authored frontier field comment is accurate without a rename. All requested follow-up checks pass outside the sandbox: 13 controller attention/push/dismiss tests, controller Clippy with warnings denied, formatting and whitespace. Logs and details: `.mj/agents/ad0c15bbdaf0aeb6567a40ee8a66a5bf/review-activity-result.md`. No commit was made.
 
@@ -180,7 +189,7 @@ Latest parent instruction (2026-11-13): skip live acceptance in this worker; the
 
 Add tests of these kinds only (the repository's rules allow golden, end-to-end, integration and tricky-condition tests; extend existing tests where one fits):
 
-Snapshot apply and replay (tricky condition: ordering, persisted format): an AwaitInput assessment creates the open request even when it arrives after the completion; a later agent-only turn that ends Finished keeps it; a generated prompt keeps it; a person's prompt clears it; DismissQuestion clears it; a later AwaitInput turn replaces it; replaying the journal into a fresh snapshot reproduces the same open request; a snapshot written before the field loads with none.
+Snapshot apply and replay (tricky condition: ordering, persisted format): an AwaitInput assessment creates the open request even when it arrives after the completion; a later agent-only turn that ends Finished keeps it; a generated prompt keeps it; a person's prompt clears it; DismissQuestion clears it; a later AwaitInput turn replaces it; replaying the journal into a fresh snapshot reproduces the same open request; a pre-23 snapshot seeds its undismissed legacy AwaitInput or harness InputRequired request once, fenced by any later accepted prompt; a current snapshot preserves exact empty publication.
 
 Daemon projector (`attention.rs` tests): a Claude session with an open request and a running managed child is Working, and becomes NeedsInput when the child finishes and the imminent window passes; the same with a Kimi session is NeedsInput immediately; a session whose later turn ended Finished still shows NeedsInput for the earlier open request; a pending form is NeedsInput even while children run; a change in a child's state alone reprojects the parent; a worker that publishes no field (older protocol) gets today's behavior.
 
@@ -191,7 +200,7 @@ Acceptance by behavior, in an isolated instance with a Claude session: start a b
 
 ## Idempotence and Recovery
 
-The new snapshot field is optional and serde-defaulted, so older snapshots and journals load and have no open request. The daemon keeps today's behavior for workers that predate the field. If the hold misbehaves in production, making `has_reliable_background_inventory` return false for a harness disables holding for it without other changes; the open request still keeps questions from disappearing.
+The new snapshot fields are serde-defaulted. At the single durable load boundary, pre-23 snapshots seed their legacy current input-requiring completion once. New checkpoint envelopes preserve derived open_request and person_input_through exactly, including empty; older checkpoints use the same seeding helper. The daemon keeps today's behavior for workers that predate the field. If the hold misbehaves in production, making `has_reliable_background_inventory` return false for a harness disables holding for it without other changes; the open request still keeps questions from disappearing.
 
 
 ## Artifacts and Notes
@@ -217,3 +226,7 @@ Revision note (2026-11-13, frontier): aligned the implementation steps with the 
 Revision note (2026-11-13, final validation): recorded the full eight-package result, the corrected CLI fixture and passing targeted follow-up, the unchanged readiness timing observation, and passing workspace/follow-up lint and formatting checks. No commit or installation was performed.
 
 Revision note (2026-11-13, review): restored the shared activity-idle gate, corrected the harness/background assertions and documented SessionTail.latest_user_position as person-authored. Only the requested affected controller checks are run for this follow-up.
+
+Revision note (review upgrade/checkpoint follow-up): recorded the shared loader and the missing exporter transport facts; implementation paused for the parent’s contract decision.
+
+Revision note (review persistence decision): implemented shared pre-23/legacy-checkpoint seeding, and the parent-selected CheckpointOpenRequest envelope (absent is legacy; present is exact). RelayOperationalState exports only the person frontier in addition to the existing derived request; protocol remains unshipped 64.

@@ -636,6 +636,9 @@ pub struct RelayOperationalState {
     pub assessment: Option<Arc<crate::assessment::TurnAssessment>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_request: Option<crate::assessment::OpenRequest>,
+    /// Retained for checkpoint export; attention reads `open_request`.
+    #[serde(default)]
+    pub person_input_through: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assessment_context: Option<Arc<crate::assessment::ContextHistory>>,
     /// The latest prompt's completion identity; see `TurnCompletion`.
@@ -1790,6 +1793,7 @@ impl RelaySnapshot {
         RelayOperationalState {
             assessment: self.assessment.clone(),
             open_request: self.open_request().cloned(),
+            person_input_through: self.person_input_through,
             assessment_context: self.assessment_context.clone(),
             turn_completion: self.turn_completion.clone(),
             continuation: self.continuation.clone(),

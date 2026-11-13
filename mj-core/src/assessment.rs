@@ -716,10 +716,19 @@ impl ContextHistory {
     }
 }
 
+/// Exact request publication and person-input frontier at a checkpoint cut.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CheckpointOpenRequest {
+    pub request: Option<OpenRequest>,
+    pub person_input_through: u64,
+}
+
 /// Kept at the archive boundary as JSON so canonical equality remains exact.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Checkpoint {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_request: Option<CheckpointOpenRequest>,
     pub version: u32,
     pub context: Option<ContextHistory>,
     pub assessment: Option<TurnAssessment>,

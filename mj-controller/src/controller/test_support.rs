@@ -218,6 +218,7 @@ pub(crate) fn checkpoint_archive_input(
             command_ledger: None,
             assessment_state: Some(
                 serde_json::to_value(mj_core::assessment::Checkpoint {
+                    open_request: None,
                     version: 1,
                     context: Some(Default::default()),
                     assessment: None,

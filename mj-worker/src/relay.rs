@@ -421,8 +421,11 @@ impl DurableRelay {
             }
             // Upgrade an older snapshot in place. The stored frontier digests
             // stay valid — each is recomputed with the formula matching the
-            // record's format — so only the schema marker advances; the next
-            // persist writes it back at the current version.
+            // record's format. Seed newly owned request state before advancing
+            // the schema marker; the next persist writes the current version.
+            if snapshot.format_version < 23 {
+                seed_legacy_open_request(&mut snapshot);
+            }
             snapshot.format_version = RELAY_STATE_VERSION;
             // Older snapshots can still identify a live turn, even though
             // they did not retain its start through subsequent background work.
@@ -455,6 +458,12 @@ impl DurableRelay {
                     snapshot.continuation = state.continuation;
                     snapshot.capacity_retry = state.capacity_retry;
                     snapshot.turn_completion = state.turn_completion;
+                    if let Some(open) = state.open_request {
+                        snapshot.request = open.request;
+                        snapshot.person_input_through = open.person_input_through;
+                    } else {
+                        seed_legacy_open_request(&mut snapshot);
+                    }
                 }
                 snapshot.latest_ordinal = restored.event_frontier;
                 snapshot.latest_digest = restored.event_frontier_digest.clone();
@@ -1759,3 +1768,34 @@ mod continuation_tests;
 
 #[cfg(test)]
 mod handback_tests;
+
+/// Seed once at the legacy persisted-format boundary, never during publication.
+fn seed_legacy_open_request(snapshot: &mut RelaySnapshot) {
+    let Some(assessment) = snapshot.assessment.as_deref() else {
+        return;
+    };
+    if assessment.question_dismissed() {
+        return;
+    }
+    let question = assessment.inferred_question().or_else(|| {
+        (mj_core::state::classify_prompt_completion(&assessment.completion.stop_reason)
+            == mj_core::state::PromptCompletion::InputRequired)
+            .then(|| mj_core::assessment::InferredQuestion {
+                turn_id: assessment.turn_id.clone(),
+                completed_ordinal: assessment.completed_ordinal,
+            })
+    });
+    if let Some(question) = question {
+        snapshot.person_input_through = snapshot
+            .latest_prompt_accepted_ordinal
+            .filter(|ordinal| *ordinal > question.completed_ordinal)
+            .unwrap_or(0);
+        snapshot.request = Some(mj_core::assessment::OpenRequest {
+            question,
+            question_message: assessment
+                .question_message
+                .clone()
+                .or_else(|| snapshot.completed_reply_message.clone()),
+        });
+    }
+}
