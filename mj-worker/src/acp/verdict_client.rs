@@ -184,9 +184,25 @@ impl Drop for VerdictAttempt {
 
 #[cfg_attr(not(unix), allow(dead_code))]
 impl VerdictClient {
-    /// Compare complete forms; the proxy's documented body ceiling is 64 KiB.
+    /// The hosted proxy URL for a GLiDE route. GLiDE is hosted even when the
+    /// source is Direct, because the Fastino key exists only as the proxy's secret.
+    fn hosted_glide_url(&self, route: &str) -> Result<reqwest::Url> {
+        match &self.source {
+            VerdictSource::Hosted { endpoint } => Ok(reqwest::Url::parse(endpoint)?.join(route)?),
+            VerdictSource::Direct { .. } => Ok(reqwest::Url::parse(
+                "https://mj-jev-proxy.eng-admin-a63.workers.dev",
+            )?
+            .join(route)?),
+        }
+    }
+
+    /// Compare complete forms. Returns true when `current_question` repeats earlier
+    /// ones (hold it for the person) and false when GLiDE finds a new decision
+    /// (decline it for now). The request has no size cap and no truncation: an
+    /// oversized request or any other failure is an error and the question is held.
     pub(crate) async fn same_afk_question(
         &self,
+        session: &str,
         current_question: &serde_json::Value,
         previous_questions: &[serde_json::Value],
     ) -> Result<bool> {
@@ -218,85 +234,100 @@ impl VerdictClient {
             anonymize_secret_choices(form, &mut labels);
         }
         mj_core::redact::redact_json_strings_distinct(&mut state, &mut labels);
-        let questions = match &self.source {
-            VerdictSource::Direct { .. } => {
-                Some(serde_json::from_str(include_str!("afk_question.json"))?)
+        let body = mj_core::jev::request_body(&state, None);
+        let diagnostic = self.log.as_ref().map(|log| {
+            let attempt = log.start(
+                session,
+                "activity",
+                "Does this question repeat one already declined while away?",
+                "The question the agent just asked and the earlier questions declined for the same agent.",
+            );
+            attempt.update(
+                None,
+                serde_json::json!({"request":body,"contract":"afk-question-glide-v1"}),
+            );
+            attempt
+        });
+        let result = self.afk_probabilities(&body).await;
+        if let Some(attempt) = &diagnostic {
+            match &result {
+                Ok((same, different)) => {
+                    let new = different > same;
+                    attempt.update(
+                        None,
+                        serde_json::json!({"probabilities":{"same":same,"different":different}}),
+                    );
+                    if new {
+                        attempt.finish(
+                            "declined_new",
+                            "Classified as a new decision; the worker declines it unless the state changed first.",
+                        );
+                    } else {
+                        attempt.finish("held_repeat", "Held the question for the person.");
+                    }
+                }
+                Err(error) => {
+                    attempt.update(None, serde_json::json!({"error":format!("{error:#}")}));
+                    attempt.finish(
+                        "failed",
+                        "The check failed; the question is held for the person.",
+                    );
+                }
             }
-            VerdictSource::Hosted { .. } => None,
-        };
-        let body = serde_json::to_vec(&mj_core::jev::request_body(&state, questions))?;
-        ensure!(
-            body.len() <= 64 * 1024,
-            "AFK question evidence exceeds Jev body limit"
-        );
-        let http = match &self.source {
-            VerdictSource::Direct { key, endpoint } => self.client.post(endpoint).bearer_auth(key),
-            VerdictSource::Hosted { endpoint } => {
-                let mut url =
-                    reqwest::Url::parse(endpoint).context("parse AFK question proxy URL")?;
-                url.set_path("/v1/afk-question-verdict");
-                self.client.post(url)
-            }
-        };
-        let response = http
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body)
+        }
+        // A tie does not establish a new decision: the frozen rule is `different`
+        // only when its probability is strictly higher.
+        result.map(|(same, different)| different <= same)
+    }
+
+    /// POST the redacted state to the hosted route and return `(same, different)`.
+    async fn afk_probabilities(&self, body: &serde_json::Value) -> Result<(f64, f64)> {
+        // Fastino: "set your client read timeout above 170 seconds"
+        // https://docs.fastino.ai/troubleshooting/retries (supersedes older 300s notes).
+        let response = self
+            .client
+            .post(self.hosted_glide_url("/v1/afk-question-glide")?)
+            .timeout(Duration::from_secs(180))
+            .json(body)
             .send()
             .await
-            .context("classify AFK question")?
-            .error_for_status()
-            .context("AFK question HTTP status")?;
+            .context("classify AFK question")?;
+        let status = response.status();
         let bytes = response
             .bytes()
             .await
             .context("read AFK question verdict")?;
         ensure!(
             bytes.len() <= 64 * 1024,
-            "AFK question verdict exceeds Jev body limit"
+            "AFK question verdict exceeds proxy response bound"
+        );
+        ensure!(
+            status.is_success(),
+            "AFK question HTTP {status}: {}",
+            String::from_utf8_lossy(&bytes)
         );
         let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-        let answer = value.get("answers").map_or(&value, |v| &v["same_question"]);
-        let choice = answer["choice"]
-            .as_str()
-            .context("missing AFK question choice")?;
-        ensure!(
-            matches!(choice, "same" | "different"),
-            "invalid AFK question choice"
-        );
-        if let Some(kind) = answer.get("type") {
-            ensure!(kind == "choice", "invalid AFK question answer type");
-        }
-        let confidence = answer["confidence"]
-            .as_f64()
-            .context("missing AFK question confidence")?;
-        ensure!(
-            (0.0..=1.0).contains(&confidence),
-            "invalid AFK question confidence"
-        );
-        let scores = answer["probabilities"]
+        let scores = value["probabilities"]
             .as_object()
             .context("missing AFK question distribution")?;
         ensure!(scores.len() == 2, "invalid AFK question distribution");
-        let same = scores
-            .get("same")
-            .and_then(serde_json::Value::as_f64)
-            .context("missing same probability")?;
-        let different = scores
-            .get("different")
-            .and_then(serde_json::Value::as_f64)
-            .context("missing different probability")?;
+        let probability = |label: &str| -> Result<f64> {
+            let p = scores
+                .get(label)
+                .and_then(serde_json::Value::as_f64)
+                .with_context(|| format!("missing {label} probability"))?;
+            ensure!(
+                p.is_finite() && (0.0..=1.0).contains(&p),
+                "invalid AFK question probabilities"
+            );
+            Ok(p)
+        };
+        let (same, different) = (probability("same")?, probability("different")?);
         ensure!(
-            (0.0..=1.0).contains(&same)
-                && (0.0..=1.0).contains(&different)
-                && (same + different - 1.0).abs() <= 0.01 + 1e-12,
+            (same + different - 1.0).abs() <= 0.03,
             "invalid AFK question probabilities"
         );
-        ensure!(
-            (if choice == "same" { same } else { different }) + 1e-12 >= same.max(different),
-            "AFK question choice is not a probability winner"
-        );
-        // A tie does not establish a new decision; keep the existing behavior.
-        Ok(choice == "same" || different <= same)
+        Ok((same, different))
     }
 
     pub(crate) fn log_single_question(
@@ -349,15 +380,7 @@ impl VerdictClient {
             );
         }
         let result = async {
-            // GLiDE is hosted even when the unrelated Jev source is Direct.
-            let endpoint = match &self.source {
-                VerdictSource::Hosted { endpoint } => {
-                    reqwest::Url::parse(endpoint)?.join("/v1/question-locator-glide")?
-                }
-                VerdictSource::Direct { .. } => reqwest::Url::parse(
-                    "https://mj-jev-proxy.eng-admin-a63.workers.dev/v1/question-locator-glide",
-                )?,
-            };
+            let endpoint = self.hosted_glide_url("/v1/question-locator-glide")?;
             // Fastino: "set your client read timeout above 170 seconds"
             // https://docs.fastino.ai/troubleshooting/retries (supersedes older 300s notes).
             let response = self
@@ -757,15 +780,7 @@ impl VerdictClient {
         facts: &mj_core::activity::ActivityFacts,
         native_agent_count: usize,
     ) -> Result<glide_turn::Probabilities> {
-        // GLiDE is hosted even when the unrelated locator uses a Direct source.
-        let endpoint = match &self.source {
-            VerdictSource::Hosted { endpoint } => {
-                reqwest::Url::parse(endpoint)?.join("/v1/glide-turn-verdict")?
-            }
-            VerdictSource::Direct { .. } => reqwest::Url::parse(
-                "https://mj-jev-proxy.eng-admin-a63.workers.dev/v1/glide-turn-verdict",
-            )?,
-        };
+        let endpoint = self.hosted_glide_url("/v1/glide-turn-verdict")?;
         // Fastino: "set your client read timeout above 170 seconds"
         // https://docs.fastino.ai/troubleshooting/retries (supersedes older 300s notes).
         let mut response = self

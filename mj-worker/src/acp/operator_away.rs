@@ -99,15 +99,19 @@ impl OperatorAway {
 
     #[cfg(test)]
     pub(super) fn pending_for_bridge(&self) -> PendingElicitations {
-        self.pending_for_bridge_with_source(Some(VerdictSource::Direct {
-            key: String::new(),
-            endpoint: String::new(),
-        }))
+        self.pending_for_bridge_with_source(
+            Some(VerdictSource::Direct {
+                key: String::new(),
+                endpoint: String::new(),
+            }),
+            None,
+        )
     }
 
     pub(super) fn pending_for_bridge_with_source(
         &self,
         source: Option<VerdictSource>,
+        turn_context: Option<mj_transcript::turn_context::TurnContext>,
     ) -> PendingElicitations {
         let mut state = self.0.lock().expect("operator-away state lock poisoned");
         let id = state.next_bridge;
@@ -117,6 +121,7 @@ impl OperatorAway {
             owner: self.clone(),
             id,
             source,
+            turn_context,
         }))
     }
 }
@@ -129,6 +134,8 @@ struct PendingBridge {
     owner: OperatorAway,
     id: u64,
     source: Option<VerdictSource>,
+    /// Owns the session id and the decision log the AFK check records into.
+    turn_context: Option<mj_transcript::turn_context::TurnContext>,
 }
 
 impl Drop for PendingBridge {
@@ -232,8 +239,19 @@ impl PendingElicitations {
                         client =
                             verdict_client::VerdictClient::resolve(self.0.source.as_ref()).await;
                     }
+                    // Read at classification time: the log opens after the bridge starts.
+                    let (session, log) = self.0.turn_context.as_ref().map_or_else(
+                        || (String::new(), None),
+                        |context| (context.session_id(), context.decision_log()),
+                    );
                     match &client {
-                        Some(client) => client.same_afk_question(&question, &history).await,
+                        Some(client) => {
+                            client
+                                .clone()
+                                .with_log(log)
+                                .same_afk_question(&session, &question, &history)
+                                .await
+                        }
                         None => Err(anyhow!("Jev is disabled or unavailable")),
                     }
                 };
@@ -439,18 +457,13 @@ mod tests {
     }
 
     impl Classifier {
-        async fn new(direct: bool) -> Self {
+        async fn new() -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let endpoint = format!("http://{}/v7/turn-verdict", listener.local_addr().unwrap());
-            let source = if direct {
-                VerdictSource::Direct {
-                    key: "test-key".into(),
-                    endpoint,
-                }
-            } else {
-                VerdictSource::Hosted { endpoint }
-            };
-            Self { listener, source }
+            let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+            Self {
+                listener,
+                source: VerdictSource::Hosted { endpoint },
+            }
         }
 
         async fn request(&self) -> (TcpStream, Value) {
@@ -476,20 +489,10 @@ mod tests {
             let mut body = vec![0; length.unwrap()];
             stream.read_exact(&mut body).await.unwrap();
             let body: Value = serde_json::from_slice(&body).unwrap();
-            if matches!(self.source, VerdictSource::Direct { .. }) {
-                assert!(headers.starts_with("POST /v7/turn-verdict "));
-                assert_eq!(body["model"], "jev-latest");
-                assert_eq!(
-                    body["questions"],
-                    serde_json::from_str::<Value>(include_str!("afk_question.json")).unwrap()
-                );
-            } else {
-                assert!(headers.starts_with("POST /v1/afk-question-verdict "));
-            }
-            (
-                stream.into_inner(),
-                body.get("state").unwrap_or(&body).clone(),
-            )
+            assert!(headers.starts_with("POST /v1/afk-question-glide "));
+            // The hosted proxy owns the question: the body is the state alone.
+            assert_eq!(body.as_object().unwrap().len(), 2, "{body}");
+            (stream.into_inner(), body)
         }
 
         async fn respond(&self, mut stream: TcpStream, choice: &str) {
@@ -498,14 +501,7 @@ mod tests {
             } else {
                 (0.01, 0.99)
             };
-            let answer = json!({"type":"choice", "choice":choice, "confidence":0.99,
-                "probabilities":{"same":same,"different":different}});
-            let body = if matches!(self.source, VerdictSource::Direct { .. }) {
-                json!({"answers":{"same_question":answer}})
-            } else {
-                answer
-            }
-            .to_string();
+            let body = json!({"probabilities":{"same":same,"different":different}}).to_string();
             stream
                 .write_all(
                     format!(
@@ -553,73 +549,71 @@ mod tests {
     // Hard-won: #1489: new questions shared the generic Question refusal identity.
     #[tokio::test]
     async fn afk_question_protocol_distinguishes_mixed_forms_and_preserves_unavailable_fallback() {
-        for direct in [false, true] {
-            let classifier = Classifier::new(direct).await;
-            let owner = OperatorAway::default();
-            let pending = owner.pending_for_bridge_with_source(Some(classifier.source.clone()));
-            owner.set(mj_core::state::OperatorPresence {
-                away: true,
-                revision: 1,
-            });
-            assert!(matches!(
-                ask(&pending, "first", "Who owns #10941?").await.unwrap(),
-                Some(PendingAnswer::OperatorAway)
-            ));
-            let new = ask(&pending, "mixed", "Who owns #11482, and who owns #10941?");
-            let (stream, evidence) = classifier.request().await;
-            assert_eq!(
-                evidence,
-                json!({"current_question":{"message":"Who owns #11482, and who owns #10941?", "fields":[]}, "previous_questions":[{"message":"Who owns #10941?", "fields":[]}]})
-            );
-            classifier.respond(stream, "different").await;
-            assert!(matches!(
-                new.await.unwrap(),
-                Some(PendingAnswer::OperatorAway)
-            ));
+        let classifier = Classifier::new().await;
+        let owner = OperatorAway::default();
+        let pending = owner.pending_for_bridge_with_source(Some(classifier.source.clone()), None);
+        owner.set(mj_core::state::OperatorPresence {
+            away: true,
+            revision: 1,
+        });
+        assert!(matches!(
+            ask(&pending, "first", "Who owns #10941?").await.unwrap(),
+            Some(PendingAnswer::OperatorAway)
+        ));
+        let new = ask(&pending, "mixed", "Who owns #11482, and who owns #10941?");
+        let (stream, evidence) = classifier.request().await;
+        assert_eq!(
+            evidence,
+            json!({"current_question":{"message":"Who owns #11482, and who owns #10941?", "fields":[]}, "previous_questions":[{"message":"Who owns #10941?", "fields":[]}]})
+        );
+        classifier.respond(stream, "different").await;
+        assert!(matches!(
+            new.await.unwrap(),
+            Some(PendingAnswer::OperatorAway)
+        ));
 
-            let repeated = ask(&pending, "repeat", "Please assign #10941.");
-            let (stream, evidence) = classifier.request().await;
-            assert_eq!(
-                evidence["previous_questions"],
-                json!([{"message":"Who owns #10941?", "fields":[]}, {"message":"Who owns #11482, and who owns #10941?", "fields":[]}])
-            );
-            classifier.respond(stream, "same").await;
+        let repeated = ask(&pending, "repeat", "Please assign #10941.");
+        let (stream, evidence) = classifier.request().await;
+        assert_eq!(
+            evidence["previous_questions"],
+            json!([{"message":"Who owns #10941?", "fields":[]}, {"message":"Who owns #11482, and who owns #10941?", "fields":[]}])
+        );
+        classifier.respond(stream, "same").await;
+        pending
+            .resolve("repeat", ElicitationResponse::Decline)
+            .unwrap();
+        assert!(matches!(
+            repeated.await.unwrap(),
+            Some(PendingAnswer::Human(_))
+        ));
+
+        for body in [
+            "HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+        ] {
+            let fallback = ask(&pending, "fallback", "Who owns #12000?");
+            let (mut stream, _) = classifier.request().await;
+            stream.write_all(body.as_bytes()).await.unwrap();
+            // Wait until the network attempt has consumed the response before
+            // answering, so this proves fallback rather than winning a race.
+            let mut eof = Vec::new();
+            stream.read_to_end(&mut eof).await.unwrap();
             pending
-                .resolve("repeat", ElicitationResponse::Decline)
+                .resolve("fallback", ElicitationResponse::Decline)
                 .unwrap();
             assert!(matches!(
-                repeated.await.unwrap(),
+                fallback.await.unwrap(),
                 Some(PendingAnswer::Human(_))
             ));
-
-            for body in [
-                "HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
-            ] {
-                let fallback = ask(&pending, "fallback", "Who owns #12000?");
-                let (mut stream, _) = classifier.request().await;
-                stream.write_all(body.as_bytes()).await.unwrap();
-                // Wait until the network attempt has consumed the response before
-                // answering, so this proves fallback rather than winning a race.
-                let mut eof = Vec::new();
-                stream.read_to_end(&mut eof).await.unwrap();
-                pending
-                    .resolve("fallback", ElicitationResponse::Decline)
-                    .unwrap();
-                assert!(matches!(
-                    fallback.await.unwrap(),
-                    Some(PendingAnswer::Human(_))
-                ));
-            }
         }
     }
 
     // Hard-won: #1489 review: evidence lost constraints and leaked secret defaults/choices.
     #[tokio::test]
     async fn afk_question_evidence_preserves_changed_selection_and_required_constraints() {
-        let classifier = Classifier::new(false).await;
+        let classifier = Classifier::new().await;
         let owner = OperatorAway::default();
-        let pending = owner.pending_for_bridge_with_source(Some(classifier.source.clone()));
+        let pending = owner.pending_for_bridge_with_source(Some(classifier.source.clone()), None);
         owner.set(mj_core::state::OperatorPresence {
             away: true,
             revision: 1,
@@ -713,9 +707,9 @@ mod tests {
     // Hard-won: #1489 review: redaction changed ID identity across escapes and punctuation.
     #[tokio::test]
     async fn afk_question_protocol_preserves_redacted_identifier_equality() {
-        let classifier = Classifier::new(false).await;
+        let classifier = Classifier::new().await;
         let owner = OperatorAway::default();
-        let pending = owner.pending_for_bridge_with_source(Some(classifier.source.clone()));
+        let pending = owner.pending_for_bridge_with_source(Some(classifier.source.clone()), None);
         owner.set(mj_core::state::OperatorPresence {
             away: true,
             revision: 1,
@@ -781,11 +775,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn afk_question_decisions_are_recorded_with_the_redacted_request_and_outcome() {
+        let classifier = Classifier::new().await;
+        let directory = tempfile::tempdir().unwrap();
+        let context = mj_transcript::turn_context::TurnContext::default();
+        context.set_session_id("afk-session");
+        context.set_decision_log(mj_core::jev::DecisionLog::open(directory.path().into()).unwrap());
+        let owner = OperatorAway::default();
+        let pending =
+            owner.pending_for_bridge_with_source(Some(classifier.source.clone()), Some(context));
+        owner.set(mj_core::state::OperatorPresence {
+            away: true,
+            revision: 1,
+        });
+        const TOKEN: &str = "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789";
+        assert!(matches!(
+            ask(&pending, "first", &format!("Use {TOKEN}?"))
+                .await
+                .unwrap(),
+            Some(PendingAnswer::OperatorAway)
+        ));
+        let new = ask(&pending, "new", "Who owns #11482?");
+        let (stream, _) = classifier.request().await;
+        classifier.respond(stream, "different").await;
+        assert!(matches!(
+            new.await.unwrap(),
+            Some(PendingAnswer::OperatorAway)
+        ));
+        let repeat = ask(&pending, "repeat", "Please assign #11482.");
+        let (stream, _) = classifier.request().await;
+        classifier.respond(stream, "same").await;
+        let failed = ask(&pending, "failed", "Another decision?");
+        let (mut stream, _) = classifier.request().await;
+        stream
+            .write_all(
+                b"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut eof = Vec::new();
+        stream.read_to_end(&mut eof).await.unwrap();
+        // "repeat" was held and still waits; resolve both so the tasks end.
+        for id in ["repeat", "failed"] {
+            pending.resolve(id, ElicitationResponse::Decline).unwrap();
+        }
+        repeat.await.unwrap();
+        failed.await.unwrap();
+        let mut page = mj_core::jev::read(directory.path(), "afk-session", None).unwrap();
+        page.decisions
+            .sort_by_key(|d| (d.started_at_ms, d.id.clone()));
+        let outcomes: Vec<_> = page.decisions.iter().map(|d| d.status.as_str()).collect();
+        assert_eq!(outcomes, ["declined_new", "held_repeat", "failed"]);
+        // The list omits technical details; read each record by id.
+        let mut records = Vec::new();
+        for summary in &page.decisions {
+            let detail =
+                mj_core::jev::read(directory.path(), "afk-session", Some(&summary.id)).unwrap();
+            records.push(detail.decisions.into_iter().next().unwrap());
+        }
+        for record in &records {
+            assert_eq!(record.kind, "activity");
+            assert_eq!(
+                record.checked,
+                "Does this question repeat one already declined while away?"
+            );
+            let technical = record.technical.as_ref().unwrap();
+            assert_eq!(technical["contract"], "afk-question-glide-v1");
+            assert!(!technical.to_string().contains(TOKEN), "{technical}");
+            assert!(
+                technical["request"]["previous_questions"][0]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("[redacted token"),
+                "{technical}"
+            );
+        }
+        assert_eq!(
+            records[0].technical.as_ref().unwrap()["probabilities"],
+            json!({"same":0.01,"different":0.99})
+        );
+        assert!(
+            records[2].technical.as_ref().unwrap()["error"]
+                .as_str()
+                .unwrap()
+                .contains("413")
+        );
+    }
+
+    #[tokio::test]
     async fn afk_question_classification_cannot_outlive_human_cancel_return_or_bridge_close() {
         for action in ["human", "cancel", "return", "close"] {
-            let classifier = Classifier::new(false).await;
+            let classifier = Classifier::new().await;
             let owner = OperatorAway::default();
-            let pending = owner.pending_for_bridge_with_source(Some(classifier.source.clone()));
+            let pending =
+                owner.pending_for_bridge_with_source(Some(classifier.source.clone()), None);
             owner.set(mj_core::state::OperatorPresence {
                 away: true,
                 revision: 1,
@@ -845,9 +928,9 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_afk_questions_reclassify_after_another_question_is_answered() {
-        let classifier = Classifier::new(false).await;
+        let classifier = Classifier::new().await;
         let owner = OperatorAway::default();
-        let pending = owner.pending_for_bridge_with_source(Some(classifier.source.clone()));
+        let pending = owner.pending_for_bridge_with_source(Some(classifier.source.clone()), None);
         owner.set(mj_core::state::OperatorPresence {
             away: true,
             revision: 1,
