@@ -156,6 +156,7 @@ pub fn import_native_session(
         SessionRecord {
             oracle_choice: None,
             oracle: true,
+            notifications_ignored: false,
             project: Some(project.into()),
             target_runtime: None,
             launch_base: None,

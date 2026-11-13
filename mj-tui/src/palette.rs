@@ -121,6 +121,8 @@ impl CommandPalette {
 const SESSION_MENU_COMMANDS: &[CommandId] = &[
     CommandId::ChangedFiles,
     CommandId::DismissNotification,
+    CommandId::IgnoreNotifications,
+    CommandId::StopIgnoringNotifications,
     CommandId::RenameSession,
     CommandId::PinSession,
     CommandId::UnpinSession,
@@ -782,7 +784,9 @@ fn palette_lines(dashboard: &DashboardState, palette: &CommandPalette) -> Vec<Pa
             let next = match entry.id {
                 CommandId::OpenSession
                 | CommandId::ChangedFiles
-                | CommandId::DismissNotification => 0,
+                | CommandId::DismissNotification
+                | CommandId::IgnoreNotifications
+                | CommandId::StopIgnoringNotifications => 0,
                 CommandId::RenameSession
                 | CommandId::PinSession
                 | CommandId::UnpinSession
@@ -1267,10 +1271,13 @@ mod tests {
         );
         dashboard.begin_session_palette();
         drawn(&mut dashboard, 120, 30);
-        assert_eq!(selected_command(&dashboard), Some(CommandId::PinSession));
+        assert_eq!(
+            selected_command(&dashboard),
+            Some(CommandId::IgnoreNotifications)
+        );
         dashboard.finish_session_operation("session-1");
         drawn(&mut dashboard, 120, 30);
-        dashboard.handle_key(key(KeyCode::Up));
+        dashboard.handle_key(key(KeyCode::Down));
         assert_eq!(selected_command(&dashboard), Some(CommandId::RenameSession));
         dashboard.handle_key(key(KeyCode::Enter));
         assert!(matches!(dashboard.mode, Mode::Rename(_)));

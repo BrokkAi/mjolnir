@@ -245,6 +245,7 @@ Idle
 Session 1: investigate the desktop layout and validate responsive behavior
 ⋯
 Changed files…
+Ignore notifications
 Rename
 Copy session ID
 Mjolnir

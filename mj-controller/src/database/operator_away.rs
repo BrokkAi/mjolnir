@@ -164,8 +164,9 @@ pub(super) fn set_with(
         // before leaving was attended, and one answered during the away period
         // through a path that does not count as activity got its reply already:
         // neither is told the operator is back, as if its requests went unseen.
-        let answered_threshold = changed_at_ms
-            .map(|engaged| engaged.saturating_sub(auto_afk_window.as_millis().min(i64::MAX as u128) as i64));
+        let answered_threshold = changed_at_ms.map(|engaged| {
+            engaged.saturating_sub(auto_afk_window.as_millis().min(i64::MAX as u128) as i64)
+        });
         for (session, last_away) in recipients {
             let protocol: Option<u32> = tx
                 .query_row(

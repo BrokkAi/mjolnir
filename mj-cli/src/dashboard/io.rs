@@ -168,6 +168,10 @@ pub(crate) enum DashboardIoUpdate {
         title: String,
         result: std::result::Result<String, String>,
     },
+    NotificationsIgnored {
+        ignored: bool,
+        result: std::result::Result<(), String>,
+    },
     ChangeWorkspace {
         session_id: String,
         workspace_name: String,
@@ -1094,6 +1098,14 @@ impl DashboardContext {
                     ));
                 }
             },
+            DashboardIoUpdate::NotificationsIgnored { ignored, result } => {
+                if let Err(error) = result {
+                    self.dashboard.set_notice(format!(
+                        "Could not {} notifications: {error}",
+                        if ignored { "ignore" } else { "unignore" }
+                    ));
+                }
+            }
             DashboardIoUpdate::ChangeWorkspace {
                 session_id,
                 workspace_name,
@@ -2812,6 +2824,7 @@ mod tests {
         SessionRecord {
             oracle_choice: None,
             oracle: true,
+            notifications_ignored: false,
             project: None,
             target_runtime: None,
             launch_base: None,

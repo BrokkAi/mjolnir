@@ -1206,6 +1206,7 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
     let previous = SessionRecord {
         oracle_choice: None,
         oracle: true,
+        notifications_ignored: false,
         project: None,
         target_runtime: Some((&TargetTemplate::LocalBare).into()),
         launch_base: None,
