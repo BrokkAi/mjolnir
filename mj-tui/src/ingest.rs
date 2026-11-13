@@ -1403,10 +1403,7 @@ impl DashboardState {
     }
 
     /// The session's harness kind, for harness-specific readings of its state.
-    pub fn session_harness_kind(
-        &self,
-        session_id: &str,
-    ) -> Option<mj_core::config::HarnessKind> {
+    pub fn session_harness_kind(&self, session_id: &str) -> Option<mj_core::config::HarnessKind> {
         self.state
             .sessions
             .get(session_id)

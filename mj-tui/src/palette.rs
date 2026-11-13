@@ -834,7 +834,6 @@ impl DashboardState {
 /// One drawn row: either a group heading or a command.
 enum PaletteLine {
     Heading(String),
-    Separator,
     /// An empty row between session-menu sections.
     Blank,
     /// The entry's index into `entries`, so the highlight can be placed.
@@ -922,7 +921,7 @@ pub(crate) fn render_palette(
     let facts_height = if facts.is_empty() { 0 } else { facts.len() + 1 };
     // The popup grows with the complete list. The shared modal helper clamps
     // it to the usable terminal bounds when the list cannot fit.
-    let extra_height = facts_height + if palette.session_only { 5 } else { 5 };
+    let extra_height = facts_height + 5;
     let popup_height =
         u16::try_from(lines.len().saturating_add(extra_height).max(5)).unwrap_or(u16::MAX);
     let popup = centered_modal(frame, surfaces, 72, popup_height, area);
@@ -1075,14 +1074,6 @@ pub(crate) fn render_palette(
                         theme::border(false),
                     ),
                 ])
-            }
-            PaletteLine::Separator => {
-                row_map.push(None);
-                enabled.push(false);
-                Line::styled(
-                    format!("  {}", theme::glyphs().rule.repeat(width.saturating_sub(2))),
-                    theme::border(false),
-                )
             }
             PaletteLine::Blank => {
                 row_map.push(None);
@@ -1418,7 +1409,6 @@ mod tests {
             .into_iter()
             .map(|line| match line {
                 PaletteLine::Heading(heading) => format!("[{heading}]"),
-                PaletteLine::Separator => "---".to_owned(),
                 PaletteLine::Blank => String::new(),
                 PaletteLine::Command(index) => {
                     session_menu_label(dashboard, palette, palette.entries[index].id)
