@@ -19,7 +19,6 @@ include = [
     "src/activity/eot_glide_questions.json",
     "src/activity/eot_glide_fresh_sample.json",
     "src/help_search/question.json",
-    "src/continuation/questions.json",
     "src/github_item/questions_v2.json",
     "src/github_item/ettin-tokenizer.json",
     # Recorded ACP bridge traffic the step-clock tests replay.

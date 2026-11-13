@@ -13,7 +13,7 @@ After this change, mj never sends an automatic "continue" prompt for ordinary un
 - [x] (2026-11-13) Milestone 1: worker and core: remove the GLiDE Continue switch, the worker `continuation_enabled` flag and its environment variable, keep legacy decoding.
 - [x] (2026-11-13) Milestone 2: daemon (also removed `ContinuationConfig` and the `Config.continuation` field with the legacy `[continuation]` decoder, because core could not compile otherwise): remove the automatic-continuation decider and submit path; keep quota recovery, the seed job, the update feed and the review observer.
 - [x] (2026-11-13) Milestone 3: configuration, settings UI, goldens, docs, shipped skill, e2e scripts, AGENTS.md.
-- [ ] Milestone 4: proxy: keep serving the old routes, move their question files into the proxy package.
+- [x] (2026-11-13) Milestone 4: proxy: keep serving the old routes, move their question files into the proxy package.
 - [ ] Full validation, commit, review, push; close #1304 and #1532.
 
 ## Surprises & Discoveries
