@@ -107,8 +107,8 @@ impl ActiveLogin {
             _job: job,
         })
     }
-    pub(super) fn render(&self, frame: &mut ratatui::Frame<'_>) {
-        self.pane.render(frame);
+    pub(super) fn render(&self, frame: &mut ratatui::Frame<'_>, screen: ratatui::layout::Rect) {
+        self.pane.render(frame, screen);
     }
     fn send(&self, input: TerminalInput) {
         if self.input.send(input).is_err() {

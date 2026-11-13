@@ -946,6 +946,8 @@ fn view_at_ordinal(ordinal: u64) -> ManagedSessionView {
             materialized,
             operational: RelayOperationalState {
                 assessment: None,
+                open_request: None,
+                person_input_through: 0,
                 assessment_context: None,
                 turn_completion: None,
                 continuation: Default::default(),

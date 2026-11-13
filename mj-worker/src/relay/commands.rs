@@ -209,7 +209,7 @@ impl DurableRelay {
     fn validate_turn_control(&self, command: &RelayCommand) -> Result<(), String> {
         match command {
             RelayCommand::DismissQuestion { question } => {
-                if self.snapshot.assessment.as_ref().and_then(|a| a.inferred_question()).as_ref()
+                if self.snapshot.open_request().map(|request| &request.question)
                     != Some(question)
                     || self.snapshot.active_prompt.is_some()
                     || self.snapshot.harness_turn.is_some()

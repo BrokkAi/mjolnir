@@ -614,7 +614,7 @@ pub enum DashboardAction {
         original: String,
         updated: String,
     },
-    /// Save a managed profile and then hand the terminal to its sign-in flow.
+    /// Save a managed profile and then open its sign-in modal.
     SaveSetupAndLogin {
         generation: u64,
         original: String,
@@ -623,8 +623,8 @@ pub enum DashboardAction {
     },
     /// Open the guided chooser for a harness Mjolnir installs itself.
     OpenManagedSetup,
-    /// Hand the terminal to `mj login` for the selected profile, then resume
-    /// the dashboard. The generation anchors the result to the open dialog.
+    /// Open the selected profile's sign-in flow in a dashboard modal. The
+    /// generation anchors the result to the open dialog.
     SetupLogin {
         generation: u64,
         profile_id: String,

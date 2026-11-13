@@ -115,18 +115,18 @@ pub fn managed_harness_manifest_matches(
 
 pub const CODEX_ACP_PACKAGE: &str = "@brokkai/codex-acp";
 pub const CODEX_ACP_VERSION: &str = "1.15.0";
-pub const CODEX_CLI_VERSION: &str = "0.165.0";
-pub const CLAUDE_ACP_VERSION: &str = "0.102.0";
-pub const CLAUDE_CLI_VERSION: &str = "2.1.321";
-pub const KIMI_VERSION: &str = "2.4.0";
-pub const GROK_VERSION: &str = "1.0.70";
+pub const CODEX_CLI_VERSION: &str = "0.168.0";
+pub const CLAUDE_ACP_VERSION: &str = "0.106.0";
+pub const CLAUDE_CLI_VERSION: &str = "2.1.323";
+pub const KIMI_VERSION: &str = "2.6.1";
+pub const GROK_VERSION: &str = "1.0.77";
 pub const MUSE_ACP_PACKAGE: &str = "@brokkai/muse-acp";
 pub const MUSE_ACP_VERSION: &str = "0.21.0";
 pub const MUSE_VERSION: &str = "1.4.14-R7309.1";
-pub const OPENCODE_VERSION: &str = "2.2.6";
-pub const DSH_ACP_VERSION: &str = "0.5.0";
+pub const OPENCODE_VERSION: &str = "2.2.7";
+pub const DSH_ACP_VERSION: &str = "0.6.0";
 pub const DSH_ACP_PACKAGE: &str = "@brokkai/dsh-acp";
-pub const ANTIGRAVITY_VERSION: &str = "1.5.7";
+pub const ANTIGRAVITY_VERSION: &str = "1.5.8";
 
 /// The shell commands that start OpenCode's ACP server with the executable
 /// named by `$opencode`, for the managed install and the container fallback
@@ -461,7 +461,7 @@ pub struct HarnessPin {
 pub const fn pin(kind: HarnessKind) -> HarnessPin {
     match kind {
         HarnessKind::Antigravity => HarnessPin {
-            install_id: "antigravity-1.5.7",
+            install_id: "antigravity-1.5.8",
             display_version: ANTIGRAVITY_VERSION,
             entrypoint: "bin/agy",
             cli_entrypoint: "bin/agy",
@@ -473,8 +473,8 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             cli_entrypoint: "bin/muse",
         },
         HarnessKind::Codex => HarnessPin {
-            install_id: "brokkai-codex-acp-1.15.0_codex-0.165.0",
-            display_version: "@brokkai/codex-acp 1.15.0 + codex 0.165.0",
+            install_id: "brokkai-codex-acp-1.15.0_codex-0.168.0",
+            display_version: "@brokkai/codex-acp 1.15.0 + codex 0.168.0",
             entrypoint: "node_modules/.bin/codex-acp",
             cli_entrypoint: CODEX_CLI_ENTRYPOINT,
         },
@@ -482,32 +482,32 @@ pub const fn pin(kind: HarnessKind) -> HarnessPin {
             // pkg2: the asset lists @anthropic-ai/claude-code in allowScripts.
             // Installs made before that change kept the package's native-binary
             // stub, so their identity must not match this pin.
-            install_id: "claude-agent-acp-0.102.0_claude-2.1.321_pkg2",
-            display_version: "claude-agent-acp 0.102.0 + Claude Code 2.1.321",
+            install_id: "claude-agent-acp-0.106.0_claude-2.1.323_pkg2",
+            display_version: "claude-agent-acp 0.106.0 + Claude Code 2.1.323",
             entrypoint: "node_modules/.bin/claude-agent-acp",
             cli_entrypoint: "node_modules/.bin/claude",
         },
         HarnessKind::Kimi => HarnessPin {
-            install_id: "kimi-2.4.0",
-            display_version: "Kimi Code 2.4.0",
+            install_id: "kimi-2.6.1",
+            display_version: "Kimi Code 2.6.1",
             entrypoint: "bin/kimi",
             cli_entrypoint: "bin/kimi",
         },
         HarnessKind::Grok => HarnessPin {
-            install_id: "grok-1.0.70",
-            display_version: "Grok 1.0.70",
+            install_id: "grok-1.0.77",
+            display_version: "Grok 1.0.77",
             entrypoint: "bin/grok",
             cli_entrypoint: "bin/grok",
         },
         HarnessKind::OpenCode => HarnessPin {
-            install_id: "opencode-2.2.6",
-            display_version: "OpenCode 2.2.6",
+            install_id: "opencode-2.2.7",
+            display_version: "OpenCode 2.2.7",
             entrypoint: "opencode",
             cli_entrypoint: "opencode",
         },
         HarnessKind::Dsh => HarnessPin {
-            install_id: "dsh-acp-0.5.0",
-            display_version: "dsh-acp 0.5.0",
+            install_id: "dsh-acp-0.6.0",
+            display_version: "dsh-acp 0.6.0",
             entrypoint: "dsh-acp",
             cli_entrypoint: "dsh-acp",
         },

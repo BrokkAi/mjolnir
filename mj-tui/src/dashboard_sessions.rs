@@ -745,13 +745,29 @@ impl DashboardState {
             .collect()
     }
 
+    /// Whether the session itself holds an open question: the daemon's question
+    /// identity, or for a worker before relay protocol 64 (which may report a
+    /// question the daemon cannot target for dismissal) the latest-turn rule.
+    /// Remove the legacy half when relay protocols below 64 are retired.
+    fn owns_open_question(&self, session_id: &str) -> bool {
+        matches!(
+            self.notification_dismissals.get(session_id),
+            Some(mj_core::attention::NotificationDismissal::Question(_))
+        ) || self
+            .session_details
+            .get(session_id)
+            .is_some_and(|detail| !detail.supports_open_request && detail.legacy_awaiting_input)
+    }
+
     /// Whether the session's own turn is still going: working, or holding a
     /// question the agent asked in that turn.
     fn has_unfinished_turn(&self, session_id: &str) -> bool {
         self.own_turn_is_running(session_id)
-            || self.session_details.get(session_id).is_some_and(|detail| {
-                !detail.pending_elicitations.is_empty() || detail.awaiting_input
-            })
+            || self.owns_open_question(session_id)
+            || self
+                .session_details
+                .get(session_id)
+                .is_some_and(|detail| !detail.pending_elicitations.is_empty())
     }
 
     /// What Interrupt all stops for `root`: every session in its Mjolnir
@@ -825,9 +841,11 @@ impl DashboardState {
     /// parent itself is not, so a person is taken to that form.
     pub(crate) fn waiting_child_of(&self, parent_id: &str) -> Option<String> {
         if self.attention_level(parent_id) != AttentionLevel::Waiting
-            || self.session_details.get(parent_id).is_some_and(|detail| {
-                !detail.pending_elicitations.is_empty() || detail.awaiting_input
-            })
+            || self.owns_open_question(parent_id)
+            || self
+                .session_details
+                .get(parent_id)
+                .is_some_and(|detail| !detail.pending_elicitations.is_empty())
         {
             return None;
         }

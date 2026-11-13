@@ -164,22 +164,15 @@ async fn located_login(profile: &HarnessProfile) -> Result<(Located, BTreeMap<St
         HarnessHost::current(),
         &mut environment,
     );
-    // A login runs in the person's terminal, not in an isolated worker. Keep
-    // the ambient display, browser and provider-key environment, then layer
-    // the account login shell and finally the profile's own overrides. The
-    // old CLI login inherited this environment; env_clear here would drop
-    // DISPLAY/BROWSER and exported provider keys.
+    // A login runs in the person's terminal, not in an isolated worker. Its
+    // ambient display, browser, provider-key and tool environment is already
+    // the one the CLI fallback inherits, so layer profile overrides directly
+    // on it. Starting the account's interactive login shell here would repeat
+    // potentially expensive startup before every sign-in without producing a
+    // second fact the login path needs.
     let mut launch_environment: BTreeMap<String, String> = std::env::vars_os()
         .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
         .collect();
-    match mj_core::login_environment::with_overrides(&BTreeMap::new()).await {
-        Ok(login) => launch_environment.extend(login),
-        Err(error) => {
-            eprintln!(
-                "Could not read the account login shell ({error:#}); using the environment Mjolnir started with."
-            );
-        }
-    }
     launch_environment.extend(environment.clone());
     let execution_policy = mj_core::config::ExecutionPolicy::ConfiguredApprovals;
     let (command, args) = mj_core::harness_runtime::fallback_launch(profile.kind, execution_policy);
@@ -930,6 +923,59 @@ mod tests {
                 .any(|entry| Path::new(entry) == tools)
         );
         assert!(bridge.exists());
+    }
+
+    // Hard-won: #1452: interactive sign-in started the account login-shell
+    // probe, so a slow shell spent its startup budget before every login.
+    #[cfg(all(unix, feature = "test-hooks"))]
+    #[tokio::test]
+    async fn sign_in_uses_the_terminal_environment_without_starting_the_account_shell() {
+        let _guard = TEST_LOCK.lock().await;
+        let directory = tempfile::tempdir().unwrap();
+        let slow_shell = write_script(
+            directory.path(),
+            "slow-login-shell",
+            "#!/bin/sh\nsleep 30\n",
+        );
+        let ambient_home = directory.path().join("ambient-home");
+        std::fs::create_dir(&ambient_home).unwrap();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "harness_login::acp_login::tests::sign_in_environment_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("MJ_TEST_SIGNIN_ROOT", directory.path())
+            .env("MJ_TEST_ACCOUNT_SHELL", &slow_shell)
+            .env("MJ_TEST_AMBIENT_VALUE", "kept")
+            .env("HOME", ambient_home);
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            mj_core::subprocess::run_capturing_stdout_cancellable(&mut command),
+        )
+        .await
+        .expect("interactive sign-in must not wait for the account login shell");
+        let output = result.unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    #[cfg(all(unix, feature = "test-hooks"))]
+    #[tokio::test]
+    #[ignore = "subprocess fixture for interactive sign-in environment handling"]
+    async fn sign_in_environment_child() {
+        let root = PathBuf::from(std::env::var_os("MJ_TEST_SIGNIN_ROOT").unwrap());
+        let profile = HarnessProfile::new(HarnessKind::Dsh, root.join("profile"));
+        let (_, environment) = located_login(&profile).await.unwrap();
+        assert_eq!(
+            environment.get("MJ_TEST_AMBIENT_VALUE").map(String::as_str),
+            Some("kept")
+        );
     }
 
     // Hard-won: d42fd3cbe: headless daemon login refused Codex ChatGPT sign-in with no recovery

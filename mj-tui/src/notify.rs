@@ -232,10 +232,18 @@ impl DashboardState {
                         .map(str::to_owned)
                 })
                 .or_else(|| {
-                    detail
-                        .and_then(|detail| detail.last_agent_message.as_deref())
-                        .filter(|text| !text.trim().is_empty())
-                        .map(str::to_owned)
+                    let detail = detail?;
+                    let target = detail.question_message.as_deref()?;
+                    mj_core::transcript::materialized_agent_message_text(
+                        detail.projection.transcript.iter().map(AsRef::as_ref),
+                        target,
+                    )
+                })
+                .or_else(|| {
+                    let detail = detail?;
+                    (!detail.supports_open_request)
+                        .then(|| detail.last_agent_message.as_deref().map(str::to_owned))
+                        .flatten()
                 })
                 .unwrap_or_else(|| "Waiting for your input".to_owned()),
             AttentionLevel::Important => detail
@@ -475,6 +483,48 @@ mod tests {
         ]));
         dashboard.set_current_session(None);
         dashboard
+    }
+
+    #[test]
+    fn retained_question_notification_uses_original_message_after_later_reply() {
+        let mut dashboard = dashboard();
+        let detail = dashboard.session_details.get_mut("asks").unwrap();
+        detail.pending_elicitations.clear();
+        detail.supports_open_request = true;
+        detail.question_message = Some("agent:original".into());
+        detail.last_agent_message = Some("The background build finished".into());
+        detail.projection.transcript.push(std::sync::Arc::new(mj_core::state::TranscriptItem {
+            stable_id: "agent:original".into(), position: 1, latest_content_event_ordinal: None,
+            created_at_ms: 1, last_changed_at_ms: 1,
+            body: mj_core::state::TranscriptBody::Agent { chunks: vec![serde_json::json!({"content":{"type":"text","text":"Keep the old format?"}})], streaming: false },
+        }));
+        detail.question_message = None;
+        assert_eq!(
+            dashboard.notification_body("asks", AttentionLevel::Waiting),
+            "Waiting for your input"
+        );
+        dashboard
+            .session_details
+            .get_mut("asks")
+            .unwrap()
+            .supports_open_request = false;
+        assert_eq!(
+            dashboard.notification_body("asks", AttentionLevel::Waiting),
+            "The background build finished"
+        );
+        let detail = dashboard.session_details.get_mut("asks").unwrap();
+        detail.supports_open_request = true;
+        detail.question_message = Some("agent:original".into());
+        assert!(dashboard.notification_events(0).is_empty());
+        let notices = dashboard.notification_events(2000);
+        assert_eq!(
+            notices
+                .iter()
+                .find(|notice| notice.session_id == "asks")
+                .unwrap()
+                .body,
+            "Keep the old format?"
+        );
     }
 
     // Hard-won: 92684ad3b: interruption after read output stopped producing an unread notification.

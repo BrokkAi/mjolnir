@@ -1934,7 +1934,7 @@ fn review_refs_round_trip_with_non_commit_tips_and_restore_conflicts() {
 }
 
 #[test]
-fn session_starts_follow_the_session_between_worktree_names() {
+fn session_starts_and_explicit_review_bases_follow_worktree_names() {
     let directory = tempfile::tempdir().unwrap();
     let origin = directory.path().join("origin");
     initialize_repository(&origin);
@@ -1960,6 +1960,12 @@ fn session_starts_follow_the_session_between_worktree_names() {
         digest_bytes(scope.as_bytes())
     );
     git(&linked, &["update-ref", &start, &base]);
+    commit_file(&linked, "reviewed.txt", b"reviewed\n", "reviewed");
+    let reviewed = git_line(&linked, &["rev-parse", "HEAD"]);
+    git(
+        &linked,
+        &["update-ref", &push_review_base_ref(&scope), &reviewed],
+    );
     let snapshot = collect_git_snapshot(
         &SystemGit,
         &linked,
@@ -1991,6 +1997,18 @@ fn session_starts_follow_the_session_between_worktree_names() {
     );
     assert_eq!(
         git_line(&destination, &["rev-parse", &relocated_start]),
+        base
+    );
+    let relocated_base = push_review_base_ref(MAIN_SCOPE);
+    assert_eq!(
+        git_line(&destination, &["rev-parse", &relocated_base]),
+        reviewed
+    );
+    // A selection already made in the destination belongs to that worktree.
+    git(&destination, &["update-ref", &relocated_base, &base]);
+    restore_git_snapshot(&SystemGit, &destination, &snapshot).unwrap();
+    assert_eq!(
+        git_line(&destination, &["rev-parse", &relocated_base]),
         base
     );
 }

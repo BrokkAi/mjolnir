@@ -2153,10 +2153,10 @@ pub use git::{
     capture_worktree_tree, collect_git_metadata_snapshot, collect_git_snapshot,
     collect_git_snapshot_with_progress, collect_plain_directory_snapshot, diff_between_trees,
     empty_tree_id, has_origin_refs, merge_trees, migrate_review_ref, numstat_between_trees,
-    pin_review_tree, push_branch, read_head_reflog, read_review_point, record_overridden_tree,
-    record_review_point, record_reviewed_tree, remote_workspace_base, restore_git_snapshot,
-    session_diff, session_diff_details, session_start_scope, tree_without_paths,
-    validate_symlink_target,
+    pin_review_tree, push_branch, push_review_base_ref, read_head_reflog, read_review_point,
+    record_overridden_tree, record_review_point, record_reviewed_tree, remote_workspace_base,
+    restore_git_snapshot, session_diff, session_diff_details, session_start_scope,
+    tree_without_paths, validate_symlink_target,
 };
 #[cfg(test)]
 use git::{build_untracked_tar, restore_untracked_tar};
