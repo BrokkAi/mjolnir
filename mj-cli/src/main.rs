@@ -30,6 +30,7 @@ mod go;
 mod hints;
 mod import;
 mod logging;
+mod observe;
 mod pollers;
 mod session_presentation;
 mod simple;
@@ -115,6 +116,8 @@ enum Command {
     Acp(acp::AcpArgs),
     /// Diagnose platform and configuration prerequisites.
     Doctor(DoctorArgs),
+    /// Inspect or export Mjolnir sessions for Brokk Observe.
+    Observe(observe::ObserveArgs),
     /// Create, list, or destroy persistent EC2 hosts with rootless Podman.
     Ec2(ec2::Ec2Args),
     /// Rerun agent and repository discovery, preserving existing configuration.
@@ -865,6 +868,7 @@ fn command_name(command: Option<&Command>) -> &'static str {
         Some(Command::DaemonRun) => "daemon-run",
         Some(Command::Acp(_)) => "acp",
         Some(Command::Doctor(_)) => "doctor",
+        Some(Command::Observe(_)) => "observe",
         Some(Command::Ec2(_)) => "ec2",
         Some(Command::Setup(_)) => "setup",
         Some(Command::Import(_)) => "import",
@@ -1058,6 +1062,7 @@ async fn run_command(
             }
             doctor(args).await.map(|()| DashboardExit::Normal)
         }
+        Some(Command::Observe(args)) => observe::run(args).await.map(|()| DashboardExit::Normal),
         Some(Command::Setup(args)) => {
             if daemon::run_where_daemon_lives(&daemon_forwarded_args(), true).await? {
                 return Ok(DashboardExit::Normal);
