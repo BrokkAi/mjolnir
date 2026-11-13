@@ -34,9 +34,6 @@ pub(crate) struct GithubItemClassification {
     pub created_at: String,
     pub interested: bool,
     pub created: bool,
-    /// The login of the account the daemon polls with, for the own-activity
-    /// filter on the item's recorded lifecycle event.
-    pub credential_login: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,7 +65,6 @@ pub(crate) struct GithubItemWatch {
 pub(crate) struct RecordedLifecycle {
     pub key: String,
     pub body_json: String,
-    pub author: Option<String>,
     pub at: String,
 }
 
@@ -344,42 +340,33 @@ pub(crate) fn commit_github_item_classification(
             // event, or this one sees the recorded event and delivers it.
             let recorded = tx
                 .query_row(
-                    "SELECT lifecycle_event_key, lifecycle_event_json, lifecycle_author, lifecycle_at
+                    "SELECT lifecycle_event_key, lifecycle_event_json, lifecycle_at
                      FROM github_watch_items WHERE owner=?1 AND repo=?2 AND number=?3",
-                    params![classification.owner, classification.repo, classification.number],
-                    |row| {
-                        Ok(recorded_lifecycle(
-                            row.get(0)?,
-                            row.get(1)?,
-                            row.get(2)?,
-                            row.get(3)?,
-                        ))
-                    },
+                    params![
+                        classification.owner,
+                        classification.repo,
+                        classification.number
+                    ],
+                    |row| Ok(recorded_lifecycle(row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .optional()?
                 .flatten();
+            // No own-activity filter here: sessions share one GitHub account,
+            // so an overlapping turn does not show that this session made the
+            // change, and a wrong skip would lose the notice for good. A
+            // queued echo of its own action costs one line.
             if let Some(recorded) = recorded {
-                let mut windows = TurnWindows::new();
-                if !authored_during_session_turn(
-                    &tx,
-                    &mut windows,
-                    classification.credential_login.as_deref(),
-                    recorded.author.as_deref(),
-                    Some(&recorded.at),
-                    &classification.session_id,
-                ) {
-                    let body: MailboxEventBody = serde_json::from_str(&recorded.body_json)
-                        .context("decode the recorded GitHub lifecycle event")?;
-                    let key = interested_event_key(&recorded.key, &classification.session_id);
-                    let json = github_mailbox_event_json(
-                        &key,
-                        interested_lifecycle_body(body),
-                        false,
-                        &recorded.at,
-                    )?;
-                    enqueued_lifecycle =
-                        enqueue_github_event(&tx, &key, &classification.session_id, &json, false)?;
-                }
+                let body: MailboxEventBody = serde_json::from_str(&recorded.body_json)
+                    .context("decode the recorded GitHub lifecycle event")?;
+                let key = interested_event_key(&recorded.key, &classification.session_id);
+                let json = github_mailbox_event_json(
+                    &key,
+                    interested_lifecycle_body(body),
+                    false,
+                    &recorded.at,
+                )?;
+                enqueued_lifecycle =
+                    enqueue_github_event(&tx, &key, &classification.session_id, &json, false)?;
             }
         }
         tx.commit()?;
@@ -397,7 +384,7 @@ pub(crate) fn load_github_watches(owner: &str, repo: &str) -> Result<Vec<GithubI
     let mut statement = connection.prepare(
         "SELECT w.owner, w.repo, w.number, w.creator_session_id, w.kind, w.title, w.url, w.created_at,
                 w.timeline_at, w.timeline_id, w.review_comments_at, w.review_comments_id, w.processed_at, s.updated_at,
-                w.lifecycle_event_key, w.lifecycle_event_json, w.lifecycle_author, w.lifecycle_at
+                w.lifecycle_event_key, w.lifecycle_event_json, w.lifecycle_at
          FROM github_watch_items w LEFT JOIN github_seen_items s
            ON w.owner=s.owner AND w.repo=s.repo AND w.number=s.number
          WHERE w.owner=?1 AND w.repo=?2 ORDER BY w.number",
@@ -419,12 +406,7 @@ pub(crate) fn load_github_watches(owner: &str, repo: &str) -> Result<Vec<GithubI
                 review_comments_id: row.get(11)?,
                 processed_at: row.get(12)?,
                 recorded_updated_at: row.get(13)?,
-                lifecycle: recorded_lifecycle(
-                    row.get(14)?,
-                    row.get(15)?,
-                    row.get(16)?,
-                    row.get(17)?,
-                ),
+                lifecycle: recorded_lifecycle(row.get(14)?, row.get(15)?, row.get(16)?),
             })
         })?
         .map(|row| row.map_err(Into::into))
@@ -436,13 +418,11 @@ pub(crate) fn load_github_watches(owner: &str, repo: &str) -> Result<Vec<GithubI
 fn recorded_lifecycle(
     key: Option<String>,
     body_json: Option<String>,
-    author: Option<String>,
     at: Option<String>,
 ) -> Option<RecordedLifecycle> {
     Some(RecordedLifecycle {
         key: key?,
         body_json: body_json?,
-        author,
         at: at?,
     })
 }
@@ -667,16 +647,8 @@ pub(crate) fn commit_github_timeline(
                     continue;
                 }
                 for session in interested.iter().filter(|s| Some(*s) != creator.as_ref()) {
-                    if authored_during_session_turn(
-                        &tx,
-                        &mut windows,
-                        credential_login.as_deref(),
-                        event.author.as_deref(),
-                        Some(&event.timestamp),
-                        session,
-                    ) {
-                        continue;
-                    }
+                    // No own-activity filter for interested sessions; see
+                    // `commit_github_item_classification`.
                     let key = interested_event_key(&event.key, session);
                     let json = github_mailbox_event_json(
                         &key,
@@ -701,16 +673,15 @@ pub(crate) fn commit_github_timeline(
             if let Some((_, event)) = latest {
                 tx.execute(
                     "UPDATE github_watch_items
-                     SET lifecycle_event_key=?4, lifecycle_event_json=?5, lifecycle_author=?6, lifecycle_at=?7
+                     SET lifecycle_event_key=?4, lifecycle_event_json=?5, lifecycle_at=?6
                      WHERE owner=?1 AND repo=?2 AND number=?3
-                       AND (lifecycle_at IS NULL OR julianday(lifecycle_at) <= julianday(?7))",
+                       AND (lifecycle_at IS NULL OR julianday(lifecycle_at) <= julianday(?6))",
                     params![
                         watch.owner,
                         watch.repo,
                         watch.number,
                         event.key,
                         serde_json::to_string(&event.body)?,
-                        event.author,
                         event.timestamp
                     ],
                 )?;

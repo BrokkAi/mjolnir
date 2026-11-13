@@ -695,7 +695,6 @@ async fn classify_for_session(
         created_at: item.created_at,
         interested,
         created,
-        credential_login: credential_login.map(str::to_owned),
     };
     blocking_db(move || {
         crate::database::commit_github_item_classification(classification, event).map(|_| ())
@@ -1994,7 +1993,6 @@ mod tests {
             created_at: created_at.into(),
             interested: true,
             created: true,
-            credential_login: None,
         }
     }
 
@@ -2809,6 +2807,7 @@ mod tests {
             ],
             "same-account actions in the creator turn, including a close mapped as merged, are suppressed; outside-turn and other-account actions are delivered"
         );
+        // Hard-won: review ce48727a1: an interested session lost its merge notice when another session sharing the GitHub account merged during its turn.
         assert_eq!(
             rows_for("follower"),
             vec![
@@ -2818,10 +2817,11 @@ mod tests {
                     "github:acme/repo#23:reopened:2301:follower".to_owned(),
                     false
                 ),
+                ("github:acme/repo#24:closed:2401:follower".to_owned(), false),
                 ("github:acme/repo#25:closed:2501:follower".to_owned(), false),
                 ("github:acme/repo#26:merged:2601:follower".to_owned(), false),
             ],
-            "an interested session gets lifecycle events only, queued, minus its own action at 10 s during its own turn, which the creator still gets"
+            "an interested session gets lifecycle events only, queued, including shared-account activity during its own turn"
         );
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
@@ -3037,11 +3037,10 @@ mod tests {
             (start + chrono::Duration::seconds(1000)).timestamp_millis(),
         )
         .unwrap();
-        let interested = |number, session: &str, login: Option<&str>| {
+        let interested = |number, session: &str| {
             let mut classification = watch_classification(number, &at(1));
             classification.session_id = session.into();
             classification.created = false;
-            classification.credential_login = login.map(str::to_owned);
             classification
         };
         let merged = |number: i64, id: i64| crate::database::MappedGithubEvent {
@@ -3099,7 +3098,7 @@ mod tests {
         )
         .unwrap();
         crate::database::commit_github_item_classification(
-            interested(41, "late", Some("watcher-bot")),
+            interested(41, "late"),
             Some((
                 "github:acme/repo#41:interest:late".into(),
                 serde_json::to_string(&MailboxEvent {
@@ -3131,11 +3130,8 @@ mod tests {
         // The classification lands between the poll's fetch and its commit,
         // which is built from the snapshot taken before it.
         let snapshot = load(42);
-        crate::database::commit_github_item_classification(
-            interested(42, "between", Some("watcher-bot")),
-            None,
-        )
-        .unwrap();
+        crate::database::commit_github_item_classification(interested(42, "between"), None)
+            .unwrap();
         crate::database::commit_github_timeline(
             snapshot,
             progress(),
@@ -3143,7 +3139,9 @@ mod tests {
             Some("watcher-bot".into()),
         )
         .unwrap();
-        // The session that merged it itself, in its own turn, is not told.
+        // A session working in the shared account when the PR merged is still
+        // told when it is classified later: an overlapping turn does not show
+        // that it made the merge.
         crate::database::commit_github_timeline(
             load(43),
             progress(),
@@ -3151,17 +3149,13 @@ mod tests {
             Some("watcher-bot".into()),
         )
         .unwrap();
-        crate::database::commit_github_item_classification(
-            interested(43, "own", Some("watcher-bot")),
-            None,
-        )
-        .unwrap();
+        // Hard-won: review ce48727a1: a late-classified session mid-turn in the shared account lost the recorded merge.
+        crate::database::commit_github_item_classification(interested(43, "own"), None).unwrap();
 
         // A watch kept for interested sessions gains its creator while a poll,
         // which did not read review comments for it, is in flight: that poll
         // must not record progress past the comments the creator is owed.
-        crate::database::commit_github_item_classification(interested(44, "late", None), None)
-            .unwrap();
+        crate::database::commit_github_item_classification(interested(44, "late"), None).unwrap();
         let snapshot = load(44);
         assert_eq!(snapshot.creator_session_id, None);
         crate::database::commit_github_item_classification(watch_classification(44, &at(1)), None)
@@ -3173,8 +3167,7 @@ mod tests {
 
         // The creator attaches after a poll already committed progress read
         // without it: the creator is owed everything since the item's creation.
-        crate::database::commit_github_item_classification(interested(45, "late", None), None)
-            .unwrap();
+        crate::database::commit_github_item_classification(interested(45, "late"), None).unwrap();
         crate::database::commit_github_timeline(load(45), progress(), vec![], None).unwrap();
         assert_eq!(load(45).processed_at, at(20));
         crate::database::commit_github_item_classification(watch_classification(45, &at(1)), None)
@@ -3196,8 +3189,7 @@ mod tests {
         let mut first = watch_classification(46, &at(1));
         first.session_id = "gone".into();
         crate::database::commit_github_item_classification(first, None).unwrap();
-        crate::database::commit_github_item_classification(interested(46, "late", None), None)
-            .unwrap();
+        crate::database::commit_github_item_classification(interested(46, "late"), None).unwrap();
         let snapshot = load(46);
         crate::database::delete_session("gone").unwrap();
         let mut replacement = watch_classification(46, &at(1));
@@ -3213,8 +3205,7 @@ mod tests {
         // A creator attached after a poll's progress was recorded and was then
         // destroyed: the watch has no creator again, but its cursors were
         // rewound, and a poll built before the rewind must not undo that.
-        crate::database::commit_github_item_classification(interested(47, "late", None), None)
-            .unwrap();
+        crate::database::commit_github_item_classification(interested(47, "late"), None).unwrap();
         crate::database::commit_github_timeline(load(47), progress(), vec![], None).unwrap();
         let snapshot = load(47);
         assert_eq!(snapshot.processed_at, at(20));
@@ -3247,7 +3238,7 @@ mod tests {
             keys_for("between"),
             vec!["github:acme/repo#42:merged:4201:between"]
         );
-        assert_eq!(keys_for("own"), Vec::<String>::new());
+        assert_eq!(keys_for("own"), vec!["github:acme/repo#43:merged:4301:own"]);
         assert_eq!(
             keys_for("creator"),
             vec![

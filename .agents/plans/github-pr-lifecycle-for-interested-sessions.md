@@ -38,7 +38,7 @@ It is enabled by default, with no setting. You can see it working by opening a P
 - Observation: SQLite refuses `ALTER TABLE ... RENAME` while a trigger on another table names a table that no longer exists. The migration therefore drops the two `sessions` triggers before rebuilding `github_watch_items` and recreates them afterwards.
 - Observation: a creator-less watch has no creator whose destruction removes it, so without a rule it would be polled for ever once its last interested session was destroyed.- Observation: a creator can attach to a creator-less watch (its classification arrives after an interested session's) while a poll that skipped the review-comment read for that watch is in flight. Recording that poll's progress would skip the comments the creator is owed.
   Evidence: `commit_github_timeline` reads the creator from the row; the test `an_interested_session_is_told_of_a_merge_in_any_commit_order` covers it. The commit now leaves progress unrecorded in that case, so the next poll redoes the read; outbox keys make the repeat harmless.
-- Observation: the classification commit needs the credential login for the own-activity filter on the recorded event, so `GithubItemClassification` gained `credential_login`.
+- Observation: the creator's own-activity filter has the same imprecision: a creator mid-turn is not told when another session sharing the account merges its PR. This is pre-existing and remains out of scope; the creator's filter is unchanged.
 
 ## Decision Log
 
@@ -202,7 +202,7 @@ Golden files are regenerated with the repository's usual golden update procedure
 
 These tests must fail before the change and pass after it:
 
-1. Extend `watcher_filters_lifecycle_activity_by_actor_and_creator_turn` with an interested session for the same item. The outbox must hold the creator's rows unchanged (same keys, `wake=1`). It must also hold one row per lifecycle event for the interested session, with key `…:{session}`, `wake=0` and `"recipient":"interested"`, and no comment or review rows for it. The interested session's own merge made during its own turn must be filtered for it but still delivered to the creator.
+1. Extend `watcher_filters_lifecycle_activity_by_actor_and_creator_turn` with an interested session for the same item. The outbox must hold the creator's rows unchanged (same keys, `wake=1`). It must also hold one row per lifecycle event for the interested session, with key `…:{session}`, `wake=0` and `"recipient":"interested"`, including shared-account activity during its own turn, and no comment or review rows for it.
 2. Extend `watcher_reports_a_close_at_the_merge_time_as_a_merge` with a `mergemarshall[bot]` batch PR that has no creator and two interested sessions. After a `closed` entry at the `merged_at` time, both receive one `merged` row each. No `pulls/{n}/comments` request is made for that item; assert this on the fake server's request log.
 3. A tricky-condition test, `an_interested_session_is_told_of_a_merge_in_any_commit_order`. It carries no Hard-won marker, because AGENTS.md keeps that marker for defects found after the code was believed done, and this race was handled in the design. Commit a timeline poll that merges the PR, then commit a classification for a new interested session. The new session must receive exactly one `merged` row, with the recorded key. Run the reverse order too: classification committed between the poll's network fetch and its commit. That session must also receive exactly one row.
 4. A migration test, beside `github_timeline_migration_resets_progress_and_keeps_watches`. Build an isolated store at the previous revision with watch rows, triggers and outbox rows, then migrate it. Rows and creators must be preserved, the new columns must be NULL, `minimum_compatible_version` must equal the new revision, and a check from the previous revision must refuse the store. Extend `rows_of_a_gone_session_cannot_outlive_it`: destroying a creator that has interested sessions leaves the watch with a NULL creator; destroying one with no interested sessions deletes it.
@@ -272,3 +272,8 @@ No new crates or dependencies.
 Revision note (2026-11-13): first version, written after the code map. Jonathan then approved the breaking migration, and the Decision Log records it. After master moved (schema 129, relay protocol 64), the plan uses the next numbers, 130 and 65, and says to take them at merge time.
 
 Revision note (2026-11-13, integration): the plan asked for a Hard-won marker on the commit-order test. That contradicts AGENTS.md, which keeps the marker for defects found after code was believed done, so the marker was removed.
+
+
+- Decision: interested sessions have no own-activity filter; always enqueue lifecycle events for them.
+  Rationale: a shared GitHub login and overlapping turn cannot establish which session performed the action. A queued echo costs one line, while a false skip permanently loses the merge notice this feature exists to deliver. The creator's existing filter remains unchanged.
+  Date/Author: 2026-11-13, parent agent.

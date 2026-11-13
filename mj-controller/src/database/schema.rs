@@ -2567,7 +2567,6 @@ fn migrate_github_watch_followers(connection: &Connection) -> Result<()> {
              processed_at TEXT NOT NULL DEFAULT '',
              lifecycle_event_key TEXT,
              lifecycle_event_json TEXT CHECK(lifecycle_event_json IS NULL OR json_valid(lifecycle_event_json)),
-             lifecycle_author TEXT,
              lifecycle_at TEXT,
              PRIMARY KEY(owner, repo, number)
          ) STRICT;
@@ -4231,20 +4230,15 @@ mod reader_tests {
         assert!(state.ensure_supported_by(84).is_err());
         // Revision 130 rebuilt the table: the watch kept its creator and
         // cursors, and the recorded lifecycle event starts empty.
-        let lifecycle: (
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        ) = writer
+        let lifecycle: (Option<String>, Option<String>, Option<String>) = writer
             .query_row(
-                "SELECT lifecycle_event_key, lifecycle_event_json, lifecycle_author, lifecycle_at
+                "SELECT lifecycle_event_key, lifecycle_event_json, lifecycle_at
                  FROM github_watch_items",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
-        assert_eq!(lifecycle, (None, None, None, None));
+        assert_eq!(lifecycle, (None, None, None));
     }
 
     /// Revision 130 is breaking. Build a store at revision 129 with a watch, its
