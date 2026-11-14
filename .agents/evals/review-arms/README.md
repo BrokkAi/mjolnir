@@ -257,6 +257,40 @@ Results (`results/stage3/`):
   + 2× Terra (9.0 for 3× Terra, 11.3 for Sol/high + 2× Terra). Only 12
   Hard-won diffs have a matching group, so these differences are small.
 
+## Missing-fact labels (for a static-analysis hypothesis)
+
+Jonathan asked, on 2026-11-14, for the one fact each defect's reviewer needed
+that was not in the diff, labeled by kind, to test whether a static analysis
+tool can improve review.
+
+- Items (`label_facts.py build`): the 30 Hard-won diffs with their known
+  defect, and the 31 sampled diffs that have a confirmed problem in `verify3`,
+  each with its most severe one. The 9 sampled diffs with no confirmed
+  problem were left out at his request.
+- Labeling (`label/SPEC.md`, `label/workflow.js`): a Claude Code workflow of
+  13 Opus/high agents, one per batch of 5, working in this repository. Each
+  item gets a defect check, the fact with `file:line` at the intro commit, its
+  kind (affected callers, path, value flow, or none with a reason: in_diff,
+  intent or external), a second kind when two fit, and the tool query that
+  would have produced the fact. 1.13M tokens, 4.7 minutes.
+- `results/missing-facts.jsonl` (`label_facts.py collect`). All 61 defects
+  were confirmed at their intro commit.
+
+  | Kind | Hard-won | Sampled | All |
+  |---|---:|---:|---:|
+  | affected callers | 3 | 8 | 11 |
+  | path | 6 | 6 | 12 |
+  | value flow | 9 | 7 | 16 |
+  | none: in the diff | 5 | 6 | 11 |
+  | none: outside the repository | 7 | 4 | 11 |
+  | none: intent | 0 | 0 | 0 |
+
+- 39 of 61 (64%) need a repository fact a code-analysis tool could supply.
+  45 of the 61 labels name a second kind (path/value flow 13, callers/value
+  flow 10, callers/path 8; 14 pair a tool kind with none), so the split among
+  the three tool kinds is less certain than the tool versus none split. Each label is a single Opus judgment; agreement between
+  labelers has not been measured.
+
 ## Running
 
 The scripts read the corpus from this directory and keep everything else
