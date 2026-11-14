@@ -759,7 +759,7 @@ fn ensure_client_session_state_schema(connection: &Connection) -> Result<()> {
 
 /// Per-session container size overrides. They are additive columns, so
 /// databases written before the dashboard could edit them open unchanged.
-fn ensure_session_container_override_columns(connection: &Connection) -> Result<()> {
+pub(super) fn ensure_session_container_override_columns(connection: &Connection) -> Result<()> {
     for column in ["container_cpus", "container_memory"] {
         if !table_has_column(connection, "sessions", column)? {
             connection.execute_batch(&format!(

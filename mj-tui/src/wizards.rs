@@ -4,7 +4,7 @@ mod projects;
 use projects::{ProjectPicker, ProjectTab};
 mod move_files;
 mod render;
-mod resources;
+pub(crate) mod resources;
 mod subagents;
 pub(crate) use picker::*;
 pub(crate) use render::*;
@@ -703,7 +703,7 @@ fn bundle_ids_by_recent_creation<'a>(
 
 fn target_label(target: &TargetTemplate) -> &'static str {
     match target {
-        TargetTemplate::LocalBare => "raw localhost",
+        TargetTemplate::LocalBare => "localhost",
         TargetTemplate::LocalPodman { .. } => "local Podman",
         TargetTemplate::LocalDocker { .. } => "local Docker",
         TargetTemplate::AppleContainer { .. } => "Apple container",

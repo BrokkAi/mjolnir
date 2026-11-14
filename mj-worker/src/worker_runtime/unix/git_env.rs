@@ -121,7 +121,7 @@ export PATH
 /// When `login` exists, the wrapper exports the controller's slopcop login
 /// from it on every invocation, so a login that credential sync replaces
 /// reaches the running session; otherwise the session's own environment and
-/// slopcop configuration apply, as on a raw localhost target.
+/// slopcop configuration apply, as on the localhost target.
 pub fn configure_slopcop_cli(root: &std::path::Path, login: &std::path::Path) -> Result<()> {
     let wrapper = GithubCliPaths::new(root).bin.join("slopcop");
     if std::fs::symlink_metadata(&wrapper).is_ok_and(|metadata| metadata.file_type().is_symlink()) {

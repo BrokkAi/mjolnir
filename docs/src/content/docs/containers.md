@@ -132,7 +132,9 @@ own path, so a refreshed login lands where the host keeps it. Set `runtime` to
 `podman` or `docker` to insist on one engine (with that runtime's image, or the
 release's agent-dev image when none is configured), or to `host` to never use a
 container. A check never downloads the image; the daemon downloads it in the
-background, and until then the check reports that it is waiting for it.
+background, and until then the check reports that it is waiting for it. The
+runtime's `pull_policy` governs that download too: with `never`, the daemon
+leaves the image to you, and a check that finds it missing says so.
 Claude Code on macOS always checks on the host, because its login lives in the
 Keychain.
 
@@ -423,7 +425,7 @@ syncs its active GitHub token into every live non-local session. That includes
 managed containers, EC2, SSH Podman, and raw SSH targets, and lets `gh` and
 HTTPS Git pushes work without copying SSH keys. The token never goes into a
 recovery archive. Raw SSH targets are therefore inside the token's trust
-boundary; raw localhost sessions are deliberately excluded. A slopcop login on
+boundary; localhost sessions are deliberately excluded. A slopcop login on
 that machine reaches the same sessions the same way, so an agent can run
 `slopcop` checks there without signing in again.
 

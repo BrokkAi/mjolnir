@@ -51,7 +51,7 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │  │ No message  │  codex-1                                                                           │                │
 │  │             │  Sub-agents Mjolnir                                                                │                │
 │                │  CPU        no CPU data yet                                                        │                │
-│                │  Container  4 CPUs · 8g memory                                                     │                │
+│                │  Container  4 CPUs · 8 GiB memory                                                  │                │
 │                │                                                                                    │                │
 │                │  Content  ───────────────────────────────────────────────────────────────────────  │                │
 │                │  Changed files — The session's target is not running.                    ctrl+b d  │                │

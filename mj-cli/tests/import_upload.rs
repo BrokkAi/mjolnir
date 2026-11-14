@@ -23,6 +23,17 @@ fn run(command: &mut Command) -> String {
 fn cli_import_uploads_client_history_to_separate_daemon_store() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("client-home");
+    // The client home is reached through a symlink, as macOS reaches its
+    // temporary directories through /var -> /private/var: the recorded session
+    // and the configured project keep the linked spelling while Git reports
+    // the physical one, and the import must treat them as one place.
+    #[cfg(unix)]
+    {
+        let physical = root.path().join("client-home-physical");
+        fs::create_dir(&physical).unwrap();
+        // Hard-won: 9913663aa: the import refused its own project as outside the recorded root behind a symlink.
+        std::os::unix::fs::symlink(&physical, &home).unwrap();
+    }
     let client_data = root.path().join("client-data");
     let daemon_data = root.path().join("daemon-data");
     let daemon_config = root.path().join("daemon-config");
@@ -177,7 +188,11 @@ fn cli_import_uploads_client_history_to_separate_daemon_store() {
         Some(&source)
     );
     fs::create_dir_all(custom_home.join("sessions/2026/09/13")).unwrap();
-    let custom_native = custom_home.join("sessions/2026/09/13/rollout.jsonl");
+    // Joined by component, so it is spelled with this host's separator, as
+    // the import reports the path it found.
+    let custom_native = ["sessions", "2026", "09", "13", "rollout.jsonl"]
+        .iter()
+        .fold(custom_home.clone(), |path, part| path.join(part));
     fs::rename(&native, &custom_native).unwrap();
     fs::remove_dir_all(home.join(".codex")).unwrap();
     let output = run(command(&client_data, &client_config)

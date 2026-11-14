@@ -334,7 +334,7 @@ impl DashboardState {
         }
     }
 
-    pub(in crate::wizards) fn host_limits(&self, target_id: &str) -> Option<(u64, u64)> {
+    pub(crate) fn host_limits(&self, target_id: &str) -> Option<(u64, u64)> {
         self.capacity_details
             .values()
             .find(|detail| detail.target.target_ids.iter().any(|id| id == target_id))

@@ -302,6 +302,8 @@ The commands below run from any dashboard pane and from the composer, once the p
 | `prefix+z` | Zoom the conversation pane you are in, or put the others back |
 | `prefix+q` | Detach this terminal while the daemon and sessions continue |
 
+A stopped session whose failure needs you stays in Sessions until you resume it, dismiss the notification, or destroy it. `prefix+o` selects its row. Enter resumes it, and `.` opens its actions, which include **Dismiss notification** and **Destroy session**.
+
 `Esc` is not a detach key. It closes a dialog or, from the conversation, cancels the active agent turn or shell command. `prefix+shift+c` is different: it cancels a lifecycle operation such as launch or resume. Use `prefix+shift+x` or **Suspend session** in the command palette to save a recovery copy and release the environment. Suspension asks for confirmation when a turn is running or a sub-agent is still at work, because suspending stops its sub-agents. Restart, Move, Destroy session, container settings, and managing profiles or targets have no default key.
 
 Pressing the prefix twice sends the literal key through to whatever has focus instead of running a command. In the composer this is how you still reach `Ctrl-B`, backward-character: press `ctrl+b ctrl+b`.

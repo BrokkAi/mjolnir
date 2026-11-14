@@ -120,7 +120,8 @@ pub enum ExecutionPolicy {
     Unconstrained,
 }
 
-/// Approval behavior selected for a named raw SSH target.
+/// Approval behavior of a target that runs the harness directly on a machine:
+/// chosen for a named SSH machine, always `Guardian` on localhost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PermissionMode {
@@ -141,7 +142,7 @@ impl PermissionMode {
 }
 
 /// The Claude Code permission mode a Claude profile's sessions run in on
-/// targets that keep configured approvals (raw localhost, guardian SSH).
+/// targets that keep configured approvals (localhost, guardian SSH).
 /// Unconstrained targets always run Claude in bypassPermissions.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1310,7 +1311,7 @@ pub struct HarnessProfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub muse_auto_review: Option<bool>,
     /// The Claude Code permission mode this Claude profile's sessions run in
-    /// where the target keeps configured approvals (raw localhost, guardian
+    /// where the target keeps configured approvals (localhost, guardian
     /// SSH): `"auto"` (the default when absent) lets Claude's classifier
     /// decide each action, `"accept-edits"` runs file edits and asks for the
     /// rest, and `"manual"` asks for every action that needs permission.

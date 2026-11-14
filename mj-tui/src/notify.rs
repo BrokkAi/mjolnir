@@ -340,9 +340,21 @@ impl DashboardState {
             && !self.pane_session_is_suspended(session_id)
     }
 
-    /// Empties the pane that held a suspended session, instead of attaching
-    /// to a session with no worker, and says so. The host saves the layout.
+    /// Lets a pane go of a suspended session instead of attaching to a
+    /// session with no worker. The host cancels the attach and saves the
+    /// layout.
+    ///
+    /// Browse shows the selection, so it keeps a stopped row that is still
+    /// listed because its failure needs a person: emptying it would clear the
+    /// selection the row's keys act on. Any other suspended session has left
+    /// the list, and Browse just empties. A pinned pane empties and says so.
     pub fn release_suspended_pane(&mut self, pane: crate::tile_layout::PaneId, session_id: &str) {
+        if pane == self.browse_pane() {
+            if !self.stopped_notification_row(session_id) {
+                self.set_pane_session(pane, None);
+            }
+            return;
+        }
         self.set_pane_session(pane, None);
         let name = self.session_notice_name(session_id);
         self.say_suspended_session_was_unpinned(&name);

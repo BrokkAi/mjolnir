@@ -420,8 +420,6 @@ impl DashboardState {
             ));
         }
         let raw_project = is_bare_project_target(&self.config.targets[&target_template_id]);
-        let container_target =
-            mj_core::config::is_container_target(&self.config.targets[&target_template_id]);
         // The checkout, not the record's path, names the project: a managed
         // worktree's own path is the source's, and a sub-agent works in its
         // owner's checkout.
@@ -540,20 +538,12 @@ impl DashboardState {
                 source.additional_mounts.clone()
             },
             // A sub-agent runs in its owner's container, whose size lives on
-            // the owner's record: the child's own overrides are always empty.
+            // the owner's record.
             resource_allocation: chooser.resource_allocation.clone(),
             carried: crate::CarriedLaunchSettings {
                 no_project_memory: source.no_project_memory,
                 no_github_events: source.no_github_events,
                 no_github_credentials: source.no_github_credentials,
-                // Container targets only, as in the container editor; the
-                // runtime was checked above, so this is the target's kind.
-                container_cpus: container_target
-                    .then(|| chooser.container_cpus.clone())
-                    .flatten(),
-                container_memory: container_target
-                    .then(|| chooser.container_memory.clone())
-                    .flatten(),
                 note: (!changes.is_empty()).then(|| changes.join(" ")),
             },
         })

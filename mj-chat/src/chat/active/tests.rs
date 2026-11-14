@@ -857,8 +857,6 @@ fn context_session_record(id: &str, workspace_id: &str) -> SessionRecord {
         target_template_id: "podman".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),
-        container_cpus: None,
-        container_memory: None,
         state: mj_core::state::SessionState::Running,
         archived: false,
         target: None,
