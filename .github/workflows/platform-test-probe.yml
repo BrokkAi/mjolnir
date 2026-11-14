@@ -1,0 +1,82 @@
+name: Platform test probe
+
+# Run chosen tests on a macOS or Windows runner on demand. Check-ins run CI on
+# Linux only, and the full platform lanes take about an hour, so this answers
+# "does this test pass there, and what does it do" in minutes. A test that is
+# still running after `hang_seconds` gets its process table printed (process
+# group, terminal foreground group and state, where `ps` reports them) and is
+# stopped, so a hang leaves evidence instead of a lane timeout.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: Runner image
+        type: choice
+        options:
+        - macos-latest
+        - windows-latest
+        default: macos-latest
+      package:
+        description: Cargo package whose tests to run
+        required: true
+        default: brokk-mj-core
+      filter:
+        description: Test name filter, as passed to the test binary
+        required: true
+      hang_seconds:
+        description: Seconds before a still-running test is inspected and stopped
+        required: true
+        default: '120'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: ${{ inputs.package }} on ${{ inputs.runner }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 45
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        persist-credentials: false
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@1.99.1
+
+    - uses: ./.github/actions/cache-rust
+      with:
+        lane: platform-test-probe
+        build-paths: target/debug
+
+    - name: Build the tests
+      shell: bash
+      env:
+        PACKAGE: ${{ inputs.package }}
+      run: cargo test --locked -p "$PACKAGE" --no-run
+
+    - name: Run the tests
+      shell: bash
+      env:
+        PACKAGE: ${{ inputs.package }}
+        FILTER: ${{ inputs.filter }}
+        HANG_SECONDS: ${{ inputs.hang_seconds }}
+        RUST_BACKTRACE: '1'
+      run: |
+        cargo test --locked -p "$PACKAGE" -- "$FILTER" --nocapture &
+        tests=$!
+        for _ in $(seq "$HANG_SECONDS"); do
+          if ! kill -0 "$tests" 2>/dev/null; then
+            wait "$tests"
+            exit $?
+          fi
+          sleep 1
+        done
+        echo "::error::the tests were still running after ${HANG_SECONDS}s"
+        ps -axo pid,ppid,pgid,tpgid,stat,tty,command 2>/dev/null \
+          | awk 'NR == 1 || /\/deps\/|\/bin\/sh|head -c|cargo test/' \
+          || ps -ef
+        pkill -9 -f '/deps/' 2>/dev/null || true
+        kill "$tests" 2>/dev/null || true
+        exit 1
