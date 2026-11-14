@@ -429,7 +429,10 @@ impl ProfileCatalog {
         snapshot
     }
 
-    /// Adoption updates which profiles are enabled without invalidating capability entries.
+    /// Adoption keeps ready capability entries. A definition whose identity
+    /// changed, or whose profile was enabled or disabled, is retired: its
+    /// supervisors stop, and the next claim builds a fresh owner that reuses
+    /// ready entries and retries failed ones.
     pub(crate) fn sync(self: &Arc<Self>, config: &Config) {
         let (changed, first) = {
             let mut inner = self.lock();
@@ -450,11 +453,9 @@ impl ProfileCatalog {
             if let Some(old) = &inner.live {
                 for (id, profile) in &old.profiles {
                     let identity = profile.capabilities_key(id);
-                    if config
-                        .named_profile(id)
-                        .ok()
-                        .is_none_or(|new| new.capabilities_key(id) != identity)
-                        && let Some(definition) = inner.definitions.get(&identity)
+                    if config.named_profile(id).ok().is_none_or(|new| {
+                        new.capabilities_key(id) != identity || new.enabled != profile.enabled
+                    }) && let Some(definition) = inner.definitions.get(&identity)
                     {
                         definition.cancellation.cancel();
                     }
@@ -3588,6 +3589,34 @@ mod tests {
             .fetch_settled(&config, "parent", None)
             .await
             .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    // Hard-won: a5eb2adae: re-enabling a profile kept its failed entry with no supervisor to retry it.
+    #[tokio::test(start_paused = true)]
+    async fn re_enabling_a_profile_retries_its_failed_discovery() {
+        let calls = calls();
+        let failing = Arc::new(AtomicBool::new(true));
+        let catalog = ProfileCatalog::with_probe(flag_probe(failing.clone(), calls.clone()));
+        let mut config = test_config(&[("parent", HarnessKind::Codex)]);
+        config.profiles.get_mut("parent").unwrap().enabled = false;
+        catalog.sync_now(&config).await;
+        assert!(
+            catalog
+                .fetch_settled(&config, "parent", None)
+                .await
+                .is_err()
+        );
+        tokio::time::advance(Duration::from_secs(600)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        failing.store(false, Ordering::SeqCst);
+        config.profiles.get_mut("parent").unwrap().enabled = true;
+        catalog.sync_now(&config).await;
+        catalog.capabilities(&["parent".into()]).await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
