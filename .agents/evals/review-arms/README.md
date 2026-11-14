@@ -291,6 +291,24 @@ tool can improve review.
   the three tool kinds is less certain than the tool versus none split. Each label is a single Opus judgment; agreement between
   labelers has not been measured.
 
+Second pass on the 11 labeled "none: in the diff" (`label/SPEC-pass2.md`,
+`label/workflow-pass2.js`, `results/missing-facts-pass2.jsonl`). These
+defects were visible yet committed, so Jonathan asked again what fact a
+static analysis tool could have stated explicitly. One Opus/high agent per
+item also wrote the tool's output and rated how specific it would be.
+
+- 10 of 11 get a tool-statable fact: value flow 7, path 2, affected
+  callers 1. Specificity: high 3 (a focus handler hiding its focused button;
+  a new field whose only read is an emptiness check; `unused_mut` under the
+  Windows cfg that CI lints), medium 7. The one `none` is
+  `palette-scattered-match-beats-literal`, a scoring-weight error (`logic`).
+- Combined with the first pass, 49 of 61 defects have a fact a tool could
+  surface; 11 depend on behavior outside the repository and 1 on logic.
+- The second-pass question asks for a fact to surface, which invites an
+  answer; several outputs assume a tool that joins facts across files and
+  languages, and medium-specificity outputs still need the reviewer to judge
+  intent.
+
 ## Running
 
 The scripts read the corpus from this directory and keep everything else
