@@ -223,8 +223,11 @@ impl DashboardState {
         if self.pane_menu.is_some() {
             return self.handle_pane_menu_event(Event::Mouse(mouse));
         }
+        // An open away dialog owns the pointer, so no background menu opens
+        // under it.
         if mouse.kind == MouseEventKind::Down(MouseButton::Right)
             && matches!(self.mode, Mode::Dashboard)
+            && self.away_dialog().is_none()
         {
             // A right-clicked profile row offers its load-balancing menu.
             let quota_hit = self

@@ -307,36 +307,43 @@ pub(crate) async fn apply_dashboard_action(
             );
         }
         DashboardAction::DismissNotifications { dismissals } => {
-            // One supervised job sends every dismissal at once and reports
-            // all results together; a timeout fails the ones still pending.
-            let submitted = dismissals.clone();
-            spawn_async_job(
-                Some(context.critical_operations.clone()),
-                "notification dismissals",
-                context.dashboard_io_tx.clone(),
-                std::time::Duration::from_secs(30),
-                async move {
-                    Ok(futures::future::join_all(dismissals.into_iter().map(
-                        |(session_id, target)| async move {
-                            let result =
-                                request_notification_dismissal(session_id.clone(), target.clone())
-                                    .await
-                                    .map_err(|error| format!("{error:#}"));
-                            (session_id, target, result)
-                        },
-                    ))
-                    .await)
-                },
-                move |result| DashboardIoUpdate::NotificationsDismissed {
-                    results: match result {
-                        Ok(results) => results,
-                        Err(error) => submitted
-                            .into_iter()
-                            .map(|(session_id, target)| (session_id, target, Err(error.clone())))
-                            .collect(),
+            // Every dismissal is sent at once with its own deadline, so a slow
+            // session cannot discard the others' results; all come back in
+            // one update.
+            let guard = context.critical_operations.begin("notification dismissals");
+            let updates = context.dashboard_io_tx.clone();
+            tokio::spawn(async move {
+                let results = futures::future::join_all(dismissals.into_iter().map(
+                    |(session_id, target)| async move {
+                        let deadline = std::time::Duration::from_secs(30);
+                        let result = match tokio::time::timeout(
+                            deadline,
+                            request_notification_dismissal(session_id.clone(), target.clone()),
+                        )
+                        .await
+                        {
+                            Ok(result) => result.map_err(|error| format!("{error:#}")),
+                            Err(_) => Err(format!(
+                                "the daemon did not acknowledge the dismissal within {} seconds; it may still complete",
+                                deadline.as_secs()
+                            )),
+                        };
+                        (session_id, target, result)
                     },
-                },
-            );
+                ))
+                .await;
+                for (session_id, _, result) in &results {
+                    if let Err(error) = result {
+                        tracing::error!(session_id, %error, "notification dismissal was not confirmed");
+                    }
+                }
+                if let Err(error) =
+                    updates.send(DashboardIoUpdate::NotificationsDismissed { results })
+                {
+                    tracing::warn!(%error, "notification dismissal results receiver closed");
+                }
+                drop(guard);
+            });
         }
         DashboardAction::InterruptAll { targets } => {
             let updates = context.dashboard_io_tx.clone();
