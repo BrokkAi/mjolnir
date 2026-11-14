@@ -1412,10 +1412,24 @@ fn in_place_eligibility_requires_same_target_mounts_and_allocation() {
     let mut stopped = source.clone();
     stopped.state = SessionState::Stopped;
     assert!(!super::move_in_place_for_record(&stopped, &baseline, &targets, false, None).unwrap());
-    let mut disconnected = source;
+    let mut disconnected = source.clone();
     disconnected.state = SessionState::Disconnected;
     assert!(
         super::move_in_place_for_record(&disconnected, &baseline, &targets, false, None).unwrap()
+    );
+
+    // A cross-target Move that began admitting its queue already runs on the
+    // destination, which matches the selection exactly. Its retry keeps the
+    // decision it carried out instead of calling the destination in place.
+    let mut admitting = source_recovery_operation(&source);
+    admitting.source_target_template_id = "ssh-bare".into();
+    admitting.selection = baseline.clone();
+    admitting.phase = MovePhase::Failed;
+    admitting.queue_admission_started = true;
+    // Hard-won: 2333717a3: a cross-target Move that began admitting its queue could no longer be retried
+    assert!(
+        !super::move_in_place_for_record(&source, &baseline, &targets, false, Some(&admitting))
+            .unwrap()
     );
 }
 

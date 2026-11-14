@@ -2859,6 +2859,15 @@ pub(crate) fn move_in_place_for_record(
     is_subagent: bool,
     previous: Option<&MoveOperation>,
 ) -> Result<bool> {
+    // A Move that began admitting queued work has already carried out its
+    // environment decision: the session now runs on the destination, and a
+    // retry only finishes that admission. Comparing the destination with
+    // itself would call every such Move in place.
+    if let Some(operation) = previous.filter(|operation| {
+        operation.queue_admission_started && !operation.queue_admission_finished
+    }) {
+        return Ok(operation.in_place);
+    }
     let obstacle = move_environment_obstacle(source, selection, targets, is_subagent);
     if matches!(
         source.state,
