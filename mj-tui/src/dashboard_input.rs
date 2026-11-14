@@ -223,8 +223,11 @@ impl DashboardState {
         if self.pane_menu.is_some() {
             return self.handle_pane_menu_event(Event::Mouse(mouse));
         }
+        // An open away dialog owns the pointer, so no background menu opens
+        // under it.
         if mouse.kind == MouseEventKind::Down(MouseButton::Right)
             && matches!(self.mode, Mode::Dashboard)
+            && self.away_dialog().is_none()
         {
             // A right-clicked profile row offers its load-balancing menu.
             let quota_hit = self
@@ -235,6 +238,16 @@ impl DashboardState {
                 .map(|(id, _)| id.clone());
             if let Some(profile_id) = quota_hit {
                 self.begin_quota_row_menu(&profile_id, (mouse.column, mouse.row));
+                self.record_event_handled();
+                return DashboardAction::None;
+            }
+            if let Some(workspace_id) = self
+                .workspace_tab_areas
+                .iter()
+                .find(|(_, area)| area.contains((mouse.column, mouse.row).into()))
+                .map(|(workspace_id, _)| workspace_id.clone())
+            {
+                self.begin_workspace_row_menu(&workspace_id, (mouse.column, mouse.row));
                 self.record_event_handled();
                 return DashboardAction::None;
             }

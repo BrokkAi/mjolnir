@@ -602,6 +602,9 @@ pub enum DashboardAction {
         session_id: String,
         target: mj_core::attention::NotificationDismissal,
     },
+    DismissNotifications {
+        dismissals: Vec<(String, mj_core::attention::NotificationDismissal)>,
+    },
     /// Toggle whether the session raises bell, desktop, and push
     /// notifications.
     SetSessionNotificationsIgnored {
