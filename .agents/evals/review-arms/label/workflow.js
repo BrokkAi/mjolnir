@@ -3,7 +3,9 @@ export const meta = {
   description: 'Opus labels the one non-diff fact each review-arms defect needed, and its kind',
   phases: [{ title: 'Label', detail: 'one Opus/high labeler per batch of about 5 commits' }],
 }
-const DIR = '/mnt/optane/review-arms-20261113/label-facts'
+// args: {dir: '<REVIEW_ARMS_DIR>/label-facts', batches: [[item IDs of batch-0.json], ...]}
+const DIR = args.dir
+const ROOT = DIR.replace(/\/label-facts\/?$/, '')
 const NULLSTR = { type: ['string', 'null'] }
 const SCHEMA = {
   type: 'object',
@@ -35,10 +37,10 @@ const prompt = (n, ids) => `Read ${DIR}/SPEC.md and follow it exactly, with one 
 Your batch file: ${DIR}/batch-${n}.json
 ${ids ? `Label only these items from it: ${ids.join(', ')}.` : 'Label every item in it.'}
 
-Use the git repository in your current working directory (it has every commit named in the batch). Read only SPEC.md, your batch file, and that repository's history and code. Do not open .agents/evals/ or anything else under /mnt/optane/review-arms-20261113: other files there hold other labels and model results. Do not build, run tests, or edit files.`
+Use the git repository in your current working directory (it has every commit named in the batch). Read only SPEC.md, your batch file, and that repository's history and code. Do not open .agents/evals/ or anything else under ${ROOT}: other files there hold other labels and model results. Do not build, run tests, or edit files.`
 
 phase('Label')
-const results = await parallel(args.map((ids, n) => async () => {
+const results = await parallel(args.batches.map((ids, n) => async () => {
   const opts = { label: `batch ${n}`, phase: 'Label', schema: SCHEMA, model: 'opus', effort: 'high' }
   const first = await agent(prompt(n), opts)
   const got = new Map((first?.labels || []).filter(l => ids.includes(l.id)).map(l => [l.id, l]))
@@ -51,5 +53,5 @@ const results = await parallel(args.map((ids, n) => async () => {
   return { batch: n, labels: ids.map(id => got.get(id)).filter(Boolean), missing: ids.filter(id => !got.has(id)) }
 }))
 const labels = results.filter(Boolean).flatMap(r => r.labels)
-const missing = args.flat().filter(id => !labels.some(l => l.id === id))
+const missing = args.batches.flat().filter(id => !labels.some(l => l.id === id))
 return { labels, missing }

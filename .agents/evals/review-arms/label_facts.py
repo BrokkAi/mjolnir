@@ -2,7 +2,8 @@
 
 Usage:
   python3 label_facts.py build [--verify verify3] [--batch-size 5]
-  (run label/workflow.js with the Workflow tool, args = item IDs per batch; save its result as
+  (run label/workflow.js with the Workflow tool, args = {"dir": "$REVIEW_ARMS_DIR/label-facts",
+   "batches": item IDs of each batch-N.json in order}; save its result as
    $REVIEW_ARMS_DIR/label-facts/workflow-out.json)
   python3 label_facts.py collect   # writes results/missing-facts.jsonl and a summary
 
