@@ -132,7 +132,9 @@ own path, so a refreshed login lands where the host keeps it. Set `runtime` to
 `podman` or `docker` to insist on one engine (with that runtime's image, or the
 release's agent-dev image when none is configured), or to `host` to never use a
 container. A check never downloads the image; the daemon downloads it in the
-background, and until then the check reports that it is waiting for it.
+background, and until then the check reports that it is waiting for it. The
+runtime's `pull_policy` governs that download too: with `never`, the daemon
+leaves the image to you, and a check that finds it missing says so.
 Claude Code on macOS always checks on the host, because its login lives in the
 Keychain.
 

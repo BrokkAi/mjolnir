@@ -372,11 +372,12 @@ async fn prepare<'a>(
     }
     if client.is_none() {
         if let CodexLauncher::Container(check) = launcher {
-            check
-                .runtime
-                .ensure_image_async()
-                .await
-                .map_err(|error| QueryError::ImageUnavailable(format!("{error:#}")))?;
+            check.runtime.ensure_image_async().await.map_err(|error| {
+                QueryError::ImageUnavailable {
+                    detail: format!("{error:#}"),
+                    downloading: check.runtime.image_refresh().is_some(),
+                }
+            })?;
         }
         *client = Some(CodexUsageClient::spawn(cwd, env, launcher).await?);
     }
@@ -724,8 +725,13 @@ enum QueryError {
     // constructs it.
     #[cfg_attr(not(unix), allow(dead_code))]
     Launch(String),
-    /// The container engine does not hold the agent-dev image yet.
-    ImageUnavailable(String),
+    /// The container engine does not hold the agent-dev image yet;
+    /// `downloading` says whether the runtime's pull policy lets the daemon
+    /// download it.
+    ImageUnavailable {
+        detail: String,
+        downloading: bool,
+    },
     NotSignedIn,
     UnsupportedAccount,
     Unsupported,
@@ -767,8 +773,15 @@ impl QueryError {
                 "Codex quota probing is unavailable because managed Codex installations require Unix"
             }
             Self::Launch(_) => "could not start Codex CLI",
-            Self::ImageUnavailable(_) => {
+            Self::ImageUnavailable {
+                downloading: true, ..
+            } => {
                 "the agent-dev image is not downloaded yet; Mjolnir downloads it in the background"
+            }
+            Self::ImageUnavailable {
+                downloading: false, ..
+            } => {
+                "the agent-dev image is not downloaded, and its runtime's pull policy is never, so Mjolnir does not download it"
             }
             Self::NotSignedIn => "not signed in with ChatGPT",
             Self::UnsupportedAccount => {
@@ -785,7 +798,7 @@ impl std::fmt::Display for QueryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Launch(detail) => write!(f, "could not start Codex CLI: {detail}"),
-            Self::ImageUnavailable(detail) => f.write_str(detail),
+            Self::ImageUnavailable { detail, .. } => f.write_str(detail),
             Self::Protocol(kind) => write!(f, "Codex app-server protocol error ({kind:?})"),
             Self::NotInstalled { expected, detail } => {
                 f.write_str(self.user_reason())?;
@@ -1697,6 +1710,7 @@ IFS= read -r line
                 engine: crate::quota_runtime::Engine::Podman,
                 program: engine,
                 image: "example.invalid/agent-dev:test".to_owned(),
+                pull_policy: mj_core::config::ImagePullPolicy::Auto,
             },
             home: temp.path().join("codex-home"),
         };

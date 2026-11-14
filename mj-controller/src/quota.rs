@@ -69,12 +69,20 @@ pub struct QuotaRuntimeConfig {
     pub choice: QuotaRuntimeChoice,
     /// The image of the enabled local Podman runtime, preferring one the
     /// person configured over a standard candidate.
-    pub podman_image: Option<String>,
+    pub podman_image: Option<RuntimeImage>,
     /// The same for Docker.
-    pub docker_image: Option<String>,
+    pub docker_image: Option<RuntimeImage>,
     /// Whether the daemon runs in its own container, whose image already
     /// carries every harness: checks then run beside it, whatever `choice` says.
     pub in_daemon_container: bool,
+}
+
+/// A local runtime's image, with that runtime's pull policy: the policy, not
+/// the quota check, decides whether the daemon downloads the image.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeImage {
+    pub image: String,
+    pub pull_policy: mj_core::config::ImagePullPolicy,
 }
 
 impl QuotaRuntimeConfig {
@@ -91,9 +99,10 @@ impl QuotaRuntimeConfig {
                 .collect::<Vec<_>>();
             // Configured runtimes first: `false` sorts before `true`.
             enabled.sort_by_key(|(standard, _)| *standard);
-            enabled
-                .first()
-                .map(|(_, container)| container.image.clone())
+            enabled.first().map(|(_, container)| RuntimeImage {
+                image: container.image.clone(),
+                pull_policy: container.pull_policy,
+            })
         };
         Self {
             choice: config.quota.runtime,
