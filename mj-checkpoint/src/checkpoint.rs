@@ -66,8 +66,6 @@ impl NativeCheckpointState for NoNativeCheckpointState {
     }
 }
 
-const MAX_NATIVE_FILE: u64 = 1024 * 1024 * 1024;
-const MAX_NATIVE_TOTAL: u64 = 8 * 1024 * 1024 * 1024;
 /// Version of the controller-to-exporter checkpoint specification contract.
 pub const CHECKPOINT_EXPORT_PROTOCOL_VERSION: u32 = 2;
 /// Version of the two-phase capture/pack contract used by ordinary checkpoints.

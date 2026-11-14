@@ -147,16 +147,6 @@ pub(super) fn collect_native_artifacts_cached(
         _ => !output.is_empty(),
     };
     ensure!(allow_empty || holds_conversation, NO_SESSION_ARTIFACTS);
-    let total = output
-        .iter()
-        .try_fold(0_u64, |total, artifact| {
-            total.checked_add(artifact.data.len() as u64)
-        })
-        .context("native artifact size overflow")?;
-    ensure!(
-        total <= MAX_NATIVE_TOTAL,
-        "native session artifacts are too large"
-    );
     Ok(output)
 }
 
@@ -205,14 +195,9 @@ pub fn collect_import_native_artifacts(
         "Codex rollout '{}' is not a regular file",
         source_path.display()
     );
-    ensure!(
-        metadata.len() <= MAX_NATIVE_FILE,
-        "Codex rollout is too large"
-    );
     Ok(vec![NativeArtifact {
         relative_path: relative.to_path_buf(),
-        data: fs::read(source_path)
-            .with_context(|| format!("read Codex rollout {}", source_path.display()))?,
+        data: mj_core::archive::NativeArtifactData::File(source_path.to_path_buf()),
         mode: file_mode(&metadata),
     }])
 }
@@ -255,16 +240,6 @@ pub(super) fn collect_muse_import_artifacts(
         !output.is_empty(),
         "Muse native session contains no durable artifacts"
     );
-    let total = output
-        .iter()
-        .try_fold(0u64, |total, artifact| {
-            total.checked_add(artifact.data.len() as u64)
-        })
-        .context("Muse native artifact size overflow")?;
-    ensure!(
-        total <= MAX_NATIVE_TOTAL,
-        "Muse native session artifacts are too large"
-    );
     for artifact in &mut output {
         artifact.relative_path = Path::new(".data/muse/sessions").join(&artifact.relative_path);
     }
@@ -288,10 +263,6 @@ pub(super) fn collect_kimi_registry_artifacts(
         !metadata.file_type().is_symlink() && metadata.is_file(),
         "Kimi workspace registry is not a regular file"
     );
-    ensure!(
-        metadata.len() <= MAX_NATIVE_FILE,
-        "Kimi workspace registry is too large"
-    );
     let workspaces: Value = serde_json::from_slice(&fs::read(&workspaces_path)?)
         .context("parse Kimi workspace registry")?;
     let workspace = workspaces
@@ -302,11 +273,12 @@ pub(super) fn collect_kimi_registry_artifacts(
     selected_workspaces.insert(source_workspace, workspace);
     output.push(NativeArtifact {
         relative_path: PathBuf::from("workspaces.json"),
-        data: serde_json::to_vec(&json!({
+        data: (serde_json::to_vec(&json!({
             "version": workspaces.get("version").cloned().unwrap_or(Value::Null),
             "deleted_workspace_ids": [],
             "workspaces": selected_workspaces,
-        }))?,
+        }))?)
+        .into(),
         mode: file_mode(&metadata),
     });
 
@@ -317,16 +289,13 @@ pub(super) fn collect_kimi_registry_artifacts(
         !metadata.file_type().is_symlink() && metadata.is_file(),
         "Kimi session index is not a regular file"
     );
-    ensure!(
-        metadata.len() <= MAX_NATIVE_FILE,
-        "Kimi session index is too large"
-    );
     let mut selected = Vec::new();
-    for (line_number, line) in fs::read_to_string(&index_path)?.lines().enumerate() {
+    for (line_number, line) in BufReader::new(File::open(&index_path)?).lines().enumerate() {
+        let line = line?;
         if line.trim().is_empty() {
             continue;
         }
-        let entry: Value = serde_json::from_str(line)
+        let entry: Value = serde_json::from_str(&line)
             .with_context(|| format!("parse Kimi session index line {}", line_number + 1))?;
         if entry.get("sessionId").and_then(Value::as_str) == Some(session_id) {
             serde_json::to_writer(&mut selected, &entry)?;
@@ -339,7 +308,7 @@ pub(super) fn collect_kimi_registry_artifacts(
     );
     output.push(NativeArtifact {
         relative_path: PathBuf::from("session_index.jsonl"),
-        data: selected,
+        data: (selected).into(),
         mode: file_mode(&metadata),
     });
     Ok(())
@@ -420,14 +389,10 @@ pub(super) fn collect_claude_memory_tree(
         return Ok(());
     }
     let relative = path.strip_prefix(home)?;
-    ensure!(
-        metadata.len() <= MAX_NATIVE_FILE,
-        "native artifact is too large"
-    );
     validate_relative_path(relative)?;
     output.push(NativeArtifact {
         relative_path: relative.to_path_buf(),
-        data: fs::read(path)?,
+        data: mj_core::archive::NativeArtifactData::File(path.to_path_buf()),
         mode: file_mode(&metadata),
     });
     Ok(())
@@ -490,19 +455,21 @@ pub(super) fn collect_native_tree(
     if !selected {
         return Ok(());
     }
-    ensure!(
-        metadata.len() <= MAX_NATIVE_FILE,
-        "native artifact is too large"
-    );
     validate_relative_path(relative)?;
-    let data = if is_sqlite_native_database(harness, relative) {
+    // SQLite snapshots use the backup API; their database representation stays in memory.
+    let database = is_sqlite_native_database(harness, relative);
+    let data = if database {
         sqlite_native_database_snapshot(harness, path)?
     } else {
-        fs::read(path)?
+        Vec::new()
     };
     output.push(NativeArtifact {
         relative_path: relative.to_path_buf(),
-        data,
+        data: if database {
+            data.into()
+        } else {
+            mj_core::archive::NativeArtifactData::File(path.to_path_buf())
+        },
         mode: file_mode(&metadata),
     });
     Ok(())

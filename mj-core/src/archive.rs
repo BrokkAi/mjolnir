@@ -491,8 +491,67 @@ pub struct ArchiveManifest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeArtifact {
     pub relative_path: PathBuf,
-    pub data: Vec<u8>,
+    pub data: NativeArtifactData,
     pub mode: u32,
+}
+
+/// One owner for native bytes: generated runtime state or a disk source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeArtifactData {
+    Bytes(Vec<u8>),
+    File(PathBuf),
+}
+
+impl From<Vec<u8>> for NativeArtifactData {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self::Bytes(bytes)
+    }
+}
+
+impl NativeArtifactData {
+    pub fn open_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = options.open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::other(
+                "native artifact is not a regular file",
+            ));
+        }
+        Ok(file)
+    }
+
+    /// Materialize a small provider record when its format requires rewriting.
+    /// Checkpoint capture and archive writing must use `NativeArtifact::reader`.
+    pub fn bytes(&self) -> std::io::Result<std::borrow::Cow<'_, [u8]>> {
+        match self {
+            Self::Bytes(bytes) => Ok(std::borrow::Cow::Borrowed(bytes)),
+            Self::File(path) => Ok(std::borrow::Cow::Owned(std::fs::read(path)?)),
+        }
+    }
+}
+
+impl NativeArtifact {
+    pub fn size(&self) -> std::io::Result<u64> {
+        match &self.data {
+            NativeArtifactData::File(path) => {
+                Ok(NativeArtifactData::open_file(path)?.metadata()?.len())
+            }
+            NativeArtifactData::Bytes(bytes) => Ok(bytes.len() as u64),
+        }
+    }
+
+    pub fn reader(&self) -> std::io::Result<Box<dyn std::io::Read + '_>> {
+        match &self.data {
+            NativeArtifactData::File(path) => Ok(Box::new(NativeArtifactData::open_file(path)?)),
+            NativeArtifactData::Bytes(bytes) => Ok(Box::new(std::io::Cursor::new(bytes))),
+        }
+    }
 }
 
 fn validate_canonical_session(snapshot: &CanonicalSessionSnapshot) -> Result<()> {

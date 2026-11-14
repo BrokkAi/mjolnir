@@ -2393,7 +2393,7 @@ fn conversion_checkpoint(
         .map(|(relative_path, descriptor)| {
             Ok(mj_checkpoint::archive::NativeArtifact {
                 relative_path: relative_path.clone(),
-                data: previous.payload(descriptor)?.to_vec(),
+                data: (previous.payload(descriptor)?.to_vec()).into(),
                 mode: descriptor.mode,
             })
         })

@@ -68,12 +68,14 @@ pub fn capture_checkpoint_with_native_state(
     )?;
     let repositories =
         collect_checkpoint_repositories(&resolved.workspace_root, &resolved.repositories, git)?;
-    let native_bytes = native_artifacts
-        .iter()
-        .try_fold(0_u64, |total, artifact| {
-            total.checked_add(artifact.data.len() as u64)
-        })
-        .context("native checkpoint size overflow")?;
+    let native_bytes =
+        native_artifacts
+            .iter()
+            .try_fold(0_u64, |total, artifact| -> Result<u64> {
+                total
+                    .checked_add(artifact.size()?)
+                    .context("native checkpoint size overflow")
+            })?;
     let repository_bytes = checkpoint_repository_bytes(&repositories)?;
 
     let parent = resolved
@@ -95,11 +97,12 @@ pub fn capture_checkpoint_with_native_state(
     let mut staged_native = Vec::with_capacity(native_artifacts.len());
     for (index, artifact) in native_artifacts.into_iter().enumerate() {
         let body_path = PathBuf::from(format!("native/{index:08}"));
-        write_private_file(temporary.path(), &body_path, &artifact.data, 0o600)?;
+        write_private_reader(temporary.path(), &body_path, &mut artifact.reader()?, 0o600)?;
+        let size = artifact.size()?;
         staged_native.push(StagedNativeArtifact {
             relative_path: artifact.relative_path,
             mode: artifact.mode,
-            size: artifact.data.len() as u64,
+            size,
             body_path,
         });
     }
@@ -427,7 +430,7 @@ pub(super) fn collect_subagent_reports(
         total += data.len() as u64;
         artifacts.push(NativeArtifact {
             relative_path: Path::new(mj_core::subagent::ARCHIVE_REPORT_DIR).join(relative),
-            data,
+            data: data.into(),
             mode: 0o600,
         });
     }
@@ -521,14 +524,18 @@ pub fn pack_checkpoint(spec: &CheckpointPackSpec) -> Result<TargetCheckpoint> {
             .native_artifacts
             .into_iter()
             .map(|artifact| {
-                let data = read_staged_file(&stage_path, &artifact.body_path, MAX_NATIVE_FILE)?;
+                validate_relative_path(&artifact.body_path)?;
+                let path = stage_path.join(&artifact.body_path);
+                ensure_no_symlink_ancestors(&stage_path, &artifact.body_path)?;
+                let size = fs::symlink_metadata(&path)?;
+                ensure!(size.is_file(), "staged native artifact is not a file");
                 ensure!(
-                    data.len() as u64 == artifact.size,
+                    size.len() == artifact.size,
                     "staged native artifact size changed"
                 );
                 Ok(NativeArtifact {
                     relative_path: artifact.relative_path,
-                    data,
+                    data: mj_core::archive::NativeArtifactData::File(path),
                     mode: artifact.mode,
                 })
             })
@@ -544,22 +551,22 @@ pub fn pack_checkpoint(spec: &CheckpointPackSpec) -> Result<TargetCheckpoint> {
                     committed_bundle: read_staged_file(
                         &stage_path,
                         &repository.committed_bundle_path,
-                        MAX_NATIVE_TOTAL,
+                        u64::MAX,
                     )?,
                     staged_patch: read_staged_file(
                         &stage_path,
                         &repository.staged_patch_path,
-                        MAX_NATIVE_TOTAL,
+                        u64::MAX,
                     )?,
                     unstaged_patch: read_staged_file(
                         &stage_path,
                         &repository.unstaged_patch_path,
-                        MAX_NATIVE_TOTAL,
+                        u64::MAX,
                     )?,
                     untracked_tar: read_staged_file(
                         &stage_path,
                         &repository.untracked_tar_path,
-                        MAX_NATIVE_TOTAL,
+                        u64::MAX,
                     )?,
                     operation_payloads: match (
                         &repository.conflicted_worktree_tar_path,
@@ -571,13 +578,9 @@ pub fn pack_checkpoint(spec: &CheckpointPackSpec) -> Result<TargetCheckpoint> {
                                 conflicted_worktree_tar: read_staged_file(
                                     &stage_path,
                                     worktree_path,
-                                    MAX_NATIVE_TOTAL,
+                                    u64::MAX,
                                 )?,
-                                state_tar: read_staged_file(
-                                    &stage_path,
-                                    state_path,
-                                    MAX_NATIVE_TOTAL,
-                                )?,
+                                state_tar: read_staged_file(&stage_path, state_path, u64::MAX)?,
                             })
                         }
                         _ => bail!("staged repository has only one of its Git operation payloads"),
@@ -977,13 +980,6 @@ pub(super) fn collect_checkpoint_native_artifacts_with_reports(
     }
     artifacts.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     artifacts.dedup_by(|left, right| left.relative_path == right.relative_path);
-    let total = artifacts.iter().try_fold(0_u64, |total, artifact| {
-        total.checked_add(artifact.data.len() as u64)
-    });
-    anyhow::ensure!(
-        total.context("native artifact size overflow")? <= MAX_NATIVE_TOTAL,
-        "native session artifacts are too large"
-    );
     Ok((artifacts, omitted_reports))
 }
 

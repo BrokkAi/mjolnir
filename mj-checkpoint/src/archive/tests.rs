@@ -322,7 +322,7 @@ pub(super) fn input() -> ArchiveInput {
         },
         native_artifacts: vec![NativeArtifact {
             relative_path: PathBuf::from("sessions/native-1/rollout.jsonl"),
-            data: b"native transcript".to_vec(),
+            data: (b"native transcript".to_vec()).into(),
             mode: 0o600,
         }],
         repositories: vec![repository("hel"), repository("worker")],
@@ -387,7 +387,7 @@ fn streaming_verification_does_not_retain_large_noncanonical_payloads() {
     archive_input.repositories.clear();
     archive_input.native_artifacts = vec![NativeArtifact {
         relative_path: PathBuf::from("sessions/native-1/large-rollout.jsonl"),
-        data: vec![b'x'; LARGE_PAYLOAD_BYTES],
+        data: (vec![b'x'; LARGE_PAYLOAD_BYTES]).into(),
         mode: 0o600,
     }];
 
@@ -441,7 +441,7 @@ fn sharded_input() -> (ArchiveInput, Vec<u8>, Vec<u8>) {
         &b"untracked payload line\n".repeat(1_000),
         0o644,
     );
-    archive_input.native_artifacts[0].data = native.clone();
+    archive_input.native_artifacts[0].data = native.clone().into();
     archive_input.repositories[0].untracked_tar = untracked.clone();
     (archive_input, native, untracked)
 }
@@ -1020,7 +1020,7 @@ fn streaming_verification_rejects_noncanonical_corruption() {
     let path = directory.path().join("corrupt-native.hel.zip");
     let mut archive_input = input();
     archive_input.repositories.clear();
-    archive_input.native_artifacts[0].data = b"native payload".to_vec();
+    archive_input.native_artifacts[0].data = b"native payload".to_vec().into();
     write_archive_atomic(&path, &archive_input).unwrap();
 
     let file = OpenOptions::new()

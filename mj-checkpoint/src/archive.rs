@@ -27,8 +27,6 @@ use mj_core::config::HarnessKind;
 const MANIFEST_PATH: &str = "manifest.json";
 const CANONICAL_SESSION_PATH: &str = "canonical/session.json";
 const MAX_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
-const MAX_PAYLOAD_BYTES: u64 = 8 * 1024 * 1024 * 1024;
-const MAX_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 /// Compressible payloads larger than this are split into parts of this size.
 /// DEFLATE is sequential inside one stream, so parts are what let both the
 /// writer and the reader use every core on a large payload.
@@ -266,6 +264,7 @@ impl CloseVerification {
 struct PendingPayload<'a> {
     descriptor: PayloadDescriptor,
     data: Cow<'a, [u8]>,
+    source: Option<&'a Path>,
 }
 
 /// Writes, fsyncs, atomically replaces, reopens, and verifies an archive.
@@ -378,6 +377,61 @@ pub fn read_archive_verified(path: &Path) -> Result<VerifiedArchive> {
         payloads: contents.payloads,
         archive_sha256: digest_reader(&mut file)?,
     })
+}
+
+/// Retain control and repository state while native files remain in the ZIP.
+pub(crate) fn read_archive_for_restore(path: &Path) -> Result<VerifiedArchive> {
+    let contents = read_verified_zip(path, PayloadRetention::Restore)?;
+    Ok(VerifiedArchive {
+        manifest: contents.manifest,
+        payloads: contents.payloads,
+        archive_sha256: digest_reader(&mut File::open(path)?)?,
+    })
+}
+
+pub(crate) fn copy_native_payload(
+    path: &Path,
+    descriptor: &PayloadDescriptor,
+    writer: &mut dyn Write,
+) -> Result<()> {
+    struct Destination<'a> {
+        writer: &'a mut dyn Write,
+        digest: Sha256,
+        size: u64,
+    }
+    impl Write for Destination<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let count = self.writer.write(bytes)?;
+            self.digest.update(&bytes[..count]);
+            self.size += count as u64;
+            Ok(count)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.writer.flush()
+        }
+    }
+    let mut output = Destination {
+        writer,
+        digest: Sha256::new(),
+        size: 0,
+    };
+    let mut archive = open_archive(path)?;
+    if descriptor.parts.is_empty() {
+        std::io::copy(&mut archive.by_name(&descriptor.path)?, &mut output)?;
+    } else {
+        for part in &descriptor.parts {
+            std::io::copy(&mut archive.by_name(&part.path)?, &mut output)?;
+        }
+    }
+    ensure!(
+        output.size == descriptor.size,
+        "native payload size changed during restore"
+    );
+    ensure!(
+        lower_hex(output.digest.finalize()) == descriptor.sha256,
+        "native payload digest changed during restore"
+    );
+    Ok(())
 }
 
 /// Verify an archive without materializing repository or native payloads.
@@ -685,12 +739,20 @@ fn prepare_archive_view_with_part_size(
         push_payload(
             &mut payloads,
             archive_path,
-            Cow::Borrowed(artifact.data.as_slice()),
+            Cow::Borrowed(match &artifact.data {
+                NativeArtifactData::Bytes(bytes) => bytes.as_slice(),
+                NativeArtifactData::File(_) => &[],
+            }),
             artifact.mode,
             PayloadRole::NativeArtifact {
                 relative_path: artifact.relative_path.clone(),
             },
         )?;
+        if let NativeArtifactData::File(source) = &artifact.data {
+            let payload = payloads.last_mut().expect("just inserted native payload");
+            payload.source = Some(source);
+            payload.descriptor.size = artifact.size()?;
+        }
     }
 
     let mut repository_ids = BTreeSet::new();
@@ -848,15 +910,51 @@ fn prepare_archive_view_with_part_size(
         });
     }
 
-    payloads.par_iter_mut().for_each(|payload| {
-        payload.descriptor.sha256 = digest_bytes(&payload.data);
-        payload.descriptor.parts = plan_payload_parts(
-            &payload.descriptor.path,
-            &payload.data,
-            payload_compression(&payload.descriptor.role),
-            part_bytes,
-        );
-    });
+    payloads
+        .par_iter_mut()
+        .try_for_each(|payload| -> Result<()> {
+            if let Some(path) = payload.source {
+                let mut source = File::open(path)?;
+                let mut whole = Sha256::new();
+                let mut buffer = vec![0; part_bytes];
+                let mut index = 0;
+                let split = payload_compression(&payload.descriptor.role)
+                    != CompressionMethod::Stored
+                    && payload.descriptor.size > part_bytes as u64;
+                loop {
+                    let mut count = 0;
+                    while count < buffer.len() {
+                        let read = source.read(&mut buffer[count..])?;
+                        if read == 0 {
+                            break;
+                        }
+                        count += read;
+                    }
+                    if count == 0 {
+                        break;
+                    }
+                    whole.update(&buffer[..count]);
+                    if split {
+                        payload.descriptor.parts.push(PayloadPartDescriptor {
+                            path: payload_part_path(&payload.descriptor.path, index),
+                            sha256: digest_bytes(&buffer[..count]),
+                            size: count as u64,
+                        });
+                    }
+                    index += 1;
+                }
+                payload.descriptor.sha256 = lower_hex(whole.finalize());
+            } else {
+                payload.descriptor.sha256 = digest_bytes(&payload.data);
+                payload.descriptor.parts = plan_payload_parts(
+                    &payload.descriptor.path,
+                    &payload.data,
+                    payload_compression(&payload.descriptor.role),
+                    part_bytes,
+                );
+            }
+            Ok(())
+        })?;
 
     let mut paths = BTreeSet::new();
     for payload in &payloads {
@@ -912,10 +1010,6 @@ fn push_payload<'a>(
     role: PayloadRole,
 ) -> Result<()> {
     validate_archive_relative_path(Path::new(&path))?;
-    ensure!(
-        data.len() as u64 <= MAX_PAYLOAD_BYTES,
-        "archive payload '{path}' is too large"
-    );
     let descriptor = PayloadDescriptor {
         path,
         sha256: String::new(),
@@ -924,7 +1018,11 @@ fn push_payload<'a>(
         role,
         parts: Vec::new(),
     };
-    payloads.push(PendingPayload { descriptor, data });
+    payloads.push(PendingPayload {
+        descriptor,
+        data,
+        source: None,
+    });
     Ok(())
 }
 
@@ -989,15 +1087,6 @@ fn plan_payload_parts(
         .collect()
 }
 
-/// One ZIP entry to write: either a whole payload, one part of a sharded
-/// payload, or the manifest.
-struct PlannedEntry<'a> {
-    name: &'a str,
-    mode: u32,
-    method: CompressionMethod,
-    data: &'a [u8],
-}
-
 fn write_zip(
     output: &mut File,
     manifest: &ArchiveManifest,
@@ -1009,102 +1098,94 @@ fn write_zip(
         manifest_bytes.len() as u64 <= MAX_MANIFEST_BYTES,
         "archive manifest is too large"
     );
-    let mut entries = vec![PlannedEntry {
-        name: MANIFEST_PATH,
-        mode: 0o600,
-        method: CompressionMethod::Deflated,
-        data: &manifest_bytes,
-    }];
+    let mut writer = zip::ZipWriter::new(output);
+    write_stream_entry(
+        &mut writer,
+        MANIFEST_PATH,
+        0o600,
+        CompressionMethod::Deflated,
+        manifest_bytes.len() as u64,
+        &mut Cursor::new(&manifest_bytes),
+        &digest_bytes(&manifest_bytes),
+    )?;
     for payload in payloads {
         let descriptor = &payload.descriptor;
+        let mut source: Box<dyn Read> = match payload.source {
+            Some(path) => Box::new(NativeArtifactData::open_file(path)?),
+            None => Box::new(Cursor::new(payload.data.as_ref())),
+        };
         let method = payload_compression(&descriptor.role);
         if descriptor.parts.is_empty() {
-            entries.push(PlannedEntry {
-                name: &descriptor.path,
-                mode: descriptor.mode,
+            write_stream_entry(
+                &mut writer,
+                &descriptor.path,
+                descriptor.mode,
                 method,
-                data: &payload.data,
-            });
-            continue;
-        }
-        let mut offset = 0_usize;
-        for part in &descriptor.parts {
-            let end = usize::try_from(part.size)
-                .ok()
-                .and_then(|size| offset.checked_add(size))
-                .filter(|end| *end <= payload.data.len())
-                .ok_or_else(|| {
-                    anyhow!("payload '{}' parts do not fit its body", descriptor.path)
-                })?;
-            entries.push(PlannedEntry {
-                name: &part.path,
-                mode: descriptor.mode,
-                method,
-                data: &payload.data[offset..end],
-            });
-            offset = end;
+                descriptor.size,
+                &mut source,
+                &descriptor.sha256,
+            )?;
+        } else {
+            for part in &descriptor.parts {
+                write_stream_entry(
+                    &mut writer,
+                    &part.path,
+                    descriptor.mode,
+                    method,
+                    part.size,
+                    &mut source.by_ref().take(part.size),
+                    &part.sha256,
+                )?;
+            }
         }
         ensure!(
-            offset == payload.data.len(),
-            "payload '{}' parts do not cover its body",
-            descriptor.path
+            source.read(&mut [0u8; 1])? == 0,
+            "payload source grew during export"
         );
     }
 
-    // Compression is the export freeze window, so every entry deflates on its
-    // own core; the container is then assembled sequentially in plan order so
-    // the archive layout stays deterministic.
-    let compressed = entries
-        .par_iter()
-        .map(compress_entry)
-        .collect::<Result<Vec<_>>>()?;
-
-    let mut writer = zip::ZipWriter::new(output);
-    for (entry, buffer) in entries.iter().zip(compressed) {
-        let mut source = zip::ZipArchive::new(Cursor::new(buffer))
-            .with_context(|| format!("reopen compressed ZIP entry '{}'", entry.name))?;
-        let compressed_entry = source
-            .by_index(0)
-            .with_context(|| format!("read compressed ZIP entry '{}'", entry.name))?;
-        writer
-            .raw_copy_file(compressed_entry)
-            .with_context(|| format!("write ZIP entry '{}'", entry.name))?;
-    }
     writer.finish().context("finish Mjolnir archive ZIP")?;
     Ok(())
 }
 
-/// Compresses one entry into a single-entry ZIP so the assembly pass can copy
-/// the finished deflate stream verbatim with [`zip::ZipWriter::raw_copy_file`].
-fn compress_entry(entry: &PlannedEntry<'_>) -> Result<Vec<u8>> {
-    let mut buffer = Cursor::new(Vec::with_capacity(entry.data.len() / 2 + 512));
-    let mut writer = zip::ZipWriter::new(&mut buffer);
-    writer
-        .start_file(
-            entry.name,
-            SimpleFileOptions::default()
-                .compression_method(entry.method)
-                .compression_level(match entry.method {
-                    CompressionMethod::Deflated => Some(DEFLATE_LEVEL),
-                    CompressionMethod::Zstd => Some(ZSTD_LEVEL),
-                    _ => None,
-                })
-                .unix_permissions(entry.mode)
-                .large_file(entry.data.len() as u64 > zip::ZIP64_BYTES_THR),
-        )
-        .with_context(|| format!("start ZIP entry '{}'", entry.name))?;
-    writer
-        .write_all(entry.data)
-        .with_context(|| format!("write ZIP entry '{}'", entry.name))?;
-    writer
-        .finish()
-        .with_context(|| format!("compress ZIP entry '{}'", entry.name))?;
-    Ok(buffer.into_inner())
+fn write_stream_entry(
+    writer: &mut zip::ZipWriter<&mut File>,
+    name: &str,
+    mode: u32,
+    method: CompressionMethod,
+    size: u64,
+    reader: &mut dyn Read,
+    expected_digest: &str,
+) -> Result<()> {
+    writer.start_file(
+        name,
+        SimpleFileOptions::default()
+            .compression_method(method)
+            .compression_level(match method {
+                CompressionMethod::Deflated => Some(DEFLATE_LEVEL),
+                CompressionMethod::Zstd => Some(ZSTD_LEVEL),
+                _ => None,
+            })
+            .unix_permissions(mode)
+            // ZIP's documented 32-bit size threshold requires ZIP64 beyond this value.
+            .large_file(size > zip::ZIP64_BYTES_THR),
+    )?;
+    let mut checked = DigestingReader::new(reader);
+    ensure!(
+        std::io::copy(&mut checked, writer)? == size,
+        "payload source size changed"
+    );
+    ensure!(
+        checked.finish().1 == expected_digest,
+        "payload source changed during export"
+    );
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PayloadRetention {
     All,
+    Restore,
     CanonicalOnly,
     CanonicalAndGitBundles,
 }
@@ -1212,6 +1293,15 @@ impl std::io::Seek for ArchiveFile {
 /// Payload bodies the caller keeps.
 fn retains_payload(retention: PayloadRetention, role: &PayloadRole) -> bool {
     retention == PayloadRetention::All
+        || (retention == PayloadRetention::Restore
+            && match role {
+                PayloadRole::NativeArtifact { relative_path } => {
+                    relative_path.starts_with(mj_core::attachment::ARCHIVE_ATTACHMENT_DIR)
+                        || relative_path.starts_with(mj_core::subagent::ARCHIVE_REPORT_DIR)
+                        || relative_path.starts_with(mj_core::goal::NATIVE_ARTIFACT_ROOT)
+                }
+                _ => true,
+            })
         || *role == PayloadRole::CanonicalSession
         || (retention == PayloadRetention::CanonicalAndGitBundles
             && matches!(role, PayloadRole::GitBundle { .. }))
@@ -1251,18 +1341,9 @@ fn read_verified_zip_cancellable(
             .enclosed_name()
             .ok_or_else(|| anyhow!("unsafe ZIP entry path '{}'", entry.name()))?;
         validate_archive_relative_path(&enclosed)?;
-        ensure!(
-            entry.size() <= MAX_PAYLOAD_BYTES,
-            "ZIP entry '{}' is too large",
-            entry.name()
-        );
         total_size = total_size
             .checked_add(entry.size())
             .ok_or_else(|| anyhow!("archive expanded size overflow"))?;
-        ensure!(
-            total_size <= MAX_ARCHIVE_BYTES,
-            "archive expanded size exceeds limit"
-        );
         let name = slash_path(&enclosed)?;
         ensure!(
             actual_paths.insert(name.clone()),
@@ -1389,10 +1470,7 @@ fn read_verified_zip_cancellable(
                 "archive contains duplicate canonical session payloads"
             );
         }
-        if retention == PayloadRetention::All
-            || (retention == PayloadRetention::CanonicalAndGitBundles
-                && matches!(descriptor.role, PayloadRole::GitBundle { .. }))
-        {
+        if retains_payload(retention, &descriptor.role) {
             payloads.insert(
                 descriptor.path.clone(),
                 bytes.expect("selected payloads are retained by the reader"),
@@ -1676,11 +1754,6 @@ fn validate_manifest(manifest: &ArchiveManifest) -> Result<()> {
         ensure!(
             paths.insert(descriptor.path.as_str()),
             "duplicate manifest payload '{}'",
-            descriptor.path
-        );
-        ensure!(
-            descriptor.size <= MAX_PAYLOAD_BYTES,
-            "payload '{}' exceeds size limit",
             descriptor.path
         );
         normalized_mode(descriptor.mode)?;
