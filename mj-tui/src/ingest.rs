@@ -1327,11 +1327,15 @@ impl DashboardState {
     }
 
     pub(crate) fn begin_dismiss_notification(&mut self) -> crate::DashboardAction {
-        let Some(session_id) = self
-            .resume_command_session_id()
-            .or_else(|| self.command_session_id())
-            .map(str::to_owned)
-        else {
+        // While the resume dialog is open, `d` acts on its selected row only;
+        // a native or archive row must not fall through to the dashboard
+        // selection behind the dialog.
+        let target = if matches!(self.mode, crate::Mode::ResumeDialog(_)) {
+            self.resume_command_session_id()
+        } else {
+            self.command_session_id()
+        };
+        let Some(session_id) = target.map(str::to_owned) else {
             return crate::DashboardAction::None;
         };
         self.begin_dismiss_notification_for(&session_id)

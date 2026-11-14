@@ -433,9 +433,11 @@ fn project_states(
             let dismissed = failure
                 .as_ref()
                 .is_some_and(|failure| record.dismissed_failure.as_ref() == Some(failure));
-            let state = if current_condition_failure(runtime, id)
-                || (failure.is_some() && !dismissed)
-            {
+            // Archiving removes the session from the dashboard; nothing about
+            // it needs a person any more.
+            let state = if record.archived {
+                Inactive
+            } else if current_condition_failure(runtime, id) || (failure.is_some() && !dismissed) {
                 Failed
             } else if dismissed
                 && (!record.state.is_active()
@@ -1371,6 +1373,17 @@ mod tests {
             record.state = state;
             record.dismissed_failure = mj_core::attention::FailureIdentity::of(record);
             assert_eq!(project(&runtime)["parent"], SessionAttention::Inactive);
+        }
+        // Hard-won: ca27a43c8: an archived session's undismissed failure resurfaced as a notification.
+        {
+            let record = runtime.records.get_mut("parent").unwrap();
+            record.dismissed_failure = None;
+            record.archived = true;
+            assert_eq!(project(&runtime)["parent"], SessionAttention::Inactive);
+            runtime.records.get_mut("parent").unwrap().archived = false;
+            assert_eq!(project(&runtime)["parent"], SessionAttention::Failed);
+            let record = runtime.records.get_mut("parent").unwrap();
+            record.dismissed_failure = mj_core::attention::FailureIdentity::of(record);
         }
 
         assert_eq!(project(&runtime)["parent"], SessionAttention::Inactive);
