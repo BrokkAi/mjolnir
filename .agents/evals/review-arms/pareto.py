@@ -108,8 +108,10 @@ def summarize(o, ds, rng, samples):
         if lats:
             medians.append(statistics.median(lats))
     tokens = statistics.fmean(statistics.fmean(r[2] for r in per[o, d]) for d in ds)
-    priced = [[r[3] for r in per[o, d] if r[3] is not None] for d in ds]
-    cost = statistics.fmean(statistics.fmean(c) for c in priced) if all(priced) else None
+    # Priced only when every assignment is: a priced subset would bias the mean.
+    costs = [[r[3] for r in per[o, d]] for d in ds]
+    cost = (statistics.fmean(statistics.fmean(c) for c in costs)
+            if all(x is not None for c in costs for x in c) else None)
     return {"findings": findings, "latency": statistics.fmean(medians) if medians else None,
             "tokens_per_diff": tokens, "cost_per_diff": cost}
 
@@ -128,7 +130,7 @@ def frontier(stats):
 rng = random.Random(20261114)
 stats = {o: summarize(o, diffs, rng, a.samples) for o in options}
 main_frontier = frontier(stats)
-# Options with unpriced sessions on any diff are left out of the cost frontier.
+# Options with any unpriced session are left out of the cost frontier.
 cost_stats = {o: dict(s, latency=s["cost_per_diff"]) for o, s in stats.items() if s["cost_per_diff"] is not None}
 cost_frontier = frontier(cost_stats)
 hits = collections.Counter()
