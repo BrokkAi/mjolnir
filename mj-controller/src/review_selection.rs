@@ -721,10 +721,7 @@ mod tests {
                 Ok(catalog_profile(&[&model]))
             })
             .await;
-        assert_eq!(
-            picked(&configured),
-            [("gpt-6.1-terra", None), ("gpt-6.1-sol", None)]
-        );
+        assert_eq!(picked(&configured), [("gpt-6.1-terra", None); 3]);
     }
 
     #[tokio::test(start_paused = true)]
