@@ -2515,9 +2515,24 @@ fn a_stopped_notification_is_a_row_and_attention_advances() {
         }
     );
     dashboard.set_active_workspace(Some("other".into()));
+    assert_eq!(dashboard.take_session_to_open(), None);
+    // The host then releases every pane holding a suspended session, as
+    // `open_chat_session_into` does after a switch. Browse keeps the row.
+    for (pane, session) in dashboard.pane_sessions() {
+        if dashboard.pane_session_is_suspended(&session) {
+            dashboard.release_suspended_pane(pane, &session);
+        }
+    }
     assert_eq!(dashboard.selected_session_id(), Some("remote"));
     assert_eq!(dashboard.focus, Focus::Sessions);
-    assert_eq!(dashboard.take_session_to_open(), None);
+    let action = dashboard.step_attention(1);
+    assert_eq!(
+        action,
+        DashboardAction::SelectWorkspace {
+            workspace_id: "default".into()
+        },
+        "the next press leaves the stopped row for the question"
+    );
 }
 
 #[test]

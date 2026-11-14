@@ -196,16 +196,12 @@ impl DashboardContext {
         self.sync_opening_session();
     }
 
-    /// Lets a pane go of a suspended session instead of attaching to it. A
-    /// pinned pane says so, as before; Browse just empties, since it shows
-    /// whatever is selected and the suspended row has left the list.
+    /// Lets a pane go of a suspended session instead of attaching to it. The
+    /// dashboard decides what the pane keeps; see
+    /// `DashboardState::release_suspended_pane`.
     pub(crate) fn release_suspended_pane(&mut self, pane: PaneId, session_id: &str) {
         self.cancel_chat_open_in(pane);
-        if pane == self.dashboard.browse_pane() {
-            self.dashboard.set_pane_session(pane, None);
-        } else {
-            self.dashboard.release_suspended_pane(pane, session_id);
-        }
+        self.dashboard.release_suspended_pane(pane, session_id);
         self.retire_chats_outside_the_layout();
         self.save_active_workspace_layout();
     }
