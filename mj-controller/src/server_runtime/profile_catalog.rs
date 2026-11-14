@@ -1552,7 +1552,14 @@ impl ProfileCatalog {
         // ensuring an adopted definition would retire that owner and discard
         // the default entry that model-specific reads depend on.
         let identity = profile.capabilities_key(id);
-        if !live || !self.lock().definitions.contains_key(&identity) {
+        // A retired owner (its profile changed, or was enabled or disabled)
+        // is no owner: claim a fresh one.
+        let owned = self
+            .lock()
+            .definitions
+            .get(&identity)
+            .is_some_and(|definition| !definition.cancellation.is_cancelled());
+        if !live || !owned {
             self.ensure_profiles(config, true, Some(id));
         }
         let key = (identity, model);
@@ -4470,6 +4477,22 @@ mod tests {
                 .iter()
                 .any(|choice| choice.value == "p-model")
         );
+    }
+
+    // Hard-won: 9120b5643: an explicit read of a Muse profile disabled after discovery joined its retired owner and failed.
+    #[tokio::test]
+    async fn a_disabled_muse_profile_gets_a_fresh_owner_on_request() {
+        let probes = calls();
+        let catalog = ProfileCatalog::with_probe(counting_probe(probes.clone()));
+        let mut config = test_config(&[("p", HarnessKind::Muse)]);
+        catalog.sync_now(&config).await;
+        config.profiles.get_mut("p").unwrap().enabled = false;
+        catalog.sync_now(&config).await;
+        catalog.fetch(&config, "p", None).await.unwrap();
+        catalog
+            .fetch(&config, "p", Some("p-model".into()))
+            .await
+            .unwrap();
     }
 
     // Hard-won: a2afafcb3: a model probe exempted its requested hidden model.
