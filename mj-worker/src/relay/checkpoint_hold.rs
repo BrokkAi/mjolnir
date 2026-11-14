@@ -9,13 +9,26 @@
 //! move it between the daemon's look and its Close (campaign finding I2-3).
 //!
 //! What waits is output that changes no agent work: harness notifications,
-//! notices and warnings, native-agent reports. Anything that shows the agent
-//! working or the harness changing (a turn it starts, a goal change, a
-//! question for a person, a restart) ends the hold at once, with the held
-//! writes journaled first in their order. That cut is spoiled anyway: a
+//! notices and warnings, native-agent reports. The relay decides this at the
+//! one place every journal write passes, `append_relay_event`: anything it is
+//! about to journal other than those, and other than the barrier's own
+//! commands and a Close sealed at the cut, ends the hold, with the held
+//! writes journaled first in their order. A runtime event that journals
+//! nothing therefore leaves the hold alone. A turn the agent starts, a goal
+//! change, a question for a person or a restart spoils the cut anyway: a
 //! routine checkpoint sees the new harness turn and abandons its archive, and
 //! a close is refused and returns the session to work, exactly as before the
 //! hold existed.
+//!
+//! Background work that starts after the cut (an agent terminal, an adapter
+//! task) journals nothing, so the frontier cannot show it. The relay sees it
+//! where all background work changes, `persist_activity_transition`, and
+//! spoils the barrier's cut: the hold ends and a Close at the cut is refused,
+//! like a Close after a journaled turn. Work already running when the barrier
+//! became ready does not spoil it; a Move that accepted interrupting it
+//! closes over it on purpose. The mark is process-local, like the work:
+//! terminals and adapter tasks do not survive a worker restart, and work
+//! that starts after one is seen again.
 //!
 //! When the barrier ends, the held writes are journaled in arrival order,
 //! unless a Close was accepted at the cut. The sealed relay's archive ends at
@@ -30,8 +43,8 @@ pub(super) enum HeldWrite {
 }
 
 /// Whether an observation can wait behind a checkpoint cut. Everything not
-/// listed ends the hold, so a new kind of observation is journaled at once
-/// until someone decides it can wait.
+/// listed is journaled at once and ends the hold, so a new kind of observation
+/// is never delayed until someone decides it can wait.
 fn observation_can_wait(observation: &RelayObservation) -> bool {
     matches!(
         observation,
@@ -51,6 +64,80 @@ impl DurableRelay {
             && self.hold_ended_for != self.snapshot.checkpoint_barrier
     }
 
+    /// Why a Close at this cut must be refused, or `None` when the cut is
+    /// still the one the barrier made. The only place Close acceptance reads
+    /// the cut: the barrier, its ready cursor, the journal frontier, and
+    /// whether work started after it.
+    pub(super) fn close_cut_refusal(
+        &self,
+        barrier_command_id: &str,
+        expected: &RelayCursor,
+    ) -> Option<&'static str> {
+        let ready = self
+            .snapshot
+            .checkpoint_ready_through
+            .zip(self.snapshot.checkpoint_ready_digest.as_ref());
+        let barrier = self.snapshot.checkpoint_barrier.as_deref();
+        let exact_cut = barrier == Some(barrier_command_id)
+            && ready.is_some_and(|(ordinal, digest)| {
+                ordinal == expected.ordinal && digest == &expected.digest
+            })
+            && self.snapshot.latest_ordinal == expected.ordinal
+            && self.snapshot.latest_digest == expected.digest;
+        if !exact_cut {
+            return Some("close does not match the current checkpoint cut");
+        }
+        (self.cut_spoiled_for.as_deref() == barrier)
+            .then_some("background work started after the checkpoint cut")
+    }
+
+    /// Spoil the ready barrier's cut: end its hold and remember that work
+    /// started after it, which a journal frontier cannot show.
+    fn spoil_checkpoint_cut(&mut self) -> Result<()> {
+        if self.snapshot.checkpoint_ready_through.is_none() {
+            return Ok(());
+        }
+        let Some(barrier) = self.snapshot.checkpoint_barrier.clone() else {
+            return Ok(());
+        };
+        self.cut_spoiled_for = Some(barrier);
+        self.end_checkpoint_hold()
+    }
+
+    /// The background work running now: the facts `checkpoint_blocker` reads.
+    fn current_background_work(&self) -> BTreeSet<String> {
+        let mut current: BTreeSet<String> = self
+            .background_commands()
+            .into_iter()
+            .map(|command| command.id)
+            .collect();
+        current.extend(
+            self.active_agent_terminals
+                .keys()
+                .map(|id| format!("terminal:{id}")),
+        );
+        current
+    }
+
+    /// Take the work running as the barrier makes its cut as the baseline, so
+    /// only work that starts after the cut spoils it, however the earlier
+    /// work arrived.
+    pub(super) fn baseline_background_work_at_cut(&mut self) {
+        self.known_background_work = self.current_background_work();
+    }
+
+    /// Compare the background work now with the work last seen. Work that is
+    /// new spoils the cut of a ready barrier.
+    pub(super) fn note_background_work(&mut self) -> Result<()> {
+        let current = self.current_background_work();
+        let started = !current.is_subset(&self.known_background_work);
+        self.known_background_work = current;
+        if started {
+            self.spoil_checkpoint_cut()?;
+        }
+        Ok(())
+    }
+
     /// The agent is working or the harness changed, so this barrier's cut can
     /// no longer describe an idle session. Journal what waited, in order, and
     /// stop holding for this barrier.
@@ -60,6 +147,50 @@ impl DurableRelay {
         }
         self.hold_ended_for = self.snapshot.checkpoint_barrier.clone();
         self.replay_held_writes()
+    }
+
+    /// Called by [`Self::append_relay_event`] before it writes. Whatever the
+    /// relay journals now ends the hold, unless it is part of the cut's own
+    /// protocol: the barrier's commands and a Close that is sealed at the cut.
+    /// Held writes are replayed first, so they stay ahead of this event, and
+    /// their own appends find the hold already ended.
+    pub(super) fn end_checkpoint_hold_for(
+        &mut self,
+        command_id: Option<&str>,
+        observation: &RelayObservation,
+    ) -> Result<()> {
+        if !self.worker_writes_held()
+            || self.close_pending()
+            || self.is_checkpoint_control(command_id, observation)
+        {
+            return Ok(());
+        }
+        self.end_checkpoint_hold()
+    }
+
+    /// Whether the event belongs to a checkpoint barrier or Close command.
+    /// These are how the cut is made, completed and sealed, not work that
+    /// spoils it.
+    fn is_checkpoint_control(
+        &self,
+        command_id: Option<&str>,
+        observation: &RelayObservation,
+    ) -> bool {
+        let command = match observation {
+            RelayObservation::CommandQueued { command, .. } => Some(command),
+            _ => command_id
+                .and_then(|id| self.snapshot.dispatches.get(id))
+                .map(|dispatch| &dispatch.command),
+        };
+        matches!(
+            command,
+            Some(
+                RelayCommand::BeginCheckpoint { .. }
+                    | RelayCommand::CompleteCheckpoint { .. }
+                    | RelayCommand::ReleaseCheckpoint { .. }
+                    | RelayCommand::Close { .. }
+            )
+        )
     }
 
     /// Journal the writes that waited once their barrier has ended. A relay

@@ -1200,9 +1200,6 @@ policy, and a failed or unusable review denies the action. Muse's own
 Unconstrained sessions stage `:ask-me` as well, but select `allowAll`
 approvals with auto-review off and disable only the sandbox
 (`--disable-sandbox`), so they run without permission checks like OpenCode.
-A Muse profile with `muse_auto_review = true` keeps the reviewer on in
-unconstrained targets too (`promptUnmatched` approvals with auto-review on
-inside the container boundary).
 
 Muse accepts one workspace root, without attached directories. Native import
 and checkpoint restore can relocate that workspace while retaining the session

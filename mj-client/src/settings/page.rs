@@ -185,7 +185,7 @@ pub fn hidden_key(path: &[String], value: &Value, key: &str) -> bool {
         // A legacy per-profile table, read but never saved: not a setting.
         // Fields of other profile kinds never appear: each kind's defaults
         // list only its own (`schema::defaults`).
-        ["profiles", _] if key == "subagents" => true,
+        ["profiles", _] if matches!(key, "subagents" | "muse_auto_review") => true,
         // This machine is always this machine; its type is not a choice.
         ["machines", mj_core::config::LOCAL_MACHINE_ID] => key == "kind",
         // Present only while reviewers still have to be chosen automatically:

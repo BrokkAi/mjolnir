@@ -30,7 +30,7 @@ fn zai_profile(home: &Path, base_url: &str) -> HarnessProfile {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
-        muse_auto_review: None,
+        legacy_muse_auto_review: None,
         claude_permission_mode: None,
         aws: None,
     }

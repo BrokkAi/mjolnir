@@ -645,7 +645,6 @@ home = "/home/me/.codex-work"
 | `context_window_bytes` | integer | no | unset (`262144`-byte fallback) | Conservative byte budget for cross-harness transcript compaction; when set, must be at least `32768`. |
 | `guardian_review_model` | string | no | unset (`newest-flash`) | Which model reviews escalated actions in Codex's guardian mode: `newest-flash`, `session`, or a slug from the provider's model catalog. Only valid on a Codex profile whose `config.toml` names a custom model provider. See [Profiles](/profiles/#choose-the-guardian-review-model). |
 | `models` | array of strings | no | empty (offer everything) | Exact model values, as `mj models --profile <id> --unrestricted` lists them, that Mjolnir offers from this profile in session model pickers, sub-agent choices, review slots and Autoconfigure. The profile's current model is always offered. Edits apply without rediscovery. `mj doctor` warns when a profile advertises more than 50 models without this list, and about entries the profile does not advertise. See [Profiles](/profiles/#limit-the-models-a-profile-offers). |
-| `muse_auto_review` | boolean | no | unset (`false`) | Whether an unconstrained Muse session (containers, EC2, `yolo` SSH) keeps muse-acp's auto-review on. Unset or `false` runs without permission checks, like OpenCode's `permission = "allow"`. `true` restores the reviewer inside the container boundary. Only valid on a Muse profile; guardian targets always review. |
 
 The profile's harness-home variable cannot appear in `environment`; set `home`
 instead. Those variables are `CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
@@ -1040,7 +1039,7 @@ permissions = "guardian"
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `permissions` | string enum | only on an SSH machine | `"guardian"` | `guardian` preserves harness approvals; `yolo` disables sandbox checks and approval checks. Muse runs without permission checks under `yolo` too, unless its profile sets `muse_auto_review = true`. It has no meaning on `local`, where the harness keeps its configured approvals, on other machines. |
+| `permissions` | string enum | only on an SSH machine | `"guardian"` | `guardian` preserves harness approvals; `yolo` disables sandbox checks and approval checks. Muse runs without permission checks under `yolo` too. It has no meaning on `local`, where the harness keeps its configured approvals, on other machines. |
 
 The new-session wizard asks for an existing absolute project directory on the
 runtime's machine. A local bare directory may be a plain folder and does not
