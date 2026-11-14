@@ -52,10 +52,11 @@ jobs:
     # crates run only on Linux and macOS hosts. mj-controller tests that still
     # fail on Windows are ignored there with
     # `cfg_attr(windows, ignore = "#<issue>: ...")`; the sub-issues of #1261
-    # remove those attributes as they are fixed.
+    # remove those attributes as they are fixed. `--no-fail-fast` reports
+    # every failing crate: one failure used to hide the crates after it.
     - name: Run tests
       run: >-
-        cargo test -p brokk-mj-core -p brokk-mj-chat -p brokk-mj-tui
+        cargo test --no-fail-fast -p brokk-mj-core -p brokk-mj-chat -p brokk-mj-tui
         -p brokk-mj-client -p brokk-mj-review -p brokk-mj-transcript
         -p brokk-mjolnir -p brokk-mj-controller
 
