@@ -1474,6 +1474,12 @@ impl ProfileCatalog {
                     {
                         return;
                     }
+                    // A disabled profile is probed only on request: the
+                    // failure stays, and the next request that names the
+                    // profile starts one fresh attempt (`reread_failed`).
+                    if !inner.probes_automatically(&inner.definitions[&key.0]) {
+                        return;
+                    }
                     attempt = self.attempt(&inner.definitions[&key.0], key.1.clone());
                     inner
                         .entries
@@ -1572,9 +1578,11 @@ impl ProfileCatalog {
         // cannot replace each other's Muse owner. Only warm passes refresh it.
         self.ensure_profiles(config, false, Some(id));
         if !profile.enabled {
-            // Periodic refresh skips disabled profiles, so the request that
-            // names one re-probes its expired entries. Readers keep the old
-            // answer until a probe succeeds.
+            // Background work never probes a disabled profile, so the
+            // request that names one retries its failures and re-probes its
+            // expired entries. Readers keep the old answer until a probe
+            // succeeds.
+            self.reread_failed(id);
             self.refresh_where(
                 |key, choices| {
                     key.0 == identity && !crate::controller::profile_config::is_current(choices)
@@ -3550,6 +3558,36 @@ mod tests {
             tokio::task::yield_now().await;
         }
         catalog.capabilities(&["parent".into()]).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    // Hard-won: 18ef04c19: a retryable failure kept a disabled profile's supervisor probing in the background.
+    #[tokio::test(start_paused = true)]
+    async fn a_disabled_profile_retries_a_failure_only_when_requested_again() {
+        let calls = calls();
+        let failing = Arc::new(AtomicBool::new(true));
+        let catalog = ProfileCatalog::with_probe(flag_probe(failing.clone(), calls.clone()));
+        let mut config = test_config(&[("parent", HarnessKind::Codex)]);
+        config.profiles.get_mut("parent").unwrap().enabled = false;
+        catalog.sync_now(&config).await;
+        assert!(
+            catalog
+                .fetch_settled(&config, "parent", None)
+                .await
+                .is_err()
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        tokio::time::advance(Duration::from_secs(600)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "no background retry");
+
+        failing.store(false, Ordering::SeqCst);
+        catalog
+            .fetch_settled(&config, "parent", None)
+            .await
+            .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
