@@ -12,12 +12,15 @@ import sys
 
 ROOT = pathlib.Path(os.environ.get("REVIEW_ARMS_DIR", "/mnt/optane/review-arms-20261113"))
 
+# Where a command word can start. Inputs are matched as serialized JSON, so a
+# command at the start of an argument follows a quote or an escaping backslash.
+CMD = r"""(^|[\s;&|(`"'\\])"""
 # Patterns checked against what the reviewer asked for: commands, tool names, arguments.
 INPUT_PATTERNS = {
-    "github-or-web": r"(^|[\s;&|(])gh\s|github\.com|api\.github|\bcurl\b|\bwget\b|https?://|claude\.ai|web_search|web\.run|websearch|webfetch|search_query",
+    "github-or-web": CMD + r"gh\s|github\.com|api\.github|\bcurl\b|\bwget\b|https?://|claude\.ai|web_search|web\.run|websearch|webfetch|search_query",
     "git-history-escape": r"git\b[^\n]*\b(fetch|pull|clone|remote|ls-remote|bundle|fsck|reflog)\b|git\b[^\n]*(log|rev-list|for-each-ref|show-ref)\b[^\n]*--all\b|cat-file\s+--batch-all|/run/hel/git-cache|\.bundle\b",
-    "outside-workspace": r"/home/jonathan|/mnt/optane|/var/lib/hel|/home/hel/\.(codex|claude|cache|config|local)|\.codex/(sessions|history|archived)|(^|[\s;&|])(find|ls|du|tree)\s+/(\s|$)|grep\s+-[a-zA-Z]*r[a-zA-Z]*\s+[^\n]*\s/(\s|$)",
-    "memory-or-sessions": r"search_sessions|read_session|search_session|get_session_brief|session_files|trace_file|blame_file|mj-memory|(^|[\s;&|])mj\s+(transcript|sessions|events|usage)|sqlite",
+    "outside-workspace": r"/home/jonathan|/mnt/optane|/var/lib/hel|/home/hel/\.(codex|claude|cache|config|local)|\.codex/(sessions|history|archived)|" + CMD + r"(find|ls|du|tree)\s+/(\s|$|[\"'])|grep\s+-[a-zA-Z]*r[a-zA-Z]*\s+[^\n]*\s/(\s|$|[\"'])",
+    "memory-or-sessions": r"search_sessions|read_session|search_session|get_session_brief|session_files|trace_file|blame_file|mj-memory|" + CMD + r"mj\s+(transcript|sessions|events|usage)|sqlite",
     "build-or-test": r"\bcargo\s+(build|test|check|clippy|run|nextest)\b|\bnpm\s+(test|run)\b|\bpytest\b",
 }
 # Patterns checked against tool output: places that only exist outside the checkout.

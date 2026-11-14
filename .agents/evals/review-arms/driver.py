@@ -303,6 +303,13 @@ def collect(d, bug, identity, sid, place, before):
                               "model": settings.get("model"), "effort": settings.get("effort"),
                               "has_output": bool(messages)})
         save(d / "reviewers.json", reviewers)
+    # A review can clear before every reviewer was observed, or with a reviewer that
+    # failed; such a run must not count as finished.
+    expected = sorted(r.split(":")[0] for r in ARMS[identity["arm"]])
+    got = sorted(r["model"] or "" for r in reviewers)
+    incomplete = [r["child"] for r in reviewers if not r["has_output"] or r["effort"] != "high"]
+    if got != expected or incomplete:
+        raise RuntimeError(f"incomplete review: models {got}, expected {expected}; without output or wrong effort: {incomplete}")
 
     if (d / "inventory-check.json").exists():
         problems = json.loads((d / "inventory-check.json").read_text())["problems"]
@@ -355,9 +362,12 @@ def main():
             save(d / "error.json", {"error": str(e), "traceback": traceback.format_exc(), "time_ns": time.time_ns()})
             return job, "failed", str(e)
 
+    unfinished = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=a.concurrency) as pool:
         for job, state, error in pool.map(one, jobs):
             print(json.dumps({"job": job, "state": state, "error": error}), flush=True)
+            unfinished += state != "done"
+    return 1 if unfinished else 0
 
 
 if __name__ == "__main__":
