@@ -703,7 +703,7 @@ fn bundle_ids_by_recent_creation<'a>(
 
 fn target_label(target: &TargetTemplate) -> &'static str {
     match target {
-        TargetTemplate::LocalBare => "raw localhost",
+        TargetTemplate::LocalBare => "localhost",
         TargetTemplate::LocalPodman { .. } => "local Podman",
         TargetTemplate::LocalDocker { .. } => "local Docker",
         TargetTemplate::AppleContainer { .. } => "Apple container",

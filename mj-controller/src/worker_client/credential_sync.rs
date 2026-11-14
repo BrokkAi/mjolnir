@@ -2883,7 +2883,7 @@ fn syncs_slopcop_login(target: &CredentialSyncTarget) -> bool {
 
 /// Converge an isolated session's copy of the slopcop login onto the host's.
 /// Sync is the copy's only writer, and it writes only isolated sessions; a
-/// raw localhost session's home is staged without one and reads the host's
+/// localhost session's home is staged without one and reads the host's
 /// own login.
 pub(super) async fn reconcile_slopcop_login(
     client: &mut RelayClient,
