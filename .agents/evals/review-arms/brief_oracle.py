@@ -74,10 +74,19 @@ def collect():
         bug = r["id"]
         d = ROOT / "briefs/oracle" / bug
         d.mkdir(parents=True, exist_ok=True)
+        blind = ROOT / "briefs/blind" / bug / "brief.md"
+        if r["group"] == "C" and r["final_brief"]:
+            # A control's oracle brief is its blind brief. A leak rewrite therefore replaces the
+            # blind brief too (the writer's text is kept as brief-original.md), so both stay equal.
+            original = blind.with_name("brief-original.md")
+            if not original.exists():
+                original.write_text(blind.read_text())
+            blind.write_text(r["final_brief"].rstrip() + "\n")
         # A control brief that needed no rewrite comes back as null: it is the blind brief.
-        final = r["final_brief"] or (ROOT / "briefs/blind" / bug / "brief.md").read_text()
+        final = r["final_brief"] or blind.read_text()
         (d / "brief.md").write_text(final.rstrip() + "\n")
-        problems = brief_driver.lint(final, driver.CORPUS[bug])
+        inserted = [(r.get("edit") or {}).get("inserted_item")] if r["group"] == "S" else []
+        problems = brief_driver.lint(final, driver.CORPUS[bug], in_diff_items=inserted)
         save(d / "oracle.json", {**r, "lint": problems})
         rows.append({"id": bug, "group": r["group"], "contains": (r.get("edit") or {}).get("contains"),
                      "leak_first": r["leak"][0]["label"], "leak_final": r["leak"][-1]["label"],

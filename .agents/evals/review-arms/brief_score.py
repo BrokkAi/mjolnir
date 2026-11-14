@@ -1,8 +1,10 @@
 """Judges known-defect catches for the relation-brief arms and scores them (brief/PLAN.md).
 
 Usage:
-  python3 brief_score.py build [--arms OT,OS] [--bugs-per-batch 3]
-      blind judge batches of stored no-brief and brief sessions -> $REVIEW_ARMS_DIR/brief-judge/
+  python3 brief_score.py build [--arms OT,OS] [--bugs-per-batch 3] [--name brief-judge]
+      blind judge batches of stored no-brief and brief sessions -> $REVIEW_ARMS_DIR/<name>/
+      (stage B: --arms OT,OS,BT,BS --name brief-judge-b, so oracle and blind are scored apart
+       and stage A's batches and key are kept)
       (run brief/workflow-judge.js with the args it prints; save its result as
        brief-judge/workflow-out.json)
   python3 brief_score.py collect
@@ -24,12 +26,12 @@ import statistics
 import sys
 
 import brief_oracle
-from driver import ROOT, SCRIPTS, save
+from driver import ARMS, BRIEF_ARMS, ROOT, SCRIPTS, save
 
 BASELINE_ARMS = ("A", "B", "D", "D2")
 MODELS = ("gpt-6.1-terra", "gpt-6.1-sol")
-J = ROOT / "brief-judge"
-KEY = ROOT / "private" / "key-brief-judge.json"
+# Set from --name: each judging round (stage A, stage B) has its own batches and key.
+J = KEY = None
 
 
 def latency(session_dir):
@@ -56,11 +58,36 @@ def sessions(arms):
                 usage = json.loads((sd / "usage.json").read_text())
                 tools = sum(1 for p in json.loads((sd / "transcript.json").read_text()) for i in p["items"]
                             if i["role"] in ("tool", "terminal"))
-                out.append({"bug": bug, "arm": arm, "condition": "brief" if arm in arms else "no-brief",
+                out.append({"bug": bug, "arm": arm, "condition": BRIEF_ARMS[arm] if arm in arms else "no-brief",
                             "session": r["child"], "model": r["model"], "dir": str(sd),
                             "latency_s": latency(sd), "tool_calls": tools,
                             "total_tokens": usage["totals"]["total_tokens"]["tokens"]})
     return out
+
+
+def conditions(arms):
+    """no-brief, then each brief kind (oracle, blind) the arms carry; kinds are never pooled."""
+    return ["no-brief", *sorted({BRIEF_ARMS[a] for a in arms})]
+
+
+def require_complete(rows, arms):
+    """Refuses a partial sample: every frozen diff needs its planned sessions for every model.
+
+    No-brief: the stored arms give each Hard-won diff at least 3 sessions per model.
+    Each brief kind: exactly the sessions its arms launch (driver.ARMS), all with output.
+    """
+    planned = collections.Counter((BRIEF_ARMS[arm], m.split(":")[0]) for arm in arms for m in ARMS[arm])
+    have = collections.Counter((r["bug"], r["condition"], r["model"]) for r in rows)
+    gaps = []
+    for bug in sum(brief_oracle.sets().values(), []):
+        for model in MODELS:
+            if have[(bug, "no-brief", model)] < 3:
+                gaps.append(f"{bug} no-brief {model}: {have[(bug, 'no-brief', model)]} of at least 3")
+            for kind in conditions(arms)[1:]:
+                if have[(bug, kind, model)] != planned[(kind, model)]:
+                    gaps.append(f"{bug} {kind} {model}: {have[(bug, kind, model)]} of {planned[(kind, model)]}")
+    if gaps:
+        raise SystemExit("incomplete sample; not scoring a subset:\n" + "\n".join(gaps))
 
 
 def build(arms, per_batch):
@@ -68,6 +95,7 @@ def build(arms, per_batch):
     KEY.parent.mkdir(parents=True, exist_ok=True)
     corpus = {r["id"]: r for r in map(json.loads, open(SCRIPTS / "corpus/corpus.jsonl"))}
     rows = sessions(arms)
+    require_complete(rows, arms)
     key = {}
     by_bug = collections.defaultdict(list)
     for r in rows:
@@ -126,7 +154,9 @@ def boot(diff_values, n=10000):
 
 
 def score():
-    key = json.loads(KEY.read_text())["outputs"]
+    saved = json.loads(KEY.read_text())
+    key = saved["outputs"]
+    require_complete(list(key.values()), saved["arms"])
     decided = json.loads((J / "handcheck-decisions.json").read_text())
     final = {}
     for line in open(J / "merged.jsonl"):
@@ -137,9 +167,10 @@ def score():
             assert r["labels"] == ["missed", "missed"], f"{r['output_id']} needs a hand-check decision"
             final[r["output_id"]] = "missed"
     sets = brief_oracle.sets()
+    conds = conditions(saved["arms"])
     rate = collections.defaultdict(dict)  # (set, condition, model) -> bug -> catch share
     for group, bugs in sets.items():
-        for cond in ("no-brief", "brief"):
+        for cond in conds:
             for model in MODELS:
                 for bug in bugs:
                     labels = [final[o] for o, k in key.items()
@@ -155,20 +186,21 @@ def score():
                                 "sessions": sum(v[2] for v in per.values()),
                                 "catch_rate": round(statistics.fmean(caught), 3), "ci95": boot(caught),
                                 "partial_rate": round(statistics.fmean(v[1] for v in per.values()), 3)})
-    for group in sets:
-        for model in MODELS:
-            a, b = rate.get((group, "brief", model), {}), rate.get((group, "no-brief", model), {})
-            common = sorted(set(a) & set(b))
-            if common:
+    for kind in conds[1:]:
+        for group in sets:
+            for model in MODELS:
+                a, b = rate[(group, kind, model)], rate[(group, "no-brief", model)]
+                common = sorted(set(a) & set(b))
+                assert len(common) == len(sets[group]), (kind, group, model)
                 diffs = [a[x][0] - b[x][0] for x in common]
-                report["effects"].append({"set": group, "model": model, "diffs": len(common),
+                report["effects"].append({"brief": kind, "set": group, "model": model, "diffs": len(common),
                                           "effect_points": round(100 * statistics.fmean(diffs), 1),
                                           "ci95_points": [round(100 * x, 1) for x in boot(diffs)]})
     for model in MODELS:  # expected catches of 30 for one reviewer
-        for cond in ("no-brief", "brief"):
+        for cond in conds:
             report.setdefault("expected_catches_of_30", []).append({"model": model, "condition": cond, "value": round(
                 sum(v[0] for g in sets for v in rate.get((g, cond, model), {}).values()), 1)})
-    for cond in ("no-brief", "brief"):
+    for cond in conds:
         for model in MODELS:
             ks = [k for k in key.values() if k["condition"] == cond and k["model"] == model]
             lat = [k["latency_s"] for k in ks if k["latency_s"] is not None]
@@ -185,7 +217,9 @@ if __name__ == "__main__":
     p.add_argument("step", choices=["build", "collect", "score"])
     p.add_argument("--arms", default="OT,OS")
     p.add_argument("--bugs-per-batch", type=int, default=3)
+    p.add_argument("--name", default="brief-judge", help="judging round: batches in <name>/, key in private/")
     a = p.parse_args()
+    J, KEY = ROOT / a.name, ROOT / "private" / f"key-{a.name}.json"
     if a.step == "build":
         build(tuple(a.arms.split(",")), a.bugs_per_batch)
     else:

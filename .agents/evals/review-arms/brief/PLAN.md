@@ -85,6 +85,11 @@ baseline is the stored Terra/high and Sol/high sessions on the same diffs
 
 ## Scoring
 
+Each judging round has its own batches and key (`brief_score.py --name`);
+stage B judges no-brief, oracle and blind sessions together and never pools
+the two brief kinds. Scoring refuses to run unless every frozen diff has its
+planned sessions for every model.
+
 Known-defect verdicts per session with `judge/SPEC.md`, for both the stored
 baseline sessions and the new ones, mixed in the same blind batches with
 random output IDs. Two independent Opus/high judges label every output; every
@@ -118,8 +123,10 @@ S is reported separately and does not enter the decision.
 
 ## Stage B (only if stage A is not null)
 
-Blind briefs `BT` and `BS` on the 30 Hard-won diffs (180 sessions), and `BT`
-on the 40 ordinary diffs (120 sessions), whose findings are pooled through
+Before any stage B run, the blind briefs of P and S (which differ from their
+oracle briefs) get the same leak check; a control brief rewritten in stage A
+is already its blind brief. Blind briefs `BT` and `BS` on the 30 Hard-won
+diffs (180 sessions), and `BT` on the 40 ordinary diffs (120 sessions), whose findings are pooled through
 the verify pipeline with arms hidden; each rejected finding that cites a
 brief item is marked. Control 2: confirmed findings per session on ordinary
 diffs stay at or above 90% of no-brief, and rejected findings citing the brief

@@ -54,8 +54,11 @@ def changed_lines(bug):
     return lines
 
 
-def lint(text, bug):
+def lint(text, bug, in_diff_items=()):
+    """Rule violations a script can see. Items in in_diff_items (a secondary oracle item,
+    brief/PLAN.md) may relate two changed locations."""
     changed = changed_lines(bug)
+    exempt = {i.strip().removeprefix("- ").strip() for i in in_diff_items if i}
     problems = []
     for s in SECTIONS:
         if s not in text:
@@ -74,7 +77,8 @@ def lint(text, bug):
         anchors = [(m.group(1), int(m.group(2)), int(m.group(3) or m.group(2))) for m in ANCHOR.finditer(item)]
         if not anchors:
             problems.append(f"item {n} has no file:line anchor: {item[:120]}")
-        elif all(p in changed and set(range(a, b + 1)) <= changed[p] for p, a, b in anchors):
+        elif item.strip() not in exempt and all(p in changed and set(range(a, b + 1)) <= changed[p]
+                                                for p, a, b in anchors):
             problems.append(f"item {n} has no anchor outside the changed lines: {item[:120]}")
     return problems
 
@@ -178,14 +182,16 @@ def run(bug_id, gate):
     cd = d / "reviewers" / sid[:12]
     save(cd / "transcript.json", driver.transcript(sid))
     save(cd / "usage.json", mj("usage", "--session", sid))
-    save(d / "suspend.json", mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900))
     inv = json.loads((d / "inventory-check.json").read_text())["problems"]
-    save(d / "done.json", {"bug": bug_id, "session_id": sid, "fix_rounds": rounds, "lint_problems": problems,
-                           "inventory_problems": inv, "finished_ns": time.time_ns()})
-    if inv:
-        raise RuntimeError(f"writer changed the checkout beyond brief.md: {inv}")
-    if problems:
-        raise RuntimeError(f"brief still breaks {len(problems)} rules after {rounds} fix rounds; see lint-{rounds}.json")
+    if inv or problems:
+        # No done.json: a rerun fails the same way instead of passing an invalid brief on.
+        # The session stays live for inspection.
+        save(d / "failed.json", {"bug": bug_id, "session_id": sid, "fix_rounds": rounds, "lint_problems": problems,
+                                 "inventory_problems": inv, "time_ns": time.time_ns()})
+        raise RuntimeError(f"brief not accepted: inventory problems {inv}; "
+                           f"{len(problems)} rule violations after {rounds} fix rounds (lint-{rounds}.json)")
+    save(d / "suspend.json", mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900))
+    save(d / "done.json", {"bug": bug_id, "session_id": sid, "fix_rounds": rounds, "finished_ns": time.time_ns()})
     return "done"
 
 
