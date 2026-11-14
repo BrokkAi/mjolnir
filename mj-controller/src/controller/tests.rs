@@ -863,7 +863,18 @@ fn registration_turns_unavailable_explicit_oracle_off_with_a_notice() {
 }
 
 #[test]
-fn registration_rejects_a_disabled_profile_before_persisting() {
+fn registration_allows_disabled_profile_but_rejects_retired_target() {
+    const MARKER: &str = "MJ_TEST_DISABLED_PROFILE_REGISTRATION";
+    if std::env::var_os(MARKER).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        run_registration_child(
+            MARKER,
+            "registration_allows_disabled_profile_but_rejects_retired_target",
+            directory.path(),
+        );
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
     let mut config = registration_config();
     config.profiles.get_mut("codex").unwrap().enabled = false;
     let mut controller = Controller {
@@ -871,7 +882,7 @@ fn registration_rejects_a_disabled_profile_before_persisting() {
         state: State::default(),
     };
 
-    let error = controller
+    let id = controller
         .register_session_with_resources(
             "codex",
             "project",
@@ -879,11 +890,10 @@ fn registration_rejects_a_disabled_profile_before_persisting() {
             "disabled",
             launch_options(Vec::new()),
         )
-        .unwrap_err();
-
-    assert!(error.to_string().contains("disabled"));
-    assert!(controller.state.sessions.is_empty());
-    controller.config.profiles.get_mut("codex").unwrap().enabled = true;
+        .unwrap();
+    assert!(controller.state.sessions.contains_key(&id));
+    assert!(controller.config.enabled_profile("codex").is_none());
+    controller.state.sessions.clear();
     controller.config.targets.insert("retired-ec2".into(), serde_json::from_value(serde_json::json!({
         "kind": "aws-ec2", "region": "us-east-1", "launch_template": "lt-old", "ssh_user": "ubuntu"
     })).unwrap());

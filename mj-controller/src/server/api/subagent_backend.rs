@@ -95,16 +95,6 @@ pub trait SubagentBackend: Send + Sync {
         ))
     }
 
-    /// `profile_config` without the enabled gate: a disabled profile's home
-    /// still exists, so a read of what its harness advertises is safe.
-    fn discover_profile_config_any_state(
-        &self,
-        profile: String,
-    ) -> BoxFuture<'_, AnyResult<mj_core::worker_launch::ProfileConfig>> {
-        Box::pin(crate::controller::profile_config::discover_any(
-            profile, None, false, true,
-        ))
-    }
     /// What `profile`'s harness advertises before the profile's `models`
     /// allow-list, for `mj doctor`. Backends without the daemon's catalogue
     /// answer with the ordinary choices.

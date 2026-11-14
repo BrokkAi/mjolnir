@@ -111,8 +111,7 @@ async fn refused_profile_login_errors_are_authenticated_and_projected_into_sessi
 // discovers it: the read answers what the harness advertises.
 #[tokio::test]
 async fn profile_config_with_disabled_discovers_profiles_the_snapshot_omits() {
-    let (app, _actions, _snapshots, _bundles) =
-        api_app(Arc::new(FakeBackend::default()), |_| {});
+    let (app, _actions, _snapshots, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
     let path = "/api/v1/profiles/retired/config";
     let refused = app
         .clone()
@@ -130,9 +129,8 @@ async fn profile_config_with_disabled_discovers_profiles_the_snapshot_omits() {
         .unwrap();
     assert_eq!(answered.status(), StatusCode::OK);
     let value: serde_json::Value =
-        serde_json::from_slice(&answered.into_body().collect().await.unwrap().to_bytes())
-            .unwrap();
-    assert_eq!(value["model"], "any-state:retired");
+        serde_json::from_slice(&answered.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(value["model"], "kimi-code/k3");
 }
 
 // HTTP contract integration: optional All and encoded profile names must reach
@@ -1288,20 +1286,6 @@ impl SubagentBackend for FakeBackend {
                     name: "High".into(),
                     description: None,
                 }],
-                observed_at: 1,
-            })
-        })
-    }
-
-    fn discover_profile_config_any_state(
-        &self,
-        profile: String,
-    ) -> BoxFuture<'_, AnyResult<mj_core::worker_launch::ProfileConfig>> {
-        Box::pin(async move {
-            Ok(mj_core::worker_launch::ProfileConfig {
-                model: Some(format!("any-state:{profile}")),
-                models: Vec::new(),
-                efforts: Vec::new(),
                 observed_at: 1,
             })
         })
@@ -2586,6 +2570,54 @@ async fn model_first_session_start_selects_the_profile_that_offers_the_model() {
     assert_eq!(followups[0].0, "session-2");
     assert_eq!(followups[0].1.model.as_deref(), Some("grok-4.6"));
     assert_eq!(followups[0].1.effort.as_deref(), Some("high"));
+}
+
+// Hard-won: 0bb46ff94: the create API checked the enabled-only snapshot, so `mj new --profile <disabled>` was refused.
+#[tokio::test]
+async fn session_start_accepts_a_named_disabled_profile_but_not_a_disabled_saved_default() {
+    let directory = tempfile::tempdir().unwrap();
+    let preferences_path = directory.path().join("go.json");
+    save_global_default(&preferences_path, "gemini", "podman");
+    let (app, mut actions, _, _) = api_app_with_preferences(
+        Arc::new(FakeBackend::default()),
+        |snapshot| {
+            snapshot.disabled_profile_ids.insert("gemini".into());
+        },
+        preferences_path,
+    );
+
+    let response = app
+        .clone()
+        .oneshot(start_request(r#"{"bundle_id":"hel"}"#.into()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert!(
+        body.to_string()
+            .contains(r#"the saved default names an unknown profile \"gemini\""#),
+        "{body}"
+    );
+
+    let response = tokio::spawn(app.oneshot(start_request(
+        r#"{"profile_id":"gemini","target_id":"podman","bundle_id":"hel"}"#.into(),
+    )));
+    let request = actions.recv().await.unwrap();
+    assert!(matches!(
+        request.action,
+        ControllerAction::New { ref profile_id, .. } if profile_id == "gemini"
+    ));
+    request
+        .reply
+        .send(ActionOutcome::Accepted {
+            session_id: Some("session-2".into()),
+            notice: None,
+        })
+        .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::CREATED
+    );
 }
 
 #[tokio::test]

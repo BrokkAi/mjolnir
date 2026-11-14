@@ -533,7 +533,7 @@ fn move_preflight_rejects_invalid_destination_before_source_mutation() {
                 additional_mounts: None,
                 resource_allocation: None,
             },
-            "unknown destination profile",
+            "unknown profile \"missing-profile\"",
         ),
         (
             "invalid resource allocation",

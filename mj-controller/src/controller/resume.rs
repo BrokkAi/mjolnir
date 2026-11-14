@@ -1651,11 +1651,8 @@ impl Controller {
         let canonical_session = Arc::clone(&verified_archive.canonical_session);
         let profile = self
             .config
-            .profiles
-            .get(profile_id)
-            .with_context(|| format!("unknown profile {profile_id:?}"))?
+            .named_profile(profile_id)?
             .clone();
-        ensure!(profile.enabled, "profile {profile_id:?} is disabled");
         let target_template = self.config.ensure_target_enabled(target_id)?.clone();
         // Decide the representation before the record changes, so an
         // incompatible target fails here instead of during provisioning.

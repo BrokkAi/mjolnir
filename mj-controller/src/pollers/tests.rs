@@ -630,11 +630,12 @@ async fn extra_profiles_are_probed_once_and_never_on_the_batch_schedule() {
     assert_eq!(next_update_report(&mut updates).await, "extra");
 
     let mut changed = probeless_request("extra");
-    changed.codex_source = crate::quota::CodexQuotaSource::Provider(crate::quota::ProviderCredential {
-        id: "other".into(),
-        host: "example.invalid".into(),
-        api_key: "key2".into(),
-    });
+    changed.codex_source =
+        crate::quota::CodexQuotaSource::Provider(crate::quota::ProviderCredential {
+            id: "other".into(),
+            host: "example.invalid".into(),
+            api_key: "key2".into(),
+        });
     let mut next = batch(4, false, &["a"]);
     next.extra = vec![changed];
     profiles.send_replace(next);
@@ -642,9 +643,7 @@ async fn extra_profiles_are_probed_once_and_never_on_the_batch_schedule() {
     assert_quiet(&mut updates).await;
 }
 
-async fn next_update_report(
-    updates: &mut tokio::sync::mpsc::Receiver<QuotaUpdate>,
-) -> String {
+async fn next_update_report(updates: &mut tokio::sync::mpsc::Receiver<QuotaUpdate>) -> String {
     let QuotaUpdate::Report(outcome) = next_update(updates).await else {
         panic!("expected a report");
     };

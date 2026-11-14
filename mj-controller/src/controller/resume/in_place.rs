@@ -475,13 +475,7 @@ impl Controller {
             .or(previous.checkpoint.as_deref())
             .context("session has no checkpoint")?;
         let verified_archive = verify_resume_checkpoint(session_id, checkpoint)?;
-        let profile = self
-            .config
-            .profiles
-            .get(profile_id)
-            .with_context(|| format!("unknown profile {profile_id:?}"))?
-            .clone();
-        ensure!(profile.enabled, "profile {profile_id:?} is disabled");
+        let profile = self.config.named_profile(profile_id)?.clone();
         let target_template = self
             .config
             .targets

@@ -40,7 +40,7 @@ pub(crate) async fn discover_for(
     refresh: bool,
 ) -> Result<Discovery> {
     serialized_until(id.clone(), cancellation, move |cancelled| {
-        discover_with_provenance(&config, &id, model, refresh, cancelled, false)
+        discover_with_provenance(&config, &id, model, refresh, cancelled)
     })
     .await
 }
@@ -60,10 +60,7 @@ pub(crate) async fn validate_session_subagent_policy(
                 .with_code(mj_core::subagent::CHOICE_UNAVAILABLE_CODE),
         )
     };
-    let kind = config
-        .enabled_profile(profile_id)
-        .context("parent profile unavailable")?
-        .kind;
+    let kind = config.named_profile(profile_id)?.kind;
     // None asks for no Mjolnir sub-agents at all, so any harness accepts it;
     // only a Mjolnir policy needs the delegation tools.
     if !kind.supports_delegation_tools() && policy.uses_mjolnir() {
@@ -129,9 +126,7 @@ where
     F: Fn(String, Option<String>) -> Fut + Copy,
     Fut: std::future::Future<Output = Result<ProfileConfig>>,
 {
-    config
-        .enabled_profile(parent)
-        .context("parent profile is unavailable")?;
+    config.named_profile(parent)?;
     let candidates = config
         .profiles
         .iter()
@@ -238,19 +233,8 @@ pub async fn discover(
     model: Option<String>,
     refresh: bool,
 ) -> Result<ProfileConfig> {
-    discover_any(profile_id, model, refresh, false).await
-}
-
-/// [`discover`] that also answers for a disabled profile: discovery is a read
-/// of what the harness advertises, and a disabled profile's home still exists.
-pub async fn discover_any(
-    profile_id: String,
-    model: Option<String>,
-    refresh: bool,
-    allow_disabled: bool,
-) -> Result<ProfileConfig> {
     serialized(profile_id.clone(), move |cancelled| {
-        discover_blocking(&profile_id, model, refresh, cancelled, allow_disabled)
+        discover_blocking(&profile_id, model, refresh, cancelled)
     })
     .await
 }
@@ -373,9 +357,7 @@ pub(crate) async fn observe(
     let job_stored = stored.clone();
     serialized(profile_id.clone(), move |cancelled| {
         let config = Config::load()?;
-        let profile = config
-            .enabled_profile(&profile_id)
-            .context("observed profile was removed")?;
+        let profile = config.named_profile(&profile_id)?;
         let facts = mj_core::acp::AcpSessionFacts::from_operational(
             profile.kind,
             &state.config,
@@ -441,22 +423,13 @@ fn discover_blocking(
     model: Option<String>,
     refresh: bool,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
-    allow_disabled: bool,
 ) -> Result<ProfileConfig> {
     ensure!(
         !cancelled.load(std::sync::atomic::Ordering::Acquire),
         "profile discovery cancelled"
     );
     let config = Config::load()?;
-    Ok(discover_with_provenance(
-        &config,
-        profile_id,
-        model,
-        refresh,
-        cancelled,
-        allow_disabled,
-    )?
-    .choices)
+    Ok(discover_with_provenance(&config, profile_id, model, refresh, cancelled)?.choices)
 }
 
 /// What discovery returned, and whether the harness actually ran: a
@@ -475,22 +448,12 @@ fn discover_with_provenance(
     model: Option<String>,
     refresh: bool,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
-    allow_disabled: bool,
 ) -> Result<Discovery> {
     ensure!(
         !cancelled.load(std::sync::atomic::Ordering::Acquire),
         "profile discovery cancelled"
     );
-    let profile = if allow_disabled {
-        config
-            .profiles
-            .get(profile_id)
-            .with_context(|| format!("unknown profile {profile_id:?}"))?
-    } else {
-        config
-            .enabled_profile(profile_id)
-            .with_context(|| format!("unknown or disabled profile {profile_id:?}"))?
-    };
+    let profile = config.named_profile(profile_id)?;
     let mut environment = profile.environment.resolved().clone();
     let _ = super::worker_binary::apply_claude_setup_token(
         &mut environment,

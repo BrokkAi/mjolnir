@@ -339,11 +339,7 @@ pub(super) async fn serve_client(
             {
                 let prepared = (|| -> Result<portable_pty::CommandBuilder> {
                     let config = state.with_config(Clone::clone);
-                    let profile = config
-                        .profiles
-                        .get(profile_id)
-                        .context("unknown login profile")?;
-                    anyhow::ensure!(profile.enabled, "login profile is disabled");
+                    let profile = config.named_profile(profile_id)?;
                     let mut command = portable_pty::CommandBuilder::new(std::env::current_exe()?);
                     if let Some(instance) = mj_core::config::instance_name() {
                         command.args(["--instance", &instance]);

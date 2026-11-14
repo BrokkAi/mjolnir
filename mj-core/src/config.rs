@@ -1621,7 +1621,7 @@ impl Config {
         self.profiles.is_empty() && self.bundles.is_empty() && self.targets.is_empty()
     }
 
-    /// Profiles available for new work, user-facing selectors, and probes.
+    /// Profiles Mjolnir may choose or probe automatically.
     pub fn enabled_profiles(&self) -> impl Iterator<Item = (&str, &HarnessProfile)> {
         self.profiles
             .iter()
@@ -1629,7 +1629,14 @@ impl Config {
             .map(|(id, profile)| (id.as_str(), profile))
     }
 
-    /// One profile when it exists and is available for new work.
+    /// Look up a profile explicitly named by a user or recorded on a session.
+    pub fn named_profile(&self, id: &str) -> anyhow::Result<&HarnessProfile> {
+        self.profiles
+            .get(id)
+            .with_context(|| format!("unknown profile {id:?}"))
+    }
+
+    /// One profile eligible for automatic selection or probing.
     pub fn enabled_profile(&self, id: &str) -> Option<&HarnessProfile> {
         self.profiles.get(id).filter(|profile| profile.enabled)
     }

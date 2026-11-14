@@ -2122,6 +2122,13 @@ exit 0
             ..State::default()
         },
     };
+    // Automatic eligibility may change while a session is suspended.
+    controller
+        .config
+        .profiles
+        .get_mut(profile_id)
+        .unwrap()
+        .enabled = false;
     let profile = controller.config.profiles[profile_id].clone();
 
     let runtime = tokio::runtime::Builder::new_current_thread()
