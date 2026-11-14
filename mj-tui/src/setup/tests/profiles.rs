@@ -56,6 +56,19 @@ fn managed_setup_keeps_login_intent_through_pending_field_validation() {
     );
     assert_eq!(focused_field(dialog).input.value(), "many");
     assert!(focused_field(dialog).error.is_some());
+    // Hard-won: 2dfa44874: managed setup's own profile template gave a held-open Claude profile the Codex fields.
+    let profile = vec!["profiles".to_owned(), "claude".to_owned()];
+    let shown = visible_keys(&profile, dialog.draft.pointer(&pointer(&profile)).unwrap());
+    assert!(
+        shown.contains(&"claude_permission_mode".to_owned()),
+        "{shown:?}"
+    );
+    assert!(
+        !shown
+            .iter()
+            .any(|key| matches!(key.as_str(), "guardian_review_model" | "codex_profile")),
+        "{shown:?}"
+    );
     replace_text(&mut dashboard, "5");
     let action = dashboard.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
     let DashboardAction::SaveSetupAndLogin {
