@@ -116,7 +116,14 @@ pub(crate) fn order_by_draw<T: AsRef<SubagentCandidate>>(
     now_seconds: i64,
     placement: Placement,
 ) {
-    rank_candidates(candidates, ranking_anchor, prefer, model, now_seconds, placement);
+    rank_candidates(
+        candidates,
+        ranking_anchor,
+        prefer,
+        model,
+        now_seconds,
+        placement,
+    );
     let mut keyed = candidates
         .drain(..)
         .zip(units)
@@ -130,18 +137,26 @@ pub(crate) fn order_by_draw<T: AsRef<SubagentCandidate>>(
         .collect::<Vec<_>>();
     // A stable sort keeps the ranked order among the undrawn candidates.
     keyed.sort_by(|left, right| {
-        tier(quota_rank(left.1.as_ref(), model, now_seconds), left.1.as_ref(), placement)
-            .cmp(&tier(quota_rank(right.1.as_ref(), model, now_seconds), right.1.as_ref(), placement))
-            .then_with(|| {
-                projects_short_window_exhaustion(left.1.as_ref(), model, now_seconds).cmp(
-                    &projects_short_window_exhaustion(right.1.as_ref(), model, now_seconds),
-                )
-            })
-            .then_with(|| {
-                preference_position(left.1.as_ref(), prefer)
-                    .cmp(&preference_position(right.1.as_ref(), prefer))
-            })
-            .then_with(|| right.0.total_cmp(&left.0))
+        tier(
+            quota_rank(left.1.as_ref(), model, now_seconds),
+            left.1.as_ref(),
+            placement,
+        )
+        .cmp(&tier(
+            quota_rank(right.1.as_ref(), model, now_seconds),
+            right.1.as_ref(),
+            placement,
+        ))
+        .then_with(|| {
+            projects_short_window_exhaustion(left.1.as_ref(), model, now_seconds).cmp(
+                &projects_short_window_exhaustion(right.1.as_ref(), model, now_seconds),
+            )
+        })
+        .then_with(|| {
+            preference_position(left.1.as_ref(), prefer)
+                .cmp(&preference_position(right.1.as_ref(), prefer))
+        })
+        .then_with(|| right.0.total_cmp(&left.0))
     });
     candidates.extend(keyed.into_iter().map(|(_, candidate)| candidate));
 }

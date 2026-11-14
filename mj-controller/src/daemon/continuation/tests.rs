@@ -872,7 +872,11 @@ fn quota_move_candidates_filter_model_health_and_keep_usage_priced_last() {
                         None
                     },
                     windows: vec![crate::quota::QuotaWindow {
-                        label: if id == "windowed" { "5h".into() } else { "Week".into() },
+                        label: if id == "windowed" {
+                            "5h".into()
+                        } else {
+                            "Week".into()
+                        },
                         remaining_percent: Some(if matches!(id, "paid" | "empty" | "unhealthy") {
                             0
                         } else if id == "windowed" {
