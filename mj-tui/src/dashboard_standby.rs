@@ -98,6 +98,41 @@ impl DashboardState {
             .unwrap_or_else(|| "The session's worker is no longer running.".to_owned())
     }
 
+    pub(crate) fn stopped_notification_row(&self, session_id: &str) -> bool {
+        self.state.sessions.get(session_id).is_some_and(|session| {
+            !session.state.is_active()
+                && self.is_listed_top_level_session(session, &session.workspace_id)
+        })
+    }
+
+    /// What a person can do with a stopped row: resume it with Enter when the
+    /// record can be resumed, and dismiss or destroy it from its actions menu.
+    pub(crate) fn stopped_failure_guidance(&self, session_id: &str) -> String {
+        let actions = match self
+            .key_labels(crate::CommandId::SessionActions)
+            .into_iter()
+            .next()
+        {
+            Some(key) => format!("{key} opens its actions"),
+            None => "its actions menu has".to_owned(),
+        };
+        let actions = format!("{actions}: Dismiss notification or Destroy session");
+        let unresumable = self
+            .state
+            .sessions
+            .get(session_id)
+            .and_then(|session| crate::resume::unresumable_reason(session.state));
+        match (
+            unresumable,
+            self.key_labels(crate::CommandId::OpenSession)
+                .into_iter()
+                .next(),
+        ) {
+            (Some(_), _) | (None, None) => format!("In Sessions, {actions}."),
+            (None, Some(enter)) => format!("In Sessions, {enter} resumes it; {actions}."),
+        }
+    }
+
     /// A daemon notice about a session in another workspace names that
     /// workspace first, so a footer that cuts the tail still says where to
     /// look.

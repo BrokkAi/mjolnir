@@ -13,20 +13,6 @@ use mj_core::config::NotifyMode;
 
 use crate::{AttentionLevel, DashboardState};
 
-/// A failure shown in this terminal. A changed error or a recovered session
-/// starts a new notice; viewing an error does not change its underlying state.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ViewedFailure {
-    state: mj_core::state::SessionState,
-    message: Option<String>,
-}
-
-impl ViewedFailure {
-    pub(crate) fn matches(&self, session: &mj_core::state::SessionRecord) -> bool {
-        self.state == session.state && self.message == session.last_error
-    }
-}
-
 /// One thing worth interrupting the person for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notification {
@@ -53,40 +39,28 @@ pub(crate) struct AttentionEpisode {
 
 impl DashboardState {
     pub(crate) fn attention_notice_level(&self, session_id: &str) -> AttentionLevel {
-        self.unseen_failure_level(session_id, self.attention_level(session_id))
+        self.attention_level(session_id)
     }
 
-    /// `level`, except that a failure already drawn is no longer news.
-    fn unseen_failure_level(&self, session_id: &str, level: AttentionLevel) -> AttentionLevel {
-        if level == AttentionLevel::Failed
-            && self.viewed_failures.get(session_id).is_some_and(|seen| {
-                self.state
-                    .sessions
-                    .get(session_id)
-                    .is_some_and(|session| seen.matches(session))
-            })
-        {
-            AttentionLevel::Inactive
-        } else {
-            level
-        }
-    }
-
-    /// Remember only failures whose explanation was actually drawn, not rows
-    /// merely selected behind a modal or while the terminal is too small.
     pub(crate) fn failure_drawn(&mut self, session_id: &str) {
-        if self.modal_open() {
-            return;
+        if !self.modal_open()
+            && matches!(
+                self.notification_dismissal_target(session_id),
+                Some(mj_core::attention::NotificationDismissal::Failure(_))
+            )
+        {
+            self.rendered_failure_dismissals
+                .insert(session_id.to_owned());
         }
-        if let Some(session) = self.state.sessions.get(session_id) {
-            self.drawn_failures.insert(
-                session_id.to_owned(),
-                ViewedFailure {
-                    state: session.state,
-                    message: session.last_error.clone(),
-                },
-            );
-        }
+    }
+
+    /// Drain only failures actually drawn; the host submits these through the
+    /// same supervised action as an explicit notification dismissal.
+    pub fn take_drawn_failure_dismissals(&mut self) -> Vec<crate::DashboardAction> {
+        std::mem::take(&mut self.rendered_failure_dismissals)
+            .into_iter()
+            .filter_map(|id| self.begin_dismiss_notification_for(&id))
+            .collect()
     }
 
     /// The notifications due at `now_ms`, each reported exactly once per
@@ -137,7 +111,7 @@ impl DashboardState {
                 // A descendant form owns its episode and names this row.
                 // The daemon also promotes the row, which must not ring twice.
                 None if self.waiting_child_of(id).is_some() => AttentionLevel::Inactive,
-                None => self.unseen_failure_level(id, self.attention_level(id)),
+                None => self.attention_level(id),
             };
             if !level.needs_person() {
                 episodes.remove(id);
@@ -366,9 +340,21 @@ impl DashboardState {
             && !self.pane_session_is_suspended(session_id)
     }
 
-    /// Empties the pane that held a suspended session, instead of attaching
-    /// to a session with no worker, and says so. The host saves the layout.
+    /// Lets a pane go of a suspended session instead of attaching to a
+    /// session with no worker. The host cancels the attach and saves the
+    /// layout.
+    ///
+    /// Browse shows the selection, so it keeps a stopped row that is still
+    /// listed because its failure needs a person: emptying it would clear the
+    /// selection the row's keys act on. Any other suspended session has left
+    /// the list, and Browse just empties. A pinned pane empties and says so.
     pub fn release_suspended_pane(&mut self, pane: crate::tile_layout::PaneId, session_id: &str) {
+        if pane == self.browse_pane() {
+            if !self.stopped_notification_row(session_id) {
+                self.set_pane_session(pane, None);
+            }
+            return;
+        }
         self.set_pane_session(pane, None);
         let name = self.session_notice_name(session_id);
         self.say_suspended_session_was_unpinned(&name);

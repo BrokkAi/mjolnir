@@ -233,11 +233,6 @@ pub struct CarriedLaunchSettings {
     pub no_project_memory: bool,
     pub no_github_events: bool,
     pub no_github_credentials: bool,
-    /// The source's per-session container size overrides, as stored. They
-    /// take precedence over the allocation when the container is created, so
-    /// a copy that dropped them would start at a different size.
-    pub container_cpus: Option<String>,
-    pub container_memory: Option<String>,
     /// What the copy changed because a setting could not apply now, in a
     /// sentence the launch notices show.
     pub note: Option<String>,
@@ -693,8 +688,7 @@ pub enum DashboardAction {
     /// the container is created.
     SaveContainerSettings {
         session_id: String,
-        cpus: Option<String>,
-        memory: Option<String>,
+        resource_allocation: Option<SessionResourceAllocation>,
         additional_mounts: Vec<AdditionalMount>,
         mount_history: Vec<std::path::PathBuf>,
     },
@@ -1084,9 +1078,9 @@ pub struct DashboardState {
     navigation: conversation_navigation::ConversationNavigation,
     pub(crate) browse_pane: Option<tile_layout::PaneId>,
     pub(crate) pin_ids: BTreeMap<String, u32>,
-    pub(crate) navigation_session: Option<String>,
+    pub(crate) pending_navigation: Option<dashboard_sessions::PendingNavigation>,
     /// When a workspace switch was requested for a child, open its parent's
-    /// Sub-agents view before restoring `navigation_session`.
+    /// Sub-agents view before restoring `pending_navigation`.
     pub(crate) navigation_subagent_parent: Option<String>,
     pub(crate) pane_menu: Option<pane_controls::PaneMenu>,
     /// Whether the focused pane fills the conversation band on its own. The
@@ -1160,8 +1154,7 @@ pub struct DashboardState {
     /// reported, for [`DashboardState::notification_events`].
     pub(crate) attention_episodes: BTreeMap<String, crate::notify::AttentionEpisode>,
     pub(crate) attention_navigation: Option<dashboard_sessions::AttentionNavigation>,
-    pub(crate) viewed_failures: BTreeMap<String, crate::notify::ViewedFailure>,
-    pub(crate) drawn_failures: BTreeMap<String, crate::notify::ViewedFailure>,
+    pub(crate) rendered_failure_dismissals: BTreeSet<String>,
     /// The pane, row index, and time of the most recent left click on a
     /// session row, so the next click can be recognized as a double click.
     last_row_click: Option<(Focus, usize, Instant)>,
@@ -1398,7 +1391,7 @@ impl DashboardState {
             browse_pane: None,
             pin_ids: BTreeMap::new(),
 
-            navigation_session: None,
+            pending_navigation: None,
             navigation_subagent_parent: None,
             pane_menu: None,
             conversation_zoomed: false,
@@ -1425,8 +1418,7 @@ impl DashboardState {
             collapsed_project_keys: Default::default(),
             attention_episodes: BTreeMap::new(),
             attention_navigation: None,
-            viewed_failures: BTreeMap::new(),
-            drawn_failures: BTreeMap::new(),
+            rendered_failure_dismissals: BTreeSet::new(),
             last_row_click: None,
             mode: Mode::Dashboard,
             pending_welcome: None,

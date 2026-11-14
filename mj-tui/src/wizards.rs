@@ -4,7 +4,7 @@ mod projects;
 use projects::{ProjectPicker, ProjectTab};
 mod move_files;
 mod render;
-mod resources;
+pub(crate) mod resources;
 mod subagents;
 pub(crate) use picker::*;
 pub(crate) use render::*;

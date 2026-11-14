@@ -491,7 +491,9 @@ impl Controller {
         self.validate_muse_resume_destination(previous, profile.kind, target_template_id)?;
         ensure!(
             profile.kind != mj_core::config::HarnessKind::Muse
-                || previous.additional_mounts.is_empty(),
+                || mj_core::state::applied_container_settings(previous)
+                    .additional_mounts
+                    .is_empty(),
             "{} ACP supports one workspace root; attached directories are unsupported",
             profile.kind.display_name()
         );
@@ -630,6 +632,10 @@ impl Controller {
                     )?,
                 );
                 let mut retained = previous.clone();
+                let latest = crate::database::load_session_record(session_id)?
+                    .context("retained session disappeared")?;
+                retained.resource_allocation = latest.resource_allocation;
+                retained.additional_mounts = latest.additional_mounts;
                 retained.state = SessionState::Error;
                 retained.updated_at = now();
                 retained.last_error =

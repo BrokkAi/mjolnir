@@ -1,0 +1,63 @@
+# Config of the private review-arms instance ($REVIEW_ARMS_DIR/instance/config/config.toml).
+# The carrier home holds carrier-AGENTS.md as AGENTS.md; secrets.toml supplies DEEPSEEK_API_KEY.
+version = 22
+
+[phone]
+enabled = true
+bind = "127.0.0.1:38517"
+tailscale_detect = false
+
+[review]
+
+[subagents]
+max_concurrent = 16
+
+[subagents.straightforward]
+model = "gpt-6-luna"
+effort = "high"
+
+[subagents.subtle]
+model = "gpt-6.1-sol"
+effort = "medium"
+
+[profiles.codex]
+kind = "codex"
+home = "/home/jonathan/.codex"
+
+[profiles.codex2]
+kind = "codex"
+home = "/home/jonathan/.codex2"
+
+[profiles.codex3]
+kind = "codex"
+home = "/home/jonathan/.codex3"
+
+[profiles.codex4]
+kind = "codex"
+home = "/home/jonathan/.codex4"
+
+[profiles.carrier]
+kind = "dsh"
+home = "/mnt/optane/review-arms-20261113/instance/carrier-dsh"
+
+[profiles.carrier.environment]
+DEEPSEEK_API_KEY = { from_secret = "DEEPSEEK_API_KEY" }
+
+[bundles.mjolnir]
+primary_repo = "mjolnir"
+
+[[bundles.mjolnir.repositories]]
+id = "mjolnir"
+github = "BrokkAi/mjolnir"
+destination = "mjolnir"
+
+[targets.podman]
+kind = "podman"
+image = "d12b0a38aa225ef911aec4fe4af36fe903fead63e5709a70f28d495e1f3cfe26"
+pull_policy = "never"
+
+[machines.local]
+kind = "local"
+
+[machines.local.build_cache]
+enabled = false

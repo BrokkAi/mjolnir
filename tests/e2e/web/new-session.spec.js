@@ -350,7 +350,7 @@ test('golden_viewer_new_session', async ({ context }) => {
     state.snapshot.sessions.push({
       id: 'mounted', title: 'Mounted session', state: 'running', lifecycle: 'live',
       workspace_id: 'test', profile_id: 'alpha', target_id: 'container', is_idle: true,
-      container_cpus: '6', container_memory: '12g', additional_mounts: mounts,
+      resource_allocation: { kind: 'container', cpus: 6, memory_bytes: 12 * 2 ** 30 }, additional_mounts: mounts,
       capabilities: { container_settings: true, restart: true },
     });
     await refresh(page, state);
@@ -361,11 +361,17 @@ test('golden_viewer_new_session', async ({ context }) => {
     await expect(dialog.locator('.mount-row')).toHaveCount(3);
     output.push('=== existing Container settings uses the shared editor ===');
     output.push((await dialog.innerText()).trim());
+    const cpu = dialog.getByLabel('CPUs', { exact: true });
+    await cpu.fill('1.5');
+    await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(dialog.locator(':scope > [role=alert]')).toHaveText('CPU must be a positive whole number.');
+    expect(state.actions).toHaveLength(0);
+    await cpu.fill('6');
     const sourcesBeforeSave = await page.evaluate(() => window.fixtureEventSources.length);
     await dialog.getByRole('button', { name: 'Save', exact: true }).click();
     await expect.poll(() => state.actions.length).toBe(1);
     expect(state.actions[0]).toEqual({
-      action: 'set-container-settings', session_id: 'mounted', cpus: '6', memory: '12g', mounts,
+      action: 'set-container-settings', session_id: 'mounted', resource_allocation: { kind: 'container', cpus: 6, memory_bytes: 12 * 2 ** 30 }, mounts,
     });
     await expect(dialog).toHaveCount(0);
     // Save closes the dialog before its snapshot refresh lands; a later fixture

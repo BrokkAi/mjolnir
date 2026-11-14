@@ -328,13 +328,7 @@ impl Controller {
         append_hel_target_environment(profile.kind, &profile_stage, backend)?;
         // Edits to attachment settings apply on the next container creation;
         // describe this container's creation snapshot while it is retained.
-        let attachments = session
-            .target_runtime
-            .as_ref()
-            .and_then(|runtime| runtime.container_settings.as_ref())
-            .map_or(session.additional_mounts.as_slice(), |settings| {
-                settings.additional_mounts.as_slice()
-            });
+        let attachments = mj_core::state::applied_container_settings(session).additional_mounts;
         let storage = targets::inspect_container_storage(backend, attachments, executor)?;
         append_container_storage_guidance(
             profile.kind,
@@ -1078,7 +1072,7 @@ pub(super) fn worker_launch_config_with_checkout(
     };
     let mut additional_directories = workspace.1.iter().map(PathBuf::from).collect::<Vec<_>>();
     additional_directories.extend(
-        session
+        mj_core::state::applied_container_settings(session)
             .additional_mounts
             .iter()
             .map(|resource| resource.destination.clone()),

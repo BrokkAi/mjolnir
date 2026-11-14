@@ -1,0 +1,12 @@
+{
+  "review-capture-races-recovery": "attribution only likely; corpus agent suggested dropping",
+  "shortcut-completion-opens-unvisited-manager": "same commit and feature as shortcut-escape-opens-unvisited-manager",
+  "history-interleaves-other-sessions": "same introducing commit as ctrl-k-loses-earlier-kills",
+  "restore-branch-before-checkout": "3,406 changed lines, above the preferred size",
+  "subagent-tool-placeholder": "3,742 changed lines, above the preferred size",
+  "question-label-first-word": "low-severity display defect",
+  "lifecycle-drops-build-cache": "2,347 changed lines; large diff",
+  "ctrl-k-loses-earlier-kills": "1,922 changed lines; UI group over-represented",
+  "export-json-out-emits-prose": "UI/CLI group over-represented",
+  "upload-relative-write-root": "same feature family as export-relative-read-root"
+}

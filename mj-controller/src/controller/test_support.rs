@@ -39,8 +39,6 @@ pub(crate) fn checkpoint_test_session(session_id: &str) -> SessionRecord {
         create_managed_worktree: None,
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
-        container_cpus: None,
-        container_memory: None,
         id: session_id.into(),
         title: "checkpoint transition".into(),
         harness_kind: mj_core::config::HarnessKind::Codex,
@@ -65,6 +63,8 @@ pub(crate) fn checkpoint_test_session(session_id: &str) -> SessionRecord {
         viewed_through_event_ordinal: 0,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: None,
     }

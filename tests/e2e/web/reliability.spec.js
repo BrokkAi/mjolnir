@@ -69,9 +69,14 @@ test('real viewer converges with a TUI after an SSE disconnect', async ({ browse
     await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
 
     stage('snapshot-rendered');
-    // The dashboard opens on a workspace, and the workspace is in the URL.
-    await expect(page.locator('#workspace-select option')).toHaveCount(1);
-    await expect(page).toHaveURL(/#workspace\//);
+    // The select offers the Notifications inbox ahead of the lab's one real
+    // workspace. Nothing needs attention yet, so the dashboard opens on that
+    // workspace rather than the inbox, and the workspace is in the URL.
+    const workspaceSelect = page.locator('#workspace-select');
+    await expect(workspaceSelect.locator('option')).toHaveText(['Notifications', /\S/]);
+    await expect(workspaceSelect).toHaveValue(/^(?!notifications$)./);
+    const workspaceId = await workspaceSelect.inputValue();
+    await expect(page).toHaveURL(new RegExp(`#workspace/${escapeForRegExp(workspaceId)}$`));
     const workspaceHash = new URL(page.url()).hash;
 
     // This daemon has isolated config and a fake harness. Exercise the real

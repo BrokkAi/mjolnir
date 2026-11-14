@@ -402,7 +402,7 @@ fn render_combined_with_theme_and_symbols(
     selected_theme: theme::UiTheme,
     symbols: theme::SymbolSet,
 ) -> Vec<String> {
-    dashboard.drawn_failures.clear();
+    dashboard.rendered_failure_dismissals.clear();
     theme::with_theme(selected_theme, || {
         theme::with_symbols(symbols, || {
             let drawn =
@@ -1186,7 +1186,10 @@ fn render_combined_themed(
                         let failed = (!opening)
                             .then(|| selected_session_id.clone())
                             .flatten()
-                            .filter(|session_id| dashboard.session_failed(session_id));
+                            .filter(|session_id| {
+                                dashboard.session_failed(session_id)
+                                    || dashboard.stopped_notification_row(session_id)
+                            });
                         let reason = if opening {
                             EmptyConversation::Opening
                         } else if failed.is_some() {
@@ -1198,6 +1201,7 @@ fn render_combined_themed(
                         };
                         if let Some(session_id) = failed.as_deref()
                             && transcript_area.height > 3
+                            && !dashboard.stopped_notification_row(session_id)
                         {
                             dashboard.failure_drawn(session_id);
                         }
@@ -1513,6 +1517,16 @@ fn render_empty_prompt_advice(
                 }
             }],
         ),
+        EmptyConversation::Failed
+            if let Some(id) = dashboard
+                .selected_session_id()
+                .filter(|id| dashboard.stopped_notification_row(id)) =>
+        {
+            (
+                " Session stopped ",
+                [dashboard.stopped_failure_guidance(id), String::new()],
+            )
+        }
         EmptyConversation::Failed => (
             " Session failed ",
             [

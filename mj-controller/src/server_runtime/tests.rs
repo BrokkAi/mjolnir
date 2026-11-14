@@ -309,6 +309,8 @@ fn move_recovery_projection_exposes_safe_retry_settings_only() {
         source_target_template_id: "source-target".into(),
         source_target: None,
         source_native_session_id: Some("private-native-id".into()),
+        inherited_resource_allocation: None,
+        inherited_additional_mounts: Vec::new(),
         source_additional_mounts: vec![crate::targets::AdditionalMount {
             source: "/source/source".into(),
             destination: "/source/target".into(),
@@ -2039,8 +2041,6 @@ fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
         create_managed_worktree: None,
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
-        container_cpus: None,
-        container_memory: None,
         id: id.into(),
         title: "Phone launch".into(),
         harness_kind: mj_core::config::HarnessKind::Codex,
@@ -2065,6 +2065,8 @@ fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
         viewed_through_event_ordinal,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: None,
     }

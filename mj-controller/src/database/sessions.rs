@@ -657,8 +657,8 @@ pub fn save_session_with_container_size(
     })
 }
 
-/// Resume owns the target, checkout and attached resources, never a client's
-/// title, draft, archive visibility or the worker's current display title.
+/// Resume publication owns the target and checkout. Requested size and mounts,
+/// client titles, drafts, archive visibility and worker titles keep their owners.
 pub fn save_resumed_session(
     session: &SessionRecord,
     container_size: Option<(&str, HostContainerSize)>,
@@ -676,12 +676,34 @@ pub fn save_resumed_session(
     })
 }
 
+/// Commit explicit dialog choices together with the first provisioning publication.
+pub(crate) fn accept_resumed_session(
+    session: &SessionRecord,
+    container_size: Option<(&str, HostContainerSize)>,
+    requests: &crate::controller::SessionResumeOptions,
+) -> Result<()> {
+    let session = session.clone();
+    let requests = requests.clone();
+    let container_size = container_size.map(|(host, size)| (host.to_owned(), size));
+    submit_database_write("accept resumed session", move |_| {
+        save_resumed_session_in_environment_to(
+            &database_path(),
+            &session,
+            container_size
+                .as_ref()
+                .map(|(host, size)| (host.as_str(), *size)),
+            None,
+            Some(&requests),
+        )
+    })
+}
+
 pub(super) fn save_resumed_session_to(
     path: &Path,
     session: &SessionRecord,
     container_size: Option<(&str, HostContainerSize)>,
 ) -> Result<()> {
-    save_resumed_session_in_environment_to(path, session, container_size, None)
+    save_resumed_session_in_environment_to(path, session, container_size, None, None)
 }
 
 pub(crate) fn restore_resumed_session(session: &SessionRecord, environment_id: &str) -> Result<()> {
@@ -693,6 +715,7 @@ pub(crate) fn restore_resumed_session(session: &SessionRecord, environment_id: &
             &session,
             None,
             Some(&environment_id),
+            None,
         )
     })
 }
@@ -702,6 +725,7 @@ fn save_resumed_session_in_environment_to(
     session: &SessionRecord,
     container_size: Option<(&str, HostContainerSize)>,
     environment_id: Option<&str>,
+    requests: Option<&crate::controller::SessionResumeOptions>,
 ) -> Result<()> {
     validate_session_record(session)?;
     let mut connection = open(path)?;
@@ -732,17 +756,22 @@ fn save_resumed_session_in_environment_to(
         )?;
     }
     update_lifecycle_fields(&tx, session)?;
+    if let Some(requests) = requests {
+        super::state_io::update_container_requests(
+            &tx,
+            &session.id,
+            requests.resource_allocation.as_ref().map(Some),
+            requests.additional_mounts.as_deref(),
+        )?;
+    }
     tx.execute(
-        "UPDATE sessions SET native_session_id = ?2, container_cpus = ?3,
-             container_memory = ?4, container_workspace = ?5,
-             create_managed_worktree = ?6, launch_base = ?7, launch_branch = ?8,
-             checkout_json = ?9
+        "UPDATE sessions SET native_session_id = ?2, container_workspace = ?3,
+             create_managed_worktree = ?4, launch_base = ?5, launch_branch = ?6,
+             checkout_json = ?7
          WHERE session_id = ?1",
         params![
             session.id,
             session.native_session_id,
-            session.container_cpus,
-            session.container_memory,
             session
                 .container_workspace
                 .as_ref()
@@ -757,7 +786,6 @@ fn save_resumed_session_in_environment_to(
                 .transpose()?,
         ],
     )?;
-    replace_mounts(&tx, &session.id, &session.additional_mounts)?;
     replace_checkpoint(&tx, session)?;
     if let Some((host, size)) = container_size {
         write_host_container_size(&tx, host, size)?;
@@ -1152,22 +1180,19 @@ pub(super) fn set_native_session_hidden_to(
 /// owns is left to its own writer.
 pub fn set_session_container_settings(
     session_id: &str,
-    cpus: Option<&str>,
-    memory: Option<&str>,
+    allocation: Option<&SessionResourceAllocation>,
     mounts: &[AdditionalMount],
     updated_at: &str,
 ) -> Result<()> {
     let session_id = session_id.to_owned();
-    let cpus = cpus.map(str::to_owned);
-    let memory = memory.map(str::to_owned);
+    let allocation = allocation.cloned();
     let mounts = mounts.to_vec();
     let updated_at = updated_at.to_owned();
     submit_database_write("set_session_container_settings", move |_| {
         set_session_container_settings_to(
             &database_path(),
             &session_id,
-            cpus.as_deref(),
-            memory.as_deref(),
+            allocation.as_ref(),
             &mounts,
             &updated_at,
         )
@@ -1177,8 +1202,7 @@ pub fn set_session_container_settings(
 pub(super) fn set_session_container_settings_to(
     path: &Path,
     session_id: &str,
-    cpus: Option<&str>,
-    memory: Option<&str>,
+    allocation: Option<&SessionResourceAllocation>,
     mounts: &[AdditionalMount],
     updated_at: &str,
 ) -> Result<()> {
@@ -1200,9 +1224,13 @@ pub(super) fn set_session_container_settings_to(
     }
     let changed = tx.execute(
         "UPDATE sessions
-         SET container_cpus = ?2, container_memory = ?3, updated_at = ?4
+         SET resource_allocation = ?2, updated_at = ?3
          WHERE session_id = ?1",
-        params![session_id, cpus, memory, updated_at],
+        params![
+            session_id,
+            allocation.map(serde_json::to_string).transpose()?,
+            updated_at
+        ],
     )?;
     if changed != 1 {
         bail!("unknown session {session_id}");
@@ -1778,10 +1806,29 @@ pub(super) fn rebind_session_bundle_to(
     Ok(canonical_bundle)
 }
 
+/// Compare and dismiss under the database writer, so a concurrent new failure
+/// cannot inherit the receipt for the failure the person saw.
+pub fn dismiss_recorded_failure(
+    session_id: &str,
+    failure: mj_core::attention::FailureIdentity,
+) -> Result<()> {
+    let session_id = session_id.to_owned();
+    let json = serde_json::to_string(&failure)?;
+    submit_database_write("dismiss recorded failure", move |connection| {
+        let changed = connection.execute(
+            "UPDATE sessions SET dismissed_failure_json=?2 WHERE session_id=?1 AND state=?3 AND last_error IS ?4 AND failure_generation=?5",
+            params![session_id, json, failure.state.as_str(), failure.last_error, failure.generation],
+        )?;
+        ensure!(changed == 1, "notification is no longer current");
+        Ok(())
+    })
+}
+
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
 
+    // Hard-won: #1538: a resume save overwrote a Container settings edit made while it provisioned
     #[test]
     fn resume_and_rollback_preserve_edits_committed_after_their_snapshot() {
         let directory = tempfile::tempdir().unwrap();
@@ -1808,7 +1855,7 @@ mod ownership_tests {
             .unwrap();
         assert_eq!(current.state, SessionState::Provisioning);
         assert_eq!(current.native_session_id, provisioning.native_session_id);
-        assert!(current.additional_mounts.is_empty());
+        assert_eq!(current.additional_mounts, original.additional_mounts);
         assert_eq!(
             current.session_title_override.as_deref(),
             Some("renamed during resume")
@@ -1821,13 +1868,45 @@ mod ownership_tests {
         assert!(current.archived);
         assert_eq!(current.viewed_through_event_ordinal, 99);
 
+        let allocation = SessionResourceAllocation::Container {
+            cpus: 8,
+            memory_bytes: 16 << 30,
+        };
+        let mounts = vec![AdditionalMount {
+            source: "/new/source".into(),
+            destination: "/new/destination".into(),
+            access: crate::targets::MountAccess::Ro,
+        }];
+        set_session_container_settings_to(
+            &path,
+            &original.id,
+            Some(&allocation),
+            &mounts,
+            "2026-11-13T00:00:00Z",
+        )
+        .unwrap();
+        // The converted-checkpoint publication still holds the provisioning snapshot.
+        provisioning.checkpoint = Some(Box::new(mj_core::state::CheckpointMetadata {
+            archive_path: "converted.hel.zip".into(),
+            sha256: "c".repeat(64),
+            created_at: "2026-11-13T00:01:00Z".into(),
+            event_frontier: 1,
+        }));
+        save_resumed_session_to(&path, &provisioning, None).unwrap();
+        let converted = load_session_with(&connection, &original.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(converted.resource_allocation, Some(allocation.clone()));
+        assert_eq!(converted.additional_mounts, mounts);
+
         // Failure restores a snapshot captured before those independent edits.
         save_resumed_session_to(&path, &original, None).unwrap();
         let rolled_back = load_session_with(&connection, &original.id)
             .unwrap()
             .unwrap();
         assert_eq!(rolled_back.state, original.state);
-        assert_eq!(rolled_back.additional_mounts, original.additional_mounts);
+        assert_eq!(rolled_back.additional_mounts, mounts);
+        assert_eq!(rolled_back.resource_allocation, Some(allocation));
         assert_eq!(
             rolled_back.session_title_override,
             current.session_title_override

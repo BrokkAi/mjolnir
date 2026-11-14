@@ -240,8 +240,17 @@ pub(super) async fn upload_attachment(
 /// still running.
 pub(super) async fn action(
     State(state): State<ServerState>,
-    Json(mut action): Json<ControllerAction>,
+    Json(body): Json<serde_json::Value>,
 ) -> Result<StatusCode, ApiError> {
+    if body.get("action").and_then(serde_json::Value::as_str) == Some("set-container-settings")
+        && (body.get("cpus").is_some() || body.get("memory").is_some())
+    {
+        return Err(ApiError::bad_request(
+            "Container settings now take resource_allocation (whole CPUs and memory bytes); reload the page or update the script.",
+        ));
+    }
+    let mut action: ControllerAction =
+        serde_json::from_value(body).map_err(|error| ApiError::bad_request(error.to_string()))?;
     if let ControllerAction::New {
         remember_launch_choices,
         ..
