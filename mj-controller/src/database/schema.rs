@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 131;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 132;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2471,8 +2471,38 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
     if version < 130 {
         migrate_github_watch_followers(connection)?;
     }
-    // Breaking: removes legacy size columns; older writers cannot preserve edits.
+    // Compatible: older writers preserve this nullable receipt through explicit
+    // column lists. The trigger maintains the generation and invalidates receipts
+    // when state/error changes, including writes by older daemons.
     if version < 131 {
+        let mut add_columns = String::new();
+        for (column, definition) in [
+            ("dismissed_failure_json", "TEXT"),
+            ("failure_generation", "INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            if !super::legacy_schema::table_has_column(connection, "sessions", column)? {
+                add_columns.push_str(&format!(
+                    "ALTER TABLE sessions ADD COLUMN {column} {definition};"
+                ));
+            }
+        }
+        connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE;
+             {add_columns}
+             CREATE TRIGGER IF NOT EXISTS clear_dismissed_failure
+             AFTER UPDATE OF state, last_error ON sessions
+             WHEN NEW.state IS NOT OLD.state OR NEW.last_error IS NOT OLD.last_error
+             BEGIN
+                 UPDATE sessions SET dismissed_failure_json = NULL, failure_generation = failure_generation + 1 WHERE session_id = NEW.session_id;
+             END;
+             INSERT INTO schema_migrations(version, applied_at)
+                 VALUES (131, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+             PRAGMA user_version = 131;
+             COMMIT;"
+        ))?;
+    }
+    // Breaking: removes legacy size columns; older writers cannot preserve edits.
+    if version < 132 {
         super::container_size::report(super::container_size::migrate(connection)?);
     }
     let recorded: Option<i64> =
@@ -4673,7 +4703,7 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
-        if version < 131 {
+        if version < 132 {
             for column in ["container_cpus", "container_memory"] {
                 if !legacy_schema::table_has_column(&connection, "sessions", column).unwrap() {
                     connection
@@ -4681,6 +4711,12 @@ mod reader_tests {
                         .unwrap();
                 }
             }
+        }
+        if version < 131
+            && legacy_schema::table_has_column(&connection, "sessions", "dismissed_failure_json")
+                .unwrap()
+        {
+            connection.execute_batch("DROP TRIGGER IF EXISTS clear_dismissed_failure; ALTER TABLE sessions DROP COLUMN dismissed_failure_json; ALTER TABLE sessions DROP COLUMN failure_generation;").unwrap();
         }
         if version < 129
             && legacy_schema::table_has_column(&connection, "sessions", "notifications_ignored")
@@ -5215,6 +5251,50 @@ mod reader_tests {
     }
 
     #[test]
+    fn compatible_failure_receipts_are_invalidated_by_failure_writers() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mj.sqlite3");
+        let mut record = super::super::tests::session("failure", "project");
+        record.state = mj_core::state::SessionState::Stopped;
+        record.last_error = Some("resume failed".into());
+        save_session_to(&path, &record).unwrap();
+        stamp_schema_version(&path, 130);
+        let connection = open_writer(&path).unwrap();
+        assert_eq!(
+            read_schema_state(&connection).unwrap().minimum_compatible,
+            Some(MINIMUM_COMPATIBLE_VERSION)
+        );
+        let receipt =
+            serde_json::to_string(&mj_core::attention::FailureIdentity::of(&record).unwrap())
+                .unwrap();
+        connection
+            .execute(
+                "UPDATE sessions SET dismissed_failure_json=?1 WHERE session_id='failure'",
+                [&receipt],
+            )
+            .unwrap();
+        // The real upsert names state/error even when only unrelated fields
+        // change; it must preserve the receipt for that same failure.
+        record.title = "renamed".into();
+        record.draft_input = "draft".into();
+        save_session_to(&path, &record).unwrap();
+        assert_eq!(
+            super::super::load_state_from(&path).unwrap().sessions["failure"].dismissed_failure,
+            mj_core::attention::FailureIdentity::of(&record)
+        );
+        // A retry passes through a different state before failing identically.
+        record.state = mj_core::state::SessionState::Provisioning;
+        save_session_to(&path, &record).unwrap();
+        record.state = mj_core::state::SessionState::Stopped;
+        save_session_to(&path, &record).unwrap();
+        assert!(
+            super::super::load_state_from(&path).unwrap().sessions["failure"]
+                .dismissed_failure
+                .is_none()
+        );
+    }
+
+    #[test]
     fn older_readers_and_reopened_writers_preserve_a_compatible_future_schema() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mj.sqlite3");
@@ -5556,16 +5636,16 @@ mod reader_tests {
             expected_snapshot
         );
         let schema = read_schema_state(&raw).unwrap();
-        assert_eq!(schema.minimum_compatible, Some(131));
+        assert_eq!(schema.minimum_compatible, Some(132));
         assert!(matches!(
             schema
-                .ensure_supported_by(130)
+                .ensure_supported_by(131)
                 .unwrap_err()
                 .downcast_ref::<StoreSchemaMismatch>()
                 .unwrap()
                 .reason,
             StoreSchemaMismatchReason::Incompatible {
-                minimum_compatible: 131
+                minimum_compatible: 132
             }
         ));
         let directory = tempfile::tempdir().unwrap();

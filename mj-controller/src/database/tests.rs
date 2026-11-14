@@ -582,6 +582,8 @@ pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
         viewed_through_event_ordinal: 7,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: Some("temporary recovery failure".into()),
         checkpoint: Some(Box::new(CheckpointMetadata {
             archive_path: PathBuf::from("sessions/test.hel.zip"),
@@ -7427,6 +7429,8 @@ fn target_access_survives_lifecycle_updates_and_changes_with_the_target() {
 
     record.state = SessionState::Error;
     save_lifecycle_session_to(&database, &record).unwrap();
+    // The database's failure trigger advances the generation on the state change.
+    record.failure_generation += 1;
     assert_eq!(
         load_state_from(&database).unwrap().sessions[&record.id],
         record

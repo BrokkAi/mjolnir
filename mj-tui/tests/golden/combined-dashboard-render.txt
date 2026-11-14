@@ -1308,17 +1308,17 @@ layout: sessions=Rect { x: 0, y: 3, width: 40, height: 3 }; transcript=Rect { x:
 ╭ Workspaces ───────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ Project 00  Project 01  Project 02            ▐ ≡ ││                                                                                                         │
 │ Project 03  Project 04  Project 05            ▐   │╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-│ Project 06  Project 07  Project 08            ▐   │╭ No live session ────────────────────────────────────────────────────────────────────────────────────────╮
+│ Project 06  Project 07  Project 08            │   │╭ No live session ────────────────────────────────────────────────────────────────────────────────────────╮
 │ Project 09  Project 10  Project 11            │   ││No live session in this workspace.                                                                       │
 │ Project 12  Project 13  Project 14            │   │╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-╰───────────────────────────────────────────────────╯╭ Targets ▾ ─────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-╭ Sessions ────────────────────────────── ▁   ▄   □ ╮│  Host / fleet  Targets  CPU  RAM                                                                        │
-│ Create   Open   Filter: ________________________  │╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-│No sessions yet                                    │╭ Profiles ▾ (not refreshed)─────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│Create new work or open a session.                 ││            Harness      Weekly      Resets  5H Resets                                                   ▐
+│ Project 15  Project 16  Project 17            │   │╭ Targets ▾ ─────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+╰───────────────────────────────────────────────────╯│  Host / fleet  Targets  CPU  RAM                                                                        │
+╭ Sessions ────────────────────────────── ▁   ▄   □ ╮╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+│ Create   Open   Filter: ________________________  │╭ Profiles ▾ (not refreshed)─────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│No sessions yet                                    ││            Harness      Weekly      Resets  5H Resets                                                   ▐
 ╰───────────────────────────────────────────────────╯╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
-layout: sessions=Rect { x: 0, y: 7, width: 53, height: 5 }; transcript=Rect { x: 53, y: 0, width: 107, height: 3 }; prompt=Rect { x: 53, y: 3, width: 107, height: 3 }; targets=Rect { x: 53, y: 6, width: 107, height: 3 }; quota=Rect { x: 53, y: 9, width: 107, height: 3 }
+layout: sessions=Rect { x: 0, y: 8, width: 53, height: 4 }; transcript=Rect { x: 53, y: 0, width: 107, height: 3 }; prompt=Rect { x: 53, y: 3, width: 107, height: 3 }; targets=Rect { x: 53, y: 6, width: 107, height: 3 }; quota=Rect { x: 53, y: 9, width: 107, height: 3 }
 
 === selected checkout and branch (140x45) ===
 current · codex-1 · podman

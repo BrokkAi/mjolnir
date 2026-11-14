@@ -1742,6 +1742,12 @@ pub struct SessionRecord {
     /// [`CLOSE_FAILURE_PREFIX`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// Database-owned failure occurrence; omitted from portable session formats.
+    #[serde(skip)]
+    pub failure_generation: u64,
+    /// Database-owned dismissal receipt.
+    #[serde(skip)]
+    pub dismissed_failure: Option<crate::attention::FailureIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_checkpoint_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3415,8 +3421,12 @@ pub fn provisional_session_title(prompt: &str) -> Option<String> {
     Some(truncate_session_title(normalized, MAX_TITLE_CHARS))
 }
 
+/// How many leading characters of a session id Mjolnir shows, and so the
+/// shortest prefix a person can be expected to paste back.
+pub const SHORT_ID_LEN: usize = 8;
+
 pub fn short_id(id: &str) -> &str {
-    id.get(..8).unwrap_or(id)
+    id.get(..SHORT_ID_LEN).unwrap_or(id)
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

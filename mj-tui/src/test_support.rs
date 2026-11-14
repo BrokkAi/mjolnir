@@ -77,7 +77,20 @@ pub(crate) fn drawn(dashboard: &mut DashboardState, width: u16, height: u16) -> 
     terminal
         .draw(|frame| crate::render::render(frame, dashboard))
         .expect("draw the surface");
-    buffer_lines(terminal.backend().buffer())
+    let mut lines = buffer_lines(terminal.backend().buffer());
+    pin_spinner_glyphs(&mut lines);
+    lines
+}
+
+/// Replace the compact Scan spinner's frames with `?`. Spinners take their
+/// frame from a process-wide clock (`mj_chat::spinner::elapsed_ms`), so a
+/// golden would otherwise record whichever frame was showing when it drew.
+pub(crate) fn pin_spinner_glyphs(lines: &mut [String]) {
+    for line in lines {
+        if line.contains(['⠁', '⠂', '⠄', '⡀']) {
+            *line = line.replace(['⠁', '⠂', '⠄', '⡀'], "?");
+        }
+    }
 }
 
 /// The cell position of the first drawn row containing `label`, as the column
@@ -345,6 +358,8 @@ pub(crate) fn stopped_session() -> SessionRecord {
         viewed_through_event_ordinal: 0,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: Some(Box::new(CheckpointMetadata {
             archive_path: PathBuf::from("sessions/session-1.hel.zip"),

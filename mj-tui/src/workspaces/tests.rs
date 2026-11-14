@@ -180,11 +180,11 @@ fn golden_workspace_manager_drafts() {
     for size in [crate::PaneSize::Standard, crate::PaneSize::Maximized] {
         dashboard.set_pane_size(crate::SupportPane::Sessions, size);
         let lines = drawn(&mut dashboard, 110, 32);
-        assert_eq!(dashboard.workspace_pane_area.unwrap().height, 7);
+        assert_eq!(dashboard.workspace_pane_area.unwrap().height, 9);
         assert!(dashboard.workspace_scrollbar.geometry().is_some());
         append_workspace_state(
             &mut output,
-            &format!("five workspace rows in {size:?} sidebar"),
+            &format!("seven workspace rows in {size:?} sidebar"),
             &lines,
         );
     }

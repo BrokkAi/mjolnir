@@ -90,6 +90,14 @@ pub(crate) enum DashboardIoUpdate {
         target: mj_core::attention::NotificationDismissal,
         result: std::result::Result<u64, String>,
     },
+    /// Every result of one workspace "Clear notifications".
+    NotificationsDismissed {
+        results: Vec<(
+            String,
+            mj_core::attention::NotificationDismissal,
+            std::result::Result<u64, String>,
+        )>,
+    },
     /// A bounded tail of a resumed session's stored transcript, loaded off the
     /// event loop so the conversation is not blank while the poller catches up.
     TranscriptTailSeed {
@@ -812,6 +820,9 @@ impl DashboardContext {
             }
             DashboardIoUpdate::NotificationDismissed { session_id, target, result } => {
                 self.dashboard.notification_dismissal_finished(&session_id, target, result);
+            }
+            DashboardIoUpdate::NotificationsDismissed { results } => {
+                self.dashboard.notifications_dismissed(results);
             }
             DashboardIoUpdate::TranscriptTailSeed { materialized } => {
                 let viewed_through_event_ordinal = self
@@ -2873,6 +2884,8 @@ mod tests {
             viewed_through_event_ordinal: 0,
             draft_input: String::new(),
             last_error: None,
+            dismissed_failure: None,
+            failure_generation: 0,
             last_checkpoint_error: None,
             checkpoint: None,
         }

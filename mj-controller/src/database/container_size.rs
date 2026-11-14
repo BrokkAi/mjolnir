@@ -1,4 +1,4 @@
-//! Breaking revision 131: one durable per-session container size.
+//! Breaking revision 132: one durable per-session container size.
 use super::*;
 
 /// Parse positive decimal engine sizes exactly, rounding up only the final unit.
@@ -330,9 +330,9 @@ pub(super) fn migrate(connection: &Connection) -> Result<Vec<Conversion>> {
     }
     tx.execute_batch("ALTER TABLE sessions DROP COLUMN container_cpus;
         ALTER TABLE sessions DROP COLUMN container_memory;
-        UPDATE schema_compatibility SET minimum_compatible_version=131 WHERE singleton=1;
-        INSERT INTO schema_migrations(version,applied_at) VALUES(131,strftime('%Y-%m-%dT%H:%M:%fZ','now'));
-        PRAGMA user_version=131;")?;
+        UPDATE schema_compatibility SET minimum_compatible_version=132 WHERE singleton=1;
+        INSERT INTO schema_migrations(version,applied_at) VALUES(132,strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+        PRAGMA user_version=132;")?;
     tx.commit()?;
     Ok(changes)
 }

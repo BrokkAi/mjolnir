@@ -167,6 +167,8 @@ fn populated_dashboard_with(adjust: impl FnOnce(&mut State)) -> DashboardState {
                 viewed_through_event_ordinal: 0,
                 draft_input: String::new(),
                 last_error: None,
+                dismissed_failure: None,
+                failure_generation: 0,
                 last_checkpoint_error: None,
                 checkpoint: None,
             },
@@ -957,6 +959,8 @@ fn live_session(id: &str, created_at: &str) -> mj_core::state::SessionRecord {
         viewed_through_event_ordinal: 0,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: None,
     }

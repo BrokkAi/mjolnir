@@ -321,7 +321,7 @@ pub struct MoveOperation {
     pub source_target_template_id: String,
     pub source_target: Option<TargetLocator>,
     pub source_native_session_id: Option<String>,
-    // Additive shape within unshipped breaking store revision 131; no new migration.
+    // Additive shape within unshipped breaking store revision 132; no new migration.
     /// Frozen request inherited by the destination when selection says keep.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inherited_resource_allocation: Option<SessionResourceAllocation>,

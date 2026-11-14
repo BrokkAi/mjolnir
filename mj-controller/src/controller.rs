@@ -1140,6 +1140,8 @@ impl Controller {
             viewed_through_event_ordinal: 0,
             draft_input: initial_prompt.unwrap_or_default(),
             last_error: None,
+            dismissed_failure: None,
+            failure_generation: 0,
             last_checkpoint_error: None,
             checkpoint: None,
         };

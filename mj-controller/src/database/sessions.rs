@@ -1806,6 +1806,24 @@ pub(super) fn rebind_session_bundle_to(
     Ok(canonical_bundle)
 }
 
+/// Compare and dismiss under the database writer, so a concurrent new failure
+/// cannot inherit the receipt for the failure the person saw.
+pub fn dismiss_recorded_failure(
+    session_id: &str,
+    failure: mj_core::attention::FailureIdentity,
+) -> Result<()> {
+    let session_id = session_id.to_owned();
+    let json = serde_json::to_string(&failure)?;
+    submit_database_write("dismiss recorded failure", move |connection| {
+        let changed = connection.execute(
+            "UPDATE sessions SET dismissed_failure_json=?2 WHERE session_id=?1 AND state=?3 AND last_error IS ?4 AND failure_generation=?5",
+            params![session_id, json, failure.state.as_str(), failure.last_error, failure.generation],
+        )?;
+        ensure!(changed == 1, "notification is no longer current");
+        Ok(())
+    })
+}
+
 #[cfg(test)]
 mod ownership_tests {
     use super::*;

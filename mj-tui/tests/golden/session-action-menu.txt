@@ -289,6 +289,47 @@ context menu Enter opens on Copy: CopySessionId { session_id: "session-1" }
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
+=== workspace menu, no dismissible notifications (120x40) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default                            ≡ ││                                                                              │
+╰╭Workspace────────────╮───────────────╯│                                                                              │
+╭│Clear notifications  │──── ▁   ▄   □ ╮│                                                                              │
+│╰─────────────────────╯: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› · ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Idle  podman  codex-1               ││                                                                              │
+│  │ No messages yet                   ││                                                                              │
+│  │                                   ││                                                                              │
+│                                      ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
+│                                      ││                  Select a session to open its conversation.                  │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ No conversation open ────────────────────────────────────────────────────────╮
+│                                      ││No conversation open.                                                         │
+│                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
 === copy session ID menu row (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default                            ≡ ││                                                                              │
@@ -417,6 +458,49 @@ selection after disabled click: Some(RenameSession)
 │                                      ││  codex-2   Codex        refreshing…                                          │
 ╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
 Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
+=== workspace menu, dismissible notification (120x40) ===
+╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
+│ default ?1                         ≡ ││                                                                              │
+╰╭Workspace────────────╮───────────────╯│                                                                              │
+╭│Clear notifications  │──── ▁   ▄   □ ╮│                                                                              │
+│╰─────────────────────╯: _____________││                                                                              │
+│hel ──────────────────────────────────││                                                                              │
+│› ? ACP pretty name               ◇ ⋯ ││                                                                              │
+│  Question  podman  codex-1           ││                                                                              │
+│  │ Waiting on you to choose a target.││                                                                              │
+│  │                                   ││                                                                              │
+│                                      ││                               ✦  M J O L N I R                               │
+│                                      ││                                                                              │
+│                                      ││                  Select a session to open its conversation.                  │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ No conversation open ────────────────────────────────────────────────────────╮
+│                                      ││No conversation open.                                                         │
+│                                      ││Press Tab for Sessions, then Enter on the one to open.                        │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Targets ▾ ──────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││  Host / fleet  Targets  CPU  RAM                                             │
+│                                      │╰──────────────────────────────────────────────────────────────────────────────╯
+│                                      │╭ Profiles ▾ (not refreshed)──────────────────────────────────────────── ▁   ▄ ╮
+│                                      ││            Harness      Weekly      Resets  5H Resets                        │
+│                                      ││  claude-1  Claude Code  refreshing…                                          │
+│                                      ││  codex-1   Codex        refreshing…                                          │
+│                                      ││  codex-2   Codex        refreshing…                                          │
+╰──────────────────────────────────────╯╰──────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · : / ? palette
+workspace clear notifications: DismissNotifications { dismissals: [("session-1", Question(InferredQuestion { turn_id: "prompt-1", completed_ordinal: 3 }))] }
+notice after a refused workspace clear: Some("Could not dismiss 1 notification: daemon refused")
 === row context menu, dismissible notification (120x40) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ────────────────────────────────────────────── ◇   ⋯───╮
 │ default ?1                         ≡ ││                                                                              │
@@ -593,7 +677,7 @@ unread dismissed: Some("Notification dismissed.")
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────                                                                                                        │
 │› ? ACP pretty                                                                                                        │
-│  ⠁ Sub-agent   ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  ? Sub-agent   ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
 │  │ No message  │                                                                   Copy session ID  │                │
 │  │             │  codex-1                                                                           │                │
 │                │  Sub-agents Native · 0 of 1 working                                                │                │

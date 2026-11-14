@@ -295,6 +295,12 @@ pub(crate) async fn serve(
             }
         }
     }.await;
+    // The connection has stopped forwarding output. Release the receiver now so
+    // the reader discards PTY output from here on: the root writes to the
+    // terminal while it exits (its cancellation error goes to stderr), and a
+    // reader parked on a full channel would leave it blocked on a full PTY
+    // while cleanup below waits for that exit.
+    drop(output_rx);
     if !observed {
         process.hangup();
         closing = close_console_on_exit(&master);
@@ -310,7 +316,6 @@ pub(crate) async fn serve(
         _ => {}
     }
     drop(bytes_tx);
-    drop(output_rx);
     if let Some(closing) = closing {
         closing.await.context("close login console")?;
     }
@@ -338,4 +343,43 @@ pub(crate) async fn serve(
         .await?;
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    // Hard-won: 29354e991: a disconnect left the root blocked writing to a full PTY while cleanup waited for its exit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn disconnect_cleanup_drains_output_the_exiting_root_writes() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        // On hangup the root writes far more than the one-chunk channel and the
+        // PTY buffer hold, as a root's exit output can when nobody reads it.
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args([
+            "-c",
+            "trap 'head -c 1048576 /dev/zero | tr \"\\000\" x; exit 0' HUP; \
+             printf ready; while :; do sleep 0.05; done",
+        ]);
+        let serving = tokio::spawn(serve(server, command, 80, 24, CancellationToken::new()));
+        let mut transcript = Vec::new();
+        while !transcript.ends_with(b"ready") {
+            match read_frame::<TerminalOutput>(&mut client).await.unwrap() {
+                TerminalOutput::Bytes(bytes) => transcript.extend(bytes),
+                other => panic!("login ended before it was ready: {other:?}"),
+            }
+        }
+        drop(client);
+        // Bounds only the hang this test exists to catch; cleanup itself takes
+        // milliseconds.
+        tokio::time::timeout(std::time::Duration::from_secs(30), serving)
+            .await
+            .expect("disconnect cleanup waited on a root blocked writing its output")
+            .unwrap()
+            .unwrap();
+    }
 }

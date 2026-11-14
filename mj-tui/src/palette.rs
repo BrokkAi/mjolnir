@@ -1810,6 +1810,23 @@ mod tests {
         let lines = drawn(&mut dashboard, 120, 40);
         append_golden_state(&mut output, "after the context menu copy", 120, 40, &lines);
 
+        // The workspace context menu uses the rendered tab hitbox.
+        let mut dashboard = dashboard_with_session(running_session());
+        let _ = drawn(&mut dashboard, 120, 40);
+        let (_, workspace) = &dashboard.workspace_tab_areas[0];
+        dashboard.handle_mouse(mouse_at(
+            MouseEventKind::Down(MouseButton::Right),
+            (workspace.x, workspace.y),
+        ));
+        let lines = drawn(&mut dashboard, 120, 40);
+        append_golden_state(
+            &mut output,
+            "workspace menu, no dismissible notifications",
+            120,
+            40,
+            &lines,
+        );
+
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
         dashboard.begin_session_palette();
@@ -1926,6 +1943,39 @@ mod tests {
             );
         };
         project(&mut dashboard, &materialized, &assessment);
+        let _ = drawn(&mut dashboard, 120, 40);
+        let (_, workspace) = &dashboard.workspace_tab_areas[0];
+        dashboard.handle_mouse(mouse_at(
+            MouseEventKind::Down(MouseButton::Right),
+            (workspace.x, workspace.y),
+        ));
+        let lines = drawn(&mut dashboard, 120, 40);
+        append_golden_state(
+            &mut output,
+            "workspace menu, dismissible notification",
+            120,
+            40,
+            &lines,
+        );
+        // Hard-won: workspace Clear notifications: results of dismissals the
+        // batch never marked as submitting were silently discarded.
+        let clear = dashboard.handle_key(key(KeyCode::Enter));
+        append_golden_value(&mut output, "workspace clear notifications", &clear);
+        let DashboardAction::DismissNotifications { dismissals } = clear else {
+            panic!("Clear notifications dismisses the workspace's notifications");
+        };
+        dashboard.notifications_dismissed(
+            dismissals
+                .into_iter()
+                .map(|(session_id, target)| (session_id, target, Err("daemon refused".into())))
+                .collect(),
+        );
+        append_golden_value(
+            &mut output,
+            "notice after a refused workspace clear",
+            dashboard.notices.current(),
+        );
+        dashboard.clear_notice();
         dashboard.focus_sessions();
         let lines = right_click_first_row(&mut dashboard);
         append_golden_state(

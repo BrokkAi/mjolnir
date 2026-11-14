@@ -147,6 +147,12 @@ for that row's session and without moving the selection:
   runtime or project can no longer be used, the new-session wizard opens
   instead.
 
+Right-clicking a workspace tab opens **Clear notifications** at the pointer.
+It dismisses each dismissible notification in that workspace, including
+sub-agent sessions; the item is disabled when there is nothing to dismiss.
+Errors and forms have nothing to dismiss and stay flagged, and the notice
+bar reports any dismissal the daemon refuses.
+
 ## Detach and reattach
 
 `prefix+q` detaches the current terminal client. Active turns, shell commands, and queued prompts keep running under the daemon.

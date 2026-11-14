@@ -22,21 +22,21 @@ After this change each session has one size, `resource_allocation`. Container se
 
 - [x] (2026-11-14) Follow-up request ownership: Resume/Move acceptance alone writes explicit size/mount choices; lifecycle publications and rollback preserve newer requests. Central applied-settings lookup and all-reader audit complete, including inherited TUI Move choices and removed-locator upgrade recovery. Final controller suite: 2635 passed/27 ignored; core: 651 passed/4 ignored; final Move module: 61 passed; workspace Clippy and formatting passed. TUI: 588 passed/2 ignored, with only the two documented baseline goldens failing. Evidence: `.mj/agents/f5843c6b3c11ad265083711bafa5ee82/validation.md`.
 
-- [x] Follow-up #1538: revision 131 now converts embedded Move recovery/transfer records, effective source recovery sizing, retained sources and environment snapshots. Existing regression extended with the requested Hard-won assertion; final targeted migration tests (2) and controller-only Clippy passed.
+- [x] Follow-up #1538: revision 132 now converts embedded Move recovery/transfer records, effective source recovery sizing, retained sources and environment snapshots. Existing regression extended with the requested Hard-won assertion; final targeted migration tests (2) and controller-only Clippy passed.
 
 - [x] (2026-11-13 23:00Z) Map the current code (read-only child report, summarized in Context and Orientation).
 - [x] (2026-11-13 23:00Z) User chose the one-size design and the conversion rule (Decision Log).
 - [x] (2026-11-13) Read AGENTS.md and PLANS.md; inspected store, capacity, editor and action contracts.
 - [x] Parent clarified public mount-history behavior; preserve the current contract.
 - [x] Milestone 1: revision/floor 131 migration implemented; previous-store conversion and incompatibility regression passed. Existing lifecycle/checkpoint stale-write regressions passed after separating allocation ownership.
-- [x] Milestone 2: allocation-only runtime/API, applied-size counting, Move commitments, projection updates and protocol 97 implemented; workspace Clippy passes.
+- [x] Milestone 2: allocation-only runtime/API, applied-size counting, Move commitments, projection updates and protocol 98 implemented; workspace Clippy passes.
 - [x] Milestone 3: terminal/browser editors, copy launch and documentation updated; both terminal goldens and the browser dialog golden passed.
 - [x] Milestone 4: isolated cs1538 Podman scenario and cleanup passed; full touched-crate suites ran, all change-related failures were fixed and targeted reruns passed. Formatting and workspace Clippy pass. Only the two documented base-tree TUI goldens remain failing.
 
 
 ## Surprises & Discoveries
 
-- Observation: removing deny_unknown_fields SessionRecord fields also invalidates old MoveOperation.recovery_session and workspace_transfer.source JSON. Revision 131 must convert those records before readers decode them. Additional durable copies exist in retained_move_sources.source_json, environments.placement_json (runtime and prepared destination), and environment_workers.runtime_json. MoveOperation has no separate source CPU/memory string fields. Its typed source_resource_allocation nevertheless needs folding with recovery_session overrides: the old failed-Move Resume combined precisely those values (daemon/session_move.rs in the base tree). Revision 131 preserves that effective source size before removing the recovery strings; when recovery_session is absent, it uses the session row strings that legacy Resume would have retained. The follow-up converts only known persisted SessionRecord and ContainerSettings JSON locations, preserving unrelated JSON including retired harness identities and environment variables named container_cpus.
+- Observation: removing deny_unknown_fields SessionRecord fields also invalidates old MoveOperation.recovery_session and workspace_transfer.source JSON. Revision 132 must convert those records before readers decode them. Additional durable copies exist in retained_move_sources.source_json, environments.placement_json (runtime and prepared destination), and environment_workers.runtime_json. MoveOperation has no separate source CPU/memory string fields. Its typed source_resource_allocation nevertheless needs folding with recovery_session overrides: the old failed-Move Resume combined precisely those values (daemon/session_move.rs in the base tree). Revision 132 preserves that effective source size before removing the recovery strings; when recovery_session is absent, it uses the session row strings that legacy Resume would have retained. The follow-up converts only known persisted SessionRecord and ContainerSettings JSON locations, preserving unrelated JSON including retired harness identities and environment variables named container_cpus.
 
 - Observation: the chat transcript golden uses UTC timestamps; the inherited America/Chicago timezone rendered 18:00 instead of 00:00. Its targeted rerun passed with TZ=UTC, which was then used for the remaining full suites. No golden was changed for this environment difference.
 
@@ -46,7 +46,7 @@ After this change each session has one size, `resource_allocation`. Container se
 - Observation: the existing stale lifecycle/checkpoint regressions expose that generic lifecycle saves own resource_allocation today. With settings now writing that field, they overwrite a newer settings edit. Removed allocation writes from generic lifecycle updates; the later ownership follow-up moves explicit Resume/Move request changes into acceptance transactions and removes them from all lifecycle publications, including destination adoption. Existing regression names: lifecycle_save_preserves_container_settings_and_mounts and checkpointed_save_preserves_container_settings_and_mounts.
 
 - Observation: Move source reservations compare their allocation with the live source allocation; both now use counted_container_allocation so resized live sources are not charged twice or at their pending request.
-- Observation: fixtures rewinding the current schema must restore removed columns before replaying revision 131; updated stamp_schema_version. Fresh baseline construction supplies historical columns inside its transaction, then revision 131 removes them.
+- Observation: fixtures rewinding the current schema must restore removed columns before replaying revision 132; updated stamp_schema_version. Fresh baseline construction supplies historical columns inside its transaction, then revision 132 removes them.
 
 - Observation: Interfaces and Dependencies says the public `SetContainerSettings` action carries `mount_history` "as now", but the existing action has no such field. `mj-controller/src/server/actions.rs:165` defines only session ID, CPU, memory and mounts; `server_runtime/actions.rs:549` derives mount history from controller state. The TUI internal action does carry it (`mj-tui/src/dialogs/container.rs:352`). The parent approved retaining existing public mount-history behavior and replacing only CPU/memory with resource_allocation; implementation resumed.
 
@@ -57,7 +57,7 @@ After this change each session has one size, `resource_allocation`. Container se
 ## Decision Log
 
 - Decision: Move source allocation/mounts describe only the applied source via `applied_container_settings`; separate defaulted `inherited_resource_allocation` and `inherited_additional_mounts` freeze the request at acceptance for keep destinations. Capacity source commitments already use `counted_container_allocation`.
-  Rationale: a failed explicit destination choice remains the request, so retry recovery must not mistake it for applied source settings. These fields extend the unshipped breaking revision 131; no new migration is needed. `MoveOperation` denies unknown fields and is exposed in protocol-97 snapshots/feeds: earlier 97 clients reject populated new fields, whereas this client accepts older payloads with defaults.
+  Rationale: a failed explicit destination choice remains the request, so retry recovery must not mistake it for applied source settings. These fields extend the unshipped breaking revision 132; no new migration is needed. `MoveOperation` denies unknown fields and is exposed in protocol-98 snapshots/feeds: earlier 98 clients reject populated new fields, whereas this client accepts older payloads with defaults.
   Date/Author: 2026-11-14, parent decision implemented by worker.
 
 
@@ -106,11 +106,15 @@ After this change each session has one size, `resource_allocation`. Container se
   Date/Author: 2026-11-13, parent.
 
 
+- Decision: renumber this work to store revision 132 and protocol 98 at the merge with master.
+  Rationale: master took revision 131 (a compatible migration adding failure-dismissal columns) and protocol 97 (the daemon decides which sessions are notifications) while this work was in review. Revision numbers are final only at merge, so this breaking migration runs after master's 131 and raises the minimum compatible revision to 132. The merge also shifted master's two new session columns to positions 38 and 39 in `SESSION_QUERY`, which the automatic merge had left at 40 and 41.
+  Date/Author: 2026-11-14, parent.
+
 ## Outcomes & Retrospective
 
 Follow-up ownership fix: explicit Resume and Move settings are committed atomically at acceptance; even an unchanged Move accepts explicit requests. Later Container settings edits survive converted-checkpoint publication, destination adoption and failed-operation rollback. The applied lookup owns legacy fallback for size and mounts; a snapshot remains authoritative if recovery has removed the locator. Provisioning capacity independently reserves the next-creation request. Move creates from its admitted request snapshot while subsequent edits remain requested. Final checks passed except the two existing TUI goldens listed above. The parent’s Hard-won unknown-size regression remains intact.
 
-Implementation is complete across store, runtime, and clients. Migration, stale lifecycle/checkpoint writes, terminal goldens, and browser dialog goldens have passed their targeted checks. One requested allocation now controls editors, launch, admission and provisioning; running owners are counted at their applied snapshot. Revision 131 converts and removes the legacy strings and fences revision-130 writers. Protocol 97 carries the replacement allocation. The real cs1538 resize/recreation and cleanup passed. Full touched-crate suites ran; all change-related failures were corrected and their targeted reruns passed. Formatting and workspace Clippy pass. The two documented base-tree TUI goldens remain outside this work. Live Apple/Nitro engines and macOS/Windows were not exercised.
+Implementation is complete across store, runtime, and clients. Migration, stale lifecycle/checkpoint writes, terminal goldens, and browser dialog goldens have passed their targeted checks. One requested allocation now controls editors, launch, admission and provisioning; running owners are counted at their applied snapshot. Revision 132 converts and removes the legacy strings and fences revision-131 writers. Protocol 98 carries the replacement allocation. The real cs1538 resize/recreation and cleanup passed. Full touched-crate suites ran; all change-related failures were corrected and their targeted reruns passed. Formatting and workspace Clippy pass. The two documented base-tree TUI goldens remain outside this work. Live Apple/Nitro engines and macOS/Windows were not exercised.
 
 
 ## Context and Orientation
