@@ -36,7 +36,9 @@ def call_parts(item):
     call = body.get("call") or {}
     if call:
         inp = json.dumps({"title": call.get("title"), "kind": call.get("kind"), "rawInput": call.get("rawInput")})
-        out = json.dumps({"content": call.get("content"), "rawOutput": call.get("rawOutput")})
+        # Command output lives in the item's terminal_outputs; call.content holds only a terminal ID.
+        out = json.dumps({"content": call.get("content"), "rawOutput": call.get("rawOutput"),
+                          "terminal_outputs": body.get("terminal_outputs")})
         return inp, out
     return json.dumps(body), ""
 
