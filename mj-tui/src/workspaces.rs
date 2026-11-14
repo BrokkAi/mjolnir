@@ -1028,7 +1028,7 @@ const WORKSPACES_TITLE: &str = " Workspaces ";
 /// The two rounded corners a bordered title row cannot draw into.
 const BORDER_CORNER_CELLS: usize = 2;
 
-const WORKSPACE_MAX_ROWS: usize = 5;
+const WORKSPACE_MAX_ROWS: usize = 7;
 const WORKSPACE_MENU_WIDTH: u16 = 3;
 
 struct WorkspaceTabs {

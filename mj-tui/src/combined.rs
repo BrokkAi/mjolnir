@@ -725,7 +725,18 @@ fn render_combined_themed(
     let workspace_height = if narrow {
         sidebar_height.saturating_sub(dimensions[0].1.minimized)
     } else {
-        workspace_target.min(sidebar_height.saturating_sub(PANE_MINIMUM))
+        // Sessions keeps its minimum frame plus one row for a session below
+        // the Create/Open/Filter controls. The workspace pane gives up rows
+        // for that row, but never shrinks below its own minimum, and
+        // Sessions' minimum frame always wins.
+        let sessions_floor = PANE_MINIMUM + 1;
+        workspace_target
+            .min(
+                sidebar_height
+                    .saturating_sub(sessions_floor)
+                    .max(PANE_MINIMUM),
+            )
+            .min(sidebar_height.saturating_sub(PANE_MINIMUM))
     };
     let workspace_area = Rect::new(
         sidebar_area.x,
@@ -2253,21 +2264,7 @@ mod tests {
             .draw(|frame| crate::render::render(frame, dashboard))
             .unwrap();
         let mut lines = buffer_lines(terminal.backend().buffer());
-        // Transition spinners use a process-wide clock, so pin their glyph.
-        for line in &mut lines {
-            if line.contains("Transition ·") {
-                *line = line
-                    .chars()
-                    .map(|character| {
-                        if matches!(character, '⠁' | '⠂' | '⠄' | '⡀') {
-                            '?'
-                        } else {
-                            character
-                        }
-                    })
-                    .collect();
-            }
-        }
+        crate::test_support::pin_spinner_glyphs(&mut lines);
         lines
     }
 
@@ -2488,12 +2485,12 @@ mod tests {
         for (width, height) in [(70, 22), (80, 13), (160, 13)] {
             let mut dashboard = dashboard_with_session(running_session());
             dashboard.set_workspace_names(
-                (0..24)
+                (0..48)
                     .map(|index| (format!("workspace-{index}"), format!("Project {index:02}")))
                     .collect(),
             );
             dashboard.order_workspaces(
-                &(0..24)
+                &(0..48)
                     .map(|index| format!("workspace-{index}"))
                     .collect::<Vec<_>>(),
             );
