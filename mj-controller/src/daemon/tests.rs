@@ -12440,7 +12440,9 @@ async fn daemon_api_exchange() {
         },
         DaemonAction::CompletePath {
             host: mj_core::path_completion::CompletionHost::Local,
-            prefix: format!("{}/server-", server_root.as_path().display()),
+            // Typed with this host's separator: on Windows the root is a
+            // verbatim `\\?\` path, which reads `/` as part of a name.
+            prefix: server_root.join("server-").display().to_string(),
             kind: mj_core::path_completion::CompletionKind::Directories,
         },
         DaemonAction::DiscoverProjects {
@@ -12554,6 +12556,14 @@ async fn daemon_api_exchange() {
         drop(stream);
         server.await.unwrap();
     }
+    // Windows resolves a bare `docker` through its system directories before
+    // PATH, so this fixture cannot hide a Docker the host installed. Leave the
+    // host's Docker out there; Linux and macOS keep its isolated answer.
+    if cfg!(windows) {
+        for entry in &mut exchange {
+            remove_host_docker(entry);
+        }
+    }
     // Normalize JSON's escaped Windows separators before replacing roots.
     let rendered = serde_json::to_string_pretty(&exchange)
         .unwrap()
@@ -12576,11 +12586,42 @@ async fn daemon_api_exchange() {
                 .replace('\\', "/"),
             "<server-parent>",
         );
-    mj_core::golden::assert_platform_golden(
-        env!("CARGO_MANIFEST_DIR"),
-        "daemon-api-exchange",
-        &rendered,
-    );
+    // Windows has its own runtime answers: no local bare target, and Podman
+    // only through WSL2.
+    if cfg!(windows) {
+        mj_core::golden::assert_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "daemon-api-exchange-windows",
+            &rendered,
+        );
+    } else {
+        mj_core::golden::assert_platform_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "daemon-api-exchange",
+            &rendered,
+        );
+    }
+}
+
+/// Drop every answer that depends on the host's Docker: its availability
+/// entry, its rejected-runtime row, and a local Docker target it allowed.
+fn remove_host_docker(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(serde_json::Value::Object(local)) = object.get_mut("local") {
+                local.remove("docker");
+            }
+            if let Some(serde_json::Value::Array(rejected)) = object.get_mut("rejected_runtimes") {
+                rejected.retain(|runtime| runtime["kind"] != "docker");
+            }
+            if let Some(serde_json::Value::Object(targets)) = object.get_mut("targets") {
+                targets.retain(|_, target| target["kind"] != "local-docker");
+            }
+            object.values_mut().for_each(remove_host_docker);
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(remove_host_docker),
+        _ => {}
+    }
 }
 
 /// Real OpenSSH is held in a proxy command. Closing a superseded completion
