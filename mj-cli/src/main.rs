@@ -2465,11 +2465,7 @@ fn profile_ids(config: &Config) -> String {
 
 fn resolve_login_profile(config: &Config, requested: Option<&str>) -> Result<String> {
     if let Some(profile) = requested {
-        let configured = config
-            .profiles
-            .get(profile)
-            .with_context(|| format!("unknown profile {profile:?}"))?;
-        ensure!(configured.enabled, "profile {profile:?} is disabled");
+        config.named_profile(profile)?;
         return Ok(profile.to_owned());
     }
     let mut profiles = config.enabled_profiles().map(|(id, _)| id);

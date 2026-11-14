@@ -224,7 +224,12 @@ impl Inner {
     fn allowed_models(&self, identity: &str) -> Vec<String> {
         self.live
             .iter()
-            .flat_map(Config::enabled_profiles)
+            .flat_map(|config| {
+                config
+                    .profiles
+                    .iter()
+                    .map(|(id, profile)| (id.as_str(), profile))
+            })
             .find(|(id, profile)| profile.capabilities_key(id) == identity)
             .map(|(_, profile)| profile.models.clone())
             .or_else(|| {
@@ -431,10 +436,11 @@ impl ProfileCatalog {
                 inner.publication = None;
             }
             if let Some(old) = &inner.live {
-                for (id, profile) in old.enabled_profiles() {
+                for (id, profile) in &old.profiles {
                     let identity = profile.capabilities_key(id);
                     if config
-                        .enabled_profile(id)
+                        .named_profile(id)
+                        .ok()
                         .is_none_or(|new| new.capabilities_key(id) != identity)
                         && let Some(definition) = inner.definitions.get(&identity)
                     {
@@ -679,15 +685,22 @@ impl ProfileCatalog {
     /// `config` selects under one lock. A Settings draft uses this same path
     /// without becoming the live configuration.
     pub(crate) fn ensure(self: &Arc<Self>, config: &Config) {
-        self.ensure_profiles(config, true);
+        self.ensure_profiles(config, true, None);
     }
 
-    fn ensure_profiles(self: &Arc<Self>, config: &Config, refresh_live: bool) {
+    fn ensure_profiles(
+        self: &Arc<Self>,
+        config: &Config,
+        refresh_live: bool,
+        requested: Option<&str>,
+    ) {
         let config = Arc::new(config.clone());
         let mut started = Vec::new();
         {
             let mut inner = self.lock();
-            for (id, profile) in config.enabled_profiles() {
+            for (id, profile) in config.profiles.iter().filter(|(id, profile)| {
+                requested.map_or(profile.enabled, |requested| requested == id.as_str())
+            }) {
                 let identity = profile.capabilities_key(id);
                 inner
                     .wanted
@@ -795,7 +808,7 @@ impl ProfileCatalog {
             let Some(identity) = inner
                 .live
                 .as_ref()
-                .and_then(|config| config.enabled_profile(profile_id))
+                .and_then(|config| config.named_profile(profile_id).ok())
                 .map(|profile| profile.capabilities_key(profile_id))
             else {
                 return;
@@ -1123,6 +1136,9 @@ impl ProfileCatalog {
                 else {
                     continue;
                 };
+                if definition.config.enabled_profile(&definition.id).is_none() {
+                    continue;
+                }
                 let attempt = self.attempt_refresh(&definition, key.1.clone());
                 inner.refreshing.insert(key.clone(), attempt.clone());
                 started.push((key, attempt, definition.cancellation));
@@ -1453,7 +1469,7 @@ impl ProfileCatalog {
         id: &str,
         model: Option<String>,
     ) -> Result<ProfileConfig> {
-        let profile = config.enabled_profile(id).context("profile unavailable")?;
+        let profile = config.named_profile(id)?;
         let identity = profile.capabilities_key(id);
         // Model-specific probes select that model to discover its efforts. Only
         // the default probe can grant the default-model exemption.
@@ -1500,14 +1516,14 @@ impl ProfileCatalog {
         id: &str,
         model: Option<String>,
     ) -> Result<ProfileConfig> {
-        let profile = config.enabled_profile(id).context("profile unavailable")?;
+        let profile = config.named_profile(id)?;
         let live = profile.kind == HarnessKind::Muse;
         // A live read has its own fresh-probe admission in fetch_live. Re-
         // ensuring an adopted definition would retire that owner and discard
         // the default entry that model-specific reads depend on.
         let identity = profile.capabilities_key(id);
         if !live || !self.lock().definitions.contains_key(&identity) {
-            self.ensure(config);
+            self.ensure_profiles(config, true, Some(id));
         }
         let key = (identity, model);
         let cancellation = self.lock().definitions[&key.0].cancellation.clone();
@@ -1527,11 +1543,11 @@ impl ProfileCatalog {
         id: &str,
         model: Option<String>,
     ) -> Result<ProfileConfig> {
-        let profile = config.enabled_profile(id).context("profile unavailable")?;
+        let profile = config.named_profile(id)?;
         let identity = profile.capabilities_key(id);
         // Claim and reuse under the same lock, so concurrent first readers
         // cannot replace each other's Muse owner. Only warm passes refresh it.
-        self.ensure_profiles(config, false);
+        self.ensure_profiles(config, false, Some(id));
         let key = (identity, model);
         let mut revisions = self.revisions.subscribe();
         loop {
@@ -1660,7 +1676,7 @@ impl ProfileCatalog {
         self.lock()
             .live
             .as_ref()
-            .and_then(|config| config.enabled_profile(id))
+            .and_then(|config| config.named_profile(id).ok())
             .map(|profile| profile.models.clone())
             .unwrap_or_default()
     }
@@ -1733,10 +1749,7 @@ impl ProfileCatalog {
     ) -> Result<ProfileConfig> {
         loop {
             let config = self.live()?;
-            let identity = config
-                .enabled_profile(id)
-                .context("profile unavailable")?
-                .capabilities_key(id);
+            let identity = config.named_profile(id)?.capabilities_key(id);
             let result = if unrestricted {
                 self.fetch_unrestricted(&config, id, model.clone()).await
             } else {
@@ -1744,7 +1757,8 @@ impl ProfileCatalog {
             };
             let current = self.live()?;
             if current
-                .enabled_profile(id)
+                .named_profile(id)
+                .ok()
                 .map(|profile| profile.capabilities_key(id))
                 .as_ref()
                 == Some(&identity)
@@ -1773,9 +1787,7 @@ impl ProfileCatalog {
         parent: &str,
         models: std::collections::BTreeSet<String>,
     ) -> Result<std::collections::BTreeMap<String, mj_core::subagent::SubagentOptions>> {
-        config
-            .enabled_profile(parent)
-            .context("parent profile unavailable")?;
+        config.named_profile(parent)?;
         let defaults = join_all(config.enabled_profiles().map(|(id, _)| async move {
             (id.to_owned(), self.fetch_settled(config, id, None).await)
         }))
@@ -3593,6 +3605,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disabled_profile_is_discovered_only_on_request_and_never_refreshed() {
+        let probes = calls();
+        let catalog = ProfileCatalog::with_probe(counting_probe(probes.clone()));
+        let mut config = test_config(&[("parent", HarnessKind::Codex)]);
+        config.profiles.get_mut("parent").unwrap().enabled = false;
+        catalog.sync_now(&config).await;
+        assert_eq!(probes.load(Ordering::SeqCst), 0);
+        assert!(catalog.candidates().unwrap().is_empty());
+        let (left, right) = tokio::join!(
+            catalog.fetch_settled(&config, "parent", None),
+            catalog.fetch_settled(&config, "parent", None)
+        );
+        left.unwrap();
+        right.unwrap();
+        assert_eq!(probes.load(Ordering::SeqCst), 1);
+        assert!(catalog.refresh(|_, _| true).is_empty());
+        assert!(catalog.candidates().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn subagent_candidates_include_every_enabled_profile() {
         let catalog = ProfileCatalog::new(CancellationToken::new());
         let mut config = test_config(&[
@@ -4217,9 +4249,15 @@ mod tests {
             "editing the allow-list does not rediscover"
         );
 
+        config.profiles.get_mut("p").unwrap().enabled = false;
+        catalog.sync_now(&config).await;
+        let read = catalog.capabilities(&["p".into()]).await.unwrap();
+        assert_eq!(values(&read[0]), ["p-model", "m2"]);
+        assert_eq!(catalog.allowed_models("p"), ["m2", "unadvertised"]);
         config.profiles.get_mut("p").unwrap().models.clear();
         catalog.sync_now(&config).await;
-        assert_eq!(snapshot_models(&catalog), ["p-model", "m1", "m2", "m3"]);
+        let read = catalog.capabilities(&["p".into()]).await.unwrap();
+        assert_eq!(values(&read[0]), ["p-model", "m1", "m2", "m3"]);
     }
     // Hard-won: 9d1f70d2b: refreshing Muse retired an admission waiter.
     #[tokio::test]
