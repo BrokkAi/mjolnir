@@ -1714,6 +1714,22 @@ fn launch_wires_require_the_new_baseline_shape() {
         Some("agent-full-access")
     );
 
+    // A Muse launch an older controller wrote for a profile that opted back
+    // into review on unconstrained targets (`muse_auto_review`, 2.60 to 2.71)
+    // runs without permission checks: the policy owns the variable.
+    let mut muse = launch.clone();
+    muse.harness = HarnessKind::Muse;
+    muse.execution_policy = ExecutionPolicy::Unconstrained;
+    muse.environment
+        .insert("MUSE_APPROVAL_MODE".into(), "promptUnmatched".into());
+    super::enforce_execution_policy(&mut muse).unwrap();
+    assert_eq!(
+        muse.environment
+            .get("MUSE_APPROVAL_MODE")
+            .map(String::as_str),
+        Some("allowAll")
+    );
+
     let mut legacy = serde_json::to_value(&launch).unwrap();
     for field in ["additional_directories", "native_session_id"] {
         legacy.as_object_mut().unwrap().remove(field);

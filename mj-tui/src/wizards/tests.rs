@@ -1600,7 +1600,7 @@ fn profile_picker_marks_harnesses_without_guardian_approvals() {
                 models: Default::default(),
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
-                muse_auto_review: None,
+                legacy_muse_auto_review: None,
                 claude_permission_mode: None,
                 aws: None,
                 codex_profile: None,

@@ -2664,7 +2664,7 @@ fn a_session_without_project_memory_launches_without_memory() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
-            muse_auto_review: None,
+            legacy_muse_auto_review: None,
             claude_permission_mode: None,
             aws: None,
             ..mj_core::config::HarnessProfile::new(
@@ -2751,7 +2751,7 @@ fn project_memory_replica_is_separate_from_controller_attachment_directories() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
-            muse_auto_review: None,
+            legacy_muse_auto_review: None,
             claude_permission_mode: None,
             aws: None,
             ..mj_core::config::HarnessProfile::new(
@@ -2845,7 +2845,7 @@ fn zai_profile(home: &Path) -> mj_core::config::HarnessProfile {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
-        muse_auto_review: None,
+        legacy_muse_auto_review: None,
         claude_permission_mode: None,
         aws: None,
     }
@@ -3150,7 +3150,7 @@ fn deepseek_profile(home: &Path) -> mj_core::config::HarnessProfile {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
-        muse_auto_review: None,
+        legacy_muse_auto_review: None,
         claude_permission_mode: None,
         aws: None,
     }
@@ -3509,7 +3509,7 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
-            muse_auto_review: None,
+            legacy_muse_auto_review: None,
             claude_permission_mode: None,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.path().to_path_buf())
@@ -3848,7 +3848,7 @@ fn codex_login_profile(home: &Path, auth_mode: &str) -> mj_core::config::Harness
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         codex_profile: None,
-        muse_auto_review: None,
+        legacy_muse_auto_review: None,
         claude_permission_mode: None,
         aws: None,
     }
@@ -4340,8 +4340,7 @@ fn staged_muse_settings(body: &str) -> (tempfile::TempDir, PathBuf) {
 // Hard-won: a24070f: Muse launches failed when staged settings retained the shipped :auto-review profile.
 // Both policies stage `:ask-me`. Unconstrained Muse additionally runs
 // `allowAll` approvals with auto-review off (plus `--disable-sandbox`), so
-// no permission requests are emitted and the staged profile never matters;
-// a profile with `muse_auto_review = true` opts back into the reviewer.
+// no permission requests are emitted and the staged profile never matters.
 #[test]
 fn muse_staged_settings_replace_the_auto_review_profile_under_every_policy() {
     for (policy, profile) in [
@@ -5452,7 +5451,7 @@ fn a_staged_home_gets_the_login_and_settings_and_no_native_history() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
-            muse_auto_review: None,
+            legacy_muse_auto_review: None,
             claude_permission_mode: None,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.path().to_path_buf())
@@ -5615,7 +5614,7 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
-            muse_auto_review: None,
+            legacy_muse_auto_review: None,
             claude_permission_mode: None,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.clone())
@@ -5776,7 +5775,7 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             codex_profile: None,
-            muse_auto_review: None,
+            legacy_muse_auto_review: None,
             claude_permission_mode: None,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.clone())

@@ -19,10 +19,7 @@ flag, OpenCode's `"permission": "allow"` config setting, or DSH's
 `permission_mode` `allow`.
 Muse stages `:ask-me`, selects `allowAll` approvals, turns muse-acp's auto-review
 off, and disables only the sandbox (`--disable-sandbox`), so it runs without
-permission checks like OpenCode. A Muse profile with `muse_auto_review = true`
-opts back into the reviewer (`promptUnmatched` approvals with auto-review on),
-which answers each approval without prompting you, so critical actions can
-still be denied. Every other harness's control approves every call. Note that Kimi Code's
+permission checks like OpenCode. Every other harness's control approves every call. Note that Kimi Code's
 mode is named `auto` but is not a guardian policy that approves only low-risk
 calls.
 

@@ -102,7 +102,7 @@ fn zai_profile(home: &Path, environment: BTreeMap<String, String>) -> HarnessPro
         models: Default::default(),
         legacy_subagents: Default::default(),
         guardian_review_model: None,
-        muse_auto_review: None,
+        legacy_muse_auto_review: None,
         claude_permission_mode: None,
         aws: None,
         codex_profile: None,
@@ -134,7 +134,7 @@ fn only_a_codex_profile_that_uses_an_api_key_keeps_the_openai_key_variables() {
         models: Default::default(),
         legacy_subagents: Default::default(),
         guardian_review_model: None,
-        muse_auto_review: None,
+        legacy_muse_auto_review: None,
         claude_permission_mode: None,
         aws: None,
         codex_profile: None,
@@ -1049,62 +1049,38 @@ fn configured_approvals_preserve_other_profiles_and_select_guardians() {
     }
 }
 
-/// Unconstrained Muse runs without permission checks by default, like
-/// OpenCode's `permission = "allow"`. A Muse profile opts back into
-/// auto-review with `muse_auto_review = true`; guardian targets always
-/// review, so the toggle changes nothing there.
+/// A config file written while Muse profiles could opt back into review on
+/// unconstrained targets (`muse_auto_review`, 2.60 to 2.71) still loads on any
+/// profile kind. The key is ignored and dropped when the file is saved: Muse
+/// follows its runtime's policy like every harness, running unconstrained
+/// sessions without permission checks and guardian ones with auto-review.
 #[test]
-fn muse_auto_review_defaults_off_and_opts_back_into_review() {
-    let mut muse = sample_config().profiles["codex-1"].clone();
-    muse.kind = HarnessKind::Muse;
-    muse.home = PathBuf::from("/home/test/.config/muse");
-    muse.codex_profile = None;
-    muse.guardian_review_model = None;
+fn a_stored_muse_auto_review_still_loads_and_no_longer_changes_review() {
+    for (kind, home) in [
+        ("muse", "/home/test/.config/muse"),
+        ("codex", "/home/test/.codex"),
+    ] {
+        let text = format!(
+            "version = {CONFIG_VERSION}\n[profiles.p]\nkind = \"{kind}\"\n\
+             home = \"{home}\"\nmuse_auto_review = true\n"
+        );
+        let config: Config = toml::from_str(&text).expect("read the stored profile");
+        config.validate().expect("the legacy key is accepted");
+        let saved = toml::to_string(&config).unwrap();
+        assert!(!saved.contains("muse_auto_review"), "{saved}");
+    }
 
-    // Default: no permission checks in isolated targets.
-    assert_eq!(muse.muse_auto_review, None);
+    let text = format!(
+        "version = {CONFIG_VERSION}\n[profiles.muse]\nkind = \"muse\"\n\
+         home = \"/home/test/.config/muse\"\nmuse_auto_review = true\n"
+    );
+    let config: Config = toml::from_str(&text).unwrap();
+    let muse = &config.profiles["muse"];
     let enforcement = muse
         .execution_enforcement(ExecutionPolicy::Unconstrained)
         .expect("Muse enforces an execution policy");
     assert_eq!(enforcement.acp_mode(), Some("allowAll"));
     assert_eq!(enforcement.acp_setting(), Some(("auto_review", "off")));
-    assert_eq!(
-        enforcement.label(),
-        "allowAll / no-review / sandbox-off / :ask-me"
-    );
-    assert_eq!(
-        enforcement.launch_environment(),
-        Some(("MUSE_APPROVAL_MODE", "allowAll"))
-    );
-
-    // Explicit false matches the default.
-    muse.muse_auto_review = Some(false);
-    let enforcement = muse
-        .execution_enforcement(ExecutionPolicy::Unconstrained)
-        .expect("Muse enforces an execution policy");
-    assert_eq!(enforcement.acp_mode(), Some("allowAll"));
-    assert_eq!(enforcement.acp_setting(), Some(("auto_review", "off")));
-
-    // Opt-in restores the reviewer inside the container boundary.
-    muse.muse_auto_review = Some(true);
-    assert!(muse.muse_auto_review_unconstrained());
-    let enforcement = muse
-        .execution_enforcement(ExecutionPolicy::Unconstrained)
-        .expect("Muse enforces an execution policy");
-    assert_eq!(enforcement.acp_mode(), Some("promptUnmatched"));
-    assert_eq!(enforcement.acp_setting(), Some(("auto_review", "on")));
-    assert_eq!(
-        enforcement.label(),
-        "promptUnmatched / auto-review / sandbox-off / :ask-me"
-    );
-    assert_eq!(
-        enforcement.launch_environment(),
-        Some(("MUSE_APPROVAL_MODE", "promptUnmatched"))
-    );
-
-    // The launch environment follows the toggle; only the sandbox is ever
-    // disabled.
-    muse.muse_auto_review = None;
     let mut environment = BTreeMap::new();
     muse.configure_execution_environment(ExecutionPolicy::Unconstrained, &mut environment)
         .unwrap();
@@ -1112,51 +1088,11 @@ fn muse_auto_review_defaults_off_and_opts_back_into_review() {
         environment.get("MUSE_APPROVAL_MODE").map(String::as_str),
         Some("allowAll")
     );
-    assert_eq!(
-        environment.get("MUSE_SERVE_ARGS").map(String::as_str),
-        Some("--disable-sandbox")
-    );
-    muse.muse_auto_review = Some(true);
-    let mut environment = BTreeMap::new();
-    muse.configure_execution_environment(ExecutionPolicy::Unconstrained, &mut environment)
-        .unwrap();
-    assert_eq!(
-        environment.get("MUSE_APPROVAL_MODE").map(String::as_str),
-        Some("promptUnmatched")
-    );
-
-    // Guardian targets always review, whatever the toggle says.
-    for review in [None, Some(true), Some(false)] {
-        muse.muse_auto_review = review;
-        let enforcement = muse
-            .execution_enforcement(ExecutionPolicy::ConfiguredApprovals)
-            .expect("Muse guardian enforces an execution policy");
-        assert_eq!(enforcement.acp_mode(), Some("promptUnmatched"));
-        assert_eq!(enforcement.acp_setting(), Some(("auto_review", "on")));
-    }
-}
-
-/// `muse_auto_review` is a Muse-only setting: any other harness rejects it
-/// when the configuration loads.
-#[test]
-fn muse_auto_review_applies_only_to_a_muse_profile() {
-    let text = format!(
-        "version = {CONFIG_VERSION}\n[profiles.muse]\nkind = \"muse\"\n\
-         home = \"/home/test/.config/muse\"\nmuse_auto_review = true\n"
-    );
-    let config: Config = toml::from_str(&text).expect("read the Muse profile");
-    assert_eq!(config.profiles["muse"].muse_auto_review, Some(true));
-    config.validate().expect("Muse accepts the toggle");
-
-    let text = text.replace("kind = \"muse\"", "kind = \"codex\"");
-    let config: Config = toml::from_str(&text).expect("read the Codex profile");
-    assert!(
-        config
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("applies only to a Muse profile")
-    );
+    let guardian = muse
+        .execution_enforcement(ExecutionPolicy::ConfiguredApprovals)
+        .expect("Muse guardian enforces an execution policy");
+    assert_eq!(guardian.acp_mode(), Some("promptUnmatched"));
+    assert_eq!(guardian.acp_setting(), Some(("auto_review", "on")));
 }
 
 // Hard-won: #1278: guardian Muse kept a stale --disable-sandbox in MUSE_SERVE_ARGS
@@ -3265,7 +3201,7 @@ fn native_continuity_follows_the_codex_model_service_not_only_the_harness() {
         models: Default::default(),
         legacy_subagents: Default::default(),
         guardian_review_model: None,
-        muse_auto_review: None,
+        legacy_muse_auto_review: None,
         claude_permission_mode: None,
         aws: None,
         codex_profile: codex_profile.map(str::to_owned),
@@ -3500,7 +3436,7 @@ fn setup_additions_recognizes_equivalent_profile_homes() {
             models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
-            muse_auto_review: None,
+            legacy_muse_auto_review: None,
             claude_permission_mode: None,
             aws: None,
             codex_profile: None,
