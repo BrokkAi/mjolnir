@@ -32,7 +32,9 @@ files are the scripts, specifications and corpus.
   `inventory.py` records the checkout before and after each review.
 - **Audit** (`audit.py`): scans every reviewer tool call for network or
   GitHub access, history escapes, paths outside the workspace, memory or
-  session tools, and builds or tests. Hits are read by hand.
+  session tools, and builds or tests. Hits are read by hand. The command
+  patterns are a heuristic list; the inventory's ignored-file check is the
+  structural guard against builds and test runs (from stage 2 on).
 - **Judging** (`judge/SPEC.md`): one judge per batch of bugs sees each bug's
   defect record and its reviewers' outputs under random IDs, and labels each
   output caught, partial or missed. Every verdict is then checked by hand.

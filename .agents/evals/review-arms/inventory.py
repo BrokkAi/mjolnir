@@ -49,4 +49,6 @@ print(json.dumps({
     "remotes": text("remote").splitlines(),
     "alternates": "alternate:" in text("count-objects", "-v"),
     "status": text("status", "--porcelain=v1", "--untracked-files=all"),
+    # Builds and test runs leave ignored output (target/, __pycache__/) however they were started.
+    "ignored": text("status", "--porcelain=v1", "--ignored=traditional", "--untracked-files=normal"),
 }))

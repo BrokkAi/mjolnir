@@ -158,8 +158,8 @@ tools, or modify files. Helper agents it starts follow the same constraints.
 def compare_inventories(before, after):
     """Returns problems; extra objects are reported, not silently accepted."""
     problems = []
-    for key in ["head", "head_tree", "base_tree", "diff_sha256", "remotes", "alternates", "status", "session_start"]:
-        if before[key] != after[key]:
+    for key in ["head", "head_tree", "base_tree", "diff_sha256", "remotes", "alternates", "status", "session_start", "ignored"]:
+        if key in before and before[key] != after.get(key):  # stage 1 inventories predate "ignored"
             problems.append(f"{key} changed: {before[key]!r} -> {after[key]!r}")
     new_commits = sorted(set(after["commits"]) - set(before["commits"]))
     if new_commits:
@@ -302,14 +302,17 @@ def collect(d, bug, identity, sid, place, before):
             reviewers.append({"child": child, "slot": info["slot"], "profile": row.get("profile_id"),
                               "model": settings.get("model"), "effort": settings.get("effort"),
                               "has_output": bool(messages)})
+        # A review can clear before every reviewer was observed, or with a reviewer
+        # that failed. Only a complete capture is saved as reviewers.json, so a
+        # resumed job captures again instead of reloading an incomplete one.
+        expected = sorted(r.split(":")[0] for r in ARMS[identity["arm"]])
+        got = sorted(r["model"] or "" for r in reviewers)
+        incomplete = [r["child"] for r in reviewers if not r["has_output"] or r["effort"] != "high"]
+        if got != expected or incomplete:
+            save(d / "reviewers-incomplete.json", reviewers)
+            raise RuntimeError(f"incomplete review: models {got}, expected {expected}; "
+                               f"without output or wrong effort: {incomplete}")
         save(d / "reviewers.json", reviewers)
-    # A review can clear before every reviewer was observed, or with a reviewer that
-    # failed; such a run must not count as finished.
-    expected = sorted(r.split(":")[0] for r in ARMS[identity["arm"]])
-    got = sorted(r["model"] or "" for r in reviewers)
-    incomplete = [r["child"] for r in reviewers if not r["has_output"] or r["effort"] != "high"]
-    if got != expected or incomplete:
-        raise RuntimeError(f"incomplete review: models {got}, expected {expected}; without output or wrong effort: {incomplete}")
 
     if (d / "inventory-check.json").exists():
         problems = json.loads((d / "inventory-check.json").read_text())["problems"]
@@ -364,7 +367,8 @@ def main():
 
     unfinished = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=a.concurrency) as pool:
-        for job, state, error in pool.map(one, jobs):
+        for future in concurrent.futures.as_completed([pool.submit(one, job) for job in jobs]):
+            job, state, error = future.result()
             print(json.dumps({"job": job, "state": state, "error": error}), flush=True)
             unfinished += state != "done"
     return 1 if unfinished else 0
