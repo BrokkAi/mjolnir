@@ -37,6 +37,7 @@ enum PaneOperation {
     SessionCommand(String, CommandId),
     /// Creates a top-level session with this session's settings.
     NewSessionLike(String),
+    ClearWorkspaceNotifications(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -266,6 +267,33 @@ impl DashboardState {
         }
     }
 
+    /// The sessions in `workspace_id` whose notification "Dismiss
+    /// notification" could dismiss now. The workspace menu draws its row and
+    /// runs it from this one answer.
+    fn dismissible_sessions_in(&self, workspace_id: &str) -> Vec<String> {
+        self.state
+            .sessions
+            .values()
+            .filter(|session| session.workspace_id == workspace_id)
+            .filter(|session| {
+                crate::actions::dismiss_notification_available_for(self, &session.id)
+                    == Availability::Ready
+            })
+            .map(|session| session.id.clone())
+            .collect()
+    }
+
+    pub(crate) fn begin_workspace_row_menu(&mut self, workspace_id: &str, at: (u16, u16)) {
+        let entries = vec![(
+            "Clear notifications".to_owned(),
+            PaneOperation::ClearWorkspaceNotifications(workspace_id.to_owned()),
+        )];
+        self.show_pane_menu("Workspace", entries, false);
+        if let Some(menu) = self.pane_menu.as_mut() {
+            menu.anchor = Some(Rect::new(at.0, at.1, 1, 1));
+        }
+    }
+
     /// Whether a pane-menu row can run now. Both the drawing and the
     /// activation ask here, so a row that looks disabled cannot be run from
     /// the keyboard, a digit or the mouse.
@@ -281,6 +309,9 @@ impl DashboardState {
             PaneOperation::SessionCommand(session_id, _)
             | PaneOperation::NewSessionLike(session_id) => {
                 self.state.sessions.contains_key(session_id)
+            }
+            PaneOperation::ClearWorkspaceNotifications(workspace_id) => {
+                !self.dismissible_sessions_in(workspace_id).is_empty()
             }
             _ => true,
         }
@@ -515,6 +546,21 @@ impl DashboardState {
                 self.run_session_command(session_id, id)
             }
             PaneOperation::NewSessionLike(session_id) => self.begin_new_session_like(&session_id),
+            PaneOperation::ClearWorkspaceNotifications(workspace_id) => {
+                let dismissals: Vec<_> = self
+                    .dismissible_sessions_in(&workspace_id)
+                    .into_iter()
+                    .filter_map(|session_id| {
+                        let target = self.submit_notification_dismissal(&session_id)?;
+                        Some((session_id, target))
+                    })
+                    .collect();
+                if dismissals.is_empty() {
+                    DashboardAction::None
+                } else {
+                    DashboardAction::DismissNotifications { dismissals }
+                }
+            }
             PaneOperation::Workspace(workspace_id) => {
                 if self.workspace_ids().contains(&workspace_id) {
                     DashboardAction::SelectWorkspace { workspace_id }
