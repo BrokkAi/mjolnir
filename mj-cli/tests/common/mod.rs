@@ -110,17 +110,27 @@ impl DaemonStorage {
     // start a daemon in the background.
     #[allow(dead_code)]
     pub fn wait_until_owned(&self, deadline: Instant) -> bool {
+        self.wait_until_owned_while(deadline, || {})
+    }
+
+    /// [`Self::wait_until_owned`], calling `poll` between checks, for a
+    /// fixture that must keep serving its client while the daemon starts.
+    #[allow(dead_code)]
+    pub fn wait_until_owned_while(&self, deadline: Instant, mut poll: impl FnMut()) -> bool {
         // Metadata is published only after the daemon owns the store. Taking
         // the lock to probe startup can instead lock out that daemon's one
         // admission attempt, making an otherwise isolated fixture fail.
         let metadata = self.data.join("daemon.json");
-        while !self.daemon_pid(&metadata).is_some_and(process_exists) {
+        loop {
+            poll();
+            if self.daemon_pid(&metadata).is_some_and(process_exists) {
+                return true;
+            }
             if Instant::now() >= deadline {
                 return false;
             }
             thread::sleep(Duration::from_millis(10));
         }
-        true
     }
 
     /// Stop whichever daemon owns this store, so the storage can be removed.
