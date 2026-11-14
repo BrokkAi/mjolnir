@@ -2293,7 +2293,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&ambient, std::fs::Permissions::from_mode(0o755)).unwrap();
         let matching = resolve(HarnessRuntimePolicy::Ambient).unwrap();
-        assert_eq!(matching.command, ambient);
+        // Canonical, like the lookup: macOS keeps temporary directories under
+        // the /var -> /private/var link.
+        assert_eq!(matching.command, ambient.canonicalize().unwrap());
         assert!(matching.managed.is_none());
         let managed = resolve(HarnessRuntimePolicy::Managed).unwrap();
         assert_eq!(managed.command, managed_path);
