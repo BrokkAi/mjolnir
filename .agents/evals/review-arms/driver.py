@@ -30,12 +30,20 @@ MJX = SCRIPTS / "mjx"
 # The mjolnir checkout that supplies commit messages; defaults to the one holding these scripts.
 REPO = os.environ.get("REVIEW_ARMS_REPO") or subprocess.check_output(
     ["git", "-C", str(SCRIPTS), "rev-parse", "--show-toplevel"]).decode().strip()
+# Reviewer sessions are independent, so setups are composed afterwards from
+# sessions; a review only groups up to three sessions of one launch.
 ARMS = {
     "A": ["gpt-6.1-terra:high"] * 3,
     "B": ["gpt-6.1-terra:high", "gpt-6.1-sol:high"],
+    "C": ["muse-ember-1.0:high"] * 3,
+    "D": ["gpt-6.1-sol:high"] * 3,
+    "D2": ["gpt-6.1-sol:high"] * 2,  # stage 1 diffs already have one Sol session
 }
 WORKSPACE = json.loads((ROOT / "instance/workspace.json").read_text())["workspace"]["id"]
-CORPUS = {c["id"]: c for c in map(json.loads, (SCRIPTS / "corpus/candidates-all.jsonl").read_text().splitlines())}
+# Hard-won candidates and the sampled ordinary diffs share one id space.
+CORPUS = {c["id"]: c for name in ("candidates-all.jsonl", "diffs.jsonl")
+          if (SCRIPTS / "corpus" / name).exists()
+          for c in map(json.loads, (SCRIPTS / "corpus" / name).read_text().splitlines())}
 
 
 def save(path, value):
@@ -208,6 +216,15 @@ def run_job(job, gate):
     assert not before["remotes"] and not before["alternates"] and not before["status"], before
     assert before["base_tree"] != before["head_tree"]
 
+    # Reviewers read the carrier's workspace, and review results reach the carrier
+    # while other reviewers still run: make the carrier unable to edit or browse
+    # before it sees anything.
+    for key, value in [("mode", "plan"), ("web_fetch", "disabled")]:
+        mj("set-config", "--session", sid, "--key", key, "--value", value)
+    settings = {c["key"]: c.get("current") for c in session(sid).get("config_options", [])}
+    assert settings.get("mode") == "plan" and settings.get("web_fetch") == "disabled", settings
+    save(d / "carrier-settings.json", settings)
+
     (d / "historical-context.txt").write_text(context_text(bug))
     command = "carrier-" + hashlib.sha256((bug["id"] + arm).encode()).hexdigest()[:32]
     request = mj("message", "--session", sid, "--command-id", command, "--prompt-file", d / "historical-context.txt")
@@ -225,15 +242,13 @@ def run_job(job, gate):
         raise TimeoutError("carrier turn did not finish")
     carrier_pages = transcript(sid)
     save(d / "carrier-transcript.json", carrier_pages)
-    tools = [i for p in carrier_pages for i in p["items"] if i["role"] in ("tool", "terminal")]
-    assert not tools, "carrier used tools; review not started"
-    # Reviewers read the carrier's workspace, and review results reach the carrier
-    # while other reviewers still run: make the carrier unable to edit or browse.
-    for key, value in [("mode", "plan"), ("web_fetch", "disabled")]:
-        mj("set-config", "--session", sid, "--key", key, "--value", value)
-    settings = {c["key"]: c.get("current") for c in session(sid).get("config_options", [])}
-    assert settings.get("mode") == "plan" and settings.get("web_fetch") == "disabled", settings
-    save(d / "carrier-settings.json", settings)
+    # What reviewers need is an unchanged checkout; a carrier that only looked
+    # around (it sometimes lists files) does not change what they review.
+    tools = [{"seq": i["seq"], "title": (i["body"].get("call") or {}).get("title")}
+             for p in carrier_pages for i in p["items"] if i["role"] in ("tool", "terminal")]
+    save(d / "carrier-first-turn-tools.json", tools)
+    problems, _ = compare_inventories(before, inventory(place, "audit", bug["base_commit"]))
+    assert not problems, f"carrier changed the checkout; review not started: {problems}"
 
     save(d / "review-start-intent.json", {"time_ns": time.time_ns()})
     save(d / "review-start.json", mj("review", "start", "--session", sid))
