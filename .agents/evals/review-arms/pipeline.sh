@@ -9,8 +9,14 @@ jobs=$1; verify=$2
 while :; do
   reviewing=$(pgrep -f "driver.py --jobs $jobs" >/dev/null && echo yes || echo no)
   python3 -B "$here/build_verify.py" "$verify" --append --ready-jobs "$jobs" || exit 1
-  python3 -B "$here/verify_driver.py" "$verify" --concurrency 7 || echo "verify_driver reported failures; see the log above"
-  [ "$reviewing" = no ] && break
+  failed=no
+  python3 -B "$here/verify_driver.py" "$verify" --concurrency 7 || failed=yes
+  if [ "$reviewing" = no ]; then
+    # The last pass decides the result: unverified batches would drop diffs from scoring.
+    [ "$failed" = yes ] && { echo "pipeline incomplete: verification failed on the final pass; see the log above"; exit 1; }
+    break
+  fi
+  [ "$failed" = yes ] && echo "verify_driver reported failures; retrying on the next pass"
   sleep 300
 done
 echo "pipeline finished"

@@ -45,6 +45,14 @@ private = ROOT / "private" / f"key-{out.name}.json"
 private.parent.mkdir(parents=True, exist_ok=True)
 previous = json.loads(private.read_text()) if a.append and private.exists() else {"findings": {}, "sessions": []}
 assert a.append or not private.exists(), f"{private} exists; use --append"
+# A run that stopped after publishing its key left batches under temporary names:
+# publish those the key maps, and drop those from a run that never wrote its key.
+for tmp in sorted(out.glob("batch-*.json.tmp")):
+    ids = {f["id"] for c in json.loads(tmp.read_text()) for f in c["findings"]}
+    if ids <= set(previous["findings"]):
+        tmp.replace(out / tmp.name.removesuffix(".tmp"))
+    else:
+        tmp.unlink()
 batched = {k["bug"] for k in previous["findings"].values()}
 batched |= {json.loads(d.read_text())["bug"] for d in ROOT.glob("runs/*/*/done.json")
             if any(r["child"] in set(previous["sessions"]) for r in json.loads(d.read_text())["reviewers"])}

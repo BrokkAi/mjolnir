@@ -1,7 +1,8 @@
 """Paired comparison of reviewer options over diffs, with a bootstrap interval.
 
 Usage: python3 compare.py <verify-dir> "<option>" "<option>" [...] [--severities high,medium]
-An option is models joined by "+", e.g. "Terra+Terra+Terra" or "Terra+Sol".
+An option is configurations joined by "+", e.g. "Terra+Terra+Terra" or
+"Terra/high+Sol/high". A bare model name stands for its only effort.
 
 Each diff contributes the exact expected number of counted groups found by the
 option, averaged over every assignment of distinct sessions. Reports the
@@ -36,11 +37,23 @@ for row in csv.DictReader(open(V / "session_groups.csv")):
         found[row["session"]].add(row["group"])
 by_diff = collections.defaultdict(lambda: collections.defaultdict(list))
 for s in csv.DictReader(open(V / "sessions.csv")):
-    by_diff[s["bug"]][LABELS.get(s["model"], s["model"])].append(s["session"])
+    by_diff[s["bug"]][f"{LABELS.get(s['model'], s['model'])}/{s['effort']}"].append(s["session"])
+configs = {c for d in by_diff.values() for c in d}
+
+
+def config_key(token, configs):
+    """Resolves "Terra" or "Terra/high" to a configuration; a bare model name is
+    accepted only while that model ran at a single effort."""
+    if "/" in token:
+        assert token in configs, f"no sessions for {token}; have {sorted(configs)}"
+        return token
+    matches = sorted(c for c in configs if c.split("/")[0] == token)
+    assert len(matches) == 1, f"{token} is ambiguous or unknown; name one of {matches or sorted(configs)}"
+    return matches[0]
 
 
 def expected(diff, option):
-    need = collections.Counter(option.split("+"))
+    need = collections.Counter(config_key(t, configs) for t in option.split("+"))
     pools = [list(itertools.combinations(by_diff[diff][m], k)) for m, k in sorted(need.items())]
     counts = [len(set().union(*(found[s] for part in parts for s in part))) for parts in itertools.product(*pools)]
     return statistics.fmean(counts) if counts else None

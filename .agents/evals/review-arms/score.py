@@ -56,6 +56,7 @@ for f, k in key.items():
 complete = {b for b, fs in expected.items() if fs <= set(seen)}
 partial = sorted(b for b, fs in expected.items() if fs & set(seen) and not fs <= set(seen))
 assert not partial, f"diffs with only some findings verified: {partial}"
+unverified = sorted(set(expected) - complete)  # batched but not yet verified; left out below
 
 
 def latency(session_dir):
@@ -103,4 +104,5 @@ write_csv("session_groups.csv", session_groups, ["session", "bug", "group"])
 per_model = collections.Counter(s["model"] for s in sessions.values())
 print(json.dumps({"diffs": len({s["bug"] for s in sessions.values()}), "sessions": len(sessions), "sessions_per_model": per_model,
                   "groups": len(groups), "verdicts": collections.Counter(g["verdict"] for g in groups.values()),
-                  "missing_latency": sum(s["latency_s"] is None for s in sessions.values())}, indent=1))
+                  "missing_latency": sum(s["latency_s"] is None for s in sessions.values()),
+                  "unverified_diffs_left_out": unverified}, indent=1))

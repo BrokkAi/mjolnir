@@ -32,7 +32,8 @@ for row in csv.DictReader(open(V / "session_groups.csv")):
     reported[row["group"]].add(row["session"])
 by_diff = collections.defaultdict(lambda: collections.defaultdict(list))
 for s in csv.DictReader(open(V / "sessions.csv")):
-    by_diff[s["bug"]][LABELS.get(s["model"], s["model"])].append(s["session"])
+    # Keyed by model and effort, as in pareto.py, so efforts are never pooled.
+    by_diff[s["bug"]][f"{LABELS.get(s['model'], s['model'])}/{s['effort']}"].append(s["session"])
 models = sorted({m for d in by_diff.values() for m in d})
 options = [o for n in (1, 2, 3) for o in itertools.combinations_with_replacement(models, n)]
 
