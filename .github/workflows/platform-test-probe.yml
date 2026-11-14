@@ -82,9 +82,16 @@ jobs:
           sleep 1
         done
         echo "::error::the tests were still running after ${HANG_SECONDS}s"
-        ps -axo pid,ppid,pgid,tpgid,stat,tty,command 2>/dev/null \
-          | awk 'NR == 1 || /\/deps\/|\/bin\/sh|head -c|cargo test/' \
-          || ps -ef
+        # Every process of this user, zombies included, then where each test
+        # process is blocked (`sample` on macOS).
+        ps -U "$(id -u)" -o pid,ppid,pgid,tpgid,stat,tty,command 2>/dev/null || ps -ef
+        for pid in $(pgrep -f '/deps/' 2>/dev/null); do
+          if command -v sample >/dev/null; then
+            echo "::group::sample $pid"
+            sample "$pid" 1 2>&1 | grep -E 'Thread_|^ *[+!:|]' | head -80
+            echo "::endgroup::"
+          fi
+        done
         pkill -9 -f '/deps/' 2>/dev/null || true
         kill "$tests" 2>/dev/null || true
         exit 1
