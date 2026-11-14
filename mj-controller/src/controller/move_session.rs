@@ -1499,8 +1499,10 @@ impl Controller {
                 source_target_template_id: source.target_template_id.clone(),
                 source_target: source.target.clone().map(|v| *v),
                 source_native_session_id: source.native_session_id.clone(),
-                source_additional_mounts: source.additional_mounts.clone(),
-                source_resource_allocation: source.resource_allocation.clone(),
+                inherited_resource_allocation: None,
+                inherited_additional_mounts: Vec::new(),
+                source_additional_mounts: Vec::new(),
+                source_resource_allocation: None,
                 destination_target: None,
                 destination_native_session_id: None,
                 destination_store_id: None,
@@ -1522,10 +1524,7 @@ impl Controller {
             operation.quota_stop_reason = Some(reason);
             operation.quota_continuation = Some(continuation);
         }
-        // Keep the admitted inheritance baseline for this accepted attempt.
-        // A later settings edit is a request for a subsequent creation.
-        operation.source_resource_allocation = source.resource_allocation.clone();
-        operation.source_additional_mounts = source.additional_mounts.clone();
+        operation.capture_container_settings(&source);
         operation.accepted_preparation = Some(Box::new(checked.clone()));
         operation.acknowledge_interruption = request.acknowledge_interruption;
         crate::database::accept_move_operation(&operation)?;
@@ -2337,10 +2336,10 @@ impl Controller {
                 None
             } else {
                 operation.selection.resource_allocation.clone()
-                    .or_else(|| operation.source_resource_allocation.clone())
+                    .or_else(|| operation.inherited_resource_allocation.clone())
             };
             session.additional_mounts = operation.selection.additional_mounts.clone()
-                .unwrap_or_else(|| operation.source_additional_mounts.clone());
+                .unwrap_or_else(|| operation.inherited_additional_mounts.clone());
             // The destination worker reads its delegation policy from the
             // record at launch. `recovery_session` above keeps the old one
             // for a rollback.

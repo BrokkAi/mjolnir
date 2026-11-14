@@ -321,6 +321,13 @@ pub struct MoveOperation {
     pub source_target_template_id: String,
     pub source_target: Option<TargetLocator>,
     pub source_native_session_id: Option<String>,
+    // Additive shape within unshipped breaking store revision 131; no new migration.
+    /// Frozen request inherited by the destination when selection says keep.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited_resource_allocation: Option<SessionResourceAllocation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherited_additional_mounts: Vec<AdditionalMount>,
+    /// Applied source settings, used only for source recovery.
     pub source_additional_mounts: Vec<AdditionalMount>,
     pub source_resource_allocation: Option<SessionResourceAllocation>,
     pub destination_target: Option<TargetLocator>,
@@ -342,6 +349,25 @@ pub struct MoveOperation {
 }
 
 impl MoveOperation {
+    /// Capture the two independently owned facts at acceptance of each attempt.
+    pub fn capture_container_settings(&mut self, source: &SessionRecord) {
+        let applied = super::applied_container_settings(source);
+        self.source_resource_allocation = applied.resource_allocation.cloned();
+        self.source_additional_mounts = applied.additional_mounts.to_vec();
+        self.inherited_resource_allocation = if self.selection.resource_allocation.is_none()
+            && !self.selection.clear_resource_allocation
+        {
+            source.resource_allocation.clone()
+        } else {
+            None
+        };
+        self.inherited_additional_mounts = if self.selection.additional_mounts.is_none() {
+            source.additional_mounts.clone()
+        } else {
+            Vec::new()
+        };
+    }
+
     /// Explicit Resume resolves a cancelled Move by finishing its queue
     /// without ever admitting it. Its archives are then historical, just as
     /// for a completed Move, and cannot make a later Move a retry.

@@ -434,6 +434,8 @@ mod tests {
             source_target_template_id: session.target_template_id.clone(),
             source_target: session.target.clone().map(|v| *v),
             source_native_session_id: session.native_session_id.clone(),
+            inherited_resource_allocation: None,
+            inherited_additional_mounts: Vec::new(),
             source_additional_mounts: session.additional_mounts.clone(),
             source_resource_allocation: session.resource_allocation.clone(),
             destination_target: None,

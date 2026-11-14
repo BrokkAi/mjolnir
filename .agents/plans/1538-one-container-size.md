@@ -16,6 +16,10 @@ After this change each session has one size, `resource_allocation`. Container se
 
 ## Progress
 
+- [x] Separated Move applied-source recovery from frozen keep-request inheritance; extended the existing failed-outcome regression for two failures and keep acceptance.
+- [x] Final review-fix validation: workspace Clippy and fmt pass; core 651 passed/4 ignored; controller 2634 passed/27 ignored with unrelated mbx probe failure (picked user-bin 1.31 instead of symlink 1.30); TUI 588 passed/2 ignored with the two already documented base goldens failing. Extended Move retry/keep regression passes. Logs: `.mj/agents/ecce6678b0ecd0f8e26f6a3e960d0c78/{clippy,fmt,suites}.log`; failure diagnostics in `failures.md` there.
+
+
 - [x] (2026-11-14) Follow-up request ownership: Resume/Move acceptance alone writes explicit size/mount choices; lifecycle publications and rollback preserve newer requests. Central applied-settings lookup and all-reader audit complete, including inherited TUI Move choices and removed-locator upgrade recovery. Final controller suite: 2635 passed/27 ignored; core: 651 passed/4 ignored; final Move module: 61 passed; workspace Clippy and formatting passed. TUI: 588 passed/2 ignored, with only the two documented baseline goldens failing. Evidence: `.mj/agents/f5843c6b3c11ad265083711bafa5ee82/validation.md`.
 
 - [x] Follow-up #1538: revision 131 now converts embedded Move recovery/transfer records, effective source recovery sizing, retained sources and environment snapshots. Existing regression extended with the requested Hard-won assertion; final targeted migration tests (2) and controller-only Clippy passed.
@@ -51,6 +55,11 @@ After this change each session has one size, `resource_allocation`. Container se
 
 
 ## Decision Log
+
+- Decision: Move source allocation/mounts describe only the applied source via `applied_container_settings`; separate defaulted `inherited_resource_allocation` and `inherited_additional_mounts` freeze the request at acceptance for keep destinations. Capacity source commitments already use `counted_container_allocation`.
+  Rationale: a failed explicit destination choice remains the request, so retry recovery must not mistake it for applied source settings. These fields extend the unshipped breaking revision 131; no new migration is needed. `MoveOperation` denies unknown fields and is exposed in protocol-97 snapshots/feeds: earlier 97 clients reject populated new fields, whereas this client accepts older payloads with defaults.
+  Date/Author: 2026-11-14, parent decision implemented by worker.
+
 
 - Decision: size and mounts on SessionRecord are requests for the next creation. Only creation, explicit Resume/Move choices, and Container settings write them; lifecycle publications and rollback preserve them. Keep selections remain omitted through Move preparation. Commit explicit choices with operation acceptance.
   Rationale: a provisioning controller's stale snapshot must never overwrite settings saved while provisioning runs. Failed operations retain the person's requested settings.

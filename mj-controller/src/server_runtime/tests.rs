@@ -309,6 +309,8 @@ fn move_recovery_projection_exposes_safe_retry_settings_only() {
         source_target_template_id: "source-target".into(),
         source_target: None,
         source_native_session_id: Some("private-native-id".into()),
+        inherited_resource_allocation: None,
+        inherited_additional_mounts: Vec::new(),
         source_additional_mounts: vec![crate::targets::AdditionalMount {
             source: "/source/source".into(),
             destination: "/source/target".into(),

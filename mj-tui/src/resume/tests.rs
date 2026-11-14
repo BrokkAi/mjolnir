@@ -242,6 +242,8 @@ fn incomplete_move() -> MoveOperation {
         source_target_template_id: "target-1".into(),
         source_target: None,
         source_native_session_id: None,
+        inherited_resource_allocation: None,
+        inherited_additional_mounts: Vec::new(),
         source_additional_mounts: Vec::new(),
         source_resource_allocation: None,
         destination_target: None,

@@ -382,6 +382,8 @@ fn terminal_move_recovery_finishes_interrupted_close_before_phase_retry() {
             source_target_template_id: "local-bare".into(),
             source_target: session.target.clone().map(|v| *v),
             source_native_session_id: session.native_session_id.clone(),
+            inherited_resource_allocation: None,
+            inherited_additional_mounts: Vec::new(),
             source_additional_mounts: Vec::new(),
             source_resource_allocation: None,
             destination_target: None,
@@ -945,6 +947,8 @@ fn move_queue_replay_survives_accept_then_relay_crash_and_rejects_replaced_store
         source_target_template_id: "local-bare".into(),
         source_target: None,
         source_native_session_id: None,
+        inherited_resource_allocation: None,
+        inherited_additional_mounts: Vec::new(),
         source_additional_mounts: Vec::new(),
         source_resource_allocation: None,
         destination_target: Some(target),
@@ -1669,6 +1673,8 @@ pub(super) fn source_recovery_operation(session: &mj_core::state::SessionRecord)
         source_target_template_id: session.target_template_id.clone(),
         source_target: session.target.clone().map(|v| *v),
         source_native_session_id: session.native_session_id.clone(),
+        inherited_resource_allocation: None,
+        inherited_additional_mounts: Vec::new(),
         source_additional_mounts: Vec::new(),
         source_resource_allocation: None,
         destination_target: None,
@@ -1731,6 +1737,7 @@ fn move_raw_checkout_uses_the_same_accepted_bundle_transition_plan() {
 }
 
 #[cfg(unix)]
+// Hard-won: #1538: a retried Move stored the destination choice as the source settings
 #[test]
 fn move_outcome_publishes_safe_recovery_and_clears_it_after_a_successful_retry() {
     let name =
@@ -1750,6 +1757,83 @@ fn move_outcome_publishes_safe_recovery_and_clears_it_after_a_successful_retry()
         .sessions
         .insert(session.id.clone(), session.clone());
     let mut operation = source_recovery_operation(&session);
+    let applied_size = Some(SessionResourceAllocation::Container {
+        cpus: 2,
+        memory_bytes: 4 << 30,
+    });
+    let requested_size = Some(SessionResourceAllocation::Container {
+        cpus: 4,
+        memory_bytes: 8 << 30,
+    });
+    let applied_mounts = vec![crate::targets::AdditionalMount {
+        source: PathBuf::from("/source"),
+        destination: PathBuf::from("/source"),
+        access: crate::targets::MountAccess::Ro,
+    }];
+    let requested_mounts = vec![crate::targets::AdditionalMount {
+        source: PathBuf::from("/destination"),
+        destination: PathBuf::from("/destination"),
+        access: crate::targets::MountAccess::Rw,
+    }];
+    let source = controller.state.sessions.get_mut(&session.id).unwrap();
+    std::sync::Arc::make_mut(source.target_runtime.get_or_insert_with(|| {
+        std::sync::Arc::new((&resume_compatibility_config().targets["local-bare"]).into())
+    }))
+    .container_settings = Some(mj_core::state::ContainerSettings {
+        resource_allocation: applied_size.clone(),
+        additional_mounts: applied_mounts.clone(),
+        default_image: None,
+    });
+    operation.selection.resource_allocation = requested_size.clone();
+    operation.selection.additional_mounts = Some(requested_mounts.clone());
+    for _ in 0..2 {
+        operation.capture_container_settings(&controller.state.sessions[&session.id]);
+        crate::database::accept_move_operation(&operation).unwrap();
+        controller
+            .state
+            .sessions
+            .get_mut(&session.id)
+            .unwrap()
+            .resource_allocation = requested_size.clone();
+        controller
+            .state
+            .sessions
+            .get_mut(&session.id)
+            .unwrap()
+            .additional_mounts = requested_mounts.clone();
+        controller
+            .finish_move_result(
+                &mut operation,
+                Err(anyhow::anyhow!("destination failed")),
+                &RefusingExecutor("no command"),
+            )
+            .unwrap();
+        let recovery = crate::server::ViewerMoveRecovery::from_operation(&operation).unwrap();
+        assert_eq!(recovery.source_resource_allocation, applied_size);
+        assert_eq!(recovery.source_additional_mounts, applied_mounts);
+    }
+    operation.selection.resource_allocation = None;
+    operation.selection.additional_mounts = None;
+    operation.capture_container_settings(&controller.state.sessions[&session.id]);
+    assert_eq!(operation.inherited_resource_allocation, requested_size);
+    assert_eq!(operation.inherited_additional_mounts, requested_mounts);
+    controller
+        .state
+        .sessions
+        .get_mut(&session.id)
+        .unwrap()
+        .resource_allocation = None;
+    controller
+        .state
+        .sessions
+        .get_mut(&session.id)
+        .unwrap()
+        .additional_mounts
+        .clear();
+    let recovery = crate::server::ViewerMoveRecovery::from_operation(&operation).unwrap();
+    assert_eq!(recovery.destination_resource_allocation, requested_size);
+    assert_eq!(recovery.destination_additional_mounts, requested_mounts);
+    operation.phase = MovePhase::ClosingSource;
     let outcome = controller
         .finish_move_result(
             &mut operation,
@@ -2952,6 +3036,8 @@ fn in_place_operation(controller: &Controller, destination_profile: &str) -> Mov
         source_target_template_id: source.target_template_id.clone(),
         source_target: source.target.clone().map(|v| *v),
         source_native_session_id: source.native_session_id.clone(),
+        inherited_resource_allocation: None,
+        inherited_additional_mounts: Vec::new(),
         source_additional_mounts: Vec::new(),
         source_resource_allocation: None,
         destination_target: None,
