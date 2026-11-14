@@ -1077,13 +1077,19 @@ pull_policy = "never"
             # Sockets cannot be copied, and the worker executables staged under
             # the data directory are copies of a binary this run did not build
             # and dwarf everything else: a soak that kept one per iteration ran
-            # the runner out of disk.
+            # the runner out of disk. The managed Node.js install (about 200 MB
+            # an iteration) is a download of the same kind.
+            managed_cache = self.runtime_root / "cache" / "mjolnir"
+
             def ignore_uncopied(directory: str, names: list[str]) -> list[str]:
                 staged = pathlib.Path(directory).is_relative_to(workers)
+                in_managed_cache = pathlib.Path(directory) == managed_cache
                 return [
                     name
                     for name in names
-                    if pathlib.Path(directory, name).is_socket() or (staged and name == "hel")
+                    if pathlib.Path(directory, name).is_socket()
+                    or (staged and name == "hel")
+                    or (in_managed_cache and name == "node")
                 ]
 
             # A worker that is still shutting down removes its own directory,
