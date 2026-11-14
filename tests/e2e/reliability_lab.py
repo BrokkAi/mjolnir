@@ -1393,9 +1393,15 @@ pull_policy = "never"
         )
         if status != 202:
             raise ScenarioFailure(f"active close action returned {status}")
+        # The Stop commits the record as stopped before its lifecycle
+        # completes, and the daemon publishes committed records at once, so
+        # a row can read "suspended" while the Stop still owns the session
+        # and Resume is refused. The lifecycle owns "the Stop finished".
         stopped = self.wait_snapshot(
-            lambda value: (self.session(value, session_id) or {}).get("state") == "suspended",
-            "active session to stop without the barrier grace period",
+            lambda value: (session := self.session(value, session_id) or {}).get("state")
+            == "suspended"
+            and not session.get("operation"),
+            "active Stop to finish without the barrier grace period",
         )
         elapsed = time.monotonic() - started
         if elapsed >= 15:
@@ -1404,7 +1410,10 @@ pull_policy = "never"
             )
         stopped_session = self.session(stopped, session_id) or {}
         if not stopped_session.get("capabilities", {}).get("resume"):
-            raise ScenarioFailure("active Stop did not leave a resumable recovery archive")
+            raise ScenarioFailure(
+                "active Stop did not leave a resumable recovery archive: "
+                f"{json.dumps(stopped_session)[:4000]}"
+            )
         self.record_action("active-stop", session_id=session_id, elapsed_seconds=elapsed)
 
         marker = "active turn cancellation settled before checkpoint barrier"
