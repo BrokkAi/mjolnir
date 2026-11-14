@@ -203,8 +203,8 @@ pub fn autoconfigure(
                 effort: used,
             }
         };
-    use ReviewModelFamily::{DeepSeek, Grok, Kimi, Sol, Sonnet, Terra};
-    let preset = if selected.contains_key(&Terra) && selected.contains_key(&Sol) {
+    use ReviewModelFamily::{DeepSeek, Grok, Kimi, Sonnet, Terra};
+    let preset = if selected.contains_key(&Terra) {
         vec![(Terra, "high"); 3]
     } else {
         let family = [Sonnet, DeepSeek, Grok, Kimi]
@@ -544,7 +544,7 @@ mod tests {
                 (false, &["grok-4.6"]),
                 (true, &["claude-sonnet-4.5", "gpt-6.1-terra"]),
             ]),
-            expect(&[("claude-sonnet-4.5", "high"), ("claude-sonnet-4.5", "high")])
+            expect(&[("gpt-6.1-terra", "high"); 3])
         );
     }
 
