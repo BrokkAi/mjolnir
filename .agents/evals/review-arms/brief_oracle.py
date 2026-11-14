@@ -4,12 +4,20 @@ Usage:
   python3 brief_oracle.py build     # -> $REVIEW_ARMS_DIR/briefs/oracle-work/, prints workflow args
   (run brief/workflow-oracle.js with the Workflow tool and those args; save its
    result as briefs/oracle-work/workflow-out.json)
-  python3 brief_oracle.py collect   # -> briefs/oracle/<diff>/brief.md, lint, summary
+  python3 brief_oracle.py collect   # checks; writes briefs/oracle-work/factcheck.jsonl
+  (read factcheck.jsonl and write briefs/oracle-work/factcheck-decisions.json:
+   {diff: "carries" | "does not carry: <reason>"} for every primary and secondary diff)
+  python3 brief_oracle.py collect   # again: publishes briefs/oracle/<diff>/brief.md
 
 Primary and secondary diffs get an editor item: the blind brief and the census
 record (fact, evidence, other facts, kind; never the census query, which was
 written with knowledge of the defect). Control diffs get no editor: their
 oracle brief is the blind brief. Every diff's oracle brief gets a leak check.
+
+A brief is published (written where driver.py reads it) only when it passes
+the lint and, for primary and secondary diffs, when the item that carries the
+decisive fact (the editor's match, or its inserted item) appears verbatim in
+the final brief and a person has recorded that it carries the census fact.
 """
 import argparse
 import json
@@ -66,10 +74,19 @@ def build():
     print(json.dumps({"dir": str(W), "diffs": diffs}))
 
 
+def carrier_item(r):
+    """The brief item the editor says carries the decisive fact."""
+    edit = r.get("edit") or {}
+    return edit.get("inserted_item") if edit.get("contains") in ("partial", "no") else edit.get("matching_item")
+
+
 def collect():
-    out = json.loads((ROOT / "briefs/oracle-work/workflow-out.json").read_text())
+    W = ROOT / "briefs/oracle-work"
+    out = json.loads((W / "workflow-out.json").read_text())
     assert not out["missing"], out["missing"]
-    rows, rejected = [], []
+    decisions_path = W / "factcheck-decisions.json"
+    decisions = json.loads(decisions_path.read_text()) if decisions_path.exists() else {}
+    rows, rejected, factcheck, undecided = [], [], [], []
     for r in out["results"]:
         bug = r["id"]
         d = ROOT / "briefs/oracle" / bug
@@ -79,16 +96,32 @@ def collect():
         final = (r["final_brief"] or blind.read_text()).rstrip() + "\n"
         inserted = [(r.get("edit") or {}).get("inserted_item")] if r["group"] == "S" else []
         problems = brief_driver.lint(final, driver.CORPUS[bug], in_diff_items=inserted)
+        if r["group"] in "PS":
+            item = carrier_item(r)
+            norm = lambda t: " ".join((t or "").removeprefix("- ").split())
+            if not item or norm(item) not in norm(final):
+                problems.append(f"the item carrying the decisive fact is not in the final brief: {item!r}")
+            item_file = json.loads((W / f"item-{bug}.json").read_text())
+            factcheck.append({"id": bug, "group": r["group"], "census_fact": item_file["census"]["fact"],
+                              "contains": r["edit"]["contains"], "carrier_item": item,
+                              "rewritten": len(r["leak"]) > 1, "final_brief": final})
+            decision = decisions.get(bug)
+            if decision is None:
+                undecided.append(bug)
+            elif decision != "carries":
+                problems.append(f"hand check: {decision}")
         save(d / "oracle.json", {**r, "lint": problems})
         rows.append({"id": bug, "group": r["group"], "contains": (r.get("edit") or {}).get("contains"),
                      "leak_first": r["leak"][0]["label"], "leak_final": r["leak"][-1]["label"],
-                     "rewritten": len(r["leak"]) > 1, "lint": len(problems)})
-        if problems:
-            # Only a brief that passes the rules is written where driver.py reads it.
-            (d / "brief-rejected.md").write_text(final)
+                     "rewritten": len(r["leak"]) > 1, "problems": len(problems)})
+        if problems or bug in undecided:
+            # Only an accepted brief is written where driver.py reads it.
+            (d / "brief-pending.md").write_text(final)
             (d / "brief.md").unlink(missing_ok=True)
-            rejected.append(bug)
+            if problems:
+                rejected.append(bug)
             continue
+        (d / "brief-pending.md").unlink(missing_ok=True)
         if r["group"] == "C" and r["final_brief"]:
             # A control's oracle brief is its blind brief. A leak rewrite therefore replaces the
             # blind brief too (the writer's text is kept as brief-original.md), so both stay equal.
@@ -97,11 +130,12 @@ def collect():
                 original.write_text(blind.read_text())
             blind.write_text(final)
         (d / "brief.md").write_text(final)
+    (W / "factcheck.jsonl").write_text("".join(json.dumps(f) + "\n" for f in factcheck))
     for row in sorted(rows, key=lambda x: (x["group"], x["id"])):
         print(json.dumps(row))
-    if rejected:
-        raise SystemExit(f"{len(rejected)} oracle briefs break the rules and were not published "
-                         f"(see brief-rejected.md and oracle.json): {rejected}")
+    if rejected or undecided:
+        raise SystemExit(f"not published: {len(rejected)} briefs with problems (oracle.json) {rejected}; "
+                         f"{len(undecided)} awaiting a hand check in factcheck-decisions.json {undecided}")
 
 
 if __name__ == "__main__":

@@ -65,7 +65,12 @@ so their agreement is not fully independent.
    are close to the defect by themselves (a function that holds a lock while
    calling one that takes it); if a neutral relation alone is still judged
    caught or partial, it is kept and listed in the report, because removing
-   it would remove the fact under test. Every inserted item is read by hand.
+   it would remove the fact under test.
+4. **Fact check:** for every P and S diff, the item that carries the decisive
+   fact (the editor's match or inserted item) must appear verbatim in the
+   final brief, and a person reads it beside the census fact and records
+   that it carries the fact (`factcheck-decisions.json`). Only then is the
+   brief published for the reviewer runs. Every inserted item is read.
 
 ## Injection
 
@@ -107,11 +112,21 @@ calls are recorded per session.
 
 Effect = oracle catch rate minus stored no-brief catch rate on P, per model.
 
-- **Null:** the effect is under 15 points for both models. Stop: a brief
-  generator would not improve review of these defects. Stage B is not run.
+- **Null:** for both models, the effect is under 15 points and the upper
+  end of its 95% interval is under 30 points, so an effect large enough to
+  support building is ruled out. Stop: a brief generator would not improve
+  review of these defects. Stage B is not run.
+- **Inconclusive:** the effect is under 15 points for both models, but for
+  at least one model the interval reaches 30 points or more. The sample
+  cannot tell a null from a useful effect. Stage B is not run (it adds no
+  power for this question); recommend tracing about 40 more Hard-won markers
+  under `corpus/SPEC.md` with the added rule "the decisive fact is a
+  relation", then running stage A on them.
 - **Supports building:** the effect is at least 30 points for either model,
   and control 1 passes. Run stage B.
-- **Between:** otherwise. Run stage B, and recommend tracing about 40 more
+- **Between:** otherwise (the effect is at least 15 points for a model, but
+  the rule for supports building is not met). Run stage B, and recommend
+  tracing about 40 more
   Hard-won markers under `corpus/SPEC.md` with the added rule "the decisive
   fact is a relation" before a final decision.
 - **Control 1:** on C, the gain from the brief is under 10 points for both
@@ -121,7 +136,7 @@ Effect = oracle catch rate minus stored no-brief catch rate on P, per model.
 
 S is reported separately and does not enter the decision.
 
-## Stage B (only if stage A is not null)
+## Stage B (only if stage A is supports building or between)
 
 Before any stage B run, the blind briefs of P and S (which differ from their
 oracle briefs) get the same leak check; a control brief rewritten in stage A
