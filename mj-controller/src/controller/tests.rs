@@ -2125,6 +2125,10 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
 /// never ran and is still delivered; one that started is not.
 // Hard-won: #1535: a Restart re-sent a finished sub-agent's assignment and froze its view.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 fn a_launch_delivers_a_childs_assignment_only_until_its_history_shows_it_started() {
     use super::worker_binary::LaunchHistory;
     use mj_core::archive::{
