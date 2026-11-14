@@ -214,12 +214,22 @@ fn native_profiles_search_and_reconcile_only_their_own_home() {
                 } else {
                     &config.profiles["second"].home
                 };
-                let sources = crate::import::list_native_session_sources(kind, home).unwrap();
-                assert!(
-                    sources.iter().any(|source| {
-                        source.source_path.canonicalize().unwrap() == path.canonicalize().unwrap()
-                    }),
-                    "the native import reader must locate the indexed {tool} session"
+                let located = crate::import::locate_native_session(
+                    kind,
+                    home,
+                    &crate::import::ClaudeSessionSelection::NativeSessionId(
+                        native_session_id.to_str().unwrap().to_owned(),
+                    ),
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "the native import reader must locate the indexed {tool} session: {error:#}"
+                    )
+                });
+                assert_eq!(
+                    located.source_path.canonicalize().unwrap(),
+                    path.canonicalize().unwrap(),
+                    "the native import reader and the index disagree on the {tool} session"
                 );
             }
         }
