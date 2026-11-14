@@ -188,7 +188,11 @@ fn cli_import_uploads_client_history_to_separate_daemon_store() {
         Some(&source)
     );
     fs::create_dir_all(custom_home.join("sessions/2026/09/13")).unwrap();
-    let custom_native = custom_home.join("sessions/2026/09/13/rollout.jsonl");
+    // Joined by component, so it is spelled with this host's separator, as
+    // the import reports the path it found.
+    let custom_native = ["sessions", "2026", "09", "13", "rollout.jsonl"]
+        .iter()
+        .fold(custom_home.clone(), |path, part| path.join(part));
     fs::rename(&native, &custom_native).unwrap();
     fs::remove_dir_all(home.join(".codex")).unwrap();
     let output = run(command(&client_data, &client_config)
