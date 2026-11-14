@@ -168,7 +168,8 @@ def run(bug_id, gate):
                + "\n\nFix brief.md so that it follows every rule, then reply `brief written`.\n")
         send(d, sid, f"fix-{rounds}", f"brief-fix{rounds}-" + tag[:28], fix)
         text = fetch_brief(sid)
-    (d / "brief.md").write_text(text)
+    # brief.md is where the oracle builder and the blind arms read; it is written only on success.
+    (d / "brief-candidate.md").write_text(text)
     if not (d / "inventory-check.json").exists():
         # The writer may add brief.md and nothing else; audit.py reads this file.
         place = json.loads((d / "placement.json").read_text())
@@ -186,11 +187,13 @@ def run(bug_id, gate):
     if inv or problems:
         # No done.json: a rerun fails the same way instead of passing an invalid brief on.
         # The session stays live for inspection.
+        (d / "brief-rejected.md").write_text(text)
         save(d / "failed.json", {"bug": bug_id, "session_id": sid, "fix_rounds": rounds, "lint_problems": problems,
                                  "inventory_problems": inv, "time_ns": time.time_ns()})
         raise RuntimeError(f"brief not accepted: inventory problems {inv}; "
                            f"{len(problems)} rule violations after {rounds} fix rounds (lint-{rounds}.json)")
     save(d / "suspend.json", mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900))
+    (d / "brief.md").write_text(text)
     save(d / "done.json", {"bug": bug_id, "session_id": sid, "fix_rounds": rounds, "finished_ns": time.time_ns()})
     return "done"
 
@@ -203,7 +206,8 @@ def main():
     a = p.parse_args()
     if a.lint:
         for b in a.bugs:
-            text = (ROOT / "briefs" / "blind" / b / "brief.md").read_text()
+            d = ROOT / "briefs" / "blind" / b
+            text = (d / "brief.md" if (d / "brief.md").exists() else d / "brief-candidate.md").read_text()
             print(json.dumps({"bug": b, "problems": lint(text, driver.CORPUS[b])}))
         return 0
     gate = threading.Semaphore(2)  # serialize session startup as driver.py does

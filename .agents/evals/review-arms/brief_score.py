@@ -91,6 +91,9 @@ def require_complete(rows, arms):
 
 
 def build(arms, per_batch):
+    if KEY.exists():
+        # New output IDs would orphan any verdicts already returned for this round.
+        raise SystemExit(f"{KEY} exists: round {J.name} is already built; use another --name")
     J.mkdir(parents=True, exist_ok=True)
     KEY.parent.mkdir(parents=True, exist_ok=True)
     corpus = {r["id"]: r for r in map(json.loads, open(SCRIPTS / "corpus/corpus.jsonl"))}

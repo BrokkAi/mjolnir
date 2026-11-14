@@ -6,7 +6,8 @@ Usage:
    result as briefs/oracle-work/workflow-out.json)
   python3 brief_oracle.py collect   # checks; writes briefs/oracle-work/factcheck.jsonl
   (read factcheck.jsonl and write briefs/oracle-work/factcheck-decisions.json:
-   {diff: "carries" | "does not carry: <reason>"} for every primary and secondary diff)
+   {diff: {"decision": "carries" | "does not carry: <reason>", "brief_sha256": <from factcheck.jsonl>}}
+   for every primary and secondary diff; a decision counts only for the brief whose hash it names)
   python3 brief_oracle.py collect   # again: publishes briefs/oracle/<diff>/brief.md
 
 Primary and secondary diffs get an editor item: the blind brief and the census
@@ -20,6 +21,7 @@ decisive fact (the editor's match, or its inserted item) appears verbatim in
 the final brief and a person has recorded that it carries the census fact.
 """
 import argparse
+import hashlib
 import json
 import pathlib
 import re
@@ -102,14 +104,15 @@ def collect():
             if not item or norm(item) not in norm(final):
                 problems.append(f"the item carrying the decisive fact is not in the final brief: {item!r}")
             item_file = json.loads((W / f"item-{bug}.json").read_text())
+            digest = hashlib.sha256(final.encode()).hexdigest()
             factcheck.append({"id": bug, "group": r["group"], "census_fact": item_file["census"]["fact"],
                               "contains": r["edit"]["contains"], "carrier_item": item,
-                              "rewritten": len(r["leak"]) > 1, "final_brief": final})
+                              "rewritten": len(r["leak"]) > 1, "brief_sha256": digest, "final_brief": final})
             decision = decisions.get(bug)
-            if decision is None:
-                undecided.append(bug)
-            elif decision != "carries":
-                problems.append(f"hand check: {decision}")
+            if decision is None or decision.get("brief_sha256") != digest:
+                undecided.append(bug)  # never checked, or checked against a different brief
+            elif decision["decision"] != "carries":
+                problems.append(f"hand check: {decision['decision']}")
         save(d / "oracle.json", {**r, "lint": problems})
         rows.append({"id": bug, "group": r["group"], "contains": (r.get("edit") or {}).get("contains"),
                      "leak_first": r["leak"][0]["label"], "leak_final": r["leak"][-1]["label"],

@@ -25,6 +25,10 @@ asked only about things the diff shows, and if not, why not.
 
 1. Read `git -C <worktree> show HEAD` and the record. Find the decisive
    anchor: the `file:line` in `fact` that lies outside the changed lines.
+   For second-pass items (those in `missing-facts-pass2.jsonl`) the decisive
+   relation can lie entirely inside the diff; then the decisive anchor is
+   the changed location the relation connects to the one the diff makes
+   most visible, and "found" means a tool output states that connection.
 2. Rewrite `query` so that it names only symbols, files and lines visible in
    the diff. Do not name the decisive anchor or anything you know only from
    the record.
