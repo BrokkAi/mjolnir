@@ -1551,6 +1551,8 @@ pub(crate) fn runtime_test_session(
         viewed_through_event_ordinal: 0,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: None,
     }
@@ -4297,6 +4299,8 @@ async fn failed_container_preparation_can_be_cancelled_after_result_publication(
     );
     saved.last_error = None;
     saved.updated_at = session.updated_at.clone();
+    // Recording the failure advanced the database-owned generation.
+    saved.failure_generation = session.failure_generation;
     assert_eq!(saved, session);
 
     // A late upgrade Cancel must not cancel the next ordinary operation.
@@ -13206,7 +13210,7 @@ async fn dismiss_notification_clears_the_served_question_attention() {
         manager.control.clone(),
         &recovery.observer(),
     );
-    let state = Arc::new(RuntimeState::new_with_controller_loader(
+    let state = Arc::new(RuntimeState::new(
         manager.control.clone(),
         Controller {
             config: runtime_test_config(),
@@ -13215,12 +13219,6 @@ async fn dismiss_notification_clears_the_served_question_attention() {
         recovery.observer(),
         upgrades.observer(),
         Vec::new(),
-        || {
-            Ok(Controller {
-                config: runtime_test_config(),
-                state: Default::default(),
-            })
-        },
     ));
     state.owner().edit_sessions(|sessions| {
         sessions.insert(record.id.clone(), record);
@@ -13308,5 +13306,84 @@ async fn dismiss_notification_clears_the_served_question_attention() {
             .metadata
             .notification_dismissals
             .contains_key("session-1")
+    );
+    // Recorded failures use the same action without a worker: the database
+    // writer publishes committed records before replying, and owner() observes
+    // that publication before attention is projected.
+    let mut failed = runtime_test_session(
+        "resume-failure",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Stopped,
+    );
+    failed.last_error = Some("resume failed: operation cancelled".into());
+    crate::database::save_session(&failed).unwrap();
+    let served = state.runtime_publication().unwrap();
+    assert_eq!(
+        served.metadata.session_attention[&failed.id],
+        mj_core::attention::SessionAttention::Failed
+    );
+    let target = served.metadata.notification_dismissals[&failed.id].clone();
+    // Hard-won: 0db309adc: a delayed dismissal accepted a repeated identical failure.
+    failed.state = SessionState::Provisioning;
+    crate::database::save_session(&failed).unwrap();
+    failed.state = SessionState::Stopped;
+    crate::database::save_session(&failed).unwrap();
+    let error = state
+        .dismiss_notification(failed.id.clone(), target)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("notification is no longer current")
+    );
+    let served = state.runtime_publication().unwrap();
+    assert_eq!(
+        served.metadata.session_attention[&failed.id],
+        mj_core::attention::SessionAttention::Failed
+    );
+    let target = served.metadata.notification_dismissals[&failed.id].clone();
+
+    assert!(matches!(
+        target,
+        mj_core::attention::NotificationDismissal::Failure(_)
+    ));
+    state
+        .dismiss_notification(failed.id.clone(), target)
+        .await
+        .unwrap();
+    let dismissed = state.runtime_publication().unwrap();
+    assert_eq!(
+        dismissed.metadata.session_attention[&failed.id],
+        mj_core::attention::SessionAttention::Inactive
+    );
+    assert!(
+        !dismissed
+            .metadata
+            .notification_dismissals
+            .contains_key(&failed.id)
+    );
+    failed.title = "renamed failure".into();
+    crate::database::save_session(&failed).unwrap();
+    assert_eq!(
+        state
+            .runtime_publication()
+            .unwrap()
+            .metadata
+            .session_attention[&failed.id],
+        mj_core::attention::SessionAttention::Inactive
+    );
+    failed.last_error = Some("resume failed: different failure".into());
+    crate::database::save_session(&failed).unwrap();
+    let renewed = state.runtime_publication().unwrap();
+    assert_eq!(
+        renewed.metadata.session_attention[&failed.id],
+        mj_core::attention::SessionAttention::Failed
+    );
+    assert!(
+        renewed
+            .metadata
+            .notification_dismissals
+            .contains_key(&failed.id)
     );
 }

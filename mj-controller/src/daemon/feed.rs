@@ -1228,5 +1228,31 @@ mod tests {
             4,
             "the web server keeps every record"
         );
+
+        // A stopped failure enters through attention alone and leaves after
+        // dismissal, even when the record itself never changes.
+        let before = full.clone();
+        let scoped = ScopedProjection::new(&before, BTreeSet::new());
+        full.metadata.session_attention.insert(
+            "stopped".into(),
+            mj_core::attention::SessionAttention::Failed,
+        );
+        let alerted = scoped.advance(&before, &full);
+        assert!(alerted.projection.records.contains_key("stopped"));
+        assert_eq!(
+            alerted.projection,
+            full.for_subagent_parents(&BTreeSet::new())
+        );
+        let before = full.clone();
+        full.metadata.session_attention.insert(
+            "stopped".into(),
+            mj_core::attention::SessionAttention::Inactive,
+        );
+        let dismissed = alerted.advance(&before, &full);
+        assert!(!dismissed.projection.records.contains_key("stopped"));
+        assert_eq!(
+            dismissed.projection,
+            full.for_subagent_parents(&BTreeSet::new())
+        );
     }
 }

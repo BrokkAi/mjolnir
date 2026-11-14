@@ -1328,6 +1328,7 @@ impl RuntimeState {
         if matches!(
             target,
             mj_core::attention::NotificationDismissal::Question(_)
+                | mj_core::attention::NotificationDismissal::Failure(_)
         ) && runtime.metadata.notification_dismissals.get(&session_id) != Some(&target)
         {
             return Err(mj_core::refusal::Refusal::precondition(
@@ -1336,6 +1337,11 @@ impl RuntimeState {
             .into());
         }
         let (through, command_ordinal) = match target {
+            mj_core::attention::NotificationDismissal::Failure(failure) => {
+                blocking(move || crate::database::dismiss_recorded_failure(&session_id, failure))
+                    .await?;
+                return Ok(0);
+            }
             mj_core::attention::NotificationDismissal::Question(question) => {
                 let through = question.completed_ordinal;
                 let ordinal = self

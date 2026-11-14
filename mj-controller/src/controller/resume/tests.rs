@@ -1245,6 +1245,8 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
         viewed_through_event_ordinal: 0,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: None,
     };

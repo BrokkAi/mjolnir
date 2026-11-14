@@ -360,6 +360,8 @@ pub(crate) fn stopped_session() -> SessionRecord {
         viewed_through_event_ordinal: 0,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: Some(Box::new(CheckpointMetadata {
             archive_path: PathBuf::from("sessions/session-1.hel.zip"),

@@ -30,8 +30,7 @@ impl QuotaProfileRow<'_> {
 /// unreachable, then a question the agent cannot proceed without, then an
 /// important update, then an unread answer, then work in progress, idle, and
 /// anything stopped or still starting. Rows and priority sorting retain the
-/// session's status; the attention queue and badges omit failures already read
-/// in this terminal.
+/// session's status; notification dismissal belongs to the daemon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AttentionLevel {
     Inactive,
@@ -553,9 +552,8 @@ impl DashboardState {
 
     /// Whether the Sessions pane lists `session` as a top-level row of
     /// `workspace_id`: live or mid-transition. Stopped sessions are listed
-    /// only by the resume dialog. Terminal failures such as a lost or data-loss session have
-    /// no row, so the badges and the attention queue must not count them
-    /// either; they are reachable only through the resume dialog.
+    /// only by the resume dialog. Notification navigation reaches stopped
+    /// sessions there; badges and the attention queue include them.
     pub(crate) fn is_listed_top_level_session(
         &self,
         session: &SessionRecord,
@@ -910,9 +908,10 @@ impl DashboardState {
 
     fn attention_queue_for_workspace(&self, workspace_id: Option<&str>) -> Vec<AttentionEntry> {
         let mut entries = self
-            .listed_session_candidates()
-            .into_iter()
-            .filter(|session| self.is_listed_top_level_session(session, &session.workspace_id))
+            .state
+            .sessions
+            .values()
+            .filter(|session| !self.state.is_subagent_session(&session.id))
             .filter_map(|session| {
                 let level = self.attention_notice_level(&session.id);
                 level.needs_person().then(|| {
@@ -961,11 +960,9 @@ impl DashboardState {
         &self,
         workspace_id: &str,
     ) -> Option<(AttentionLevel, usize)> {
-        self.attention_summary(
-            self.listed_session_candidates()
-                .into_iter()
-                .filter(|session| self.is_listed_top_level_session(session, workspace_id)),
-        )
+        self.attention_summary(self.state.sessions.values().filter(|session| {
+            session.workspace_id == workspace_id && !self.state.is_subagent_session(&session.id)
+        }))
     }
 
     /// The badge for the visible sessions of one project, for a folded
@@ -1036,6 +1033,14 @@ impl DashboardState {
         let (session_id, action) = if let Some(child) = self.waiting_child_of(&target.session_id) {
             let action = self.focus_session_from_cpu_report(&child);
             (child, action)
+        } else if self
+            .state
+            .sessions
+            .get(&target.session_id)
+            .is_some_and(|session| !session.state.is_active())
+        {
+            self.resume_notification_target = Some(target.session_id.clone());
+            (target.session_id, DashboardAction::OpenResumeDialog)
         } else {
             let action = self.focus_session_anywhere(&target.workspace_id, &target.session_id);
             (target.session_id, action)
@@ -1225,7 +1230,8 @@ impl DashboardState {
                         mj_core::attention::NotificationDismissal::ReadThrough(through) => {
                             Some(*through)
                         }
-                        mj_core::attention::NotificationDismissal::Question(_) => None,
+                        mj_core::attention::NotificationDismissal::Question(_)
+                        | mj_core::attention::NotificationDismissal::Failure(_) => None,
                     }),
             );
             let Some(through) = through else {

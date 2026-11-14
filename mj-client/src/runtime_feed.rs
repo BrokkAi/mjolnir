@@ -134,7 +134,24 @@ impl ScopeSelection {
                 mj_core::state::SessionState::Stopped | mj_core::state::SessionState::Parked
             ),
         };
-        self.operations.contains(id)
+        // Notification membership is the daemon's served answer, including
+        // stopped sessions that have no live Sessions-pane row.
+        let notification = relation.is_none()
+            && full
+                .metadata
+                .session_attention
+                .get(id)
+                .is_some_and(|attention| {
+                    matches!(
+                        attention,
+                        mj_core::attention::SessionAttention::NeedsInput
+                            | mj_core::attention::SessionAttention::Important
+                            | mj_core::attention::SessionAttention::Failed
+                            | mj_core::attention::SessionAttention::Unreachable
+                    )
+                });
+        notification
+            || self.operations.contains(id)
             || (!record.archived && (live || in_family || self.ancestors.contains(id)))
     }
 }
@@ -190,6 +207,13 @@ impl ScopedProjection {
         let mut candidates = BTreeSet::new();
         candidates.extend(before.records.changes(&after.records).map(|(id, _)| id));
         candidates.extend(before.subagents.changes(&after.subagents).map(|(id, _)| id));
+        candidates.extend(
+            before
+                .metadata
+                .session_attention
+                .changes(&after.metadata.session_attention)
+                .map(|(id, _)| id),
+        );
         candidates.extend(
             self.selection
                 .operations

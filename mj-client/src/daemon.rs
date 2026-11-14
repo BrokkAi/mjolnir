@@ -3536,7 +3536,7 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // unread frontiers.
 // Version 95: authenticated daemon-owned login terminal streams.
 // Version 95: milestone-4 setup discovery, availability, login status and machine actions.
-pub const PROTOCOL_VERSION: u32 = 96;
+pub const PROTOCOL_VERSION: u32 = 97;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

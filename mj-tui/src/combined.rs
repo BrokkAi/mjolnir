@@ -402,7 +402,7 @@ fn render_combined_with_theme_and_symbols(
     selected_theme: theme::UiTheme,
     symbols: theme::SymbolSet,
 ) -> Vec<String> {
-    dashboard.drawn_failures.clear();
+    dashboard.rendered_failure_dismissals.clear();
     theme::with_theme(selected_theme, || {
         theme::with_symbols(symbols, || {
             let drawn =

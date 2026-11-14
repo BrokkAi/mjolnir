@@ -803,19 +803,19 @@ pub(crate) fn merged_resume_rows(
     // newer when there is one: a session resumed since the dialog opened is
     // active now, and the Live tab lists it. A sub-agent is resumed through
     // its parent.
-    let from_feed = history.is_some().then(|| {
+    let from_feed = {
         state
             .sessions
             .values()
             .filter(|session| !session.state.is_active() && !state.is_subagent_session(&session.id))
             .map(|session| ResumeCandidate::of(session, config))
-    });
+    };
     let listed = history
         .into_iter()
         .flat_map(|history| history.candidates.values())
         .filter(|candidate| !state.sessions.contains_key(&candidate.session_id))
         .cloned()
-        .chain(from_feed.into_iter().flatten());
+        .chain(from_feed);
     for candidate in listed {
         rows.push(hel_row(candidate));
     }
@@ -1036,6 +1036,12 @@ fn build_resume_rows(
                 row.details
                     .push_str(&format!(" · {}", format_resource_bytes(size)));
             }
+            if let Some(record) = row.session_id().and_then(|id| state.sessions.get(id))
+                && let Some(error) = record.last_error.as_deref()
+            {
+                row.details
+                    .push_str(&format!(" · {error} · d: dismiss notification"));
+            }
             row
         })
         .collect::<Vec<_>>();
@@ -1231,6 +1237,13 @@ impl DashboardState {
             })
     }
 
+    pub(crate) fn resume_command_session_id(&self) -> Option<&str> {
+        let dialog = resume_dialog(&self.mode)?;
+        self.resume_rows()
+            .get(selected_index(dialog, self.resume_rows().len())?)?
+            .session_id()
+    }
+
     pub fn show_resume_dialog(&mut self, discovery_id: u64, profiles: Vec<ImportProfileOption>) {
         self.wiki_search_generation = self.wiki_search_generation.wrapping_add(1);
         self.mode = Mode::ResumeDialog(ResumeDialog {
@@ -1260,6 +1273,12 @@ impl DashboardState {
             history: HistoryLoad::Loading,
             opening: None,
         });
+        if let Some(id) = self.resume_notification_target.take()
+            && let Mode::ResumeDialog(dialog) = &mut self.mode
+        {
+            dialog.tab = ResumeTab::Hel;
+            dialog.selected = Some(ResumeRowKey::Hel(id));
+        }
         self.rebuild_resume_rows();
         // Record which row the initial selection lands on, so the first
         // incremental scan result cannot slide the selection out from under it.
@@ -1869,6 +1888,11 @@ impl DashboardState {
             return DashboardAction::None;
         };
         let focused = dialog.focused();
+        if matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('d') && key.modifiers.is_empty())
+            && focused != ResumeFocus::Search
+        {
+            return self.begin_dismiss_notification();
+        }
         if self.handle_resume_scrollbar_mouse(&event) {
             return DashboardAction::None;
         }
@@ -2461,7 +2485,14 @@ pub(crate) fn render_resume_dialog(
     if let Some(detail) = selected {
         footer.push(Line::styled(
             truncate_to_cells(
-                &detail.details,
+                &if detail
+                    .session_id()
+                    .is_some_and(|id| dashboard.notification_dismissal_target(id).is_some())
+                {
+                    format!("d: dismiss notification · {}", detail.details)
+                } else {
+                    detail.details.clone()
+                },
                 usize::from(footer_band.width),
                 Truncate::SUMMARY,
             ),

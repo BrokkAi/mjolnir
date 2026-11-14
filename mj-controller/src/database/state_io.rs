@@ -784,6 +784,8 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
         updated_at,
         viewed_through_event_ordinal,
         last_error,
+        dismissed_failure: _,
+        failure_generation: _,
         resource_allocation,
         last_checkpoint_error,
         project_directory,
@@ -1409,7 +1411,7 @@ const SESSION_QUERY: &str =
                 s.container_workspace, s.build_cache_json, s.launch_base, s.target_runtime_json,
                 s.launch_branch, s.publication_json, s.checkout_json, s.project_json,
                 s.review_json, s.no_project_memory, s.no_mailbox, s.oracle, s.oracle_choice,
-                s.no_github_credentials, s.notifications_ignored
+                s.no_github_credentials, s.notifications_ignored, s.dismissed_failure_json, s.failure_generation
          FROM sessions s JOIN session_contexts c USING(session_id)";
 
 fn decode_session(
@@ -1544,6 +1546,18 @@ fn decode_session(
         viewed_through_event_ordinal: row.get::<_, u64>(12)?,
         draft_input: row.get(18)?,
         last_error: row.get(13)?,
+        failure_generation: row.get(41)?,
+        dismissed_failure: row
+            .get::<_, Option<String>>(40)?
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    40,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
         last_checkpoint_error: row.get(15)?,
         checkpoint: None,
     }))
