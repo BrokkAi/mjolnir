@@ -4299,6 +4299,8 @@ async fn failed_container_preparation_can_be_cancelled_after_result_publication(
     );
     saved.last_error = None;
     saved.updated_at = session.updated_at.clone();
+    // Recording the failure advanced the database-owned generation.
+    saved.failure_generation = session.failure_generation;
     assert_eq!(saved, session);
 
     // A late upgrade Cancel must not cancel the next ordinary operation.

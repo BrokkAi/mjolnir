@@ -7410,6 +7410,8 @@ fn target_access_survives_lifecycle_updates_and_changes_with_the_target() {
 
     record.state = SessionState::Error;
     save_lifecycle_session_to(&database, &record).unwrap();
+    // The database's failure trigger advances the generation on the state change.
+    record.failure_generation += 1;
     assert_eq!(
         load_state_from(&database).unwrap().sessions[&record.id],
         record
