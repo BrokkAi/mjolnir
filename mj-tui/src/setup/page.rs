@@ -56,7 +56,8 @@ pub(super) fn value_summary(
     let summary = match value {
         Value::Object(_) | Value::Array(_) => format!(
             "{}  ›",
-            mj_client::settings::page::contents_summary(value).expect("a page holds entries")
+            mj_client::settings::page::contents_summary(&child_path, value)
+                .expect("a page holds entries")
         ),
         // The machine's own switch is a checkbox, and an unset value means on.
         // A host that cannot support the cache reports an unchecked box
