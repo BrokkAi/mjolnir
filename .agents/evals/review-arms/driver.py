@@ -35,7 +35,7 @@ ARMS = {
     "B": ["gpt-6.1-terra:high", "gpt-6.1-sol:high"],
 }
 WORKSPACE = json.loads((ROOT / "instance/workspace.json").read_text())["workspace"]["id"]
-CORPUS = {c["id"]: c for c in map(json.loads, (ROOT / "corpus/candidates-all.jsonl").read_text().splitlines())}
+CORPUS = {c["id"]: c for c in map(json.loads, (SCRIPTS / "corpus/candidates-all.jsonl").read_text().splitlines())}
 
 
 def save(path, value):

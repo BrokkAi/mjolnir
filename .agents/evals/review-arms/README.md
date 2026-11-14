@@ -80,9 +80,24 @@ which has not been judged.
 
 ## Running
 
+The scripts read the corpus from this directory and keep everything else
+under `REVIEW_ARMS_DIR`. To set up a fresh data directory:
+
 ```sh
-export REVIEW_ARMS_DIR=/mnt/optane/review-arms-20261113
-# instance-config.toml is the instance's config.toml; secrets.toml needs DEEPSEEK_API_KEY.
+export REVIEW_ARMS_DIR=/mnt/optane/review-arms-<date>
+mkdir -p $REVIEW_ARMS_DIR/instance/{config,data,carrier-dsh}
+# Edit the carrier `home` and the Podman image ID first; both are specific to the first run.
+cp instance-config.toml $REVIEW_ARMS_DIR/instance/config/config.toml
+cp carrier-AGENTS.md $REVIEW_ARMS_DIR/instance/carrier-dsh/AGENTS.md
+grep '^DEEPSEEK_API_KEY' ~/.config/mjolnir/secrets.toml > $REVIEW_ARMS_DIR/instance/config/secrets.toml
+chmod 600 $REVIEW_ARMS_DIR/instance/config/secrets.toml
+./mjx doctor --json
+./mjx workspaces create "Review arms" --json > $REVIEW_ARMS_DIR/instance/workspace.json
+```
+
+Then:
+
+```sh
 python3 driver.py --jobs jobs.json --concurrency 6   # [{"bug": "<id>", "arm": "A"|"B"}]
 python3 carrier_check.py
 python3 audit.py
