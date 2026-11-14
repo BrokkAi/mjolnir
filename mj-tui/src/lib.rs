@@ -1078,9 +1078,9 @@ pub struct DashboardState {
     navigation: conversation_navigation::ConversationNavigation,
     pub(crate) browse_pane: Option<tile_layout::PaneId>,
     pub(crate) pin_ids: BTreeMap<String, u32>,
-    pub(crate) navigation_session: Option<String>,
+    pub(crate) pending_navigation: Option<dashboard_sessions::PendingNavigation>,
     /// When a workspace switch was requested for a child, open its parent's
-    /// Sub-agents view before restoring `navigation_session`.
+    /// Sub-agents view before restoring `pending_navigation`.
     pub(crate) navigation_subagent_parent: Option<String>,
     pub(crate) pane_menu: Option<pane_controls::PaneMenu>,
     /// Whether the focused pane fills the conversation band on its own. The
@@ -1391,7 +1391,7 @@ impl DashboardState {
             browse_pane: None,
             pin_ids: BTreeMap::new(),
 
-            navigation_session: None,
+            pending_navigation: None,
             navigation_subagent_parent: None,
             pane_menu: None,
             conversation_zoomed: false,

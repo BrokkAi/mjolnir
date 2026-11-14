@@ -1680,7 +1680,7 @@ impl DashboardContext {
         for (pane, session) in self.dashboard.pane_sessions() {
             self.open_chat_session_into(pane, &session);
         }
-        if let Some(session) = self.dashboard.take_navigation_session() {
+        if let Some(session) = self.dashboard.take_session_to_open() {
             self.open_chat_session(&session);
             self.dashboard.focus_prompt();
         }

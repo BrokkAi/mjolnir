@@ -2490,6 +2490,34 @@ fn a_stopped_notification_is_a_row_and_attention_advances() {
         dashboard.workspace_attention_summary("default"),
         Some((AttentionLevel::Failed, 1))
     );
+
+    // In another workspace, reached from the Workspaces pane, the switch still
+    // lands on the row with Sessions focused, and the host opens nothing.
+    dashboard.state.sessions.get_mut("quiet").unwrap().state = SessionState::Running;
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &["quiet"],
+        mj_core::attention::SessionAttention::Idle,
+    );
+    dashboard.state.sessions.get_mut("remote").unwrap().state = SessionState::Stopped;
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &["remote"],
+        mj_core::attention::SessionAttention::Failed,
+    );
+    dashboard.select_active_session("done");
+    dashboard.focus = Focus::Workspaces;
+    let action = dashboard.step_attention(1);
+    assert_eq!(
+        action,
+        DashboardAction::SelectWorkspace {
+            workspace_id: "other".into()
+        }
+    );
+    dashboard.set_active_workspace(Some("other".into()));
+    assert_eq!(dashboard.selected_session_id(), Some("remote"));
+    assert_eq!(dashboard.focus, Focus::Sessions);
+    assert_eq!(dashboard.take_session_to_open(), None);
 }
 
 #[test]
@@ -2869,7 +2897,7 @@ fn golden_attention_navigation() {
             let action = chord(&mut cycling, command);
             if let DashboardAction::SelectWorkspace { workspace_id } = action {
                 cycling.set_active_workspace(Some(workspace_id));
-                cycling.take_navigation_session();
+                cycling.take_session_to_open();
             }
             visited.push(cycling.selected_session_id().unwrap().to_owned());
         }
@@ -2923,7 +2951,7 @@ fn golden_attention_navigation() {
             }
         );
         interrupted.set_active_workspace(Some("other".into()));
-        interrupted.take_navigation_session();
+        interrupted.take_session_to_open();
         match interruption {
             "session selection" => interrupted.select_active_session("remote"),
             "workspace switch" => {

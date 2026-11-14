@@ -76,6 +76,15 @@ pub struct AttentionEntry {
     pub level: AttentionLevel,
 }
 
+/// A session the dashboard is moving to across a workspace switch. `open`
+/// says whether arriving opens its conversation or only selects its row; the
+/// workspace switch and the host both follow it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingNavigation {
+    pub(crate) session_id: String,
+    pub(crate) open: bool,
+}
+
 /// Keep workspace preference stable while attention navigation changes tabs.
 pub(crate) struct AttentionNavigation {
     pub(super) session_id: String,
@@ -1103,7 +1112,10 @@ impl DashboardState {
                     focus: Focus::Prompt,
                 });
             view.focus = if open { Focus::Prompt } else { Focus::Sessions };
-            self.navigation_session = Some(session_id.to_owned());
+            self.pending_navigation = Some(PendingNavigation {
+                session_id: session_id.to_owned(),
+                open,
+            });
             return DashboardAction::SelectWorkspace {
                 workspace_id: workspace_id.to_owned(),
             };
