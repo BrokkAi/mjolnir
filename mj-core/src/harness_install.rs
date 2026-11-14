@@ -2104,9 +2104,13 @@ mod tests {
         ))
         .unwrap();
 
+        // The installed file was just written by this process, so it runs
+        // through `/bin/sh` rather than being exec'd: see `install_fake_command`
+        // on ETXTBSY.
+        let launcher = staging.join("bin/kimi");
+        assert!(entrypoint_is_executable(&launcher));
         let output =
-            crate::subprocess::run_with_input(&mut Command::new(staging.join("bin/kimi")), &[])
-                .unwrap();
+            crate::subprocess::run_with_input(Command::new("/bin/sh").arg(&launcher), &[]).unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout, b"kimi-fixture\n");
     }
@@ -2141,6 +2145,9 @@ mod tests {
         .unwrap();
         std::fs::rename(&staging, &relocated).unwrap();
 
+        // The launchers were just written by this process, so they run through
+        // `/bin/sh` rather than being exec'd: see `install_fake_command` on
+        // ETXTBSY. `sh` still opens `agent` through its relative link.
         for launcher in ["grok", "agent"] {
             let path = relocated.join("bin").join(launcher);
             if launcher == "agent" {
@@ -2148,7 +2155,9 @@ mod tests {
             } else {
                 assert!(path.is_file());
             }
-            let output = crate::subprocess::run_with_input(&mut Command::new(path), &[]).unwrap();
+            assert!(entrypoint_is_executable(&path));
+            let output =
+                crate::subprocess::run_with_input(Command::new("/bin/sh").arg(&path), &[]).unwrap();
             assert!(output.status.success());
             assert_eq!(output.stdout, b"grok-fixture\n");
         }
@@ -2188,8 +2197,12 @@ mod tests {
             &metadata,
         ))
         .unwrap();
+        // Just extracted by this process, so it runs through `/bin/sh` rather
+        // than being exec'd: see `install_fake_command` on ETXTBSY.
+        let entrypoint = staging.join("bin/agy");
+        assert!(entrypoint_is_executable(&entrypoint));
         let output =
-            crate::subprocess::run_with_input(&mut Command::new(staging.join("bin/agy")), &[])
+            crate::subprocess::run_with_input(Command::new("/bin/sh").arg(&entrypoint), &[])
                 .unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout, b"agy-fixture\n");
