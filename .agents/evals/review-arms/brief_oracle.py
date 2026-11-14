@@ -69,30 +69,39 @@ def build():
 def collect():
     out = json.loads((ROOT / "briefs/oracle-work/workflow-out.json").read_text())
     assert not out["missing"], out["missing"]
-    rows = []
+    rows, rejected = [], []
     for r in out["results"]:
         bug = r["id"]
         d = ROOT / "briefs/oracle" / bug
         d.mkdir(parents=True, exist_ok=True)
         blind = ROOT / "briefs/blind" / bug / "brief.md"
-        if r["group"] == "C" and r["final_brief"]:
-            # A control's oracle brief is its blind brief. A leak rewrite therefore replaces the
-            # blind brief too (the writer's text is kept as brief-original.md), so both stay equal.
-            original = blind.with_name("brief-original.md")
-            if not original.exists():
-                original.write_text(blind.read_text())
-            blind.write_text(r["final_brief"].rstrip() + "\n")
         # A control brief that needed no rewrite comes back as null: it is the blind brief.
-        final = r["final_brief"] or blind.read_text()
-        (d / "brief.md").write_text(final.rstrip() + "\n")
+        final = (r["final_brief"] or blind.read_text()).rstrip() + "\n"
         inserted = [(r.get("edit") or {}).get("inserted_item")] if r["group"] == "S" else []
         problems = brief_driver.lint(final, driver.CORPUS[bug], in_diff_items=inserted)
         save(d / "oracle.json", {**r, "lint": problems})
         rows.append({"id": bug, "group": r["group"], "contains": (r.get("edit") or {}).get("contains"),
                      "leak_first": r["leak"][0]["label"], "leak_final": r["leak"][-1]["label"],
                      "rewritten": len(r["leak"]) > 1, "lint": len(problems)})
+        if problems:
+            # Only a brief that passes the rules is written where driver.py reads it.
+            (d / "brief-rejected.md").write_text(final)
+            (d / "brief.md").unlink(missing_ok=True)
+            rejected.append(bug)
+            continue
+        if r["group"] == "C" and r["final_brief"]:
+            # A control's oracle brief is its blind brief. A leak rewrite therefore replaces the
+            # blind brief too (the writer's text is kept as brief-original.md), so both stay equal.
+            original = blind.with_name("brief-original.md")
+            if not original.exists():
+                original.write_text(blind.read_text())
+            blind.write_text(final)
+        (d / "brief.md").write_text(final)
     for row in sorted(rows, key=lambda x: (x["group"], x["id"])):
         print(json.dumps(row))
+    if rejected:
+        raise SystemExit(f"{len(rejected)} oracle briefs break the rules and were not published "
+                         f"(see brief-rejected.md and oracle.json): {rejected}")
 
 
 if __name__ == "__main__":
