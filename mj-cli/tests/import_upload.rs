@@ -23,6 +23,17 @@ fn run(command: &mut Command) -> String {
 fn cli_import_uploads_client_history_to_separate_daemon_store() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("client-home");
+    // The client home is reached through a symlink, as macOS reaches its
+    // temporary directories through /var -> /private/var: the recorded session
+    // and the configured project keep the linked spelling while Git reports
+    // the physical one, and the import must treat them as one place.
+    #[cfg(unix)]
+    {
+        let physical = root.path().join("client-home-physical");
+        fs::create_dir(&physical).unwrap();
+        // Hard-won: 9913663aa: the import refused its own project as outside the recorded root behind a symlink.
+        std::os::unix::fs::symlink(&physical, &home).unwrap();
+    }
     let client_data = root.path().join("client-data");
     let daemon_data = root.path().join("daemon-data");
     let daemon_config = root.path().join("daemon-config");
