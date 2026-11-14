@@ -1115,6 +1115,16 @@ impl ProfileCatalog {
         self: &Arc<Self>,
         expired: impl Fn(&CacheKey, &ProfileConfig) -> bool,
     ) -> Vec<CacheKey> {
+        self.refresh_where(expired, false)
+    }
+
+    /// [`Self::refresh`], which skips disabled profiles unless
+    /// `include_disabled`: only a request naming one refreshes it.
+    fn refresh_where(
+        self: &Arc<Self>,
+        expired: impl Fn(&CacheKey, &ProfileConfig) -> bool,
+        include_disabled: bool,
+    ) -> Vec<CacheKey> {
         let mut started = Vec::new();
         {
             let mut inner = self.lock();
@@ -1136,7 +1146,8 @@ impl ProfileCatalog {
                 else {
                     continue;
                 };
-                if definition.config.enabled_profile(&definition.id).is_none() {
+                if !include_disabled && definition.config.enabled_profile(&definition.id).is_none()
+                {
                     continue;
                 }
                 let attempt = self.attempt_refresh(&definition, key.1.clone());
@@ -1548,6 +1559,17 @@ impl ProfileCatalog {
         // Claim and reuse under the same lock, so concurrent first readers
         // cannot replace each other's Muse owner. Only warm passes refresh it.
         self.ensure_profiles(config, false, Some(id));
+        if !profile.enabled {
+            // Periodic refresh skips disabled profiles, so the request that
+            // names one re-probes its expired entries. Readers keep the old
+            // answer until a probe succeeds.
+            self.refresh_where(
+                |key, choices| {
+                    key.0 == identity && !crate::controller::profile_config::is_current(choices)
+                },
+                true,
+            );
+        }
         let key = (identity, model);
         let mut revisions = self.revisions.subscribe();
         loop {

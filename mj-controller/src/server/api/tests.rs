@@ -2572,6 +2572,54 @@ async fn model_first_session_start_selects_the_profile_that_offers_the_model() {
     assert_eq!(followups[0].1.effort.as_deref(), Some("high"));
 }
 
+// Hard-won: 0bb46ff94: the create API checked the enabled-only snapshot, so `mj new --profile <disabled>` was refused.
+#[tokio::test]
+async fn session_start_accepts_a_named_disabled_profile_but_not_a_disabled_saved_default() {
+    let directory = tempfile::tempdir().unwrap();
+    let preferences_path = directory.path().join("go.json");
+    save_global_default(&preferences_path, "gemini", "podman");
+    let (app, mut actions, _, _) = api_app_with_preferences(
+        Arc::new(FakeBackend::default()),
+        |snapshot| {
+            snapshot.disabled_profile_ids.insert("gemini".into());
+        },
+        preferences_path,
+    );
+
+    let response = app
+        .clone()
+        .oneshot(start_request(r#"{"bundle_id":"hel"}"#.into()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert!(
+        body.to_string()
+            .contains(r#"the saved default names an unknown profile \"gemini\""#),
+        "{body}"
+    );
+
+    let response = tokio::spawn(app.oneshot(start_request(
+        r#"{"profile_id":"gemini","target_id":"podman","bundle_id":"hel"}"#.into(),
+    )));
+    let request = actions.recv().await.unwrap();
+    assert!(matches!(
+        request.action,
+        ControllerAction::New { ref profile_id, .. } if profile_id == "gemini"
+    ));
+    request
+        .reply
+        .send(ActionOutcome::Accepted {
+            session_id: Some("session-2".into()),
+            notice: None,
+        })
+        .unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::CREATED
+    );
+}
+
 #[tokio::test]
 async fn model_first_session_start_reports_incompatible_profiles_in_the_api_error() {
     let directory = tempfile::tempdir().unwrap();
