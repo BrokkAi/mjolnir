@@ -113,6 +113,84 @@ confirmed, plausible or rejected, with a trace at the introducing commit.
   the observed mean difference (0.28 per diff), about 65 diffs would be needed
   for 80% power.
 
+## Stage 2 result: 70 diffs, latency and findings (verified by Opus/high)
+
+Jonathan asked for about 65 more diffs, a 3× Ember/high setup, and the
+latency-versus-findings Pareto frontier over combinations of up to three
+reviewers. He then dropped Ember after its pilot, because it was too slow to
+be useful: 3 to 4 minutes and 1.3M to 2.4M tokens per session, against about
+45 seconds and 0.25M tokens for Terra. The one finished Ember review is kept
+in `runs-ember/` and left out of the analysis.
+
+Method:
+
+- 70 diffs: the 10 from stage 1, the other 20 Hard-won diffs, and 40
+  ordinary commits from before 2026-11-01, sampled by `select_diffs.py` from
+  2,087 eligible commits (`corpus/diffs.jsonl`).
+- Every diff has at least 3 Terra/high and 3 Sol/high sessions (setups A, D
+  and D2, plus stage 1's B): 431 sessions in all, 221 Terra and 210 Sol.
+  Sessions are independent, so combinations are built from them afterward.
+- The carrier is put in plan mode with web fetch off before its first message.
+  It sometimes lists files, so the driver now requires an unchanged checkout
+  after its turn rather than no tool use.
+- `pipeline.sh` verified diffs as their reviews finished:
+  `build_verify.py --append --ready-jobs` built blind batches, and
+  `verify_driver.py` ran one Opus/high Claude Code session per batch,
+  round-robin over `claude` to `claude7`. `claude6` was dropped after it
+  failed with ACP `auth_required`. There were 32 batches, and all 10 stage 1
+  diffs were verified again from scratch.
+- One review was refused at start with "relay hello timed out after 60
+  seconds" and retried. The private instance's image was re-pinned from
+  `d12b0a38` to `aa3e7f32` after the old one was pruned. The harness pins
+  were unchanged (codex 0.168.0, codex-acp 1.15.0).
+- Latency is each reviewer's own turn, from its prompt to the end of the
+  turn. An option's latency is the median over diffs of its slowest member.
+  This assumes members start together, and it excludes session startup.
+  Cost is mj's estimated API price, at 10^10 ticks per dollar.
+
+Results (`results/`):
+
+- 200 distinct problems: 156 confirmed, 21 plausible, 23 rejected.
+- Verifier consistency on the 96 findings verified twice: 93.8% got the same
+  verdict, and 95.8% agreed on confirmed versus not confirmed. Severity
+  matched 72.8% of the time, and every disagreement was off by one level.
+- Frontier on confirmed problems (`results/pareto.md`):
+
+  | Reviewers | Median latency (s) | Confirmed (70 diffs) | Est. cost per diff ($) | Frontier share |
+  |---|---:|---:|---:|---:|
+  | Terra | 43.1 | 84.9 | 0.044 | 1.00 |
+  | 2× Terra | 47.3 | 106.3 | 0.087 | 1.00 |
+  | 3× Terra | 51.7 | 117.3 | 0.131 | 1.00 |
+  | Sol + Terra | 91.9 | 120.3 | 0.211 | 0.64 |
+  | Sol + 2× Terra | 93.7 | 134.5 | 0.255 | 1.00 |
+
+  Off the frontier: Sol (90.2 s, 79.0), 2× Sol (100.0 s, 98.7), 2× Sol +
+  Terra (101.1 s, 132.3) and 3× Sol (103.6 s, 109.0). The frontier share is
+  how often an option stays on the frontier over 1,000 bootstrap resamples of
+  the diffs.
+- Paired differences against 3× Terra, with bootstrap 95% intervals
+  (`compare.py`):
+  - Terra + Sol: +3.0 confirmed (−7.3 to +13.4), but +10.4 medium- or
+    high-severity confirmed (+2.6 to +18.8).
+  - Sol + 2× Terra: +17.3 confirmed (+8.2 to +26.8) and +16.8 medium or
+    high (+9.1 to +25.4).
+  - On tokens, 3× Terra and Terra + Sol cost about the same (735k and 679k
+    per diff). On estimated price they do not ($0.131 and $0.211).
+- Severity: a single Sol session found 10.0 confirmed high-severity problems
+  against Terra's 4.7 (+1.3 to +10.0). Counting only medium and high, 2× Sol
+  + Terra also joins the frontier (`results/pareto-sev-high-medium.md`).
+- Known bugs (`knownbug.py`): the known defect appears among the verified
+  groups for 12 of the 30 Hard-won diffs (`results/known-bug.jsonl`).
+  Expected catches out of 30: Terra 6.7, Sol 8.3, 3× Terra 9.0, Terra + Sol
+  10.6, Sol + 2× Terra 11.3.
+- `results/unfixed-at-head.csv`: 62 confirmed problems whose evidence says
+  they are still present at HEAD (2026-11-13). This comes from a text match
+  on the verifier's evidence and has not been checked.
+
+Limits: the verifier is a model, and some low-severity "confirmed" groups
+are only lost test coverage. Latency was measured while about 10 reviews
+shared four Codex profiles, so it includes provider load at that time.
+
 ## Running
 
 The scripts read the corpus from this directory and keep everything else
@@ -140,3 +218,18 @@ python3 audit.py
 
 `carrier_test.py <bug>` checks that the carrier answers a bug's context
 without tools, and then destroys its session.
+
+Stage 2 (pooled findings, per-session scoring). Run long drivers with
+`setsid nohup`, because a harness background task has a time limit:
+
+```sh
+python3 select_diffs.py <repo> 40 > corpus/diffs.jsonl
+python3 driver.py --jobs jobs.json --concurrency 10        # arms A, D, D2 (C = Ember, dropped)
+./pipeline.sh jobs.json verify2                           # batches + Opus verifiers as diffs finish;
+                                                          # creates the verifier checkout, workspace and SPEC.md
+python3 score.py verify2                                  # sessions.csv, groups.csv, session_groups.csv
+python3 pareto.py verify2 [--severities high,medium] [--verdicts confirmed,plausible]
+python3 compare.py verify2 Terra+Terra+Terra Terra+Sol Terra+Terra+Sol
+python3 consistency.py verify verify2
+python3 knownbug.py verify2 <known-bug.jsonl>
+```

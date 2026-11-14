@@ -1,49 +1,40 @@
-"""Scores verified findings per reviewer session, so setups can be composed afterwards.
+"""Joins verified finding groups to reviewer sessions; writes per-session tables.
+
+Usage: python3 score.py <verify-dir>   (e.g. verify2; under REVIEW_ARMS_DIR)
 
 Inputs under REVIEW_ARMS_DIR:
-  private/key-verify-stage1.json   finding id -> bug, review arm, model, reviewer session
-  verify/out/verify-out-v<n>.json  verifier groups with verdicts
-  runs/<bug>/<arm>/reviewers/<id>/usage.json  reviewer token usage
+  private/key-<verify-dir>.json        finding ID -> diff, reviewer session, model
+  <verify-dir>/out/verify-out-*.json   verifier groups with verdicts
+  runs/<diff>/<review>/                reviewer sessions, transcripts and usage
 
-Writes, under verify/:
-  sessions.csv        one row per reviewer session: bug, session, model, review, profile, tokens
-  groups.csv          one row per distinct problem: bug, group, verdict, severity, summary
+Writes, under <verify-dir>/:
+  sessions.csv        one row per reviewer session: diff, session, model, review,
+                      profile, latency_s, tokens, estimated cost in USD
+  groups.csv          one row per distinct problem: diff, group, verdict, severity
   session_groups.csv  one row per (session, group) the session reported
-  score.json          the same data plus the example comparison below
 
-A setup's result on a bug is the union of the groups its sessions reported.
-Reviewer sessions are independent harness sessions, so any combination of a
-bug's sessions is a valid sample of a setup. The example comparison averages
-every 3-Terra combination against every Terra + Sol pair.
+Only diffs whose every finding was verified are included. A setup's result on
+a diff is the union of the groups its sessions reported; reviewer sessions are
+independent, so any combination of a diff's sessions is a valid sample.
+
+Latency is the reviewer's own turn: from its prompt to the end of its turn.
+It excludes session startup and time waiting for other reviewers.
 """
 import collections
 import csv
 import glob
-import itertools
 import json
 import os
 import pathlib
+import sys
 
 ROOT = pathlib.Path(os.environ.get("REVIEW_ARMS_DIR", "/mnt/optane/review-arms-20261113"))
-OUT = ROOT / "verify"
-key = json.loads((ROOT / "private/key-verify-stage1.json").read_text())
-stage1_outputs = json.loads((ROOT / "private/key-stage1.json").read_text())
-
-# Every stage 1 reviewer session, including those that reported no findings.
-sessions = {}
-for oid, k in stage1_outputs.items():
-    run = ROOT / "runs" / k["bug"] / k["arm"]
-    reviewers = {r["child"]: r for r in json.loads((run / "reviewers.json").read_text())}
-    usage = json.loads((run / "reviewers" / k["child"][:12] / "usage.json").read_text())
-    sessions[k["child"]] = {
-        "bug": k["bug"], "session": k["child"], "model": k["model"], "review": f"{k['bug']}/{k['arm']}",
-        "arm": k["arm"], "slot": k["slot"], "profile": reviewers[k["child"]]["profile"],
-        "total_tokens": usage["totals"]["total_tokens"]["tokens"],
-        "output_tokens": usage["totals"]["output_tokens"]["tokens"],
-    }
+VERIFY = ROOT / sys.argv[1]
+private_key = json.loads((ROOT / "private" / f"key-{VERIFY.name}.json").read_text())
+key, covered = private_key["findings"], set(private_key["sessions"])
 
 groups, session_groups, seen = {}, [], collections.Counter()
-for path in sorted(glob.glob(str(OUT / "out/verify-out-v*.json"))):
+for path in sorted(glob.glob(str(VERIFY / "out/verify-out-*.json"))):
     for commit in json.load(open(path))["commits"]:
         for g in commit["groups"]:
             members = [key[f] for f in g["findings"]]
@@ -52,57 +43,66 @@ for path in sorted(glob.glob(str(OUT / "out/verify-out-v*.json"))):
             assert len(bugs) == 1, (path, g["group"], bugs)
             bug = bugs.pop()
             gid = f"{bug}/{g['group']}"
+            assert gid not in groups, gid
             groups[gid] = {"bug": bug, "group": gid, "verdict": g["verdict"], "severity": g.get("severity"),
                            "confidence": g.get("confidence"), "summary": g["summary"]}
             for s in sorted({m["child"] for m in members}):
                 session_groups.append({"session": s, "bug": bug, "group": gid})
-missing = sorted(set(key) - set(seen))
 duplicated = sorted(f for f, n in seen.items() if n > 1)
-assert not missing and not duplicated, (missing, duplicated)
-
-found = collections.defaultdict(set)
-for row in session_groups:
-    found[row["session"]].add(row["group"])
-
-
-def union_score(session_ids, verdicts=("confirmed",)):
-    """Distinct groups with these verdicts found by any of the sessions."""
-    hit = set().union(*(found[s] for s in session_ids)) if session_ids else set()
-    return sum(groups[g]["verdict"] in verdicts for g in hit)
+assert not duplicated, duplicated
+expected = collections.defaultdict(set)
+for f, k in key.items():
+    expected[k["bug"]].add(f)
+complete = {b for b, fs in expected.items() if fs <= set(seen)}
+partial = sorted(b for b, fs in expected.items() if fs & set(seen) and not fs <= set(seen))
+assert not partial, f"diffs with only some findings verified: {partial}"
+unverified = sorted(set(expected) - complete)  # batched but not yet verified; left out below
 
 
-# Example: every 3-Terra combination vs every Terra + Sol pair, per bug.
-example = {}
-for bug in sorted({s["bug"] for s in sessions.values()}):
-    terra = [s for s, v in sessions.items() if v["bug"] == bug and v["model"] == "gpt-6.1-terra"]
-    sol = [s for s, v in sessions.items() if v["bug"] == bug and v["model"] == "gpt-6.1-sol"]
-    row = {}
-    for name, verdicts in [("confirmed", ("confirmed",)), ("confirmed_or_plausible", ("confirmed", "plausible"))]:
-        a = [union_score(c, verdicts) for c in itertools.combinations(terra, 3)]
-        b = [union_score((t, s), verdicts) for t in terra for s in sol]
-        row[name] = {"3_terra_mean": sum(a) / len(a), "terra_sol_mean": sum(b) / len(b),
-                     "single_terra_mean": sum(union_score((t,), verdicts) for t in terra) / len(terra),
-                     "single_sol_mean": sum(union_score((s,), verdicts) for s in sol) / len(sol)}
-    example[bug] = row
+def latency(session_dir):
+    """Seconds from the reviewer's prompt to the end of its turn, or None."""
+    row = json.loads((session_dir / "session.json").read_text())
+    done = (row.get("last_turn_outcome") or {}).get("completed_at_ms")
+    items = [i for p in json.loads((session_dir / "transcript.json").read_text()) for i in p["items"]]
+    prompt = next((i["created_at_ms"] for i in items if i["role"] == "user"), None)
+    return round((done - prompt) / 1000, 1) if done and prompt else None
+
+
+sessions = {}
+for done_path in sorted(ROOT.glob("runs/*/*/done.json")):
+    done = json.loads(done_path.read_text())
+    if done["bug"] not in complete and done["bug"] in expected:
+        continue
+    for r in done["reviewers"]:
+        if r["child"] not in covered:
+            continue
+        sd = done_path.parent / "reviewers" / r["child"][:12]
+        usage = json.loads((sd / "usage.json").read_text())
+        ticks = usage.get("turn_cost_usd_ticks")
+        sessions[r["child"]] = {
+            "bug": done["bug"], "session": r["child"], "model": r["model"], "effort": r["effort"],
+            "review": f"{done['bug']}/{done['arm']}", "profile": r["profile"], "latency_s": latency(sd),
+            "total_tokens": usage["totals"]["total_tokens"]["tokens"],
+            "output_tokens": usage["totals"]["output_tokens"]["tokens"],
+            # mj's estimated API-price cost; 10^10 ticks per dollar (mj-core/src/usage.rs).
+            "cost_usd": round(ticks / 1e10, 4) if isinstance(ticks, (int, float)) else None,
+        }
 
 
 def write_csv(name, rows, fields):
-    with open(OUT / name, "w", newline="") as f:
+    with open(VERIFY / name, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
         w.writerows(rows)
 
 
 write_csv("sessions.csv", list(sessions.values()),
-          ["bug", "session", "model", "review", "arm", "slot", "profile", "total_tokens", "output_tokens"])
+          ["bug", "session", "model", "effort", "review", "profile", "latency_s", "total_tokens", "output_tokens",
+           "cost_usd"])
 write_csv("groups.csv", list(groups.values()), ["bug", "group", "verdict", "severity", "confidence", "summary"])
 write_csv("session_groups.csv", session_groups, ["session", "bug", "group"])
-summary = {}
-for k in ("confirmed", "confirmed_or_plausible"):
-    summary[k] = {m: round(sum(example[b][k][m] for b in example), 2)
-                  for m in ("3_terra_mean", "terra_sol_mean", "single_terra_mean", "single_sol_mean")}
-result = {"sessions": len(sessions), "groups": len(groups),
-          "verdicts": dict(collections.Counter(g["verdict"] for g in groups.values())),
-          "example_totals_over_bugs": summary, "example_per_bug": example}
-(OUT / "score.json").write_text(json.dumps(result, indent=2) + "\n")
-print(json.dumps({k: v for k, v in result.items() if k != "example_per_bug"}, indent=1))
+per_model = collections.Counter(s["model"] for s in sessions.values())
+print(json.dumps({"diffs": len({s["bug"] for s in sessions.values()}), "sessions": len(sessions), "sessions_per_model": per_model,
+                  "groups": len(groups), "verdicts": collections.Counter(g["verdict"] for g in groups.values()),
+                  "missing_latency": sum(s["latency_s"] is None for s in sessions.values()),
+                  "unverified_diffs_left_out": unverified}, indent=1))
