@@ -710,19 +710,9 @@ pub(crate) fn record_runtime_event_with_facts(
 ) -> Result<bool> {
     let stopped = matches!(event, RuntimeEvent::Stopped);
     let mut relay = relay.lock().expect("relay state lock poisoned");
-    // Only harness output that changes no work can wait behind a ready
-    // checkpoint barrier; the relay decides which of it does. Anything else
-    // (a question for a person, a restart, command progress, background
-    // work) spoils the cut, so the writes that waited go first.
-    if !matches!(
-        event,
-        RuntimeEvent::SessionUpdate { .. }
-            | RuntimeEvent::NativeAgent { .. }
-            | RuntimeEvent::Notice { .. }
-            | RuntimeEvent::Warning { .. }
-    ) {
-        relay.end_checkpoint_hold()?;
-    }
+    // Whether this event can wait behind a ready checkpoint barrier is the
+    // relay's decision, made where it journals (`append_relay_event`). An
+    // event that journals nothing leaves the cut held.
     match event {
         RuntimeEvent::Connected {
             protocol_version: Some(protocol_version),

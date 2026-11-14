@@ -2,6 +2,7 @@
 //! its cut (campaign finding I2-3).
 use super::test_support::*;
 use super::*;
+use crate::acp::RuntimeEvent;
 use agent_client_protocol::v1::schema::ContentChunk;
 
 fn notification(text: &str) -> SessionUpdate {
@@ -218,4 +219,74 @@ fn a_question_during_a_barrier_is_journaled_at_once() {
     assert!(asked > cut.ordinal);
     assert!(notice_ordinal(&relay, "before the question").unwrap() < asked);
     assert!(!relay.worker_writes_held());
+}
+
+/// Claude Code ends a cancelled cycle with a result and the adapter's
+/// `usage_update` origin marker, in that order, right after a barrier became
+/// ready. With no harness turn open the result journals nothing, so it must
+/// not end the hold: the marker waits and the Close still matches its cut.
+// Hard-won: 634af0a36: a runtime event that journaled nothing ended the cut hold, so a late usage_update moved the cut
+#[test]
+fn a_runtime_event_that_journals_nothing_leaves_the_cut_held() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut durable = configured(&temp);
+    durable.set_harness_turn_policy(HarnessTurnPolicy::ClaudeAdapter);
+    let cut = ready_checkpoint(&mut durable, "cancelled-turn-barrier");
+    let relay = Arc::new(RelayCell::new(durable));
+    let mut in_flight = BTreeMap::new();
+
+    let result = mj_core::acp::ClaudeTurnResult::from_sdk_message(&serde_json::json!({
+        "type": "result", "subtype": "error_during_execution", "is_error": true,
+        "num_turns": 1, "stop_reason": "cancelled",
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+        "origin": {"kind": "human"},
+    }))
+    .unwrap()
+    .unwrap();
+    crate::worker_runtime::record_runtime_event(
+        &relay,
+        &mut in_flight,
+        RuntimeEvent::ClaudeTurnResult(result),
+    )
+    .unwrap();
+    let usage_update = serde_json::json!({
+        "sessionUpdate": "usage_update",
+        "used": 10,
+        "size": 200,
+        "_meta": {"_claude/origin": {"kind": "human"}},
+    });
+    crate::worker_runtime::record_runtime_event(
+        &relay,
+        &mut in_flight,
+        RuntimeEvent::SessionUpdate {
+            update: usage_update,
+        },
+    )
+    .unwrap();
+
+    let mut durable = relay.lock().unwrap();
+    assert!(durable.worker_writes_held());
+    assert_eq!(durable.operational_state().latest_ordinal, cut.ordinal);
+
+    submit_relay(
+        &mut durable,
+        "close-command",
+        RelayCommand::Close {
+            barrier_command_id: "cancelled-turn-barrier".into(),
+            expected: cut,
+        },
+    );
+    submit_relay(
+        &mut durable,
+        "close-checkpoint-complete",
+        RelayCommand::CompleteCheckpoint {
+            barrier_command_id: "cancelled-turn-barrier".into(),
+        },
+    );
+    assert!(!durable.worker_writes_held());
+    assert!(
+        !journal(&durable)
+            .iter()
+            .any(|event| matches!(event.observation, RelayObservation::SessionUpdate { .. }))
+    );
 }
