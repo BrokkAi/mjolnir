@@ -1150,7 +1150,7 @@ impl HarnessKind {
     pub const fn supports_review_gate(self) -> bool {
         matches!(
             self,
-            Self::Claude | Self::Codex | Self::Dsh | Self::Antigravity
+            Self::Claude | Self::Codex | Self::Dsh | Self::Kimi | Self::Antigravity
         )
     }
 
