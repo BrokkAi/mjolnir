@@ -290,16 +290,13 @@ task gets a smarter, more expensive agent. Judge difficulty, not brief length.";
 
 /// The same description when only the straightforward type is configured.
 /// There is no type to choose, so the parent delegates straightforward
-/// work and keeps work that needs judgment. The policy's rule for keeping an
-/// implementation slice names "needs your full context" as a reason; this
-/// text says judgment work meets it, so the two rules agree.
+/// work and keeps work that needs judgment.
 const ONE_TASK_TYPE: &str = "Mjolnir supplies the configured
 child model and effort. Delegate straightforward work: work with a clear
 method, including locating code, running commands or test suites, and
 implementing a settled design. Do work that needs judgment yourself, including
 ambiguous diagnosis, design choices, and changes with a high risk of subtle
-bugs; with no stronger child available, such work counts as needing your full
-context. Judge difficulty, not brief length.";
+bugs. Judge difficulty, not brief length.";
 
 /// The parent's delegation policy. `offers_subtle` is false when only the
 /// straightforward task type is configured.
@@ -2881,10 +2878,15 @@ mod tests {
             one.contains("Judge difficulty, not brief length.\nUp to 4 children"),
             "{one}"
         );
-        // Hard-won: e105bd9ce: the single-type judgment rule contradicted the slice rule's three reasons.
+        // Hard-won: e105bd9ce: the single-type judgment rule contradicted a
+        // closed list of reasons for keeping a slice. The policy now weighs
+        // the cost of each piece of work instead of listing reasons.
         assert!(
-            one.contains("Keep a slice\nyourself only when it needs your full context")
-                && one.contains("such work counts as needing your full\ncontext."),
+            one.contains("Weigh each\npiece of work.") && !one.contains("only when it needs"),
+            "{one}"
+        );
+        assert!(
+            one.contains("Decide who builds and when, yourself included"),
             "{one}"
         );
         for text in ["task_type", "task type", "`subtle`", "$TASK_TYPES", "$N"] {
