@@ -1524,7 +1524,51 @@ mod tests {
         }
         let mut child = command.spawn().unwrap();
         master.write_all(b"terminal-answer\n").unwrap();
-        assert!(child.wait().unwrap().success());
+        // Read the terminal's output (the echoed answer) as a real terminal
+        // does. macOS makes an exiting session leader wait until its
+        // terminal's output drains, so an unread master never lets the child
+        // exit; the wait below would then hang.
+        let exited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let terminal = {
+            let exited = exited.clone();
+            let mut terminal = master.try_clone().unwrap();
+            std::thread::spawn(move || {
+                let mut buffer = [0_u8; 1024];
+                while !exited.load(std::sync::atomic::Ordering::Acquire) {
+                    let mut poll = libc::pollfd {
+                        fd: terminal.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    // SAFETY: one valid pollfd for a descriptor this thread owns.
+                    match unsafe { libc::poll(&mut poll, 1, 50) } {
+                        0 => continue,
+                        ready if ready < 0 => {
+                            let error = std::io::Error::last_os_error();
+                            assert_eq!(
+                                error.kind(),
+                                std::io::ErrorKind::Interrupted,
+                                "poll the terminal: {error}"
+                            );
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    match std::io::Read::read(&mut terminal, &mut buffer) {
+                        Ok(0) => return,
+                        Ok(_) => {}
+                        // Linux reports a terminal whose slave side closed as EIO.
+                        Err(error) if error.raw_os_error() == Some(libc::EIO) => return,
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(error) => panic!("read the terminal: {error}"),
+                    }
+                }
+            })
+        };
+        let status = child.wait().unwrap();
+        exited.store(true, std::sync::atomic::Ordering::Release);
+        terminal.join().unwrap();
+        assert!(status.success());
     }
 
     // Hard-won: 6dec78fe: A real large-repository resume deadlocked while stdin and stdout pipes were both full.
