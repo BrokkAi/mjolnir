@@ -82,6 +82,17 @@ def check(batch_path, out):
 
 profiles = itertools.cycle(PROFILES)
 lock = threading.Lock()
+# Profiles whose verifier turn ended at the provider's quota limit during this run.
+exhausted = set()
+
+
+def pick_profile():
+    with lock:
+        for _ in PROFILES:
+            profile = next(profiles)
+            if profile not in exhausted:
+                return profile
+    raise RuntimeError(f"every profile reported QuotaLimit: {sorted(exhausted)}")
 
 
 def run(batch_path):
@@ -93,8 +104,7 @@ def run(batch_path):
         rec = json.loads(rec_path.read_text())
         sid = rec["session_id"]
     else:
-        with lock:
-            profile = next(profiles)
+        profile = pick_profile()
         sid = mj("new", "--workspace-id", WORKSPACE, "--profile", profile, "--target", "localhost",
                  "--project-directory", REPO, "--effort", "high", "--review", "off", "--no-project-memory",
                  "--no-github-events", "--subagents", "none", "--title", f"review-arms {V.name} {n}",
@@ -118,7 +128,8 @@ Read only SPEC.md, your batch file, and the repository in your working directory
         assert cfg.get("model") == "opus" and cfg.get("effort") == "high", cfg
         # A stable command ID makes a resend after an interrupted run the same request,
         # which mj accepts once, instead of a second verifier turn.
-        mj("message", "--session", sid, "--command-id", f"review-arms-{V.name}-batch-{n}", "--prompt-file", prompt)
+        mj("message", "--session", sid, "--command-id", f"review-arms-{V.name}-batch-{n}-{sid[:12]}",
+           "--prompt-file", prompt)
         rec = {**rec, "config": cfg, "prompted": time.time_ns()}
         save(rec_path, rec)
         time.sleep(30)
@@ -129,6 +140,16 @@ Read only SPEC.md, your batch file, and the repository in your working directory
         if s.get("is_idle") and s.get("last_turn_outcome"):
             break
         time.sleep(60)
+    if ((s["last_turn_outcome"].get("outcome") or {}).get("stop_reason")) == "QuotaLimit":
+        # The provider stopped the turn; a partial pass is not a verification. Set the
+        # session aside and start the batch again on a profile that has not hit its limit.
+        # Each retry marks its profile exhausted, so the retries end.
+        with lock:
+            exhausted.update({rec["profile"], s.get("profile_id")} - {None})
+        mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900)
+        rec_path.rename(V / "sessions" / f"quota-batch-{n}-{sid[:12]}.json")
+        print(json.dumps({"batch": n, "state": "quota", "session": sid, "profile": s.get("profile_id")}), flush=True)
+        return run(batch_path)
     r = subprocess.run(["mj", "fetch", "--session", sid, "--path", "verify-out.json", "--stdout"],
                        capture_output=True, timeout=300)
     if r.returncode:

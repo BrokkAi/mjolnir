@@ -226,14 +226,14 @@ fn row(
     } else if page_path.is_empty() {
         SettingsControl::Page {
             summary: schema::section_summary(key, draft, &theme_label)
-                .or_else(|| page::contents_summary(value))
+                .or_else(|| page::contents_summary(&path, value))
                 .unwrap_or_else(|| displayed(&path, value, draft)),
         }
     } else {
         match page::row_kind(draft, page_path, &path) {
             RowKind::Page => SettingsControl::Page {
                 summary: page::machine_build_cache_summary(&path, value)
-                    .or_else(|| page::contents_summary(value))
+                    .or_else(|| page::contents_summary(&path, value))
                     .unwrap_or_else(|| displayed(&path, value, draft)),
             },
             _ if read_only(&path, draft) => SettingsControl::ReadOnly {

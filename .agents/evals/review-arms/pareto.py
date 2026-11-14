@@ -1,6 +1,6 @@
 """Latency vs. verified findings Pareto frontier for reviewer combinations of up to 3.
 
-Usage: python3 pareto.py <verify-dir> [--samples 4000] [--bootstrap 1000]
+Usage: python3 pareto.py <verify-dir> [--samples 4000] [--bootstrap 1000] [--sessions Sol/medium=2]
 
 Reads <verify-dir>/sessions.csv, groups.csv and session_groups.csv (score.py)
 and writes <verify-dir>/pareto.csv and pareto.md. The method follows the
@@ -44,6 +44,8 @@ p.add_argument("--severities", default="high,medium,low",
                help="comma-separated severities of counted groups (rejected groups have none)")
 p.add_argument("--min-sessions", type=int, default=3,
                help="sessions each configuration needs per diff; also the most repeats of one configuration")
+p.add_argument("--sessions", default="", metavar="CONFIG=N,...",
+               help="per-configuration override of --min-sessions, e.g. Sol/medium=2")
 a = p.parse_args()
 V = ROOT / a.verify
 counted = set(a.verdicts.split(","))
@@ -70,9 +72,12 @@ for s in sessions:
                           "tokens": int(s["total_tokens"]),
                           "cost": float(s["cost_usd"]) if s.get("cost_usd") else None}
 configs = sorted({config(s) for s in sessions})
+overrides = dict(kv.split("=") for kv in a.sessions.split(",") if kv)
+assert set(overrides) <= set(configs), f"unknown configurations {sorted(set(overrides) - set(configs))}"
+cap = {c: int(overrides.get(c, a.min_sessions)) for c in configs}
 options = [o for n in (1, 2, 3) for o in itertools.combinations_with_replacement(configs, n)
-           if max(collections.Counter(o).values()) <= a.min_sessions]
-diffs = sorted(d for d, per in by_diff.items() if all(len(per[c]) >= a.min_sessions for c in configs))
+           if all(k <= cap[c] for c, k in collections.Counter(o).items())]
+diffs = sorted(d for d, per in by_diff.items() if all(len(per[c]) >= cap[c] for c in configs))
 skipped = sorted(set(by_diff) - set(diffs))
 
 

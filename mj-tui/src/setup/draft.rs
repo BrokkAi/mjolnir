@@ -466,16 +466,13 @@ impl SetupDialog {
         };
         let profile_id = self.available_profile_id(kind.id());
         let home = kind.managed_profile_home(&profile_id);
-        let profile = json!({
-            "enabled": true,
-            "kind": kind,
-            "home": home,
-            "environment": {},
-            "context_window_bytes": null,
-            "guardian_review_model": null,
-            "codex_profile": null,
-            "claude_permission_mode": null,
-        });
+        // The kind's own defaults, so the profile holds only fields its kind
+        // reads, the same as a profile added on the Profiles page.
+        let mut profile = schema::defaults(
+            &["profiles".to_owned(), profile_id.clone()],
+            &json!({ "kind": kind }),
+        );
+        profile["home"] = json!(home);
         self.draft["profiles"]
             .as_object_mut()
             .expect("profiles is an object")
