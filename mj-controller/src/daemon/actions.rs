@@ -766,6 +766,26 @@ pub(super) async fn handle_action(
             state.request_quota_refresh()?;
             Ok(DaemonReply::Done)
         }
+        DaemonAction::ProbeQuotaProfiles { profile_ids } => {
+            let config = state.owner().controller().config.clone();
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let runtime = crate::quota::QuotaRuntimeConfig::of(&config);
+            let mut requests = Vec::new();
+            for id in &profile_ids {
+                let profile = config
+                    .profiles
+                    .get(id)
+                    .with_context(|| format!("no profile named {id:?} is configured"))?;
+                requests.push(crate::quota::QuotaRefreshRequest::for_profile(
+                    id,
+                    profile,
+                    cwd.clone(),
+                    runtime.clone(),
+                ));
+            }
+            state.probe_quota_profiles(requests)?;
+            Ok(DaemonReply::Done)
+        }
         DaemonAction::RenameProfile { old_id, new_id } => {
             let _config_mutation = state.config_mutation.lock().await;
             ensure_no_active_lifecycle(state)?;

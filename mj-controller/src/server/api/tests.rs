@@ -107,6 +107,32 @@ async fn refused_profile_login_errors_are_authenticated_and_projected_into_sessi
     }
 }
 
+// A disabled profile is not in the served list, but `with_disabled` still
+// discovers it: the read answers what the harness advertises.
+#[tokio::test]
+async fn profile_config_with_disabled_discovers_profiles_the_snapshot_omits() {
+    let (app, _actions, _snapshots, _bundles) = api_app(Arc::new(FakeBackend::default()), |_| {});
+    let path = "/api/v1/profiles/retired/config";
+    let refused = app
+        .clone()
+        .oneshot(bearer(Request::get(path)).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    let answered = app
+        .oneshot(
+            bearer(Request::get(format!("{path}?with_disabled=true")))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(answered.status(), StatusCode::OK);
+    let value: serde_json::Value =
+        serde_json::from_slice(&answered.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(value["model"], "kimi-code/k3");
+}
+
 // HTTP contract integration: optional All and encoded profile names must reach
 // the same store query, with authentication and no caching on the report.
 #[tokio::test]

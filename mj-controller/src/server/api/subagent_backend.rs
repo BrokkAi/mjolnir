@@ -94,6 +94,7 @@ pub trait SubagentBackend: Send + Sync {
             profile, model, refresh,
         ))
     }
+
     /// What `profile`'s harness advertises before the profile's `models`
     /// allow-list, for `mj doctor`. Backends without the daemon's catalogue
     /// answer with the ordinary choices.

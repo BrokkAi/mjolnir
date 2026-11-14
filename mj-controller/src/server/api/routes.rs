@@ -183,6 +183,10 @@ pub(super) struct ProfileConfigQuery {
     /// `models` allow-list. `mj doctor` compares the two.
     #[serde(default)]
     pub(super) unrestricted: bool,
+    /// Answer for a disabled profile too; discovery itself refuses an id the
+    /// configuration does not have.
+    #[serde(default)]
+    pub(super) with_disabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

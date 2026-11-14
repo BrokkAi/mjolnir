@@ -720,6 +720,22 @@ impl RuntimeState {
         Ok(())
     }
 
+    /// Ask the quota poller to probe these profiles once, even disabled ones.
+    pub(crate) fn probe_quota_profiles(
+        &self,
+        requests: Vec<crate::quota::QuotaRefreshRequest>,
+    ) -> Result<()> {
+        let quota = self.quota.lock().unwrap_or_else(PoisonError::into_inner);
+        let refresh = quota
+            .refresh
+            .as_ref()
+            .context("the daemon's quota service is not running")?;
+        refresh
+            .send(super::QuotaRefreshIntent::ProbeProfiles(requests))
+            .context("the daemon's quota service is not running")?;
+        Ok(())
+    }
+
     /// Replace what the daemon says about quota, and wake every attached
     /// surface when it changed.
     pub(crate) fn publish_quotas(&self, snapshot: mj_client::quota::QuotaSnapshot) {

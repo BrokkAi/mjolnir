@@ -116,6 +116,9 @@ pub(super) fn spawn_quota_refresher_with(
         // The cache identity each profile was last adopted under. A changed
         // identity is a changed profile, whose report no longer applies.
         let mut identities: std::collections::BTreeMap<String, String> = Default::default();
+        // One-shot extras already probed, by profile and identity. They never
+        // join the batch's schedule; a forced cycle re-probes them.
+        let mut probed_extra: std::collections::BTreeMap<String, String> = Default::default();
         loop {
             let now = epoch_seconds();
             let wake = batch
@@ -149,16 +152,63 @@ pub(super) fn spawn_quota_refresher_with(
                 })
                 .cloned()
                 .collect::<Vec<_>>();
+            let fresh_extra = batch
+                .extra
+                .iter()
+                .filter(|request| {
+                    batch.refresh
+                        || probed_extra.get(&request.profile_id) != Some(&request.cache_identity())
+                })
+                .filter(|request| !on_hold(quotas.report(&request.profile_id), now))
+                .cloned()
+                .collect::<Vec<_>>();
             // A batch that only changed the profile set and finds nothing due
             // is not a cycle. A requested refresh always is, so the person's
             // notice can end.
-            if due.is_empty() && !batch.refresh {
+            if due.is_empty() && !batch.refresh && fresh_extra.is_empty() {
                 continue;
             }
             let generation = batch.generation;
+            let forced = batch.refresh;
             batch.refresh = false;
-            if !refresh_profile_quotas(&mut quotas, generation, &due, &updates_tx).await {
+            if (!due.is_empty() || forced)
+                && !refresh_profile_quotas(&mut quotas, generation, &due, &updates_tx).await
+            {
                 break;
+            }
+            if !fresh_extra.is_empty() {
+                for request in &fresh_extra {
+                    // A changed identity is a different account: its cached
+                    // client and report belong to the old one.
+                    let identity = request.cache_identity();
+                    if probed_extra
+                        .insert(request.profile_id.clone(), identity.clone())
+                        .is_some_and(|previous| previous != identity)
+                    {
+                        quotas.forget(&request.profile_id).await;
+                    }
+                }
+                // One-shot probes report individually; they are not a cycle.
+                let updates = &updates_tx;
+                let delivered = std::sync::atomic::AtomicBool::new(true);
+                quotas
+                    .probe(fresh_extra, |quota| {
+                        let delivered = &delivered;
+                        async move {
+                            if delivered.load(std::sync::atomic::Ordering::Acquire)
+                                && updates.send(QuotaUpdate::Report(quota)).await.is_err()
+                            {
+                                tracing::debug!(
+                                    "quota update consumer closed while reporting a profile"
+                                );
+                                delivered.store(false, std::sync::atomic::Ordering::Release);
+                            }
+                        }
+                    })
+                    .await;
+                if !delivered.into_inner() {
+                    break;
+                }
             }
         }
         quotas.shutdown().await;
@@ -352,6 +402,7 @@ async fn adopt_profiles(
     let keep = batch
         .profiles
         .iter()
+        .chain(&batch.extra)
         .map(|request| request.profile_id.clone())
         .collect::<std::collections::BTreeSet<_>>();
     identities.retain(|id, _| keep.contains(id));
