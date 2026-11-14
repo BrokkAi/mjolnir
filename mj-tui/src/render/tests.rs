@@ -2766,7 +2766,13 @@ fn cpu_report_subagent_navigation_restores_the_parent_view_after_workspace_switc
             workspace_id: "other".into()
         }
     );
-    assert_eq!(dashboard.navigation_session.as_deref(), Some("kid-a"));
+    assert_eq!(
+        dashboard
+            .pending_navigation
+            .as_ref()
+            .map(|pending| pending.session_id.as_str()),
+        Some("kid-a")
+    );
     assert_eq!(
         dashboard.navigation_subagent_parent.as_deref(),
         Some(parent.as_str())
@@ -2775,10 +2781,7 @@ fn cpu_report_subagent_navigation_restores_the_parent_view_after_workspace_switc
     dashboard.set_active_workspace(Some("other".into()));
     assert_eq!(dashboard.subagent_parent_id(), Some(parent.as_str()));
     assert_eq!(dashboard.selected_session_id(), Some("kid-a"));
-    assert_eq!(
-        dashboard.take_navigation_session().as_deref(),
-        Some("kid-a")
-    );
+    assert_eq!(dashboard.take_session_to_open().as_deref(), Some("kid-a"));
 }
 
 #[test]

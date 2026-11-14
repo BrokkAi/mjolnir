@@ -941,7 +941,7 @@ pub(crate) static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         id: CommandId::NextAttention,
         label: "Next session needing you",
-        description: "Jump to the session that most needs a person: a question first, then a failure, then unread activity, in any workspace.",
+        description: "Jump to the session that most needs a person: a failure first, then a question, then unread activity, in any workspace.",
         scope: Scope::Global,
         pane_keys: &[],
         action: Some(KeyAction::NextAttention),

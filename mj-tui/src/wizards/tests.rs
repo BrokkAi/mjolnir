@@ -3032,7 +3032,20 @@ fn taking_move_preparation_closes_only_a_valid_confirmation_handoff() {
     assert!(matches!(dashboard.mode, Mode::Resume(_)));
 
     let preparation = move_preparation();
+    let inherited_size = mj_core::state::SessionResourceAllocation::Container {
+        cpus: 4,
+        memory_bytes: 8 << 30,
+    };
+    let Mode::Resume(wizard) = &mut dashboard.mode else {
+        panic!("Move wizard missing")
+    };
+    wizard.resource_allocation = Some(inherited_size.clone());
+    assert!(preparation.selection.resource_allocation.is_none());
     assert!(dashboard.apply_move_preparation(request_id, preparation.clone()));
+    let Mode::Resume(wizard) = &dashboard.mode else {
+        panic!("Move wizard missing")
+    };
+    assert_eq!(wizard.resource_allocation, Some(inherited_size));
 
     // A stale action for another session must not consume the confirmation.
     assert!(dashboard.take_move_preparation("other-session").is_none());
@@ -6480,7 +6493,6 @@ fn new_session_like_a_child_in_a_managed_worktree_is_top_level_with_its_own_work
     child.review = None;
     child.no_github_credentials = true;
     // Size overrides are a container's; a bare runtime has none to carry.
-    child.container_cpus = Some("2".into());
     child.last_profile = "retired-profile".into();
     let relation = mj_core::subagent::SubagentMetadata {
         kind: mj_core::subagent::SubagentKind::Worker,
@@ -6530,7 +6542,6 @@ fn new_session_like_a_child_in_a_managed_worktree_is_top_level_with_its_own_work
         dashboard.nth_offered_profile(dashboard.default_new_profile_index())
     );
     assert!(carried.no_github_credentials);
-    assert_eq!(carried.container_cpus, None);
     let note = carried.note.expect("the replaced profile is reported");
     assert!(
         note.contains("retired-profile") && note.contains(&profile_id),
@@ -6547,32 +6558,32 @@ fn new_session_like_a_child_in_a_managed_worktree_is_top_level_with_its_own_work
     );
 }
 
-/// "New session with these settings" must carry the source's container size
-/// overrides as stored: they win over the allocation when the container is
-/// created, so a copy without them starts at a different size.
-// Hard-won: d2d6ebb14: the copy kept the allocation but dropped container_cpus and container_memory.
+/// "New session with these settings" carries the owner's requested allocation,
+/// including when the selected session borrows its owner's container.
 #[test]
-fn new_session_like_a_resized_container_session_carries_its_size_overrides() {
+fn new_session_like_carries_the_container_owners_size() {
     let mut source = running_session();
-    source.container_cpus = Some("3.5".into());
-    source.container_memory = Some("6g".into());
+    source.resource_allocation = Some(SessionResourceAllocation::Container {
+        cpus: 4,
+        memory_bytes: 6 << 30,
+    });
     let mut dashboard = dashboard_with_session(source.clone());
 
-    let DashboardAction::CreateSession { carried, .. } =
-        dashboard.begin_new_session_like(&source.id)
+    let DashboardAction::CreateSession {
+        resource_allocation,
+        ..
+    } = dashboard.begin_new_session_like(&source.id)
     else {
         panic!("the copy creates a session without a dialog");
     };
-    assert_eq!(carried.container_cpus.as_deref(), Some("3.5"));
-    assert_eq!(carried.container_memory.as_deref(), Some("6g"));
 
-    // Hard-won: 6ddd61a06: a sub-agent's copy read the child's own overrides,
-    // which are always empty because it runs in its parent's container.
+    assert_eq!(resource_allocation, source.resource_allocation);
+
+    // Hard-won: 6ddd61a06: a sub-agent's copy read the child's own size,
+    // which is not updated when its parent's container is resized.
     let mut child = running_session();
     child.id = "resized-child".into();
     child.project_directory = source.project_directory.clone();
-    child.container_cpus = None;
-    child.container_memory = None;
     let relation = mj_core::subagent::SubagentMetadata {
         kind: mj_core::subagent::SubagentKind::Worker,
         child_session_id: child.id.clone(),
@@ -6592,13 +6603,14 @@ fn new_session_like_a_resized_container_session_carries_its_size_overrides() {
     state.sessions.insert(child.id.clone(), child.clone());
     state.subagents.insert(child.id.clone(), relation);
     dashboard.set_state(state);
-    let DashboardAction::CreateSession { carried, .. } =
-        dashboard.begin_new_session_like(&child.id)
+    let DashboardAction::CreateSession {
+        resource_allocation,
+        ..
+    } = dashboard.begin_new_session_like(&child.id)
     else {
         panic!("the copy of a sub-agent creates a session without a dialog");
     };
-    assert_eq!(carried.container_cpus.as_deref(), Some("3.5"));
-    assert_eq!(carried.container_memory.as_deref(), Some("6g"));
+    assert_eq!(resource_allocation, source.resource_allocation);
 }
 
 /// A copied launch skips the new-session key, so it must wait for the host's

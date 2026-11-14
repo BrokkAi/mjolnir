@@ -1021,6 +1021,8 @@ mod tests {
             UPDATE schema_compatibility SET minimum_compatible_version=121;
             PRAGMA user_version=121;
             CREATE TRIGGER interrupt_ownership_migration BEFORE INSERT ON schema_migrations WHEN NEW.version=122 BEGIN SELECT RAISE(ABORT,'fixture interruption'); END;").unwrap();
+        super::super::legacy_schema::ensure_session_container_override_columns(&connection)
+            .unwrap();
         assert!(super::super::schema::migrate_schema(&connection).is_err());
         assert_eq!(
             connection

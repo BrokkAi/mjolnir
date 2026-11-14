@@ -1143,6 +1143,10 @@ impl Controller {
                     "{error:#}; source environment retained for Move retry"
                 ));
                 source.updated_at = now();
+                let latest =
+                    crate::database::load_session_record(id)?.context("Move source disappeared")?;
+                source.resource_allocation = latest.resource_allocation;
+                source.additional_mounts = latest.additional_mounts;
                 let environment =
                     crate::database::move_source_environment(&operation.operation_id)?
                         .context("Move rollback lost its source environment")?;

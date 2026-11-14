@@ -285,6 +285,7 @@ mod tests {
         save_session_to(&path, &super::super::tests::session("root", "project"))?;
         let connection = open(&path)?;
         // Reconstruct the previous revision, with a turn written before the index.
+        super::super::legacy_schema::ensure_session_container_override_columns(&connection)?;
         connection.execute_batch(
             "DROP INDEX session_turn_usage_completed_time;
              DROP INDEX materialized_sessions_active_usage;

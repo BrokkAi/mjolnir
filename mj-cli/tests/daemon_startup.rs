@@ -304,6 +304,8 @@ fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
              'harness_kind TEXT NOT NULL CHECK(harness_kind IN (''codex'',''claude'',''kimi'',''grok'',''deepseek'',''muse'',''zcode''))')
              WHERE type='table' AND name IN ('sessions','hidden_native_sessions');
          PRAGMA writable_schema=RESET;
+         ALTER TABLE sessions ADD COLUMN container_cpus TEXT;
+         ALTER TABLE sessions ADD COLUMN container_memory TEXT;
          DELETE FROM schema_migrations WHERE version > 43;
          UPDATE schema_compatibility SET minimum_compatible_version = 43;
          PRAGMA user_version = 43;",

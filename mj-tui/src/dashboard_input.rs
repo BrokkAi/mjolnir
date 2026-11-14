@@ -738,6 +738,16 @@ impl DashboardState {
             }));
             return DashboardAction::None;
         }
+        // A stopped row is listed only while its failure needs a person; Enter
+        // resumes it, unless the dialog would refuse the same record.
+        if !session.state.is_active() {
+            if let Some(reason) = crate::resume::unresumable_reason(session.state) {
+                self.notices.set(crate::resume::unresumable_notice(reason));
+                return DashboardAction::None;
+            }
+            let session_id = session.id.clone();
+            return self.begin_resume_for(&session_id);
+        }
         // A failed session has two reasonable answers - read what it did, or
         // put it back on a fresh target - and recovery replaces the target, so
         // the surface asks rather than guessing.

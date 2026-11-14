@@ -28,6 +28,32 @@ pub enum AssessmentAttention {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationDismissal {
+    Failure(FailureIdentity),
     Question(crate::assessment::InferredQuestion),
     ReadThrough(u64),
+}
+
+/// A recorded lifecycle failure, independent of transcript progress.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailureIdentity {
+    pub generation: u64,
+    pub state: crate::state::SessionState,
+    pub last_error: Option<String>,
+}
+
+impl FailureIdentity {
+    pub fn of(record: &crate::state::SessionRecord) -> Option<Self> {
+        (record.last_error.is_some()
+            || matches!(
+                record.state,
+                crate::state::SessionState::Error
+                    | crate::state::SessionState::Lost
+                    | crate::state::SessionState::DestroyedWithDataLoss
+            ))
+        .then(|| Self {
+            generation: record.failure_generation,
+            state: record.state,
+            last_error: record.last_error.clone(),
+        })
+    }
 }

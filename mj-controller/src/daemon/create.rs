@@ -525,8 +525,6 @@ impl RuntimeState {
                     workspace_id: request.workspace_id,
                     additional_mounts: request.additional_mounts,
                     resource_allocation: request.resource_allocation,
-                    container_cpus: request.container_cpus,
-                    container_memory: request.container_memory,
                     project_directory,
                     session_title_override: request.session_title_override,
                 },
@@ -828,8 +826,6 @@ mod delegation_replay_tests {
                 target_template_id: "localhost".into(),
                 additional_mounts: Vec::new(),
                 resource_allocation: None,
-                container_cpus: None,
-                container_memory: None,
                 title: "launch choices".into(),
                 session_title_override: None,
             };
@@ -968,8 +964,6 @@ mod delegation_replay_tests {
             target_template_id: "missing-target".into(),
             additional_mounts: Vec::new(),
             resource_allocation: None,
-            container_cpus: None,
-            container_memory: None,
             title: "must not register".into(),
             session_title_override: None,
         };

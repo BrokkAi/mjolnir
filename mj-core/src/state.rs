@@ -1693,14 +1693,6 @@ pub struct SessionRecord {
     pub resource_allocation: Option<SessionResourceAllocation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_mounts: Vec<AdditionalMount>,
-    /// Per-session container CPU limit that overrides the target template's
-    /// value. It is applied the next time the container is created.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub container_cpus: Option<String>,
-    /// Per-session container memory limit that overrides the target
-    /// template's value. It is applied the next time the container is created.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub container_memory: Option<String>,
     /// In-container workspace root this session's repositories live under.
     /// `None` is a session whose container predates per-session workspaces and
     /// therefore keeps the shared legacy `/workspace`; every session created
@@ -1750,6 +1742,12 @@ pub struct SessionRecord {
     /// [`CLOSE_FAILURE_PREFIX`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// Database-owned failure occurrence; omitted from portable session formats.
+    #[serde(skip)]
+    pub failure_generation: u64,
+    /// Database-owned dismissal receipt.
+    #[serde(skip)]
+    pub dismissed_failure: Option<crate::attention::FailureIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_checkpoint_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1826,6 +1824,41 @@ pub fn session_owns_container(session: &SessionRecord) -> bool {
     }
 }
 
+/// The creation settings from the applied snapshot, or the legacy request
+/// when no snapshot was recorded.
+/// A present snapshot is authoritative even when its size is unknown.
+pub struct AppliedContainerSettings<'a> {
+    pub resource_allocation: Option<&'a SessionResourceAllocation>,
+    pub additional_mounts: &'a [AdditionalMount],
+}
+
+pub fn applied_container_settings(session: &SessionRecord) -> AppliedContainerSettings<'_> {
+    match session
+        .target_runtime
+        .as_ref()
+        .and_then(|runtime| runtime.container_settings.as_ref())
+    {
+        Some(applied) => AppliedContainerSettings {
+            resource_allocation: applied.resource_allocation.as_ref(),
+            additional_mounts: &applied.additional_mounts,
+        },
+        None => AppliedContainerSettings {
+            resource_allocation: session.resource_allocation.as_ref(),
+            additional_mounts: &session.additional_mounts,
+        },
+    }
+}
+
+/// The size a session's container is charged at, including unknown sizes.
+pub fn counted_container_allocation(session: &SessionRecord) -> Option<&SessionResourceAllocation> {
+    if session.target.is_none() {
+        // Provisioning reserves the next creation, even if a prior snapshot remains.
+        session.resource_allocation.as_ref()
+    } else {
+        applied_container_settings(session).resource_allocation
+    }
+}
+
 /// Sum the owning container allocations for one physical host.
 ///
 /// A new or resuming owner has no target locator while provisioning, so those
@@ -1861,7 +1894,7 @@ pub fn host_container_capacity<'a>(
             continue;
         }
         let Some(SessionResourceAllocation::Container { cpus, memory_bytes }) =
-            session.resource_allocation.as_ref()
+            counted_container_allocation(session)
         else {
             complete = false;
             continue;

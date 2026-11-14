@@ -4,12 +4,12 @@
   ╭ × Settings › Code Review ────────────────────────────────────────────────────────────────────╮
   │Reviewer 1  gpt-6-terra ▾                                        high ▾               Remove  │
   │                                                                                              │
-  │Reviewer 2  gpt-6-sol ▾                                          medium ▾             Remove  │
+  │Reviewer 2  gpt-6-terra ▾                                        high ▾               Remove  │
+  │                                                                                              │
+  │Reviewer 3  gpt-6-terra ▾                                        high ▾               Remove  │
   │                                                                                              │
   │  Add reviewer     Autoconfigure                                                              │
   │Review runs before push when reviewers are set.                                               │
-  │                                                                                              │
-  │                                                                                              │
   │                                                                                              │
   │                                                                                              │
   │                                                                                              │
@@ -37,16 +37,16 @@
   │Reviewer 1 effort   high ▾                            │
   │  Remove reviewer 1                                   │
   │                                                      │
-  │Reviewer 2 model    gpt-6-sol ▾                       │
-  │Reviewer 2 effort   medium ▾                          │
+  │Reviewer 2 model    gpt-6-terra ▾                     │
+  │Reviewer 2 effort   high ▾                            │
   │  Remove reviewer 2                                   │
+  │                                                      │
+  │Reviewer 3 model    gpt-6-terra ▾                     │
+  │Reviewer 3 effort   high ▾                            │
+  │  Remove reviewer 3                                   │
   │                                                      │
   │  Add reviewer     Autoconfigure                      │
   │Review runs before push when reviewers are set.       │
-  │                                                      │
-  │                                                      │
-  │                                                      │
-  │                                                      │
   │                                                      │
   │                                                      │
   │                                                      │

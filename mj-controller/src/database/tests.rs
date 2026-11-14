@@ -547,8 +547,6 @@ pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
         create_managed_worktree: None,
         workspace_id: DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
-        container_cpus: None,
-        container_memory: None,
         id: id.into(),
         title: "test session".into(),
         harness_kind: HarnessKind::Codex,
@@ -584,6 +582,8 @@ pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
         viewed_through_event_ordinal: 7,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: Some("temporary recovery failure".into()),
         checkpoint: Some(Box::new(CheckpointMetadata {
             archive_path: PathBuf::from("sessions/test.hel.zip"),
@@ -1224,8 +1224,10 @@ fn container_settings_write_overrides_mounts_and_remembered_sources() {
     set_session_container_settings_to(
         &database,
         "session-1",
-        Some("6"),
-        Some("12g"),
+        Some(&SessionResourceAllocation::Container {
+            cpus: 6,
+            memory_bytes: 12 << 30,
+        }),
         &[AdditionalMount {
             source: PathBuf::from("/host/models"),
             destination: PathBuf::from("/mnt/models"),
@@ -1238,8 +1240,13 @@ fn container_settings_write_overrides_mounts_and_remembered_sources() {
 
     let loaded = load_state_from(&database).unwrap();
     let session = &loaded.sessions["session-1"];
-    assert_eq!(session.container_cpus.as_deref(), Some("6"));
-    assert_eq!(session.container_memory.as_deref(), Some("12g"));
+    assert_eq!(
+        session.resource_allocation,
+        Some(SessionResourceAllocation::Container {
+            cpus: 6,
+            memory_bytes: 12 << 30
+        })
+    );
     assert_eq!(
         session.additional_mounts,
         vec![AdditionalMount {
@@ -1357,8 +1364,10 @@ fn lifecycle_save_preserves_container_settings_and_mounts() {
     set_session_container_settings_to(
         &database,
         "session-1",
-        Some("6"),
-        Some("12g"),
+        Some(&SessionResourceAllocation::Container {
+            cpus: 6,
+            memory_bytes: 12 << 30,
+        }),
         std::slice::from_ref(&attached),
         "2026-08-15T00:00:00Z",
     )
@@ -1374,8 +1383,13 @@ fn lifecycle_save_preserves_container_settings_and_mounts() {
     let session = &loaded.sessions["session-1"];
     assert_eq!(session.state, SessionState::Destroying);
     assert_eq!(session.additional_mounts, vec![attached]);
-    assert_eq!(session.container_cpus.as_deref(), Some("6"));
-    assert_eq!(session.container_memory.as_deref(), Some("12g"));
+    assert_eq!(
+        session.resource_allocation,
+        Some(SessionResourceAllocation::Container {
+            cpus: 6,
+            memory_bytes: 12 << 30
+        })
+    );
 }
 
 #[test]
@@ -1715,8 +1729,10 @@ fn checkpointed_save_preserves_container_settings_and_mounts() {
     set_session_container_settings_to(
         &database,
         "session-1",
-        Some("6"),
-        Some("12g"),
+        Some(&SessionResourceAllocation::Container {
+            cpus: 6,
+            memory_bytes: 12 << 30,
+        }),
         std::slice::from_ref(&attached),
         "2026-08-15T00:00:00Z",
     )
@@ -1742,8 +1758,13 @@ fn checkpointed_save_preserves_container_settings_and_mounts() {
         Some("native-checkpointed")
     );
     assert_eq!(session.additional_mounts, vec![attached]);
-    assert_eq!(session.container_cpus.as_deref(), Some("6"));
-    assert_eq!(session.container_memory.as_deref(), Some("12g"));
+    assert_eq!(
+        session.resource_allocation,
+        Some(SessionResourceAllocation::Container {
+            cpus: 6,
+            memory_bytes: 12 << 30
+        })
+    );
 }
 
 #[test]
@@ -7408,6 +7429,8 @@ fn target_access_survives_lifecycle_updates_and_changes_with_the_target() {
 
     record.state = SessionState::Error;
     save_lifecycle_session_to(&database, &record).unwrap();
+    // The database's failure trigger advances the generation on the state change.
+    record.failure_generation += 1;
     assert_eq!(
         load_state_from(&database).unwrap().sessions[&record.id],
         record

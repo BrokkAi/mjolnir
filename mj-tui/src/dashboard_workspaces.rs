@@ -282,14 +282,16 @@ impl DashboardState {
         }
         // Only the pending attention jump continues the traversal across tabs.
         let attention_navigation = self.attention_navigation.take().filter(|navigation| {
-            self.navigation_session.as_deref() == Some(navigation.session_id.as_str())
+            self.pending_navigation
+                .as_ref()
+                .is_some_and(|pending| pending.session_id == navigation.session_id)
                 && self
                     .state
                     .sessions
                     .get(&navigation.session_id)
                     .is_some_and(|session| Some(&session.workspace_id) == workspace_id.as_ref())
         });
-        let workspace_focused = self.focus == Focus::Workspaces;
+        let mut workspace_focused = self.focus == Focus::Workspaces;
         if let Some(current) = self.active_workspace_id.clone() {
             self.workspace_views
                 .insert(current, WorkspaceViewState::from_dashboard(self));
@@ -351,9 +353,9 @@ impl DashboardState {
                 Some(record.workspace_id.as_str()) == self.active_workspace_id()
             }) {
                 if self
-                    .navigation_session
-                    .as_deref()
-                    .and_then(|child| self.state.subagents.get(child))
+                    .pending_navigation
+                    .as_ref()
+                    .and_then(|pending| self.state.subagents.get(&pending.session_id))
                     .is_some_and(|relation| {
                         relation.kind == mj_core::subagent::SubagentKind::Reviewer
                     })
@@ -362,19 +364,33 @@ impl DashboardState {
                 } else {
                     self.open_subagent_workspace(parent_id);
                 }
-                if let Some(session) = self.navigation_session.clone() {
-                    self.select_active_session(&session);
+                if let Some(pending) = self.pending_navigation.clone() {
+                    self.select_active_session(&pending.session_id);
                     self.clear_filter_hiding_selection();
                 }
             }
             self.navigation_subagent_parent = None;
-        } else if let Some(session) = self.navigation_session.clone()
-            && self.state.sessions.get(&session).is_some_and(|record| {
-                Some(record.workspace_id.as_str()) == self.active_workspace_id()
-            })
+        } else if let Some(pending) = self.pending_navigation.clone()
+            && self
+                .state
+                .sessions
+                .get(&pending.session_id)
+                .is_some_and(|record| {
+                    Some(record.workspace_id.as_str()) == self.active_workspace_id()
+                })
         {
-            self.select_active_session(&session);
+            if let Some(record) = self.state.sessions.get(&pending.session_id) {
+                let key = self.project_source(record).key;
+                self.collapsed_project_keys.remove(&key);
+            }
+            self.select_active_session(&pending.session_id);
             self.clear_filter_hiding_selection();
+            // A move that only selects the row lands on Sessions, wherever the
+            // focus was, so the row's own keys act on it.
+            if !pending.open {
+                self.focus = Focus::Sessions;
+                workspace_focused = false;
+            }
         }
         self.clamp_selections();
         if workspace_focused {

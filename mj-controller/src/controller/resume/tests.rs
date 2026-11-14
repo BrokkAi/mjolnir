@@ -1219,8 +1219,6 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
         create_managed_worktree: None,
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
-        container_cpus: None,
-        container_memory: None,
         id: "0123456789abcdef0123456789abcdef".into(),
         title: "imported session".into(),
         harness_kind: mj_core::config::HarnessKind::Codex,
@@ -1245,6 +1243,8 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
         viewed_through_event_ordinal: 0,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: None,
     };
@@ -1518,7 +1518,7 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
     assert!(!detail.contains("unknown session"), "{detail}");
     assert_eq!(
         executor.mounts_during_provisioning.into_inner().unwrap(),
-        Some(resumed_mounts)
+        Some(resumed_mounts.clone())
     );
 
     let retained = controller.state.sessions.get(session_id).unwrap();
@@ -1531,10 +1531,7 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
     let durable_session = durable.sessions.get(session_id).unwrap();
     assert_eq!(durable_session.state, SessionState::Stopped);
     assert_eq!(durable_session.checkpoint, previous.checkpoint);
-    assert_eq!(
-        durable_session.additional_mounts,
-        previous.additional_mounts
-    );
+    assert_eq!(durable_session.additional_mounts, resumed_mounts);
     assert_eq!(
         crate::database::load_materialized_session(session_id).unwrap(),
         Some(expected_projection)

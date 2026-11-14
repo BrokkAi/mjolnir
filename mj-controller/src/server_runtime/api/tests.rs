@@ -980,8 +980,6 @@ fn parent_record(id: &str, profile: &str) -> SessionRecord {
         build_cache: None,
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
-        container_cpus: None,
-        container_memory: None,
         id: id.to_owned(),
         title: "parent".into(),
         harness_kind: HarnessKind::Codex,
@@ -1006,6 +1004,8 @@ fn parent_record(id: &str, profile: &str) -> SessionRecord {
         viewed_through_event_ordinal: 0,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: None,
     }

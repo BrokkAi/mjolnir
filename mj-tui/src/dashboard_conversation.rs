@@ -201,8 +201,13 @@ impl DashboardState {
         }
     }
 
-    pub fn take_navigation_session(&mut self) -> Option<String> {
-        self.navigation_session.take()
+    /// The session a finished workspace switch should open, if the move that
+    /// asked for the switch wanted it opened rather than only selected.
+    pub fn take_session_to_open(&mut self) -> Option<String> {
+        self.pending_navigation
+            .take()
+            .filter(|navigation| navigation.open)
+            .map(|navigation| navigation.session_id)
     }
 
     pub fn reveal_pane(&mut self, pane: PaneId) {

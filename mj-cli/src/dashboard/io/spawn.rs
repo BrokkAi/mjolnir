@@ -938,8 +938,7 @@ pub(crate) fn spawn_quota_refresh_request(updates: UnboundedSender<DashboardIoUp
 /// What the container editor asks the controller to persist.
 pub(crate) struct ContainerSettingsRequest {
     pub(crate) session_id: String,
-    pub(crate) cpus: Option<String>,
-    pub(crate) memory: Option<String>,
+    pub(crate) resource_allocation: Option<mj_core::state::SessionResourceAllocation>,
     pub(crate) additional_mounts: Vec<mj_controller::targets::AdditionalMount>,
     pub(crate) mount_history: Vec<std::path::PathBuf>,
 }
@@ -959,8 +958,7 @@ pub(crate) fn spawn_dashboard_container_settings(
         async move {
             let ContainerSettingsRequest {
                 session_id,
-                cpus,
-                memory,
+                resource_allocation,
                 additional_mounts,
                 mount_history,
             } = request;
@@ -968,8 +966,7 @@ pub(crate) fn spawn_dashboard_container_settings(
                 .await?
                 .set_session_container_settings(
                     session_id,
-                    cpus,
-                    memory,
+                    resource_allocation,
                     additional_mounts,
                     mount_history,
                 )
@@ -1353,8 +1350,6 @@ pub(crate) fn spawn_dashboard_create_session(
                         // Local changes are never part of isolated creation;
                         // the compatibility field is intentionally ignored.
                         resource_allocation,
-                        container_cpus: carried.container_cpus,
-                        container_memory: carried.container_memory,
                         title,
                         session_title_override: None,
                     })

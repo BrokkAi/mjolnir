@@ -944,8 +944,6 @@ impl Controller {
             &source.native_session_id,
             &source.resource_allocation,
             &source.additional_mounts,
-            &source.container_cpus,
-            &source.container_memory,
             selection,
             self.move_configuration_fingerprint(selection)?,
             &queued,
@@ -1136,25 +1134,10 @@ impl Controller {
         selection
             .target_template_id
             .get_or_insert_with(|| source.target_template_id.clone());
-        selection
-            .additional_mounts
-            .get_or_insert_with(|| source.additional_mounts.clone());
         ensure!(
             !selection.clear_resource_allocation || selection.resource_allocation.is_none(),
             "select resource allocation or explicitly clear it, not both"
         );
-        if !selection.clear_resource_allocation {
-            selection.resource_allocation = selection
-                .resource_allocation
-                .or_else(|| source.resource_allocation.clone());
-        }
-        if selection.clear_resource_allocation
-            && source.resource_allocation.is_none()
-            && source.container_cpus.is_none()
-            && source.container_memory.is_none()
-        {
-            selection.clear_resource_allocation = false;
-        }
         if let Some(retained) = previous.as_ref().filter(|op| op.holds_source_environment()) {
             // An in-place Move transfers no files, so its file selection is
             // not part of what a retry has to repeat. Every surface (the web
@@ -1230,7 +1213,7 @@ impl Controller {
         .map_err(anyhow::Error::msg)?;
         super::backend::validate_resource_allocation(
             target,
-            selection.resource_allocation.as_ref(),
+            move_requested_allocation(source, &selection),
         )?;
         let in_place = move_in_place_for_record(
             source,
@@ -1239,7 +1222,7 @@ impl Controller {
             self.state.subagents.contains_key(&source.id),
             previous.as_ref(),
         );
-        let mounts = selection.additional_mounts.as_deref().unwrap_or_default();
+        let mounts = move_requested_mounts(source, &selection);
         ensure!(
             profile.kind != mj_core::config::HarnessKind::Muse || mounts.is_empty(),
             "{} ACP supports one workspace root; attached directories are unsupported",
@@ -1449,6 +1432,11 @@ impl Controller {
             op.selection == prepared.selection && op.checkpoint_retained()
         });
         if retry.is_none() && move_changes_nothing(&source, &checked.selection) {
+            crate::database::accept_unchanged_move(&checked.selection)?;
+            let latest = crate::database::load_session_record(&id)?.context("Move session disappeared")?;
+            let record = self.state.sessions.get_mut(&id).unwrap();
+            record.resource_allocation = latest.resource_allocation;
+            record.additional_mounts = latest.additional_mounts;
             on_accepted();
             return Ok(outcome(
                 &prepared.operation_id,
@@ -1511,8 +1499,10 @@ impl Controller {
                 source_target_template_id: source.target_template_id.clone(),
                 source_target: source.target.clone().map(|v| *v),
                 source_native_session_id: source.native_session_id.clone(),
-                source_additional_mounts: source.additional_mounts.clone(),
-                source_resource_allocation: source.resource_allocation.clone(),
+                inherited_resource_allocation: None,
+                inherited_additional_mounts: Vec::new(),
+                source_additional_mounts: Vec::new(),
+                source_resource_allocation: None,
                 destination_target: None,
                 destination_native_session_id: None,
                 destination_store_id: None,
@@ -1534,9 +1524,10 @@ impl Controller {
             operation.quota_stop_reason = Some(reason);
             operation.quota_continuation = Some(continuation);
         }
+        operation.capture_container_settings(&source);
         operation.accepted_preparation = Some(Box::new(checked.clone()));
         operation.acknowledge_interruption = request.acknowledge_interruption;
-        crate::database::save_move_operation(&operation)?;
+        crate::database::accept_move_operation(&operation)?;
         on_accepted();
         tracing::info!(
             session_id = id,
@@ -1594,6 +1585,16 @@ impl Controller {
         result: Result<()>,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<MoveOutcome> {
+        let id = &operation.selection.session_id;
+        let latest =
+            crate::database::load_session_record(id)?.context("Move session disappeared")?;
+        let record = self
+            .state
+            .sessions
+            .get_mut(id)
+            .context("Move session missing from controller")?;
+        record.resource_allocation = latest.resource_allocation;
+        record.additional_mounts = latest.additional_mounts;
         if result.is_err()
             && operation.workspace_transfer.is_some()
             && !crate::upgrade::gate().is_open()
@@ -2328,6 +2329,17 @@ impl Controller {
             crate::database::save_move_operation(operation)?;
             executor.reserve_move_destination();
             executor.notify_notice("Preparing destination");
+            // Provision from this attempt's admitted choices, not settings
+            // edited while the source was checkpointing or rolling back.
+            let session = self.state.sessions.get_mut(&id).unwrap();
+            session.resource_allocation = if operation.selection.clear_resource_allocation {
+                None
+            } else {
+                operation.selection.resource_allocation.clone()
+                    .or_else(|| operation.inherited_resource_allocation.clone())
+            };
+            session.additional_mounts = operation.selection.additional_mounts.clone()
+                .unwrap_or_else(|| operation.inherited_additional_mounts.clone());
             // The destination worker reads its delegation policy from the
             // record at launch. `recovery_session` above keeps the old one
             // for a rollback.
@@ -2359,13 +2371,6 @@ impl Controller {
                 ))
                 .await?;
             } else {
-                if operation.selection.clear_resource_allocation {
-                    let session = self.state.sessions.get_mut(&id).unwrap();
-                    session.resource_allocation = None;
-                    session.container_cpus = None;
-                    session.container_memory = None;
-                    crate::database::save_resumed_session(session, None)?;
-                }
                 if operation.workspace_transfer.is_some() {
                     self.capture_move_workspace(operation, executor)?;
                     Box::pin(self.resume_session_for_move(operation, executor)).await?;
@@ -2379,8 +2384,8 @@ impl Controller {
                         operation.selection.profile_id.as_deref().unwrap(),
                         operation.selection.target_template_id.as_deref().unwrap(),
                         SessionResumeOptions {
-                            additional_mounts: operation.selection.additional_mounts.clone(),
-                            resource_allocation: operation.selection.resource_allocation.clone(),
+                            additional_mounts: None,
+                            resource_allocation: None,
                             discard_queue: true,
                         },
                         executor,
@@ -2844,6 +2849,30 @@ fn outcome(
     }
 }
 
+fn move_requested_allocation<'a>(
+    source: &'a mj_core::state::SessionRecord,
+    selection: &'a MoveSelection,
+) -> Option<&'a mj_core::state::SessionResourceAllocation> {
+    if selection.clear_resource_allocation {
+        None
+    } else {
+        selection
+            .resource_allocation
+            .as_ref()
+            .or(source.resource_allocation.as_ref())
+    }
+}
+
+fn move_requested_mounts<'a>(
+    source: &'a mj_core::state::SessionRecord,
+    selection: &'a MoveSelection,
+) -> &'a [crate::targets::AdditionalMount] {
+    selection
+        .additional_mounts
+        .as_deref()
+        .unwrap_or(&source.additional_mounts)
+}
+
 /// One decision shared by no-op detection and environment retention. A
 /// different target template counts as a change unless `same_environment` says
 /// the two name the same bare machine.
@@ -2856,11 +2885,12 @@ fn move_environment_change(
         && !same_environment
     {
         Some("target changed")
-    } else if Some(&source.additional_mounts) != selection.additional_mounts.as_ref() {
+    } else if mj_core::state::applied_container_settings(source).additional_mounts
+        != move_requested_mounts(source, selection)
+    {
         Some("attached mounts changed")
-    } else if source.resource_allocation != selection.resource_allocation
-        || (selection.clear_resource_allocation
-            && (source.container_cpus.is_some() || source.container_memory.is_some()))
+    } else if mj_core::state::applied_container_settings(source).resource_allocation
+        != move_requested_allocation(source, selection)
     {
         Some("resource allocation changed")
     } else {

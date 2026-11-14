@@ -41,6 +41,48 @@
 / search (filter a/b/w/i/d) · Tab pane │ ctrl+b then c create · g sessions · a read · o next (?2) · b panes · q detach · : / ? palette
 attention levels: asks=Waiting, remote=Waiting, done=Unread, quiet=Idle, missing=Inactive; queue: [asks:Waiting, remote:Waiting, done:Unread]
 
+=== stopped failure remains a row (140x40) ===
+╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
+│ Default ×1  Other ?1                     ≡ ││                                                                                            │
+╰────────────────────────────────────────────╯│ The session's target failed, so there is no conversation to open.                          │
+╭ Sessions ─────────────────────── ▁   ▄   □ ╮│                                                                                            │
+│ Create   Open   Filter: ___________________││ resume failed: target unavailable                                                          │
+│[1] asks ───────────────────────────────────││                                                                                            │
+│  ? ACP pretty name                     ◇ ⋯ ││                                                                                            │
+│  Question  podman  codex-1                 ││                                                                                            │
+│  │ Choose a path                           ││                                                                                            │
+│  │                                         ││                                                                                            │
+│                                            ││                                                                                            │
+│[2] done ───────────────────────────────────││                                                                                            │
+│  ✓ ACP pretty name                     ◇ ⋯ ││                                                                                            │
+│  Idle  podman  codex-1                     ││                                                                                            │
+│  │ No messages yet                         ││                                                                                            │
+│  │                                         ││                                                                                            │
+│                                            ││                                                                                            │
+│[3] quiet ──────────────────────────────────││                                                                                            │
+│› × ACP pretty name                     ◇ ⋯ ││                                                                                            │
+│  Stopped  podman  codex-1                  ││                                                                                            │
+│  │ No messages yet                         ││                                                                                            │
+│  │                                         ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            ││                                                                                            │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Session stopped ───────────────────────────────────────────────────────────────────────────╮
+│                                            ││In Sessions, Enter resumes it; . opens its actions: Dismiss notification or Destroy session.│
+│                                            ││                                                                                            │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Targets ▾ ────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││  Host / fleet  Targets  CPU  RAM                                                           │
+│                                            │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+│                                            │╭ Profiles ▾ (not refreshed)────────────────────────────────────────────────────────── ▁   ▄ ╮
+│                                            ││            Harness      Weekly      Resets  5H Resets                                      │
+│                                            ││  claude-1  Claude Code  refreshing…                                                        │
+│                                            ││  codex-1   Codex        refreshing…                                                        │
+│                                            ││  codex-2   Codex        refreshing…                                                        │
+╰────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────────────╯
+Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b then c create · g sessions · a read · o next (×1) · : / ? palette
+
 === failure, unreachable worker, and question (140x40) ===
 ╭ Workspaces ────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────────────────────────────── ◇   ⋯───╮
 │ Default ×1  Other ×1                     ≡ ││                                                                                            │

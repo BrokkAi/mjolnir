@@ -30,8 +30,6 @@ pub struct TargetRuntimeSettings {
 pub struct ContainerSettings {
     pub additional_mounts: Vec<AdditionalMount>,
     pub resource_allocation: Option<SessionResourceAllocation>,
-    pub cpus: Option<String>,
-    pub memory: Option<String>,
     /// Which image the container was created from, as far as upgrades care:
     /// `Some(Some(image))` for the default image of the Mjolnir that created
     /// it, `Some(None)` for a configured image, and `None` for a container
@@ -72,8 +70,6 @@ impl ContainerSettings {
         Self {
             additional_mounts: session.additional_mounts.clone(),
             resource_allocation: session.resource_allocation.clone(),
-            cpus: session.container_cpus.clone(),
-            memory: session.container_memory.clone(),
             // A container on the default image follows the default to the one
             // this Mjolnir names; a configured image stays as it was.
             default_image: Self::applied_to(session)

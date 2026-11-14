@@ -3134,8 +3134,6 @@ fn register_leased_relay_session() {
         create_managed_worktree: None,
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
-        container_cpus: None,
-        container_memory: None,
         id: LEASED_RELAY_SESSION.into(),
         title: "leased relay".into(),
         harness_kind: mj_core::config::HarnessKind::Codex,
@@ -3160,6 +3158,8 @@ fn register_leased_relay_session() {
         viewed_through_event_ordinal: 0,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: None,
     })

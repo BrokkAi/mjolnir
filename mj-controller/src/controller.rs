@@ -611,14 +611,11 @@ pub struct SessionLaunchOptions {
     pub workspace_id: String,
     pub additional_mounts: Vec<AdditionalMount>,
     pub resource_allocation: Option<SessionResourceAllocation>,
-    /// Per-session container size overrides, stored as the record's
-    /// `container_cpus` and `container_memory`; container targets only.
-    pub container_cpus: Option<String>,
-    pub container_memory: Option<String>,
     pub project_directory: Option<PathBuf>,
     pub session_title_override: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct SessionResumeOptions {
     pub additional_mounts: Option<Vec<AdditionalMount>>,
     pub resource_allocation: Option<SessionResourceAllocation>,
@@ -933,8 +930,6 @@ impl Controller {
             workspace_id,
             additional_mounts,
             resource_allocation,
-            container_cpus,
-            container_memory,
             project_directory,
             session_title_override,
         } = options;
@@ -1073,15 +1068,6 @@ impl Controller {
             (bundle_id.to_owned(), None)
         };
         validate_resource_allocation(template, resource_allocation.as_ref())?;
-        // The editor stores a cleared field as no override; a copy of its
-        // value must read the same.
-        let container_cpus = container_cpus.filter(|value| !value.trim().is_empty());
-        let container_memory = container_memory.filter(|value| !value.trim().is_empty());
-        if (container_cpus.is_some() || container_memory.is_some())
-            && !mj_core::config::is_container_target(template)
-        {
-            bail!("container size overrides apply to container targets only");
-        }
         let selected_container_size =
             selected_host_container_size(template, resource_allocation.as_ref())
                 .filter(|_| remember_container_size);
@@ -1124,8 +1110,6 @@ impl Controller {
             publication: None,
             subagents: Some(subagents),
             archived: false,
-            container_cpus,
-            container_memory,
             // Recorded for every new session, container-backed or not, so a
             // later move into a container already knows the path its checkout
             // will occupy. Only sessions that predate per-session container
@@ -1156,6 +1140,8 @@ impl Controller {
             viewed_through_event_ordinal: 0,
             draft_input: initial_prompt.unwrap_or_default(),
             last_error: None,
+            dismissed_failure: None,
+            failure_generation: 0,
             last_checkpoint_error: None,
             checkpoint: None,
         };
@@ -1506,8 +1492,7 @@ impl Controller {
     pub fn update_session_container_settings(
         &mut self,
         session_id: &str,
-        cpus: Option<String>,
-        memory: Option<String>,
+        resource_allocation: Option<SessionResourceAllocation>,
         additional_mounts: Vec<targets::AdditionalMount>,
         mount_history: Vec<std::path::PathBuf>,
         executor: &impl CommandExecutor,
@@ -1533,13 +1518,21 @@ impl Controller {
             }
             self.validate_mount_source(&session.target_template_id, &mount.source, executor)?;
         }
-        let cpus = cpus.filter(|value| !value.trim().is_empty());
-        let memory = memory.filter(|value| !value.trim().is_empty());
+        let template = self
+            .config
+            .targets
+            .get(&session.target_template_id)
+            .context("session target template is missing")?;
+        backend::validate_resource_allocation(template, resource_allocation.as_ref())?;
+        if resource_allocation != session.resource_allocation
+            && let Some(allocation) = &resource_allocation
+        {
+            allocation.validate_minimum_useful_container()?;
+        }
         let updated_at = now();
         crate::database::set_session_container_settings(
             session_id,
-            cpus.as_deref(),
-            memory.as_deref(),
+            resource_allocation.as_ref(),
             &additional_mounts,
             &updated_at,
         )?;
@@ -1566,8 +1559,7 @@ impl Controller {
             .sessions
             .get_mut(session_id)
             .expect("session was checked before updating its container settings");
-        record.container_cpus = cpus;
-        record.container_memory = memory;
+        record.resource_allocation = resource_allocation;
         record.additional_mounts = additional_mounts;
         record.updated_at = updated_at;
         Ok(())

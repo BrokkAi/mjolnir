@@ -646,15 +646,6 @@ pub struct CreateSessionRequest {
     pub target_template_id: String,
     pub additional_mounts: Vec<AdditionalMount>,
     pub resource_allocation: Option<SessionResourceAllocation>,
-    /// Per-session container CPU and memory overrides, stored verbatim on the
-    /// record. They win over `resource_allocation` when the container is
-    /// created, so a copy of a resized session carries them as they are. Only
-    /// valid for a container target. Omitted fields are skipped on the wire,
-    /// so a request without them is accepted by every daemon of this protocol.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub container_cpus: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub container_memory: Option<String>,
     pub title: String,
     pub session_title_override: Option<String>,
 }
@@ -944,8 +935,7 @@ pub enum DaemonAction {
     },
     SetSessionContainerSettings {
         session_id: String,
-        cpus: Option<String>,
-        memory: Option<String>,
+        resource_allocation: Option<SessionResourceAllocation>,
         mounts: Vec<AdditionalMount>,
         mount_history: Vec<PathBuf>,
     },
@@ -2576,16 +2566,14 @@ impl DaemonClient {
     pub async fn set_session_container_settings(
         &mut self,
         session_id: String,
-        cpus: Option<String>,
-        memory: Option<String>,
+        resource_allocation: Option<SessionResourceAllocation>,
         mounts: Vec<AdditionalMount>,
         mount_history: Vec<PathBuf>,
     ) -> Result<()> {
         match self
             .request(DaemonAction::SetSessionContainerSettings {
                 session_id,
-                cpus,
-                memory,
+                resource_allocation,
                 mounts,
                 mount_history,
             })
@@ -3536,7 +3524,9 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // unread frontiers.
 // Version 95: authenticated daemon-owned login terminal streams.
 // Version 95: milestone-4 setup discovery, availability, login status and machine actions.
-pub const PROTOCOL_VERSION: u32 = 96;
+// Version 97: the daemon decides which sessions are notifications.
+// Version 98: container settings use the single resource allocation.
+pub const PROTOCOL_VERSION: u32 = 98;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

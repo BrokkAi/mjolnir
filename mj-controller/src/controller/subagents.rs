@@ -324,7 +324,9 @@ impl Controller {
             })?;
         profile.ensure_ready(&request.profile_id)?;
         if profile.kind == HarnessKind::Muse {
-            let multiple_roots = !parent.additional_mounts.is_empty()
+            let multiple_roots = !mj_core::state::applied_container_settings(&parent)
+                .additional_mounts
+                .is_empty()
                 || (self
                     .state
                     .checkout(&parent.id)?
@@ -374,8 +376,6 @@ impl Controller {
             subagents: Some(mj_core::subagent::SubagentPolicy::None),
             create_managed_worktree: Some(false),
             archived: false,
-            container_cpus: None,
-            container_memory: None,
             // A child runs inside its parent's container, so it works in the
             // parent's workspace, including the legacy shared one.
             container_workspace: parent.container_workspace.clone(),
@@ -395,8 +395,12 @@ impl Controller {
                 || request.no_github_credentials
                 || !self.config.github.session_credentials,
             target_template_id: parent.target_template_id.clone(),
-            resource_allocation: parent.resource_allocation.clone(),
-            additional_mounts: parent.additional_mounts.clone(),
+            resource_allocation: mj_core::state::applied_container_settings(&parent)
+                .resource_allocation
+                .cloned(),
+            additional_mounts: mj_core::state::applied_container_settings(&parent)
+                .additional_mounts
+                .to_vec(),
             state: SessionState::Provisioning,
             target: Some(Box::new(target)),
             native_session_id: None,
@@ -407,6 +411,8 @@ impl Controller {
             viewed_through_event_ordinal: 0,
             draft_input: String::new(),
             last_error: None,
+            dismissed_failure: None,
+            failure_generation: 0,
             last_checkpoint_error: None,
             checkpoint: None,
         };

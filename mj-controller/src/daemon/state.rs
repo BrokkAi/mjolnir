@@ -363,8 +363,6 @@ impl RuntimeState {
                 target_template_id: request.target_template_id,
                 additional_mounts: request.additional_mounts,
                 resource_allocation: request.resource_allocation,
-                container_cpus: None,
-                container_memory: None,
                 title: archived.title.clone(),
                 // The harness names a session after its first message, and the
                 // first message here carries the hidden hand-off. Pinning the

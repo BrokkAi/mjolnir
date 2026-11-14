@@ -743,21 +743,15 @@ fn backend_bundle_with_sources(
     })
 }
 
-/// Per-session container overrides. They win over both the target
-/// template's values and any recorded resource allocation, and they are read
-/// only while a container is being created.
+/// Per-session credential policy applied while creating a container.
 #[derive(Debug, Clone, Copy, Default)]
-pub(super) struct ContainerOverrides<'a> {
-    pub cpus: Option<&'a str>,
-    pub memory: Option<&'a str>,
+pub(super) struct ContainerOverrides {
     pub no_github_credentials: bool,
 }
 
-impl<'a> ContainerOverrides<'a> {
-    pub(super) fn for_session(session: &'a SessionRecord) -> Self {
+impl ContainerOverrides {
+    pub(super) fn for_session(session: &SessionRecord) -> Self {
         Self {
-            cpus: session.container_cpus.as_deref(),
-            memory: session.container_memory.as_deref(),
             no_github_credentials: session.no_github_credentials,
         }
     }
@@ -766,7 +760,7 @@ impl<'a> ContainerOverrides<'a> {
 pub(super) fn backend_target(
     template: &TargetTemplate,
     allocation: Option<&SessionResourceAllocation>,
-    overrides: ContainerOverrides<'_>,
+    overrides: ContainerOverrides,
 ) -> Result<targets::TargetTemplate> {
     Ok(match template {
         TargetTemplate::LocalBare => targets::TargetTemplate::LocalBare,
@@ -997,7 +991,7 @@ pub(super) fn use_github_https_urls(bundle: &mut targets::ProjectBundleSpec) {
 fn backend_container(
     container: &mj_core::config::ContainerTemplate,
     allocation: Option<&SessionResourceAllocation>,
-    overrides: ContainerOverrides<'_>,
+    overrides: ContainerOverrides,
 ) -> ContainerTemplate {
     backend_container_with(container, allocation, overrides, false)
 }
@@ -1019,7 +1013,7 @@ pub(super) struct ContainerEnvironment {
 
 pub(super) fn container_environment(
     container: &mj_core::config::ContainerTemplate,
-    overrides: ContainerOverrides<'_>,
+    overrides: ContainerOverrides,
     secrets_out_of_band: bool,
 ) -> ContainerEnvironment {
     let mut environment = container.environment.resolved().clone();
@@ -1042,7 +1036,7 @@ pub(super) fn container_environment(
 fn backend_container_with(
     container: &mj_core::config::ContainerTemplate,
     allocation: Option<&SessionResourceAllocation>,
-    overrides: ContainerOverrides<'_>,
+    overrides: ContainerOverrides,
     secrets_out_of_band: bool,
 ) -> ContainerTemplate {
     let mut extra_run_args = Vec::new();
@@ -1055,9 +1049,6 @@ fn backend_container_with(
         }
         _ => (container.cpus.clone(), container.memory.clone()),
     };
-    // The session's own overrides are the last word on size.
-    let cpus = overrides.cpus.map(str::to_owned).or(cpus);
-    let memory = overrides.memory.map(str::to_owned).or(memory);
     if let Some(cpus) = cpus {
         extra_run_args.push(format!("--cpus={cpus}"));
     }

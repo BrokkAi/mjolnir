@@ -290,21 +290,8 @@ pub(crate) async fn apply_dashboard_action(
             });
         }
         DashboardAction::OpenSubagents { parent_id } => context.open_subagents(parent_id),
-        DashboardAction::DismissNotification { session_id, target } => {
-            let result_session = session_id.clone();
-            let result_target = target.clone();
-            spawn_async_job(
-                Some(context.critical_operations.clone()),
-                "notification dismissal",
-                context.dashboard_io_tx.clone(),
-                std::time::Duration::from_secs(30),
-                request_notification_dismissal(session_id, target),
-                move |result| DashboardIoUpdate::NotificationDismissed {
-                    session_id: result_session,
-                    target: result_target,
-                    result,
-                },
-            );
+        action @ DashboardAction::DismissNotification { .. } => {
+            spawn_notification_dismissal(context, action)
         }
         DashboardAction::DismissNotifications { dismissals } => {
             // Every dismissal is sent at once with its own deadline, so a slow
@@ -1061,8 +1048,7 @@ pub(crate) async fn apply_dashboard_action(
         }
         DashboardAction::SaveContainerSettings {
             session_id,
-            cpus,
-            memory,
+            resource_allocation,
             additional_mounts,
             mount_history,
         } => {
@@ -1073,8 +1059,7 @@ pub(crate) async fn apply_dashboard_action(
             spawn_dashboard_container_settings(
                 ContainerSettingsRequest {
                     session_id,
-                    cpus,
-                    memory,
+                    resource_allocation,
                     additional_mounts,
                     mount_history,
                 },
@@ -2302,6 +2287,28 @@ fn lifecycle_move_outcome(reply: daemon::DaemonReply) -> Result<mj_core::state::
     match reply {
         daemon::DaemonReply::MoveOutcome(outcome) => Ok(outcome),
         _ => bail!("daemon returned an unexpected move reply"),
+    }
+}
+
+pub(crate) fn spawn_notification_dismissal(
+    context: &mut DashboardContext,
+    action: DashboardAction,
+) {
+    if let DashboardAction::DismissNotification { session_id, target } = action {
+        let result_session = session_id.clone();
+        let result_target = target.clone();
+        spawn_async_job(
+            Some(context.critical_operations.clone()),
+            "notification dismissal",
+            context.dashboard_io_tx.clone(),
+            std::time::Duration::from_secs(30),
+            request_notification_dismissal(session_id, target),
+            move |result| DashboardIoUpdate::NotificationDismissed {
+                session_id: result_session,
+                target: result_target,
+                result,
+            },
+        );
     }
 }
 

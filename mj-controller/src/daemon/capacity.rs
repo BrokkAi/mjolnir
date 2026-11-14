@@ -283,6 +283,31 @@ impl RuntimeState {
     /// One serialized decision for create, resume and Move. Create under a hard
     /// RAM limit retains the guard until registration; existing sessions
     /// install a lease before unlock.
+    pub(crate) async fn validate_container_settings_size(
+        &self,
+        session_id: &str,
+        allocation: Option<&mj_core::state::SessionResourceAllocation>,
+    ) -> Result<()> {
+        let Some(mj_core::state::SessionResourceAllocation::Container { cpus, memory_bytes }) =
+            allocation
+        else {
+            return Ok(());
+        };
+        let target_id = self
+            .session_record(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?
+            .target_template_id
+            .clone();
+        if let Some(input) = self.container_capacity_input(&target_id).await?
+            && (*cpus > input.total.cpus || *memory_bytes > input.total.memory_bytes)
+        {
+            bail!("container resource allocation exceeds this host's reported CPU or memory limit");
+        }
+        Ok(())
+    }
+
+    /// RAM limit retains the guard until registration;
+    /// install a lease before unlock.
     pub(crate) async fn admit_container_launch(
         self: &Arc<Self>,
         target_id: &str,
@@ -510,7 +535,8 @@ fn source_commitment_is_live(
         .is_some_and(|session| {
             source.target_ids.contains(&session.target_template_id)
                 && mj_core::state::session_owns_container(session)
-                && session.resource_allocation == source.allocation
+                && mj_core::state::counted_container_allocation(session)
+                    == source.allocation.as_ref()
         })
 }
 
@@ -583,7 +609,8 @@ impl ContainerCapacityProjection {
             match (self.owners.get(id), owner) {
                 (Some(before), Some(after))
                     if before.target_template_id == after.target_template_id
-                        && before.resource_allocation == after.resource_allocation => {}
+                        && mj_core::state::counted_container_allocation(before)
+                            == mj_core::state::counted_container_allocation(after) => {}
                 (_, Some(record)) => {
                     self.owners.insert(id.clone(), record.clone());
                     changed = true;

@@ -2860,8 +2860,6 @@ mod tests {
             create_managed_worktree: None,
             workspace_id: workspace_id.to_owned(),
             archived: false,
-            container_cpus: None,
-            container_memory: None,
             id: id.into(),
             title: id.into(),
             harness_kind: HarnessKind::Codex,
@@ -2886,6 +2884,8 @@ mod tests {
             viewed_through_event_ordinal: 0,
             draft_input: String::new(),
             last_error: None,
+            dismissed_failure: None,
+            failure_generation: 0,
             last_checkpoint_error: None,
             checkpoint: None,
         }

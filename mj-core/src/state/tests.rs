@@ -294,8 +294,6 @@ fn sample_state() -> State {
         create_managed_worktree: None,
         workspace_id: crate::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
-        container_cpus: None,
-        container_memory: None,
         container_workspace: None,
         id: "0123456789abcdef".into(),
         title: "Build Hel".into(),
@@ -329,6 +327,8 @@ fn sample_state() -> State {
         viewed_through_event_ordinal: 0,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: Some(Box::new(CheckpointMetadata {
             archive_path: PathBuf::from("sessions/0123456789abcdef.hel.zip"),
@@ -358,6 +358,17 @@ fn container_capacity_counts_owners_and_provisioning_but_not_borrowed_children()
         memory_bytes: 8 << 30,
     });
 
+    let mut runtime = parent
+        .target_runtime
+        .as_deref()
+        .cloned()
+        .unwrap_or_else(|| (&sample_config().targets["podman"]).into());
+    runtime.container_settings = Some(ContainerSettings::requested(&parent));
+    parent.target_runtime = Some(std::sync::Arc::new(runtime));
+    parent.resource_allocation = Some(SessionResourceAllocation::Container {
+        cpus: 8,
+        memory_bytes: 16 << 30,
+    });
     let mut child = parent.clone();
     child.id = "fedcba9876543210".into();
     child.target = Some(Box::new(TargetLocator::LocalPodman {
@@ -374,6 +385,19 @@ fn container_capacity_counts_owners_and_provisioning_but_not_borrowed_children()
         cpus: 2,
         memory_bytes: 4 << 30,
     });
+    // A removed locator during upgrade recovery does not erase its applied snapshot.
+    assert_eq!(
+        applied_container_settings(&provisioning).resource_allocation,
+        parent
+            .target_runtime
+            .as_ref()
+            .unwrap()
+            .container_settings
+            .as_ref()
+            .unwrap()
+            .resource_allocation
+            .as_ref()
+    );
 
     let capacity = host_container_capacity(
         HostContainerSize {
@@ -443,6 +467,27 @@ fn container_capacity_counts_owners_and_provisioning_but_not_borrowed_children()
     assert!(warning.contains("more CPUs"));
     assert!(warning.contains("more RAM"));
     assert!(warning.contains("still start"));
+
+    // Hard-won: #1538: a container created at the target's defaults was
+    // counted at a later, smaller Container settings request.
+    let mut defaults = parent.clone();
+    let mut runtime = defaults.target_runtime.as_deref().cloned().unwrap();
+    runtime
+        .container_settings
+        .as_mut()
+        .expect("the parent records its applied settings")
+        .resource_allocation = None;
+    defaults.target_runtime = Some(std::sync::Arc::new(runtime));
+    let unknown = host_container_capacity(
+        HostContainerSize {
+            cpus: 10,
+            memory_bytes: 20 << 30,
+        },
+        false,
+        &["podman".into()],
+        [&defaults],
+    );
+    assert!(!unknown.complete);
 }
 
 #[test]
@@ -560,13 +605,9 @@ fn session_records_written_before_container_overrides_still_load() {
     assert!(object.remove("container_memory").is_none());
 
     let loaded: SessionRecord = serde_json::from_value(json).expect("load older session");
-    assert_eq!(loaded.container_cpus, None);
-    assert_eq!(loaded.container_memory, None);
     assert_eq!(loaded, session);
 
-    let mut edited = session.clone();
-    edited.container_cpus = Some("4".into());
-    edited.container_memory = Some("8g".into());
+    let edited = session.clone();
     let round_tripped: SessionRecord =
         serde_json::from_str(&serde_json::to_string(&edited).expect("serialize"))
             .expect("reload edited session");

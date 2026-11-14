@@ -334,8 +334,6 @@ pub(crate) fn stopped_session() -> SessionRecord {
         create_managed_worktree: None,
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
-        container_cpus: None,
-        container_memory: None,
         id: "session-1".into(),
         title: "Raise the dead".into(),
         harness_kind: HarnessKind::Codex,
@@ -360,6 +358,8 @@ pub(crate) fn stopped_session() -> SessionRecord {
         viewed_through_event_ordinal: 0,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: Some(Box::new(CheckpointMetadata {
             archive_path: PathBuf::from("sessions/session-1.hel.zip"),
