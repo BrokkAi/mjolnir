@@ -44,3 +44,13 @@ license = "MIT"
 path = "LICENSE.txt"
 license = "MIT"
 checksum = "a08554fab028af3af047e8588d32d019662c1b1bf07959a195a2f75fe340726b"
+
+# jemalloc's vendored BSD license is in the supplemental native notice.
+# Select the Rust bindings' Apache license deterministically here.
+[tikv-jemalloc-sys.clarify]
+license = "Apache-2.0"
+
+[[tikv-jemalloc-sys.clarify.files]]
+path = "LICENSE-APACHE"
+license = "Apache-2.0"
+checksum = "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"

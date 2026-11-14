@@ -6,8 +6,18 @@ use super::*;
 /// The daemon's implementation lives in `server_runtime::api`; route tests
 /// supply a fake.
 pub trait SubagentBackend: Send + Sync {
+    /// Current login failures from the daemon's publication; memory only.
+    fn profile_login_errors(&self) -> AnyResult<std::collections::BTreeMap<String, String>> {
+        Ok(Default::default())
+    }
+
     fn subagent_config(&self) -> BoxFuture<'_, AnyResult<mj_core::config::SubagentConfig>> {
         Box::pin(async { anyhow::bail!("sub-agent configuration unavailable") })
+    }
+
+    /// The dashboard's load-balancing preference order, from `[quota] prefer`.
+    fn quota_preferences(&self) -> BoxFuture<'_, AnyResult<Vec<String>>> {
+        Box::pin(async { Ok(Vec::new()) })
     }
 
     /// Cheap token for this session's durable wait inputs. Backends without

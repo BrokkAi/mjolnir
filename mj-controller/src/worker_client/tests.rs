@@ -1343,7 +1343,10 @@ async fn skills_are_pushed_in_the_archive_format_the_worker_reads() {
             &skills,
             &credential_sync::GithubSync::Known(None),
             &credential_sync::AwsSync::Unmanaged,
-            &credential_sync::HostSlopcopLogin::Unknown,
+            credential_sync::HostLogins {
+                slopcop: &credential_sync::HostSlopcopLogin::Unknown,
+                harness: &credential_sync::PassLogin::PerSession,
+            },
             credential_sync::JobHold::new(None, None, None, None),
         )
         .await
@@ -2433,7 +2436,10 @@ async fn the_workers_recorded_scope_decides_what_a_failed_renewal_keeps() {
                 skills,
                 &credential_sync::GithubSync::Known(None),
                 &aws,
-                &credential_sync::HostSlopcopLogin::Unknown,
+                credential_sync::HostLogins {
+                    slopcop: &credential_sync::HostSlopcopLogin::Unknown,
+                    harness: &credential_sync::PassLogin::PerSession,
+                },
                 credential_sync::JobHold::new(None, None, None, None),
             )
             .await
@@ -2800,6 +2806,286 @@ async fn a_clean_later_pass_replaces_the_failure_an_earlier_one_reported() {
     assert!(flaky.step_failures.is_empty());
     let puller = outcomes.iter().find(|o| o.session_id == "puller").unwrap();
     assert_eq!(puller.outcome, Ok(vec![CredentialSyncAction::Pulled]));
+}
+
+/// A Claude login as the sync sees it. A copy without `refresh` is what a
+/// harness holds since #1490.
+#[cfg(unix)]
+fn claude_login(expires_at: i64, access: &str, refresh: Option<&str>) -> Vec<u8> {
+    let mut oauth = serde_json::json!({
+        "accessToken": access,
+        "expiresAt": expires_at,
+        "scopes": ["user:inference"],
+    });
+    if let Some(refresh) = refresh {
+        oauth["refreshToken"] = refresh.into();
+    }
+    serde_json::to_vec(&serde_json::json!({ "claudeAiOauth": oauth })).unwrap()
+}
+
+/// [`codex_sync_target`] for a Claude profile whose session holds `login`,
+/// which the fixture serves back and records pushes over at `received`.
+#[cfg(unix)]
+fn claude_sync_target(
+    home: &std::path::Path,
+    session_id: &str,
+    login: &[u8],
+    received: &std::path::Path,
+) -> CredentialSyncTarget {
+    let mut target = codex_sync_target(home, session_id, "2026-09-25T20:00:00.000Z", received);
+    target.profile_id = "claude1".into();
+    target.harness = mj_core::config::HarnessKind::Claude;
+    std::fs::write(received, login).unwrap();
+    let session = CredentialSnapshot::of(mj_core::config::HarnessKind::Claude, login);
+    target.spec.args[4] = session.fingerprint;
+    target.spec.args[5] = session.freshness_epoch_ms.unwrap().to_string();
+    target
+}
+
+/// #1490: a session copy holds no refresh token, so the sync must converge a
+/// copy that still holds the host's, never let a copy without one replace the
+/// host, and adopt a copy that carries a newer login of its own, then hand it
+/// back without the token.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[tokio::test]
+async fn claude_sync_converges_copies_to_the_hosts_login_without_its_refresh_token() {
+    let host_login = claude_login(2_000, "access-host", Some("refresh-host"));
+    let stripped_host = mj_core::credentials::credential_copy_for_harness(
+        mj_core::config::HarnessKind::Claude,
+        &host_login,
+    )
+    .into_owned();
+    // (session copy, expected pushes, expected pulls, host after)
+    let own_login = claude_login(3_000, "access-own", Some("refresh-own"));
+    let stripped_own = mj_core::credentials::credential_copy_for_harness(
+        mj_core::config::HarnessKind::Claude,
+        &own_login,
+    )
+    .into_owned();
+    #[allow(clippy::type_complexity, reason = "one-off table of scenarios")]
+    let cases: [(&str, Vec<u8>, Vec<CredentialSyncAction>, &[u8], &[u8]); 5] = [
+        // (a) staged before the rule: the host's own bytes, token included.
+        (
+            "pre-upgrade copy",
+            host_login.clone(),
+            vec![CredentialSyncAction::Pushed],
+            &host_login,
+            &stripped_host,
+        ),
+        // Already converged.
+        (
+            "converged copy",
+            stripped_host.clone(),
+            vec![],
+            &host_login,
+            &stripped_host,
+        ),
+        // An older copy catches up.
+        (
+            "older copy",
+            claude_login(1_000, "access-old", None),
+            vec![CredentialSyncAction::Pushed],
+            &host_login,
+            &stripped_host,
+        ),
+        // (b) later expiry but no refresh token: neither side changes.
+        (
+            "later copy without a refresh token",
+            claude_login(9_000, "access-later", None),
+            vec![],
+            &host_login,
+            &claude_login(9_000, "access-later", None),
+        ),
+        // (c) an in-session login: adopted, then returned without the token.
+        (
+            "copy with its own newer login",
+            own_login.clone(),
+            // The pull makes a second pass; the fixture's worker keeps
+            // reporting its first state, so that pass pushes again. The host
+            // holding the session's login proves the pull.
+            vec![CredentialSyncAction::Pushed],
+            &own_login,
+            &stripped_own,
+        ),
+    ];
+    for (name, session_login, actions, host_after, session_after) in cases {
+        let home = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let received = scratch.path().join("session-login");
+        let canonical = home.path().join(".credentials.json");
+        std::fs::write(&canonical, &host_login).unwrap();
+        let target = claude_sync_target(home.path(), "claude-session", &session_login, &received);
+
+        let outcomes = reconcile_profile(&[target], Some("claude-session")).await;
+
+        let outcome = outcomes
+            .iter()
+            .find(|o| o.session_id == "claude-session")
+            .unwrap();
+        assert_eq!(outcome.outcome, Ok(actions), "{name}: {outcomes:?}");
+        assert_eq!(
+            std::fs::read(&canonical).unwrap(),
+            host_after,
+            "{name}: host"
+        );
+        assert_eq!(
+            std::fs::read(&received).unwrap(),
+            session_after,
+            "{name}: session"
+        );
+    }
+}
+
+/// One macOS sync pass for one session whose copy is `session_login`, against
+/// a host whose login `keychain` holds, with `claude_dir` standing for
+/// `~/.claude`. Returns the session's copy afterwards
+/// and what the pass did.
+#[cfg(unix)]
+async fn mac_sync_pass(
+    keychain: &Arc<crate::claude_login::fake::FakeKeychain>,
+    claude_dir: &std::path::Path,
+    session_login: &[u8],
+) -> (Vec<u8>, credential_sync::SessionSync) {
+    let kind = mj_core::config::HarnessKind::Claude;
+    let home = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let received = scratch.path().join("session-login");
+    let target = claude_sync_target(home.path(), "claude-session", session_login, &received);
+    let skills = Arc::new(CanonicalSkills::collect(&target));
+    let read = match crate::setup::read_claude_keychain_login(&**keychain).unwrap() {
+        crate::setup::KeychainLogin::Present(bytes) => {
+            (CredentialSnapshot::of(kind, &bytes), bytes)
+        }
+        _ => (CredentialSnapshot::absent(), Vec::new()),
+    };
+    let pass = credential_sync::PassLogin::Keychain {
+        read: Arc::new(Ok(read)),
+        access: credential_sync::LoginAccess::new(
+            mj_core::config::HarnessLoginStore::MacKeychain,
+            keychain.clone(),
+        )
+        .with_lock_marker(claude_dir.join(".credentials.json")),
+    };
+    let sync = reconcile_session(
+        &SessionRelays::Direct,
+        &target,
+        &skills,
+        &credential_sync::GithubSync::Known(None),
+        &credential_sync::AwsSync::Unmanaged,
+        credential_sync::HostLogins {
+            slopcop: &credential_sync::HostSlopcopLogin::Unknown,
+            harness: &pass,
+        },
+        credential_sync::JobHold::new(None, None, None, None),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        !home.path().join(".credentials.json").exists(),
+        "the profile home gains no login file"
+    );
+    (std::fs::read(&received).unwrap(), sync)
+}
+
+/// #1491: a login the macOS Keychain holds reaches sessions as the stripped
+/// copy. A session copy that is strictly newer and holds its own refresh token
+/// (a pre-upgrade container or remote session that refreshed the shared grant,
+/// so the spent token is the only one the host has left) is pulled into the
+/// Keychain, with the secret on `security`'s stdin and never in its arguments,
+/// and the session is handed the stripped copy back.
+#[cfg(unix)]
+// Hard-won: #1491 review: a macOS session's refreshed login stayed in the session while the Keychain kept the spent token
+#[tokio::test]
+async fn keychain_login_sync_pulls_a_newer_session_login_into_the_keychain_and_pushes_it_back_stripped()
+ {
+    let kind = mj_core::config::HarnessKind::Claude;
+    let host_login = claude_login(2_000, "access-host", Some("refresh-host"));
+    let stripped_host =
+        mj_core::credentials::credential_copy_for_harness(kind, &host_login).into_owned();
+    let own_login = claude_login(3_000, "access-own", Some("refresh-own"));
+    let stripped_own =
+        mj_core::credentials::credential_copy_for_harness(kind, &own_login).into_owned();
+    let stripped_newer = claude_login(3_000, "access-stripped", None);
+    let claude_dir = tempfile::tempdir().unwrap();
+    // (name, session copy, expected actions, session after, Keychain after)
+    #[allow(clippy::type_complexity, reason = "one-off table of scenarios")]
+    let cases: [(&str, Vec<u8>, Vec<CredentialSyncAction>, Vec<u8>, Vec<u8>); 5] = [
+        (
+            "pre-upgrade copy that still holds the host's refresh token",
+            host_login.clone(),
+            vec![CredentialSyncAction::Pushed],
+            stripped_host.clone(),
+            host_login.clone(),
+        ),
+        (
+            "converged copy",
+            stripped_host.clone(),
+            vec![],
+            stripped_host.clone(),
+            host_login.clone(),
+        ),
+        (
+            "older copy",
+            claude_login(1_000, "access-old", None),
+            vec![CredentialSyncAction::Pushed],
+            stripped_host.clone(),
+            host_login.clone(),
+        ),
+        (
+            "newer copy that holds its own refresh token",
+            own_login.clone(),
+            vec![CredentialSyncAction::Pulled, CredentialSyncAction::Pushed],
+            stripped_own.clone(),
+            own_login.clone(),
+        ),
+        (
+            "newer copy without a refresh token cannot become the host's login",
+            stripped_newer.clone(),
+            vec![],
+            stripped_newer.clone(),
+            host_login.clone(),
+        ),
+    ];
+    for (name, session_login, actions, session_after, keychain_after) in cases {
+        let keychain = Arc::new(
+            crate::claude_login::fake::FakeKeychain::holding(&host_login)
+                .requiring_lock_in(claude_dir.path()),
+        );
+
+        let (session, sync) = mac_sync_pass(&keychain, claude_dir.path(), &session_login).await;
+
+        assert!(sync.failures.is_empty(), "{name}: {:?}", sync.failures);
+        assert_eq!(sync.actions, actions, "{name}");
+        assert_eq!(session, session_after, "{name}: session");
+        assert_eq!(
+            keychain.login().unwrap(),
+            keychain_after,
+            "{name}: Keychain"
+        );
+        for (args, stdin) in keychain.calls() {
+            let secret_in_arguments = args
+                .iter()
+                .any(|arg| arg.contains("refresh-own") || arg.contains("refresh-host"));
+            assert!(!secret_in_arguments, "{name}: {args:?}");
+            if args == ["-i"] {
+                assert!(stdin.is_some(), "{name}: the write comes on stdin");
+            }
+        }
+    }
+
+    // A Keychain that refuses the write fails the pull as a login step. The
+    // session keeps its login, and nothing is written to a file instead.
+    let keychain = Arc::new(crate::claude_login::fake::FakeKeychain::holding(
+        &host_login,
+    ));
+    keychain.refuse_writes();
+    let (session, sync) = mac_sync_pass(&keychain, claude_dir.path(), &own_login).await;
+    assert_eq!(sync.failures.len(), 1, "{:?}", sync.failures);
+    assert_eq!(sync.failures[0].step, SyncStep::HarnessLogin);
+    assert_eq!(session, own_login);
+    assert_eq!(keychain.login().unwrap(), host_login);
+    assert!(!claude_dir.path().join(".oauth_refresh.lock").exists());
 }
 
 #[cfg(unix)]
@@ -4844,7 +5130,7 @@ for line in sys.stdin:
         raise AssertionError(method)
     print(json.dumps({"request_id": req["request_id"], "protocol_version": protocol, "result": "ok", "payload": payload}), flush=True)
 "#;
-    for protocol in [43, 44] {
+    for protocol in [43, 44, 58] {
         for response_compressed in [0, 1] {
             let spec = CommandSpec::new(
                 "python3",
@@ -5010,4 +5296,208 @@ for line in sys.stdin:
     assert!(retired.0.is_empty() && retired.1.is_empty());
     let unchanged = client.subagent_requests().await.unwrap();
     assert!(retired.0.ptr_eq(&unchanged.0) && retired.1.ptr_eq(&unchanged.1));
+}
+
+#[cfg(unix)]
+// Hard-won: #1500: a single project-memory file could exceed the relay frame on download or upload.
+#[tokio::test]
+async fn project_memory_transfer_pages_large_files_and_preserves_cas_and_cleanup() {
+    use mj_core::project_memory::{ProjectMemorySnapshot, ReplicaReplaceOutcome, TreeVersion};
+    let script = r#"
+import base64, gzip, json, pathlib, sys, time
+mode, size, marker = sys.argv[1], int(sys.argv[2]), pathlib.Path(sys.argv[3])
+alphabet = b'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+state, content = 7, bytearray(size)
+for i in range(size):
+    state = (state * 1664525 + 1013904223) & 0xffffffff
+    content[i] = alphabet[state >> 26]
+tree = {'files': {'/one-huge.md': content.decode()}}
+current = {'files': dict(tree['files'], **{'/delete.md': 'remove this'})}
+active, ident, injected = None, 0, False
+limit = 8 * 1024 * 1024
+for line in sys.stdin:
+    assert len(line.encode()) <= limit
+    req = json.loads(line)
+    method = req['request']['method']
+    if method == 'hello':
+        payload = {'type':'hello','data':{'negotiated':59,'relay_version':'memory-pages-peer','session_id':sys.argv[4]}}
+    else:
+        assert method == 'project_memory_transfer', 'new protocol must never use legacy requests'
+        action = req['request']['params']['action']
+        name, params = action['action'], action.get('params', {})
+        error = None
+        if name == 'begin_snapshot':
+            assert active is None
+            ident += 1
+            wire = {'gzip': base64.b64encode(gzip.compress(json.dumps(current['files']).encode())).decode()}
+            data = json.dumps({'baseline':wire,'replica':wire}).encode()
+            if mode == 'healthy': assert len(data) > limit
+            active = ('download', data)
+            result = {'action':'snapshot_started','data':{'transfer_id':ident,'total_bytes':len(data)}}
+        elif name == 'read_snapshot_page':
+            assert params['transfer_id'] == ident and active[0] == 'download'
+            offset = params['offset']
+            # Exact serialized response overhead plus newline determines the base64 capacity.
+            template = {'request_id':req['request_id'],'protocol_version':59,'result':'ok','payload':{'type':'project_memory_transfer','data':{'result':{'action':'snapshot_page','data':{'transfer_id':ident,'offset':offset,'next_offset':len(active[1]),'complete':False,'chunk':''}}}}}
+            capacity = 3 * ((limit - len(json.dumps(template).encode()) - 1) // 4)
+            chunk = active[1][offset:offset+capacity]
+            end = offset + len(chunk)
+            complete = end == len(active[1])
+            result = {'action':'snapshot_page','data':{'transfer_id':ident,'offset':offset,'next_offset':end,'complete':complete,'chunk':base64.b64encode(chunk).decode()}}
+            if complete: active = None
+        elif name == 'begin_upload':
+            assert active is None
+            ident += 1
+            if mode == 'healthy': assert params['total_bytes'] > limit
+            active = ('upload', bytearray(), params)
+            result = {'action':'upload_started','data':{'transfer_id':ident}}
+        elif name == 'append_upload':
+            assert params['transfer_id'] == ident and active[0] == 'upload'
+            assert params['offset'] == len(active[1])
+            if mode == 'cancel':
+                marker.write_text('append accepted')
+                sys.stdin.read()
+                sys.exit(0)
+            if mode in ('append_error', 'abort_error') and not injected:
+                injected = True
+                error = 'injected append refusal'
+            else:
+                active[1].extend(base64.b64decode(params['chunk']))
+                result = {'action':'upload_progress','data':{'transfer_id':ident,'next_offset':len(active[1])}}
+        elif name == 'commit_upload':
+            assert params['transfer_id'] == ident and active[0] == 'upload'
+            assert len(active[1]) == active[2]['total_bytes']
+            wire = json.loads(active[1])
+            incoming = {'files':json.loads(gzip.decompress(base64.b64decode(wire['gzip'])))}
+            assert incoming == tree
+            kind = active[2]['kind']
+            if kind['kind'] == 'install_snapshot':
+                current['files'].update(incoming['files'])
+                result = {'action':'installed'}
+            else:
+                assert kind['kind'] == 'replace_tree'
+                replaced = kind['params']['expected_replica'] == 'current'
+                if replaced: current = incoming
+                result = {'action':'replaced','data':{'outcome':'replaced' if replaced else 'replica_changed'}}
+            active = None
+        elif name == 'abort':
+            assert active is not None and params['transfer_id'] == ident
+            if mode == 'abort_error': error = 'injected abort refusal'
+            else:
+                active = None
+                result = {'action':'aborted','data':{'transfer_id':ident}}
+        else: raise AssertionError(name)
+        if error:
+            response = {'request_id':req['request_id'],'protocol_version':59,'result':'error','error':{'code':'invalid_state','message':error,'retryable':False}}
+            print(json.dumps(response), flush=True)
+            continue
+        payload = {'type':'project_memory_transfer','data':{'result':result}}
+    response = json.dumps({'request_id':req['request_id'],'protocol_version':59,'result':'ok','payload':payload})
+    assert len(response.encode()) + 1 <= limit
+    print(response, flush=True)
+"#;
+    for mode in ["healthy", "append_error", "abort_error", "cancel"] {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("append");
+        let size = if mode == "healthy" {
+            12 * 1024 * 1024
+        } else {
+            128 * 1024
+        };
+        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut state = 7u32;
+        let content: String = (0..size)
+            .map(|_| {
+                state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                alphabet[(state >> 26) as usize] as char
+            })
+            .collect();
+        let tree = ProjectMemorySnapshot {
+            files: BTreeMap::from([("/one-huge.md".into(), content)]),
+        };
+        let spec = CommandSpec::new(
+            "python3",
+            [
+                "-c".to_owned(),
+                script.to_owned(),
+                mode.to_owned(),
+                size.to_string(),
+                marker.to_string_lossy().into_owned(),
+                SESSION_ID.to_owned(),
+            ],
+        )
+        .purpose("paged project-memory protocol peer");
+        let mut client =
+            RelayClient::connect_with_timeout(&spec, SESSION_ID, Duration::from_secs(30))
+                .await
+                .unwrap();
+        if mode == "healthy" {
+            let mut before = tree.clone();
+            before
+                .files
+                .insert("/delete.md".into(), "remove this".into());
+            assert_eq!(
+                client.project_memory_snapshot().await.unwrap(),
+                (before.clone(), before.clone())
+            );
+            client
+                .install_project_memory_snapshot(tree.clone())
+                .await
+                .unwrap();
+            assert_eq!(
+                client.project_memory_snapshot().await.unwrap(),
+                (before.clone(), before)
+            );
+            assert_eq!(
+                client
+                    .replace_project_memory_tree(TreeVersion("stale".into()), tree.clone())
+                    .await
+                    .unwrap(),
+                ReplicaReplaceOutcome::ReplicaChanged
+            );
+            assert_eq!(
+                client
+                    .replace_project_memory_tree(TreeVersion("current".into()), tree.clone())
+                    .await
+                    .unwrap(),
+                ReplicaReplaceOutcome::Replaced
+            );
+            assert_eq!(
+                client.project_memory_snapshot().await.unwrap(),
+                (tree.clone(), tree)
+            );
+        } else if mode == "cancel" {
+            {
+                let upload =
+                    client.replace_project_memory_tree(TreeVersion("current".into()), tree);
+                tokio::pin!(upload);
+                tokio::select! {
+                    result = &mut upload => panic!("upload completed before cancellation: {result:?}"),
+                    () = async { while !marker.exists() { tokio::time::sleep(Duration::from_millis(10)).await; } } => {}
+                }
+            }
+            assert!(client.abandoned.is_some());
+            assert!(client.input.is_none());
+        } else {
+            let error = client
+                .replace_project_memory_tree(TreeVersion("current".into()), tree.clone())
+                .await
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("injected append refusal"));
+            if mode == "abort_error" {
+                assert!(format!("{error:#}").contains("injected abort refusal"));
+                assert!(client.abandoned.is_some());
+                assert!(client.input.is_none());
+            } else {
+                assert!(client.abandoned.is_none());
+                assert_eq!(
+                    client
+                        .replace_project_memory_tree(TreeVersion("current".into()), tree)
+                        .await
+                        .unwrap(),
+                    ReplicaReplaceOutcome::Replaced
+                );
+            }
+        }
+    }
 }

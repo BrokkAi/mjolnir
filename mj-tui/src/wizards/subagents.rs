@@ -36,6 +36,15 @@ enum DelegationMode {
 }
 
 impl DelegationMode {
+    /// The name the combo box and launch notices give this mode.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Native => "Native",
+            Self::Mjolnir => "Mjolnir",
+            Self::None => "None",
+        }
+    }
+
     fn of(policy: &SubagentPolicy) -> Self {
         match policy {
             SubagentPolicy::Native => Self::Native,
@@ -133,11 +142,15 @@ impl SubagentDraft {
         self.modes()
             .iter()
             .map(|mode| match mode {
-                DelegationMode::Native => "Native".to_owned(),
                 DelegationMode::Mjolnir => mjolnir.clone(),
-                DelegationMode::None => "None".to_owned(),
+                other => other.label().to_owned(),
             })
             .collect()
+    }
+    /// The combo box's name for the mode of `policy`, as shown for the
+    /// profile's harness.
+    pub(crate) fn policy_label(&self, policy: &SubagentPolicy) -> &'static str {
+        DelegationMode::of(&self.shown(policy)).label()
     }
     pub(crate) fn policy_index(&self) -> usize {
         let mode = DelegationMode::of(&self.selected());

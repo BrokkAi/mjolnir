@@ -193,6 +193,9 @@ pub struct NativeAgentSummary {
     pub agent: NativeAgent,
     pub projection_ordinal: u64,
     pub projection_digest: String,
+    /// Native operational facts needed by the daemon attention projection.
+    #[serde(default)]
+    pub pending_input: bool,
 }
 
 impl NativeAgentSummary {
@@ -202,6 +205,7 @@ impl NativeAgentSummary {
             agent: view.agent.clone(),
             projection_ordinal: view.projection.applied_event_ordinal,
             projection_digest: view.projection.applied_event_digest.clone(),
+            pending_input: !view.projection.pending_elicitations.is_empty(),
         }
     }
 

@@ -5,8 +5,8 @@ use crate::chat::test_support::{
     queued, snapshot, transcript_text,
 };
 use crate::selection::SelectionState;
-use agent_client_protocol::v1::schema::ToolCallStatus;
 use agent_client_protocol::v1::schema::ToolKind;
+use agent_client_protocol::v1::schema::{ToolCall, ToolCallStatus};
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
@@ -15,20 +15,39 @@ use mj_client::web::BrowserTranscriptEntry;
 use mj_core::acp::RuntimeEvent;
 use mj_core::relay::{SequencedEvent, WorkerEvent};
 use mj_transcript::transcript::{TerminalOutputRecord, tool_content_details};
+use serde::Deserialize;
 
+// Hard-won: e13ed5c7c: one parked terminal record disabled reuse of every unchanged entry.
 #[test]
 fn background_conversion_reuses_unchanged_entries_and_refreshes_changed_text() {
     let mut session = MaterializedSession::empty("incremental");
-    session.applied_event_ordinal = 2;
+    session.applied_event_ordinal = 3;
     session.transcript = vec![
         user_transcript_item(1, "first"),
         user_transcript_item(2, "second"),
+        // Output parked because its owner had left the live window.
+        std::sync::Arc::new(mj_core::transcript::TranscriptItem {
+            stable_id: "terminal:parked".into(),
+            position: 3,
+            latest_content_event_ordinal: None,
+            created_at_ms: 3,
+            last_changed_at_ms: 3,
+            body: mj_core::transcript::TranscriptBody::TerminalOutput {
+                record: TerminalOutputRecord {
+                    terminal_id: "parked".into(),
+                    output: "done\n".into(),
+                    truncated: false,
+                    exit_code: Some(0),
+                    signal: None,
+                },
+            },
+        }),
     ];
     let first = TranscriptSnapshot::from_materialized(&session);
     let previous = first.converted_entries();
-    session.applied_event_ordinal = 3;
+    session.applied_event_ordinal = 4;
     session.transcript[1] = user_transcript_item(2, "edited");
-    session.transcript.push(user_transcript_item(3, "third"));
+    session.transcript.push(user_transcript_item(4, "third"));
     let reused = TranscriptSnapshot::from_materialized_reusing(
         &session,
         &BTreeMap::new(),
@@ -423,12 +442,13 @@ fn real_tool_claim_suppresses_only_the_matching_terminal_incarnation() {
         created_at_ms: claimed_at_ms,
         last_changed_at_ms: claimed_at_ms,
         body: TranscriptBody::Tool {
-            call: serde_json::json!({
+            call: (serde_json::json!({
                 "toolCallId": "shell",
                 "title": "Shell",
                 "status": "in_progress",
                 "content": [{"type": "terminal", "terminalId": "term-1"}]
-            }),
+            }))
+            .into(),
             terminal_outputs: Vec::new(),
             terminal_refs: vec!["term-1".into()],
             presentation: None,
@@ -564,7 +584,7 @@ fn fixture_tool_item(position: u64) -> Arc<TranscriptItem> {
         position,
         format!("tool:{position}"),
         TranscriptBody::Tool {
-            call: serde_json::json!({
+            call: (serde_json::json!({
                 "toolCallId": format!("call-{position}"),
                 "title": format!("read file-{position}"),
                 "status": "completed",
@@ -573,7 +593,8 @@ fn fixture_tool_item(position: u64) -> Arc<TranscriptItem> {
                     "content": {"type": "text", "text": "output ".repeat(600)}
                 }],
                 "locations": [{"path": format!("src/file-{position}.rs"), "line": 3}]
-            }),
+            }))
+            .into(),
             terminal_outputs: Vec::new(),
             terminal_refs: Vec::new(),
             presentation: None,
@@ -1519,7 +1540,7 @@ fn exact_diffstats_are_available_only_after_the_tool_finishes() {
         created_at_ms: 1,
         last_changed_at_ms: 2,
         body: TranscriptBody::Tool {
-            call: serde_json::json!({
+            call: (serde_json::json!({
                 "toolCallId": "edit",
                 "title": "Edit src/lib.rs",
                 "status": status,
@@ -1529,7 +1550,8 @@ fn exact_diffstats_are_available_only_after_the_tool_finishes() {
                     "oldText": "alpha\n",
                     "newText": "alpha\nbeta\n"
                 }]
-            }),
+            }))
+            .into(),
             terminal_outputs: Vec::new(),
             terminal_refs: Vec::new(),
             presentation: None,
@@ -1715,7 +1737,7 @@ fn transcript_snapshot_tail_counts_only_nonempty_rows() {
 }
 
 #[test]
-fn browser_transcript_is_bounded_utf8_safe_and_supports_deltas() {
+fn browser_transcript_preserves_rows_is_utf8_safe_and_supports_deltas() {
     let mut chat = ChatState::new(&snapshot(), &[]);
     chat.entries.push(ChatEntry::plain(
         1,
@@ -1738,15 +1760,10 @@ fn browser_transcript_is_bounded_utf8_safe_and_supports_deltas() {
             .iter()
             .map(|entry| entry.lines.len())
             .sum::<usize>(),
-        BROWSER_TRANSCRIPT_LINES
+        1_006
     );
     assert_eq!(full.entries.last().unwrap().role, "thought");
-    assert!(
-        full.entries[0]
-            .lines
-            .first()
-            .is_some_and(|line| line.contains("earlier lines omitted"))
-    );
+    assert_eq!(full.entries[0].lines[0], "line 0");
     let truncated = &full.entries.last().unwrap().lines[0];
     assert!(truncated.ends_with("… [truncated]"));
     assert!(truncated.len() <= BROWSER_LINE_BYTES);
@@ -2195,12 +2212,13 @@ fn materialized_terminal_content_renders_output_and_exit_summary() {
         created_at_ms: 1,
         last_changed_at_ms: 1,
         body: TranscriptBody::Tool {
-            call: serde_json::json!({
+            call: (serde_json::json!({
                 "toolCallId": "bash",
                 "title": "Bash",
                 "status": "completed",
                 "content": [{"type": "terminal", "terminalId": "term-1"}]
-            }),
+            }))
+            .into(),
             terminal_outputs: vec![TerminalOutputRecord {
                 terminal_id: "term-1".into(),
                 // Colored output from a real build tool: the escape must
@@ -2259,7 +2277,7 @@ fn kimi_text_and_captured_terminal_output_render_once_and_only_in_raw_mode() {
         created_at_ms: 1,
         last_changed_at_ms: 1,
         body: TranscriptBody::Tool {
-            call: serde_json::json!({
+            call: (serde_json::json!({
                 "toolCallId": "kimi-shell",
                 "title": "Execute `inspect toolchain`",
                 "status": "completed",
@@ -2273,7 +2291,8 @@ fn kimi_text_and_captured_terminal_output_render_once_and_only_in_raw_mode() {
                     "exit_code": 1,
                     "command": "inspect toolchain"
                 }
-            }),
+            }))
+            .into(),
             terminal_outputs: vec![TerminalOutputRecord {
                 terminal_id: "term-1".into(),
                 output: OUTPUT.into(),
@@ -2330,7 +2349,7 @@ fn legacy_kimi_duplicate_is_suppressed_without_reprojecting_history() {
             created_at_ms: 1,
             last_changed_at_ms: 2,
             body: TranscriptBody::Tool {
-                call: serde_json::json!({
+                call: (serde_json::json!({
                     "toolCallId": "kimi-shell",
                     "title": "Execute `inspect toolchain`",
                     "status": "completed",
@@ -2344,7 +2363,8 @@ fn legacy_kimi_duplicate_is_suppressed_without_reprojecting_history() {
                         "exit_code": 1,
                         "command": "inspect toolchain"
                     }
-                }),
+                }))
+                .into(),
                 terminal_outputs: Vec::new(),
                 terminal_refs: Vec::new(),
                 presentation: None,
@@ -2438,7 +2458,7 @@ fn fallback_terminal_session(record: TerminalOutputRecord) -> MaterializedSessio
         created_at_ms: 1,
         last_changed_at_ms: 2,
         body: TranscriptBody::Tool {
-            call: serde_json::to_value(call).unwrap(),
+            call: serde_json::to_value(call).unwrap().into(),
             terminal_refs: vec![record.terminal_id.clone()],
             terminal_outputs: vec![record],
             presentation: None,
@@ -2452,7 +2472,7 @@ fn browser_lines(session: &MaterializedSession) -> Vec<String> {
         .browser_transcript(None)
         .entries
         .into_iter()
-        .flat_map(|entry| entry.lines)
+        .flat_map(|entry| std::sync::Arc::unwrap_or_clone(entry).lines)
         .collect()
 }
 
@@ -2592,7 +2612,7 @@ fn attached_terminal_output_renders_when_the_call_no_longer_refers_to_it() {
         created_at_ms: 1,
         last_changed_at_ms: 1,
         body: TranscriptBody::Tool {
-            call: serde_json::json!({
+            call: (serde_json::json!({
                 "toolCallId": "bash",
                 "title": "Bash",
                 "status": "completed",
@@ -2600,7 +2620,8 @@ fn attached_terminal_output_renders_when_the_call_no_longer_refers_to_it() {
                     "type": "content",
                     "content": {"type": "text", "text": "ran the build"}
                 }]
-            }),
+            }))
+            .into(),
             terminal_outputs: vec![TerminalOutputRecord {
                 terminal_id: "term-1".into(),
                 output: "build finished".into(),
@@ -2672,13 +2693,14 @@ fn current_stored_tool_presentation_is_preserved() {
         created_at_ms: 1,
         last_changed_at_ms: 1,
         body: TranscriptBody::Tool {
-            call: serde_json::to_value(
+            call: (serde_json::to_value(
                 ToolCall::new("git", "Bash")
                     .kind(ToolKind::Execute)
                     .status(ToolCallStatus::Completed)
                     .raw_input(serde_json::json!({ "command": "git add src/lib.rs" })),
             )
-            .unwrap(),
+            .unwrap())
+            .into(),
             terminal_outputs: Vec::new(),
             terminal_refs: Vec::new(),
             presentation: Some(Box::new(mj_core::transcript::ToolCallPresentation {
@@ -2708,13 +2730,14 @@ fn stale_stored_tool_presentation_is_reparsed_for_rich_surfaces() {
         created_at_ms: 1,
         last_changed_at_ms: 1,
         body: TranscriptBody::Tool {
-            call: serde_json::to_value(
+            call: (serde_json::to_value(
                 ToolCall::new("heredoc", "Bash")
                     .kind(ToolKind::Execute)
                     .status(ToolCallStatus::Completed)
                     .raw_input(serde_json::json!({ "command": source })),
             )
-            .unwrap(),
+            .unwrap())
+            .into(),
             terminal_outputs: Vec::new(),
             terminal_refs: Vec::new(),
             presentation: Some(Box::new(mj_core::transcript::ToolCallPresentation {
@@ -4976,10 +4999,10 @@ fn golden_rich_transcript_tool_presentation() {
     let delivery =
         include_str!("../../../../mj-transcript/tests/golden/mailbox-delivery-transcript.txt");
     let batch = delivery
-        .split_once("19: Mailbox events:\n")
+        .split_once("20: Mailbox events:\n")
         .unwrap()
         .1
-        .split_once("\n20: ")
+        .split_once("\n21: ")
         .unwrap()
         .0;
     let mut mailbox = ChatState::new(&snapshot(), &[]);
@@ -5004,7 +5027,7 @@ fn golden_rich_transcript_tool_presentation() {
     let second_child = mailbox
         .transcript_click_targets
         .iter()
-        .find(|target| target.mailbox_event == Some(MailboxDisclosureId::Event(2, 11)))
+        .find(|target| target.mailbox_event == Some(MailboxDisclosureId::Event(2, 12)))
         .cloned()
         .unwrap();
     mailbox.handle_mouse(MouseEvent {
@@ -5024,7 +5047,7 @@ fn golden_rich_transcript_tool_presentation() {
     );
     assert_eq!(
         mailbox.expanded_mailbox_events,
-        BTreeSet::from([MailboxDisclosureId::Event(2, 11)])
+        BTreeSet::from([MailboxDisclosureId::Event(2, 12)])
     );
     let cached = mailbox.render_cache.entries[0].as_ref().unwrap();
     let report_start = cached
@@ -5080,12 +5103,12 @@ fn golden_rich_transcript_tool_presentation() {
         &[],
     );
     mailbox.anchor = TranscriptAnchor::Row { entry: 0, row: 9 };
-    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 44, 22));
+    let rows = crate::golden::buffer_lines(&golden_chat_buffer(&mut mailbox, 44, 24));
     append_transcript_golden_state(
         &mut output,
         "mailbox report scrolled before collapse",
         44,
-        22,
+        24,
         &rows,
         &[],
     );

@@ -230,7 +230,7 @@ fn cancelling_setup_preserves_configuration_and_render_keeps_controls_visible() 
         assert!(text.contains("Settings › Runtimes"), "{text}");
         // Every page action keeps its own row in one column at the dialog's
         // right edge, on top of each other rather than spread along a row.
-        let labels = ["Add", "Detect runtimes"];
+        let labels = ["Add", "Detect runtimes", "Machines"];
         let width = labels
             .iter()
             .map(|label| label.len())
@@ -292,6 +292,40 @@ fn cancelling_setup_preserves_configuration_and_render_keeps_controls_visible() 
         assert!(!dashboard.modal_open());
         assert_eq!(dashboard.config, original);
     }
+}
+
+/// The Runtimes page's Machines action opens the Machines page with the
+/// unsaved draft intact, and Back returns to the settings root (#1282).
+#[test]
+fn runtimes_page_jumps_to_machines_keeping_the_draft() {
+    let mut dashboard = dashboard_with_session(stopped_session());
+    dashboard.begin_settings_section("targets", None);
+    let Mode::Setup(dialog) = &mut dashboard.mode else {
+        panic!("settings");
+    };
+    // An unsaved edit anywhere in the draft must survive the jump.
+    dialog.toggle_path(&["profiles".into(), "codex-1".into(), "enabled".into()]);
+    assert!(dialog.is_dirty());
+    dialog.form.get_mut().focus(SetupControl::OpenMachines);
+    dashboard.handle_key(key(KeyCode::Enter));
+    let Mode::Setup(dialog) = &dashboard.mode else {
+        panic!("settings");
+    };
+    assert_eq!(
+        dialog.path,
+        ["machines"],
+        "the action opens the Machines page"
+    );
+    assert!(dialog.is_dirty(), "the unsaved draft survives the jump");
+    dashboard.handle_key(key(KeyCode::Backspace));
+    let Mode::Setup(dialog) = &dashboard.mode else {
+        panic!("settings");
+    };
+    assert!(
+        dialog.path.is_empty(),
+        "Back from Machines returns to the settings root"
+    );
+    assert!(dialog.is_dirty(), "the draft still holds the edit");
 }
 
 /// The cache size is typed, stored and shown as a whole number of GB.

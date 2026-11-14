@@ -70,7 +70,6 @@ impl DashboardState {
     /// requested by input or background content, so the next timer checks the
     /// displayed baseline rather than the previous timer check.
     pub fn acknowledge_render(&mut self) {
-        self.viewed_failures.append(&mut self.drawn_failures);
         self.render_change_snapshot.clock = self.current_clock_signature();
         self.render_change_snapshot.animation = self.current_animation_signature();
     }
@@ -257,7 +256,13 @@ impl DashboardState {
             });
         }
 
-        for (id, quota) in &self.quotas {
+        for row in self.quota_profile_rows() {
+            let Some(quota) = self.quotas.get(row.id) else {
+                continue;
+            };
+            let projected = row.pool.map(|pool| quota.for_antigravity_pool(pool));
+            let quota = projected.as_ref().unwrap_or(quota);
+            let id = row.label();
             if quota.error.is_some() {
                 continue;
             }

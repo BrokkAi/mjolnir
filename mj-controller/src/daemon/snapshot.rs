@@ -221,7 +221,7 @@ impl RuntimeState {
                     let view = owner.sessions.get(&record.id);
                     ReadinessObservation {
                         harness_ready: view.is_some_and(|view| {
-                            view.operational.as_ref().is_some_and(
+                            view.operational.as_deref().is_some_and(
                                 mj_core::relay::RelayOperationalState::native_session_is_ready,
                             )
                         }),
@@ -269,42 +269,6 @@ impl RuntimeState {
                 %session_id,
                 error = format!("{error:#}"),
                 "could not record that a session's harness never became usable"
-            ),
-        }
-    }
-
-    /// Persist a worker-reported preparation failure against the session
-    /// revision observed by the upgrade coordinator. Lifecycle work that has
-    /// since changed that revision remains the owner of the outcome.
-    pub(super) async fn fail_harness_preparation(
-        &self,
-        session_id: String,
-        failure: crate::controller::HarnessPreparationFailure,
-        observed_updated_at: String,
-    ) {
-        let cause = failure.to_string();
-        let applied = blocking({
-            let session_id = session_id.clone();
-            let cause = cause.clone();
-            move || {
-                let mut controller = Controller::load()?;
-                controller.fail_unready_session(&session_id, &cause, &observed_updated_at)
-            }
-        })
-        .await;
-        match applied {
-            Ok(true) => {
-                if let Err(error) = self.reload_controller().await {
-                    tracing::warn!(%session_id, error = format!("{error:#}"), "could not reload state after harness preparation failed");
-                }
-                self.push_notice(&session_id, cause);
-                self.publish_revision();
-            }
-            Ok(false) => {}
-            Err(error) => tracing::warn!(
-                %session_id,
-                error = format!("{error:#}"),
-                "could not record worker-reported harness preparation failure"
             ),
         }
     }
@@ -452,9 +416,14 @@ impl RuntimeState {
 
     // Caller holds the inactivity/config coordinator through commit.
     pub(super) async fn persist_operator_away(&self, away: bool) -> Result<Vec<String>> {
-        let changed = tokio::task::spawn_blocking(move || crate::database::set_operator_away(away))
-            .await
-            .context("operator away database writer panicked")??;
+        let auto_afk_window = self.with_config(|config| {
+            Duration::from_secs(u64::from(config.advanced.auto_afk_minutes) * 60)
+        });
+        let changed = tokio::task::spawn_blocking(move || {
+            crate::database::set_operator_away(away, auto_afk_window)
+        })
+        .await
+        .context("operator away database writer panicked")??;
         if !changed {
             return Ok(Vec::new());
         }

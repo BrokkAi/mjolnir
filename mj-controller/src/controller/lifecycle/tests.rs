@@ -19,9 +19,9 @@ use super::*;
 fn a_close_whose_restart_left_no_worker_records_error_and_keeps_the_target() {
     let mut session = checkpoint_test_session("0123456789abcdef0123456789abcdef");
     session.state = SessionState::Running;
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: "/tmp/mjolnir-close-test".into(),
-    });
+    }));
     let previous = session.clone();
     let error =
         anyhow::anyhow!("connect to Mjolnir worker").context(super::WorkerRestartLeftNoWorker);
@@ -68,12 +68,12 @@ fn a_close_whose_checkpoint_failed_with_a_live_worker_returns_to_its_previous_st
 }
 
 struct DeferredCleanupExecutor {
-    statuses: RefCell<Vec<i32>>,
+    statuses: std::sync::Mutex<Vec<i32>>,
 }
 
 impl CommandExecutor for DeferredCleanupExecutor {
     fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
-        let status = self.statuses.borrow_mut().pop().unwrap_or(0);
+        let status = self.statuses.lock().unwrap().pop().unwrap_or(0);
         Ok(CommandOutput {
             status,
             stdout: Vec::new(),
@@ -92,11 +92,11 @@ fn stopped_podman_cleanup_controller(session_id: &str) -> Controller {
     let mut session = checkpoint_test_session(session_id);
     session.target_template_id = "podman".into();
     session.state = SessionState::Stopped;
-    session.target = Some(TargetLocator::LocalPodman {
+    session.target = Some(Box::new(TargetLocator::LocalPodman {
         borrowed_from: None,
         container_id,
         workspace_storage: mj_core::state::PodmanWorkspaceLocator::Volume { name: volume },
-    });
+    }));
     let mut config = Config::default();
     config.targets.insert(
         "podman".into(),
@@ -140,7 +140,7 @@ fn deferred_cleanup_failure_is_visible_and_successful_retry_clears_it() {
             &DeferredCleanupExecutor {
                 // The cleanup command fails, then the exact-absence probe
                 // confirms that the owned target is still present.
-                statuses: RefCell::new(vec![1, 1]),
+                statuses: std::sync::Mutex::new(vec![1, 1]),
             },
             |record| {
                 persisted
@@ -168,7 +168,7 @@ fn deferred_cleanup_failure_is_visible_and_successful_retry_clears_it() {
         .cleanup_stopped_target_with(
             session_id,
             &DeferredCleanupExecutor {
-                statuses: RefCell::new(Vec::new()),
+                statuses: std::sync::Mutex::new(Vec::new()),
             },
             |record| {
                 retry_persisted
@@ -198,7 +198,7 @@ fn deferred_cleanup_persistence_failure_restores_the_stopped_record() {
         .cleanup_stopped_target_with(
             session_id,
             &DeferredCleanupExecutor {
-                statuses: RefCell::new(vec![1, 1]),
+                statuses: std::sync::Mutex::new(vec![1, 1]),
             },
             |_| Err(anyhow::anyhow!("database unavailable")),
         )
@@ -222,12 +222,12 @@ fn target_cleanup_persists_destroying_and_rechecks_the_installed_archive() {
     crate::database::load_state().unwrap();
 
     struct RecordingExecutor {
-        commands: RefCell<Vec<CommandSpec>>,
+        commands: std::sync::Mutex<Vec<CommandSpec>>,
     }
 
     impl CommandExecutor for RecordingExecutor {
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            self.commands.borrow_mut().push(command.clone());
+            self.commands.lock().unwrap().push(command.clone());
             Ok(CommandOutput {
                 status: 0,
                 stdout: Vec::new(),
@@ -242,10 +242,10 @@ fn target_cleanup_persists_destroying_and_rechecks_the_installed_archive() {
     let mut session = checkpoint_test_session(session_id);
     session.target_template_id = "local".into();
     session.state = SessionState::Closing;
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: directory.path().join(session_id),
-    });
-    session.checkpoint = Some(checkpoint.clone());
+    }));
+    session.checkpoint = Some(Box::new(checkpoint.clone()));
     let mut config = Config::default();
     config
         .targets
@@ -258,7 +258,7 @@ fn target_cleanup_persists_destroying_and_rechecks_the_installed_archive() {
         },
     };
     let executor = RecordingExecutor {
-        commands: RefCell::new(Vec::new()),
+        commands: std::sync::Mutex::new(Vec::new()),
     };
     let persisted = RefCell::new(Vec::new());
 
@@ -274,9 +274,9 @@ fn target_cleanup_persists_destroying_and_rechecks_the_installed_archive() {
         persisted.into_inner(),
         vec![SessionState::Destroying, SessionState::Stopped]
     );
-    let commands = executor.commands.borrow();
+    let commands = executor.commands.lock().unwrap().clone();
     assert_eq!(commands.len(), 2);
-    assert_eq!(commands[0].purpose, "stop Mjolnir worker daemon");
+    assert_eq!(commands[0].purpose, "kill retired Mjolnir worker daemon");
     assert!(commands[1].args.iter().any(|arg| arg.contains("rm -rf")));
     let stopped = &controller.state.sessions[session_id];
     assert_eq!(stopped.state, SessionState::Stopped);
@@ -314,10 +314,10 @@ fn destruction_waits_for_recovery_and_failed_cleanup_never_restarts_the_target()
     let mut controller = stopped_podman_cleanup_controller(session_id);
     let record = controller.state.sessions.get_mut(session_id).unwrap();
     record.state = SessionState::Closing;
-    record.checkpoint = Some(checkpoint.clone());
+    record.checkpoint = Some(Box::new(checkpoint.clone()));
     crate::database::save_session(record).unwrap();
     let plan = WorkerRecoveryPlan {
-        source_target: record.target.clone().unwrap(),
+        source_target: *record.target.clone().unwrap(),
         target: None,
         workspace: None,
         exit_record: None,
@@ -374,7 +374,7 @@ fn destruction_waits_for_recovery_and_failed_cleanup_never_restarts_the_target()
                 session_id,
                 &checkpoint,
                 &DeferredCleanupExecutor {
-                    statuses: RefCell::new(vec![125]),
+                    statuses: std::sync::Mutex::new(vec![125]),
                 },
                 |record| {
                     assert!(*recovery.restarted.lock().unwrap());
@@ -405,7 +405,7 @@ fn destruction_waits_for_recovery_and_failed_cleanup_never_restarts_the_target()
         SessionState::Destroying
     );
     assert_eq!(
-        controller.state.sessions[session_id].checkpoint.as_ref(),
+        controller.state.sessions[session_id].checkpoint.as_deref(),
         Some(&checkpoint)
     );
     // An empty executor panics if a stale retry attempts any target command.
@@ -417,7 +417,7 @@ fn destruction_waits_for_recovery_and_failed_cleanup_never_restarts_the_target()
                 true,
                 Some(session_id),
                 &DeferredCleanupExecutor {
-                    statuses: RefCell::new(Vec::new())
+                    statuses: std::sync::Mutex::new(Vec::new())
                 }
             )
             .unwrap(),
@@ -431,7 +431,7 @@ fn destruction_waits_for_recovery_and_failed_cleanup_never_restarts_the_target()
                 session_id,
                 &checkpoint,
                 &DeferredCleanupExecutor {
-                    statuses: RefCell::new(vec![0])
+                    statuses: std::sync::Mutex::new(vec![0])
                 },
                 crate::database::save_lifecycle_session
             )
@@ -456,12 +456,12 @@ fn podman_close_persists_stopped_before_deferred_storage_cleanup() {
     crate::database::load_state().unwrap();
 
     struct RecordingExecutor {
-        commands: RefCell<Vec<CommandSpec>>,
+        commands: std::sync::Mutex<Vec<CommandSpec>>,
     }
 
     impl CommandExecutor for RecordingExecutor {
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            self.commands.borrow_mut().push(command.clone());
+            self.commands.lock().unwrap().push(command.clone());
             Ok(CommandOutput {
                 status: 0,
                 stdout: Vec::new(),
@@ -478,14 +478,14 @@ fn podman_close_persists_stopped_before_deferred_storage_cleanup() {
     let mut session = checkpoint_test_session(session_id);
     session.target_template_id = "podman".into();
     session.state = SessionState::Closing;
-    session.target = Some(TargetLocator::LocalPodman {
+    session.target = Some(Box::new(TargetLocator::LocalPodman {
         borrowed_from: None,
         container_id,
         workspace_storage: mj_core::state::PodmanWorkspaceLocator::Volume {
             name: volume.clone(),
         },
-    });
-    session.checkpoint = Some(checkpoint.clone());
+    }));
+    session.checkpoint = Some(Box::new(checkpoint.clone()));
     let mut config = Config::default();
     config.targets.insert(
         "podman".into(),
@@ -510,7 +510,7 @@ fn podman_close_persists_stopped_before_deferred_storage_cleanup() {
         },
     };
     let executor = RecordingExecutor {
-        commands: RefCell::new(Vec::new()),
+        commands: std::sync::Mutex::new(Vec::new()),
     };
     let persisted = RefCell::new(Vec::new());
 
@@ -532,7 +532,7 @@ fn podman_close_persists_stopped_before_deferred_storage_cleanup() {
             (SessionState::Stopped, true)
         ]
     );
-    let commands = executor.commands.borrow();
+    let commands = executor.commands.lock().unwrap().clone();
     assert_eq!(commands.len(), 1);
     assert!(commands[0].args[1].contains("podman stop --time 0"));
     assert!(!commands[0].args[1].contains("podman rm"));
@@ -547,7 +547,7 @@ fn podman_close_persists_stopped_before_deferred_storage_cleanup() {
         })
         .unwrap();
 
-    let commands = executor.commands.borrow();
+    let commands = executor.commands.lock().unwrap().clone();
     assert_eq!(
         commands[1].stage,
         Some(targets::ProvisionStage::StoppingTarget)
@@ -587,10 +587,10 @@ fn verified_close_retires_managed_checkout_but_keeps_archive_and_branch() {
     let worktree = session.managed_worktree.clone().unwrap();
     std::fs::write(worktree.worktree_root.join("dirty.txt"), "worktree state\n").unwrap();
     session.state = SessionState::Closing;
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: archive_directory.path().join(session_id),
-    });
-    session.checkpoint = Some(checkpoint.clone());
+    }));
+    session.checkpoint = Some(Box::new(checkpoint.clone()));
     let mut config = Config::default();
     config
         .targets
@@ -659,10 +659,10 @@ fn force_stop_reuses_verified_archive_and_leaves_session_resumable() {
     let mut session = managed_worktree_session(repository.path(), session_id);
     let worktree = session.managed_worktree.clone().unwrap();
     session.state = SessionState::Running;
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: archive_directory.path().join(session_id),
-    });
-    session.checkpoint = Some(checkpoint.clone());
+    }));
+    session.checkpoint = Some(Box::new(checkpoint.clone()));
     let mut config = Config::default();
     config
         .targets
@@ -683,7 +683,7 @@ fn force_stop_reuses_verified_archive_and_leaves_session_resumable() {
     let stopped = &controller.state.sessions[session_id];
     assert_eq!(stopped.state, SessionState::Stopped);
     assert!(stopped.target.is_none());
-    assert_eq!(stopped.checkpoint.as_ref(), Some(&checkpoint));
+    assert_eq!(stopped.checkpoint.as_deref(), Some(&checkpoint));
     assert!(checkpoint.archive_path.is_file());
     assert!(!worktree.worktree_root.exists());
     assert!(
@@ -723,9 +723,9 @@ fn closing_a_wedged_provisioning_session_tears_down_its_target_and_settles() {
     session.state = SessionState::Provisioning;
     session.checkpoint = None;
     session.target_template_id = "local".into();
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: worker_root.clone(),
-    });
+    }));
     let mut config = Config::default();
     config
         .targets
@@ -756,6 +756,10 @@ fn closing_a_wedged_provisioning_session_tears_down_its_target_and_settles() {
 /// The same close refuses a session that still has a workspace worth
 /// archiving, so it can never become a quiet force-destroy.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 fn closing_without_a_checkpoint_refuses_a_session_that_has_one_to_take() {
     if !in_isolated_store("closing_without_a_checkpoint_refuses_a_session_that_has_one_to_take") {
         return;
@@ -767,9 +771,9 @@ fn closing_without_a_checkpoint_refuses_a_session_that_has_one_to_take() {
     let mut session = checkpoint_test_session(session_id);
     session.state = SessionState::Running;
     session.target_template_id = "local".into();
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: directory.path().join(session_id),
-    });
+    }));
     let mut config = Config::default();
     config
         .targets
@@ -825,9 +829,9 @@ fn failed_subagent_controller(worker_root: &std::path::Path, session_id: &str) -
     session.last_error = Some("this agent does not offer high as a effort".into());
     session.checkpoint = None;
     session.target_template_id = "local".into();
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: worker_root.to_owned(),
-    });
+    }));
     let relation = failed_subagent_relation(session_id);
     let mut config = Config::default();
     config
@@ -853,9 +857,9 @@ fn seed_child_reports(
     parent.state = SessionState::Running;
     parent.target_template_id = "local".into();
     parent.project_directory = Some(directory.join("project"));
-    parent.target = Some(TargetLocator::LocalBare {
+    parent.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: directory.join(parent_id),
-    });
+    }));
     crate::database::save_session(&parent).unwrap();
     controller.state.sessions.insert(parent_id.into(), parent);
     let mut relation = failed_subagent_relation(child_id);
@@ -1060,7 +1064,7 @@ async fn close_child_with_partial_root(
     seed_child_reports(&mut controller, session_id, directory.path());
     let intent = crate::database::WorkerRestartIntent {
         operation_id: "failed-checkpoint-only-restart".into(),
-        target: controller.state.sessions[session_id]
+        target: *controller.state.sessions[session_id]
             .target
             .clone()
             .unwrap(),
@@ -1214,7 +1218,7 @@ fn checkpointed_close_keeps_a_child_report_directory() {
     let checkpoint = write_checkpoint_gate_archive(directory.path(), session_id, 7);
     let session = controller.state.sessions.get_mut(session_id).unwrap();
     session.state = SessionState::Closing;
-    session.checkpoint = Some(checkpoint.clone());
+    session.checkpoint = Some(Box::new(checkpoint.clone()));
 
     persist_controller_fixture(&controller);
     controller
@@ -1295,6 +1299,10 @@ fn reconciling_an_orphaned_in_flight_state_records_a_readable_cause() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 fn force_stop_without_a_recovery_archive_does_not_touch_the_target() {
     if !in_isolated_store("force_stop_without_a_recovery_archive_does_not_touch_the_target") {
         return;
@@ -1302,12 +1310,12 @@ fn force_stop_without_a_recovery_archive_does_not_touch_the_target() {
     let _writer = crate::database::install_isolated_test_writer();
 
     struct RecordingExecutor {
-        calls: RefCell<usize>,
+        calls: std::sync::Mutex<usize>,
     }
 
     impl CommandExecutor for RecordingExecutor {
         fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
-            *self.calls.borrow_mut() += 1;
+            *self.calls.lock().unwrap() += 1;
             Ok(CommandOutput {
                 status: 0,
                 stdout: Vec::new(),
@@ -1322,9 +1330,9 @@ fn force_stop_without_a_recovery_archive_does_not_touch_the_target() {
     session.state = SessionState::Running;
     session.checkpoint = None;
     session.target_template_id = "local".into();
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: directory.path().join(session_id),
-    });
+    }));
     let mut config = Config::default();
     config
         .targets
@@ -1337,7 +1345,7 @@ fn force_stop_without_a_recovery_archive_does_not_touch_the_target() {
         },
     };
     let executor = RecordingExecutor {
-        calls: RefCell::new(0),
+        calls: std::sync::Mutex::new(0),
     };
 
     persist_controller_fixture(&controller);
@@ -1346,7 +1354,7 @@ fn force_stop_without_a_recovery_archive_does_not_touch_the_target() {
         .unwrap_err();
 
     assert!(error.to_string().contains("existing recovery archive"));
-    assert_eq!(*executor.calls.borrow(), 0);
+    assert_eq!(*executor.calls.lock().unwrap(), 0);
     assert_eq!(
         controller.state.sessions[session_id].state,
         SessionState::Running
@@ -1365,12 +1373,12 @@ fn destroying_retry_blocks_cleanup_when_the_archive_gate_changed() {
     let _writer = crate::database::install_isolated_test_writer();
 
     struct RecordingExecutor {
-        calls: RefCell<usize>,
+        calls: std::sync::Mutex<usize>,
     }
 
     impl CommandExecutor for RecordingExecutor {
         fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
-            *self.calls.borrow_mut() += 1;
+            *self.calls.lock().unwrap() += 1;
             Ok(CommandOutput {
                 status: 0,
                 stdout: Vec::new(),
@@ -1387,10 +1395,10 @@ fn destroying_retry_blocks_cleanup_when_the_archive_gate_changed() {
     let worktree = session.managed_worktree.clone().unwrap();
     session.target_template_id = "local".into();
     session.state = SessionState::Destroying;
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: directory.path().join(session_id),
-    });
-    session.checkpoint = Some(checkpoint.clone());
+    }));
+    session.checkpoint = Some(Box::new(checkpoint.clone()));
     let mut config = Config::default();
     config
         .targets
@@ -1403,7 +1411,7 @@ fn destroying_retry_blocks_cleanup_when_the_archive_gate_changed() {
         },
     };
     let executor = RecordingExecutor {
-        calls: RefCell::new(0),
+        calls: std::sync::Mutex::new(0),
     };
     let persisted = RefCell::new(Vec::new());
     std::fs::write(&checkpoint.archive_path, b"changed after checkpoint").unwrap();
@@ -1417,7 +1425,7 @@ fn destroying_retry_blocks_cleanup_when_the_archive_gate_changed() {
         .unwrap_err();
 
     assert!(error.to_string().contains("checkpoint SHA changed"));
-    assert_eq!(*executor.calls.borrow(), 0);
+    assert_eq!(*executor.calls.lock().unwrap(), 0);
     assert!(persisted.into_inner().is_empty());
     assert!(worktree.worktree_root.is_dir());
     assert_eq!(
@@ -1434,12 +1442,12 @@ fn destroying_retry_finalizes_when_apple_container_is_confirmed_absent() {
     crate::database::load_state().unwrap();
 
     struct AlreadyRemovedExecutor {
-        commands: RefCell<Vec<CommandSpec>>,
+        commands: std::sync::Mutex<Vec<CommandSpec>>,
     }
 
     impl CommandExecutor for AlreadyRemovedExecutor {
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            self.commands.borrow_mut().push(command.clone());
+            self.commands.lock().unwrap().push(command.clone());
             if command.program == "sh"
                 && command
                     .args
@@ -1467,11 +1475,11 @@ fn destroying_retry_finalizes_when_apple_container_is_confirmed_absent() {
     let mut session = checkpoint_test_session(session_id);
     session.target_template_id = "apple".into();
     session.state = SessionState::Destroying;
-    session.target = Some(TargetLocator::AppleContainer {
+    session.target = Some(Box::new(TargetLocator::AppleContainer {
         borrowed_from: None,
         container_id: targets::resource_name(session_id).unwrap(),
-    });
-    session.checkpoint = Some(checkpoint.clone());
+    }));
+    session.checkpoint = Some(Box::new(checkpoint.clone()));
     let mut config = Config::default();
     config.targets.insert(
         "apple".into(),
@@ -1496,7 +1504,7 @@ fn destroying_retry_finalizes_when_apple_container_is_confirmed_absent() {
         },
     };
     let executor = AlreadyRemovedExecutor {
-        commands: RefCell::new(Vec::new()),
+        commands: std::sync::Mutex::new(Vec::new()),
     };
     let persisted = RefCell::new(Vec::new());
 
@@ -1508,7 +1516,7 @@ fn destroying_retry_finalizes_when_apple_container_is_confirmed_absent() {
         })
         .unwrap();
 
-    let commands = executor.commands.borrow();
+    let commands = executor.commands.lock().unwrap().clone();
     assert_eq!(commands.len(), 3);
     assert_eq!(
         commands[0].purpose,
@@ -1610,10 +1618,10 @@ fn force_destroy_from_running_removes_target_worktree_branch_and_archive() {
     let mut session = managed_worktree_session(repository.path(), session_id);
     session.state = SessionState::Running;
     session.target_template_id = "local".into();
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: worker_root.clone(),
-    });
-    session.checkpoint = Some(checkpoint.clone());
+    }));
+    session.checkpoint = Some(Box::new(checkpoint.clone()));
     let mut config = Config::default();
     config
         .targets
@@ -1671,9 +1679,9 @@ fn force_destroy_keeps_the_branch_and_removes_the_checkout_by_default() {
     let mut session = managed_worktree_session(repository.path(), session_id);
     session.state = SessionState::Running;
     session.target_template_id = "local".into();
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: worker_root.clone(),
-    });
+    }));
     session.checkpoint = None;
     let mut config = Config::default();
     config
@@ -1730,7 +1738,7 @@ fn destroy_warns_when_cleanup_fails_but_automatic_stopping_keeps_the_record() {
         .sessions
         .get_mut(session_id)
         .unwrap()
-        .checkpoint = Some(checkpoint.clone());
+        .checkpoint = Some(Box::new(checkpoint.clone()));
     let checkout = repository.path().join(".mj/clones").join(session_id);
     crate::database::save_session(&controller.state.sessions[session_id]).unwrap();
     let deleted = RefCell::new(Vec::new());
@@ -1811,7 +1819,7 @@ fn force_destroy_tolerates_a_missing_archive() {
     std::fs::remove_file(&checkpoint.archive_path).unwrap();
     let mut session = checkpoint_test_session(session_id);
     session.state = SessionState::Error;
-    session.checkpoint = Some(checkpoint);
+    session.checkpoint = Some(Box::new(checkpoint));
     let mut controller = Controller {
         config: Config::default(),
         state: State {
@@ -1908,7 +1916,7 @@ fn failed_suspension_replaces_stale_internal_error_and_preserves_recovery_data()
     let record = controller.state.sessions.get_mut(id).unwrap();
     record.state = SessionState::Running;
     record.last_error = Some("old transport error with secret details".into());
-    record.checkpoint = Some(checkpoint.clone());
+    record.checkpoint = Some(Box::new(checkpoint.clone()));
     crate::database::save_session(record).unwrap();
     let target = record.target.clone();
     let reason = format!(
@@ -1921,7 +1929,7 @@ fn failed_suspension_replaces_stale_internal_error_and_preserves_recovery_data()
     assert_eq!(record.public_error(), Some(reason.as_str()));
     assert_eq!(record.state, SessionState::Running);
     assert_eq!(record.target, target);
-    assert_eq!(record.checkpoint.as_ref(), Some(&checkpoint));
+    assert_eq!(record.checkpoint.as_deref(), Some(&checkpoint));
     assert!(checkpoint.archive_path.exists());
     let snapshot =
         crate::server::ViewerSnapshot::from_config_state(&controller.config, &restored, 1);
@@ -1950,7 +1958,7 @@ fn is_release(command: &CommandSpec) -> bool {
 struct RealTargetsRecordedRelease {
     release_status: i32,
     checkout: std::path::PathBuf,
-    releases: RefCell<Vec<(CommandSpec, bool)>>,
+    releases: std::sync::Mutex<Vec<(CommandSpec, bool)>>,
 }
 
 #[cfg(unix)]
@@ -1960,7 +1968,8 @@ impl CommandExecutor for RealTargetsRecordedRelease {
             return ProcessExecutor.execute(command);
         }
         self.releases
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .push((command.clone(), self.checkout.exists()));
         Ok(CommandOutput {
             status: self.release_status,
@@ -1977,13 +1986,15 @@ impl CommandExecutor for RealTargetsRecordedRelease {
 /// Answers every command with success and records them in order.
 #[derive(Default)]
 struct RecordingTargets {
-    commands: RefCell<Vec<CommandSpec>>,
+    commands: std::sync::Mutex<Vec<CommandSpec>>,
 }
 
 impl RecordingTargets {
     fn releases(&self) -> Vec<CommandSpec> {
         self.commands
-            .borrow()
+            .lock()
+            .unwrap()
+            .clone()
             .iter()
             .filter(|command| is_release(command))
             .cloned()
@@ -1992,18 +2003,23 @@ impl RecordingTargets {
 
     /// The position of the first command whose arguments mention `needle`.
     fn position(&self, needle: &str) -> Option<usize> {
-        self.commands.borrow().iter().position(|command| {
-            command
-                .args
-                .iter()
-                .any(|argument| argument.contains(needle))
-        })
+        self.commands
+            .lock()
+            .unwrap()
+            .clone()
+            .iter()
+            .position(|command| {
+                command
+                    .args
+                    .iter()
+                    .any(|argument| argument.contains(needle))
+            })
     }
 }
 
 impl CommandExecutor for RecordingTargets {
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-        self.commands.borrow_mut().push(command.clone());
+        self.commands.lock().unwrap().push(command.clone());
         Ok(CommandOutput {
             status: 0,
             stdout: Vec::new(),
@@ -2047,9 +2063,9 @@ fn running_managed_clone_controller(
         crate::controller::test_support::managed_clone_session(repository, session_id);
     session.state = SessionState::Running;
     session.target_template_id = "local".into();
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: worker_root.to_owned(),
-    });
+    }));
     session.checkpoint = None;
     let mut config = Config::default();
     config
@@ -2087,7 +2103,7 @@ fn destroying_a_managed_clone_releases_its_mbx_build_state_once_the_checkout_is_
     let executor = RealTargetsRecordedRelease {
         release_status: 0,
         checkout: checkout.clone(),
-        releases: RefCell::new(Vec::new()),
+        releases: std::sync::Mutex::new(Vec::new()),
     };
 
     persist_controller_fixture(&controller);
@@ -2095,7 +2111,7 @@ fn destroying_a_managed_clone_releases_its_mbx_build_state_once_the_checkout_is_
         .force_destroy_session_with(session_id, &executor, BranchDisposition::Keep, |_| Ok(()))
         .unwrap();
 
-    let releases = executor.releases.into_inner();
+    let releases = executor.releases.into_inner().unwrap();
     assert_eq!(releases.len(), 1, "{releases:?}");
     let (release, checkout_present) = &releases[0];
     assert!(
@@ -2137,7 +2153,7 @@ fn a_failed_mbx_release_still_destroys_the_session_and_is_reported_by_doctor() {
     let executor = RealTargetsRecordedRelease {
         release_status: 1,
         checkout: checkout.clone(),
-        releases: RefCell::new(Vec::new()),
+        releases: std::sync::Mutex::new(Vec::new()),
     };
 
     persist_controller_fixture(&controller);
@@ -2145,7 +2161,7 @@ fn a_failed_mbx_release_still_destroys_the_session_and_is_reported_by_doctor() {
         .force_destroy_session_with(session_id, &executor, BranchDisposition::Keep, |_| Ok(()))
         .unwrap();
 
-    assert_eq!(executor.releases.borrow().len(), 1);
+    assert_eq!(executor.releases.lock().unwrap().clone().len(), 1);
     assert!(!checkout.exists());
     assert!(!worker_root.exists());
     assert!(!controller.state.sessions.contains_key(session_id));
@@ -2181,11 +2197,11 @@ fn destroying_an_ssh_bare_session_releases_each_repository_on_its_host() {
     session.target_template_id = "ssh".into();
     session.target_runtime = Some((&template).into());
     session.checkpoint = None;
-    session.target = Some(TargetLocator::SshBare {
+    session.target = Some(Box::new(TargetLocator::SshBare {
         host: "build.test".into(),
         workspace: workspace.clone().into(),
         worker_id: None,
-    });
+    }));
     let mut config = Config::default();
     config.targets.insert("ssh".into(), template);
     config
@@ -2206,7 +2222,12 @@ fn destroying_an_ssh_bare_session_releases_each_repository_on_its_host() {
         .unwrap();
 
     let releases = executor.releases();
-    assert_eq!(releases.len(), 1, "{:?}", executor.commands.borrow());
+    assert_eq!(
+        releases.len(),
+        1,
+        "{:?}",
+        executor.commands.lock().unwrap().clone()
+    );
     let release = &releases[0];
     assert_eq!(release.program, "ssh");
     let remote = release.args.last().unwrap();
@@ -2270,7 +2291,12 @@ fn removing_a_cached_container_releases_its_workspaces_from_the_shared_cache() {
         .unwrap();
 
     let releases = executor.releases();
-    assert_eq!(releases.len(), 1, "{:?}", executor.commands.borrow());
+    assert_eq!(
+        releases.len(),
+        1,
+        "{:?}",
+        executor.commands.lock().unwrap().clone()
+    );
     let arguments = release_arguments(&releases[0]);
     assert_eq!(
         &arguments[..4],
@@ -2325,11 +2351,11 @@ fn destroying_a_subagent_never_releases_the_workspace_it_borrows() {
     let child = controller.state.sessions.get_mut(session_id).unwrap();
     // A child runs in its parent's container, workspace and build cache.
     child.target_template_id = "podman".into();
-    child.target = Some(TargetLocator::LocalPodman {
+    child.target = Some(Box::new(TargetLocator::LocalPodman {
         borrowed_from: Some(parent_id.into()),
         container_id: targets::resource_name(parent_id).unwrap(),
         workspace_storage: mj_core::state::PodmanWorkspaceLocator::ContainerLayer,
-    });
+    }));
     child.container_workspace = Some(mj_core::targets::new_container_workspace(parent_id).unwrap());
     child.build_cache = Some(mj_core::state::SessionBuildCache {
         host: "local".into(),
@@ -2347,7 +2373,9 @@ fn destroying_a_subagent_never_releases_the_workspace_it_borrows() {
     assert!(
         executor
             .commands
-            .borrow()
+            .lock()
+            .unwrap()
+            .clone()
             .iter()
             .any(|command| command.purpose == "stop Mjolnir worker daemon")
     );
@@ -2398,7 +2426,7 @@ fn destroy_removes_every_archive_of_the_session_and_only_those() {
     let mut session = checkpoint_test_session(session_id);
     session.state = SessionState::Provisioning;
     session.target = None;
-    session.checkpoint = Some(current.clone());
+    session.checkpoint = Some(Box::new(current.clone()));
     let mut controller = Controller {
         config: Config::default(),
         state: State {

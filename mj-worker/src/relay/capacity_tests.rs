@@ -278,7 +278,7 @@ fn newer_user_work_cancels_pending_assessment() {
 
 #[test]
 fn autonomous_provider_failure_arms_one_retry_and_survives_restart() {
-    use mj_core::assessment::{Action, Failure, Input, Judgment, Verdict, Work};
+    use mj_core::assessment::Action;
     let root = tempfile::tempdir().unwrap();
     let mut relay = open(root.path());
     start(&mut relay, "original-prompt");
@@ -304,27 +304,9 @@ fn autonomous_provider_failure_arms_one_retry_and_survives_restart() {
     relay.prepare_pending_assessment().unwrap();
     let (generation, evidence, _) = relay.pending_replied_verdict().unwrap();
     assert!(evidence.completion.is_some());
-    let answer = Verdict {
-        failure: Judgment {
-            choice: Failure::TransientProvider,
-            confidence: 0.91,
-            probabilities: Default::default(),
-        },
-        input: Judgment {
-            choice: Input::Unclear,
-            confidence: 0.32,
-            probabilities: Default::default(),
-        },
-        work: Judgment {
-            choice: Work::Unclear,
-            confidence: 0.24,
-            probabilities: Default::default(),
-        },
-        background: None,
-        reply: None,
-    };
+    let answer = glide_answer("retry_provider", None);
     assert_eq!(
-        relay.apply_turn_assessment(generation, answer).unwrap(),
+        relay.apply_glide_assessment(generation, answer).unwrap(),
         "server_retry_armed"
     );
     let retry = relay.operational_state().capacity_retry.unwrap();
@@ -347,7 +329,6 @@ fn autonomous_provider_failure_arms_one_retry_and_survives_restart() {
 
 #[test]
 fn a_new_user_command_supersedes_an_in_flight_autonomous_assessment() {
-    use mj_core::assessment::{Failure, Input, Judgment, Verdict, Work};
     let root = tempfile::tempdir().unwrap();
     let mut relay = open(root.path());
     start(&mut relay, "original-prompt");
@@ -364,27 +345,9 @@ fn a_new_user_command_supersedes_an_in_flight_autonomous_assessment() {
         "replacement-prompt",
         prompt("Stop that task and do this instead"),
     );
-    let answer = Verdict {
-        failure: Judgment {
-            choice: Failure::TransientProvider,
-            confidence: 1.0,
-            probabilities: Default::default(),
-        },
-        input: Judgment {
-            choice: Input::None,
-            confidence: 1.0,
-            probabilities: Default::default(),
-        },
-        work: Judgment {
-            choice: Work::Unclear,
-            confidence: 0.5,
-            probabilities: Default::default(),
-        },
-        background: None,
-        reply: None,
-    };
+    let answer = glide_answer("retry_provider", None);
     assert_eq!(
-        relay.apply_turn_assessment(generation, answer).unwrap(),
+        relay.apply_glide_assessment(generation, answer).unwrap(),
         "stale_turn"
     );
     assert!(relay.capacity_retry_deadline().is_none());
@@ -392,7 +355,6 @@ fn a_new_user_command_supersedes_an_in_flight_autonomous_assessment() {
 
 #[test]
 fn uncertain_assessment_is_cached_and_pending_completion_recovers() {
-    use mj_core::assessment::{Failure, Input, Judgment, Verdict, Work};
     let root = tempfile::tempdir().unwrap();
     let mut relay = open(root.path());
     start(&mut relay, "original-prompt");
@@ -407,26 +369,8 @@ fn uncertain_assessment_is_cached_and_pending_completion_recovers() {
     relay.prepare_pending_assessment().unwrap();
     let (generation, evidence, _) = relay.pending_replied_verdict().unwrap();
     assert!(evidence.authorization.unwrap().authorization_complete);
-    let answer = Verdict {
-        failure: Judgment {
-            choice: Failure::Unclear,
-            confidence: 0.5,
-            probabilities: Default::default(),
-        },
-        input: Judgment {
-            choice: Input::Unclear,
-            confidence: 0.5,
-            probabilities: Default::default(),
-        },
-        work: Judgment {
-            choice: Work::Unclear,
-            confidence: 0.5,
-            probabilities: Default::default(),
-        },
-        background: None,
-        reply: None,
-    };
-    relay.apply_turn_assessment(generation, answer).unwrap();
+    let answer = glide_answer("uncertain", None);
+    relay.apply_glide_assessment(generation, answer).unwrap();
     assert!(relay.pending_replied_verdict().is_none());
     drop(relay);
     let mut relay = open(root.path());
@@ -436,8 +380,7 @@ fn uncertain_assessment_is_cached_and_pending_completion_recovers() {
 
 // Hard-won: 295a3f85c: evidence sized without the questions exceeded the request limit on every retry.
 #[test]
-fn stored_evidence_is_refit_to_the_request_limit_before_sending() {
-    use mj_core::activity::verdict::{REQUEST_BYTES, request_bytes, request_fits};
+fn stored_evidence_preserves_history_before_glide_projection() {
     use mj_core::assessment::ContextHistory;
     use mj_core::continuation::EvidenceMessage;
     let root = tempfile::tempdir().unwrap();
@@ -445,9 +388,8 @@ fn stored_evidence_is_refit_to_the_request_limit_before_sending() {
     start(&mut relay, "request-one");
     finish(&mut relay, "request-one", "Done.", "EndTurn");
     relay.prepare_pending_assessment().unwrap();
-    // A full user budget and recent replies, stored by a build that held the
-    // evidence alone to 60 KiB: under that budget, over the limit with the
-    // questions added.
+    // A full user budget and recent replies, stored by an earlier build. The
+    // history reaches the projection whole: only the provider's refusal cuts it.
     let mut messages: Vec<_> = (0..29)
         .map(|i| EvidenceMessage {
             id: format!("user:u{i}"),
@@ -460,11 +402,7 @@ fn stored_evidence_is_refit_to_the_request_limit_before_sending() {
         role: "assistant".into(),
         text: "a".repeat(2700),
     }));
-    let stored = relay
-        .snapshot
-        .assessment
-        .as_mut()
-        .unwrap()
+    let stored = std::sync::Arc::make_mut(relay.snapshot.assessment.as_mut().unwrap())
         .evidence
         .as_mut()
         .unwrap();
@@ -473,13 +411,18 @@ fn stored_evidence_is_refit_to_the_request_limit_before_sending() {
         ..Default::default()
     });
     stored.transcript_summary.clear();
-    assert!(serde_json::to_vec(&*stored).unwrap().len() <= 60 * 1024);
-    assert!(request_bytes(stored) > REQUEST_BYTES);
 
     let (_, sent, _) = relay.pending_replied_verdict().unwrap();
-    assert!(request_fits(&sent));
+    let body = crate::acp::verdict_client::glide_turn::project(
+        &sent,
+        sent.authorization.clone().unwrap(),
+        &relay.activity_facts(),
+        0,
+    )
+    .unwrap();
+    assert!(serde_json::to_vec(&body).unwrap().len() <= 80 * 1024);
     let history = sent.authorization.unwrap();
-    assert!(history.assistant_history_omitted);
+    assert!(!history.assistant_history_omitted);
     assert_eq!(
         history.messages.iter().filter(|m| m.role == "user").count(),
         29
@@ -504,12 +447,12 @@ fn classification_transport_backoff_and_diagnostics_survive_restart() {
     relay
         .fail_turn_assessment(revision, "transport_failed")
         .unwrap();
-    let a = relay.snapshot.assessment.clone().unwrap();
+    let a = relay.snapshot.assessment.as_deref().cloned().unwrap();
     assert!(!a.needs_classification(a.retry_at_ms.unwrap() - 1));
     assert!(a.needs_classification(a.retry_at_ms.unwrap()));
     drop(relay);
     let mut relay = open(root.path());
-    assert_eq!(relay.snapshot.assessment.as_ref().unwrap(), &a);
+    assert_eq!(relay.snapshot.assessment.as_deref().unwrap(), &a);
     assert!(relay.pending_replied_verdict().is_none());
     assert_eq!(a.evidence, Some(evidence.clone()));
     let id = format!("assessment-{SESSION}-{revision}");
@@ -519,7 +462,7 @@ fn classification_transport_backoff_and_diagnostics_survive_restart() {
     assert_eq!(page.decisions[0].action, "transport failed");
 
     relay.prepare_pending_assessment().unwrap();
-    assert_eq!(relay.snapshot.assessment.as_ref().unwrap(), &a);
+    assert_eq!(relay.snapshot.assessment.as_deref().unwrap(), &a);
     let mut due = a.clone();
     due.retry_at_ms = Some(0);
     relay
@@ -528,7 +471,7 @@ fn classification_transport_backoff_and_diagnostics_survive_restart() {
         })
         .unwrap();
     relay.prepare_pending_assessment().unwrap();
-    let pending = relay.snapshot.assessment.clone().unwrap();
+    let pending = relay.snapshot.assessment.as_deref().cloned().unwrap();
     assert_eq!(pending.status, mj_core::assessment::Status::Pending);
     assert_eq!(pending.retry_at_ms, None);
     assert_eq!(pending.failures, a.failures);
@@ -538,7 +481,7 @@ fn classification_transport_backoff_and_diagnostics_survive_restart() {
     assert!(relay.pending_replied_verdict().is_none());
     drop(relay);
     let mut relay = open(root.path());
-    assert_eq!(relay.snapshot.assessment.as_ref().unwrap(), &pending);
+    assert_eq!(relay.snapshot.assessment.as_deref().unwrap(), &pending);
     assert!(relay.pending_replied_verdict().is_some());
 }
 
@@ -555,9 +498,10 @@ fn a_checkpoint_seed_preserves_pending_assessment_and_full_authorization() {
     );
     relay.prepare_pending_assessment().unwrap();
     let state = mj_core::assessment::Checkpoint {
+        open_request: None,
         version: 1,
-        context: relay.snapshot.assessment_context.clone(),
-        assessment: relay.snapshot.assessment.clone(),
+        context: relay.snapshot.assessment_context.as_deref().cloned(),
+        assessment: relay.snapshot.assessment.as_deref().cloned(),
         continuation: relay.snapshot.continuation.clone(),
         capacity_retry: relay.snapshot.capacity_retry.clone(),
         turn_completion: relay.snapshot.turn_completion.clone(),
@@ -576,7 +520,10 @@ fn a_checkpoint_seed_preserves_pending_assessment_and_full_authorization() {
     let mut restored = open(destination.path());
     let (_, evidence, _) = restored.pending_replied_verdict().unwrap();
     assert_eq!(evidence, state.assessment.unwrap().evidence.unwrap());
-    assert_eq!(restored.snapshot.assessment_context, state.context);
+    assert_eq!(
+        restored.snapshot.assessment_context.as_deref(),
+        state.context.as_ref()
+    );
 }
 
 /// A routine checkpoint is Mjolnir's housekeeping, not user work, so it keeps

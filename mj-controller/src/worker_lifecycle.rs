@@ -151,7 +151,7 @@ impl WorkerPermit {
     pub(crate) fn verify_target(&self, expected: &mj_core::state::TargetLocator) -> Result<()> {
         let current = crate::database::read_durable_session_record(self.session_id())?;
         ensure!(
-            current.is_some_and(|session| session.target.as_ref() == Some(expected)),
+            current.is_some_and(|session| session.target.as_deref() == Some(expected)),
             "worker target changed before lifecycle ownership"
         );
         Ok(())

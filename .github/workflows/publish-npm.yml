@@ -43,11 +43,6 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
 
-      - name: Install Linux WebKitGTK runtime for smoke test
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends --assume-yes libwebkit2gtk-4.1-0
-
       - name: Confirm the tag owns the Cargo release version
         run: |
           version="$(sed -n '/^\[workspace\.package\]$/,/^\[/s/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
@@ -106,7 +101,6 @@ jobs:
             "npm/dist/brokkai-mjolnir-$version.tgz" \
             "npm/dist/brokkai-mjolnir-linux-x64-gnu-$version.tgz"
           test -x npm-smoke/node_modules/@brokkai/mjolnir-linux-x64-gnu/bin/mj
-          test -x npm-smoke/node_modules/@brokkai/mjolnir-linux-x64-gnu/bin/mj-desktop
           test -x npm-smoke/node_modules/@brokkai/mjolnir-linux-x64-gnu/bin/mj-voice-worker
           npm-smoke/node_modules/.bin/mj --version
 

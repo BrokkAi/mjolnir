@@ -175,7 +175,7 @@ pub(super) fn validate_move_selection(
         if session
             .incompatible_resume_targets
             .iter()
-            .any(|id| id == target_id)
+            .any(|id| id.as_ref() == target_id)
         {
             return Err(resume_refusal(session, target_id));
         }
@@ -609,7 +609,7 @@ fn validate_action_against(
             if session
                 .incompatible_resume_targets
                 .iter()
-                .any(|incompatible| incompatible == target_id)
+                .any(|incompatible| incompatible.as_ref() == target_id)
             {
                 return Err(resume_refusal(session, target_id));
             }
@@ -632,6 +632,14 @@ fn validate_action_against(
             if !session.capabilities.rename {
                 return Err(ApiError::bad_request("this session cannot be renamed"));
             }
+        }
+        ControllerAction::DismissNotification { session_id, .. } => {
+            validate_public_id(session_id)?;
+            require_session_record(snapshot, session_id)?;
+        }
+        ControllerAction::SetSessionNotificationsIgnored { session_id, .. } => {
+            validate_public_id(session_id)?;
+            require_session_record(snapshot, session_id)?;
         }
         ControllerAction::TurnControl {
             session_id,
@@ -759,7 +767,16 @@ fn validate_action_against(
                 ));
             }
         }
-        ControllerAction::RecordOperatorActivity | ControllerAction::SetOperatorAway { .. } => {}
+        ControllerAction::PushSubscribe { subscription }
+        | ControllerAction::PushRenew { subscription, .. } => {
+            subscription
+                .validate()
+                .map_err(|_| ApiError::bad_request("invalid Web Push subscription"))?;
+        }
+        ControllerAction::PushUnsubscribe { .. }
+        | ControllerAction::PushTest { .. }
+        | ControllerAction::RecordOperatorActivity
+        | ControllerAction::SetOperatorAway { .. } => {}
         ControllerAction::RefreshQuota { profile_id } => {
             validate_public_id(profile_id)?;
             require_profile(snapshot, profile_id)?;

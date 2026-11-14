@@ -408,6 +408,14 @@ fn streaming_verification_does_not_retain_large_noncanonical_payloads() {
             .len()
         + verified.archive_sha256.len();
     assert!(retained_metadata_bytes < LARGE_PAYLOAD_BYTES / 100);
+    // A preparation cancellation reaches readers cloned for parallel verification.
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let archive = open_archive_cancellable(&path, Some(cancelled.clone())).unwrap();
+    let mut parallel_reader = archive.clone();
+    cancelled.store(true, std::sync::atomic::Ordering::Release);
+    let mut entry = parallel_reader.by_index(0).unwrap();
+    assert!(entry.read_to_end(&mut Vec::new()).is_err());
+    assert!(verify_archive_streaming_cancellable(&path, cancelled).is_err());
 }
 
 const TEST_PART_BYTES: usize = 4096;
@@ -1926,7 +1934,7 @@ fn review_refs_round_trip_with_non_commit_tips_and_restore_conflicts() {
 }
 
 #[test]
-fn session_starts_follow_the_session_between_worktree_names() {
+fn session_starts_and_explicit_review_bases_follow_worktree_names() {
     let directory = tempfile::tempdir().unwrap();
     let origin = directory.path().join("origin");
     initialize_repository(&origin);
@@ -1952,6 +1960,12 @@ fn session_starts_follow_the_session_between_worktree_names() {
         digest_bytes(scope.as_bytes())
     );
     git(&linked, &["update-ref", &start, &base]);
+    commit_file(&linked, "reviewed.txt", b"reviewed\n", "reviewed");
+    let reviewed = git_line(&linked, &["rev-parse", "HEAD"]);
+    git(
+        &linked,
+        &["update-ref", &push_review_base_ref(&scope), &reviewed],
+    );
     let snapshot = collect_git_snapshot(
         &SystemGit,
         &linked,
@@ -1983,6 +1997,18 @@ fn session_starts_follow_the_session_between_worktree_names() {
     );
     assert_eq!(
         git_line(&destination, &["rev-parse", &relocated_start]),
+        base
+    );
+    let relocated_base = push_review_base_ref(MAIN_SCOPE);
+    assert_eq!(
+        git_line(&destination, &["rev-parse", &relocated_base]),
+        reviewed
+    );
+    // A selection already made in the destination belongs to that worktree.
+    git(&destination, &["update-ref", &relocated_base, &base]);
+    restore_git_snapshot(&SystemGit, &destination, &snapshot).unwrap();
+    assert_eq!(
+        git_line(&destination, &["rev-parse", &relocated_base]),
         base
     );
 }

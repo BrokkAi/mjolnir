@@ -155,7 +155,12 @@ fn discovers_default_and_overridden_homes_with_authentication_markers() {
     );
 
     assert_eq!(homes.len(), 5);
-    assert!(homes.iter().all(|home| home.authenticated));
+    // On a Mac the Keychain is the only Claude login (#1491): a home holding
+    // just a `.credentials.json` is not signed in there.
+    for home in &homes {
+        let keychain_only = home.kind == HarnessKind::Claude && cfg!(target_os = "macos");
+        assert_eq!(home.authenticated, !keychain_only, "{home:?}");
+    }
     let codex_profiles = homes
         .iter()
         .filter(|home| home.path == codex)
@@ -176,7 +181,7 @@ fn an_installed_harness_is_offered_before_its_first_login() {
     let directory = tempfile::tempdir().unwrap();
     let executor = FakeExecutor {
         commands: RefCell::new(Vec::new()),
-        statuses: vec![1, 1, 1, 1, 1, 0, 1],
+        statuses: vec![1, 1, 1, 1, 1, 0, 1, 1],
     };
     let mut homes = Vec::new();
 
@@ -216,7 +221,7 @@ fn an_installed_dsh_is_offered_before_its_first_login() {
     let directory = tempfile::tempdir().unwrap();
     let executor = FakeExecutor {
         commands: RefCell::new(Vec::new()),
-        statuses: vec![1, 1, 1, 1, 1, 1, 0],
+        statuses: vec![1, 1, 1, 1, 1, 1, 0, 1],
     };
     let mut homes = Vec::new();
 
@@ -332,6 +337,8 @@ fn claude_keychain_marks_the_default_home_authenticated_without_a_marker() {
         commands[0].args,
         [
             "find-generic-password",
+            "-a",
+            &claude_keychain_account(),
             "-s",
             "Claude Code-credentials",
             "-w"

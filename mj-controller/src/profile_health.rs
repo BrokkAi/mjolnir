@@ -302,6 +302,7 @@ mod tests {
             code: code.map(str::to_owned),
             http_status,
             reset_at: None,
+            login_fingerprint: None,
         }
     }
 
@@ -485,6 +486,7 @@ mod tests {
         let now_system = SystemTime::from(now);
         let failure = TurnDiagnostic {
             reset_at: Some("23:00 UTC".into()),
+            login_fingerprint: None,
             ..diagnostic("429", Some("limit"), None)
         };
         let expected = SystemTime::from(

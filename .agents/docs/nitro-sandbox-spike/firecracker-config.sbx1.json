@@ -1,0 +1,15 @@
+{
+  "boot-source": {
+    "kernel_image_path": "/var/lib/sandboxes/kernel/vmlinuz",
+    "initrd_path": "/var/lib/sandboxes/kernel/initrd.img",
+    "boot_args": "panic=1 initcall_blacklist=i8042_init sbx.name=sbx1 sbx.ip=10.77.1.2/30 sbx.gw=10.77.1.1 sbx.dns=169.254.169.253"
+  },
+  "machine-config": { "vcpu_count": 2, "mem_size_mib": 4096 },
+  "drives": [
+    { "drive_id": "rootfs",    "path_on_host": "/var/lib/sandboxes/sbx/1/root.ext4",      "is_root_device": true,  "is_read_only": false },
+    { "drive_id": "workspace", "path_on_host": "/var/lib/sandboxes/sbx/1/workspace.ext4", "is_root_device": false, "is_read_only": false }
+  ],
+  "network-interfaces": [ { "iface_id": "eth0", "host_dev_name": "tap1", "guest_mac": "06:00:0a:4d:01:02" } ],
+  "vsock": { "guest_cid": 3, "uds_path": "/run/sandbox/1/v.sock" },
+  "enclave": { "direct_mode": true, "cpu_overcommit": true, "debug_mode": true }
+}

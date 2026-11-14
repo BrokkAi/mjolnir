@@ -103,6 +103,73 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
     );
     drop(docker_commands);
 
+    // A Nitro host reports the memory pool reserved for sandboxes; a host with
+    // no pool is told how to get one.
+    let nitro_ssh = RuntimeSshTarget {
+        destination: "ec2-user@nitro.example.test".to_owned(),
+        ssh_args: Vec::new(),
+    };
+    let nitro_report = |pool: u64| {
+        format!(
+            r#"{{"engine_version":"2.70.0","state_format":1,"firecracker_version":"1.18.0","kernel_version":"6.18.56-126.188.amzn2023","memory_pool_total_mib":{pool},"memory_pool_free_mib":{free},"slots_in_use":1,"slots_total":80,"cpus":16}}"#,
+            free = pool.saturating_sub(4098)
+        )
+    };
+    let nitro = FakeExecutor::new([
+        Ok(output(b"")),
+        Ok(output(nitro_report(49152).as_bytes())),
+        Ok(output(b"sha256:0123456789abcdef\n")),
+    ]);
+    let nitro_check = ssh_nitro_check(
+        "nitro-ready",
+        &nitro_ssh,
+        "ghcr.io/example/dev:1.2.3",
+        &nitro,
+        false,
+    );
+    let nitro_commands = nitro.commands.borrow();
+    assert_eq!(nitro_commands.len(), 3);
+    assert!(
+        nitro_commands
+            .iter()
+            .all(|command| command.program == "ssh")
+    );
+    // The engine runs as root from the installed worker, whose path comes
+    // from one constant, and the verbs reach it unchanged.
+    for (command, verbs) in [
+        (&nitro_commands[1], "'info' '--format' 'json'"),
+        (&nitro_commands[2], "'image' 'inspect' '--format' '{{.Id}}'"),
+    ] {
+        let remote = command.args.last().unwrap();
+        assert!(remote.contains("exec sudo -n \"$HOME/.local/share/hel/microvm/hel\" microvm"));
+        assert!(
+            remote.ends_with(verbs) || remote.contains(verbs),
+            "{remote}"
+        );
+    }
+    drop(nitro_commands);
+    let no_pool = FakeExecutor::new([Ok(output(b"")), Ok(output(nitro_report(0).as_bytes()))]);
+    let nitro_missing_engine = FakeExecutor::new([
+        Ok(output(b"")),
+        Ok(failed(
+            "sh: 1: exec: /home/ec2-user/.local/share/hel/microvm/hel: not found",
+        )),
+    ]);
+    let nitro_missing_engine_check = ssh_nitro_check(
+        "nitro-fresh",
+        &nitro_ssh,
+        "ghcr.io/example/dev:1.2.3",
+        &nitro_missing_engine,
+        false,
+    );
+    let nitro_no_pool_check = ssh_nitro_check(
+        "nitro-no-pool",
+        &nitro_ssh,
+        "ghcr.io/example/dev:1.2.3",
+        &no_pool,
+        false,
+    );
+
     let podman = FakeExecutor::new([Ok(output(
         b"keys.used=174\nkeys.quota=200\nkeys.max=1000\nmaxstartups=10:30:100\n",
     ))]);
@@ -135,7 +202,14 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         },
     );
     let subagent_checks = subagent_policy_checks(Ok(&config));
-    let mut checks = vec![docker_check, podman_check, missing_ssh_check];
+    let mut checks = vec![
+        docker_check,
+        nitro_check,
+        nitro_missing_engine_check,
+        nitro_no_pool_check,
+        podman_check,
+        missing_ssh_check,
+    ];
     checks.extend(subagent_checks);
 
     // External Git distributions vary their version suffixes. Exercise the
@@ -325,6 +399,19 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
         ["ssh", "ssh", "ssh"],
         "one SSH call per host"
     );
+
+    for response in [
+        Ok(failed("sudo: a password is required")),
+        Ok(output("maxsessions 10\nmaxstartups 10:30:100\n")),
+        Ok(output("maxsessions 200\nmaxstartups 100:30:300\n")),
+        Ok(output("maxsessions 1000\nmaxstartups 10:30:100\n")),
+        Ok(output("maxsessions 10\nmaxstartups 500:10:1000\n")),
+        Ok(output(
+            "maxsessions 200\nmaxstartups 100:30:300\nusedns yes\n",
+        )),
+    ] {
+        checks.push(sshd::check("remote", &ssh, &FakeExecutor::new([response])));
+    }
 
     for check in &mut checks {
         check.detail = check
@@ -1466,7 +1553,7 @@ fn missing_harness_homes_name_every_supported_agent() {
 
     assert_eq!(
         check.detail,
-        "No Codex, Claude Code, Kimi Code, Grok Build, Muse Code, OpenCode, or DSH home was found in the default or environment-overridden locations."
+        "No Codex, Claude Code, Kimi Code, Grok Build, Muse Code, OpenCode, DSH, or Antigravity home was found in the default or environment-overridden locations."
     );
 }
 
@@ -1607,7 +1694,7 @@ fn review_leftovers_skip_managed_checkouts_and_repositories_in_use() {
         let mut session = checkpoint_test_session(id);
         session.state = state;
         session.project_directory = Some(root.clone());
-        session.managed_worktree = Some(ManagedWorktree {
+        session.managed_worktree = Some(Box::new(ManagedWorktree {
             kind,
             source_project_directory: project.clone(),
             source_repository: project.clone(),
@@ -1615,7 +1702,7 @@ fn review_leftovers_skip_managed_checkouts_and_repositories_in_use() {
             branch: format!("mj/{id}"),
             target: ManagedWorktreeTarget::Local,
             base_commit: None,
-        });
+        }));
         session
     };
     let running_clone = managed("a1", ManagedCheckoutKind::Clone, SessionState::Running);

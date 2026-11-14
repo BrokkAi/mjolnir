@@ -23,12 +23,11 @@ something new. Only `/api/v1/...` is documented and stable.
 mj api-info
 ```
 
-It prints the base URL, the file holding the bearer token, and the contract
-version:
+It prints the base URL and the contract version. `mj api-token` explicitly
+prints the bearer token for external clients:
 
 ```text
 base url   http://127.0.0.1:3765/api/v1
-token file /home/you/.local/share/mjolnir/api-token
 version    Mjolnir API 1
 ```
 
@@ -44,7 +43,7 @@ then says so, and `mj daemon status` reports the viewer's state.
 Send the token as a bearer token:
 
 ```console
-curl -sS -H "Authorization: Bearer $(cat ~/.local/share/mjolnir/api-token)" \
+curl -sS -H "Authorization: Bearer $(mj api-token)" \
   http://127.0.0.1:3765/api/v1/sessions
 ```
 
@@ -681,8 +680,7 @@ Both fields are optional. `timeout_secs` defaults to 600 and may not exceed
   retry, which answers for the turn when it ends), while Jev is still reading
   the reply, and while a sub-agent child still owes its report. It does not
   wait for anything that starts new work: a turn the agent starts on its own,
-  background work, an expected continuation, Mjolnir's automatic continuation,
-  a later prompt, or a goal. To learn when your prompt's turn ended, pass its
+  background work, an expected continuation, a later prompt, or a goal. To learn when your prompt's turn ended, pass its
   `turn_id`, or use `mj prompt`.
 - **Without `turn_id`, the wait answers when the session settles**: the
   worker's activity state is idle (the same state the dashboard shows as
@@ -1054,7 +1052,7 @@ viewer does not act on these requests.
 
 | Command | Route |
 | --- | --- |
-| `mj api-info` | — (prints the base URL and token path) |
+| `mj api-info` | — (prints the base URL) |
 | `mj workspaces list` | `GET /workspaces` |
 | `mj workspaces create <name>` | `POST /workspaces` |
 | `mj sessions` | `GET /sessions` |
@@ -1174,7 +1172,7 @@ earlier initialization failed. Cleanup errors remain visible in session state. A
 close whose worker restart fails leaves the session in `error` with the failure
 recorded in its state. Retry suspension after resolving the error. Use `mj destroy` only when you intend to discard the environment and recovery copy.
 
-The CLI and `mj api-info` probe API support before reading the token file. A
+The CLI and `mj api-info` probe API support and obtain credentials over authenticated control. A
 daemon predating this API produces an explicit `mj daemon restart` instruction;
 no restart is performed automatically. Disabled viewers, connection failures,
 incompatible API versions, and missing tokens have separate diagnostics.

@@ -534,6 +534,7 @@ pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
     SessionRecord {
         oracle_choice: None,
         oracle: true,
+        notifications_ignored: false,
         project: None,
         target_runtime: None,
         launch_base: None,
@@ -546,8 +547,6 @@ pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
         create_managed_worktree: None,
         workspace_id: DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
-        container_cpus: None,
-        container_memory: None,
         id: id.into(),
         title: "test session".into(),
         harness_kind: HarnessKind::Codex,
@@ -570,11 +569,11 @@ pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
             access: crate::targets::MountAccess::Cow,
         }],
         state: SessionState::Stopped,
-        target: Some(TargetLocator::LocalPodman {
+        target: Some(Box::new(TargetLocator::LocalPodman {
             borrowed_from: None,
             container_id: "container-1".into(),
             workspace_storage: Default::default(),
-        }),
+        })),
         native_session_id: Some("native-1".into()),
         acp_session_title: Some("Agent title".into()),
         session_title_override: None,
@@ -583,13 +582,15 @@ pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
         viewed_through_event_ordinal: 7,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: Some("temporary recovery failure".into()),
-        checkpoint: Some(CheckpointMetadata {
+        checkpoint: Some(Box::new(CheckpointMetadata {
             archive_path: PathBuf::from("sessions/test.hel.zip"),
             sha256: "a".repeat(64),
             created_at: "2026-08-12T01:00:00Z".into(),
             event_frontier: 6,
-        }),
+        })),
     }
 }
 
@@ -648,7 +649,7 @@ fn materialized_session(session_id: &str) -> MaterializedSession {
                 created_at_ms: 1_200,
                 last_changed_at_ms: 1_400,
                 body: TranscriptBody::Tool {
-                    call: serde_json::json!({
+                    call: (serde_json::json!({
                         "toolCallId": "call-1",
                         "title": "Edit files",
                         "kind": "edit",
@@ -661,7 +662,8 @@ fn materialized_session(session_id: &str) -> MaterializedSession {
                         "rawInput": {"path": "src/main.rs"},
                         "rawOutput": {"changed": true},
                         "_meta": {"provider": "test"}
-                    }),
+                    }))
+                    .into(),
                     terminal_outputs: Vec::new(),
                     terminal_refs: Vec::new(),
                     presentation: None,
@@ -711,7 +713,7 @@ fn normalized_state_round_trip_preserves_children_and_order() {
     let mut state = State::default();
     let mut record = session("session-1", "project-1");
     record.project_directory = Some(PathBuf::from("/srv/project-1/.mj/worktrees/session-1"));
-    record.managed_worktree = Some(ManagedWorktree {
+    record.managed_worktree = Some(Box::new(ManagedWorktree {
         kind: Default::default(),
         source_project_directory: PathBuf::from("/srv/project-1"),
         source_repository: PathBuf::from("/srv/project-1"),
@@ -722,18 +724,18 @@ fn normalized_state_round_trip_preserves_children_and_order() {
             ssh_args: vec!["-o".into(), "BatchMode=yes".into()],
         },
         base_commit: None,
-    });
+    }));
     record.resource_allocation = None;
     record.launch_base = Some("origin/main".into());
-    record.checkout = Some(mj_core::remote_git::ExactCheckout {
+    record.checkout = Some(Box::new(mj_core::remote_git::ExactCheckout {
         repository_id: "project".into(),
         commit: "a".repeat(40),
         branch: Some("town/run-123".into()),
         no_later_history: false,
-    });
-    record.target = Some(TargetLocator::LocalBare {
+    }));
+    record.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: PathBuf::from("/var/lib/hel/workers/session-1"),
-    });
+    }));
     state.sessions.insert(record.id.clone(), record);
     state.mount_history.insert(
         "local".into(),
@@ -807,7 +809,7 @@ fn removing_runtime_identity_upgrades_existing_sessions_and_preserves_receipt_hi
         DROP TABLE project_seed_failures;
         DELETE FROM schema_migrations WHERE version >= 66;
         UPDATE schema_compatibility SET minimum_compatible_version = 65;
-        DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 65;",
+        DROP TABLE IF EXISTS operator_away_requests; DROP TABLE IF EXISTS operator_away_workers; DROP TABLE IF EXISTS operator_away; DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 65;",
         )
         .unwrap();
     connection
@@ -867,7 +869,7 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
         ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic;
         DELETE FROM schema_migrations WHERE version >= 54;
         UPDATE schema_compatibility SET minimum_compatible_version = 53;
-        DROP TABLE IF EXISTS subagent_accounting;
+        DROP TABLE IF EXISTS operator_away_requests; DROP TABLE IF EXISTS operator_away_workers; DROP TABLE IF EXISTS operator_away; DROP TABLE IF EXISTS subagent_accounting;
         DROP TABLE IF EXISTS session_turn_selections;
         DROP TABLE IF EXISTS github_seen_items;
         DROP TABLE IF EXISTS github_watch_cursors;
@@ -929,12 +931,12 @@ fn exact_checkout_migration_preserves_history_and_lifecycle_updates_preserve_sel
         load_state_from(&path).unwrap().sessions["old-session"],
         record
     );
-    record.checkout = Some(mj_core::remote_git::ExactCheckout {
+    record.checkout = Some(Box::new(mj_core::remote_git::ExactCheckout {
         repository_id: "project".into(),
         commit: "a".repeat(40),
         branch: Some("town/run-123".into()),
         no_later_history: false,
-    });
+    }));
     save_session_to(&path, &record).unwrap();
     let mut connection = open(&path).unwrap();
     let tx = connection.transaction().unwrap();
@@ -966,7 +968,7 @@ fn clone_publication_evidence_round_trips_and_migration_preserves_old_rows() {
          ALTER TABLE sessions DROP COLUMN launch_branch;
          DELETE FROM schema_migrations WHERE version >= 47;
          UPDATE schema_compatibility SET minimum_compatible_version = 46;
-         DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 46;",
+         DROP TABLE IF EXISTS operator_away_requests; DROP TABLE IF EXISTS operator_away_workers; DROP TABLE IF EXISTS operator_away; DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 46;",
         )
         .unwrap();
     drop(connection);
@@ -981,7 +983,7 @@ fn clone_publication_evidence_round_trips_and_migration_preserves_old_rows() {
     let root = PathBuf::from("/srv/project/.mj/clones/clone-session");
     clone.project_directory = Some(root.clone());
     clone.target = None;
-    clone.managed_worktree = Some(ManagedWorktree {
+    clone.managed_worktree = Some(Box::new(ManagedWorktree {
         kind: ManagedCheckoutKind::Clone,
         source_project_directory: PathBuf::from("/srv/project"),
         source_repository: PathBuf::from("/srv/project"),
@@ -989,8 +991,8 @@ fn clone_publication_evidence_round_trips_and_migration_preserves_old_rows() {
         branch: "main".into(),
         target: ManagedWorktreeTarget::Local,
         base_commit: Some("1".repeat(40)),
-    });
-    clone.publication = Some(PublicationAssessment {
+    }));
+    clone.publication = Some(Box::new(PublicationAssessment {
         checkpoint_sha256: "a".repeat(64),
         state: PublicationState::Published,
         dirty: false,
@@ -999,7 +1001,7 @@ fn clone_publication_evidence_round_trips_and_migration_preserves_old_rows() {
         destinations: vec!["https://example.test/repository.git".into()],
         checked_at: "2026-08-12T01:00:00Z".into(),
         reason: None,
-    });
+    }));
     save_session_to(&database, &clone).unwrap();
     let loaded = load_state_from(&database).unwrap();
     assert_eq!(
@@ -1018,10 +1020,10 @@ fn local_docker_locator_round_trips_through_the_normalized_target_table() {
     let database = directory.path().join("hel.sqlite3");
     let mut record = session("session-1", "project-1");
     record.target_template_id = "docker".into();
-    record.target = Some(TargetLocator::LocalDocker {
+    record.target = Some(Box::new(TargetLocator::LocalDocker {
         borrowed_from: None,
         container_id: "hel-session-1".into(),
-    });
+    }));
 
     save_session_to(&database, &record).unwrap();
 
@@ -1038,6 +1040,33 @@ fn local_docker_locator_round_trips_through_the_normalized_target_table() {
             .unwrap(),
         "local-docker"
     );
+
+    // A sandbox keeps its host and resource in the same normalized columns,
+    // and its borrowing child keeps its owner.
+    for (id, borrowed_from) in [
+        ("sandbox", None),
+        ("sandbox-child", Some("sandbox".to_owned())),
+    ] {
+        let mut record = session(id, "project-1");
+        record.target_template_id = "nitro".into();
+        record.target = Some(Box::new(TargetLocator::SshNitro {
+            borrowed_from,
+            host: "ec2.example.test".into(),
+            container_id: "mj-sandbox".into(),
+        }));
+        save_session_to(&database, &record).unwrap();
+        assert_eq!(load_state_from(&database).unwrap().sessions[id], record);
+    }
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT kind FROM session_targets WHERE session_id = 'sandbox'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "ssh-nitro"
+    );
 }
 
 #[test]
@@ -1046,11 +1075,11 @@ fn a_borrowed_container_target_round_trips_and_a_null_column_means_owned() {
     let database = directory.path().join("hel.sqlite3");
     let mut record = session("session-1", "project-1");
     record.target_template_id = "podman".into();
-    record.target = Some(TargetLocator::LocalPodman {
+    record.target = Some(Box::new(TargetLocator::LocalPodman {
         borrowed_from: Some("parent-session".into()),
         container_id: "hel-parent-session".into(),
         workspace_storage: Default::default(),
-    });
+    }));
 
     save_session_to(&database, &record).unwrap();
     assert_eq!(
@@ -1072,6 +1101,7 @@ fn a_borrowed_container_target_round_trips_and_a_null_column_means_owned() {
         load_state_from(&database).unwrap().sessions["session-1"]
             .target
             .clone()
+            .map(|v| *v)
     else {
         panic!("Podman locator changed kind")
     };
@@ -1083,13 +1113,13 @@ fn podman_workspace_locator_round_trips_and_legacy_null_defaults_to_container_la
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     let mut record = session("session-1", "project-1");
-    record.target = Some(TargetLocator::LocalPodman {
+    record.target = Some(Box::new(TargetLocator::LocalPodman {
         borrowed_from: None,
         container_id: "hel-session-1".into(),
         workspace_storage: mj_core::state::PodmanWorkspaceLocator::Volume {
             name: "hel-session-1-workspace".into(),
         },
-    });
+    }));
 
     save_session_to(&database, &record).unwrap();
     assert_eq!(
@@ -1108,7 +1138,7 @@ fn podman_workspace_locator_round_trips_and_legacy_null_defaults_to_container_la
     let loaded = load_state_from(&database).unwrap();
     let Some(TargetLocator::LocalPodman {
         workspace_storage, ..
-    }) = loaded.sessions["session-1"].target.as_ref()
+    }) = loaded.sessions["session-1"].target.as_deref()
     else {
         panic!("Podman locator changed kind")
     };
@@ -1194,8 +1224,10 @@ fn container_settings_write_overrides_mounts_and_remembered_sources() {
     set_session_container_settings_to(
         &database,
         "session-1",
-        Some("6"),
-        Some("12g"),
+        Some(&SessionResourceAllocation::Container {
+            cpus: 6,
+            memory_bytes: 12 << 30,
+        }),
         &[AdditionalMount {
             source: PathBuf::from("/host/models"),
             destination: PathBuf::from("/mnt/models"),
@@ -1208,8 +1240,13 @@ fn container_settings_write_overrides_mounts_and_remembered_sources() {
 
     let loaded = load_state_from(&database).unwrap();
     let session = &loaded.sessions["session-1"];
-    assert_eq!(session.container_cpus.as_deref(), Some("6"));
-    assert_eq!(session.container_memory.as_deref(), Some("12g"));
+    assert_eq!(
+        session.resource_allocation,
+        Some(SessionResourceAllocation::Container {
+            cpus: 6,
+            memory_bytes: 12 << 30
+        })
+    );
     assert_eq!(
         session.additional_mounts,
         vec![AdditionalMount {
@@ -1327,8 +1364,10 @@ fn lifecycle_save_preserves_container_settings_and_mounts() {
     set_session_container_settings_to(
         &database,
         "session-1",
-        Some("6"),
-        Some("12g"),
+        Some(&SessionResourceAllocation::Container {
+            cpus: 6,
+            memory_bytes: 12 << 30,
+        }),
         std::slice::from_ref(&attached),
         "2026-08-15T00:00:00Z",
     )
@@ -1344,8 +1383,13 @@ fn lifecycle_save_preserves_container_settings_and_mounts() {
     let session = &loaded.sessions["session-1"];
     assert_eq!(session.state, SessionState::Destroying);
     assert_eq!(session.additional_mounts, vec![attached]);
-    assert_eq!(session.container_cpus.as_deref(), Some("6"));
-    assert_eq!(session.container_memory.as_deref(), Some("12g"));
+    assert_eq!(
+        session.resource_allocation,
+        Some(SessionResourceAllocation::Container {
+            cpus: 6,
+            memory_bytes: 12 << 30
+        })
+    );
 }
 
 #[test]
@@ -1353,12 +1397,12 @@ fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     let mut record = session("session-1", "project-1");
-    record.review = Some(mj_core::config::SessionReview::Push {
+    record.review = Some(Box::new(mj_core::config::SessionReview::Push {
         reviewers: Some(vec![mj_core::config::SubagentChoice {
             model: "gpt-6-astra".into(),
             effort: Some("high".into()),
         }]),
-    });
+    }));
     save_session_to(&database, &record).unwrap();
     record.state = SessionState::Running;
     save_lifecycle_session_to(&database, &record).unwrap();
@@ -1366,12 +1410,12 @@ fn a_session_keeps_its_review_choice_through_lifecycle_writes() {
     let loaded = load_state_from(&database).unwrap();
     assert_eq!(
         loaded.sessions["session-1"].review,
-        Some(mj_core::config::SessionReview::Push {
+        Some(Box::new(mj_core::config::SessionReview::Push {
             reviewers: Some(vec![mj_core::config::SubagentChoice {
                 model: "gpt-6-astra".into(),
                 effort: Some("high".into())
             }]),
-        }),
+        })),
         "writes omit the legacy tier while preserving the review choice"
     );
 }
@@ -1396,7 +1440,7 @@ fn a_session_stored_with_turn_review_loads_as_push_and_is_rewritten_as_push() {
     };
     for json in stored {
         let mut record = session("session-1", "project-1");
-        record.review = Some(expected.clone());
+        record.review = Some(Box::new(expected.clone()));
         save_session_to(&database, &record).unwrap();
         Connection::open(&database)
             .unwrap()
@@ -1407,7 +1451,7 @@ fn a_session_stored_with_turn_review_loads_as_push_and_is_rewritten_as_push() {
             .unwrap();
         let loaded = load_state_from(&database).unwrap();
         assert_eq!(
-            loaded.sessions["session-1"].review.as_ref(),
+            loaded.sessions["session-1"].review.as_deref(),
             Some(&expected)
         );
         save_session_to(&database, &loaded.sessions["session-1"]).unwrap();
@@ -1429,7 +1473,7 @@ fn inherited_session_review_survives_lifecycle_writes_and_keeps_trigger_inherita
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("hel.sqlite3");
     let mut record = session("session-1", "project-1");
-    record.review = Some(mj_core::config::SessionReview::Inherit {
+    record.review = Some(Box::new(mj_core::config::SessionReview::Inherit {
         reviewers: Some(vec![
             mj_core::config::SubagentChoice {
                 model: "gpt-6-astra".into(),
@@ -1437,13 +1481,13 @@ fn inherited_session_review_survives_lifecycle_writes_and_keeps_trigger_inherita
             };
             3
         ]),
-    });
+    }));
     save_session_to(&database, &record).unwrap();
     record.state = SessionState::Running;
     save_lifecycle_session_to(&database, &record).unwrap();
 
     let loaded = load_state_from(&database).unwrap();
-    let review = loaded.sessions["session-1"].review.as_ref().unwrap();
+    let review = loaded.sessions["session-1"].review.as_deref().unwrap();
     assert_eq!(
         review,
         &mj_core::config::SessionReview::Inherit {
@@ -1685,8 +1729,10 @@ fn checkpointed_save_preserves_container_settings_and_mounts() {
     set_session_container_settings_to(
         &database,
         "session-1",
-        Some("6"),
-        Some("12g"),
+        Some(&SessionResourceAllocation::Container {
+            cpus: 6,
+            memory_bytes: 12 << 30,
+        }),
         std::slice::from_ref(&attached),
         "2026-08-15T00:00:00Z",
     )
@@ -1701,19 +1747,24 @@ fn checkpointed_save_preserves_container_settings_and_mounts() {
     stale.state = SessionState::Running;
     stale.updated_at = "2026-08-15T00:02:00Z".into();
     stale.native_session_id = Some("native-checkpointed".into());
-    stale.checkpoint = Some(verified.clone());
+    stale.checkpoint = Some(Box::new(verified.clone()));
     save_checkpointed_session_to(&database, &stale).unwrap();
 
     let loaded = load_state_from(&database).unwrap();
     let session = &loaded.sessions["session-1"];
-    assert_eq!(session.checkpoint.as_ref(), Some(&verified));
+    assert_eq!(session.checkpoint.as_deref(), Some(&verified));
     assert_eq!(
         session.native_session_id.as_deref(),
         Some("native-checkpointed")
     );
     assert_eq!(session.additional_mounts, vec![attached]);
-    assert_eq!(session.container_cpus.as_deref(), Some("6"));
-    assert_eq!(session.container_memory.as_deref(), Some("12g"));
+    assert_eq!(
+        session.resource_allocation,
+        Some(SessionResourceAllocation::Container {
+            cpus: 6,
+            memory_bytes: 12 << 30
+        })
+    );
 }
 
 #[test]
@@ -1817,7 +1868,7 @@ fn display_updates_cannot_restore_a_stale_checkpoint() {
 
     let loaded = load_state_from(&database).unwrap();
     let session = &loaded.sessions["session-1"];
-    assert_eq!(session.checkpoint.as_ref(), Some(&recovered));
+    assert_eq!(session.checkpoint.as_deref(), Some(&recovered));
     assert_eq!(
         session.native_session_id.as_deref(),
         Some("native-recovered")
@@ -1872,12 +1923,12 @@ fn lifecycle_write_preserves_independently_owned_session_fields() {
     stale.native_session_id = Some("native-old".into());
     stale.acp_session_title = Some("Old harness title".into());
     stale.session_title_override = Some("Old user title".into());
-    stale.checkpoint = Some(CheckpointMetadata {
+    stale.checkpoint = Some(Box::new(CheckpointMetadata {
         archive_path: PathBuf::from("sessions/old.hel.zip"),
         sha256: "a".repeat(64),
         created_at: "2026-08-14T11:00:00Z".into(),
         event_frontier: 10,
-    });
+    }));
     save_session_to(&database, &stale).unwrap();
     let recovered = CheckpointMetadata {
         archive_path: PathBuf::from("sessions/recovered.hel.zip"),
@@ -1905,7 +1956,7 @@ fn lifecycle_write_preserves_independently_owned_session_fields() {
         session.native_session_id.as_deref(),
         Some("native-recovered")
     );
-    assert_eq!(session.checkpoint.as_ref(), Some(&recovered));
+    assert_eq!(session.checkpoint.as_deref(), Some(&recovered));
     assert_eq!(
         session.session_title_override.as_deref(),
         Some("Current user title")
@@ -1937,6 +1988,29 @@ fn the_archived_flag_round_trips_without_touching_other_session_fields() {
     set_session_archived_to(&database, "session-1", false).unwrap();
     assert!(!load_state_from(&database).unwrap().sessions["session-1"].archived);
     assert!(set_session_archived_to(&database, "missing", true).is_err());
+}
+
+/// Ignoring notifications is a display choice with its own writer: it must not
+/// disturb the lifecycle state, checkpoint, or titles other writers own.
+#[test]
+fn the_notifications_ignored_flag_round_trips_without_touching_other_session_fields() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("hel.sqlite3");
+    let mut session = session("session-1", "project-1");
+    save_session_to(&database, &session).unwrap();
+    assert!(!load_state_from(&database).unwrap().sessions["session-1"].notifications_ignored);
+
+    set_session_notifications_ignored_to(&database, "session-1", true).unwrap();
+    let reloaded = load_state_from(&database).unwrap().sessions["session-1"].clone();
+    assert!(reloaded.notifications_ignored);
+    session.notifications_ignored = true;
+    assert_eq!(reloaded.state, session.state);
+    assert_eq!(reloaded.checkpoint, session.checkpoint);
+    assert_eq!(reloaded.acp_session_title, session.acp_session_title);
+
+    set_session_notifications_ignored_to(&database, "session-1", false).unwrap();
+    assert!(!load_state_from(&database).unwrap().sessions["session-1"].notifications_ignored);
+    assert!(set_session_notifications_ignored_to(&database, "missing", true).is_err());
 }
 
 /// Hel never writes a harness home, so the hidden set for native sessions
@@ -2193,11 +2267,68 @@ fn materialized_session_round_trip_preserves_typed_projection() {
         }));
     }
 
+    let large = "terminal output supports Unicode λ\n".repeat(4096);
+    for item in &mut materialized.transcript {
+        if let TranscriptBody::Tool {
+            call,
+            terminal_outputs,
+            presentation,
+            ..
+        } = &mut Arc::make_mut(item).body
+        {
+            call.edit(|value| value["rawInput"] = serde_json::json!({"command": large}));
+            terminal_outputs.push(mj_core::transcript::TerminalOutputRecord {
+                terminal_id: "large-terminal".into(),
+                output: large.clone().into(),
+                truncated: false,
+                exit_code: Some(0),
+                signal: None,
+            });
+            *presentation = Some(Box::new(mj_core::transcript::ToolCallPresentation {
+                summary: "large command".into(),
+                source: large.clone().into(),
+                source_kind: mj_core::transcript::ToolSummarySourceKind::RawInput,
+                tool_kind: agent_client_protocol::v1::schema::ToolKind::Execute,
+                summary_version: 0,
+            }));
+        }
+    }
+
     save_materialized_session_to(&database, &materialized).unwrap();
 
     let loaded = load_materialized_session_from(&database, "session-1")
         .unwrap()
         .unwrap();
+    // Both durable rows and buffered wire envelopes must keep ACP JSON bytes.
+    for (before, after) in materialized.transcript.iter().zip(&loaded.transcript) {
+        if let TranscriptBody::Tool { call, .. } = &before.body {
+            let expected = serde_json::to_string(&call.value()).unwrap();
+            let TranscriptBody::Tool {
+                call: loaded_call, ..
+            } = &after.body
+            else {
+                panic!("tool body changed during store round trip");
+            };
+            assert_eq!(serde_json::to_string(loaded_call).unwrap(), expected);
+            assert_eq!(
+                serde_json::to_string(&before.body).unwrap(),
+                serde_json::to_string(&after.body).unwrap()
+            );
+            let wire = mj_client::runtime_feed::TranscriptChange::Items(
+                mj_client::runtime_feed::TranscriptItems {
+                    header: None,
+                    window: None,
+                    upserts: vec![Arc::clone(after)],
+                    removes: vec![],
+                },
+            );
+            let bytes = serde_json::to_string(&wire).unwrap();
+            let decoded: mj_client::runtime_feed::TranscriptChange =
+                serde_json::from_str(&bytes).unwrap();
+            assert_eq!(serde_json::to_string(&decoded).unwrap(), bytes);
+            assert!(bytes.contains(&format!("\"call\":{expected}")));
+        }
+    }
     assert_eq!(loaded, materialized);
     assert_eq!(loaded.last_activity_at_ms(), Some(1_500));
 }
@@ -2355,7 +2486,7 @@ fn tool_item(position: u64, path: &str, old_text: &str, new_text: &str) -> Arc<T
         created_at_ms: 1_000,
         last_changed_at_ms: 1_000,
         body: TranscriptBody::Tool {
-            call: serde_json::json!({
+            call: (serde_json::json!({
                 "toolCallId": format!("call-{position}"),
                 "title": "Edit files",
                 "kind": "edit",
@@ -2373,7 +2504,8 @@ fn tool_item(position: u64, path: &str, old_text: &str, new_text: &str) -> Arc<T
                 ],
                 "rawInput": {"file_text": "y".repeat(64 * 1024)},
                 "rawOutput": {"formatted_output": "z".repeat(64 * 1024)},
-            }),
+            }))
+            .into(),
             terminal_outputs: Vec::new(),
             terminal_refs: Vec::new(),
             presentation: None,
@@ -2403,7 +2535,7 @@ fn releasing_a_diff_written_before_patches_keeps_its_stat() {
         created_at_ms: 1_000,
         last_changed_at_ms: 1_000,
         body: TranscriptBody::Tool {
-            call: serde_json::json!({
+            call: (serde_json::json!({
                 "toolCallId": "call-10",
                 "title": "Edit files",
                 "kind": "edit",
@@ -2415,7 +2547,8 @@ fn releasing_a_diff_written_before_patches_keeps_its_stat() {
                     "oldText": old_text,
                     "newText": new_text,
                 }],
-            }),
+            }))
+            .into(),
             terminal_outputs: Vec::new(),
             terminal_refs: Vec::new(),
             presentation: None,
@@ -2516,6 +2649,7 @@ fn a_checkpoint_releases_the_tool_output_it_covers_and_keeps_the_diffstat() {
     let TranscriptBody::Tool { call, .. } = &after.transcript[1].body else {
         panic!("expected a tool call");
     };
+    let call = call.value();
     assert!(call.get("rawInput").is_none());
     assert!(call.get("rawOutput").is_none());
     assert_eq!(
@@ -3043,6 +3177,21 @@ fn detach_receipt_is_monotonic_and_cannot_pass_projection() {
         .unwrap(),
         2
     );
+    assert_eq!(
+        persist_read_receipt_with(
+            &mut connection,
+            "notification-dismissal",
+            DEFAULT_WORKSPACE_ID,
+            "session-1",
+            1
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        load_state_from(&database).unwrap().sessions["session-1"].viewed_through_event_ordinal,
+        2
+    );
     assert!(
         persist_read_receipt_with(
             &mut connection,
@@ -3495,6 +3644,7 @@ fn deleting_an_operational_session_removes_its_prompts_and_keeps_its_context() {
         )
         .unwrap();
 
+    super::sessions::delete_session_from(&database, "session-1").unwrap();
     state.sessions.clear();
     save_state_to(&database, &state).unwrap();
 
@@ -5422,7 +5572,9 @@ fn a_turn_summary_counts_the_tool_calls_the_turn_made() {
         item(
             position,
             TranscriptBody::Tool {
-                call: serde_json::json!({"toolCallId": format!("call-{position}"), "title": "Read"}),
+                call:
+                    (serde_json::json!({"toolCallId": format!("call-{position}"), "title": "Read"}))
+                        .into(),
                 terminal_outputs: Vec::new(),
                 terminal_refs: Vec::new(),
                 presentation: None,
@@ -5793,7 +5945,7 @@ fn filtered_transcript_pages_include_ties_and_advance_across_gaps() {
     item.stable_id = "tool:call-7".into();
     item.latest_content_event_ordinal = None;
     item.body = TranscriptBody::Tool {
-        call: serde_json::json!({"toolCallId": "call-7", "status": "completed"}),
+        call: serde_json::json!({"toolCallId": "call-7", "status": "completed"}).into(),
         terminal_outputs: Vec::new(),
         terminal_refs: Vec::new(),
         presentation: None,
@@ -6101,6 +6253,9 @@ fn state_reads_keep_sessions_and_subagents_in_one_snapshot_during_concurrent_cha
         } else {
             (with_child, without_child)
         };
+        if creating_child {
+            super::sessions::delete_session_from(&path, &child.id).unwrap();
+        }
         save_state_to(&path, &before).unwrap();
         let writer_path = path.clone();
         let committed = after.clone();
@@ -6110,6 +6265,9 @@ fn state_reads_keep_sessions_and_subagents_in_one_snapshot_during_concurrent_cha
                 // WAL permits this while a read transaction remains open.
                 if creating_child {
                     register_test_subagent(&writer_path, &child, &launch).unwrap();
+                }
+                if !creating_child {
+                    super::sessions::delete_session_from(&writer_path, &child.id).unwrap();
                 }
                 save_state_to(&writer_path, &committed).unwrap();
                 let writer = open(&writer_path).unwrap();
@@ -6415,7 +6573,7 @@ fn continuation_reads_earlier_authorization_outside_the_ui_window_at_one_frontie
         .unwrap()
         .unwrap();
     assert!(metadata.omitted_items > 0);
-    assert!(crate::continuation::evidence(&window).is_err());
+    assert!(mj_transcript::authorization::evidence(&window).is_err());
     let collected = load_continuation_evidence_from(
         &database,
         "session-1",
@@ -6425,7 +6583,7 @@ fn continuation_reads_earlier_authorization_outside_the_ui_window_at_one_frontie
     .unwrap();
     assert_eq!(
         collected,
-        crate::continuation::evidence(&materialized).unwrap()
+        mj_transcript::authorization::evidence(&materialized).unwrap()
     );
     assert_eq!(
         collected.messages[0].text,
@@ -6465,7 +6623,7 @@ fn quota_recovery_migration_advances_the_breaking_floor_and_preserves_cache() {
         "DROP TABLE quota_reset_cache;
         DELETE FROM schema_migrations WHERE version >= 44;
         UPDATE schema_compatibility SET minimum_compatible_version = 43;
-        DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 43;",
+        DROP TABLE IF EXISTS operator_away_requests; DROP TABLE IF EXISTS operator_away_workers; DROP TABLE IF EXISTS operator_away; DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 43;",
     )
     .unwrap();
     drop(raw);
@@ -6588,17 +6746,39 @@ fn long_conversation() -> MaterializedSession {
     projection
 }
 
+// Hard-won: 312cdbd23: stale pending content made the live window load nearly all history.
+// Hard-won: f7df24176: store queries split turns at elicitation replies and missed native prompts.
+// Hard-won: 8c2f98de2: unread output outside the transcript window lost its mark.
 #[test]
-fn actor_history_window_matches_live_trimming_and_preserves_pending_turns() {
+fn actor_history_window_keeps_open_streams_and_rehydrates_old_tools() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("history.sqlite3");
     let mut full = long_conversation();
+    // An elicitation reply inside the old turn is not a turn start, and the
+    // newest turn begins with a native prompt; store and trim must agree.
+    full.transcript[50] = Arc::new(TranscriptItem {
+        stable_id: format!("{}0051", mj_core::transcript::ELICITATION_REPLY_ITEM_PREFIX),
+        body: TranscriptBody::User {
+            content: vec![serde_json::json!({"type":"text", "text":"approve"})],
+        },
+        latest_content_event_ordinal: None,
+        ..(*full.transcript[50]).clone()
+    });
+    Arc::make_mut(&mut full.transcript[2400]).stable_id = "native-user:2401".into();
     save_session_to(&path, &session(&full.session_id, "project-1")).unwrap();
-    for pending in [false, true] {
+    for pending in ["none", "tool", "stream"] {
+        let mut full = full.clone();
         if let TranscriptBody::Agent { streaming, .. } =
             &mut Arc::make_mut(&mut full.transcript[1]).body
         {
-            *streaming = pending;
+            *streaming = pending == "stream";
+        }
+        if pending == "tool" {
+            let mut tool = materialized_session(&full.session_id).transcript[2].clone();
+            if let TranscriptBody::Tool { call, .. } = &mut Arc::make_mut(&mut tool).body {
+                call.edit(|value| value["status"] = "in_progress".into());
+            }
+            full.transcript[2] = tool;
         }
         save_materialized_session_to(&path, &full).unwrap();
         let (loaded, window) = load_materialized_actor_projection_from(&path, &full.session_id)
@@ -6609,8 +6789,16 @@ fn actor_history_window_matches_live_trimming_and_preserves_pending_turns() {
         expected.trim(&mut trimmed, PROJECTION_TAIL_ITEMS);
         assert_eq!(loaded, trimmed);
         assert_eq!(window, expected);
-        assert_eq!(loaded.transcript.len(), if pending { 2500 } else { 1100 });
+        assert_eq!(
+            loaded.transcript.len(),
+            if pending == "none" { 600 } else { 700 }
+        );
+        if pending != "none" {
+            assert_eq!(&loaded.transcript[..100], &full.transcript[..100]);
+            assert_eq!(loaded.transcript[100], full.transcript[1900]);
+        }
         assert_eq!(window.provisional_title.as_deref(), Some("request 1"));
+        assert_eq!(window.latest_turn_start_position, Some(2401));
         assert_eq!(
             load_materialized_session_from(&path, &full.session_id)
                 .unwrap()
@@ -6618,6 +6806,58 @@ fn actor_history_window_matches_live_trimming_and_preserves_pending_turns() {
             full,
             "the durable source for checkpoints must stay complete"
         );
+    }
+    // Completed tool rows can push every unread item outside the actor window.
+    for interrupted in [false, true] {
+        let mut history = long_conversation();
+        let mut tool_body = materialized_session(&history.session_id).transcript[2]
+            .body
+            .clone();
+        if let TranscriptBody::Tool { call, .. } = &mut tool_body {
+            call.edit(|value| value["status"] = "completed".into());
+        } else {
+            panic!("tool fixture");
+        }
+        for item in &mut history.transcript {
+            let item = Arc::make_mut(item);
+            if !item.is_turn_start() && item.position != 2 {
+                item.body = tool_body.clone();
+                item.stable_id = format!("tool:{}", item.position);
+                item.latest_content_event_ordinal = None;
+            }
+            if interrupted && item.position == 3 {
+                item.body = TranscriptBody::System {
+                    text: "Work interrupted".into(),
+                };
+                item.stable_id = format!("{}3", mj_core::transcript::WORK_INTERRUPTED_ITEM_PREFIX);
+            }
+        }
+        let expected = if interrupted { 3 } else { 2 };
+        save_materialized_session_to(&path, &history).unwrap();
+        let mut live = history.clone();
+        let mut live_window = ProjectionWindow::of(&history);
+        live_window.trim(&mut live, PROJECTION_TAIL_ITEMS);
+        assert!(
+            !live
+                .transcript
+                .iter()
+                .any(|item| item.is_nonempty_agent_message() || item.is_work_interruption())
+        );
+        assert_eq!(live_window.latest_unread_event_ordinal, Some(expected));
+        // This valid JSON is not a TranscriptBody. Loading all history would fail.
+        open(&path).unwrap().execute("UPDATE materialized_transcript_items SET body_json = ?2 WHERE session_id = ?1 AND stable_id = 'tool:50'", params![&history.session_id, r#"{"kind":"unknown-old-row"}"#]).unwrap();
+        for _restart in 0..2 {
+            let (reloaded, window) =
+                load_materialized_actor_projection_from(&path, &history.session_id)
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(window.latest_unread_event_ordinal, Some(expected));
+            assert_eq!(window, live_window);
+            assert_eq!(reloaded.transcript, live.transcript);
+            let tail = mj_client::runtime_feed::SessionTail::of(&reloaded, &window, 0);
+            assert_eq!(tail.window.latest_unread_event_ordinal, Some(expected));
+        }
+        assert!(load_materialized_session_from(&path, &history.session_id).is_err());
     }
 }
 
@@ -6835,89 +7075,276 @@ fn history_window_deduplicates_deliveries_after_their_row_leaves_the_live_tail()
     }
 }
 
+// Hard-won: 312cdbd23: late completion must preserve evicted tools and uniquely claim parked output.
 #[test]
 fn history_window_rehydrates_late_tool_updates_before_durable_projection() {
     use agent_client_protocol::v1::schema::{
         SessionUpdate, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
     };
     use mj_core::relay::{RELAY_EVENT_FORMAT_V1, RelayEvent, RelayObservation};
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("history.sqlite3");
-    let mut full = long_conversation();
-    let old_tool = materialized_session(&full.session_id).transcript[2].clone();
-    full.transcript[2] = old_tool.clone();
-    save_session_to(&path, &session(&full.session_id, "project-1")).unwrap();
-    save_materialized_session_to(&path, &full).unwrap();
-    let (mut live, mut window) = load_materialized_actor_projection_from(&path, &full.session_id)
-        .unwrap()
+    {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("history.sqlite3");
+        let mut full = long_conversation();
+        let mut old_tool = materialized_session(&full.session_id).transcript[2].clone();
+        let output = "old output ".repeat(10_000);
+        let raw_output = serde_json::json!({"partial": output});
+        if let TranscriptBody::Tool { call, .. } = &mut Arc::make_mut(&mut old_tool).body {
+            call.edit(|value| {
+                value["status"] = "completed".into();
+                value["rawOutput"] = raw_output.clone();
+            });
+        }
+        full.transcript[2] = old_tool.clone();
+        save_session_to(&path, &session(&full.session_id, "project-1")).unwrap();
+        save_materialized_session_to(&path, &full).unwrap();
+        let (mut live, mut window) =
+            load_materialized_actor_projection_from(&path, &full.session_id)
+                .unwrap()
+                .unwrap();
+        assert!(
+            !live
+                .transcript
+                .iter()
+                .any(|item| item.stable_id == old_tool.stable_id)
+        );
+        let fields = ToolCallUpdateFields::new()
+            .status(ToolCallStatus::Completed)
+            .title("Late result");
+        let mut event = RelayEvent {
+            format: RELAY_EVENT_FORMAT_V1,
+            ordinal: 2501,
+            previous_digest: full.applied_event_digest.clone(),
+            digest: String::new(),
+            recorded_at_ms: 5000,
+            command_id: None,
+            observation: RelayObservation::SessionUpdate {
+                update: Box::new(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                    "call-1", fields,
+                ))),
+            },
+        };
+        event.digest = mj_core::relay::relay_event_digest(&event).unwrap();
+        let restored =
+            load_projection_references_from(&path, &live, std::slice::from_ref(&event)).unwrap();
+        assert_eq!(restored.len(), 1);
+        assert!(restored.contains(&old_tool));
+        window.omitted_items -= restored.len();
+        live.transcript.splice(0..0, restored);
+        assert!(
+            load_projection_references_from(&path, &live, std::slice::from_ref(&event))
+                .unwrap()
+                .is_empty()
+        );
+        let mutation = mj_transcript::projection::project_relay_event(&live, &event)
+            .unwrap()
+            .mutation;
+        apply_projection_page_to(&path, &full.session_id, |page| {
+            page.apply(
+                event.ordinal,
+                &event.previous_digest,
+                &event.digest,
+                &mutation,
+            )
+        })
         .unwrap();
-    assert!(
-        !live
+        mj_transcript::projection::apply_committed_projection_event(&mut live, &event, mutation)
+            .unwrap();
+        window.trim(&mut live, PROJECTION_TAIL_ITEMS);
+        let saved = load_materialized_session_from(&path, &full.session_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.transcript.len(), 2500);
+        let tool = saved
             .transcript
             .iter()
-            .any(|item| item.stable_id == old_tool.stable_id)
-    );
-    let mut event = RelayEvent {
-        format: RELAY_EVENT_FORMAT_V1,
-        ordinal: 2501,
-        previous_digest: full.applied_event_digest.clone(),
-        digest: String::new(),
-        recorded_at_ms: 5000,
-        command_id: None,
-        observation: RelayObservation::SessionUpdate {
-            update: Box::new(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                "call-1",
-                ToolCallUpdateFields::new()
-                    .status(ToolCallStatus::Completed)
-                    .title("Late result"),
-            ))),
-        },
+            .find(|item| item.stable_id == old_tool.stable_id)
+            .unwrap();
+        assert_eq!(tool.position, old_tool.position);
+        assert_eq!(tool.created_at_ms, old_tool.created_at_ms);
+        let TranscriptBody::Tool {
+            call,
+            terminal_outputs,
+            terminal_refs,
+            ..
+        } = &tool.body
+        else {
+            panic!("tool remains a tool")
+        };
+        let call = call.value();
+        assert_eq!(call["title"], "Late result");
+        assert_eq!(call["rawOutput"], raw_output);
+        assert!(terminal_refs.is_empty());
+        assert!(terminal_outputs.is_empty());
+        assert!(
+            !live
+                .transcript
+                .iter()
+                .any(|item| item.stable_id == old_tool.stable_id)
+        );
+        assert_eq!(
+            live.transcript.len() + window.omitted_items,
+            saved.transcript.len()
+        );
+    }
+}
+
+// Hard-won: 83536df64: evicting an unfinished tool's turn separated it from its parked terminal output
+#[test]
+fn history_window_keeps_pending_turn_for_late_completion() {
+    use agent_client_protocol::v1::schema::{
+        SessionUpdate, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
     };
-    event.digest = mj_core::relay::relay_event_digest(&event).unwrap();
-    let restored =
-        load_projection_references_from(&path, &live, std::slice::from_ref(&event)).unwrap();
-    assert_eq!(restored, vec![old_tool.clone()]);
-    window.omitted_items -= restored.len();
-    live.transcript.splice(0..0, restored);
-    assert!(
-        load_projection_references_from(&path, &live, std::slice::from_ref(&event))
-            .unwrap()
-            .is_empty()
-    );
-    let mutation = mj_transcript::projection::project_relay_event(&live, &event)
-        .unwrap()
-        .mutation;
-    apply_projection_page_to(&path, &full.session_id, |page| {
-        page.apply(
-            event.ordinal,
-            &event.previous_digest,
-            &event.digest,
-            &mutation,
-        )
-    })
-    .unwrap();
-    mj_transcript::projection::apply_committed_projection_event(&mut live, &event, mutation)
-        .unwrap();
-    window.trim(&mut live, PROJECTION_TAIL_ITEMS);
-    let saved = load_materialized_session_from(&path, &full.session_id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(saved.transcript.len(), 2500);
-    let tool = saved
-        .transcript
-        .iter()
-        .find(|item| item.stable_id == old_tool.stable_id)
-        .unwrap();
-    assert_eq!(tool.position, old_tool.position);
-    assert_eq!(tool.created_at_ms, old_tool.created_at_ms);
-    let TranscriptBody::Tool { call, .. } = &tool.body else {
-        panic!("tool remains a tool")
-    };
-    assert_eq!(call["title"], "Late result");
-    assert_eq!(
-        live.transcript.len() + window.omitted_items,
-        saved.transcript.len()
-    );
+    use mj_core::relay::{RELAY_EVENT_FORMAT_V1, RelayEvent, RelayObservation};
+    for raw_earlier in [false, true] {
+        for standalone in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("history.sqlite3");
+            let mut full = long_conversation();
+            let mut tool = materialized_session(&full.session_id).transcript[2].clone();
+            let output = "late output ".repeat(10_000);
+            let raw = serde_json::json!({"exit_code":0,"output":output.as_bytes()});
+            if let TranscriptBody::Tool {
+                call,
+                terminal_refs,
+                ..
+            } = &mut Arc::make_mut(&mut tool).body
+            {
+                call.edit(|value| {
+                    value["status"] = "pending".into();
+                    value["rawOutput"] = if raw_earlier {
+                        raw.clone()
+                    } else {
+                        serde_json::Value::Null
+                    };
+                });
+                assert!(terminal_refs.is_empty());
+            }
+            full.transcript[2] = tool.clone();
+            let record = mj_core::state::TerminalOutputRecord {
+                terminal_id: "late-terminal".into(),
+                output: output.clone().into(),
+                truncated: false,
+                exit_code: Some(0),
+                signal: None,
+            };
+            let fallback =
+                mj_core::acp::fallback_terminal_tool_call("late-terminal", "cargo test".into())
+                    .status(ToolCallStatus::Completed);
+            let (parked_id, body) = if standalone {
+                (
+                    "terminal:late-terminal".to_owned(),
+                    TranscriptBody::TerminalOutput { record },
+                )
+            } else {
+                (
+                    format!("tool:{}", fallback.tool_call_id),
+                    TranscriptBody::Tool {
+                        call: serde_json::to_value(fallback).unwrap().into(),
+                        terminal_outputs: vec![record],
+                        terminal_refs: vec!["late-terminal".into()],
+                        presentation: None,
+                    },
+                )
+            };
+            full.transcript[3] = Arc::new(TranscriptItem {
+                stable_id: parked_id.clone(),
+                position: 4,
+                latest_content_event_ordinal: None,
+                created_at_ms: 1200,
+                last_changed_at_ms: 1400,
+                body,
+            });
+            save_session_to(&path, &session(&full.session_id, "project-1")).unwrap();
+            save_materialized_session_to(&path, &full).unwrap();
+            let (mut live, mut window) =
+                load_materialized_actor_projection_from(&path, &full.session_id)
+                    .unwrap()
+                    .unwrap();
+            assert!(live.transcript.contains(&tool));
+            assert!(
+                live.transcript
+                    .iter()
+                    .any(|item| item.stable_id == parked_id)
+            );
+            let mut fields = ToolCallUpdateFields::new().status(ToolCallStatus::Completed);
+            if !raw_earlier {
+                fields = fields.raw_output(raw);
+            }
+            let mut event = RelayEvent {
+                format: RELAY_EVENT_FORMAT_V1,
+                ordinal: 2501,
+                previous_digest: full.applied_event_digest.clone(),
+                digest: String::new(),
+                recorded_at_ms: 5000,
+                command_id: None,
+                observation: RelayObservation::SessionUpdate {
+                    update: Box::new(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                        "call-1", fields,
+                    ))),
+                },
+            };
+            event.digest = mj_core::relay::relay_event_digest(&event).unwrap();
+            assert!(
+                load_projection_references_from(&path, &live, std::slice::from_ref(&event))
+                    .unwrap()
+                    .is_empty()
+            );
+            let mutation = mj_transcript::projection::project_relay_event(&live, &event)
+                .unwrap()
+                .mutation;
+            apply_projection_page_to(&path, &full.session_id, |page| {
+                page.apply(
+                    event.ordinal,
+                    &event.previous_digest,
+                    &event.digest,
+                    &mutation,
+                )
+            })
+            .unwrap();
+            mj_transcript::projection::apply_committed_projection_event(
+                &mut live, &event, mutation,
+            )
+            .unwrap();
+            let saved = load_materialized_session_from(&path, &full.session_id)
+                .unwrap()
+                .unwrap();
+            for projection in [&live, &saved] {
+                let owner = projection
+                    .transcript
+                    .iter()
+                    .find(|item| item.stable_id == tool.stable_id)
+                    .unwrap();
+                let TranscriptBody::Tool {
+                    terminal_outputs,
+                    terminal_refs,
+                    ..
+                } = &owner.body
+                else {
+                    panic!("owner remains tool")
+                };
+                assert_eq!(terminal_refs, &["late-terminal"]);
+                assert_eq!(terminal_outputs[0].output.text(), output);
+                assert!(
+                    !projection
+                        .transcript
+                        .iter()
+                        .any(|item| item.stable_id == parked_id)
+                );
+            }
+            window.trim(&mut live, PROJECTION_TAIL_ITEMS);
+            let (loaded, loaded_window) =
+                load_materialized_actor_projection_from(&path, &full.session_id)
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(live, loaded);
+            assert_eq!(window, loaded_window);
+            assert_eq!(
+                live.transcript.len() + window.omitted_items,
+                saved.transcript.len()
+            );
+        }
+    }
 }
 
 #[test]
@@ -6929,28 +7356,89 @@ fn target_access_survives_lifecycle_updates_and_changes_with_the_target() {
         r#"{"kind":"ssh-podman","host":"original.test","user":"builder","identity_file":"/keys/id","extra_args":["-p","2222"],"image":"test"}"#
     ).unwrap();
     record.target_runtime = Some((&template).into());
-    record.target_runtime.as_mut().unwrap().tool_cache = Some(mj_core::state::ToolCachePlacement {
-        host: "ssh:builder@original.test".into(),
-        directory: "/fast/shared native caches".into(),
-        nx_home: "/home/hel/.nx".into(),
-    });
-    record.target = Some(TargetLocator::SshPodman {
+    std::sync::Arc::make_mut(record.target_runtime.as_mut().unwrap()).tool_cache =
+        Some(mj_core::state::ToolCachePlacement {
+            host: "ssh:builder@original.test".into(),
+            directory: "/fast/shared native caches".into(),
+            nx_home: "/home/hel/.nx".into(),
+        });
+    record.target = Some(Box::new(TargetLocator::SshPodman {
         host: "original.test".into(),
         container_id: "original-container".into(),
         workspace_storage: Default::default(),
         borrowed_from: None,
-    });
+    }));
+    record.project = Some(std::sync::Arc::new(
+        mj_core::repository::ProjectBundleSnapshot {
+            bundle: mj_core::config::ProjectBundle {
+                primary_repo: "source".into(),
+                repositories: vec![mj_core::config::ProjectRepository {
+                    id: "source".into(),
+                    github: Some("acme/source".into()),
+                    local: None,
+                    destination: "source".into(),
+                    git_ref: None,
+                }],
+            },
+            identities: BTreeMap::from([(
+                "source".into(),
+                mj_core::repository::RepositoryIdentity::Github("acme".into(), "source".into()),
+            )]),
+            network_sources: Default::default(),
+            plain_directories: Default::default(),
+        },
+    ));
+    let project_json = serde_json::to_string(record.project.as_deref().unwrap()).unwrap();
+    let runtime_json = serde_json::to_string(record.target_runtime.as_deref().unwrap()).unwrap();
     save_session_to(&database, &record).unwrap();
+    let stored: (String, String) = open_reader(&database)
+        .unwrap()
+        .query_row(
+            "SELECT project_json, target_runtime_json FROM sessions WHERE session_id=?1",
+            [&record.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(stored, (project_json.clone(), runtime_json.clone()));
+    let loaded = load_state_from(&database).unwrap();
+    let loaded_record = &loaded.sessions[&record.id];
+    assert_eq!(
+        serde_json::to_string(&loaded_record.project).unwrap(),
+        project_json
+    );
+    assert_eq!(
+        serde_json::to_string(&loaded_record.target_runtime).unwrap(),
+        runtime_json
+    );
+    let mut interns = state_io::SessionInterns::from_state(&loaded).unwrap();
+    let refreshed = state_io::load_session_interned_with(
+        &open_reader(&database).unwrap(),
+        &record.id,
+        &mut interns,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(std::sync::Arc::ptr_eq(
+        loaded_record.project.as_ref().unwrap(),
+        refreshed.project.as_ref().unwrap(),
+    ));
+    assert!(std::sync::Arc::ptr_eq(
+        loaded_record.target_runtime.as_ref().unwrap(),
+        refreshed.target_runtime.as_ref().unwrap(),
+    ));
+
     record.state = SessionState::Error;
     save_lifecycle_session_to(&database, &record).unwrap();
+    // The database's failure trigger advances the generation on the state change.
+    record.failure_generation += 1;
     assert_eq!(
         load_state_from(&database).unwrap().sessions[&record.id],
         record
     );
     record.target_runtime = Some((&mj_core::config::TargetTemplate::LocalBare).into());
-    record.target = Some(TargetLocator::LocalBare {
+    record.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: PathBuf::from("/new").join(&record.id),
-    });
+    }));
     save_lifecycle_session_to(&database, &record).unwrap();
     assert_eq!(
         load_state_from(&database).unwrap().sessions[&record.id],
@@ -6990,6 +7478,7 @@ fn a_subagent_report_is_kept_once_per_turn_and_leaves_with_its_child() {
     let mut state = load_state_from(&path).unwrap();
     state.subagents.remove(&child.id);
     state.sessions.remove(&child.id);
+    super::sessions::delete_session_from(&path, &child.id).unwrap();
     save_state_to(&path, &state).unwrap();
     assert_eq!(
         load_subagent_report_from(&path, &child.id).unwrap(),
@@ -7037,6 +7526,7 @@ fn a_parents_stopped_sub_agents_are_listed_once_and_leave_with_the_parent() {
     let mut state = load_state_from(&path).unwrap();
     state.subagents.remove(&child.id);
     state.sessions.remove(&child.id);
+    super::sessions::delete_session_from(&path, &child.id).unwrap();
     save_state_to(&path, &state).unwrap();
     assert_eq!(
         load_stopped_subagents_from(&path, &parent.id)
@@ -7149,7 +7639,7 @@ fn the_parked_state_migration_keeps_every_session_and_refuses_older_builds() {
          PRAGMA writable_schema = OFF;
          DELETE FROM schema_migrations WHERE version >= 53;
          UPDATE schema_compatibility SET minimum_compatible_version = 49;
-         DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 52;",
+         DROP TABLE IF EXISTS operator_away_requests; DROP TABLE IF EXISTS operator_away_workers; DROP TABLE IF EXISTS operator_away; DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 52;",
     )
     .unwrap();
     drop(raw);
@@ -7227,10 +7717,10 @@ fn oracle_choice_and_profile_preference_survive_reopen_and_rename() {
     let path = directory.path().join("oracle-choice.sqlite3");
     let mut record = session("advisor-parent", "project");
     record.oracle = false;
-    record.oracle_choice = Some(mj_core::config::SubagentChoice {
+    record.oracle_choice = Some(Box::new(mj_core::config::SubagentChoice {
         model: "advisor".into(),
         effort: Some("high".into()),
-    });
+    }));
     save_new_session_to(&path, &record, None, true, false).unwrap();
     let state = load_state_from(&path).unwrap();
     assert_eq!(
@@ -7752,5 +8242,258 @@ fn obsolete_turn_review_rows_are_retired_before_recovery() {
             .unwrap()
             .active_group,
         None
+    );
+}
+
+// Hard-won: e13ed5c7c: page joins duplicated parked output across page boundaries
+#[test]
+fn history_pages_join_parked_terminal_output_without_changing_page_boundaries() {
+    use mj_core::state::TerminalOutputRecord;
+    for output_first in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("history.sqlite3");
+        let mut full = materialized_session("joined-history");
+        let mut owner = full.transcript[2].clone();
+        let record = TerminalOutputRecord {
+            terminal_id: "parked".into(),
+            output: "authoritative terminal output".into(),
+            truncated: false,
+            exit_code: Some(0),
+            signal: None,
+        };
+        if let TranscriptBody::Tool {
+            terminal_outputs,
+            terminal_refs,
+            ..
+        } = &mut Arc::make_mut(&mut owner).body
+        {
+            terminal_refs.push(record.terminal_id.clone());
+            terminal_outputs.push(TerminalOutputRecord {
+                output: "older streamed output".into(),
+                ..record.clone()
+            });
+            terminal_outputs.push(TerminalOutputRecord {
+                terminal_id: "embedded-only".into(),
+                output: "embedded terminal output".into(),
+                ..record.clone()
+            });
+        }
+        let parked = Arc::new(TranscriptItem {
+            stable_id: "terminal:parked".into(),
+            position: if output_first { 1 } else { 4 },
+            latest_content_event_ordinal: None,
+            created_at_ms: 1,
+            last_changed_at_ms: 1,
+            body: TranscriptBody::TerminalOutput { record },
+        });
+        full.transcript = if output_first {
+            vec![parked, owner.clone()]
+        } else {
+            vec![owner.clone(), parked]
+        };
+        save_session_to(&path, &session(&full.session_id, "project-1")).unwrap();
+        save_materialized_session_to(&path, &full).unwrap();
+        let filtered = load_materialized_transcript_filtered_from(
+            &path,
+            &full.session_id,
+            0,
+            1,
+            vec![mj_core::transcript::TranscriptRole::Tool],
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(filtered.items.len(), 1);
+        assert_eq!(filtered.items[0].stable_id, owner.stable_id);
+        let text = mj_transcript::transcript::transcript_item_text(&filtered.items[0]);
+        assert!(text.contains("authoritative terminal output"));
+        assert!(text.contains("embedded terminal output"));
+        assert!(!text.contains("older streamed output"));
+        let before = if output_first {
+            None
+        } else {
+            Some(mj_core::storage::TranscriptCursor::of(&full.transcript[1]))
+        };
+        let page = load_transcript_history_from(&path, &full.session_id, before.as_ref(), 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(page.items[0].stable_id, owner.stable_id);
+        assert!(
+            !mj_client::transcript::history_entries(&page)[0]
+                .text
+                .contains("authoritative terminal output")
+        );
+        // Convert single-item pages independently, as dispatch_earlier_history does.
+        let newest = load_transcript_history_from(&path, &full.session_id, None, 1)
+            .unwrap()
+            .unwrap();
+        let older =
+            load_transcript_history_from(&path, &full.session_id, newest.before.as_ref(), 1)
+                .unwrap()
+                .unwrap();
+        let rendered = [newest, older]
+            .iter()
+            .flat_map(mj_client::transcript::history_entries)
+            .map(|e| e.text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(rendered.matches("authoritative terminal output").count(), 1);
+        let unfiltered = load_materialized_transcript_filtered_from(
+            &path,
+            &full.session_id,
+            0,
+            10,
+            vec![],
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        let rendered = unfiltered
+            .items
+            .iter()
+            .map(|i| mj_transcript::transcript::transcript_item_text(i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(rendered.matches("authoritative terminal output").count(), 1);
+        let stored = load_materialized_session_from(&path, &full.session_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.transcript, full.transcript,
+            "presentation joins never write to storage"
+        );
+    }
+}
+
+// Hard-won: e13ed5c7c: history hydration duplicated output for evicted owners
+#[test]
+fn terminal_output_for_evicted_owner_parks_and_joins_history_pages() {
+    use mj_core::relay::{RELAY_EVENT_FORMAT_V1, RelayEvent, RelayObservation};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("history.sqlite3");
+    let mut full = long_conversation();
+    let mut owner = materialized_session(&full.session_id).transcript[2].clone();
+    if let TranscriptBody::Tool { terminal_refs, .. } = &mut Arc::make_mut(&mut owner).body {
+        terminal_refs.push("evicted-terminal".into());
+    }
+    full.transcript[2] = owner.clone();
+    save_session_to(&path, &session(&full.session_id, "project-1")).unwrap();
+    save_materialized_session_to(&path, &full).unwrap();
+    let (mut live, _) = load_materialized_actor_projection_from(&path, &full.session_id)
+        .unwrap()
+        .unwrap();
+    assert!(
+        !live
+            .transcript
+            .iter()
+            .any(|item| item.stable_id == owner.stable_id)
+    );
+    let output = "output from an evicted terminal owner";
+    let mut event = RelayEvent {
+        format: RELAY_EVENT_FORMAT_V1,
+        ordinal: 2501,
+        previous_digest: full.applied_event_digest.clone(),
+        digest: String::new(),
+        recorded_at_ms: 5000,
+        command_id: None,
+        observation: RelayObservation::TerminalOutput {
+            terminal_id: "evicted-terminal".into(),
+            output: output.into(),
+            truncated: false,
+            exit_code: Some(0),
+            signal: None,
+        },
+    };
+    event.digest = mj_core::relay::relay_event_digest(&event).unwrap();
+    let references =
+        load_projection_references_from(&path, &live, std::slice::from_ref(&event)).unwrap();
+    assert!(
+        references.is_empty(),
+        "terminal output must not scan history for its owner"
+    );
+    let mutation = mj_transcript::projection::project_relay_event(&live, &event)
+        .unwrap()
+        .mutation;
+    apply_projection_page_to(&path, &full.session_id, |page| {
+        page.apply(
+            event.ordinal,
+            &event.previous_digest,
+            &event.digest,
+            &mutation,
+        )
+    })
+    .unwrap();
+    mj_transcript::projection::apply_committed_projection_event(&mut live, &event, mutation)
+        .unwrap();
+    let stored = load_materialized_session_from(&path, &full.session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        &**stored
+            .transcript
+            .iter()
+            .find(|item| item.stable_id == owner.stable_id)
+            .unwrap(),
+        &*owner
+    );
+    assert!(
+        stored
+            .transcript
+            .iter()
+            .any(|item| item.stable_id == "terminal:evicted-terminal")
+    );
+    for roles in [vec![], vec![mj_core::transcript::TranscriptRole::Tool]] {
+        let page = load_materialized_transcript_filtered_from(
+            &path,
+            &full.session_id,
+            2,
+            1,
+            roles.clone(),
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].stable_id, owner.stable_id);
+        let outputs =
+            mj_core::transcript::TerminalOutputs::of(page.items.iter().map(AsRef::as_ref));
+        let text =
+            mj_transcript::transcript::transcript_item_text_with_outputs(&page.items[0], &outputs);
+        assert_eq!(text.matches(output).count(), usize::from(!roles.is_empty()));
+    }
+    let before = mj_core::storage::TranscriptCursor::of(&full.transcript[3]);
+    let page = load_transcript_history_from(&path, &full.session_id, Some(&before), 1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        mj_client::transcript::history_entries(&page)[0]
+            .text
+            .matches(output)
+            .count(),
+        0
+    );
+    let all = mj_core::storage::TranscriptHistoryPage {
+        items: stored.transcript.clone(),
+        before: None,
+        frontier: stored.applied_event_ordinal,
+    };
+    assert_eq!(
+        mj_client::transcript::history_entries(&all)
+            .iter()
+            .map(|entry| entry.text.matches(output).count())
+            .sum::<usize>(),
+        1
+    );
+    let summary =
+        mj_transcript::summary::TranscriptSummary::from_materialized_keeping(&stored, usize::MAX)
+            .render(usize::MAX);
+    assert_eq!(summary.matches(output).count(), 1);
+    let entries = mj_client::transcript::materialized_chat_entries(&stored);
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.text.matches(output).count())
+            .sum::<usize>(),
+        1
     );
 }

@@ -15,14 +15,7 @@ pub const ROOT_GROUPS: &[(&str, &[&str])] = &[
     ),
     (
         "Sessions",
-        &[
-            "review",
-            "continuation",
-            "subagents",
-            "quota",
-            "sessionwiki",
-            "phone",
-        ],
+        &["review", "subagents", "quota", "sessionwiki", "phone"],
     ),
     ("Display", &["interface", "notify", "advanced"]),
     ("Privacy", &["jev"]),
@@ -195,6 +188,9 @@ pub fn hidden_key(path: &[String], value: &Value, key: &str) -> bool {
         // own validation rejects them on any other kind.
         ["profiles", _] if matches!(key, "guardian_review_model" | "codex_profile") => {
             value["kind"].as_str() != Some("codex")
+        }
+        ["profiles", _] if key == "claude_permission_mode" => {
+            value["kind"].as_str() != Some("claude")
         }
         ["machines", mj_core::config::LOCAL_MACHINE_ID] => key == "kind",
         // Present only while reviewers still have to be chosen automatically:

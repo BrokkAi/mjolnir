@@ -324,7 +324,9 @@ impl Controller {
             })?;
         profile.ensure_ready(&request.profile_id)?;
         if profile.kind == HarnessKind::Muse {
-            let multiple_roots = !parent.additional_mounts.is_empty()
+            let multiple_roots = !mj_core::state::applied_container_settings(&parent)
+                .additional_mounts
+                .is_empty()
                 || (self
                     .state
                     .checkout(&parent.id)?
@@ -353,8 +355,15 @@ impl Controller {
         let session = SessionRecord {
             oracle_choice: None,
             oracle: false,
+            notifications_ignored: false,
             project: parent.project.clone(),
-            target_runtime: Some(parent.target_runtime_settings(&self.config)?.into_owned()),
+            target_runtime: Some(match &parent.target_runtime {
+                Some(runtime) => runtime.clone(),
+                None => parent
+                    .target_runtime_settings(&self.config)?
+                    .into_owned()
+                    .into(),
+            }),
             launch_base: None,
             launch_branch: None,
             checkout: None,
@@ -367,8 +376,6 @@ impl Controller {
             subagents: Some(mj_core::subagent::SubagentPolicy::None),
             create_managed_worktree: Some(false),
             archived: false,
-            container_cpus: None,
-            container_memory: None,
             // A child runs inside its parent's container, so it works in the
             // parent's workspace, including the legacy shared one.
             container_workspace: parent.container_workspace.clone(),
@@ -388,10 +395,14 @@ impl Controller {
                 || request.no_github_credentials
                 || !self.config.github.session_credentials,
             target_template_id: parent.target_template_id.clone(),
-            resource_allocation: parent.resource_allocation.clone(),
-            additional_mounts: parent.additional_mounts.clone(),
+            resource_allocation: mj_core::state::applied_container_settings(&parent)
+                .resource_allocation
+                .cloned(),
+            additional_mounts: mj_core::state::applied_container_settings(&parent)
+                .additional_mounts
+                .to_vec(),
             state: SessionState::Provisioning,
-            target: Some(target),
+            target: Some(Box::new(target)),
             native_session_id: None,
             acp_session_title: None,
             session_title_override: Some(request.task_name.clone()),
@@ -400,6 +411,8 @@ impl Controller {
             viewed_through_event_ordinal: 0,
             draft_input: String::new(),
             last_error: None,
+            dismissed_failure: None,
+            failure_generation: 0,
             last_checkpoint_error: None,
             checkpoint: None,
         };
@@ -696,7 +709,8 @@ fn borrowed_locator(
         | TargetLocator::AppleContainer { borrowed_from, .. }
         | TargetLocator::SshPodman { borrowed_from, .. }
         | TargetLocator::SshDocker { borrowed_from, .. }
-        | TargetLocator::SshAppleContainer { borrowed_from, .. } => {
+        | TargetLocator::SshAppleContainer { borrowed_from, .. }
+        | TargetLocator::SshNitro { borrowed_from, .. } => {
             borrowed_from.as_deref().unwrap_or(parent_id)
         }
         _ => parent_id,
@@ -755,6 +769,13 @@ fn borrowed_locator(
         TargetLocator::SshAppleContainer {
             host, container_id, ..
         } => TargetLocator::SshAppleContainer {
+            host: host.clone(),
+            container_id: container_id.clone(),
+            borrowed_from: Some(container_owner.to_owned()),
+        },
+        TargetLocator::SshNitro {
+            host, container_id, ..
+        } => TargetLocator::SshNitro {
             host: host.clone(),
             container_id: container_id.clone(),
             borrowed_from: Some(container_owner.to_owned()),

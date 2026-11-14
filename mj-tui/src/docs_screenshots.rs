@@ -190,6 +190,7 @@ fn documentation_dashboard() -> DashboardState {
             "kimi-1".into(),
             ProfileQuota {
                 paid_credits: None,
+                monthly_price_usd: None,
                 banked_resets: None,
                 profile_id: "kimi-1".into(),
                 harness: HarnessKind::Kimi,
@@ -260,6 +261,7 @@ fn documentation_dashboard() -> DashboardState {
     dashboard.apply_deployment_capacity(
         "local",
         Ok(Some(DeploymentCapacityUsage {
+            memory_pool: false,
             cpu_percent: Some(27),
             memory_used_bytes: 19 * 1024 * 1024 * 1024,
             memory_total_bytes: 64 * 1024 * 1024 * 1024,
@@ -292,13 +294,14 @@ fn documentation_conversation() -> MaterializedSession {
             transcript_item(
                 3,
                 TranscriptBody::Tool {
-                    call: serde_json::json!({
+                    call: (serde_json::json!({
                         "toolCallId": "inspect-terminal",
                         "title": "Inspect terminal layout and shared styles",
                         "kind": "read",
                         "status": "completed",
                         "content": []
-                    }),
+                    }))
+                    .into(),
                     terminal_outputs: Vec::new(),
                     terminal_refs: Vec::new(),
                     presentation: None,
@@ -349,6 +352,7 @@ fn profile_quota(
 ) -> ProfileQuota {
     ProfileQuota {
         paid_credits: None,
+        monthly_price_usd: None,
         banked_resets: None,
         profile_id: profile_id.into(),
         harness,

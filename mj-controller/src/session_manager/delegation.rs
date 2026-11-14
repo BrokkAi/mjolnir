@@ -5,7 +5,7 @@ use mj_core::subagent::SubagentToolRequest;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct DelegationObservation {
-    pub requests: Vec<SubagentToolRequest>,
+    pub requests: mj_core::snapshot_map::SharedSnapshot<Vec<SubagentToolRequest>>,
     pub completed: Vec<String>,
     /// Present only once the worker has resolved this ending, including its
     /// assessment and retries. Completion cannot observe an intermediate stop.

@@ -24,7 +24,8 @@ pub(super) fn template_architecture(
         | Template::AppleContainer { container }
         | Template::SshPodman { container, .. }
         | Template::SshDocker { container, .. }
-        | Template::SshAppleContainer { container, .. } => container.platform.as_deref()?,
+        | Template::SshAppleContainer { container, .. }
+        | Template::SshNitro { container, .. } => container.platform.as_deref()?,
         Template::LocalBare | Template::SshBare { .. } | Template::AwsEc2 { .. } => return None,
     };
     // Platform strings appear as "linux/arm64", "arm64", or "linux/arm64/v8".
@@ -57,6 +58,7 @@ pub(super) fn preflight_architectures(
         Template::SshBare { .. }
         | Template::SshPodman { .. }
         | Template::SshDocker { .. }
+        | Template::SshNitro { .. }
         | Template::AwsEc2 { .. } => {
             vec!["x86_64", "aarch64"]
         }

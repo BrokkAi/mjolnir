@@ -7,7 +7,7 @@ Mjolnir (`mj`) is a session manager for coding agents that provisions their
 execution environments and lets you continue work across harnesses, accounts,
 and machines. It supports Codex, Claude Code, Kimi Code, Grok Build, Muse
 Code, OpenCode, and DSH through the Agent Client Protocol (ACP), with a terminal dashboard,
-personal web viewer, and desktop app.
+and personal web viewer.
 
 Choose a harness account independently from the target where it runs. Mjolnir
 provisions containers or instances, synchronizes credentials, and can move the
@@ -34,7 +34,7 @@ A Mjolnir installation has four main parts:
 3. A **session worker** runs on that target beside the selected harness. It
    owns the durable command queue and event journal, so it does not depend on
    an attached terminal client.
-4. The **terminal dashboard**, **web viewer**, and **desktop app** are clients
+4. The **terminal dashboard** and **web viewer** are clients
    of the daemon. Detaching a client does not stop the session.
 
 A profile selects a harness account, and a target selects the execution

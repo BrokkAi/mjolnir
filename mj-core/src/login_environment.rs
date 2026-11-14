@@ -38,9 +38,13 @@ pub fn initialize_from_parent() -> Result<()> {
 pub async fn resolve() -> Result<&'static Environment> {
     ENVIRONMENT
         .get_or_try_init(|| async {
-            tokio::task::spawn_blocking(discover)
-                .await
-                .context("target login environment task failed")?
+            let cancellation = crate::subprocess::scoped_preparation_cancellation();
+            tokio::task::spawn_blocking(move || match cancellation {
+                Some(cancellation) => discover_cancellable(cancellation),
+                None => discover(),
+            })
+            .await
+            .context("target login environment task failed")?
         })
         .await
 }
@@ -109,9 +113,80 @@ pub fn bootstrap() -> Result<Environment> {
     anyhow::bail!("target login environment requires a Unix account")
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub fn discover() -> Result<Environment> {
     anyhow::bail!("target login environment requires a Unix account")
+}
+
+/// Ask Windows to build the account's registry-backed environment, including
+/// expanded values and the combined system/user PATH. Never inherit the
+/// caller's session overlay (bInherit = FALSE).
+/// https://learn.microsoft.com/windows/win32/api/userenv/nf-userenv-createenvironmentblock
+#[cfg(windows)]
+pub fn discover() -> Result<Environment> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::{
+        Security::{TOKEN_DUPLICATE, TOKEN_QUERY},
+        System::{
+            Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock},
+            Threading::{GetCurrentProcess, OpenProcessToken},
+        },
+    };
+
+    let mut token = std::ptr::null_mut();
+    // SAFETY: token points to writable handle storage; the pseudo process
+    // handle is valid for this process. Success transfers token ownership.
+    if unsafe {
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_QUERY | TOKEN_DUPLICATE,
+            &mut token,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error()).context("open account environment token");
+    }
+    // SAFETY: OpenProcessToken returned a new owned handle.
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    let mut block = std::ptr::null_mut();
+    // SAFETY: the token remains live and block is writable output storage.
+    if unsafe { CreateEnvironmentBlock(&mut block, token.as_raw_handle(), 0) } == 0 {
+        return Err(std::io::Error::last_os_error()).context("build account environment");
+    }
+    struct Block(*mut std::ffi::c_void);
+    impl Drop for Block {
+        fn drop(&mut self) {
+            // SAFETY: this allocation came from CreateEnvironmentBlock and
+            // has not been released or modified.
+            if unsafe { DestroyEnvironmentBlock(self.0) } == 0 {
+                tracing::warn!(error = %std::io::Error::last_os_error(), "release account environment");
+            }
+        }
+    }
+    let block = Block(block);
+    let mut environment = Environment::new();
+    let mut entry = block.0.cast::<u16>();
+    // SAFETY: Windows returns a double-NUL terminated sequence of NUL
+    // terminated UTF-16 entries. The allocation remains live through parsing.
+    unsafe {
+        while *entry != 0 {
+            let mut length = 0;
+            while *entry.add(length) != 0 {
+                length += 1;
+            }
+            let text = String::from_utf16(std::slice::from_raw_parts(entry, length))
+                .context("account environment is not valid UTF-16")?;
+            // Windows drive-current-directory entries start with '=' and
+            // belong to the process, not the account environment.
+            if let Some((name, value)) = text.split_once('=')
+                && !name.is_empty()
+            {
+                environment.insert(name.to_owned(), value.to_owned());
+            }
+            entry = entry.add(length + 1);
+        }
+    }
+    Ok(environment)
 }
 
 /// How long the login-shell probe may run. The probe reproduces everything a
@@ -155,6 +230,23 @@ pub fn discover() -> Result<Environment> {
     Ok(environment)
 }
 
+fn discover_cancellable(cancellation: tokio_util::sync::CancellationToken) -> Result<Environment> {
+    #[cfg(unix)]
+    {
+        let executor = crate::targets::CancellableProcessExecutor::with_timeout(
+            LOGIN_ENVIRONMENT_PROBE_TIMEOUT,
+        )
+        .with_cancellation(cancellation)
+        .with_foreground_terminal();
+        discover_account_with_executor(Account::current()?, &executor)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = cancellation;
+        discover()
+    }
+}
+
 /// The shell the probe starts, for diagnostics that explain where a session's
 /// environment came from.
 #[cfg(unix)]
@@ -165,6 +257,18 @@ pub fn account_shell() -> Result<std::path::PathBuf> {
 #[cfg(not(unix))]
 pub fn account_shell() -> Result<std::path::PathBuf> {
     anyhow::bail!("target shell environment requires a Unix account")
+}
+
+/// The effective user's account name from the account database, as Node's
+/// `os.userInfo().username` reports it.
+#[cfg(unix)]
+pub fn account_name() -> Result<String> {
+    Ok(Account::current()?.user)
+}
+
+#[cfg(not(unix))]
+pub fn account_name() -> Result<String> {
+    anyhow::bail!("account names come from the Unix account database")
 }
 
 #[cfg(unix)]
@@ -236,14 +340,20 @@ impl Account {
                     CStr::from_ptr(entry.pw_shell).to_str()?.to_owned(),
                 )
             };
+            let shell = if shell.is_empty() {
+                std::path::PathBuf::from("/bin/sh")
+            } else {
+                std::path::PathBuf::from(shell)
+            };
+            // Let a subprocess fixture substitute a deliberately slow shell.
+            #[cfg(feature = "test-hooks")]
+            let shell = std::env::var_os("MJ_TEST_ACCOUNT_SHELL")
+                .map(std::path::PathBuf::from)
+                .unwrap_or(shell);
             return Ok(Self {
                 user,
                 home: home.into(),
-                shell: if shell.is_empty() {
-                    "/bin/sh".into()
-                } else {
-                    shell.into()
-                },
+                shell,
             });
         }
     }
@@ -259,7 +369,17 @@ impl Account {
 /// is both, so the probe starts the account's shell the same way.
 #[cfg(unix)]
 fn discover_account(account: Account, timeout: std::time::Duration) -> Result<Environment> {
-    use crate::targets::{BoundedProcessExecutor, CommandExecutor};
+    discover_account_with_executor(
+        account,
+        &crate::targets::BoundedProcessExecutor::new(timeout),
+    )
+}
+
+#[cfg(unix)]
+fn discover_account_with_executor(
+    account: Account,
+    executor: &dyn crate::targets::CommandExecutor,
+) -> Result<Environment> {
     let mut nonce = [0u8; 16];
     getrandom::fill(&mut nonce)
         .map_err(|error| anyhow::anyhow!("create login capture marker: {error}"))?;
@@ -275,7 +395,6 @@ fn discover_account(account: Account, timeout: std::time::Duration) -> Result<En
     probe.command.clear_env = true;
     probe.command.cwd = Some(account.home.clone());
     probe.command.env = account.environment()?;
-    let executor = BoundedProcessExecutor::new(timeout);
     let output = if probe.script_on_stdin {
         let mut input = std::io::Cursor::new(script.as_bytes());
         executor.execute_with_stdin(&probe.command, &mut input)?

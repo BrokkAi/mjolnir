@@ -23,6 +23,27 @@ pub(crate) fn is_turn_control_command(command: &mj_core::relay::RelayCommand) ->
 // this public action's Rust construction shape inline; boxing would change it.
 #[allow(clippy::large_enum_variant)]
 pub enum ControllerAction {
+    PushSubscribe {
+        subscription: crate::web_push::Subscription,
+    },
+    PushRenew {
+        old_endpoint: String,
+        subscription: crate::web_push::Subscription,
+    },
+    PushUnsubscribe {
+        endpoint: String,
+    },
+    PushTest {
+        endpoint: String,
+    },
+    DismissNotification {
+        session_id: String,
+        target: mj_core::attention::NotificationDismissal,
+    },
+    SetSessionNotificationsIgnored {
+        session_id: String,
+        ignored: bool,
+    },
     RecordOperatorActivity,
     SetOperatorAway {
         away: bool,
@@ -132,16 +153,14 @@ pub enum ControllerAction {
         session_id: String,
         workspace_id: String,
     },
-    /// Record the session's container size overrides and attached
-    /// directories. An empty or absent size clears that override, and the
+    /// Record the session's container allocation and attached
+    /// directories. An absent allocation uses the target defaults, and the
     /// mounts list replaces the whole list. Nothing changes inside a running
     /// container: the values are read the next time it is created.
     SetContainerSettings {
         session_id: String,
         #[serde(default)]
-        cpus: Option<String>,
-        #[serde(default)]
-        memory: Option<String>,
+        resource_allocation: Option<SessionResourceAllocation>,
         #[serde(default)]
         mounts: Vec<AdditionalMount>,
     },
@@ -442,6 +461,8 @@ pub struct PathCompletionRequest {
 
 #[derive(Debug)]
 pub struct NewPreflightRequest {
+    pub profile_id: String,
+    pub workspace_id: String,
     pub additional_mounts: Vec<AdditionalMount>,
     pub bundle_id: String,
     pub target_id: String,
@@ -506,41 +527,7 @@ pub enum PreflightFailure {
     Controller(String),
 }
 
-/// One configured repository's network clone and publication destinations.
-/// URLs have already been passed through the shared display sanitizer before
-/// they reach a phone.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PreflightRepository {
-    pub id: String,
-    pub fetch_url: String,
-    pub default_branch: String,
-    pub push_urls: Vec<String>,
-}
-
-/// What a preflight found. Isolated sessions expose their complete network
-/// source plan so the person can review it before creation. Raw-local targets
-/// leave the plan empty because they use the selected checkout directly;
-/// isolated targets set `local_changes_excluded` to make the copy boundary
-/// explicit.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PreflightNew {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_directory: Option<PathBuf>,
-    #[serde(default)]
-    pub managed_worktree: mj_core::state::ManagedWorktreeOptions,
-    #[serde(default)]
-    pub remote_repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
-    #[serde(default)]
-    pub dirty_repositories: Vec<String>,
-    #[serde(default)]
-    pub remote_repositories: Vec<PreflightRepository>,
-    pub local_changes_excluded: bool,
-    /// Why creating this session turns its review off, when it will.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub review_notice: Option<String>,
-}
+pub use mj_client::daemon::{PreflightNew, PreflightRepository};
 
 /// What a phone asks about, or stores against, its own identity.
 ///

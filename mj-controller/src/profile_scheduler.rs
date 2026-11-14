@@ -9,6 +9,8 @@ pub enum CandidateQuota {
     /// Billed per use, with no allowance to run out of.
     UsagePriced,
     Subscription {
+        /// Monthly list price as a capacity proxy, when the plan is recognized.
+        monthly_price_usd: Option<u32>,
         windows: Vec<crate::quota::QuotaWindow>,
         paid_credits: Option<mj_client::quota::PaidCredits>,
         /// When the windows were read, which is when their usage was measured.
@@ -25,6 +27,7 @@ impl CandidateQuota {
         match report.billing_class() {
             QuotaBilling::Usage => Self::UsagePriced,
             QuotaBilling::Subscription => Self::Subscription {
+                monthly_price_usd: report.monthly_price_usd,
                 windows: report.windows.clone(),
                 paid_credits: report.paid_credits.clone(),
                 refreshed_at_epoch_seconds: report.refreshed_at_epoch_seconds,
@@ -62,12 +65,21 @@ pub struct SubagentCandidate {
     pub unhealthy: std::collections::BTreeMap<String, crate::profile_health::Unhealthy>,
 }
 
+impl AsRef<SubagentCandidate> for SubagentCandidate {
+    fn as_ref(&self) -> &SubagentCandidate {
+        self
+    }
+}
+
 /// Order candidates for a spawn so that simultaneous spawns spread out
 /// instead of all taking the same profile. Included quota and paid funds each
 /// get a weighted order within their tier; included quota always comes first.
-pub(crate) fn draw_candidates(
-    candidates: &mut Vec<SubagentCandidate>,
+/// Profiles named in `prefer` (dashboard's load-balancing preference) rank
+/// ahead of the rest, in preference order, while their quota tier allows.
+pub(crate) fn draw_candidates<T: AsRef<SubagentCandidate>>(
+    candidates: &mut Vec<T>,
     ranking_anchor: Option<&str>,
+    prefer: &[String],
     model: &str,
     now_seconds: i64,
 ) -> anyhow::Result<()> {
@@ -77,26 +89,34 @@ pub(crate) fn draw_candidates(
         // 53 random bits as a float in (0, 1], so its logarithm is finite.
         units.push(((bits >> 11) + 1) as f64 / (1u64 << 53) as f64);
     }
-    order_by_draw(candidates, ranking_anchor, &units, model, now_seconds);
+    order_by_draw(
+        candidates,
+        ranking_anchor,
+        prefer,
+        &units,
+        model,
+        now_seconds,
+    );
     Ok(())
 }
 
 /// The ordering `draw_candidates` describes, with one uniform (0, 1] number
 /// per candidate in ranked order. Sorting by ln(u) / score is the
 /// Efraimidis–Spirakis weighted sample without replacement.
-pub(crate) fn order_by_draw(
-    candidates: &mut Vec<SubagentCandidate>,
+pub(crate) fn order_by_draw<T: AsRef<SubagentCandidate>>(
+    candidates: &mut Vec<T>,
     ranking_anchor: Option<&str>,
+    prefer: &[String],
     units: &[f64],
     model: &str,
     now_seconds: i64,
 ) {
-    rank_candidates(candidates, ranking_anchor, model, now_seconds);
+    rank_candidates(candidates, ranking_anchor, prefer, model, now_seconds);
     let mut keyed = candidates
         .drain(..)
         .zip(units)
         .map(|(candidate, unit)| {
-            let key = match quota_rank(&candidate, model, now_seconds) {
+            let key = match quota_rank(candidate.as_ref(), model, now_seconds) {
                 QuotaRank::Available(score) | QuotaRank::Paid(score) => unit.ln() / score,
                 _ => f64::NEG_INFINITY,
             };
@@ -105,31 +125,46 @@ pub(crate) fn order_by_draw(
         .collect::<Vec<_>>();
     // A stable sort keeps the ranked order among the undrawn candidates.
     keyed.sort_by(|left, right| {
-        quota_rank(&left.1, model, now_seconds)
+        quota_rank(left.1.as_ref(), model, now_seconds)
             .tier()
-            .cmp(&quota_rank(&right.1, model, now_seconds).tier())
+            .cmp(&quota_rank(right.1.as_ref(), model, now_seconds).tier())
             .then_with(|| {
-                projects_short_window_exhaustion(&left.1, model, now_seconds).cmp(
-                    &projects_short_window_exhaustion(&right.1, model, now_seconds),
+                projects_short_window_exhaustion(left.1.as_ref(), model, now_seconds).cmp(
+                    &projects_short_window_exhaustion(right.1.as_ref(), model, now_seconds),
                 )
+            })
+            .then_with(|| {
+                preference_position(left.1.as_ref(), prefer)
+                    .cmp(&preference_position(right.1.as_ref(), prefer))
             })
             .then_with(|| right.0.total_cmp(&left.0))
     });
     candidates.extend(keyed.into_iter().map(|(_, candidate)| candidate));
 }
 
+/// A candidate's position in the load-balancing preference list, if the
+/// person named it: preferred profiles lead, in list order.
+fn preference_position(candidate: &SubagentCandidate, prefer: &[String]) -> usize {
+    prefer
+        .iter()
+        .position(|id| *id == candidate.profile_id)
+        .unwrap_or(usize::MAX)
+}
+
 /// Order candidates by [`QuotaRank`] tier; within a tier, profiles on course
 /// to run out of their five-hour window before it resets come last, and
-/// subscriptions with quota left are ordered by pace score. Then the optional
+/// subscriptions with quota left are ordered by price-weighted pace score. Then the optional
 /// anchor's profile and profile id, so the order never depends on how the
 /// configuration happens to list them.
-pub(crate) fn rank_candidates(
-    candidates: &mut [SubagentCandidate],
+pub(crate) fn rank_candidates<T: AsRef<SubagentCandidate>>(
+    candidates: &mut [T],
     ranking_anchor: Option<&str>,
+    prefer: &[String],
     model: &str,
     now_seconds: i64,
 ) {
     candidates.sort_by(|left, right| {
+        let (left, right) = (left.as_ref(), right.as_ref());
         let left_rank = quota_rank(left, model, now_seconds);
         let right_rank = quota_rank(right, model, now_seconds);
         left_rank
@@ -138,6 +173,10 @@ pub(crate) fn rank_candidates(
             .then_with(|| {
                 projects_short_window_exhaustion(left, model, now_seconds)
                     .cmp(&projects_short_window_exhaustion(right, model, now_seconds))
+            })
+            // A preferred profile leads the profiles quota treats alike.
+            .then_with(|| {
+                preference_position(left, prefer).cmp(&preference_position(right, prefer))
             })
             .then_with(|| left_rank.order(right_rank))
             .then_with(|| {
@@ -190,9 +229,18 @@ fn quota_rank(candidate: &SubagentCandidate, model: &str, now_seconds: i64) -> Q
         CandidateQuota::Subscription {
             windows,
             paid_credits,
+            monthly_price_usd,
             ..
         } => match crate::quota::quota_score(windows, model, now_seconds) {
-            Some(score) if score > 0.0 => QuotaRank::Available(score),
+            // $100 is the reference weight; unreported plans retain unit weight.
+            // Price is a proxy: advertised session multipliers do not describe
+            // the relative weekly allowances of Claude Max plans (#1519).
+            Some(score) if score > 0.0 => QuotaRank::Available(
+                score
+                    * monthly_price_usd
+                        .filter(|price| *price > 0)
+                        .map_or(1.0, |price| f64::from(price) / 100.0),
+            ),
             score => paid_weight(paid_credits.as_ref())
                 .map(QuotaRank::Paid)
                 .unwrap_or(

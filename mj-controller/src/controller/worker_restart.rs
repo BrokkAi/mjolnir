@@ -240,7 +240,7 @@ impl Controller {
                 let operation_id = owner.operation_id().to_owned();
                 let intent = crate::database::WorkerRestartIntent {
                     operation_id: operation_id.clone(),
-                    target: self.state.sessions[session_id]
+                    target: *self.state.sessions[session_id]
                         .target
                         .clone()
                         .context("worker restart has no durable target")?,
@@ -257,6 +257,7 @@ impl Controller {
                     )?;
                     stop_worker_after_target_recovery(executor, &backend, session_id, &worker_root)
                         .context(RESTART_FOR_UPGRADE.stop)?;
+                    tracing::info!(%session_id, worker_root = %worker_root, "worker restart confirmed old process tree stopped");
                     // Old workers reject unknown launch fields and may reread on stop.
                     replace_installed_worker_launch_config(executor, &backend, session_id, &launch)
                         .context(

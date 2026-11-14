@@ -1,3 +1,5 @@
+Unicode attention: needs_input=? important=! unread=✓ failed=× unreachable=×
+ASCII attention: needs_input=? important=! unread=+ failed=x unreachable=x
 === NO_COLOR monochrome controls (40x1) ===
 NO_COLOR theme: Mono; color-enabled light remains: Light; base: Style::new().fg(Color::Reset).bg(Color::Reset); selection: Style::new().bold().reversed(); active control: Style::new().bold().reversed()
 selected active canvas

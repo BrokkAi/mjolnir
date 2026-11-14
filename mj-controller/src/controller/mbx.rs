@@ -260,6 +260,8 @@ fn supported_host(target: &targets::TargetTemplate) -> Option<(CacheHost, Target
         }
         targets::TargetTemplate::AppleContainer(_)
         | targets::TargetTemplate::SshAppleContainer { .. }
+        // A sandbox is a VM with no way to mount a host directory.
+        | targets::TargetTemplate::SshNitro { .. }
         | targets::TargetTemplate::LocalBare
         | targets::TargetTemplate::SshBare { .. } => return None,
     };
@@ -436,13 +438,6 @@ fn classify_native_mbx(native: Option<NativeMbx>) -> NativeMbxStatus {
             version: native.version,
         },
     }
-}
-
-pub(super) fn version_at_least(found: &str, required: &str) -> bool {
-    matches!(
-        (semver::Version::parse(found), semver::Version::parse(required)),
-        (Ok(found), Ok(required)) if found >= required
-    )
 }
 
 fn cache_unavailable_reason(status: &NativeMbxStatus) -> String {

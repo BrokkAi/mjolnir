@@ -201,8 +201,9 @@ impl Controller {
 
     /// Accept a durable wake, launch the worker, and observe native readiness.
     /// Preparation and readiness hold no daemon admission. Once the wake is
-    /// accepted, failure leaves its active record and boot intent for recovery;
-    /// it never stops a worker that may already have resumed accepted work.
+    /// accepted, a proved dead worker returns to Parked with its failure;
+    /// uncertain liveness leaves the active record and boot intent for recovery.
+    /// It never stops a worker that may have resumed accepted work.
     pub async fn unpark_subagent_worker(
         &self,
         session_id: &str,
@@ -287,29 +288,50 @@ impl Controller {
                 session_id,
                 &crate::database::WorkerRestartIntent {
                     operation_id: owner.operation_id().to_owned(),
-                    target: target.clone(),
+                    target: *target.clone(),
                     desired_build: String::new(),
                 },
             )?;
-            start_worker_durably(&owner, target, executor, &backend, &worker_root, &self.config.github)
-                .context(RESTART_FROM_PARKED.start)
-                .map_err(|error| explain_process_exhaustion(error, &backend, session_id))?;
-            // The active record and boot intent are durable. Handoff may cancel
-            // this wait; the next daemon attaches to the same live worker.
-            executor.begin_resumable_work()?;
-            self.observe_started_worker(
-                session_id,
-                executor,
-                InstalledWorkerRestart {
-                    backend: &backend,
-                    worker_root: &worker_root,
-                    reconnect: &reconnect,
-                    launch: Some(&launch),
-                    prepared: true,
-                    messages: &RESTART_FROM_PARKED,
-                },
-            )
-            .await?;
+            let observed = async {
+                start_worker_durably(&owner, target, executor, &backend, &worker_root, &self.config.github)
+                    .context(RESTART_FROM_PARKED.start)
+                    .map_err(|error| explain_process_exhaustion(error, &backend, session_id))?;
+                // The active record and boot intent are durable. Handoff may cancel
+                // this wait; the next daemon attaches to the same live worker.
+                executor.begin_resumable_work()?;
+                self.observe_started_worker(
+                    session_id,
+                    executor,
+                    InstalledWorkerRestart {
+                        backend: &backend,
+                        worker_root: &worker_root,
+                        reconnect: &reconnect,
+                        launch: Some(&launch),
+                        prepared: true,
+                        messages: &RESTART_FROM_PARKED,
+                    },
+                )
+                .await
+            }.await;
+            if let Err(error) = observed {
+                // A failed connection alone does not prove death. The same
+                // lifecycle owner probes and settles before recovery can act.
+                let liveness = executor.execute(&super::worker_binary::worker_liveness_command(
+                    &backend, &worker_root,
+                )).context("check whether the failed unpark worker exited")?;
+                if liveness.status == 0 && String::from_utf8_lossy(&liveness.stdout).trim() == "dead" {
+                    let detail = format!("{error:#}");
+                    let failure = if mj_core::credentials::text_reports_auth_failure(&detail) {
+                        let profile = &self.state.subagents[session_id].profile_id;
+                        format!("login_invalid: login refused for profile {profile} on target {}; run `mj login --profile {profile}` and retry send_message: {detail}", session.target_template_id)
+                    } else {
+                        detail
+                    };
+                    crate::database::fail_subagent_unpark(session_id, owner.operation_id(), &failure)?;
+                    anyhow::bail!("{failure}");
+                }
+                return Err(error);
+            }
             Ok(())
         })
         .await
@@ -395,9 +417,9 @@ mod tests {
     fn register_child(root: &std::path::Path) {
         crate::database::save_session(&checkpoint_test_session("parent-1")).unwrap();
         let mut child = checkpoint_test_session(LATCH_RELAY_SESSION);
-        child.target = Some(TargetLocator::LocalBare {
+        child.target = Some(Box::new(TargetLocator::LocalBare {
             worker_root: root.join(LATCH_RELAY_SESSION),
-        });
+        }));
         crate::database::save_subagent_session(
             &child,
             &mj_core::subagent::SubagentRecord {
@@ -521,9 +543,9 @@ mod tests {
             .unwrap();
         parent.project_directory = Some(root.to_path_buf());
         parent.target_template_id = "local-bare".into();
-        parent.target = Some(TargetLocator::LocalBare {
+        parent.target = Some(Box::new(TargetLocator::LocalBare {
             worker_root: root.join("parent-1"),
-        });
+        }));
         parent.no_project_memory = true;
         crate::database::save_session(&parent).unwrap();
         let mut child = crate::database::read_durable_session_record(LATCH_RELAY_SESSION)
@@ -568,11 +590,49 @@ mod tests {
                 guardian_review_model: None,
                 codex_profile: None,
                 muse_auto_review: None,
+                claude_permission_mode: None,
                 aws: None,
                 ..mj_core::config::HarnessProfile::new(mj_core::config::HarnessKind::Codex, home)
             },
         );
         controller
+    }
+
+    // Hard-won: #1508: a refused unpark left a running record and endless reconnects.
+    #[tokio::test]
+    async fn dead_unpark_returns_to_parked_and_releases_its_boot_atomically() {
+        if !isolated("dead_unpark_returns_to_parked_and_releases_its_boot_atomically") {
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let root = tempfile::tempdir().unwrap();
+        let controller = waking_controller(root.path(), 0);
+        let target = controller.state.sessions[LATCH_RELAY_SESSION]
+            .target
+            .clone()
+            .unwrap();
+        let owner =
+            crate::worker_lifecycle::WorkerPermit::try_acquire(LATCH_RELAY_SESSION, "test unpark")
+                .unwrap()
+                .unwrap();
+        owner.scope(async {
+            let intent = crate::database::WorkerRestartIntent {
+                operation_id: owner.operation_id().to_owned(), target: *target, desired_build: String::new(),
+            };
+            crate::database::begin_subagent_unpark(LATCH_RELAY_SESSION, &intent).unwrap();
+            let failure = "login_invalid: workspace routing discovery unauthorized (401); run `mj login --profile codex`";
+            // A stale completion must leave the current boot and state intact.
+            assert!(crate::database::fail_subagent_unpark(LATCH_RELAY_SESSION, "stale-owner", failure).is_err());
+            assert_eq!(crate::database::load_session_state(LATCH_RELAY_SESSION).unwrap(), Some(SessionState::Running));
+            crate::database::fail_subagent_unpark(LATCH_RELAY_SESSION, owner.operation_id(), failure).unwrap();
+            let record = crate::database::read_durable_session_record(LATCH_RELAY_SESSION).unwrap().unwrap();
+            assert_eq!(record.state, SessionState::Parked);
+            assert_eq!(record.last_error.as_deref(), Some(failure));
+            assert!(crate::database::load_worker_restart(LATCH_RELAY_SESSION).unwrap().is_none());
+            // The same child can accept a later wake after login repair.
+            crate::database::begin_subagent_unpark(LATCH_RELAY_SESSION, &intent).unwrap();
+            assert_eq!(crate::database::load_session_state(LATCH_RELAY_SESSION).unwrap(), Some(SessionState::Running));
+        }).await;
     }
 
     // Hard-won: a6ad3cc3c: unpark waited for a resumed provider retry to finish and then stopped it.
@@ -692,7 +752,7 @@ mod tests {
         );
         let mut target = latch_relay_target(root.path(), None, ReleaseSupport::Supported, false);
         target.worker_recovery = Some(crate::session_manager::WorkerRecoveryPlan {
-            source_target,
+            source_target: *source_target,
             target: None,
             workspace: None,
             exit_record: None,
@@ -786,7 +846,7 @@ mod tests {
                     LATCH_RELAY_SESSION,
                     &crate::database::WorkerRestartIntent {
                         operation_id: owner.operation_id().into(),
-                        target: controller.state.sessions[LATCH_RELAY_SESSION]
+                        target: *controller.state.sessions[LATCH_RELAY_SESSION]
                             .target
                             .clone()
                             .unwrap(),

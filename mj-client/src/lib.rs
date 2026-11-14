@@ -1,6 +1,5 @@
 //! Client-facing contracts shared by Mjolnir's daemon and control surfaces.
 
-pub mod auth;
 pub mod build_identity;
 pub mod image;
 pub mod quota;
@@ -19,3 +18,7 @@ pub mod operations;
 
 pub mod daemon;
 pub mod executable;
+
+pub mod availability;
+
+pub mod discovery;

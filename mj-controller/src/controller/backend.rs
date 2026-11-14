@@ -40,7 +40,7 @@ impl Controller {
         if session
             .project
             .as_ref()
-            .is_some_and(mj_core::repository::ProjectBundleSnapshot::primary_is_plain_directory)
+            .is_some_and(|project| project.primary_is_plain_directory())
         {
             return Ok((launch.cwd, "not a git checkout".to_owned()));
         }
@@ -175,7 +175,11 @@ impl Controller {
 
         let mut local_ids = Vec::new();
         // Per host: its target ids, and per SSH connection the paths to measure.
-        type HostProbes = (Vec<String>, Vec<(SshTarget, Vec<String>)>);
+        // The flag marks a connection on which every target is a Nitro
+        // sandbox, whose memory total is the engine's pool. A host shared
+        // with other runtimes keeps its physical memory as the total, because
+        // their sessions draw on all of it.
+        type HostProbes = (Vec<String>, Vec<(SshTarget, Vec<String>, bool)>);
         let mut ssh_hosts: BTreeMap<String, HostProbes> = BTreeMap::new();
         let mut targets = Vec::new();
         for (target_id, template) in &self.config.targets {
@@ -189,17 +193,35 @@ impl Controller {
                 TargetTemplate::SshBare { ssh, .. }
                 | TargetTemplate::SshPodman { ssh, .. }
                 | TargetTemplate::SshDocker { ssh, .. }
-                | TargetTemplate::SshAppleContainer { ssh, .. } => {
+                | TargetTemplate::SshAppleContainer { ssh, .. }
+                | TargetTemplate::SshNitro { ssh, .. } => {
                     let entry = ssh_hosts.entry(ssh.host.clone()).or_default();
                     entry.0.push(target_id.clone());
                     let connection = SshTarget::from(ssh);
-                    let paths = match entry.1.iter_mut().find(|(known, _)| *known == connection) {
-                        Some((_, paths)) => paths,
+                    let nitro = matches!(template, TargetTemplate::SshNitro { .. });
+                    let position = match entry
+                        .1
+                        .iter()
+                        .position(|(known, _, _)| *known == connection)
+                    {
+                        Some(position) => position,
                         None => {
-                            entry.1.push((connection, Vec::new()));
-                            &mut entry.1.last_mut().expect("just pushed").1
+                            entry.1.push((connection, Vec::new(), true));
+                            entry.1.len() - 1
                         }
                     };
+                    // A disabled target with no live session draws on no
+                    // memory. `mj ec2 create` registers a Nitro host with a
+                    // disabled bare sibling, which must not turn the pool
+                    // back into physical memory less the host reserve.
+                    let draws_memory = !self.config.disabled_targets.contains(target_id)
+                        || self.state.sessions.values().any(|session| {
+                            session.target_template_id == *target_id && session.state.is_active()
+                        });
+                    if draws_memory {
+                        entry.1[position].2 &= nitro;
+                    }
+                    let paths = &mut entry.1[position].1;
                     push_unique(paths, ssh_storage_paths(template));
                     // Each live session's own directories: a project or
                     // clone can sit on a filesystem of its own.
@@ -273,7 +295,13 @@ impl Controller {
                         local: false,
                         probes: connections
                             .iter()
-                            .map(|(ssh, paths)| targets::ssh_host_capacity_command(ssh, paths))
+                            .map(|(ssh, paths, nitro)| {
+                                if *nitro {
+                                    targets::ssh_nitro_host_capacity_command(ssh, paths)
+                                } else {
+                                    targets::ssh_host_capacity_command(ssh, paths)
+                                }
+                            })
                             .collect(),
                         local_storage_paths: Vec::new(),
                         probe_error: None,
@@ -361,6 +389,7 @@ pub(crate) fn ssh_storage_paths(template: &TargetTemplate) -> Vec<String> {
         }
         TargetTemplate::SshPodman { .. } => paths.push(ContainerStorage::Podman.path().to_owned()),
         TargetTemplate::SshDocker { .. } => paths.push(ContainerStorage::Docker.path().to_owned()),
+        TargetTemplate::SshNitro { .. } => paths.push(ContainerStorage::Microvm.path().to_owned()),
         _ => {}
     }
     paths.extend(build_cache_directory(template));
@@ -571,6 +600,20 @@ pub(super) fn verify_target(
                     )
                 })
         }
+        TargetTemplate::SshNitro { ssh, .. } => {
+            let ssh = SshTarget::from(ssh);
+            // The engine is the worker binary itself, so it is installed
+            // before the first command that needs it.
+            super::worker_binary::ensure_microvm_engine(&ssh, executor)
+                .and_then(|()| targets::verify_ssh_nitro(&ssh, executor))
+                .map(|_| ())
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "Nitro sandbox host preflight failed for {}. Fix the problem below{then_retry}: {error:#}",
+                        ssh.destination
+                    )
+                })
+        }
         TargetTemplate::SshBare { ssh, .. } => {
             verify_ssh_connectivity(&SshTarget::from(ssh), executor)
         }
@@ -607,15 +650,25 @@ pub(super) fn backend_session_bundle(
     let bundle = session
         .project_bundle(config)
         .context("session bundle is missing")?;
-    let mut spec = backend_bundle_with_sources(
+    backend_bundle_with_sources(
         bundle,
         session
             .project
             .as_ref()
             .map(|project| &project.network_sources),
         executor,
-    )?;
+    )
+}
+
+pub(super) fn apply_session_history_cutoff(
+    session: &SessionRecord,
+    config: &mj_core::config::Config,
+    spec: &mut ProjectBundleSpec,
+) -> Result<()> {
     if let Some(cutoff) = session_history_cutoff(session)? {
+        let bundle = session
+            .project_bundle(config)
+            .context("session bundle is missing")?;
         let checkout = session
             .checkout
             .as_ref()
@@ -631,10 +684,10 @@ pub(super) fn backend_session_bundle(
         spec.repositories
             .iter_mut()
             .find(|repository| repository.destination == destination)
-            .expect("bundle spec mirrors the bundle")
+            .context("cutoff repository is missing from the workspace bundle")?
             .history_cutoff = Some(cutoff);
     }
-    Ok(spec)
+    Ok(())
 }
 
 /// The history a session created with `no_later_history` starts with: its
@@ -690,21 +743,15 @@ fn backend_bundle_with_sources(
     })
 }
 
-/// Per-session container overrides. They win over both the target
-/// template's values and any recorded resource allocation, and they are read
-/// only while a container is being created.
+/// Per-session credential policy applied while creating a container.
 #[derive(Debug, Clone, Copy, Default)]
-pub(super) struct ContainerOverrides<'a> {
-    pub cpus: Option<&'a str>,
-    pub memory: Option<&'a str>,
+pub(super) struct ContainerOverrides {
     pub no_github_credentials: bool,
 }
 
-impl<'a> ContainerOverrides<'a> {
-    pub(super) fn for_session(session: &'a SessionRecord) -> Self {
+impl ContainerOverrides {
+    pub(super) fn for_session(session: &SessionRecord) -> Self {
         Self {
-            cpus: session.container_cpus.as_deref(),
-            memory: session.container_memory.as_deref(),
             no_github_credentials: session.no_github_credentials,
         }
     }
@@ -713,7 +760,7 @@ impl<'a> ContainerOverrides<'a> {
 pub(super) fn backend_target(
     template: &TargetTemplate,
     allocation: Option<&SessionResourceAllocation>,
-    overrides: ContainerOverrides<'_>,
+    overrides: ContainerOverrides,
 ) -> Result<targets::TargetTemplate> {
     Ok(match template {
         TargetTemplate::LocalBare => targets::TargetTemplate::LocalBare,
@@ -754,6 +801,10 @@ pub(super) fn backend_target(
         TargetTemplate::SshDocker { ssh, container, .. } => targets::TargetTemplate::SshDocker {
             ssh: SshTarget::from(ssh),
             container: backend_container(container, allocation, overrides),
+        },
+        TargetTemplate::SshNitro { ssh, container } => targets::TargetTemplate::SshNitro {
+            ssh: SshTarget::from(ssh),
+            container: backend_container_with(container, allocation, overrides, true),
         },
     })
 }
@@ -908,7 +959,8 @@ pub(super) fn configure_github_token_environment(target: &mut targets::TargetTem
         | targets::TargetTemplate::AppleContainer(container)
         | targets::TargetTemplate::SshPodman { container, .. }
         | targets::TargetTemplate::SshDocker { container, .. }
-        | targets::TargetTemplate::SshAppleContainer { container, .. } => container,
+        | targets::TargetTemplate::SshAppleContainer { container, .. }
+        | targets::TargetTemplate::SshNitro { container, .. } => container,
         targets::TargetTemplate::LocalBare | targets::TargetTemplate::SshBare { .. } => {
             return false;
         }
@@ -939,7 +991,53 @@ pub(super) fn use_github_https_urls(bundle: &mut targets::ProjectBundleSpec) {
 fn backend_container(
     container: &mj_core::config::ContainerTemplate,
     allocation: Option<&SessionResourceAllocation>,
-    overrides: ContainerOverrides<'_>,
+    overrides: ContainerOverrides,
+) -> ContainerTemplate {
+    backend_container_with(container, allocation, overrides, false)
+}
+
+/// A container environment as the engine receives it: the `--env` arguments,
+/// and the values those arguments leave out.
+///
+/// An entry whose value comes from a reference (`from_env`, `from_secret`) or
+/// from the controller's own environment is a secret. When the engine runs
+/// under `sudo`, which logs every command line, a secret is named by a
+/// valueless `--env NAME` and its value travels in the ssh command's
+/// environment instead (see `CommandPlan::provide_target_environment_secrets`).
+/// One function builds both lists, so an argument and its value cannot
+/// disagree. Everything else stays `--env NAME=value`.
+pub(super) struct ContainerEnvironment {
+    pub args: Vec<String>,
+    pub secrets: Vec<(String, String)>,
+}
+
+pub(super) fn container_environment(
+    container: &mj_core::config::ContainerTemplate,
+    overrides: ContainerOverrides,
+    secrets_out_of_band: bool,
+) -> ContainerEnvironment {
+    let mut environment = container.environment.resolved().clone();
+    if overrides.no_github_credentials {
+        mj_core::credentials::remove_github_authentication_environment(&mut environment);
+    }
+    let mut args = Vec::new();
+    let mut secrets = Vec::new();
+    for (key, value) in environment {
+        if secrets_out_of_band && container.environment.is_secret_sourced(&key) {
+            args.extend(["--env".to_owned(), key.clone()]);
+            secrets.push((key, value));
+        } else {
+            args.extend(["--env".to_owned(), format!("{key}={value}")]);
+        }
+    }
+    ContainerEnvironment { args, secrets }
+}
+
+fn backend_container_with(
+    container: &mj_core::config::ContainerTemplate,
+    allocation: Option<&SessionResourceAllocation>,
+    overrides: ContainerOverrides,
+    secrets_out_of_band: bool,
 ) -> ContainerTemplate {
     let mut extra_run_args = Vec::new();
     if let Some(platform) = &container.platform {
@@ -951,22 +1049,13 @@ fn backend_container(
         }
         _ => (container.cpus.clone(), container.memory.clone()),
     };
-    // The session's own overrides are the last word on size.
-    let cpus = overrides.cpus.map(str::to_owned).or(cpus);
-    let memory = overrides.memory.map(str::to_owned).or(memory);
     if let Some(cpus) = cpus {
         extra_run_args.push(format!("--cpus={cpus}"));
     }
     if let Some(memory) = memory {
         extra_run_args.push(format!("--memory={memory}"));
     }
-    let mut environment = container.environment.resolved().clone();
-    if overrides.no_github_credentials {
-        mj_core::credentials::remove_github_authentication_environment(&mut environment);
-    }
-    for (key, value) in &environment {
-        extra_run_args.extend(["--env".to_string(), format!("{key}={value}")]);
-    }
+    extra_run_args.extend(container_environment(container, overrides, secrets_out_of_band).args);
     ContainerTemplate {
         image: container.image.clone(),
         pull_policy: container.pull_policy,
@@ -1052,6 +1141,34 @@ pub fn wait_for_ec2_ssh(executor: &impl CommandExecutor, ssh: &SshTarget) -> Res
     )
 }
 
+/// Wait until a rebooting EC2 host answers SSH from a boot other than
+/// `previous_boot_id`, so an answer from the old boot, just before it goes
+/// down, cannot pass for the new one. Call from supervised blocking work.
+pub fn wait_for_ec2_reboot(
+    executor: &impl CommandExecutor,
+    ssh: &SshTarget,
+    previous_boot_id: &str,
+) -> Result<()> {
+    wait_for_ssh_ready(
+        executor,
+        &crate::targets::ssh_command(
+            ssh,
+            [
+                "sh",
+                "-c",
+                "test \"$(cat /proc/sys/kernel/random/boot_id)\" != \"$1\"",
+                "sh",
+                previous_boot_id,
+            ],
+        )
+        .purpose("wait for the EC2 host to come back from its reboot")
+        .stage(ProvisionStage::Booting),
+        AWS_SSH_READY_TIMEOUT,
+        Instant::now,
+        std::thread::sleep,
+    )
+}
+
 pub(super) fn locator_after_provision_named(
     canonical: &TargetTemplate,
     backend: &targets::TargetTemplate,
@@ -1114,6 +1231,11 @@ pub(super) fn locator_after_provision_named(
             host: ssh.host.clone(),
             container_id: generated,
         },
+        TargetTemplate::SshNitro { ssh, .. } => TargetLocator::SshNitro {
+            borrowed_from: None,
+            host: ssh.host.clone(),
+            container_id: generated,
+        },
         TargetTemplate::AwsEc2 { .. } => bail!(mj_core::config::LEGACY_EC2_TARGET_NOTICE),
     })
 }
@@ -1131,7 +1253,7 @@ pub(crate) fn backend_locator(
         locator,
         &session.id,
         &session.target_template_id,
-        session.target_runtime.as_ref(),
+        session.target_runtime.as_deref(),
         config,
     )
 }

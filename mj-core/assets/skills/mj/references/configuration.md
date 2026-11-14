@@ -76,15 +76,14 @@ also accepted when reading and is saved under `[github.watch] enabled`.
 | --- | --- | --- | --- | --- |
 | `version` | integer | yes | none | Configuration schema version; use `22`. |
 | `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
-| `show_stopped_sessions` | boolean | no | ignored | Retired. It is accepted when reading configuration files but has no effect and is omitted on the next save. Suspended sessions are listed only in the resume dialog. |
+| `show_stopped_sessions` | boolean | no | ignored | Retired. It is accepted when reading configuration files but has no effect and is omitted on the next save. Suspended sessions are listed in the resume dialog. A stopped session whose failure needs you also stays in Sessions until dismissed, resumed, or destroyed. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
 | `theme` | string enum | no | `"midnight"` | Terminal color palette: `auto`, `midnight`, `light`, `darcula`, `high-contrast`, `high-contrast-light`, `colorblind-dark`, `colorblind-light`, `catppuccin-mocha`, `catppuccin-latte`, `campbell`, `one-half-dark`, `one-half-light`, `solarized-dark`, `solarized-light`, `terminal-dark`, `terminal-light`, or `mono` (no colors). `auto` asks the terminal for its background color at startup and uses `midnight` on a dark background and `light` on a light one, or `midnight` when the terminal does not answer. The colorblind palettes keep failures distinct from success and warnings with red-green or blue-yellow color blindness. The Campbell, One Half, and Solarized palettes match the Windows Terminal schemes of the same name; `terminal-dark` and `terminal-light` use the terminal's own background and 16 ANSI colors, with a neutral gray for secondary text. A non-empty `NO_COLOR` environment variable selects `mono` regardless of this setting. |
-| `phone` | table | no | default `[phone]` values | Browser and desktop viewer settings. |
+| `phone` | table | no | default `[phone]` values | Browser viewer settings. |
 | `advanced` | table | no | default `[advanced]` values | Optional terminal display settings. |
 | `notify` | table | no | default `[notify]` values | How the terminal dashboard reports sessions that need you. |
 | `review` | table | no | default `[review]` values | Reviewer settings for push review. |
-| `continuation` | table | no | enabled | Automatic continuation of already-requested unfinished work; also requires Jev. |
-| `jev` | table | no | enabled | Hosted turn classification, continuation checks, and semantic help search. |
+| `jev` | table | no | enabled | Hosted turn classification and the quota recovery that depends on it. |
 | `daemon` | table | no | runs on the host | Where the daemon runs: on this computer or in a Podman or Docker container. |
 | `sessionwiki` | table | no | default `[sessionwiki]` values | Full-text session index and automatic archiving. |
 | `keys` | table | no | default `[keys]` values | The prefix key and every command's key bindings. |
@@ -195,8 +194,8 @@ The default bindings:
 | `palette` | `prefix+:` | Open the command palette |
 | `cancel_operation` | `prefix+shift+c` | Cancel an in-flight launch, resume, or stop |
 | `mark_all_read` | `prefix+a` | Mark unread session activity as read |
-| `next_attention` | `prefix+o` | Open the next session that needs you |
-| `previous_attention` | `prefix+shift+o` | Open the previous session that needs you |
+| `next_attention` | `prefix+o` | Visit the next session that needs you |
+| `previous_attention` | `prefix+shift+o` | Visit the previous session that needs you |
 | `web_viewer` | `prefix+u` | Show the web viewer address and access code |
 | `rename_session` | `prefix+shift+t` | Rename the selected session |
 | `toggle_transcript_rendering` | `prefix+t` | Toggle rendered/raw transcript |
@@ -298,8 +297,8 @@ The terminal Settings screen edits these settings under **Notifications**.
 
 ## Web viewer `[phone]`
 
-The historical section name remains `phone`, although it controls both the web
-viewer and the native desktop shell.
+The historical section name remains `phone`, although it controls the web
+viewer.
 
 ```toml
 [phone]
@@ -331,7 +330,7 @@ the conflict is resolved.
 A non-loopback `bind` is rejected unless both explicit TLS paths are present.
 When Tailscale detection succeeds, Mjolnir may advertise a secure non-loopback
 listener without changing the configured loopback fallback. Explicit TLS takes
-precedence. See [Web viewer and desktop app](/web-viewer/) for access and login.
+precedence. See [Web viewer](/web-viewer/) for access and login.
 
 ## Automatic review `[review]`
 
@@ -350,7 +349,7 @@ effort = "medium"
 | --- | --- | --- | --- | --- |
 | `reviewers` | array of tables | no | empty | Up to three choices, each with a nonempty `model` and optional `effort`. Each choice is served by an enabled profile offering that model and effort. |
 
-An empty reviewer list means no reviewers are configured. Press **Autoconfigure** in Settings → Code Review to choose reviewers from enabled profiles' advertised models. The first available combination wins: Terra at high effort plus Sol at medium effort; two Sonnet reviewers at high effort; two DeepSeek Pro reviewers at high effort; two Grok reviewers at high effort; or two Kimi reviewers at high effort. Other providers, including Gemini, GLM, and Muse, use two copies of their best advertised full model at high effort. When Terra and Sol are available, Anthropic models are not added. Within a family, full models are preferred over reduced variants such as Flash or Mini, then subscription offerings win over usage-priced offerings, then models offered by more enabled profiles, then the newest advertised version. If no match exists, choose reviewers in **Settings → Code Review**. Reviewers run as hidden child sessions with independent conversations. See [Code review](/turn-review/).
+An empty reviewer list means no reviewers are configured. Press **Autoconfigure** in Settings → Code Review to choose reviewers from enabled profiles' advertised models. The first available combination wins: three Terra reviewers at high effort; two Sonnet reviewers at high effort; two DeepSeek Pro reviewers at high effort; two Grok reviewers at high effort; or two Kimi reviewers at high effort. Other providers, including Gemini, GLM, and Muse, use two copies of their best advertised full model at high effort. When Terra is available, Anthropic models are not added. Within a family, full models are preferred over reduced variants such as Flash or Mini, then subscription offerings win over usage-priced offerings, then models offered by more enabled profiles, then the newest advertised version. If no match exists, choose reviewers in **Settings → Code Review**. Reviewers run as hidden child sessions with independent conversations. See [Code review](/turn-review/).
 
 Push review is available for Claude Code, Codex, and DSH primaries, the harnesses that receive Mjolnir delegation tools. They receive `request_review` and a pre-push gate; other harnesses run without review and receive a transcript notice.
 
@@ -411,11 +410,11 @@ enabled = false
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
-| `enabled` | boolean | no | `true` | `false` stops every request to the hosted Jev service: turn classification, automatic continuation, and semantic help search. |
+| `enabled` | boolean | no | `true` | `false` stops every request to the hosted Jev service: turn classification and quota recovery. |
 
-Jev reads recent conversation text to answer three questions: whether a
-silent turn is waiting for you, whether a finished reply left work undone,
-and which help rows match what you typed. [Security
+GLiDE (Fastino), through the hosted proxy, classifies current requests. The
+completed-turn verdict uses recent conversation and activity evidence; other
+classifiers receive their task-specific evidence. [Security
 boundaries](/security/#what-leaves-this-machine-by-default) lists exactly what
 each request sends and where.
 
@@ -425,8 +424,8 @@ With `enabled = false`:
   turn that goes quiet while the agent waits for an answer stays **Working**
   until the harness reports the end of the turn, and after a reply the
   session's state follows the harness's own background-task reports.
-- Automatic continuation does not run, whatever `[continuation]` says.
-- The help filter matches text only and shows no related shortcuts.
+- Quota recovery does not run: a session stopped by a quota limit is not
+  resumed after the reset.
 
 Workers read the switch when they start, so a running session follows the
 new value after it is next resumed or restarted. In the terminal the switch
@@ -434,8 +433,28 @@ is **Settings → Privacy → Jev (hosted service)**.
 
 ## GitHub events `[github.watch]`
 
+`local_inference` defaults to `false`: every GitHub relevance classification
+goes to the hosted GLiDE classifier through the public proxy, and no local
+model or native runtime is downloaded or loaded. Set `local_inference = true`
+to opt in to local scoring with GLiDE handling the middle band and unavailable
+local scoring. Changes apply on the next watcher poll; disabling local inference
+also stops model preparation and retries and releases the loaded model.
+
+`use_gpu` defaults to `true` and applies only when local inference is enabled.
+The local relevance model selects DirectML on Windows, CoreML on Apple-silicon
+macOS, and CUDA on Linux x64 when its libraries are installed. Other supported
+hosts use CPU. Linux CUDA requires the NVIDIA driver, CUDA 12 and cuDNN 9 libraries
+installed by the administrator; the daemon reports missing libraries and uses CPU.
+The model and runtime are fetched lazily on the first classification request.
+Its native-runtime choice is fixed at the first preparation, so installing libraries
+or enabling GPU scoring on Linux/Windows after CPU preparation requires the next
+daemon start. A GPU must beat the CPU
+on measured real-pair latency; otherwise the preparation owner retains CPU and
+reports why. Set `use_gpu = false` for CPU-only scoring. Device failures also
+select CPU with a visible notice.
+
 `enabled` is a boolean that defaults to `true`. Together with `[jev] enabled`,
-it controls the GitHub watcher as an event source. Jev classifies GitHub
+it controls the GitHub watcher as an event source. The hosted GLiDE service classifies GitHub
 activity. Neither setting disables mailbox delivery, peer messages, child
 reports, drain hooks or idle wakes. The old `[mailbox] enabled` key still loads
 silently. If either key is `false`, the watcher stays off. Saving writes only
@@ -450,8 +469,8 @@ old. Saved progress preserves unfinished ranges across pauses and failed
 requests. An item can still be missed if page movement affects both reads.
 The watcher also overlaps processing times by 30 seconds to allow for response
 timing and clock differences. Repeated event IDs deliver only once.
-Jev classifies new items only for sessions that were already running when the
-item was created. When Jev identifies a session as the creator, that session
+GLiDE classifies new items only for sessions that were already running when the
+item was created. When GLiDE identifies a session as the creator, that session
 receives new comments, reviews and pull request lifecycle events from the item's
 timeline. Pull request line comments are read separately and saved with the
 timeline events. Each source keeps its own cursor, and both are saved in one
@@ -459,23 +478,6 @@ item transaction. A failed item does not block delivery for other items. Failed
 classifications retry with a delay that grows from one minute to one hour; new
 work is classified before retries. Notices always include the repository name. Comments and reviews
 written by the token owner during that session's turn do not wake it.
-
-## Automatic continuation `[continuation]`
-
-```toml
-[continuation]
-enabled = false
-```
-
-| Field | TOML type | Required | Default | Validation and behavior |
-| --- | --- | --- | --- | --- |
-| `enabled` | boolean | no | `true` | Allows Jev to check ended turns and continue work already requested by the user. Requires `[jev] enabled = true`. |
-
-There are at most three automatic continuations between user messages. New
-input or an interrupt cancels a pending check; continuation never supplies
-missing approval or answers a question. See [Automatic
-continuation](/sessions/#automatic-continuation) for background work, goals,
-quota recovery, and the text sent to the classifier.
 
 ## Session index `[sessionwiki]`
 
@@ -573,8 +575,8 @@ optional effort must be offered by an enabled profile. Each effort flag requires
 its matching model flag; `adaptive` and combining an override with `native` or
 `none` are rejected. Omitted effort uses the harness default. The retired
 `--subagent-model` and `--subagent-effort` flags fail with guidance to use the
-four per-type flags. `none` (CLI only) gives a Claude, Codex, DSH, or OpenCode session no
-delegation tools.
+four per-type flags. `none` (CLI only) gives a session no
+delegation tools, whatever its harness.
 
 `mj new` and `mj move` take `--oracle enabled|disabled` and `--subagent-oracle M`
 (with optional `--subagent-oracle-effort E`, which requires the model and rejects
@@ -600,8 +602,9 @@ before a 5-hour reset is plenty, while 5% left six days before a weekly reset
 is not. The window furthest behind decides. A limit for one model, such as a
 weekly Fable limit, counts only for that model. A pay-per-use profile counts as
 exactly on pace, so a subscription with quota to spare comes first. A profile
-with no quota left, then one with no quota report, comes last. On a tie, the
-parent's own profile wins. `mj doctor` shows, for each profile, where its quota
+with no quota left, then one with no quota report, comes last. Profiles named
+in `[quota] prefer` lead, most preferred first, while their quota tier allows.
+On a tie, the parent's own profile wins. `mj doctor` shows, for each profile, where its quota
 comes from and that sub-agents may use it.
 
 A sub-agent ends its task by handing its report back to the session that
@@ -1007,7 +1010,7 @@ when it is `local`.
 
 | Field | TOML type | Required | Default | Accepted values |
 | --- | --- | --- | --- | --- |
-| `kind` | string enum | yes | none | `bare`, `podman`, `docker`, or `apple-container`. |
+| `kind` | string enum | yes | none | `bare`, `podman`, `docker`, `apple-container`, or `nitro`. |
 | `machine` | string | no | `"local"` | The id of a `[machines.<id>]` entry, or `local`. |
 | `enabled` | boolean | no | `true` | `false` keeps the runtime configured but out of every picker; launch, resume and move refuse it, and running sessions continue. Written only when `false`. Detection never adds a kind its machine already has configured, enabled or not. |
 
@@ -1058,7 +1061,7 @@ work when Git is older.
 
 ### Common container fields
 
-`podman`, `docker`, and `apple-container` accept the same container fields.
+`podman`, `docker`, `apple-container`, and `nitro` accept the same container fields.
 
 | Field | TOML type | Required | Default | Validation and behavior |
 | --- | --- | --- | --- | --- |
@@ -1172,6 +1175,28 @@ All common fields except a non-default `workspace_storage` are supported. With
 runs on that remote Apple-silicon Mac, which must run macOS 26 or newer. See
 [Apple container](/apple-container/).
 
+### `nitro`
+
+```toml
+[machines.ec2]
+kind = "ssh"
+host = "ec2-host.example.com"
+
+[targets.nitro]
+kind = "nitro"
+machine = "ec2"
+cpus = "4"
+memory = "8g"
+```
+
+A session runs in its own Firecracker microVM (an AWS Nitro Sandbox) on an EC2
+host reached over SSH; `machine` must name an `ssh` machine, and
+`mj ec2 create --runtime nitro` writes both tables. All common fields except a
+non-default `workspace_storage` are supported, but a sandbox cannot attach host
+directories or share the host's mbx build cache: a session that asks for them
+starts without and says so. RAM is a hard limit, taken from the memory pool the
+host reserved at boot.
+
 ### Files written before version 12
 
 Before version 12 one `[targets.<id>]` table fused the machine and the runtime,
@@ -1244,8 +1269,6 @@ them in the environment that starts the daemon, then run `mj daemon restart`.
 | `MJ_WORKER_DIR` | Directory containing architecture-named portable Linux workers. |
 | `MJ_WORKER_URL` | Fallback worker URL template; `{target}` expands to the target triple. Requires `MJ_WORKER_SHA256`. |
 | `MJ_WORKER_SHA256` | Required 64-character hexadecimal digest for `MJ_WORKER_URL`. |
-| `MJ_DESKTOP_BINARY` | Path to `mj-desktop` used by `mj app`. |
-| `MJ_CONTROLLER_BINARY` | Path to `mj` when `mj-desktop` cannot find its sibling controller. |
 | `MJ_VOICE_WORKER` | Path to the local dictation helper. |
 | `MJ_INSTANCE` | Instance name; same effect as `--instance`. |
 | `MJ_SSH_CONTROL_MASTER` | Set to `0` to disable SSH connection sharing (ControlMaster) for diagnosis. Mjolnir learns how many sessions each shared connection carries from the server's refusal and has no setting for it; see the [SSH guide](/ssh/#sharing-connections-per-host). |

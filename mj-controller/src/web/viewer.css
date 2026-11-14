@@ -295,6 +295,13 @@ button:disabled {
   line-height: 1;
 }
 
+.session-attention-item.queue {
+  width: auto;
+  min-width: 1.25em;
+  padding: 0 0.35em;
+  border-radius: 999px;
+}
+
 .session-attention-item.alert {
   border-color: var(--failed);
   color: var(--failed);
@@ -339,6 +346,14 @@ button:disabled {
 .session-menu button {
   width: 100%;
   text-align: left;
+}
+
+/* The menu's top line reads the session's model, effort, and profile. */
+.session-menu-info {
+  padding: 2px 12px 4px;
+  color: var(--dim);
+  font-size: 13px;
+  overflow-wrap: anywhere;
 }
 
 .session-meta {
@@ -1016,13 +1031,26 @@ details.mailbox-event[open] > summary::before {
 /* ---- workspace picker ---- */
 
 .workspace-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 4px 0 10px;
   border-bottom: 1px solid var(--border);
 }
 
 /* The select shortens a long workspace name itself; it never widens the page. */
 #workspace-select {
+  min-width: 0;
   max-width: 100%;
+}
+
+.notifications-badge {
+  flex: 0 0 auto;
+  min-width: var(--touch);
+  min-height: var(--touch);
+  padding: 0 8px;
+  color: var(--accent);
+  font-weight: 700;
 }
 
 /* ---- pages ---- */
@@ -1035,16 +1063,17 @@ details.mailbox-event[open] > summary::before {
   margin: 12px 0;
 }
 
-.recent-projects {
-  display: grid;
-  gap: 6px;
-  margin-bottom: 16px;
+/* Above the session list so a failed card action is seen where it ran. */
+#action-error:empty {
+  display: none;
 }
 
-.recent-project {
-  text-align: left;
-  overflow-wrap: anywhere;
-  white-space: normal;
+/* The Notifications heading holds its Clear all at the right edge. */
+.notifications-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
 }
 
 .project {
@@ -2461,3 +2490,7 @@ body[data-connection='reconnecting'] .connection {
   margin: 0;
   flex: 1 1 12rem;
 }
+
+#notification-offer:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; padding: .5rem; margin-bottom: .75rem; border: 1px solid var(--border); border-radius: .4rem; }
+#notification-offer-text { flex: 1 1 15rem; }
+#notification-offer-error { flex-basis: 100%; }

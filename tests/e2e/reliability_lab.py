@@ -346,7 +346,10 @@ class PtyClient:
 
 
 class Lab:
+    """One isolated mj instance driven through a reliability scenario."""
+
     def __init__(self, hel: pathlib.Path, scenario: str, seed: int, *, watchdog: bool = True):
+        """Prepare a lab for one scenario, seed and `hel` binary."""
         self.hel = hel.resolve()
         self.scenario = scenario
         self.seed = seed
@@ -1074,13 +1077,19 @@ pull_policy = "never"
             # Sockets cannot be copied, and the worker executables staged under
             # the data directory are copies of a binary this run did not build
             # and dwarf everything else: a soak that kept one per iteration ran
-            # the runner out of disk.
+            # the runner out of disk. The managed Node.js install (about 200 MB
+            # an iteration) is a download of the same kind.
+            managed_cache = self.runtime_root / "cache" / "mjolnir"
+
             def ignore_uncopied(directory: str, names: list[str]) -> list[str]:
                 staged = pathlib.Path(directory).is_relative_to(workers)
+                in_managed_cache = pathlib.Path(directory) == managed_cache
                 return [
                     name
                     for name in names
-                    if pathlib.Path(directory, name).is_socket() or (staged and name == "hel")
+                    if pathlib.Path(directory, name).is_socket()
+                    or (staged and name == "hel")
+                    or (in_managed_cache and name == "node")
                 ]
 
             # A worker that is still shutting down removes its own directory,
@@ -1163,6 +1172,7 @@ pull_policy = "never"
                     os.kill(pid, signal.SIGKILL)
 
     def run(self) -> None:
+        """Run the scenario against a freshly prepared isolated instance."""
         port = self.prepare()
         first = self.start_tui("tui-1")
         first.wait_for("Sessions")
@@ -1252,6 +1262,12 @@ pull_policy = "never"
         # review needs no reviewer and closes again on its own. The answer can
         # wait up to two minutes behind the recovery copy the finished turn
         # started, as `mj review start` allows for.
+        # The reply can render before the turn's teardown marks the session
+        # idle; a review start in that window is refused with 409.
+        self.wait_snapshot(
+            lambda value: (self.session(value, session_id) or {}).get("chat_phase") == "idle",
+            "session idle for a review",
+        )
         #
         # The fixture clone sits at the default branch with no reviewed commit
         # and no recorded start, so nothing tells the session's work from
@@ -1383,9 +1399,15 @@ pull_policy = "never"
         )
         if status != 202:
             raise ScenarioFailure(f"active close action returned {status}")
+        # The Stop commits the record as stopped before its lifecycle
+        # completes, and the daemon publishes committed records at once, so
+        # a row can read "suspended" while the Stop still owns the session
+        # and Resume is refused. The lifecycle owns "the Stop finished".
         stopped = self.wait_snapshot(
-            lambda value: (self.session(value, session_id) or {}).get("state") == "suspended",
-            "active session to stop without the barrier grace period",
+            lambda value: (session := self.session(value, session_id) or {}).get("state")
+            == "suspended"
+            and not session.get("operation"),
+            "active Stop to finish without the barrier grace period",
         )
         elapsed = time.monotonic() - started
         if elapsed >= 15:
@@ -1394,7 +1416,10 @@ pull_policy = "never"
             )
         stopped_session = self.session(stopped, session_id) or {}
         if not stopped_session.get("capabilities", {}).get("resume"):
-            raise ScenarioFailure("active Stop did not leave a resumable recovery archive")
+            raise ScenarioFailure(
+                "active Stop did not leave a resumable recovery archive: "
+                f"{json.dumps(stopped_session)[:4000]}"
+            )
         self.record_action("active-stop", session_id=session_id, elapsed_seconds=elapsed)
 
         marker = "active turn cancellation settled before checkpoint barrier"

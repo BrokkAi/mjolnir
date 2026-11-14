@@ -15,6 +15,7 @@ pub(super) const fn tool_name(kind: HarnessKind) -> &'static str {
         HarnessKind::Muse => "muse",
         HarnessKind::OpenCode => "opencode",
         HarnessKind::Dsh => "dsh",
+        HarnessKind::Antigravity => "antigravity",
     }
 }
 

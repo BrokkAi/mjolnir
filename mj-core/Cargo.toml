@@ -12,13 +12,13 @@ include = [
     "build.rs",
     "src/**/*.rs",
     "tests/fixtures/*.sh",
-    "tests/jev-gates.json",
+    "tests/fixtures/claude-antigravity-models.json",
     # Turn-classifier questions shared with the hosted proxy.
-    "src/activity/verdict_questions.json",
     "src/activity/question_locator.json",
-    "src/help_search/question.json",
-    "src/continuation/questions.json",
+    "src/activity/eot_glide_questions.json",
+    "src/activity/eot_glide_fresh_sample.json",
     "src/github_item/questions_v2.json",
+    "src/github_item/ettin-tokenizer.json",
     # Recorded ACP bridge traffic the step-clock tests replay.
     "src/**/testdata/**/*.jsonl",
     # Mjolnir-authored skills embedded with `include_str!`.
@@ -30,6 +30,7 @@ include = [
     "assets/opencode-provider-environment.txt",
     # Pinned managed harness packages and verified runtime manifests.
     "assets/harnesses/**",
+    "assets/antigravity/runtime.json",
     "assets/grok/runtime.json",
     "assets/kimi/runtime.json",
     "assets/muse/runtime.json",
@@ -45,6 +46,7 @@ include = [
 name = "mj_core"
 
 [features]
+github-history = ["dep:tokenizers"]
 default = []
 golden = []
 test-hooks = []
@@ -53,22 +55,21 @@ test-hooks = []
 workspace = true
 
 [dependencies]
+zstd = { version = "0.13", default-features = false }
 agent-client-protocol.workspace = true
 anyhow.workspace = true
 base64.workspace = true
-bytes.workspace = true
 bytesize = "2"
 chrono.workspace = true
 dirs.workspace = true
 flate2.workspace = true
 getrandom.workspace = true
-h2.workspace = true
-http.workspace = true
 imbl.workspace = true
 jsonc-parser = { version = "0.34", features = ["serde"] }
 libc.workspace = true
 memchr.workspace = true
 regex = "1"
+tokenizers = { version = "0.22", optional = true, default-features = false, features = ["fancy-regex"] }
 reqwest.workspace = true
 ruzstd.workspace = true
 rustls.workspace = true
@@ -79,7 +80,7 @@ similar = "2.7"
 tar.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["full"] }
-tokio-util.workspace = true
+tokio-util = { workspace = true }
 toml.workspace = true
 toml_edit.workspace = true
 tracing.workspace = true
@@ -92,7 +93,10 @@ yaml-rust2 = { version = "0.13", default-features = false }
 windows-sys = { workspace = true, features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
+    "Win32_System_Environment",
     "Win32_System_Threading",
+    "Win32_System_JobObjects",
+    "Win32_Security",
 ] }
 
 [build-dependencies]

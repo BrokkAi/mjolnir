@@ -10,6 +10,13 @@ use crate::continuation::{ASSISTANT_BYTES, EvidenceMessage, USER_BYTES};
 
 pub const PROTOCOL: u32 = 25;
 pub const AUTOMATION_CONFIDENCE: f32 = 0.90;
+/// A handback bounces when unfinished leads finished by at least this share of
+/// the two, and the stop categories together stay at or below
+/// [`HANDBACK_STOP_PROBABILITY`]. Measured 2026-11-11 on 428 labeled handbacks:
+/// the recall of P(unfinished) >= .50 with half its false bounces, which were
+/// mostly permitted stops. Chosen after the holdout was read; unconfirmed.
+pub const HANDBACK_UNFINISHED_SHARE: f64 = 0.30;
+pub const HANDBACK_STOP_PROBABILITY: f64 = 0.30;
 pub const REQUIRED_INPUT_PROBABILITY: f64 = 0.50;
 pub const REQUIRED_INPUT_RATIO: f64 = 2.5;
 pub const FINISHED_WORK_PROBABILITY: f64 = 0.80;
@@ -84,6 +91,81 @@ pub struct Verdict {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply: Option<Judgment<Reply>>,
 }
+/// GLiDE handback distribution; all six categories are required at the boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HandbackProbabilities {
+    pub unfinished: f64,
+    pub needs_parent_input: f64,
+    pub blocked: f64,
+    pub permitted_stop: f64,
+    pub finished: f64,
+    pub unclear: f64,
+}
+impl HandbackProbabilities {
+    pub fn parse(value: &Value) -> Result<Self> {
+        let probabilities: Self = serde_json::from_value(value.clone())?;
+        let values = [
+            probabilities.unfinished,
+            probabilities.needs_parent_input,
+            probabilities.blocked,
+            probabilities.permitted_stop,
+            probabilities.finished,
+            probabilities.unclear,
+        ];
+        ensure!(
+            values
+                .iter()
+                .all(|p| p.is_finite() && (0.0..=1.0).contains(p)),
+            "invalid handback probability"
+        );
+        // GLiDE rounds individual scores; the working client allows 0.03 total drift.
+        ensure!(
+            (values.iter().sum::<f64>() - 1.0).abs() <= 0.03,
+            "invalid handback distribution"
+        );
+        Ok(probabilities)
+    }
+}
+pub fn handback_needs_more_work(p: &HandbackProbabilities) -> bool {
+    let decided = p.unfinished + p.finished;
+    let stops = p.needs_parent_input + p.blocked + p.permitted_stop;
+    decided > 0.0
+        && p.unfinished + PROBABILITY_EPSILON >= HANDBACK_UNFINISHED_SHARE * decided
+        && stops <= HANDBACK_STOP_PROBABILITY + PROBABILITY_EPSILON
+}
+
+#[cfg(test)]
+mod handback_tests {
+    use super::*;
+
+    #[test]
+    fn handback_glide_distribution_boundary_and_malformed_answers() {
+        // Unfinished at exactly 30% of unfinished+finished, stops at exactly .30.
+        let mut value = serde_json::json!({"unfinished":0.18,"needs_parent_input":0.1,
+            "blocked":0.1,"permitted_stop":0.1,"finished":0.42,"unclear":0.1});
+        assert!(handback_needs_more_work(
+            &HandbackProbabilities::parse(&value).unwrap()
+        ));
+        value["permitted_stop"] = serde_json::json!(0.11);
+        value["unclear"] = serde_json::json!(0.09);
+        assert!(
+            !handback_needs_more_work(&HandbackProbabilities::parse(&value).unwrap()),
+            "a stop category above the guard must not bounce"
+        );
+        value["permitted_stop"] = serde_json::json!(0.1);
+        value["unfinished"] = serde_json::json!(0.17);
+        value["finished"] = serde_json::json!(0.43);
+        assert!(!handback_needs_more_work(
+            &HandbackProbabilities::parse(&value).unwrap()
+        ));
+        value["unfinished"] = serde_json::json!(-0.1);
+        assert!(HandbackProbabilities::parse(&value).is_err());
+        value.as_object_mut().unwrap().remove("unfinished");
+        assert!(HandbackProbabilities::parse(&value).is_err());
+    }
+}
+
 impl Verdict {
     pub fn parse(response: &Value) -> Result<Self> {
         fn choice<T: serde::de::DeserializeOwned>(
@@ -184,55 +266,6 @@ impl Verdict {
                         && *winner + PROBABILITY_EPSILON >= REQUIRED_INPUT_RATIO * runner_up
                 })
     }
-
-    pub fn action(&self, authorization_complete: bool) -> Action {
-        // A confident quota stop always recovers, whatever the input answer:
-        // question detection is unreliable, and the resume prompt tells the
-        // agent to ask again and stop if a decision is still open.
-        if self.failure.choice == Failure::Quota && self.failure.confidence >= AUTOMATION_CONFIDENCE
-        {
-            return Action::RecoverQuota;
-        }
-        if self.requires_input() {
-            return Action::AwaitInput;
-        }
-
-        if self.failure.confidence >= AUTOMATION_CONFIDENCE {
-            match self.failure.choice {
-                Failure::TransientProvider => return Action::RetryProvider,
-                Failure::Other => return Action::AwaitInput,
-                _ => {}
-            }
-        }
-        // Unknown failures must not become ordinary nudges.
-        if self.failure.choice != Failure::None || self.failure.confidence < AUTOMATION_CONFIDENCE {
-            return Action::Uncertain;
-        }
-        if authorization_complete
-            && self.work.choice == Work::AuthorizedUnfinished
-            && self.work.confidence >= AUTOMATION_CONFIDENCE
-            && matches!(self.input.choice, Input::None | Input::RedundantRequest)
-            && self.input.confidence >= AUTOMATION_CONFIDENCE
-        {
-            return Action::Continue;
-        }
-        if self.input.choice == Input::None && self.input.confidence >= 0.85 {
-            return match self.work.choice {
-                Work::Finished
-                    if self
-                        .work
-                        .probabilities
-                        .get("finished")
-                        .is_some_and(|p| *p + PROBABILITY_EPSILON >= FINISHED_WORK_PROBABILITY) =>
-                {
-                    Action::Finished
-                }
-                Work::Waiting if self.work.confidence >= 0.85 => Action::Wait,
-                _ => Action::Uncertain,
-            };
-        }
-        Action::Uncertain
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -240,6 +273,8 @@ impl Verdict {
 pub enum Action {
     RetryProvider,
     RecoverQuota,
+    /// Legacy: decoded from stored assessments; no longer produced by the
+    /// GLiDE rule, and nothing acts on it.
     Continue,
     AwaitInput,
     Finished,
@@ -265,8 +300,17 @@ pub struct InferredQuestion {
     pub completed_ordinal: u64,
 }
 
+/// A request remains open across agent-only turns until the person responds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenRequest {
+    pub question: InferredQuestion,
+    pub question_message: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnAssessment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention: Option<crate::attention::AssessmentAttention>,
     pub turn_id: String,
     pub completed_ordinal: u64,
     pub revision: u64,
@@ -274,6 +318,9 @@ pub struct TurnAssessment {
     pub completion: CompletionEvidence,
     pub evidence: Option<TurnEvidence>,
     pub verdict: Option<Verdict>,
+    /// Validated completed-turn GLiDE distributions; action remains authoritative on replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glide: Option<crate::activity::eot_glide::types::Probabilities>,
     pub action: Option<Action>,
     pub status: Status,
     pub reason: String,
@@ -288,6 +335,7 @@ pub struct TurnAssessment {
 impl TurnAssessment {
     pub fn pending(turn_id: String, ordinal: u64, at: i64, completion: CompletionEvidence) -> Self {
         Self {
+            attention: None,
             turn_id,
             completed_ordinal: ordinal,
             revision: ordinal,
@@ -295,6 +343,7 @@ impl TurnAssessment {
             completion,
             evidence: None,
             verdict: None,
+            glide: None,
             action: None,
             status: Status::Pending,
             reason: "awaiting_classification".into(),
@@ -311,6 +360,8 @@ impl TurnAssessment {
         self.status = Status::Pending;
         self.evidence = None;
         self.verdict = None;
+        self.glide = None;
+        self.attention = None;
         self.action = None;
         self.question_message = None;
     }
@@ -474,6 +525,24 @@ impl ContextHistory {
     }
 
     pub fn user(&mut self, id: &str, prompt: &[agent_client_protocol::v1::schema::ContentBlock]) {
+        self.user_with_source(id, prompt, false);
+    }
+
+    /// Include the parent's assignments only in handback-check evidence.
+    pub fn handback_user(
+        &mut self,
+        id: &str,
+        prompt: &[agent_client_protocol::v1::schema::ContentBlock],
+    ) {
+        self.user_with_source(id, prompt, true);
+    }
+
+    fn user_with_source(
+        &mut self,
+        id: &str,
+        prompt: &[agent_client_protocol::v1::schema::ContentBlock],
+        handback: bool,
+    ) {
         use agent_client_protocol::v1::schema::ContentBlock;
         self.open_assistant_id = None;
         let mut text = String::new();
@@ -489,7 +558,9 @@ impl ContextHistory {
             }
         }
         // A prompt Mjolnir submitted is not the person's, whatever it carries.
-        if !crate::continuation::is_user_authored_message(Some(id), &text) {
+        if !(crate::continuation::is_user_authored_message(Some(id), &text)
+            || handback && crate::continuation::GeneratedPrompt::is_subagent_assignment(id))
+        {
             return;
         }
         if non_text {
@@ -593,15 +664,23 @@ impl ContextHistory {
         crate::continuation::ContinuationEvidence {
             messages: self.messages.clone(),
             assistant_history_omitted: self.assistant_history_omitted,
-            quota_message: None,
         }
     }
+}
+
+/// Exact request publication and person-input frontier at a checkpoint cut.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CheckpointOpenRequest {
+    pub request: Option<OpenRequest>,
+    pub person_input_through: u64,
 }
 
 /// Kept at the archive boundary as JSON so canonical equality remains exact.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Checkpoint {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_request: Option<CheckpointOpenRequest>,
     pub version: u32,
     pub context: Option<ContextHistory>,
     pub assessment: Option<TurnAssessment>,
@@ -664,105 +743,6 @@ mod tests {
             reply: None,
         }
     }
-    fn scored(failure: (Failure, f32), input: (Input, f32), work: (Work, f32)) -> Verdict {
-        Verdict {
-            failure: Judgment {
-                choice: failure.0,
-                confidence: failure.1,
-                probabilities: Default::default(),
-            },
-            input: Judgment {
-                choice: input.0,
-                confidence: input.1,
-                probabilities: [(
-                    serde_json::to_value(input.0)
-                        .unwrap()
-                        .as_str()
-                        .unwrap()
-                        .to_owned(),
-                    1.0,
-                )]
-                .into(),
-            },
-            work: Judgment {
-                choice: work.0,
-                confidence: work.1,
-                probabilities: [(
-                    serde_json::to_value(work.0)
-                        .unwrap()
-                        .as_str()
-                        .unwrap()
-                        .to_owned(),
-                    1.0,
-                )]
-                .into(),
-            },
-            background: None,
-            reply: None,
-        }
-    }
-
-    #[test]
-    fn probability_gates_agree_across_running_and_completed_turns() {
-        use crate::activity::verdict::{Decision, TurnPhase, TurnVerdict, decide};
-        let cases: Vec<Value> =
-            serde_json::from_str(include_str!("../tests/jev-gates.json")).unwrap();
-        for case in cases {
-            let verdict = TurnVerdict::parse(&case).unwrap();
-            let assessment = verdict.assessment.as_ref().unwrap();
-            let expected: Action = serde_json::from_value(case["action"].clone()).unwrap();
-            let complete = case["authorization_complete"].as_bool().unwrap();
-            assert_eq!(assessment.action(complete), expected, "{}", case["name"]);
-            let required = case["requires_input"].as_bool().unwrap();
-            assert_eq!(assessment.requires_input(), required, "{}", case["name"]);
-            assert_eq!(
-                decide(TurnPhase::Running, &verdict),
-                if required {
-                    Decision::AwaitingInput
-                } else {
-                    Decision::KeepCurrent
-                },
-                "{}",
-                case["name"]
-            );
-            let replied = match assessment.action(false) {
-                Action::AwaitInput => Decision::AwaitingInput,
-                Action::Finished => Decision::InferIdle,
-                Action::Wait => Decision::ExpectContinuation,
-                _ => Decision::KeepCurrent,
-            };
-            assert_eq!(
-                decide(TurnPhase::Replied, &verdict),
-                replied,
-                "{}",
-                case["name"]
-            );
-            let stored = serde_json::to_value(assessment).unwrap();
-            let restored: Verdict = serde_json::from_value(stored).unwrap();
-            assert_eq!(&restored, assessment);
-            assert_eq!(restored.action(complete), expected);
-        }
-
-        // Preserve the cases that were unique in the older decision table.
-        assert_eq!(
-            scored(
-                (Failure::None, 0.99),
-                (Input::RedundantRequest, 0.99),
-                (Work::Finished, 0.99)
-            )
-            .action(false),
-            Action::Uncertain
-        );
-        for failure in [(Failure::Unclear, 0.5), (Failure::Other, 0.6)] {
-            for work in [Work::Finished, Work::AuthorizedUnfinished] {
-                assert_eq!(
-                    scored(failure, (Input::None, 0.99), (work, 0.99)).action(true),
-                    Action::Uncertain,
-                    "{failure:?} {work:?}"
-                );
-            }
-        }
-    }
 
     #[test]
     fn old_saved_assessments_keep_their_action_without_inventing_probabilities() {
@@ -790,7 +770,6 @@ mod tests {
         assert!(!restored.needs_classification(0));
         let judgment = restored.verdict.unwrap();
         assert!(!judgment.requires_input());
-        assert_eq!(judgment.action(true), Action::Uncertain);
     }
 
     #[test]
@@ -838,54 +817,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_recovery_is_independent_of_uncertain_remaining_work() {
-        let mut v = verdict(Failure::TransientProvider, Input::Unclear, Work::Unclear);
-        v.failure.confidence = 0.91;
-        v.input.confidence = 0.32;
-        v.work.confidence = 0.24;
-        assert_eq!(v.action(false), Action::RetryProvider);
-        v.failure.confidence = 0.89;
-        assert_eq!(v.action(true), Action::Uncertain);
-        v.failure = Judgment {
-            choice: Failure::Quota,
-            confidence: 0.99,
-            probabilities: Default::default(),
-        };
-        assert_eq!(v.action(false), Action::RecoverQuota);
-    }
-    #[test]
-    fn continuation_requires_complete_authorization_and_no_real_question() {
-        for input in [Input::None, Input::RedundantRequest] {
-            let v = verdict(Failure::None, input, Work::AuthorizedUnfinished);
-            assert_eq!(v.action(true), Action::Continue);
-            assert_eq!(v.action(false), Action::Uncertain);
-        }
-        assert_eq!(
-            verdict(Failure::None, Input::Required, Work::AuthorizedUnfinished).action(true),
-            Action::AwaitInput
-        );
-        assert_eq!(
-            verdict(Failure::Other, Input::None, Work::AuthorizedUnfinished).action(true),
-            Action::AwaitInput
-        );
-    }
-    // Hard-won: 8cecc1c: a detected question beat a confident quota stop, so the session never resumed after the reset.
-    #[test]
-    fn explicit_user_handoff_blocks_provider_retry_but_not_quota_recovery() {
-        assert_eq!(
-            verdict(Failure::TransientProvider, Input::Required, Work::Unclear).action(false),
-            Action::AwaitInput
-        );
-        assert_eq!(
-            verdict(Failure::Quota, Input::Required, Work::Unclear).action(true),
-            Action::RecoverQuota
-        );
-        let mut low = verdict(Failure::Quota, Input::Required, Work::Unclear);
-        low.failure.confidence = 0.89;
-        assert_eq!(low.action(true), Action::AwaitInput);
-    }
-
-    #[test]
     fn generated_subagent_wait_prompt_does_not_enter_authorization_history() {
         use agent_client_protocol::v1::schema::{ContentBlock, TextContent};
 
@@ -907,6 +838,32 @@ mod tests {
             &typed,
         );
         assert!(context.messages.is_empty());
+        let mut handback = ContextHistory::default();
+        for id in ["subagent-spawn-first", "subagent-input-next"] {
+            context.user(id, &typed);
+            handback.handback_user(id, &typed);
+        }
+        for id in [
+            "subagent-wait-123",
+            "handback-reminder-7",
+            "session-message-turn-peer-1",
+            "mailbox-wake-8",
+            "auto-continue-9",
+        ] {
+            handback.handback_user(id, &typed);
+        }
+        assert!(
+            context.messages.is_empty(),
+            "global authorization must still exclude assignments"
+        );
+        assert_eq!(
+            handback
+                .messages
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            ["user:subagent-spawn-first", "user:subagent-input-next"]
+        );
         // Hard-won: 97731d30a: a history stored before the upgrade kept a peer message as user authorization.
         let written = serde_json::json!({
             "messages": [

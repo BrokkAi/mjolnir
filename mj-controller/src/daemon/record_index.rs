@@ -175,9 +175,9 @@ mod tests {
     fn transitions_move_membership_and_deletion_removes_every_reference() {
         let mut before = State::default();
         let mut record = runtime_test_session("session", "first", SessionState::Running);
-        record.target = Some(mj_core::state::TargetLocator::LocalBare {
+        record.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: "/worker".into(),
-        });
+        }));
         before.sessions.insert(record.id.clone(), record);
         let mut indexes = RecordIndexes::bootstrap(&before);
         assert!(indexes.pollable.contains_key("session"));

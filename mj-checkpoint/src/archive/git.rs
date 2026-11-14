@@ -500,6 +500,12 @@ pub fn session_start_scope(runner: &dyn GitCommandRunner, repository: &Path) -> 
     Ok(format!("{WORKTREE_REVIEW_SCOPES}{name}/review-baseline"))
 }
 
+/// The selected push review base for a worktree, separate from obsolete
+/// per-turn tree baselines and from repository-wide reviewed-tree receipts.
+pub fn push_review_base_ref(scope: &str) -> String {
+    format!("refs/mj/push-base/{}", digest_bytes(scope.as_bytes()))
+}
+
 /// Move a legacy session-start ref without overwriting a concurrent
 /// initializer or deleting a legacy value that changed after it was read.
 pub fn migrate_review_ref(
@@ -1910,10 +1916,16 @@ fn relocated_review_refs(
         refs.insert(name.clone(), oid.clone());
     }
     let mut restored = refs.clone();
-    let (Some(session), Some(source)) = (session, metadata.review_baseline_ref.as_deref()) else {
+    let Some(source) = metadata.review_baseline_ref.as_deref() else {
         return Ok(restored);
     };
     let destination = session_start_scope(runner, repository)?;
+    if let Some(base) = refs.get(&push_review_base_ref(source)) {
+        restored.insert(push_review_base_ref(&destination), base.clone());
+    }
+    let Some(session) = session else {
+        return Ok(restored);
+    };
     let prefix = format!(
         "refs/mj/session-start/{}/",
         digest_bytes(session.as_bytes())

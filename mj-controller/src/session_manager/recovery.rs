@@ -175,7 +175,7 @@ pub(crate) fn recover_worker_controlled(
                 .context("read durable session before worker recovery")?;
             let eligible = session.as_ref().is_some_and(|session| {
                 crate::pollers::session_target_is_pollable(session)
-                    && session.target.as_ref() == Some(&plan.source_target)
+                    && session.target.as_deref() == Some(&plan.source_target)
             });
             if !eligible
                 || crate::controller::move_session::move_owns_session(id)

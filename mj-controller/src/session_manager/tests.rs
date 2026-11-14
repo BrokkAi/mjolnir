@@ -459,7 +459,7 @@ async fn missing_workspace_actor_parks_until_its_target_changes() {
     let mut record = crate::database::load_session_record(LEASED_RELAY_SESSION)
         .unwrap()
         .unwrap();
-    record.target = Some(recovery_source_target());
+    record.target = Some(Box::new(recovery_source_target()));
     crate::database::save_session(&record).unwrap();
 
     let directory = tempfile::tempdir().unwrap();
@@ -937,14 +937,17 @@ fn view_at_ordinal(ordinal: u64) -> ManagedSessionView {
         })
         .collect();
     ManagedSessionView {
+        attention: Default::default(),
         snapshot: Some(ManagedSessionSnapshot {
-            subagent_requests: Vec::new(),
-            subagent_completions: Vec::new(),
+            subagent_requests: Default::default(),
+            subagent_completions: Default::default(),
             subagent_queue_error: None,
             window: mj_core::state::ProjectionWindow::of(&materialized),
             materialized,
             operational: RelayOperationalState {
                 assessment: None,
+                open_request: None,
+                person_input_through: 0,
                 assessment_context: None,
                 turn_completion: None,
                 continuation: Default::default(),
@@ -983,10 +986,11 @@ fn view_at_ordinal(ordinal: u64) -> ManagedSessionView {
                 agent_info: None,
                 runtime: None,
                 steering_supported: None,
+                mailbox_delivery: None,
                 turn_controls: None,
-                config_options: Vec::new(),
+                config_options: Vec::new().into(),
                 modes: None,
-                available_commands: Vec::new(),
+                available_commands: Vec::new().into(),
                 config: BTreeMap::new(),
                 active_prompt: None,
                 queued_prompts: Vec::new(),
@@ -1003,7 +1007,8 @@ fn view_at_ordinal(ordinal: u64) -> ManagedSessionView {
                 last_harness_turn_started_ordinal: None,
                 background_commands: Vec::new(),
                 background_work_known: None,
-            },
+            }
+            .into(),
             latest_credential_sync_signal: None,
             worker_build: None,
         }),
@@ -1351,6 +1356,15 @@ fn leased_relay_child_serves_stdio() {
     let Some(root) = std::env::var_os(LEASED_RELAY_ROOT) else {
         return;
     };
+    let memory_protocol = {
+        let path = PathBuf::from(&root).join("memory-sync-protocol");
+        path.exists().then(|| {
+            std::fs::read_to_string(path)
+                .unwrap()
+                .parse::<u32>()
+                .unwrap()
+        })
+    };
     // With `--nocapture` libtest writes `test <name> ... ` without a
     // trailing newline before the body runs. End that line first so it
     // cannot glue itself onto the first protocol frame.
@@ -1453,7 +1467,7 @@ fn leased_relay_child_serves_stdio() {
             }
             let history = match &request.request {
                 RelayRequest::Hello { .. } => Some(RelayResponsePayload::Hello {
-                    negotiated: mj_core::relay::RELAY_PROTOCOL_VERSION,
+                    negotiated: memory_protocol.unwrap_or(mj_core::relay::RELAY_PROTOCOL_VERSION),
                     relay_version: "1.0.0".into(),
                     session_id: LEASED_RELAY_SESSION.into(),
                     worker_build: None,
@@ -1571,11 +1585,15 @@ fn leased_relay_child_serves_stdio() {
                 _ => None,
             };
             if let Some(payload) = history {
+                let protocol_version = match &payload {
+                    RelayResponsePayload::Hello { negotiated, .. } => *negotiated,
+                    _ => request.protocol_version,
+                };
                 mj_core::relay::write_relay_frame(
                     &mut output,
                     &RelayResponseEnvelope {
                         request_id: request.request_id,
-                        protocol_version: request.protocol_version,
+                        protocol_version,
                         body: RelayResponseBody::Ok { payload },
                     },
                 )
@@ -1696,7 +1714,18 @@ fn leased_relay_child_serves_stdio() {
                         },
                     }
                 } else {
-                    relay.handle(request)
+                    let wire_protocol = request.protocol_version;
+                    let mut request = request;
+                    if memory_protocol.is_some() {
+                        // This scoped peer speaks its advertised wire version,
+                        // while the in-process relay retains its strict current protocol.
+                        request.protocol_version = mj_core::relay::RELAY_PROTOCOL_VERSION;
+                    }
+                    let mut response = relay.handle(request);
+                    if memory_protocol.is_some() {
+                        response.protocol_version = wire_protocol;
+                    }
+                    response
                 };
             if starts_clear && std::env::var_os(CLEAR_MAILBOX_CONTROL).is_some() {
                 relay.claim_pending_commands(true).unwrap();
@@ -1918,16 +1947,31 @@ async fn retirement_ends_a_connect_that_never_answers() {
 #[tokio::test]
 async fn relay_attach_does_not_probe_or_install_project_memory() {
     if std::env::var_os(EXPLICIT_MEMORY_SYNC_TEST_CHILD).is_none() {
-        run_in_isolated_child(
-            EXPLICIT_MEMORY_SYNC_TEST_CHILD,
-            "relay_attach_does_not_probe_or_install_project_memory",
-        );
+        for protocol in [58, 59] {
+            let directory = tempfile::tempdir().unwrap();
+            IsolatedTest::new(exact_test_name(
+                "relay_attach_does_not_probe_or_install_project_memory",
+            ))
+            .env(EXPLICIT_MEMORY_SYNC_TEST_CHILD, protocol.to_string())
+            .env("MJ_DATA_DIR", directory.path())
+            .env("MJ_CONFIG_DIR", directory.path().join("config"))
+            .run();
+        }
         return;
     }
     // Alone in this child process, so it installs the one writer.
     let _writer = crate::database::install_isolated_test_writer();
     register_leased_relay_session();
     let relay_root = tempfile::tempdir().unwrap();
+    let protocol: u32 = std::env::var(EXPLICIT_MEMORY_SYNC_TEST_CHILD)
+        .unwrap()
+        .parse()
+        .unwrap();
+    std::fs::write(
+        relay_root.path().join("memory-sync-protocol"),
+        protocol.to_string(),
+    )
+    .unwrap();
     let canonical = tempfile::tempdir().unwrap();
     let mut target = leased_relay_target(relay_root.path());
     target.project_memory = Some(ProjectMemorySyncTarget {
@@ -1943,16 +1987,52 @@ async fn relay_attach_does_not_probe_or_install_project_memory() {
     );
 
     connection
+        .sync()
+        .await
+        .expect("ordinary polling must not probe memory");
+    let requests = std::fs::read_to_string(relay_root.path().join(RELAY_REQUEST_LOG)).unwrap();
+    assert!(
+        requests
+            .lines()
+            .all(|method| !method.contains("project_memory")),
+        "{requests}"
+    );
+
+    let result = connection
         .sync_project_memory(
             &mj_core::config::Config::default(),
             tokio_util::sync::CancellationToken::new(),
         )
-        .await
-        .expect("an explicit sync may detect a legacy memory endpoint");
-    assert!(
-        connection.project_memory.is_none(),
-        "the explicit sync reached the relay and disabled its unavailable endpoint"
-    );
+        .await;
+    if protocol == 58 {
+        result.expect("an explicit sync may detect a legacy memory endpoint");
+        assert!(
+            connection.project_memory.is_none(),
+            "legacy absent endpoint was disabled"
+        );
+    } else {
+        let error = result.expect_err("new transfer failures must remain visible");
+        assert_eq!(
+            error
+                .downcast_ref::<crate::worker_client::RelayRejected>()
+                .unwrap()
+                .0
+                .code,
+            mj_core::relay::RelayErrorCode::InvalidState
+        );
+        assert!(
+            connection.project_memory.is_some(),
+            "new transfer error must not disable memory"
+        );
+        let requests = std::fs::read_to_string(relay_root.path().join(RELAY_REQUEST_LOG)).unwrap();
+        assert_eq!(
+            requests
+                .lines()
+                .filter(|method| method.contains("project_memory"))
+                .collect::<Vec<_>>(),
+            ["project_memory_transfer"]
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -2013,6 +2093,7 @@ async fn installed_prompt_handoff_is_journaled_and_persisted_without_a_user_turn
 #[cfg(unix)]
 // Hard-won: 0db1a867: Relay acceptance must not wait on catch-up and invite retrying an accepted command.
 // Hard-won: 1d746fab4: every empty catch-up deeply copied unchanged operational JSON.
+// Hard-won: daemon heap profile: publishing snapshots undid the relay's shared-state cache.
 #[tokio::test]
 async fn submitting_does_not_catch_the_projection_up_until_asked() {
     if std::env::var_os(SUBMIT_WITHOUT_SYNC_TEST_CHILD).is_none() {
@@ -2052,6 +2133,32 @@ async fn submitting_does_not_catch_the_projection_up_until_asked() {
         "the catch-up is what advances the projection"
     );
     let held = connection.operational.clone();
+    let published = connection.snapshot();
+    assert!(held.ptr_eq(&published.operational));
+    assert!(
+        connection
+            .subagent_requests
+            .ptr_eq(&published.subagent_requests)
+    );
+    assert!(
+        connection
+            .subagent_completions
+            .ptr_eq(&published.subagent_completions)
+    );
+    let encoded = serde_json::to_value(&*held).unwrap();
+    assert_eq!(
+        serde_json::to_value(&published.operational).unwrap(),
+        encoded
+    );
+    let attachment: mj_client::session::RelayAttachment = serde_json::from_value(serde_json::json!({"state": encoded, "events": [], "through_ordinal": 0, "through_digest": ""})).unwrap();
+    assert_eq!(*attachment.state, *held);
+    let mut changed = published.clone();
+    changed.operational.native_session_id = Some("changed-copy".into());
+    assert_eq!(
+        serde_json::to_value(&published.operational).unwrap(),
+        encoded
+    );
+    assert!(!changed.operational.ptr_eq(&held));
     for _ in 0..3 {
         connection.sync_in_place().await.unwrap();
         assert!(
@@ -2075,7 +2182,7 @@ fn stale_recovery_checks_durable_state_under_target_ownership() {
     let _writer = crate::database::install_isolated_test_writer();
     register_leased_relay_session();
     let mut record = crate::database::load_state().unwrap().sessions[LEASED_RELAY_SESSION].clone();
-    record.target = Some(recovery_source_target());
+    record.target = Some(Box::new(recovery_source_target()));
     let plan = WorkerRecoveryPlan {
         source_target: recovery_source_target(),
         target: None,
@@ -2129,7 +2236,7 @@ fn stale_recovery_checks_durable_state_under_target_ownership() {
             worker_root: PathBuf::from("/replacement-worker").join(LEASED_RELAY_SESSION),
         }),
     ] {
-        record.target = target;
+        record.target = target.map(Box::new);
         crate::database::save_session(&record).unwrap();
         assert_eq!(
             recover_worker_controlled(plan.clone(), true, Some(&record.id), &executor).unwrap(),
@@ -2142,7 +2249,7 @@ fn stale_recovery_checks_durable_state_under_target_ownership() {
     );
     assert!(executor.0.lock().unwrap().is_empty());
 
-    record.target = Some(recovery_source_target());
+    record.target = Some(Box::new(recovery_source_target()));
     for state in [
         SessionState::Running,
         SessionState::Disconnected,
@@ -2200,7 +2307,7 @@ async fn unresponsive_live_relay_worker_is_restarted_and_reconnected() {
     fail_if_the_actor_stalls("unresponsive live relay worker was never restarted");
     register_leased_relay_session();
     let mut record = crate::database::load_state().unwrap().sessions[LEASED_RELAY_SESSION].clone();
-    record.target = Some(recovery_source_target());
+    record.target = Some(Box::new(recovery_source_target()));
     crate::database::save_session(&record).unwrap();
     let relay_root = tempfile::tempdir().unwrap();
     let restarted = relay_root.path().join("worker-restarted");
@@ -2305,7 +2412,7 @@ async fn relay_actor_waits_for_disk_space_then_recovers_its_worker() {
     };
     register_leased_relay_session();
     let mut record = crate::database::load_state().unwrap().sessions[LEASED_RELAY_SESSION].clone();
-    record.target = Some(source_target.clone());
+    record.target = Some(Box::new(source_target.clone()));
     crate::database::save_session(&record).unwrap();
     let relay_root = tempfile::tempdir().unwrap();
     let restarted = relay_root.path().join("worker-restarted");
@@ -2607,7 +2714,7 @@ async fn mailbox_delivery_serializes_clear_completion_and_rechecks_stale_batches
     connection.unwrap().detach().await.unwrap();
     let mut relay =
         mj_worker::relay::DurableRelay::open(root.path(), LEASED_RELAY_SESSION, "test").unwrap();
-    let (text, count) = match relay.drain_mailbox("PostToolUse").unwrap() {
+    let (text, count) = match relay.drain_mailbox("PostToolBatch").unwrap() {
         mj_core::relay::RelayResponsePayload::MailboxDrained { text, count, .. } => (text, count),
         other => panic!("unexpected drain: {other:?}"),
     };
@@ -2704,7 +2811,7 @@ async fn reconnect_retains_failed_preparation_for_worker_replacement() {
         .unwrap();
     session.harness_kind = mj_core::config::HarnessKind::Claude;
     session.subagents = Some(mj_core::subagent::SubagentPolicy::Native);
-    session.target = Some(durable_target.clone());
+    session.target = Some(Box::new(durable_target.clone()));
     crate::database::save_session(&session).unwrap();
 
     let failure = mj_core::relay::HarnessPreparation::Failed {
@@ -2909,7 +3016,7 @@ async fn reconnect_retries_subagent_admission_after_lost_open_reply() {
 
     let relay_root = tempfile::tempdir().unwrap();
     let target = leased_relay_target(relay_root.path());
-    crate::database::set_operator_away(true).unwrap();
+    crate::database::set_operator_away(true, std::time::Duration::ZERO).unwrap();
     let mut connection = None;
     let first = sync_actor_connection(&target, &mut connection).await;
     assert!(first.is_err(), "the first worker lost the open reply");
@@ -2926,14 +3033,14 @@ async fn reconnect_retries_subagent_admission_after_lost_open_reply() {
 
     // The worker misses off/on. Reconnect must deliver revision3 although
     // the last availability value it received was already true.
-    crate::database::set_operator_away(false).unwrap();
-    crate::database::set_operator_away(true).unwrap();
+    crate::database::set_operator_away(false, std::time::Duration::ZERO).unwrap();
+    crate::database::set_operator_away(true, std::time::Duration::ZERO).unwrap();
     sync_actor_connection(&target, &mut connection)
         .await
         .expect("the next relay connection repairs the gate");
     // A still-connected actor must also send a new revision with the same bool.
-    crate::database::set_operator_away(false).unwrap();
-    crate::database::set_operator_away(true).unwrap();
+    crate::database::set_operator_away(false, std::time::Duration::ZERO).unwrap();
+    crate::database::set_operator_away(true, std::time::Duration::ZERO).unwrap();
     sync_actor_connection(&target, &mut connection)
         .await
         .unwrap();
@@ -3014,6 +3121,7 @@ fn register_leased_relay_session() {
     crate::database::save_session(&mj_core::state::SessionRecord {
         oracle_choice: None,
         oracle: true,
+        notifications_ignored: false,
         project: None,
         target_runtime: None,
         launch_base: None,
@@ -3026,8 +3134,6 @@ fn register_leased_relay_session() {
         create_managed_worktree: None,
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
-        container_cpus: None,
-        container_memory: None,
         id: LEASED_RELAY_SESSION.into(),
         title: "leased relay".into(),
         harness_kind: mj_core::config::HarnessKind::Codex,
@@ -3052,6 +3158,8 @@ fn register_leased_relay_session() {
         viewed_through_event_ordinal: 0,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: None,
     })
@@ -3146,7 +3254,7 @@ async fn released_connection_can_be_leased_again_immediately() {
             .releases
             .send(ReturnedConnection {
                 lease_id,
-                connection: Some(connection),
+                connection: Some(Box::new(connection)),
             })
             .unwrap();
         actor
@@ -3166,7 +3274,7 @@ async fn released_connection_can_be_leased_again_immediately() {
         .releases
         .send(ReturnedConnection {
             lease_id,
-            connection: Some(connection),
+            connection: Some(Box::new(connection)),
         })
         .unwrap();
 }
@@ -3211,7 +3319,7 @@ async fn full_leased_queue_refuses_excess_and_still_processes_release() {
         .releases
         .send(ReturnedConnection {
             lease_id,
-            connection: Some(connection),
+            connection: Some(Box::new(connection)),
         })
         .unwrap();
     for response in pending {
@@ -3271,7 +3379,7 @@ async fn prompt_submitted_during_lease_is_delivered_after_release() {
         .releases
         .send(ReturnedConnection {
             lease_id,
-            connection: Some(connection),
+            connection: Some(Box::new(connection)),
         })
         .unwrap();
 
@@ -3318,7 +3426,7 @@ async fn returned_lease_publishes_what_it_learned_while_it_held_the_connection()
         .releases
         .send(ReturnedConnection {
             lease_id,
-            connection: Some(connection),
+            connection: Some(Box::new(connection)),
         })
         .unwrap();
 
@@ -3466,7 +3574,7 @@ async fn retirement_rejects_prompts_deferred_during_lease() {
         .releases
         .send(ReturnedConnection {
             lease_id,
-            connection: Some(connection),
+            connection: Some(Box::new(connection)),
         })
         .unwrap();
 
@@ -3502,10 +3610,13 @@ fn dashboard_updates_keep_only_the_latest_view_per_session() {
     for revision in 0..1_000 {
         sender.send(SessionManagerUpdate {
             raw_observation: (revision == 0).then(|| {
-                mj_core::relay::RelaySnapshot::new("session-1".into()).operational_state()
+                mj_core::relay::RelaySnapshot::new("session-1".into())
+                    .operational_state()
+                    .into()
             }),
             session_id: "session-1".into(),
             view: ManagedSessionView {
+                attention: Default::default(),
                 error: Some(ViewError::Unreachable(format!("revision-{revision}"))),
                 ..ManagedSessionView::default()
             },
@@ -3515,6 +3626,7 @@ fn dashboard_updates_keep_only_the_latest_view_per_session() {
         raw_observation: None,
         session_id: "session-2".into(),
         view: ManagedSessionView {
+            attention: Default::default(),
             error: Some(ViewError::Unreachable("other".into())),
             ..ManagedSessionView::default()
         },
@@ -3860,9 +3972,9 @@ async fn delegation_completes_with_web_disabled_and_dashboard_unconsumed() {
         .sessions
         .remove(LEASED_RELAY_SESSION)
         .unwrap();
-    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+    parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: relay_root.path().join(LEASED_RELAY_SESSION),
-    });
+    }));
     crate::database::save_session(&parent).unwrap();
     let (feed, observations) = delegation_channel();
     let manager = spawn_session_manager_observed(Some(feed)).unwrap();
@@ -3956,6 +4068,7 @@ fn replaced_actors_cannot_publish_or_leave_a_queued_observation() {
         raw_observation: None,
         session_id: "session-1".into(),
         view: ManagedSessionView {
+            attention: Default::default(),
             error: Some(ViewError::Unreachable(detail.into())),
             ..Default::default()
         },
@@ -4008,7 +4121,7 @@ fn durable_worker_restart_never_kills_a_live_replacement_and_fences_old_completi
     let _writer = crate::database::install_isolated_test_writer();
     register_leased_relay_session();
     let mut record = crate::database::load_state().unwrap().sessions[LEASED_RELAY_SESSION].clone();
-    record.target = Some(recovery_source_target());
+    record.target = Some(Box::new(recovery_source_target()));
     record.state = mj_core::state::SessionState::Running;
     crate::database::save_session(&record).unwrap();
     let plan = WorkerRecoveryPlan {

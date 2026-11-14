@@ -261,14 +261,27 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         operation: tokio::sync::Mutex::new(()),
     });
     let (subagents, subagent_socket_guard) = if subagent_role.is_some() {
-        let (endpoint, guard) =
-            super::subagents::serve(&runtime, &root, relay.clone(), config.harness)?;
+        let (endpoint, guard) = super::subagents::serve(
+            &runtime,
+            &root,
+            relay.clone(),
+            config.harness,
+            config.subagent_kind,
+        )?;
         (Some(endpoint), Some(guard))
     } else {
         (None, None)
     };
 
-    let (acp_activity, step_clock, tools_in_flight, turn_context, accepted_config) = {
+    let (
+        acp_activity,
+        step_clock,
+        tools_in_flight,
+        turn_context,
+        accepted_config,
+        login_identity,
+        operator_away,
+    ) = {
         let relay = relay.lock().expect("relay lock poisoned");
         (
             relay.acp_activity_clock(),
@@ -276,6 +289,8 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
             relay.tools_in_flight(),
             relay.turn_context(),
             Arc::new(Mutex::new(accepted_config)),
+            relay.login_identity.clone(),
+            relay.operator_away.clone(),
         )
     };
     let shell_cleanup = user_shells.completion_tracker();
@@ -312,13 +327,15 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         &session_environment,
         &mut additional_directories,
     );
+    let observe_policy = config
+        .observe_policy
+        .clone()
+        .map(|policy| crate::observe::PolicyClient::new(policy, config.session_id.clone()))
+        .transpose()?;
     let acp_spec = LaunchSpec {
-        operator_away: relay
-            .lock()
-            .expect("relay state lock poisoned")
-            .operator_away
-            .clone(),
+        operator_away,
         imported_logins: None,
+        login_identity,
         clear_context_request: None,
         context_restore: None,
         goal_recovery,
@@ -367,6 +384,8 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
         initial_model: config.initial_model,
         harness: config.harness,
         execution_policy: config.execution_policy,
+        claude_permission_mode: config.claude_permission_mode,
+        observe_policy,
         acp_activity,
         step_clock,
         tools_in_flight,
@@ -756,7 +775,7 @@ mod history_tests {
 }
 
 impl ProjectMemoryEndpoint {
-    fn new(config: Option<super::ProjectMemoryLaunchConfig>) -> Self {
+    pub(super) fn new(config: Option<super::ProjectMemoryLaunchConfig>) -> Self {
         Self {
             config,
             io: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -776,8 +795,39 @@ pub(super) struct SocketGuard(pub(super) PathBuf);
 
 impl Drop for SocketGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        remove_control_socket(&self.0, "shutdown").unwrap_or_else(|error| {
+            tracing::warn!(%error, socket = %self.0.display(), "control socket shutdown cleanup failed");
+        });
     }
+}
+
+// Capture both sides: overlay filesystems can report a successful operation
+// while subsequent path lookup still exposes an old inode.
+fn log_control_socket(path: &std::path::Path, operation: &str, error: Option<&anyhow::Error>) {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::symlink_metadata(path);
+    let errno = error
+        .and_then(|error| error.downcast_ref::<std::io::Error>())
+        .and_then(std::io::Error::raw_os_error);
+    let inode = metadata.as_ref().ok().map(MetadataExt::ino);
+    let links = metadata.as_ref().ok().map(MetadataExt::nlink);
+    let mode = metadata.as_ref().ok().map(MetadataExt::mode);
+    let device = metadata.as_ref().ok().map(MetadataExt::dev);
+    let file_type = metadata.as_ref().ok().map(|m| m.file_type());
+    let lookup_errno = metadata
+        .as_ref()
+        .err()
+        .and_then(std::io::Error::raw_os_error);
+    tracing::info!(socket = %path.display(), operation, success = error.is_none(),
+        ?errno, ?error, ?inode, ?links, ?mode, ?device, ?file_type, ?lookup_errno,
+        pid = std::process::id(), "control socket operation");
+}
+
+fn remove_control_socket(path: &std::path::Path, phase: &str) -> Result<()> {
+    log_control_socket(path, &format!("{phase}: before unlink"), None);
+    let result = std::fs::remove_file(path).map_err(anyhow::Error::from);
+    log_control_socket(path, &format!("{phase}: unlink"), result.as_ref().err());
+    result
 }
 
 /// Bind `control.sock`, restrict it to the owner, and record the `bind-socket`
@@ -788,8 +838,10 @@ fn publish_control_socket(
     socket: &std::path::Path,
 ) -> Result<(UnixListener, SocketGuard)> {
     super::record_startup_step(root, "bind-socket");
-    let listener = bind_unix_listener(socket)
-        .with_context(|| format!("bind worker socket {}", socket.display()))?;
+    log_control_socket(socket, "before bind", None);
+    let bound = bind_unix_listener(socket);
+    log_control_socket(socket, "bind", bound.as_ref().err());
+    let listener = bound.with_context(|| format!("bind worker socket {}", socket.display()))?;
     listener
         .set_nonblocking(true)
         .with_context(|| format!("set worker socket {} nonblocking", socket.display()))?;
@@ -864,14 +916,28 @@ pub async fn run_daemon_owned(
     // Refuse a second daemon before touching durable state: opening the
     // relay recovers the journal in place, so getting that far would
     // corrupt the files a live worker is still writing.
-    if socket.exists() && connect_unix_stream(&socket).is_ok() {
-        bail!("a worker is already running at {}", socket.display());
+    let exists = socket.exists();
+    log_control_socket(
+        &socket,
+        if exists {
+            "startup: exists"
+        } else {
+            "startup: absent"
+        },
+        None,
+    );
+    if exists {
+        let connected = connect_unix_stream(&socket);
+        log_control_socket(&socket, "startup: connect", connected.as_ref().err());
+        if connected.is_ok() {
+            bail!("a worker is already running at {}", socket.display());
+        }
     }
     // A dead daemon can leave its socket inode behind. Remove it before
     // journal recovery so controller liveness can distinguish a worker
     // that is still starting from one that has published its endpoint.
     if socket.exists() {
-        std::fs::remove_file(&socket)
+        remove_control_socket(&socket, "startup")
             .with_context(|| format!("remove stale socket {}", socket.display()))?;
     }
     let relay_state_exists = root.join(RELAY_STATE_FILE).exists();
@@ -893,11 +959,15 @@ pub async fn run_daemon_owned(
     // Only Claude Code's adapter marks the end of a turn it started on its
     // own, so only it can model those turns without leaving a session stuck
     // Running. See `.agents/docs/claude-autonomous-turns.md`.
+    durable_relay.set_managed_subagent(config.is_managed_subagent())?;
     durable_relay.set_turn_verdict_harness(config.harness);
+    if config.harness == HarnessKind::Claude {
+        durable_relay.authentication_login_path =
+            mj_core::credentials::claude_oauth_login_path(&config.environment);
+    }
     // Worker admission opens before profile preparation finishes. Claude must
     // already be protected from ACP steering during that window.
     durable_relay.set_steering_delivery_mode(config.harness, false);
-    durable_relay.set_continuation_enabled(!mj_core::jev::continuation_disabled_by_environment());
     durable_relay.set_harness_turn_policy(match config.harness {
         HarnessKind::Claude => crate::relay::HarnessTurnPolicy::ClaudeAdapter,
         HarnessKind::Codex => crate::relay::HarnessTurnPolicy::CodexAdapter,
@@ -1648,6 +1718,7 @@ async fn prepare_and_start_harness(
     }
 
     let mut claude_mailbox_hook_available = false;
+    let mut codex_mailbox_delivery = None;
     let profile_registration = match config.harness {
         HarnessKind::Codex => {
             let budget = preparation_step(
@@ -1670,7 +1741,7 @@ async fn prepare_and_start_harness(
             let policy = config.execution_policy;
             let mailboxes_enabled = config.agent_mailboxes_enabled;
             let subtle_subagents = config.subtle_subagents;
-            let (registered, environment) =
+            let (registered, environment, mode) =
                 bounded_blocking_preparation_step(&budget, cancel, move |step_cancel| {
                     if step_cancel.is_cancelled() {
                         bail!("preparation cancelled before configuring the Codex profile");
@@ -1689,10 +1760,19 @@ async fn prepare_and_start_harness(
                         },
                         review_tools,
                     )?;
-                    Ok((registered, environment))
+                    // The staged home holds the configuration Codex runs
+                    // with, overlay included. An unreadable one fails startup
+                    // here rather than guessing a delivery mode.
+                    let provider = mj_core::codex_provider::codex_provider(&home, None)
+                        .context("resolve the Codex provider for mailbox delivery")?;
+                    let mode = mj_core::mailbox::MailboxDeliveryMode::for_codex_provider(
+                        provider.as_ref(),
+                    );
+                    Ok((registered, environment, mode))
                 })
                 .await?;
             config.environment = environment;
+            codex_mailbox_delivery = Some(mode);
             registered
         }
         HarnessKind::Claude => {
@@ -1801,10 +1881,14 @@ async fn prepare_and_start_harness(
         }
         _ => false,
     };
-    relay
-        .lock()
-        .expect("relay state lock poisoned")
-        .set_steering_delivery_mode(config.harness, claude_mailbox_hook_available);
+    {
+        let mut relay = relay.lock().expect("relay state lock poisoned");
+        relay.set_steering_delivery_mode(config.harness, claude_mailbox_hook_available);
+        // Resolved before the harness starts, so no hook can drain earlier.
+        if let Some(mode) = codex_mailbox_delivery {
+            relay.set_mailbox_delivery_mode(mode);
+        }
+    }
     if config.project_memory.is_some()
         && resume_session.is_none()
         && config.harness != HarnessKind::Claude
@@ -2128,6 +2212,7 @@ pub(super) async fn serve_client_with_memory(
     let mut reader = BufReader::new(reader);
     let mut checkpoint_barriers = BTreeSet::new();
     let mut subagent_feed = super::subagents::SubagentFeed::default();
+    let mut project_memory_transfer = ConnectionProjectMemoryTransfer::default();
     let serving_result = async {
         while let Some(line) =
             read_bounded_line(&mut reader, mj_core::relay::MAX_FRAME_BYTES).await?
@@ -2323,7 +2408,12 @@ pub(super) async fn serve_client_with_memory(
                 // They never reach DurableRelay, its journal, or its
                 // command ledger.
                 let operation = envelope.request.method_name();
-                let response = credential_response(envelope, &credentials, &relay_root).await;
+                let login_installed = matches!(&envelope.request, RelayRequest::InstallCredentials { .. });
+                let login_identity = relay.lock().expect("relay state lock poisoned").login_identity.clone();
+                let response = credential_response(envelope, &credentials, &relay_root, &login_identity).await;
+                if login_installed && matches!(response.body, RelayResponseBody::Ok { .. }) {
+                    wake_dispatch(&relay, &dispatch_wake)?;
+                }
                 write_logged_response(&mut writer, &response, &session_id, operation).await?;
                 continue;
             }
@@ -2332,9 +2422,15 @@ pub(super) async fn serve_client_with_memory(
                 RelayRequest::ProjectMemorySnapshot
                     | RelayRequest::InstallProjectMemorySnapshot { .. }
                     | RelayRequest::ReplaceProjectMemoryTree { .. }
+                    | RelayRequest::ProjectMemoryTransfer { .. }
             ) {
                 let operation = envelope.request.method_name();
-                let response = project_memory_response(envelope, &project_memory).await;
+                let response = project_memory_response(
+                    envelope,
+                    &project_memory,
+                    &mut project_memory_transfer,
+                )
+                .await;
                 write_logged_response(&mut writer, &response, &session_id, operation).await?;
                 continue;
             }

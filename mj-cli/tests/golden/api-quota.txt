@@ -1,0 +1,115 @@
+=== mj quota text ===
+claude (Claude Code, subscription): 5H 62% left, resets 2h 41m · Week 340/500 used, resets 3d 4h · checked 4m ago
+codex (Codex, usage): API · credits $43.2 left · checked 1m ago
+grok (Grok Build, unknown): error: login expired · checked 10m ago
+kimi (Kimi Code, unknown): n/a · checked 30s ago
+muse (Muse Code, unknown): no quota report yet
+opencode (OpenCode, usage): probing now
+=== mj quota --profile claude ===
+claude (Claude Code, subscription): 5H 62% left, resets 2h 41m · Week 340/500 used, resets 3d 4h · checked 4m ago
+=== mj quota --json ===
+{
+  "cycles": 7,
+  "profiles": [
+    {
+      "profile": "claude",
+      "harness": "claude",
+      "billing": "subscription",
+      "probing": false,
+      "report": {
+        "monthly_price_usd": 100,
+        "profile_id": "claude",
+        "harness": "claude",
+        "windows": [
+          {
+            "label": "5H",
+            "remaining_percent": 62,
+            "used": null,
+            "limit": null,
+            "resets": null,
+            "resets_at_epoch_seconds": 1800009660
+          },
+          {
+            "label": "Week",
+            "remaining_percent": null,
+            "used": 340,
+            "limit": 500,
+            "resets": null,
+            "resets_at_epoch_seconds": 1800273600
+          }
+        ],
+        "extra": null,
+        "error": null,
+        "refreshed_at_epoch_seconds": 1799999760
+      },
+      "detail": "5H 62% left, resets 2h 41m · Week 340/500 used, resets 3d 4h"
+    },
+    {
+      "profile": "codex",
+      "harness": "codex",
+      "billing": "usage",
+      "probing": false,
+      "report": {
+        "paid_credits": {
+          "kind": "limited",
+          "balance": 43.2
+        },
+        "profile_id": "codex",
+        "harness": "codex",
+        "windows": [],
+        "extra": "API",
+        "error": null,
+        "refreshed_at_epoch_seconds": 1799999940
+      },
+      "detail": "API · credits $43.2 left"
+    },
+    {
+      "profile": "grok",
+      "harness": "grok",
+      "billing": "unknown",
+      "probing": false,
+      "report": {
+        "profile_id": "grok",
+        "harness": "grok",
+        "windows": [],
+        "extra": null,
+        "error": "login expired",
+        "refreshed_at_epoch_seconds": 1799999400
+      },
+      "detail": "error: login expired"
+    },
+    {
+      "profile": "kimi",
+      "harness": "kimi",
+      "billing": "unknown",
+      "probing": false,
+      "report": {
+        "profile_id": "kimi",
+        "harness": "kimi",
+        "windows": [],
+        "extra": "n/a",
+        "error": null,
+        "refreshed_at_epoch_seconds": 1799999970
+      },
+      "detail": "n/a"
+    },
+    {
+      "profile": "muse",
+      "harness": "muse",
+      "billing": "unknown",
+      "probing": false,
+      "report": null,
+      "detail": "no quota report yet"
+    },
+    {
+      "profile": "opencode",
+      "harness": "opencode",
+      "billing": "usage",
+      "probing": true,
+      "report": null,
+      "detail": "probing now"
+    }
+  ]
+}
+=== mj quota --profile missing ===
+no enabled profile "missing"

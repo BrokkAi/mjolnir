@@ -14,7 +14,7 @@ use mj_core::transcript::{ChatEntry, ChatRole};
 use super::ChatState;
 use super::config_picker::config_option_key;
 use super::rendering::truncate_to_width;
-use crate::components::{AutocompletePopup, PopupSide};
+use crate::components::{AutocompletePopup, ComboBox, PopupSide};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LocalCommand {
@@ -498,6 +498,7 @@ pub(super) fn render_autocomplete(
         prompt_area,
         prompt_area.width,
         autocomplete.matches.len(),
+        ComboBox::DEFAULT_MAX_VISIBLE_ROWS,
         title,
         PopupSide::Above,
     )?;

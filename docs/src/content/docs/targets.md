@@ -104,7 +104,9 @@ approval so critical actions can still be denied. Muse's guardian on raw
 targets is that same review with the sandbox kept on.
 
 Codex, Claude Code, Grok Build, and Muse Code can preserve guardian approvals
-on raw targets. Kimi Code cannot. OpenCode asks before tools
+on raw targets. Claude Code's guardian is its Auto mode unless the profile sets
+[`claude_permission_mode`](/profiles/#choose-claudes-permission-mode) to Accept
+edits or Manual. Kimi Code cannot. OpenCode asks before tools
 according to its permission rules, and DSH, with dsh-acp's `permission_mode`
 `ask`, asks before every write, command, and MCP tool call. Neither has a
 sandbox, so a prompt is the only thing between the agent and the host.
@@ -378,8 +380,9 @@ not seed from them: it starts with the remembered size for that physical host
 or a baseline of 4 CPUs and 8 GiB. Checking **Save as default sizing** on a new
 session makes that session's choice the remembered size for the host. The
 minimum accepted size is 2 CPUs and 4 GiB. The per-session choice overrides the
-fallback. Later **Container settings** overrides win when that session's
-container is next created.
+fallback. Later **Container settings** edits the same allocation in whole CPUs and GiB.
+It takes effect when that session's container is next created. Host capacity counts
+the running container's applied size until recreation.
 
 The EC2 host instance type is chosen when the host is created. Bare targets
 use the host directly and have no Mjolnir resource limit.

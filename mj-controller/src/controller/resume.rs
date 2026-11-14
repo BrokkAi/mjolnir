@@ -403,6 +403,7 @@ impl Controller {
         let previous = session.clone();
         let mut project = session.project.clone();
         if let Some(project) = &mut project {
+            let project = std::sync::Arc::make_mut(project);
             let repository = project
                 .bundle
                 .repositories
@@ -813,6 +814,7 @@ impl Controller {
                     &worker_root,
                     syncing,
                     super::worker_binary::WorkerFilePreparation::RefreshProfile,
+                    super::worker_binary::LaunchHistory::Restored(canonical_session),
                 )?;
                 let seed = mj_checkpoint::checkpoint::relay_seed_for_restore(
                     canonical_session,
@@ -863,6 +865,7 @@ impl Controller {
                             backend_ref,
                             worker_root_ref,
                             syncing,
+                            super::worker_binary::LaunchHistory::Restored(canonical_session),
                         )?;
                         super::provisioning::install_inherited_git_settings(
                             syncing,
@@ -927,6 +930,9 @@ impl Controller {
                 }
                 None => {}
             }
+            // Restore imports only the archived delta; its origin configuration
+            // is removed and the cutoff checked before any worker can run.
+            self.verify_history_cutoff_workspace(session_id, &backend, executor)?;
             let readiness_stage = bridge_readiness_stage(profile);
             let spec = self.reconnect_command(session_id)?;
             let readiness = async {
@@ -1151,21 +1157,6 @@ fn load_in_place_subagent_prompt_data(
 /// Canonicalizing first keeps one exact absolute path for the restore. The
 /// digest and session id must both match the record, and a legacy host-bridge
 /// archive is refused here rather than part way through a restore.
-/// Resume and Move clone the repository again from its origin, which would
-/// bring back every later commit, so a session that started without later
-/// history refuses them.
-pub(super) fn ensure_full_history_allowed(session: &SessionRecord) -> Result<()> {
-    ensure!(
-        !session
-            .checkout
-            .as_ref()
-            .is_some_and(|checkout| checkout.no_later_history),
-        "session {} was started without later history, and resuming or moving it would clone the full history; start a new session instead",
-        session.id
-    );
-    Ok(())
-}
-
 pub(super) fn verify_resume_checkpoint(
     session_id: &str,
     checkpoint: &mj_core::state::CheckpointMetadata,
@@ -1356,12 +1347,7 @@ fn fetch_source_commit(
             .context("configured repository is not a GitHub source")?;
         if github_token.is_some() {
             token_auth = true;
-            arguments.extend([
-                "-c".to_owned(),
-                "credential.helper=".to_owned(),
-                "-c".to_owned(),
-                "credential.helper=!f() { if [ \"$1\" = get ]; then echo username=x-access-token; echo \"password=$GH_TOKEN\"; fi; }; f".to_owned(),
-            ]);
+            arguments.extend(mj_core::remote_git::github_token_credential_config());
             format!(
                 "https://github.com/{}/{}.git",
                 github.owner, github.repository
@@ -1374,10 +1360,7 @@ fn fetch_source_commit(
     if accepted_source.is_some() {
         if github_token.is_some() && is_github_https_url(&source) {
             token_auth = true;
-            arguments.extend([
-                "-c".to_owned(), "credential.helper=".to_owned(), "-c".to_owned(),
-                "credential.helper=!f() { if [ \"$1\" = get ]; then echo username=x-access-token; echo \"password=$GH_TOKEN\"; fi; }; f".to_owned(),
-            ]);
+            arguments.extend(mj_core::remote_git::github_token_credential_config());
         }
         ssh_transport = source.starts_with("git@") || source.starts_with("ssh://");
     }
@@ -1508,6 +1491,30 @@ impl Controller {
         repository_preflight: Option<ResumeRepositorySourceReceipt>,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<MaterializedSession> {
+        self.resume_session_controlled_with_repository_preflight_and_admission(
+            session_id,
+            profile_id,
+            target_id,
+            options,
+            repository_preflight,
+            executor,
+            || {},
+        )
+        .await
+    }
+
+    // Keep the established resume arguments together with its admission hook.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn resume_session_controlled_with_repository_preflight_and_admission(
+        &mut self,
+        session_id: &str,
+        profile_id: &str,
+        target_id: &str,
+        options: SessionResumeOptions,
+        repository_preflight: Option<ResumeRepositorySourceReceipt>,
+        executor: &(impl CommandExecutor + Sync),
+        on_accepted: impl FnOnce() + Send,
+    ) -> Result<MaterializedSession> {
         self.resume_session_with_origin(
             session_id,
             profile_id,
@@ -1516,6 +1523,7 @@ impl Controller {
             repository_preflight,
             None,
             executor,
+            on_accepted,
         )
         .await
     }
@@ -1545,6 +1553,7 @@ impl Controller {
             None,
             Some(operation),
             executor,
+            || {},
         )
         .await
     }
@@ -1559,6 +1568,7 @@ impl Controller {
         repository_preflight: Option<ResumeRepositorySourceReceipt>,
         move_operation: Option<&mj_core::state::MoveOperation>,
         executor: &(impl CommandExecutor + Sync),
+        on_accepted: impl FnOnce() + Send,
     ) -> Result<MaterializedSession> {
         crate::worker_lifecycle::run(session_id, "resume session with origin", executor, async {
             crate::worker_lifecycle::require(session_id)?.verify_cached_target(&self.state)?;
@@ -1596,10 +1606,9 @@ impl Controller {
         {
             bail!("session {session_id} is not stopped, lost, or retryable");
         }
-        ensure_full_history_allowed(&previous)?;
         let checkpoint = move_operation
             .and_then(|op| op.handoff.as_ref())
-            .or(previous.checkpoint.as_ref())
+            .or(previous.checkpoint.as_deref())
             .context("session has no checkpoint")?;
         // A receipt for an isolated destination says nothing about a host
         // checkout. Explicit moves to raw execution must check that source.
@@ -1651,11 +1660,6 @@ impl Controller {
         // Decide the representation before the record changes, so an
         // incompatible target fails here instead of during provisioning.
         self.validate_muse_resume_destination(&previous, profile.kind, target_id)?;
-        ensure!(
-            profile.kind != HarnessKind::Muse || previous.additional_mounts.is_empty(),
-            "{} ACP supports one workspace root; attached directories are unsupported",
-            profile.kind.display_name()
-        );
         let checkout = self.state.checkout(session_id)?;
         let plan = resume_compatibility_with_checkout(
             &previous,
@@ -1702,10 +1706,18 @@ impl Controller {
                     .context("prepare a checkout for this session")?,
             )),
         };
+        let requests = if move_operation.is_none() {
+            SessionResumeOptions { additional_mounts: additional_mounts.clone(), resource_allocation: resource_allocation.clone(), discard_queue }
+        } else { SessionResumeOptions { additional_mounts: None, resource_allocation: None, discard_queue } };
         let resource_allocation =
             resource_allocation.or_else(|| previous.resource_allocation.clone());
         let additional_mounts =
             additional_mounts.unwrap_or_else(|| previous.additional_mounts.clone());
+        ensure!(
+            profile.kind != HarnessKind::Muse || additional_mounts.is_empty(),
+            "{} ACP supports one workspace root; attached directories are unsupported",
+            profile.kind.display_name()
+        );
         validate_resource_allocation(&target_template, resource_allocation.as_ref())?;
         let selected_container_size =
             selected_host_container_size(&target_template, resource_allocation.as_ref());
@@ -1744,7 +1756,7 @@ impl Controller {
         let mut source_environment = crate::database::session_environment(session_id)?;
         if previous_managed_worktree.is_some() {
             let mut physical_source = previous.clone();
-            physical_source.managed_worktree = previous_managed_worktree.clone();
+            physical_source.managed_worktree = previous_managed_worktree.clone().map(Box::new);
             source_environment = Some(crate::database::reserve_owned_checkout(&physical_source)?);
         }
         let managed_checkout_present = previous_managed_worktree
@@ -1904,12 +1916,12 @@ impl Controller {
         }
         // Resume changes target resources, while titles and drafts remain
         // owned by their independent writers throughout provisioning.
-        crate::database::save_resumed_session(
+        crate::database::accept_resumed_session(
             &self.state.sessions[session_id],
-            selected_container_size
-                .as_ref()
-                .map(|(host, size)| (host.as_str(), *size)),
+            selected_container_size.as_ref().map(|(host, size)| (host.as_str(), *size)),
+            &requests,
         )?;
+        on_accepted();
         if let Some((host, size)) = selected_container_size.as_ref() {
             self.state.remember_container_size(host, *size);
         }
@@ -2015,7 +2027,7 @@ impl Controller {
                 let written = conversion_checkpoint(&archive_path, snapshot, &output)?;
                 conversion_checkpoint_written = Some(written.clone());
                 let record = self.state.sessions.get_mut(session_id).unwrap();
-                record.checkpoint = Some(written);
+                record.checkpoint = Some(Box::new(written));
                 record.updated_at = now();
                 // Persist the converted archive before provisioning without
                 // restoring client-owned fields from this earlier snapshot.
@@ -2101,10 +2113,14 @@ impl Controller {
                 // one it replaced can go.
                 if let Some(written) = &conversion_checkpoint_written {
                     super::checkpoint::prune_replaced_checkpoint(
-                        previous.checkpoint.as_ref(),
+                        previous.checkpoint.as_deref(),
                         written,
                     );
                 }
+                let latest = crate::database::load_session_record(session_id)?.context("resumed session disappeared")?;
+                let record = self.state.sessions.get_mut(session_id).unwrap();
+                record.resource_allocation = latest.resource_allocation;
+                record.additional_mounts = latest.additional_mounts;
                 Ok(materialized)
             }
             Err(error) => {
@@ -2251,6 +2267,11 @@ impl Controller {
         } else {
             crate::database::save_resumed_session(&self.state.sessions[session_id], None)?;
         }
+        let latest = crate::database::load_session_record(session_id)?
+            .context("resumed session disappeared")?;
+        let record = self.state.sessions.get_mut(session_id).unwrap();
+        record.resource_allocation = latest.resource_allocation;
+        record.additional_mounts = latest.additional_mounts;
         Ok(failure)
     }
 }

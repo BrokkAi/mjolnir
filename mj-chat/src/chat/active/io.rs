@@ -48,6 +48,14 @@ impl ActiveChat {
                 .prepared_startup
                 .push_back(prompt);
         }
+        while let Some(command_id) = self
+            .state
+            .composer_runtime
+            .prepared_receipt_retries
+            .pop_front()
+        {
+            self.dispatch(ChatAction::ResendSubmission { command_id });
+        }
         self.refresh_voice_availability();
         while let Ok(result) = self.remote.try_recv() {
             self.apply_remote_result(result);
@@ -222,14 +230,7 @@ impl ActiveChat {
         let Some(context) = &self.context else {
             return;
         };
-        let paths = mj_client::auth::auth_paths(&context.config, &context.session.last_profile);
-        if paths != self.voice_probe_paths {
-            self.voice_probe_paths.clone_from(&paths);
-            self.voice_auth = None;
-            self.voice_unavailable = None;
-            self.state.set_voice_available(false);
-            self.voice_probe_at = None;
-        }
+        let preferred = context.session.last_profile.clone();
         if self.voice_probe_pending
             || self
                 .voice_probe_at
@@ -241,21 +242,31 @@ impl ActiveChat {
         self.voice_probe_at = Some(std::time::Instant::now());
         let updates = self.voice_updates_tx.clone();
         tokio::spawn(async move {
-            let probed_paths = paths.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                if let Some(reason) = crate::speech::voice_input_unavailable_reason() {
-                    return Err(reason);
+            let result = async {
+                if let Some(reason) =
+                    tokio::task::spawn_blocking(crate::speech::voice_input_unavailable_reason)
+                        .await?
+                {
+                    return Ok(Err(reason));
                 }
-                if paths.is_empty() {
-                    return Err(DICTATION_NEEDS_A_CODEX_PROFILE.to_owned());
+                let mut client = mj_client::daemon::connect_existing().await?;
+                match client
+                    .request(mj_client::daemon::DaemonAction::TranscriptionAvailable {
+                        preferred_profile: preferred,
+                    })
+                    .await?
+                {
+                    mj_client::daemon::DaemonReply::TranscriptionAvailable(true) => Ok(Ok(())),
+                    mj_client::daemon::DaemonReply::TranscriptionAvailable(false) => {
+                        Ok(Err(DICTATION_NEEDS_A_CODEX_PROFILE.to_owned()))
+                    }
+                    reply => Err(anyhow::anyhow!(
+                        "unexpected transcription availability reply: {reply:?}"
+                    )),
                 }
-                mj_client::auth::available_auth(paths)
-                    .ok_or_else(|| DICTATION_NEEDS_A_CHATGPT_SIGN_IN.to_owned())
-            })
+            }
             .await;
-            let result = result
-                .map_err(|error| anyhow::anyhow!("dictation availability task failed: {error}"));
-            if let Err(error) = updates.send(VoiceUpdate::Availability(probed_paths, result)) {
+            if let Err(error) = updates.send(VoiceUpdate::Availability(result)) {
                 tracing::debug!(%error, "dictation availability dropped because the chat closed");
             }
         });
@@ -263,23 +274,22 @@ impl ActiveChat {
 
     pub(super) fn apply_voice_update(&mut self, update: VoiceUpdate) {
         match update {
-            VoiceUpdate::Availability(paths, result) => {
+            VoiceUpdate::Availability(result) => {
                 self.voice_probe_pending = false;
-                if paths != self.voice_probe_paths {
-                    return;
-                }
                 match result {
-                    Ok(Ok(path)) => {
+                    Ok(Ok(())) => {
                         self.state.set_voice_available(true);
-                        self.voice_auth = Some(path);
                         self.voice_unavailable = None;
                     }
                     Ok(Err(reason)) => {
                         self.state.set_voice_available(false);
-                        self.voice_auth = None;
                         self.voice_unavailable = Some(reason);
                     }
-                    Err(error) => self.state.set_notice(error.to_string()),
+                    Err(error) => {
+                        self.state.set_voice_available(false);
+                        self.voice_unavailable = Some(format!("Dictation is unavailable: {error}"));
+                        self.state.set_notice(error.to_string());
+                    }
                 }
             }
             VoiceUpdate::Status(status) => self.state.set_notice(status),
@@ -416,5 +426,4 @@ impl ActiveChat {
 /// Shown until the first availability probe answers. A conversation opened
 /// without its session's settings never probes, so this also covers that.
 const DICTATION_NOT_CHECKED: &str = "Dictation is unavailable until Mjolnir has checked for the voice helper and a Codex sign-in. Try again in a moment.";
-pub(super) const DICTATION_NEEDS_A_CODEX_PROFILE: &str = "Dictation is unavailable. It transcribes through a Codex profile signed in with a ChatGPT account, and no Codex profile is configured. Add one in Setup.";
-const DICTATION_NEEDS_A_CHATGPT_SIGN_IN: &str = "Dictation is unavailable. It transcribes through a Codex profile signed in with a ChatGPT account, and no Codex profile is signed in that way; an API key does not work. Sign a Codex profile in with ChatGPT.";
+pub(super) const DICTATION_NEEDS_A_CODEX_PROFILE: &str = "Dictation is unavailable. It transcribes through a Codex profile signed in with a ChatGPT account, and the daemon has no Codex profile signed in that way. Sign a daemon Codex profile in with ChatGPT.";

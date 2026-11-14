@@ -188,9 +188,11 @@ impl DashboardContext {
             opening_chat_sessions,
             selection,
             selection_text,
+            login,
             ..
         } = self;
         let transcript_selected = selection.active_surface() == Some(SurfaceId::Transcript);
+        let login_open = login.is_some();
         // The renderer decides which pane draws which conversation and reports
         // back what it drew; that list is what the read receipts follow.
         let mut drawn = Vec::new();
@@ -205,10 +207,25 @@ impl DashboardContext {
                 opening_chat_sessions,
                 transcript_selected,
             );
-            *selection_text = draw_selection(frame, selection, dashboard.frame_surfaces());
+            *selection_text = if login_open {
+                None
+            } else {
+                draw_selection(frame, selection, dashboard.frame_surfaces())
+            };
+            if let Some(login) = login.as_ref() {
+                let area = frame.area();
+                login.render(frame, area);
+            }
         })?;
-        self.drawn_chat_sessions = drawn;
+        // The modal obscures its center while leaving the dashboard visible
+        // around it. Do not advance read receipts for a covered conversation.
+        self.drawn_chat_sessions = if login_open { Vec::new() } else { drawn };
         self.dashboard.acknowledge_render();
+        if !login_open {
+            for action in self.dashboard.take_drawn_failure_dismissals() {
+                super::actions::spawn_notification_dismissal(self, action);
+            }
+        }
         if let Some(chat) = self.visible_chat() {
             chat.acknowledge_render();
         }
@@ -381,8 +398,6 @@ impl DashboardContext {
                 continue;
             }
             if let Some(target) = target {
-                self.checkpoint_archive_targets_seen
-                    .insert(id.clone(), target.clone());
                 changed_targets.insert(id.clone(), target.clone());
             } else {
                 self.checkpoint_archive_targets_seen.remove(id);

@@ -13,6 +13,8 @@ use super::*;
 pub(crate) struct ContainerCapacityInput {
     pub(crate) target_ids: Vec<String>,
     pub(crate) total: mj_core::state::HostContainerSize,
+    /// `total.memory_bytes` is a boot-time pool, not host RAM: no reserve.
+    pub(crate) memory_is_pool: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,6 +175,7 @@ impl RuntimeState {
                 cpus: usage.logical_cores,
                 memory_bytes: usage.memory_total_bytes,
             },
+            memory_is_pool: usage.memory_pool,
         }))
     }
 
@@ -279,6 +282,31 @@ impl RuntimeState {
 
     /// One serialized decision for create, resume and Move. Create under a hard
     /// RAM limit retains the guard until registration; existing sessions
+    /// install a lease before unlock.
+    pub(crate) async fn validate_container_settings_size(
+        &self,
+        session_id: &str,
+        allocation: Option<&mj_core::state::SessionResourceAllocation>,
+    ) -> Result<()> {
+        let Some(mj_core::state::SessionResourceAllocation::Container { cpus, memory_bytes }) =
+            allocation
+        else {
+            return Ok(());
+        };
+        let target_id = self
+            .session_record(session_id)
+            .with_context(|| format!("unknown session {session_id}"))?
+            .target_template_id
+            .clone();
+        if let Some(input) = self.container_capacity_input(&target_id).await?
+            && (*cpus > input.total.cpus || *memory_bytes > input.total.memory_bytes)
+        {
+            bail!("container resource allocation exceeds this host's reported CPU or memory limit");
+        }
+        Ok(())
+    }
+
+    /// RAM limit retains the guard until registration;
     /// install a lease before unlock.
     pub(crate) async fn admit_container_launch(
         self: &Arc<Self>,
@@ -433,6 +461,7 @@ pub(crate) fn capacity_with_reservations_after<'a>(
     reserved_ids.extend(additionally_replaced.iter().map(String::as_str));
     let mut capacity = mj_core::state::host_container_capacity(
         input.total,
+        input.memory_is_pool,
         &input.target_ids,
         sessions
             .iter()
@@ -506,7 +535,8 @@ fn source_commitment_is_live(
         .is_some_and(|session| {
             source.target_ids.contains(&session.target_template_id)
                 && mj_core::state::session_owns_container(session)
-                && session.resource_allocation == source.allocation
+                && mj_core::state::counted_container_allocation(session)
+                    == source.allocation.as_ref()
         })
 }
 
@@ -579,7 +609,8 @@ impl ContainerCapacityProjection {
             match (self.owners.get(id), owner) {
                 (Some(before), Some(after))
                     if before.target_template_id == after.target_template_id
-                        && before.resource_allocation == after.resource_allocation => {}
+                        && mj_core::state::counted_container_allocation(before)
+                            == mj_core::state::counted_container_allocation(after) => {}
                 (_, Some(record)) => {
                     self.owners.insert(id.clone(), record.clone());
                     changed = true;
@@ -610,6 +641,7 @@ impl ContainerCapacityProjection {
                                     cpus: usage.logical_cores,
                                     memory_bytes: usage.memory_total_bytes,
                                 },
+                                memory_is_pool: usage.memory_pool,
                             },
                         ))
                     })
@@ -842,6 +874,12 @@ mod tests {
         );
         config.save().unwrap();
         let state = crate::daemon::tests::test_runtime_state();
+        // Hard-won: 5e70f76a1: admission fixtures omitted the serving profile catalog.
+        state.profile_catalog.get_or_init(|| {
+            crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                tokio_util::sync::CancellationToken::new(),
+            )
+        });
         let target_ids = vec!["podman".into(), "apple".into()];
         let target = crate::targets::DeploymentCapacityTarget {
             id: "local".into(),
@@ -854,6 +892,7 @@ mod tests {
             probe_error: None,
         };
         let usage = crate::targets::DeploymentCapacityUsage {
+            memory_pool: false,
             cpu_percent: Some(0),
             memory_used_bytes: 0,
             memory_total_bytes: 40 << 30,
@@ -1108,11 +1147,11 @@ mod tests {
             crate::controller::test_support::checkpoint_test_session("reserved-session");
         active.state = mj_core::state::SessionState::Running;
         active.target_template_id = "podman".into();
-        active.target = Some(mj_core::state::TargetLocator::LocalPodman {
+        active.target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
             container_id: "container".into(),
             workspace_storage: Default::default(),
             borrowed_from: None,
-        });
+        }));
         active.resource_allocation = Some(mj_core::state::SessionResourceAllocation::Container {
             cpus: 2,
             memory_bytes: 4 << 30,
@@ -1131,6 +1170,7 @@ mod tests {
             },
         )]);
         let input = ContainerCapacityInput {
+            memory_is_pool: false,
             target_ids: vec!["podman".into()],
             total: mj_core::state::HostContainerSize {
                 cpus: 4,
@@ -1157,16 +1197,17 @@ mod tests {
         let mut source = crate::controller::test_support::checkpoint_test_session("moving-session");
         source.state = mj_core::state::SessionState::Running;
         source.target_template_id = "podman".into();
-        source.target = Some(mj_core::state::TargetLocator::LocalPodman {
+        source.target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
             container_id: "container".into(),
             workspace_storage: Default::default(),
             borrowed_from: None,
-        });
+        }));
         source.resource_allocation = Some(mj_core::state::SessionResourceAllocation::Container {
             cpus: 8,
             memory_bytes: 16 << 30,
         });
         let input = ContainerCapacityInput {
+            memory_is_pool: false,
             target_ids: vec!["podman".into()],
             total: mj_core::state::HostContainerSize {
                 cpus: 10,
@@ -1228,11 +1269,11 @@ mod tests {
         let mut source = crate::controller::test_support::checkpoint_test_session("moving-session");
         source.state = mj_core::state::SessionState::Running;
         source.target_template_id = "podman".into();
-        source.target = Some(mj_core::state::TargetLocator::LocalPodman {
+        source.target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
             container_id: "container".into(),
             workspace_storage: Default::default(),
             borrowed_from: None,
-        });
+        }));
         source.resource_allocation = Some(mj_core::state::SessionResourceAllocation::Container {
             cpus: 8,
             memory_bytes: 16 << 30,
@@ -1254,6 +1295,7 @@ mod tests {
             },
         )]);
         let input = |target_id: &str| ContainerCapacityInput {
+            memory_is_pool: false,
             target_ids: vec![target_id.into()],
             total: mj_core::state::HostContainerSize {
                 cpus: 10,
@@ -1282,16 +1324,17 @@ mod tests {
         let mut source = crate::controller::test_support::checkpoint_test_session("moving-session");
         source.state = mj_core::state::SessionState::Running;
         source.target_template_id = "podman".into();
-        source.target = Some(mj_core::state::TargetLocator::LocalPodman {
+        source.target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
             container_id: "container".into(),
             workspace_storage: Default::default(),
             borrowed_from: None,
-        });
+        }));
         source.resource_allocation = Some(mj_core::state::SessionResourceAllocation::Container {
             cpus: 8,
             memory_bytes: 16 << 30,
         });
         let input = ContainerCapacityInput {
+            memory_is_pool: false,
             target_ids: vec!["podman".into()],
             total: mj_core::state::HostContainerSize {
                 cpus: 10,
@@ -1318,6 +1361,7 @@ mod tests {
     async fn joined_lease_cannot_remove_the_owning_reservation() {
         let state = crate::daemon::tests::test_runtime_state();
         let input = ContainerCapacityInput {
+            memory_is_pool: false,
             target_ids: vec!["podman".into()],
             total: mj_core::state::HostContainerSize {
                 cpus: 8,
@@ -1368,6 +1412,7 @@ mod tests {
             probe_error: None,
         };
         let usage = crate::targets::DeploymentCapacityUsage {
+            memory_pool: false,
             cpu_percent: Some(20),
             memory_used_bytes: 8 << 30,
             memory_total_bytes: 40 << 30,
@@ -1392,6 +1437,7 @@ mod tests {
                 .is_ok()
         );
         let input = ContainerCapacityInput {
+            memory_is_pool: false,
             target_ids: vec!["podman".into()],
             total: mj_core::state::HostContainerSize {
                 cpus: 10,
@@ -1401,11 +1447,11 @@ mod tests {
         let mut source = crate::controller::test_support::checkpoint_test_session("moving-session");
         source.state = mj_core::state::SessionState::Running;
         source.target_template_id = "podman".into();
-        source.target = Some(mj_core::state::TargetLocator::LocalPodman {
+        source.target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
             container_id: "container".into(),
             workspace_storage: Default::default(),
             borrowed_from: None,
-        });
+        }));
         source.resource_allocation = Some(mj_core::state::SessionResourceAllocation::Container {
             cpus: 8,
             memory_bytes: 16 << 30,

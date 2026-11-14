@@ -676,7 +676,7 @@ mod tests {
         )
         .unwrap();
         let mut session = raw_session_on("localhost", checkout.worktree_root.to_str().unwrap());
-        session.managed_worktree = Some(checkout.clone());
+        session.managed_worktree = Some(Box::new(checkout.clone()));
         let assess = || {
             let snapshot = collect_git_snapshot(
                 &SystemGit,

@@ -1,7 +1,6 @@
 use super::*;
 use futures::FutureExt;
 
-const OVERRIDE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 /// Most findings one `override_review` call may decline.
 const MAX_OVERRIDES: usize = 32;
 const FINDING_BYTES: usize = 2 * 1024;
@@ -62,8 +61,8 @@ impl HostState {
             session_id,
             reply,
             "override",
-            |control, persistence, events, owner| {
-                run_override(control, persistence, events, owner, overrides)
+            |control, persistence, _events, owner| {
+                run_override(control, persistence, owner, overrides)
             },
         );
     }
@@ -122,35 +121,11 @@ impl HostState {
             session_id.clone(),
             PreparingOperation::Override {
                 task,
-                admitted: false,
                 result,
                 reply,
             },
         );
         self.publish(&session_id);
-    }
-
-    pub(super) fn override_validated(
-        &mut self,
-        session_id: &str,
-        permit: oneshot::Sender<Result<crate::upgrade::Work, StartRefusal>>,
-    ) {
-        let Some(PreparingOperation::Override { admitted, .. }) =
-            self.preparing.get_mut(session_id)
-        else {
-            let _ = permit.send(Err(StartRefusal("the review host stopped".into())));
-            return;
-        };
-        if crate::controller::move_session::move_owns_session(session_id) {
-            let _ = permit.send(Err(StartRefusal("session is moving".into())));
-            return;
-        }
-        let work =
-            crate::upgrade::activity_unless_draining("push review override").map_err(|error| {
-                StartRefusal(format!("push review override was not admitted: {error:#}"))
-            });
-        *admitted = work.is_ok();
-        let _ = permit.send(work);
     }
 
     pub(super) fn override_finished(&mut self, session_id: &str) {
@@ -170,11 +145,10 @@ impl HostState {
 async fn run_override(
     control: SessionManagerControl,
     persistence: mpsc::UnboundedSender<PersistenceRequest>,
-    events: mpsc::UnboundedSender<HostEvent>,
     session_id: String,
     overrides: Vec<ReviewOverride>,
 ) -> Result<serde_json::Value, StartRefusal> {
-    let (mut state, findings, deltas, protocol) = tokio::time::timeout(OVERRIDE_TIMEOUT, async {
+    let (mut state, findings, deltas, protocol) = async {
         let (reply, loaded) = oneshot::channel();
         persistence
             .send(PersistenceRequest::Load {
@@ -205,7 +179,7 @@ async fn run_override(
             ReviewerAction::CaptureDelta { repositories },
         )
         .await
-        .map_err(StartRefusal)?;
+        .map_err(|error| StartRefusal(format!("{error:#}")))?;
         let ReviewerOutcome::Delta {
             repositories: deltas,
         } = outcome
@@ -230,20 +204,8 @@ async fn run_override(
             ));
         }
         Ok((state, findings, deltas, protocol))
-    })
-    .await
-    .map_err(|_| StartRefusal("push review override preparation exceeded 90 seconds".into()))??;
-
-    let (permit, admitted) = oneshot::channel();
-    events
-        .send(HostEvent::OverrideValidated {
-            session_id: session_id.clone(),
-            permit,
-        })
-        .map_err(|_| StartRefusal("the review host stopped".into()))?;
-    let _admission = admitted
-        .await
-        .map_err(|_| StartRefusal("the review host stopped".into()))??;
+    }
+    .await?;
 
     let declined = overrides
         .iter()
@@ -285,15 +247,10 @@ async fn run_override(
         .map_err(|error| StartRefusal(format!("{error:#}")))?;
     let command_id = new_command_id("push-review-override-notice")
         .map_err(|error| StartRefusal(format!("{error:#}")))?;
-    tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        handle.submit(command_id, RelayCommand::RecordNotice { text: notice }),
-    )
-    .await
-    .map_err(|_| {
-        StartRefusal("the worker did not record the override notice within 10 seconds".into())
-    })?
-    .map_err(|error| StartRefusal(format!("could not record override notice: {error:#}")))?;
+    handle
+        .submit(command_id, RelayCommand::RecordNotice { text: notice })
+        .await
+        .map_err(|error| StartRefusal(format!("could not record override notice: {error:#}")))?;
 
     // Keep pending findings until the worker ref is recorded. A retry can
     // safely repeat either write after a crash.
@@ -301,6 +258,7 @@ async fn run_override(
     let (reply, saved) = oneshot::channel();
     persistence
         .send(PersistenceRequest::SaveAcknowledged {
+            operation: "push review override state",
             session_id: session_id.clone(),
             state: Box::new(state.clone()),
             reply,
@@ -329,11 +287,12 @@ async fn run_override(
         },
     )
     .await
-    .map_err(StartRefusal)?;
+    .map_err(|error| StartRefusal(format!("{error:#}")))?;
     state.push_findings = None;
     let (reply, saved) = oneshot::channel();
     persistence
         .send(PersistenceRequest::SaveAcknowledged {
+            operation: "push review override state",
             session_id,
             state: Box::new(state),
             reply,

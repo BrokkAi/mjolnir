@@ -6,6 +6,7 @@
 //! Nothing in this module touches the filesystem.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use agent_client_protocol::schema::ProtocolVersion as AcpProtocolVersion;
 use agent_client_protocol::v1::schema::{
@@ -632,9 +633,14 @@ pub struct RelayCursor {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RelayOperationalState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assessment: Option<Box<crate::assessment::TurnAssessment>>,
+    pub assessment: Option<Arc<crate::assessment::TurnAssessment>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assessment_context: Option<Box<crate::assessment::ContextHistory>>,
+    pub open_request: Option<crate::assessment::OpenRequest>,
+    /// Retained for checkpoint export; attention reads `open_request`.
+    #[serde(default)]
+    pub person_input_through: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assessment_context: Option<Arc<crate::assessment::ContextHistory>>,
     /// The latest prompt's completion identity; see `TurnCompletion`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_completion: Option<crate::activity::verdict::TurnCompletion>,
@@ -724,13 +730,19 @@ pub struct RelayOperationalState {
     /// Older workers do not report the optional ACP steering extension.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steering_supported: Option<bool>,
+    /// When a message to this working session is delivered, as the worker
+    /// enforces it. Absent from older workers and from harnesses whose
+    /// delivery the worker has not classified; absence never means tool
+    /// boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mailbox_delivery: Option<crate::mailbox::MailboxDeliveryMode>,
     /// Actions decided by the worker against its ordered command queue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_controls: Option<TurnControls>,
-    pub config_options: Vec<SessionConfigOption>,
+    pub config_options: Arc<Vec<SessionConfigOption>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modes: Option<SessionModeState>,
-    pub available_commands: Vec<AvailableCommand>,
+    pub available_commands: Arc<Vec<AvailableCommand>>,
     pub config: BTreeMap<String, String>,
     pub active_prompt: Option<ActiveRelayPrompt>,
     pub queued_prompts: Vec<QueuedRelayPrompt>,
@@ -794,6 +806,42 @@ pub struct RelayOperationalState {
 }
 
 impl RelayOperationalState {
+    /// Whether this worker owns a persistent open request.
+    pub fn supports_open_request(&self) -> bool {
+        self.relay_protocol_version
+            .is_some_and(|version| version >= super::RELAY_OPEN_REQUEST_PROTOCOL)
+    }
+
+    /// The original question target, with compatibility for pre-64 workers.
+    pub fn question_message(&self) -> Option<&str> {
+        if self.supports_open_request() {
+            self.open_request
+                .as_ref()
+                .and_then(|request| request.question_message.as_deref())
+        } else {
+            self.assessment
+                .as_deref()
+                .filter(|assessment| assessment.inferred_question().is_some())
+                .and_then(|assessment| assessment.question_message.as_deref())
+        }
+    }
+
+    /// Reuse unchanged payloads after decoding a new worker response.
+    pub fn share_unchanged_fields(&mut self, previous: &Self) {
+        if self.assessment == previous.assessment {
+            self.assessment = previous.assessment.clone();
+        }
+        if self.assessment_context == previous.assessment_context {
+            self.assessment_context = previous.assessment_context.clone();
+        }
+        if self.available_commands == previous.available_commands {
+            self.available_commands = previous.available_commands.clone();
+        }
+        if self.config_options == previous.config_options {
+            self.config_options = previous.config_options.clone();
+        }
+    }
+
     /// Missing initialization advertises no support for image prompts.
     #[must_use]
     pub fn accepts_prompt_images(&self) -> bool {
@@ -951,6 +999,19 @@ impl RelayOperationalState {
         crate::activity::safe_to_replace(&self.facts(), harness)
     }
 
+    /// Move's purpose-specific interruption decision.
+    #[must_use]
+    pub fn safe_to_move(
+        &self,
+        harness: HarnessKind,
+        purpose: crate::activity::MovePurpose,
+    ) -> bool {
+        if purpose == crate::activity::MovePurpose::Manual {
+            return self.safe_to_replace(harness);
+        }
+        crate::activity::safe_to_move(&self.facts(), harness, purpose)
+    }
+
     /// Terminal startup failure; this worker cannot retry preparation in place.
     #[must_use]
     pub fn harness_preparation_failed(&self) -> bool {
@@ -1059,6 +1120,16 @@ pub struct MailboxHookSteering {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum RelayObservation {
+    QuestionTargetUpdated {
+        question: crate::assessment::InferredQuestion,
+        question_message: String,
+    },
+    ManagedSubagentConfigured {
+        managed: bool,
+    },
+    HandbackCheckStarted {
+        assignment_id: String,
+    },
     TurnAssessmentUpdated {
         assessment: Box<crate::assessment::TurnAssessment>,
     },
@@ -1358,6 +1429,9 @@ pub struct RelayDispatchRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoredHarnessTurn {
+    /// Whether no Mjolnir prompt was in flight when this turn began.
+    #[serde(default)]
+    pub autonomous: bool,
     pub started_at_ms: i64,
     /// Ordinal of the `harness_turn_started` event that opened this turn.
     pub first_ordinal: u64,
@@ -1430,18 +1504,41 @@ fn relay_command_digest(command: &RelayCommand) -> anyhow::Result<String> {
     )?)))
 }
 
+/// Worker-owned assignment identity and evidence, replayed from delivery events.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HandbackChecks {
+    pub assignment_id: Option<String>,
+    pub checked: std::collections::BTreeSet<String>,
+    /// Instructions only, allocated on the first delivered parent assignment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<crate::assessment::ContextHistory>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RelaySnapshot {
+    /// Final reply of the latest completed turn, retained for its late assessment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_reply_message: Option<String>,
+    #[serde(default)]
+    pub managed_subagent: bool,
+    #[serde(default)]
+    pub handback_checks: HandbackChecks,
     /// Survives queue removal and receipt GC, fencing reminders for older turns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_prompt_accepted_ordinal: Option<u64>,
     #[serde(default)]
     pub assessment_questions: std::collections::BTreeSet<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assessment: Option<crate::assessment::TurnAssessment>,
+    pub assessment: Option<Arc<crate::assessment::TurnAssessment>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assessment_context: Option<crate::assessment::ContextHistory>,
+    /// Latest input-requiring completion, retained after the person responds.
+    pub request: Option<crate::assessment::OpenRequest>,
+    #[serde(default)]
+    /// Journal ordinal of the latest person input; only snapshot apply advances it.
+    pub person_input_through: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assessment_context: Option<Arc<crate::assessment::ContextHistory>>,
     /// The latest prompt's completion identity; see `TurnCompletion`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_completion: Option<crate::activity::verdict::TurnCompletion>,
@@ -1521,10 +1618,10 @@ pub struct RelaySnapshot {
     pub agent_info: Option<Implementation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<crate::harness_runtime::RuntimeReceipt>,
-    pub config_options: Vec<SessionConfigOption>,
+    pub config_options: Arc<Vec<SessionConfigOption>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modes: Option<SessionModeState>,
-    pub available_commands: Vec<AvailableCommand>,
+    pub available_commands: Arc<Vec<AvailableCommand>>,
     pub config: BTreeMap<String, String>,
     pub active_prompt: Option<StoredActiveRelayPrompt>,
     pub queued_prompts: Vec<StoredQueuedRelayCommand>,
@@ -1590,19 +1687,23 @@ impl RelaySnapshot {
     /// hands it to Jev or the question locator goes through here.
     pub fn authorization_context(&self) -> Option<crate::assessment::ContextHistory> {
         self.assessment_context
-            .as_ref()
+            .as_deref()
             .map(crate::assessment::ContextHistory::without_generated_prompts)
     }
 
     /// The open turn that began without a prompt.
     pub fn autonomous_harness_turn(&self) -> Option<StoredHarnessTurn> {
-        self.harness_turn
-            .filter(|turn| self.continuation.autonomous_turn_started == Some(turn.first_ordinal))
+        self.harness_turn.filter(|turn| turn.autonomous)
     }
     pub fn new(session_id: String) -> Self {
         Self {
+            handback_checks: Default::default(),
             assessment_questions: Default::default(),
+            completed_reply_message: None,
+            managed_subagent: false,
             assessment: None,
+            request: None,
+            person_input_through: 0,
             assessment_context: Some(Default::default()),
             latest_prompt_accepted_ordinal: None,
             turn_completion: None,
@@ -1636,9 +1737,9 @@ impl RelaySnapshot {
             agent_capabilities: None,
             agent_info: None,
             runtime: None,
-            config_options: Vec::new(),
+            config_options: Arc::default(),
             modes: None,
-            available_commands: Vec::new(),
+            available_commands: Arc::default(),
             config: BTreeMap::new(),
             active_prompt: None,
             queued_prompts: Vec::new(),
@@ -1686,10 +1787,19 @@ impl RelaySnapshot {
             .flatten()
     }
 
+    /// Semantic input is derived from the request and the person's durable frontier.
+    pub fn open_request(&self) -> Option<&crate::assessment::OpenRequest> {
+        self.request.as_ref().filter(|request| {
+            !self.managed_subagent && request.question.completed_ordinal > self.person_input_through
+        })
+    }
+
     pub fn operational_state(&self) -> RelayOperationalState {
         RelayOperationalState {
-            assessment: self.assessment.clone().map(Box::new),
-            assessment_context: self.assessment_context.clone().map(Box::new),
+            assessment: self.assessment.clone(),
+            open_request: self.open_request().cloned(),
+            person_input_through: self.person_input_through,
+            assessment_context: self.assessment_context.clone(),
             turn_completion: self.turn_completion.clone(),
             continuation: self.continuation.clone(),
             relay_protocol_version: None,
@@ -1739,6 +1849,7 @@ impl RelaySnapshot {
             runtime: self.runtime.clone(),
             // Steering support belongs to the connected harness, like readiness.
             steering_supported: None,
+            mailbox_delivery: None,
             turn_controls: None,
             config_options: self.config_options.clone(),
             modes: self.modes.clone(),

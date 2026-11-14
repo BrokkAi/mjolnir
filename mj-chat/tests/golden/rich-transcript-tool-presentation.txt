@@ -1200,8 +1200,8 @@ Tab pane - Ctrl-V paste - Enter send | ctrl+b then q detach - : / ? palette
 │ ▸ Your PR #4623 was reopened.                           ▐│
 │ ▸ External event: A plain event from the CLI.           ▐│
 │ ▸ Child task Check parser finished: failed              ▐│
+│ ▸ PR #4623 was merged by dana.                          ▐│
 │ ▸ Child task Check parser finished: failed              ▐│
-│                                                         ▐│
 │                                                         ▐│
 │                                                         ▐│
 │                                                         ▐│
@@ -1239,8 +1239,8 @@ Tab pane │ ctrl+b then q detach · : / ? palette
 │ ▸ Your PR #4623 was reopened.           ▐│
 │ ▸ External event: A plain event from th…▐│
 │ ▸ Child task Check parser finished: fai…▐│
+│ ▸ PR #4623 was merged by dana.          ▐│
 │ ▸ Child task Check parser finished: fai…▐│
-│                                         ▐│
 │                                         ▐│
 │                                         ▐│
 ╰──────────────────────────────────────────╯
@@ -1264,12 +1264,12 @@ ctrl+b then q detach · : / ? palette
 │ ▸ Your PR #4623 was reopened.           ▐│
 │ ▸ External event: A plain event from th…▐│
 │ ▸ Child task Check parser finished: fai…▐│
+│ ▸ PR #4623 was merged by dana.          ▐│
 │ ▾ Child task Check parser finished:     ▐│
 │   failed                                ▐│
 │ │ 支 持  Unicode and <script>literal      ▐│
 │ │ text</script>.                        ▐│
 │ │ - A report bullet stays in this event.▐│
-│                                         ▐│
 │                                         ▐│
 │                                         ▐│
 │                                         ▐│
@@ -1304,13 +1304,13 @@ copied report: "支持 Unicode and <script>literal text</script>.\n- A report bu
 │ ▸ Your PR #4623 was reopened.           ▐│
 │ ▸ External event: A plain event from th…▐│
 │ ▸ Child task Check parser finished: fai…▐│
+│ ▸ PR #4623 was merged by dana.          ▐│
 │ ▾ Child task Check parser finished:     ▐│
 │   failed                                ▐│
 │ │ 支 持  Unicode and <script>literal      ▐│
 │ │ text</script>.                        ▐│
 │ │ - A report bullet stays in this event.▐│
 │ ▸ Your PR #4625 was merged.             ▐│
-│                                         ▐│
 │                                         ▐│
 │                                         ▐│
 │                                         ▐│
@@ -1350,13 +1350,13 @@ ctrl+b then q detach · : / ? palette
 │ │ directory for details.                ▐│
 │ │ Fixed ‹parser›.                       ▐│
 │ │ Tests passed: "parser".               ▐│
+│ ▸ PR #4623 was merged by dana.          ▐│
 │ ▾ Child task Check parser finished:     ▐│
 │   failed                                ▐│
 │ │ 支 持  Unicode and <script>literal      ▐│
 │ │ text</script>.                        ▐│
 │ │ - A report bullet stays in this event.▐│
 │ ▸ Your PR #4625 was merged.             ▐│
-│                                         ▐│
 │                                         ▐│
 │                                         ▐│
 │                                         ▐│
@@ -1379,7 +1379,7 @@ ctrl+b then q detach · : / ? palette
 ╰──────────────────────────────────────────╯
 ctrl+b then q detach · : / ? palette
 
-=== mailbox report scrolled before collapse (44x22) ===
+=== mailbox report scrolled before collapse (44x24) ===
 ╭ Conversation · message 1 of 1 · End to f…╮
 │ ▸ External event: A plain event from th…││
 │ ▾ Child task Check parser finished:     ││
@@ -1391,10 +1391,12 @@ ctrl+b then q detach · : / ? palette
 │ │ directory for details.                ▐│
 │ │ Fixed ‹parser›.                       ▐│
 │ │ Tests passed: "parser".               ▐│
+│ ▸ PR #4623 was merged by dana.          ▐│
 │ ▾ Child task Check parser finished:     ▐│
 │   failed                                ▐│
-│ │ 支 持  Unicode and <script>literal      ││
+│ │ 支 持  Unicode and <script>literal      ▐│
 │ │ text</script>.                        ││
+│ │ - A report bullet stays in this event.││
 ╰──────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────╮
 │> Message the agent, or / for commands    │
@@ -1424,9 +1426,9 @@ ctrl+b then q detach · : / ? palette
 | | directory for details.                #|
 | | Fixed ‹parser›.                       #|
 | | Tests passed: "parser".               #|
+| ▸ PR #4623 was merged by dana.          #|
 | ▸ Child task Check parser finished: fai.#|
 | ▸ Your PR #4625 was merged.             #|
-|                                         #|
 |                                         #|
 |                                         #|
 |                                         #|
@@ -1458,8 +1460,8 @@ ctrl+b then q detach - : / ? palette
 │ │ Failure: verification timed out       ││
 │ │ Report directory: /reports/child-1    ││
 │ │ Report truncated; see the report      ││
-│ │ directory for details.                ││
-│ │ Fixed ‹parser›.                       ▐│
+│ │ directory for details.                ▐│
+│ │ Fixed ‹parser›.                       ││
 │ │ Tests passed: "parser".               ││
 ╰──────────────────────────────────────────╯
 ╭  mic ────────────────────────────────────╮
@@ -1471,9 +1473,9 @@ ctrl+b then q detach · : / ? palette
 
 === body click collapses the report and restores its header (44x14) ===
 ╭ Conversation ────────────────────────────╮
-│ ▸ Your PR #4623 was reopened.           ││
 │ ▸ External event: A plain event from th…││
 │ ▸ Child task Check parser finished: fai…││
+│ ▸ PR #4623 was merged by dana.          ││
 │ ▸ Child task Check parser finished: fai…││
 │ ▸ Your PR #4625 was merged.             ▐│
 │                                         ▐│
@@ -1512,11 +1514,11 @@ ctrl+b then q detach · : / ? palette
 │ │     details.                                          ▐│
 │ │     Fixed ‹parser›.                                   ▐│
 │ │     Tests passed: "parser".                           ▐│
+│ │   - PR #4623 was merged by dana.                      ▐│
 │ │   - Child task Check parser finished: failed          ▐│
 │ │     支 持  Unicode and <script>literal text</script>.   ▐│
 │ │     - A report bullet stays in this event.            ▐│
 │ │   - Your PR #4625 was merged.                         ▐│
-│                                                         ▐│
 │                                                         ▐│
 │                                                         ▐│
 │                                                         ▐│

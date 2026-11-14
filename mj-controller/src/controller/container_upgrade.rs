@@ -171,7 +171,7 @@ impl Controller {
             .context("legacy target configuration missing")?;
         let mut target = backend::backend_target(
             configured,
-            record.resource_allocation.as_ref(),
+            mj_core::state::applied_container_settings(&record).resource_allocation,
             backend::ContainerOverrides::for_session(&record),
         )?;
         for notice in super::provisioning::enforce_cgroup_capable_limits(&mut target, executor) {
@@ -179,14 +179,14 @@ impl Controller {
         }
         let canonical = match record.target.as_ref() {
             Some(locator) => locator.clone(),
-            None => backend::locator_after_provision_named(
+            None => Box::new(backend::locator_after_provision_named(
                 configured,
                 &target,
                 session_id,
                 None,
                 executor,
                 &targets::resource_name(session_id)?,
-            )?,
+            )?),
         };
         let locator = backend_locator(&canonical, &record, &self.config)?;
         {
@@ -198,13 +198,8 @@ impl Controller {
         let (_, template) = target
             .image_host()
             .context("legacy target is not a supported container")?;
-        let mut mounts = record
-            .target_runtime
-            .as_ref()
-            .and_then(|r| r.container_settings.as_ref())
-            .map_or(record.additional_mounts.as_slice(), |s| {
-                s.additional_mounts.as_slice()
-            })
+        let mut mounts = mj_core::state::applied_container_settings(&record)
+            .additional_mounts
             .to_vec();
         // Reattach recorded cache storage without discovery, allocation or
         // release. Historical applied settings contain only user attachments.
@@ -291,7 +286,8 @@ impl Controller {
             TargetTemplate::LocalPodman { container }
             | TargetTemplate::LocalDocker { container }
             | TargetTemplate::SshPodman { container, .. }
-            | TargetTemplate::SshDocker { container, .. } => container,
+            | TargetTemplate::SshDocker { container, .. }
+            | TargetTemplate::SshNitro { container, .. } => container,
             _ => bail!("this target does not support storage-preserving container upgrades"),
         };
         let workspace = targets::container_workspace_root(session.container_workspace.as_deref());
@@ -323,7 +319,7 @@ impl Controller {
         if let Some(settings) = record
             .target_runtime
             .as_mut()
-            .and_then(|r| r.container_settings.as_mut())
+            .and_then(|r| std::sync::Arc::make_mut(r).container_settings.as_mut())
         {
             settings.default_image =
                 Some((image == mj_core::config::DEFAULT_CONTAINER_IMAGE).then(|| image.to_owned()));

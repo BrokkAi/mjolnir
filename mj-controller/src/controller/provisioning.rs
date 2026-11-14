@@ -69,7 +69,8 @@ pub(super) fn container_start_gate(
         | targets::TargetLocator::AppleContainer { container_id, .. }
         | targets::TargetLocator::SshPodman { container_id, .. }
         | targets::TargetLocator::SshDocker { container_id, .. }
-        | targets::TargetLocator::SshAppleContainer { container_id, .. } => container_id.clone(),
+        | targets::TargetLocator::SshAppleContainer { container_id, .. }
+        | targets::TargetLocator::SshNitro { container_id, .. } => container_id.clone(),
         targets::TargetLocator::LocalBare { .. }
         | targets::TargetLocator::SshBare { .. }
         | targets::TargetLocator::AwsEc2 { .. } => return None,
@@ -327,7 +328,7 @@ impl Controller {
     pub(crate) fn cleanup_failed_startup_controlled(
         &mut self,
         session_id: &str,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
         self.finish_failed_startup_controlled(session_id, executor, false)
     }
@@ -335,7 +336,7 @@ impl Controller {
     fn finish_failed_startup_controlled(
         &mut self,
         session_id: &str,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
         retry_after_stop: bool,
     ) -> Result<()> {
         crate::worker_lifecycle::run_blocking(
@@ -443,7 +444,13 @@ impl Controller {
             Ok((backend, worker_root)) => {
                 let syncing = &StagedExecutor::new(executor, ProvisionStage::Syncing);
                 let prepared = self
-                    .prepare_worker_files(session_id, &backend, &worker_root, syncing)
+                    .prepare_worker_files(
+                        session_id,
+                        &backend,
+                        &worker_root,
+                        syncing,
+                        super::worker_binary::LaunchHistory::Stored,
+                    )
                     .and_then(|()| self.prepare_subagent_report_dir(session_id, &backend, syncing));
                 let result = match prepared {
                     Ok(()) => {
@@ -489,7 +496,7 @@ impl Controller {
         &mut self,
         session_id: &str,
         error: anyhow::Error,
-        target_cleanup_executor: &impl CommandExecutor,
+        target_cleanup_executor: &(impl CommandExecutor + Sync),
     ) -> Result<anyhow::Error> {
         let session = self
             .state
@@ -618,7 +625,7 @@ impl Controller {
                 runtime.tool_cache = recorded.tool_cache.clone();
                 runtime.container_settings = recorded.container_settings.clone();
                 ensure!(
-                    recorded == &runtime,
+                    **recorded == runtime,
                     "target access settings changed before provisioning; retry with the selected target"
                 );
             } else {
@@ -626,7 +633,7 @@ impl Controller {
                     .sessions
                     .get_mut(session_id)
                     .unwrap()
-                    .target_runtime = Some(runtime);
+                    .target_runtime = Some(runtime.into());
                 self.persist_session_state(session_id)?;
             }
             let template = self
@@ -686,6 +693,22 @@ impl Controller {
             for notice in enforce_overlay_capable_mounts(&target, &mut runtime_mounts, executor) {
                 executor.notify_notice(&notice);
             }
+            let build_cache_enabled = {
+                let mut machines = self.config.machines.clone();
+                let stored = mj_core::config::stored_target(
+                    &session.target_template_id,
+                    template,
+                    &mut machines,
+                );
+                machines
+                    .get(stored.machine())
+                    .and_then(|machine| machine.build_cache())
+                    .and_then(|cache| cache.enabled)
+                    != Some(false)
+            };
+            for notice in drop_nitro_host_directories(&target, &mut runtime_mounts, build_cache_enabled) {
+                executor.notify_notice(&notice);
+            }
             let mut bundle = if project_directory.is_some() {
                 None
             } else if let Some(bundle) = self.move_destination_bundle(session_id)? {
@@ -695,6 +718,13 @@ impl Controller {
             } else {
                 Some(backend_session_bundle(&session, &self.config, executor)?)
             };
+            if let Some(bundle) = bundle.as_mut() {
+                super::backend::apply_session_history_cutoff(
+                    &session,
+                    &self.config,
+                    bundle,
+                )?;
+            }
             let container_github_token =
                 github_token.filter(|_| {
                     !session.no_github_credentials && configure_github_token_environment(&mut target)
@@ -721,7 +751,7 @@ impl Controller {
             // the same owner and writer inventory as ordinary teardown.
             let reserved_target = super::backend::locator_after_provision_named(
                 template,&target,session_id,None,executor,&resource_name)?;
-            self.state.sessions.get_mut(session_id).context("session disappeared before target reservation")?.target = Some(reserved_target);
+            self.state.sessions.get_mut(session_id).context("session disappeared before target reservation")?.target = Some(Box::new(reserved_target));
             self.persist_session_state(session_id)?;
             let reserved_environment = crate::database::session_environment(session_id)?.context("target reservation has no environment")?;
 
@@ -736,7 +766,7 @@ impl Controller {
             let runtime = self.state.sessions.get_mut(session_id)
                 .expect("session retained during provisioning")
                 .target_runtime.as_mut().context("selected runtime disappeared")?;
-            runtime.tool_cache = tool_cache;
+            std::sync::Arc::make_mut(runtime).tool_cache = tool_cache;
 
             self.persist_session_state(session_id)?;
             let prepared_cache = bundle
@@ -771,6 +801,10 @@ impl Controller {
                     .as_ref()
                     .context("project bundle disappeared during provisioning")
                     .and_then(|bundle| {
+                        if matches!(target, targets::TargetTemplate::LocalBare) {
+                            let (_, worker_root) = self.worker_placement(session_id)?;
+                            return targets::provision_local_bundle_plan(bundle, &worker_root, github_token);
+                        }
                         targets::provision_plan_named(
                             &target,
                             session_id,
@@ -791,9 +825,26 @@ impl Controller {
                     return Err(error);
                 }
             };
-            if let Some(token) = container_github_token
-                && let Err(error) =
-                    provision.provide_target_environment_secret(&target, "GH_TOKEN", token)
+            // Values that must stay off the command line: the GitHub token,
+            // and, for a sandbox whose engine runs under `sudo`, every
+            // environment value that came from a reference.
+            let mut secrets = match template {
+                TargetTemplate::SshNitro { container, .. } => {
+                    super::backend::container_environment(
+                        container,
+                        ContainerOverrides::for_session(&session),
+                        true,
+                    )
+                    .secrets
+                }
+                _ => Vec::new(),
+            };
+            if let Some(token) = container_github_token {
+                secrets.retain(|(name, _)| name != "GH_TOKEN");
+                secrets.push(("GH_TOKEN".to_owned(), token.to_owned()));
+            }
+            if !secrets.is_empty()
+                && let Err(error) = provision.provide_target_environment_secrets(&target, &secrets)
             {
                 if let Some(cache) = &prepared_cache {
                     let _ = cache.cleanup(executor);
@@ -872,10 +923,10 @@ impl Controller {
                         None => mj_core::state::ContainerSettings::requested(&session),
                     });
                 apply_new_session_provisioning_result(&mut self.state, session_id, Ok(locator))?;
-                self.state.sessions.get_mut(session_id)
+                let runtime = self.state.sessions.get_mut(session_id)
                     .expect("session retained after target creation")
-                    .target_runtime.as_mut().context("selected runtime disappeared")?
-                    .container_settings = container_settings;
+                    .target_runtime.as_mut().context("selected runtime disappeared")?;
+                std::sync::Arc::make_mut(runtime).container_settings = container_settings;
                 self.state
                     .sessions
                     .get_mut(session_id)
@@ -993,6 +1044,7 @@ impl Controller {
             &worker_root,
             syncing,
             super::worker_binary::WorkerFilePreparation::Install,
+            super::worker_binary::LaunchHistory::Stored,
         )?;
         install_attached_resources(&self.state, session_id, &backend, &worker_root, syncing)?;
         Ok(PreparedWorkerPayload {
@@ -1175,7 +1227,7 @@ fn apply_new_session_provisioning_result(
     match result {
         Ok(locator) => {
             let record = state.sessions.get_mut(session_id).unwrap();
-            record.target = Some(locator);
+            record.target = Some(Box::new(locator));
             // Provisioning has completed, but Running is reserved for a
             // successful worker handshake.
             record.state = SessionState::Disconnected;
@@ -1318,7 +1370,7 @@ fn execute_repository_setup(
 fn failed_environment_creation_cleanup(
     environment: &crate::database::EnvironmentRecord,
     config: &Config,
-    executor: &impl CommandExecutor,
+    executor: &(impl CommandExecutor + Sync),
 ) -> String {
     match super::environment::retire_owned_environment(
         environment.clone(),
@@ -1558,12 +1610,56 @@ fn provisioned_locator_named(
                 container_id: container_id()?,
             }
         }
+        targets::TargetTemplate::SshNitro { ssh, .. } => targets::TargetLocator::SshNitro {
+            borrowed_from: None,
+            ssh: ssh.clone(),
+            container_id: container_id()?,
+        },
         targets::TargetTemplate::SshBare { ssh, .. } => targets::TargetLocator::SshBare {
             ssh: ssh.clone(),
             workspace: targets::workspace_for(target, session_id).ok()?,
             worker_id: None,
         },
     })
+}
+
+/// Drop what a Nitro sandbox cannot have and say so.
+///
+/// A sandbox is a virtual machine on the host: Firecracker has no virtio-fs,
+/// so a host directory cannot be attached, and the shared mbx build cache is a
+/// host directory. The session is created without them instead of refused,
+/// and the notice names each thing that is missing so the person is not left
+/// guessing why a build starts cold or an attachment is absent. The session's
+/// stored attachments stay as chosen; this is decided at every creation, like
+/// the overlay downgrade.
+pub(super) fn drop_nitro_host_directories(
+    target: &targets::TargetTemplate,
+    mounts: &mut Vec<targets::AdditionalMount>,
+    build_cache_enabled: bool,
+) -> Vec<String> {
+    if !matches!(target, targets::TargetTemplate::SshNitro { .. }) {
+        return Vec::new();
+    }
+    let mut notices = Vec::new();
+    if !mounts.is_empty() {
+        let attached = mounts
+            .drain(..)
+            .map(|mount| mount.source.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        notices.push(format!(
+            "Nitro sandboxes cannot attach host directories, so this session starts without \
+             {attached}. Copy what it needs into the workspace, or use a Podman target."
+        ));
+    }
+    if build_cache_enabled {
+        notices.push(
+            "Nitro sandboxes cannot share the host's mbx build cache, so builds in this session \
+             start cold."
+                .to_owned(),
+        );
+    }
+    notices
 }
 
 /// Attach read-only whatever the selected container overlay cannot hold, and

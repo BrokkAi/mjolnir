@@ -14,18 +14,18 @@ pub(super) fn forward_subagent_question_with(
     if !request.goes_to_parent() {
         return Ok(false);
     }
-    let relation: Option<(String, Option<String>, String)> = tx
+    let relation: Option<(String, Option<String>, String, String)> = tx
         .query_row(
-            "SELECT a.parent_session_id, p.state, c.title, c.session_title_override,
+            "SELECT a.parent_session_id, p.state, c.state, c.title, c.session_title_override,
                     c.acp_session_title FROM subagent_sessions a
          JOIN sessions c ON c.session_id=a.child_session_id
          LEFT JOIN sessions p ON p.session_id=a.parent_session_id
          WHERE a.child_session_id=?1",
             [child],
             |row| {
-                let title: String = row.get(2)?;
-                let title_override: Option<String> = row.get(3)?;
-                let acp_title: Option<String> = row.get(4)?;
+                let title: String = row.get(3)?;
+                let title_override: Option<String> = row.get(4)?;
+                let acp_title: Option<String> = row.get(5)?;
                 // The name the session list shows, bounded to one line.
                 let name = mj_core::state::listed_session_title(
                     child,
@@ -36,14 +36,25 @@ pub(super) fn forward_subagent_question_with(
                 Ok((
                     row.get(0)?,
                     row.get(1)?,
+                    row.get(2)?,
                     mj_core::state::bounded_one_line(name, mj_core::state::MESSAGE_NAME_CHARS),
                 ))
             },
         )
         .optional()?;
-    let Some((parent, state, title)) = relation else {
+    let Some((parent, state, child_state, title)) = relation else {
         return Ok(false);
     };
+    // The message invites a send_message answer; a child that can no longer
+    // receive work could not receive it. The child's own finish or failure
+    // report already tells the parent how it ended.
+    let child_receivable = mj_core::state::SessionState::from_stored(&child_state)
+        .is_some_and(mj_core::state::SessionState::can_receive_child_work);
+    if !child_receivable {
+        tracing::info!(child_session_id = child, parent_session_id = %parent, child_state = %child_state,
+            elicitation_id = %request.id, "child question not forwarded; the child can no longer receive its answer");
+        return Ok(false);
+    }
     if !matches!(
         state.as_deref(),
         Some("running" | "disconnected" | "provisioning" | "checkpointing" | "parked")

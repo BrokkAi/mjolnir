@@ -32,7 +32,7 @@ use crate::components::{
     scrollbar_geometry, scrollbar_mark_row,
 };
 use crate::theme;
-use agent_client_protocol::v1::schema::{ToolCall, ToolCallContent, ToolKind};
+use agent_client_protocol::v1::schema::{ToolCallContent, ToolKind};
 pub use mj_client::transcript::TAIL_SEED_ITEMS;
 pub(super) use mj_client::transcript::*;
 use ratatui::Frame;
@@ -41,7 +41,6 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Padding, Paragraph, Widget};
-use serde::Deserialize;
 
 use crate::selection::{ContentPos, SelectionRange, SurfaceFrame, SurfaceId};
 use mj_core::state::{MaterializedSession, TranscriptBody, TranscriptItem};
@@ -385,6 +384,7 @@ impl TranscriptSnapshot {
             .entries
             .into_iter()
             .flat_map(|entry| {
+                let entry = std::sync::Arc::unwrap_or_clone(entry);
                 entry
                     .lines
                     .into_iter()
@@ -1042,6 +1042,9 @@ impl ChatState {
                 entry: entry.saturating_add(shift),
                 row,
             };
+        }
+        if self.has_inline_submissions() {
+            self.sync_inline_submissions();
         }
         self.invalidate_render_cache();
         true
@@ -2136,7 +2139,7 @@ impl ToolDiffstatRequest {
         let TranscriptBody::Tool { call, .. } = &item.body else {
             return None;
         };
-        let call = match ToolCall::deserialize(call) {
+        let call = match call.decode() {
             Ok(call) => call,
             Err(error) => {
                 tracing::warn!(

@@ -317,6 +317,7 @@ test('golden_viewer_resume', async ({ context }) => {
   await openSession(selectedPage, 'mutating');
   await captureResumeState(output, selectedPage, 'selected resumable session', selectedState);
   selectedState.snapshot.sessions[0].has_error = true;
+  selectedState.snapshot.sessions[0].attention = 'failed';
   selectedState.snapshot.sessions[0].queued_prompts = [{ id: 'prompt-1', text: 'queued later' }];
   await refresh(selectedPage, selectedState);
   await captureResumeState(output, selectedPage, 'selected card after error and queued prompt arrive', selectedState);
@@ -598,6 +599,7 @@ test('errors and move recovery live in the selected card, with retained source s
     sessions: [session('failed-move', {
       title: 'Failed move',
       has_error: true,
+      attention: 'failed',
       move_recovery: {
         phase: 'failed',
         checkpoint_retained: true,

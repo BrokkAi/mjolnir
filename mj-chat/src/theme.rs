@@ -677,6 +677,7 @@ pub struct Glyphs {
     pub pinned: &'static str,
     pub working: &'static str,
     pub waiting: &'static str,
+    pub important: &'static str,
     pub unread: &'static str,
     pub idle: &'static str,
     pub unknown: &'static str,
@@ -744,11 +745,12 @@ pub const UNICODE_GLYPHS: Glyphs = Glyphs {
     pin: "◇",
     pinned: "◆",
     working: "◐",
-    waiting: "!",
+    waiting: "?",
+    important: "!",
     unread: "✓",
     idle: "○",
     unknown: "·",
-    unreachable: "?",
+    unreachable: "×",
     failed: "×",
     starting: "↑",
     resuming: "↻",
@@ -802,11 +804,12 @@ pub const ASCII_GLYPHS: Glyphs = Glyphs {
     pin: "+",
     pinned: "*",
     working: "*",
-    waiting: "!",
+    waiting: "?",
+    important: "!",
     unread: "+",
     idle: "-",
     unknown: ".",
-    unreachable: "?",
+    unreachable: "x",
     failed: "x",
     starting: "^",
     resuming: "~",
@@ -1399,6 +1402,9 @@ mod tests {
     #[test]
     fn golden_theme_rendering() {
         let mut output = String::new();
+        for (name, glyphs) in [("Unicode", &UNICODE_GLYPHS), ("ASCII", &ASCII_GLYPHS)] {
+            output.push_str(&format!("{name} attention: needs_input={} important={} unread={} failed={} unreachable={}\n", glyphs.waiting, glyphs.important, glyphs.unread, glyphs.failed, glyphs.unreachable));
+        }
 
         let light = ThemeChoice::Fixed(UiTheme::Light);
         let mono = resolve(light, true, None).theme;
@@ -1621,7 +1627,7 @@ mod tests {
             }};
         }
         let entries = entries!(&UNICODE_GLYPHS;
-            pin, pinned, working, waiting, unread, idle, unknown, unreachable,
+            pin, pinned, working, waiting, important, unread, idle, unknown, unreachable,
             failed, starting, resuming, moving, checkpointing, stopping,
             stopped, destroying, selected, ellipsis, row_menu, workspace_menu,
             close, size_minimized, size_standard, size_maximized, warning,

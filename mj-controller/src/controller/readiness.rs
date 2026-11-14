@@ -88,7 +88,7 @@ impl NativeSessionProbe for StandaloneSession {
         let operational = snapshot.operational;
         // A closed relay ends the wait whatever its preparation last said; a
         // worker failure, when there is one, says more than "closed".
-        Ok(match operational.harness_preparation {
+        Ok(match operational.harness_preparation.clone() {
             Some(HarnessPreparation::Failed { step, error, .. }) => {
                 NativeSessionReadiness::PreparationFailed { step, error }
             }
@@ -99,7 +99,10 @@ impl NativeSessionProbe for StandaloneSession {
                 NativeSessionReadiness::Preparing { step, since_ms }
             }
             _ if operational.native_session_is_ready() => NativeSessionReadiness::Ready(
-                operational.native_session_id.expect("ready native session"),
+                operational
+                    .native_session_id
+                    .clone()
+                    .expect("ready native session"),
             ),
             Some(HarnessPreparation::Started) => NativeSessionReadiness::Started,
             None => NativeSessionReadiness::Waiting,

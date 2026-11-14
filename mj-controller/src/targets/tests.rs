@@ -2361,6 +2361,48 @@ fn host_capacity_probe_measures_storage_beside_cpu_and_memory() {
     assert!(usage.memory_total_bytes > 0);
     assert!(!usage.storage.is_empty());
     assert!(usage.storage[0].filesystems[0].total_bytes > 0);
+    assert!(!usage.memory_pool);
+
+    // A Nitro host appends the engine's report, and the pool replaces host RAM
+    // as the total. The engine and `sudo` are stand-ins that record nothing:
+    // the point is the line the probe adds and how it is read.
+    let home = tempfile::tempdir().unwrap();
+    let engine = home.path().join(mj_core::targets::MICROVM_ENGINE_WORKER);
+    std::fs::create_dir_all(engine.parent().unwrap()).unwrap();
+    std::fs::write(
+        &engine,
+        "#!/bin/sh\nprintf '{\\n \"engine_version\":\"2.70.0\",\"state_format\":1,\"firecracker_version\":\"1.18.0\",\"kernel_version\":\"6.18.56\",\\n \"memory_pool_total_mib\":49152,\"memory_pool_free_mib\":45054,\"slots_in_use\":1,\"slots_total\":80,\"cpus\":16}\\n'\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let fakes = tempfile::tempdir().unwrap();
+    mj_core::test_hooks::install_fake_command(
+        fakes.path(),
+        "sudo",
+        "#!/bin/sh\nshift\nexec \"$@\"\n",
+    );
+    let nitro = ssh_nitro_host_capacity_command(&ssh, &[".cache/mjolnir".into()]);
+    let mut probe =
+        CommandSpec::new("sh", ["-c", nitro.args.last().unwrap()]).purpose("test Nitro host probe");
+    probe
+        .env
+        .insert("HOME".into(), home.path().display().to_string());
+    probe.env.insert(
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", fakes.path().display()),
+    );
+    let output = ProcessExecutor.execute(&probe).unwrap();
+    assert_eq!(
+        output.status,
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let usage = parse_host_capacity(&output.stdout, "host").unwrap();
+    assert!(usage.memory_pool);
+    assert_eq!(usage.memory_total_bytes, 49152 << 20);
+    assert_eq!(usage.memory_used_bytes, 4098 << 20);
 }
 
 #[test]
@@ -2728,13 +2770,12 @@ fn checkout_authentication_uses_real_git_without_persisting_the_token() {
             .iter()
             .find(|command| command.purpose == purpose)
             .unwrap()
-            .to_node_run(false)
     };
     assert_eq!(
-        clone("clone app").sensitive_stdin.as_deref(),
+        clone("clone app").sensitive_stdin(),
         Some(b"checkout-only-secret\n".as_slice())
     );
-    assert!(clone("clone libs/lib").sensitive_stdin.is_none());
+    assert!(clone("clone libs/lib").sensitive_stdin().is_none());
 }
 
 fn cutoff_bundle(reference: Option<&str>) -> ProjectBundleSpec {
@@ -3303,6 +3344,7 @@ fn removable_profile_root_names_a_per_session_profile_directory_for_every_harnes
         guardian_review_model: None,
         codex_profile: None,
         muse_auto_review: None,
+        claude_permission_mode: None,
         aws: None,
         ..mj_core::config::HarnessProfile::new(kind, std::path::PathBuf::from(home))
     };
@@ -3383,6 +3425,7 @@ fn a_session_never_runs_from_the_profile_home_itself() {
         guardian_review_model: None,
         codex_profile: None,
         muse_auto_review: None,
+        claude_permission_mode: None,
         aws: None,
         ..mj_core::config::HarnessProfile::new(kind, std::path::PathBuf::from(home))
     };
@@ -5359,4 +5402,42 @@ pub(crate) fn unwrapped_remote_line(remote: &str) -> &str {
     remote
         .strip_prefix(prefix.as_str())
         .unwrap_or_else(|| panic!("{remote:?} does not run under the macOS system PATH"))
+}
+
+// Hard-won: #1508: a failed ps was reported as worker death, allowing duplicate boots.
+#[cfg(unix)]
+#[test]
+fn worker_liveness_does_not_report_death_when_ps_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let ps = bin.join("ps");
+    std::fs::write(
+        &ps,
+        "#!/bin/sh\nprintf 'process listing unavailable\\n' >&2\nexit 71\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&ps, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let worker_root = root.path().join("worker");
+    std::fs::create_dir(&worker_root).unwrap();
+    for pid in [None, Some("999999\n")] {
+        if let Some(pid) = pid {
+            std::fs::write(worker_root.join(mj_core::relay::WORKER_PID_FILE), pid).unwrap();
+        }
+        let output = std::process::Command::new("sh")
+            .args([
+                "-c",
+                &worker_daemon_liveness_script(worker_root.to_str().unwrap()),
+            ])
+            .env("PATH", &path)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(71));
+        assert!(output.stdout.is_empty(), "{output:?}");
+    }
 }

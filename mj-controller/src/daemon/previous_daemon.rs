@@ -58,37 +58,12 @@ fn last_logged_at(data_dir: &Path, pid: u32) -> Option<SystemTime> {
         .max()
 }
 
-/// How far apart the daemon and the `mj node` process it was started with
-/// begin their logs. They start together (the same millisecond in some runs,
-/// a few milliseconds apart in others), and the node's pid is not derived
-/// from the daemon's.
-const SIBLING_LOG_START_WINDOW: chrono::TimeDelta = chrono::TimeDelta::seconds(5);
-
-/// Rename the previous daemon's tracing log, and the log of the `mj node`
-/// that served it, to their crashed names so log retention keeps them apart
-/// from ordinary logs. A process that is still running keeps its name: it may
-/// still be writing. Returns the new paths.
+/// Rename the previous daemon's tracing log to its crashed name so log
+/// retention keeps it apart from ordinary logs. Returns the new paths.
 fn keep_crashed_logs(data_dir: &Path, previous_pid: u32) -> Vec<PathBuf> {
-    let logs = daemon_logs(data_dir);
-    let started = |started: &str| {
-        chrono::NaiveDateTime::parse_from_str(started, mj_core::logging::LOG_TIMESTAMP_FORMAT).ok()
-    };
-    let previous_starts: Vec<_> = logs
-        .iter()
-        .filter(|(_, name)| name.pid == previous_pid && !name.crashed)
-        .filter_map(|(_, name)| started(&name.started))
-        .collect();
     let mut kept = Vec::new();
-    for (path, name) in logs {
-        let is_previous = name.pid == previous_pid;
-        let is_sibling = !is_previous
-            && started(&name.started).is_some_and(|at| {
-                previous_starts
-                    .iter()
-                    .any(|previous| (at - *previous).abs() <= SIBLING_LOG_START_WINDOW)
-            })
-            && !mj_client::daemon::process_is_alive(name.pid);
-        if name.crashed || !(is_previous || is_sibling) {
+    for (path, name) in daemon_logs(data_dir) {
+        if name.crashed || name.pid != previous_pid {
             continue;
         }
         let Some(crashed) = path
@@ -161,13 +136,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_previous_daemon_and_its_node_keep_their_logs_under_crashed_names() {
+    fn the_previous_daemon_keeps_its_log_under_a_crashed_name() {
         let data_dir = tempfile::tempdir().unwrap();
         let logs = data_dir.path().join("logs");
         fs::create_dir_all(&logs).unwrap();
-        // A dead pid: the previous daemon and its node (a few ms apart, as in
-        // the 2026-11-06 incident), an unrelated older daemon, and a live
-        // process's log started in the same second.
+        // A dead pid: the previous daemon, another daemon started a few ms
+        // later, an unrelated older daemon, and a live process's log started
+        // in the same second.
         let dead = u32::MAX - 1;
         let live = std::process::id();
         let names = [
@@ -183,14 +158,14 @@ mod tests {
 
         let kept = keep_crashed_logs(data_dir.path(), dead);
 
-        assert_eq!(kept.len(), 2);
+        assert_eq!(kept.len(), 1);
         let present: std::collections::BTreeSet<String> = fs::read_dir(&logs)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .collect();
         let expected: std::collections::BTreeSet<String> = [
             format!("mj-daemon-20261106T163501.626Z-{dead}.crashed.log"),
-            format!("mj-daemon-20261106T163501.629Z-{}.crashed.log", dead - 1),
+            names[1].clone(),
             names[2].clone(),
             names[3].clone(),
             names[4].clone(),

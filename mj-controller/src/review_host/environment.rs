@@ -17,11 +17,11 @@ pub trait ReviewEnvironment: Send + Sync {
         Ok(())
     }
 
+    /// Chooses the reviewers. A cancelled review drops the returned future.
     fn resolve<'a>(
         &'a self,
         handle: ManagedSessionHandle,
         config: ReviewConfig,
-        cancelled: Arc<std::sync::atomic::AtomicBool>,
     ) -> mj_client::session::BoxFuture<
         'a,
         Result<Vec<mj_core::review::settings::ResolvedReviewSettings>, String>,
@@ -374,32 +374,25 @@ impl ReviewEnvironment for ControllerEnvironment {
         &'a self,
         handle: ManagedSessionHandle,
         config: ReviewConfig,
-        cancelled: Arc<std::sync::atomic::AtomicBool>,
     ) -> mj_client::session::BoxFuture<
         'a,
         Result<Vec<mj_core::review::settings::ResolvedReviewSettings>, String>,
     > {
         Box::pin(async move {
-            let runtime = crate::review_selection::await_or_cancel(&cancelled, self.runtime())
-                .await
-                .map_err(|error| error.to_string())??;
-            let backend = crate::review_selection::await_or_cancel(
-                &cancelled,
-                tokio::time::timeout(std::time::Duration::from_secs(10), async {
-                    loop {
-                        if let Some(backend) = runtime.report_backend.get() {
-                            return backend
-                                .upgrade()
-                                .ok_or_else(|| "reviewer profile service stopped".to_owned());
-                        }
-                        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            let runtime = self.runtime().await?;
+            let backend = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if let Some(backend) = runtime.report_backend.get() {
+                        return backend
+                            .upgrade()
+                            .ok_or_else(|| "reviewer profile service stopped".to_owned());
                     }
-                }),
-            )
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+            })
             .await
-            .map_err(|error| error.to_string())?
             .map_err(|_| "reviewer profile service did not start".to_owned())??;
-            crate::review_selection::resolve(handle, Some(config), cancelled, backend)
+            crate::review_selection::resolve(handle, Some(config), backend)
                 .await
                 .map_err(|e| format!("{e:#}"))
         })

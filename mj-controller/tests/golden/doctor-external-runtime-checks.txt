@@ -1,4 +1,9 @@
 ready Remote Docker for target remote-docker: Remote Docker 27.5.1 is available via dev@docker.example.test; image ghcr.io/example/dev:1.2.3 is present. It carries worker build 2.0.0+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, not this Mjolnir's <this build>, so sessions install the host worker. Run `mj doctor --json --smoke` to verify remote OverlayFS attachments.
+ready Nitro sandboxes for target nitro-ready: Firecracker 1.18.0, 49152 MiB sandbox memory pool (45054 MiB free), kernel 6.18.56-126.188.amzn2023; image ghcr.io/example/dev:1.2.3 is present. Run `mj doctor --json --smoke` to verify a disposable sandbox.
+fixable Nitro sandboxes for target nitro-fresh: Nitro sandbox preflight failed on ec2-user@nitro.example.test: `read the Nitro sandbox engine's host report` exited with status 1: sh: 1: exec: /home/ec2-user/.local/share/hel/microvm/hel: not found
+  remediation: Start a session on target nitro-fresh, or use Test in the Targets pane: the first use installs the sandbox engine on ec2-user@nitro.example.test.
+fixable Nitro sandboxes for target nitro-no-pool: Nitro sandbox preflight failed on ec2-user@nitro.example.test: no memory is reserved for sandboxes. Boot the host with `nitro_enclaves.mempool=95%-1G` and restart it.
+  remediation: Fix the host as the message says, or recreate it with `mj ec2 create --runtime nitro`.
 warning Host limits for target remote-podman: The login user on dev@docker.example.test holds 174 of its 200 kernel keyring quota, and `kernel.keys.maxkeys` is 1000. sshd MaxStartups is 10:30:100. Every container takes a session keyring, so `podman run` fails with `crun: create keyring` once the quota is gone.
   remediation: Raise `kernel.keys.maxkeys` and `kernel.keys.maxbytes` with sysctl on dev@docker.example.test, and close finished sessions promptly.
 warning Host limits for target missing-ssh: Could not read the kernel keyring quota or sshd MaxStartups from dev@docker.example.test: ssh executable is unavailable
@@ -31,3 +36,27 @@ fixable Runtimes for machine laptop: Machine laptop has no runtime, so no sessio
   remediation: Add the host key with `ssh-keyscan -H laptop.example.test >> ~/.ssh/known_hosts`. Verify the fingerprint out of band before trusting it; if the key changed, remove the stale entry with `ssh-keygen -R laptop.example.test` first.
 fixable Runtimes for machine pi: Machine pi has no runtime, so no session can run there, and it can run none. Bare: dev@pi.example.test reported "Linux riscv64": unsupported target architecture "riscv64". Podman: Remote Podman preflight failed on dev@pi.example.test: Postcondition `podman --version` succeeds with Podman 4.0.0 or newer failed. Podman reported: sh: 1: podman: not found. Docker: Docker preflight on dev@pi.example.test failed; run docker info on that SSH host: Docker preflight failed: `docker version` exited with status 127: bash: line 1: docker: command not found. Run `docker info` as the user running Mjolnir. See https://mjolnir.brokk.ai/docker/. Apple container: Apple container runs only on Apple-silicon macOS 26 or newer, and dev@pi.example.test reported "Linux riscv64": unsupported target architecture "riscv64".
   remediation: Mjolnir workers run on Linux and macOS, on x86_64 or arm64. On dev@pi.example.test: Install or upgrade Podman: on macOS `brew install podman` then `podman machine init --now`; Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`. See https://mjolnir.brokk.ai/podman/. Verify `ssh dev@pi.example.test` succeeds noninteractively from this host, then install and start Docker Engine there; make sure `docker info` succeeds for the configured SSH user.
+warning SSH server limits for target remote: Effective SSH server limits on dev@docker.example.test are unknown; passwordless `sudo -n sshd -T` could not read them.
+  remediation: In an SSH connection to the host, run `set -- $SSH_CONNECTION; sudo sshd -T -C "user=$(id -un),addr=$1,host=$1,laddr=$3,lport=$4"` and check MaxSessions and MaxStartups; mj recommends 200 and 100:30:300 respectively.
+warning SSH server limits for target remote: MaxSessions 10, MaxStartups 10:30:100. Mj multiplexes worker relay sessions over shared SSH connections.
+  remediation: On the host, put these lines in /etc/ssh/sshd_config.d/60-mj-mux.conf:
+# mj multiplexes worker relay sessions over shared SSH connections.
+# Measured relay-session refusals at ~40 containers on morannon (Series 20/21).
+MaxSessions 200
+MaxStartups 100:30:300
+This works only if sshd_config includes sshd_config.d/*.conf (most Linux distributions do). Otherwise add the settings to sshd_config itself. Run `sudo sshd -t` to validate before reloading. On Linux with systemd, reload with `sudo systemctl reload "$(systemctl show -p Id --value sshd.service)"`. On macOS, launchd starts sshd for each new connection, so reconnect to apply the settings. Reconnect existing SSH masters, then rerun `mj doctor` to verify the effective values.
+ready SSH server limits for target remote: MaxSessions 200, MaxStartups 100:30:300. Mj multiplexes worker relay sessions over shared SSH connections.
+warning SSH server limits for target remote: MaxSessions 1000, MaxStartups 10:30:100. Mj multiplexes worker relay sessions over shared SSH connections.
+  remediation: On the host, put these lines in /etc/ssh/sshd_config.d/60-mj-mux.conf:
+# mj multiplexes worker relay sessions over shared SSH connections.
+# Measured relay-session refusals at ~40 containers on morannon (Series 20/21).
+MaxStartups 100:30:300
+This works only if sshd_config includes sshd_config.d/*.conf (most Linux distributions do). Otherwise add the settings to sshd_config itself. Run `sudo sshd -t` to validate before reloading. On Linux with systemd, reload with `sudo systemctl reload "$(systemctl show -p Id --value sshd.service)"`. On macOS, launchd starts sshd for each new connection, so reconnect to apply the settings. Reconnect existing SSH masters, then rerun `mj doctor` to verify the effective values.
+warning SSH server limits for target remote: MaxSessions 10, MaxStartups 500:10:1000. Mj multiplexes worker relay sessions over shared SSH connections.
+  remediation: On the host, put these lines in /etc/ssh/sshd_config.d/60-mj-mux.conf:
+# mj multiplexes worker relay sessions over shared SSH connections.
+# Measured relay-session refusals at ~40 containers on morannon (Series 20/21).
+MaxSessions 200
+This works only if sshd_config includes sshd_config.d/*.conf (most Linux distributions do). Otherwise add the settings to sshd_config itself. Run `sudo sshd -t` to validate before reloading. On Linux with systemd, reload with `sudo systemctl reload "$(systemctl show -p Id --value sshd.service)"`. On macOS, launchd starts sshd for each new connection, so reconnect to apply the settings. Reconnect existing SSH masters, then rerun `mj doctor` to verify the effective values.
+ready SSH server limits for target remote: MaxSessions 200, MaxStartups 100:30:300. Mj multiplexes worker relay sessions over shared SSH connections.
+Host-based Match rules were evaluated against the client address and may differ because UseDNS is enabled.

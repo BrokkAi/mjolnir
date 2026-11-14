@@ -35,6 +35,7 @@ const bootStatus = document.querySelector('#boot-status'),
   workspaceStrip = document.querySelector('#workspaces'),
   workspaceSelect = document.querySelector('#workspace-select'),
   subagentWorkspace = document.querySelector('#subagent-workspace'),
+  notificationsBadge = document.querySelector('#notifications-badge'),
   sessions = document.querySelector('#sessions'),
   resumable = document.querySelector('#resumable'),
   resumeListView = document.querySelector('#resume-list-view'),
@@ -133,6 +134,7 @@ const PAGES = {
 const entryNodes = new Map();
 let snapshot,
   route = { name: 'dashboard' },
+  initialWorkspaceSelectionDone = false,
   resumeRouteVisit = 0,
   currentSession,
   moveDraft,
@@ -151,6 +153,10 @@ let snapshot,
 /// failure cannot leave a button dead.
 const pendingActions = new Set();
 const pendingLifecycleActions = new Map();
+/// Session → the notification target its accepted dismissal named. The card
+/// hides that notification's glyph at once rather than waiting for the feed to
+/// lower the session's attention; a cleared or different target renders again.
+const dismissedNotifications = new Map();
 /// Stop failures are tied to a task identity, so a fresh snapshot can redraw
 /// the row without losing the inline error that tells the person what failed.
 const backgroundTaskErrors = new Map();
@@ -360,6 +366,7 @@ function selectedWorkspaceId() {
   if (route.subagentParentId) {
     return sessionById(route.subagentParentId)?.workspace_id;
   }
+  if (route.workspaceId === 'notifications') return 'notifications';
   if (route.workspaceId && workspaces.some(w => w.id === route.workspaceId)) {
     return route.workspaceId;
   }
@@ -382,6 +389,7 @@ function applyRoute() {
     }
   }
   if (!snapshot) return;
+  if (route.name !== 'dashboard' || route.workspaceId !== 'notifications') notificationSnapshot.reset();
 
   // The dashboard names its workspace in the URL, so a reload, a Back press
   // and a shared link all return to the same one. An empty hash is the state
@@ -437,7 +445,7 @@ function applyRoute() {
       quota: 'Quota',
       settings: 'Settings',
       conversation: 'Conversation',
-    }[name] || 'MJ';
+    }[name] || 'Mjolnir';
 
   if (name === 'conversation') {
     openConversation(route.sessionId);
@@ -891,6 +899,7 @@ function renderSettingsSavebar() {
 }
 
 function renderSettings() {
+  refreshDeviceNotifications();
   renderSettingsSavebar();
   settingsError.replaceChildren();
   if (settingsState.error) {
@@ -957,7 +966,9 @@ const dismissedRuntimeNotices = new Set();
 function renderLaunchFailures() {
   const noticeKey = notice => `${viewerState.cursor?.incarnation}:${notice.id}`;
   const notices = (snapshot.launch_failures || []).filter(
-    failure => route.name === 'dashboard' && failure.workspace_id === selectedWorkspaceId() && !dismissedLaunchFailures.has(failure.id),
+    failure => route.name === 'dashboard'
+      && (selectedWorkspaceId() === 'notifications' || failure.workspace_id === selectedWorkspaceId())
+      && !dismissedLaunchFailures.has(failure.id),
   );
   const failureCards = notices.map(failure => {
     const card = el('div', 'card');
@@ -990,9 +1001,14 @@ function renderLaunchFailures() {
 
 function renderWorkspaces() {
   const parentId = route.subagentParentId;
-  const workspaces = snapshot.workspaces || [];
+  const workspaces = [{ id: 'notifications', name: 'Notifications' }, ...(snapshot.workspaces || [])];
   workspaceSelect.classList.toggle('hidden', Boolean(parentId) || !workspaces.length);
   subagentWorkspace.classList.toggle('hidden', !parentId);
+  const notificationCount = notificationRows().length;
+  notificationsBadge.classList.toggle('hidden', Boolean(parentId) || !notificationCount);
+  notificationsBadge.textContent = String(notificationCount);
+  notificationsBadge.setAttribute('aria-label',
+    `${notificationCount} notification${notificationCount === 1 ? '' : 's'}; open Notifications`);
   if (parentId) {
     const parent = sessionById(parentId);
     const reviewers = route.childKind === 'reviewer';
@@ -1004,8 +1020,11 @@ function renderWorkspaces() {
     subagentWorkspace.replaceChildren(el('span', '', reviewers ? `Reviewers · ${title}` : title), close);
     return;
   }
-  // Every snapshot re-renders the route. Rebuilding the options only when the
-  // list itself changes keeps a refresh from closing the picker mid-choice.
+  // Every snapshot re-renders the route, and Firefox for Android stacks a
+  // new native picker on each change to an open select until the page stops
+  // responding. So nothing that changes with attention lives in the select:
+  // the notification count is the badge beside it, and the options are
+  // rebuilt only when the workspace list itself changes.
   const options = JSON.stringify(workspaces.map(workspace => [workspace.id, workspace.name]));
   if (workspaceSelect.dataset.options !== options) {
     workspaceSelect.dataset.options = options;
@@ -1017,7 +1036,8 @@ function renderWorkspaces() {
       }),
     );
   }
-  workspaceSelect.value = selectedWorkspaceId() || '';
+  const selected = selectedWorkspaceId() || '';
+  if (workspaceSelect.value !== selected) workspaceSelect.value = selected;
 }
 
 // ---------------------------------------------------------------------------
@@ -1114,7 +1134,7 @@ function isLoadingConversationSession(session) {
     && !isTransitioningSession(session)
     && session.operation?.kind !== 'checkpoint'
     && session.lifecycle === 'live'
-    && !session.has_error
+    && session.attention !== 'failed'
     && (conversationMode === 'loading' || conversationMode?.startsWith('transition:')
       || conversationMode?.startsWith('move-failure:')),
   );
@@ -1125,11 +1145,22 @@ function isDashboardSession(session) {
     || isTransitioningSession(session);
 }
 
-/// Most recent top-level message first. Title and id keep rows that have not
-/// said anything yet in a stable order as new messages re-sort the list.
+function hasNotification(session) {
+  // An ignored session never interrupts: it neither lists nor counts here. A
+  // notification whose dismissal the daemon accepted is already handled.
+  return session.notifications_ignored !== true
+    && dismissedNotifications.get(session.id)
+      !== JSON.stringify(session.notification_dismissal ?? null)
+    && ['needs_input', 'important', 'failed', 'unreachable'].includes(session.attention);
+}
+
+/// Notifications, unread output, then other sessions; newest message first in each band.
+/// Title and id keep ties stable as messages and attention re-sort the list.
 function orderedSessions(live) {
   return [...live].sort((left, right) =>
-    sessionMessageMs(right) - sessionMessageMs(left)
+    Number(hasNotification(right)) - Number(hasNotification(left))
+    || Number(right.attention === 'unread') - Number(left.attention === 'unread')
+    || sessionMessageMs(right) - sessionMessageMs(left)
     || String(left.title || '').localeCompare(String(right.title || ''))
     || left.id.localeCompare(right.id),
   );
@@ -1149,7 +1180,85 @@ function liveSessions() {
   return [...(viewerState.live.get(selectedWorkspaceId())?.values() || [])];
 }
 
+// Notifications retain cleared rows only for the current inbox visit.
+class NotificationSnapshot {
+  constructor() { this.entries = []; }
+  reset() { this.entries = []; }
+  update(rows, allRows = rows) {
+    const current = new Map(allRows.map(row => [row.id, row]));
+    const retained = new Set(this.entries.map(entry => entry.row.id));
+    this.entries = [
+      ...rows.filter(row => !retained.has(row.id)).map(row => ({ row })),
+      ...this.entries.map(entry => ({
+        row: current.get(entry.row.id) || {
+          ...entry.row, capabilities: {}, operation: null, transitioning: false,
+          lifecycle: 'destroyed', attention: 'inactive', configuration_issue: null, move_recovery: null,
+        },
+      })),
+    ];
+    const entriesById = new Map(this.entries.map(entry => [entry.row.id, entry]));
+    this.entries = orderedSessions(this.entries.map(entry => entry.row)).map(row => entriesById.get(row.id));
+    return this.entries;
+  }
+}
+const notificationSnapshot = new NotificationSnapshot();
+
+function notificationRows() {
+  return [...viewerState.rows.values()].filter(row => !isSubagentSession(row)
+    && hasNotification(row));
+}
+
+/// Dismiss every notification that names a target. Failures and forms carry
+/// no target and stay flagged, as does any row whose dismissal is refused.
+let clearingNotifications = false;
+async function dismissAllNotifications() {
+  if (clearingNotifications) return;
+  clearingNotifications = true;
+  renderRoute();
+  const rows = notificationRows().filter(row => row.notification_dismissal);
+  const failures = [];
+  await Promise.all(rows.map(async row => {
+    const key = `dismiss-notification:${row.id}`;
+    pendingActions.add(key);
+    try {
+      await request('/api/actions', {
+        method: 'POST',
+        body: JSON.stringify({ action: 'dismiss-notification', session_id: row.id, target: row.notification_dismissal }),
+      });
+      dismissedNotifications.set(row.id, JSON.stringify(row.notification_dismissal));
+    } catch (error) {
+      failures.push(`${row.title || row.id}: ${error.message}`);
+    } finally {
+      pendingActions.delete(key);
+    }
+  }));
+  clearingNotifications = false;
+  actionError.textContent = failures.join('\n');
+  await refresh();
+}
+
+function renderNotifications() {
+  const clearAll = button('Clear all', 'secondary');
+  clearAll.id = 'notifications-clear-all';
+  // Only rows naming a dismissal target can be cleared; the rest stay flagged.
+  clearAll.hidden = clearingNotifications
+    || !notificationRows().some(row => row.notification_dismissal);
+  clearAll.onclick = () => dismissAllNotifications();
+  const header = el('div', 'notifications-header');
+  header.append(el('h2', '', 'Notifications'), clearAll);
+  const items = notificationSnapshot.update(notificationRows(), [...viewerState.rows.values()]).map(({ row }) => {
+    let card = sessionCards.get(row.id);
+    if (!card) { card = sessionCard(row); sessionCards.set(row.id, card); }
+    else updateSessionCard(card, row);
+    return card;
+  });
+  reconcileChildren(sessions, [header, ...items, ...(!items.length ? [el('p', 'dim', 'No notifications.')] : [])]);
+}
+
 function renderSessions() {
+  const notifications = !route.subagentParentId && selectedWorkspaceId() === 'notifications';
+  document.querySelector('#dashboard .page-actions').classList.toggle('hidden', notifications);
+  if (notifications) { renderNotifications(); return; }
   const allSessions = liveSessions();
   const parent = sessionById(route.subagentParentId);
   const subagentView = Boolean(route.subagentParentId);
@@ -1198,7 +1307,7 @@ function renderSessions() {
     nativeGroups = reviewerView ? [] : renderNativeSubagents(parent, showIdleSubagents);
   }
   const hiddenNativeCount = subagentView && !reviewerView && !showIdleSubagents
-    ? (parent?.native_subagents || []).filter(isIdleNativeSubagent).length
+    ? (parent?.native_subagents || []).filter(agent => isIdleNativeSubagent(parent, agent)).length
     : 0;
   const controls = [];
   if (subagentView) {
@@ -1281,23 +1390,11 @@ function renderSessions() {
 }
 
 function isIdleSubagentSession(session) {
-  if (!session
-    || session.operation
-    || session.has_error
-    || session.launch_error
-    || session.storage_problem
-    || session.configuration_issue
-    || session.quota_recovery
-    || session.capacity_retry
-    || session.retry_assessment_pending
-    || session.turn_review
-    || ['starting', 'suspending', 'failed'].includes(session.lifecycle)
-    || attentionParts(session).length) return false;
-  return session.state === 'parked' || session.is_idle === true;
+  return ['idle', 'inactive'].includes(session?.attention);
 }
 
-function isIdleNativeSubagent(agent) {
-  return ['completed', 'cancelled'].includes(agent.state) && agent.availability === 'available';
+function isIdleNativeSubagent(parent, agent) {
+  return parent.native_subagent_attention?.[agent.session_id] === 'idle' && agent.availability === 'available';
 }
 
 function renderNativeSubagents(parent, includeIdle) {
@@ -1308,13 +1405,19 @@ function renderNativeSubagents(parent, includeIdle) {
     ['Idle and reusable', a => a.state !== 'running' && a.availability === 'available'],
     ['History and availability unknown', a => a.state !== 'running' && a.availability !== 'available'],
   ].flatMap(([label, matches]) => {
-    const entries = agents.filter(agent => matches(agent) && (includeIdle || !isIdleNativeSubagent(agent)));
+    const entries = agents.filter(agent => matches(agent) && (includeIdle || !isIdleNativeSubagent(parent, agent)));
     if (!entries.length) return [];
     const section = el('section', 'project'); section.append(el('h2', '', label));
     for (const agent of entries) {
       const row = el('div', 'session-card');
       const availability = agent.availability === 'available' ? 'reusable' : agent.availability === 'unavailable' ? 'unavailable' : 'availability unknown';
       row.append(el('strong', '', agent.name), el('p', '', `${agent.state} · ${availability}`));
+      for (const [glyph, label] of attentionParts({ attention: parent.native_subagent_attention?.[agent.session_id] })) {
+        const badge = el('span', 'session-attention-item alert', glyph);
+        badge.setAttribute('aria-label', label);
+        badge.setAttribute('role', 'img');
+        row.append(badge);
+      }
       if (agent.availability_reason) row.append(el('p', 'dim', agent.availability_reason));
       const history = button('View history');
       history.onclick = () => openNativeHistory(parent.id, agent);
@@ -1410,7 +1513,98 @@ async function openNativeHistory(owner, agent) {
   await load();
 }
 
-document.querySelector('#earlier-messages').onclick = () => openConversationHistory(currentSession);
+// The control doubles as a visible retry affordance when automatic paging fails.
+const earlierMessages = document.querySelector('#earlier-messages');
+let inlineHistory = null;
+const liveHistoryRows = new Map();
+function resetInlineHistory() {
+  inlineHistory?.controller.abort();
+  inlineHistory = null;
+  liveHistoryRows.clear();
+  earlierMessages.classList.remove('hidden');
+  earlierMessages.disabled = false;
+  earlierMessages.textContent = 'Earlier messages';
+}
+async function loadInlineHistory() {
+  if (!currentSession || conversationMode !== 'conversation') return;
+  if (!inlineHistory) inlineHistory = {
+    session: currentSession, generation: conversationGeneration,
+    controller: new AbortController(),
+    before: liveHistoryRows.size ? { position: Math.min(...[...liveHistoryRows.values()].map(entry => entry.id)), stable_id: '' } : null,
+    done: false, loading: false,
+    entries: new Map(),
+  };
+  const state = inlineHistory;
+  if (state.loading || (state.done && !state.gap)) return;
+  state.loading = true;
+  state.failed = false;
+  earlierMessages.disabled = true;
+  earlierMessages.textContent = 'Loading earlier messages…';
+  try {
+    let visibleAdded, gap;
+    do {
+      visibleAdded = false;
+      const query = new URLSearchParams();
+      gap = state.gap;
+      const before = gap ? gap.before : state.before;
+      if (before) {
+        query.set('before_position', String(before.position));
+        query.set('before_id', before.stable_id);
+      }
+      const page = await request(`/api/v1/sessions/${encodeURIComponent(state.session)}/history${query.size ? `?${query}` : ''}`, { signal: state.controller.signal });
+      if (inlineHistory !== state || state.generation !== conversationGeneration) return;
+      const anchor = [...feed.children].find(node => node.getBoundingClientRect().bottom > feedScroll.getBoundingClientRect().top);
+      const top = anchor?.getBoundingClientRect().top;
+      const rows = [];
+      const oldest = liveHistoryRows.size ? Math.min(...[...liveHistoryRows.values()].map(entry => entry.id)) : Infinity;
+      for (const item of page.items) {
+        if (item.position >= oldest || state.entries.has(item.stable_id)) continue;
+        const entry = { ...item, id: item.position, lines: item.text.split('\n'), label: item.label || item.role, tone: item.role };
+        state.entries.set(item.stable_id, entry);
+        const node = el('article');
+        node.dataset.entryId = item.stable_id;
+        node.dataset.history = '1';
+        paintEntry(node, entry, null);
+        entryNodes.set(item.stable_id, node);
+        rows.push(node);
+      }
+      state.entries = new Map([...state.entries].sort((a, b) => a[1].position - b[1].position || a[0].localeCompare(b[0])));
+      for (const node of rows) {
+        const position = state.entries.get(node.dataset.entryId).position;
+        const next = [...feed.children].find(child => {
+          const stored = state.entries.get(child.dataset.entryId);
+          const live = liveHistoryRows.get(child.dataset.entryId) || liveHistoryRows.get(Number(child.dataset.entryId));
+          const nextPosition = stored?.position ?? live?.id;
+          return nextPosition > position || (nextPosition === position && stored && stored.stable_id.localeCompare(node.dataset.entryId) > 0);
+        });
+        feed.insertBefore(node, next || null);
+      }
+      if (gap) {
+        gap.before = page.before;
+        if (state.gap === gap && (!page.before || page.items.some(item => item.position <= gap.boundary))) state.gap = null;
+      } else {
+        state.before = page.before;
+        state.done = !page.before;
+      }
+      earlierMessages.classList.toggle('hidden', state.done && !state.gap);
+      earlierMessages.textContent = 'Earlier messages';
+      visibleAdded = rows.some(node => node.getBoundingClientRect().height > 0);
+      if (anchor) feedScroll.scrollTop += anchor.getBoundingClientRect().top - top;
+    } while (state.gap || (!visibleAdded && !state.done && !gap));
+  } catch (error) {
+    if (inlineHistory === state && !state.controller.signal.aborted) {
+      state.failed = true;
+      earlierMessages.classList.remove('hidden');
+      earlierMessages.textContent = `Retry earlier messages: ${error.message}`;
+    }
+  } finally {
+    if (inlineHistory === state) {
+      state.loading = false;
+      earlierMessages.disabled = false;
+    }
+  }
+}
+earlierMessages.onclick = () => void loadInlineHistory();
 
 /// Page through a session's stored messages, newest page first. Opened for
 /// the current conversation it shows the pages before the feed and closes if
@@ -1523,24 +1717,28 @@ function sessionCard(session) {
   return card;
 }
 
-function pendingFormCount(session) {
-  return session.detail === false
-    ? session.pending_elicitation_count || 0
-    : (session.pending_elicitations || []).length;
-}
-
-/// A child's open form is an approval only a person can give, and the child
-/// has no card in the main list, so its parent's card says so.
+/// Severity, including unread, is served by the daemon.
 function attentionParts(session) {
   const parts = [];
   if (session.operation?.kind === 'move') parts.push(['→', 'Moving']);
-  if (session.has_error) parts.push(['!', 'Error']);
-  if (pendingFormCount(session)) parts.push(['?', 'Input needed']);
-  else if (waitingChildCount(session)) parts.push(['?', 'Sub-agent input needed']);
+  // An ignored session never interrupts, and a notification whose dismissal
+  // the daemon already accepted is done: neither shows an attention glyph.
+  const dismissed = dismissedNotifications.get(session.id)
+    === JSON.stringify(session.notification_dismissal ?? null);
+  const attention = session.notifications_ignored === true || dismissed ? undefined : {
+    needs_input: ['?', 'Input needed'],
+    important: ['!', 'Important'],
+    unread: ['✓', 'Unread'],
+    failed: ['×', 'Failed'],
+    unreachable: ['×', 'Unreachable'],
+  }[session.attention];
+  if (attention) parts.push(attention);
   const queued = session.detail === false
     ? session.queued_prompt_count || 0
     : (session.queued_prompts || []).length;
-  if (queued) parts.push([String(queued), `${queued} queued prompt${queued === 1 ? '' : 's'}`]);
+  // Q marks the count as queued prompts, as the TUI does, so it does not
+  // read as a notification count.
+  if (queued) parts.push([`Q${queued}`, `${queued} queued prompt${queued === 1 ? '' : 's'}`, 'queue']);
   return parts;
 }
 
@@ -1549,6 +1747,8 @@ function sessionMenuActions(session) {
   const actions = [];
   if (session.configuration_issue) actions.push(['Repair configuration…', 'secondary', 'repair-config']);
   if (session.lifecycle === 'live' && !isTransitioningSession(session)) actions.push(['Changed files…', 'secondary', 'changed-files']);
+  if (can.dismiss_notification) actions.push(['Dismiss notification', 'secondary', 'dismiss-notification']);
+  actions.push([session.notifications_ignored ? 'Stop ignoring' : 'Ignore', 'secondary', 'set-session-notifications-ignored']);
   if (can.rename) actions.push(['Rename', 'secondary', 'rename']);
   if (can.change_workspace) actions.push(['Change workspace…', 'secondary', 'change-workspace']);
   if (can.container_settings) actions.push(['Container settings…', 'secondary', 'container-settings']);
@@ -1588,8 +1788,8 @@ function updateSessionCard(card, session) {
   );
   renderSessionTitle(card._heading, session);
   card._attention.replaceChildren(
-    ...attention.map(([glyph, label]) => {
-      const node = el('span', `session-attention-item ${['Error', 'Input needed', 'Sub-agent input needed'].includes(label) ? 'alert' : ''}`, glyph);
+    ...attention.map(([glyph, label, kind]) => {
+      const node = el('span', `session-attention-item ${kind || (['Failed', 'Unreachable', 'Input needed', 'Important'].includes(label) ? 'alert' : '')}`, glyph);
       node.setAttribute('aria-label', label);
       node.setAttribute('role', 'img');
       node.title = label;
@@ -1613,13 +1813,48 @@ function updateSessionCard(card, session) {
   updateSessionMenu(card, session);
 }
 
+function renderNotificationDismissal(container, session, errorNode) {
+  let control = container.querySelector('[data-dismiss-notification]');
+  if (!session.capabilities?.dismiss_notification) {
+    control?.remove();
+    return;
+  }
+  if (!control) {
+    control = button('Dismiss notification', 'secondary');
+    control.dataset.dismissNotification = 'true';
+    container.append(control);
+  }
+  control.disabled = pendingActions.has(`dismiss-notification:${session.id}`);
+  control.dataset.action = 'dismiss-notification';
+  control.dataset.id = session.id;
+  markNotificationDismissal(control, session);
+  control.onclick = event => {
+    event.stopPropagation();
+    return runSessionAction(control.dataset, errorNode);
+  };
+}
+
+/// A dismissal names the notification its control showed, so a tap clears
+/// what the person saw and not one that arrived after the last render.
+function markNotificationDismissal(control, session) {
+  if (control.dataset.action !== 'dismiss-notification') return;
+  control.dataset.notificationDismissal = JSON.stringify(session.notification_dismissal ?? null);
+}
+
 function updateSessionMenu(card, session) {
   const actions = sessionMenuActions(session);
-  const signature = actions.map(action => action[2]).join('|');
+  // The bare top line reads the session's model, effort, and profile.
+  const options = session.config_options || [];
+  const current = key => options.find(option => option.key === key)?.current;
+  const info = [current('model'), current('effort'), session.profile_id].filter(Boolean).join(' · ');
+  // Labels carry state too ("Ignore" flips when it applies), so a label-only
+  // change must rebuild the same-length menu.
+  const signature = [info, ...actions.map(([label, , name]) => `${name}=${label}`)].join('|');
   const menuChanged = card._sessionMenuSignature !== signature;
   if (menuChanged) {
     const activeAction = card._menu?.ownerDocument?.activeElement?.dataset?.action;
     card._menu.replaceChildren(
+      ...(info ? [el('div', 'session-menu-info', info)] : []),
       ...actions.map(([label, className, actionName]) => {
         const control = action(label, className, {
           action: actionName,
@@ -1628,6 +1863,7 @@ function updateSessionMenu(card, session) {
           target: session.target_id,
         });
         control.setAttribute('role', 'menuitem');
+        markNotificationDismissal(control, session);
         return control;
       }),
     );
@@ -1641,6 +1877,7 @@ function updateSessionMenu(card, session) {
     for (const control of card._menu.querySelectorAll?.('button[data-action]') || []) {
       control.dataset.profile = session.profile_id || '';
       control.dataset.target = session.target_id || '';
+      markNotificationDismissal(control, session);
       control.disabled = pendingActions.has(`${control.dataset.action}:${session.id}`);
     }
   }
@@ -1724,10 +1961,12 @@ function sessionActivityLabel(session, now = serverClockMs()) {
   // A sub-agent whose turn ended: idle, with its processes stopped until its
   // parent sends it more input.
   if (session.state === 'parked') return 'Parked';
-  if (session.has_error && isTransitioningSession(session)) return 'Needs recovery';
+  if (session.attention === 'failed' && isTransitioningSession(session)) return 'Needs recovery';
   if (['starting', 'suspending', 'failed'].includes(session.lifecycle)) {
     return sessionLifecycleLabel(session);
   }
+  const attentionLabel = { needs_input: 'Input needed', important: 'Important', failed: 'Failed', unreachable: 'Unreachable' }[session.attention];
+  if (attentionLabel) return attentionLabel;
   if (session.quota_recovery) {
     const deadline = session.quota_recovery.retry_at_ms;
     return deadline == null ? 'Quota limit · reset time unknown' : `Quota limit · resumes ${new Date(deadline).toLocaleString()}`;
@@ -1773,7 +2012,7 @@ function sessionActivityLabel(session, now = serverClockMs()) {
   if (kind === 'lifecycle') return details.label || sessionLifecycleLabel(session);
   if (kind) return details.label || kind;
   if (session.activity) return session.activity;
-  if (session.is_idle && idleStarted != null) return idleSinceLabel(idleStarted, now);
+  if (session.attention === 'idle' && idleStarted != null) return idleSinceLabel(idleStarted, now);
   return sessionLifecycleLabel(session);
 }
 
@@ -1867,7 +2106,7 @@ function beginSessionPress(event) {
         activeSessionPress.id !== card.dataset.sessionId ||
         current !== card ||
         card.isConnected === false ||
-        !sessionInWorkspace(card.dataset.sessionId, selectedWorkspaceId()) ||
+        (selectedWorkspaceId() !== 'notifications' && !sessionInWorkspace(card.dataset.sessionId, selectedWorkspaceId())) ||
         !sessionMenuActions(card._session).length
       ) {
         cancelSessionPress();
@@ -2131,7 +2370,9 @@ function parseMemoryGiB(text) {
   return Number(bytes);
 }
 
-function containerAllocationFromDraft(draft, target) {
+function containerAllocationFromDraft(draft, target, savedAllocation = undefined) {
+  const editing = savedAllocation !== undefined;
+  const unchanged = editing && draft.resourceCpuText.trim() === String(savedAllocation?.cpus) && parseMemoryGiB(draft.resourceMemoryText) === savedAllocation?.memory_bytes;
   const invalid = error => ({ allocation: null, error, warning: '' });
   const cpuText = draft.resourceCpuText.trim();
   if (!/^\d+$/.test(cpuText)) return invalid('CPU must be a positive whole number.');
@@ -2139,12 +2380,12 @@ function containerAllocationFromDraft(draft, target) {
   if (cpusBig < 1n || cpusBig > BigInt(Number.MAX_SAFE_INTEGER)) {
     return invalid('CPU must be a positive whole number.');
   }
-  if (cpusBig < BigInt(MIN_CONTAINER_CPUS)) {
+  if (!unchanged && cpusBig < BigInt(MIN_CONTAINER_CPUS)) {
     return invalid(`CPU must be at least ${MIN_CONTAINER_CPUS}.`);
   }
   const memoryBytes = parseMemoryGiB(draft.resourceMemoryText);
   if (memoryBytes === null) return invalid('MEM must be a positive number of GiB (up to 30 decimal places).');
-  if (BigInt(memoryBytes) < MIN_CONTAINER_MEMORY_BYTES) {
+  if (!unchanged && BigInt(memoryBytes) < MIN_CONTAINER_MEMORY_BYTES) {
     return invalid('RAM must be at least 4 GiB.');
   }
   const capacity = target?.container_capacity;
@@ -2157,10 +2398,10 @@ function containerAllocationFromDraft(draft, target) {
   }
   const allocation = { kind: 'container', cpus: Number(cpusBig), memory_bytes: memoryBytes };
   let error = '';
-  if (target?.container_memory_hard_limit && (!capacity || !capacity.complete || BigInt(memoryBytes) > BigInt(capacity.remaining.memory_bytes))) {
+  if (!editing && target?.container_memory_hard_limit && (!capacity || !capacity.complete || BigInt(memoryBytes) > BigInt(capacity.remaining.memory_bytes))) {
     error = !capacity || !capacity.complete
-      ? 'a live container on this Mac has no recorded RAM size, so Mjolnir cannot work out the RAM left safely'
-      : `this session asks for ${capacityGiBText(memoryBytes)} GiB of RAM, but this Mac has ${capacityGiBText(capacity.remaining.memory_bytes)} GiB left after the macOS reserve and live containers. Apple containers do not give freed memory back to macOS, so Mjolnir does not overcommit RAM on a Mac. Suspend or stop a session on this Mac, or choose less RAM. Mjolnir does not stop sessions automatically`;
+      ? 'a live container on this host has no recorded RAM size, so Mjolnir cannot work out the RAM left safely'
+      : `this session asks for ${capacityGiBText(memoryBytes)} GiB of RAM, but this host has ${capacityGiBText(capacity.remaining.memory_bytes)} GiB left after its reserve and live containers. RAM is a hard limit on this host, so Mjolnir does not overcommit it: Apple containers do not give freed memory back to macOS, and Nitro sandboxes take theirs from the memory pool the host reserved at boot. Suspend or stop a session on this host, or choose less RAM. Mjolnir does not stop sessions automatically`;
   }
   const remaining = capacity?.remaining ?? target?.container_host_limits;
   const overcommitsCpu = Boolean(remaining && cpusBig > BigInt(remaining.cpus));
@@ -2276,7 +2517,7 @@ function renderNewTargetSizingControls(draft, host) {
     } else if (target.container_host_limits) {
       host.append(el('p', 'dim', `Host: ${target.container_host_limits.cpus} CPUs and ${capacityGiBText(target.container_host_limits.memory_bytes)} GiB RAM. RAM left is unavailable until the capacity probe answers.`));
     }
-    const saveDefault = el('label', 'field');
+    const saveDefault = el('label', 'field-inline');
     const saveDefaultInput = el('input');
     saveDefaultInput.type = 'checkbox';
     saveDefaultInput.id = 'new-save-default-size';
@@ -2284,7 +2525,7 @@ function renderNewTargetSizingControls(draft, host) {
     saveDefaultInput.onchange = () => {
       draft.rememberContainerSize = saveDefaultInput.checked;
     };
-    saveDefault.append(saveDefaultInput, document.createTextNode(' Save as default sizing'));
+    saveDefault.append(saveDefaultInput, document.createTextNode('Save as default sizing'));
     host.append(saveDefault);
     const error = el('p', 'error', newResourceAllocationError(draft));
     error.id = 'new-resource-error';
@@ -2360,7 +2601,7 @@ function selectNewProfile(draft, profileId) {
 // Mirrors HarnessKind::supports_delegation_tools.
 function subagentChoiceApplies(draft = newDraft) {
   const kind = snapshot?.profiles.find(profile => profile.id === draft?.profileId)?.harness_kind;
-  return kind === 'claude' || kind === 'codex' || kind === 'dsh' || kind === 'opencode';
+  return kind === 'claude' || kind === 'codex' || kind === 'dsh' || kind === 'opencode' || kind === 'antigravity';
 }
 
 // Every top-level session's message-only server carries ask_oracle, whatever its harness.
@@ -2372,7 +2613,7 @@ function oracleChoiceApplies(draft = newDraft) {
 // do nothing there and is not offered.
 function subagentNativeOffered(draft = newDraft) {
   const kind = snapshot?.profiles.find(profile => profile.id === draft?.profileId)?.harness_kind;
-  return kind !== 'dsh';
+  return kind !== 'dsh' && kind !== 'antigravity';
 }
 
 // A policy as the delegation choice shows and submits it for the draft's
@@ -2620,21 +2861,34 @@ function renderNewForm() {
         if (!newDraft.projectDirectory && !Object.hasOwn(newDraft.projectDirectories, newDraft.targetId)) {
           newDraft.projectDirectory = recents[0] || '';
         }
-        if (recents.length) {
-          const recentList = el('div', 'recent-projects');
-          recentList.append(el('p', 'dim', 'Recent projects on this host'));
-          for (const directory of recents) {
-            const pick = el('button', 'secondary recent-project', directory);
-            pick.type = 'button';
-            pick.onclick = () => {
-              newDraft.projectDirectory = directory;
-              newDraft.projectDirectories[newDraft.targetId] = directory;
-              newDraft.preflighted = false;
-              document.querySelector('#new-project-directory').value = directory;
-            };
-            recentList.append(pick);
+        // Only the ten most recent projects earn a row in the picker; older
+        // entries stay reachable by typing the path or browsing folders.
+        const shownRecents = recents.slice(0, 10);
+        if (shownRecents.length) {
+          const field = el('label', 'field');
+          field.append(el('span', '', 'Recent projects on this host'));
+          const select = el('select');
+          select.id = 'new-recent-project';
+          const placeholder = el('option', '', 'Choose a recent project…');
+          placeholder.value = '';
+          placeholder.disabled = true;
+          placeholder.hidden = true;
+          select.append(placeholder);
+          for (const directory of shownRecents) {
+            const option = el('option', '', directory);
+            option.value = directory;
+            select.append(option);
           }
-          body.append(recentList);
+          select.value = shownRecents.includes(newDraft.projectDirectory) ? newDraft.projectDirectory : '';
+          select.onchange = () => {
+            if (!select.value) return;
+            newDraft.projectDirectory = select.value;
+            newDraft.projectDirectories[newDraft.targetId] = select.value;
+            newDraft.preflighted = false;
+            document.querySelector('#new-project-directory').value = select.value;
+          };
+          field.append(select);
+          body.append(field);
         }
         body.append(
           pathField(
@@ -2645,6 +2899,8 @@ function renderNewForm() {
               newDraft.projectDirectory = value;
               newDraft.projectDirectories[newDraft.targetId] = value;
               newDraft.preflighted = false;
+              const picker = document.querySelector('#new-recent-project');
+              if (picker) picker.value = shownRecents.includes(value) ? value : '';
             },
             {
               host: () => newDraft.targetId,
@@ -4231,7 +4487,7 @@ function resumeCardSignature(session) {
     session.lifecycle,
     session.operation?.kind,
     session.state,
-    session.has_error,
+    session.attention,
     session.configuration_issue,
     session.title,
     session.display_location,
@@ -4301,7 +4557,7 @@ function updateResumeCard(card, session, rebuild = false) {
   if (session.state === 'lost' && !recovery?.checkpoint_retained) body.append(el('p', 'resume-status error', 'The session is lost. No verified recovery checkpoint is available.'));
   else if (session.state === 'destroyed-with-data-loss') body.append(el('p', 'resume-status error', 'The session was destroyed with data loss. No session data remains to resume.'));
   else if (session.configuration_issue) body.append(el('p', 'resume-status error', session.configuration_issue));
-  else if (session.has_error) body.append(el('p', 'resume-status error', 'The previous operation reported an error. Review the available choices before trying again.'));
+  else if (session.attention === 'failed') body.append(el('p', 'resume-status error', 'The previous operation reported an error. Review the available choices before trying again.'));
   const move = resumeMoveRecovery(session);
   if (move.status) {
     body.append(el('p', '', move.status));
@@ -5032,6 +5288,10 @@ function renderQuota() {
     [...quotaPanel.querySelectorAll('details[open]')].map(row => row.dataset.profileId),
   );
   const profiles = snapshot.profiles || [];
+  const rows = profiles.flatMap(profile => {
+    const pools = profile.quota_pools || [];
+    return pools.length ? pools.map(pool => ({ profile, pool })) : [{ profile, pool: null }];
+  });
   if (!profiles.length) {
     quotaPanel.replaceChildren(el('p', 'dim', 'No profiles configured.'));
     return;
@@ -5053,19 +5313,24 @@ function renderQuota() {
   quotaPanel.replaceChildren(
     hint,
     heading,
-    ...profiles.map(profile => {
+    ...rows.map(({ profile, pool }) => {
       const disclosure = el('details', 'quota-profile');
-      disclosure.dataset.profileId = profile.id;
-      disclosure.open = expanded.has(profile.id);
+      const rowId = pool ? `${profile.id}:${pool}` : profile.id;
+      const displayName = pool ? `${profile.id} (${pool})` : profile.id;
+      disclosure.dataset.profileId = rowId;
+      disclosure.open = expanded.has(rowId);
       const summary = el('summary', 'quota-overview-row');
-      const quota = profile.quota;
-      const name = el('span', 'quota-profile-name', profile.id);
+      const quota = pool && profile.quota ? {
+        ...profile.quota,
+        windows: (profile.quota.windows || []).filter(window => window.pool === pool),
+      } : profile.quota;
+      const name = el('span', 'quota-profile-name', displayName);
       const hold = quotaHoldText(Math.floor(serverClockMs() / 1000), quota);
       if (hold) name.append(el('small', 'reading-mid', hold));
       else if (quota?.has_error) name.append(el('small', 'reading-low', 'probe failed'));
       else if (quota?.stale) name.append(el('small', 'reading-mid', 'stale'));
       summary.append(name);
-      const spoken = [profile.id, hold || (quota?.has_error ? 'probe failed; last reading' : quota?.stale ? 'stale reading' : '')];
+      const spoken = [displayName, hold || (quota?.has_error ? 'probe failed; last reading' : quota?.stale ? 'stale reading' : '')];
       if (quota?.windows?.length) {
         for (const label of labels) {
           const window = quota.windows.find(window => window.label === label);
@@ -5432,15 +5697,11 @@ function workingChildCount(session) {
     .length;
 }
 
-/// Children with an open form, which only a person can answer, counting a
-/// child whose own reviewer holds one. Validation rejects ownership cycles;
-/// `seen` keeps a malformed snapshot finite anyway.
-function waitingChildCount(session, seen = new Set()) {
-  if (!session || seen.has(session.id)) return 0;
-  seen.add(session.id);
-  return (session.subagent_session_ids || [])
+/// Served child attention already includes their descendants' open forms.
+function waitingChildCount(session) {
+  return (session?.subagent_session_ids || [])
     .map(id => sessionById(id))
-    .filter(child => child && (pendingFormCount(child) || waitingChildCount(child, seen)))
+    .filter(child => child?.attention === 'needs_input')
     .length;
 }
 
@@ -5914,14 +6175,14 @@ function openContainerSettings(session) {
   const cpusField = el('label', 'field');
   cpusField.append(el('span', '', 'CPUs'));
   const cpusInput = el('input');
-  cpusInput.value = session.container_cpus || '';
+  cpusInput.value = session.resource_allocation?.cpus?.toString() || '';
   cpusInput.placeholder = '2';
   cpusField.append(cpusInput);
   const memoryField = el('label', 'field');
-  memoryField.append(el('span', '', 'Memory'));
+  memoryField.append(el('span', '', 'Memory (GiB)'));
   const memoryInput = el('input');
-  memoryInput.value = session.container_memory || '';
-  memoryInput.placeholder = '8g';
+  memoryInput.value = session.resource_allocation ? memoryGiBText(session.resource_allocation.memory_bytes) : '';
+  memoryInput.placeholder = '8';
   memoryField.append(memoryInput);
 
   const editor = freshMountEditor(session.additional_mounts);
@@ -5939,6 +6200,10 @@ function openContainerSettings(session) {
     controls,
   );
   confirm.onclick = async () => {
+    const parsed = !cpusInput.value.trim() && !memoryInput.value.trim()
+      ? { allocation: null, error: null }
+      : containerAllocationFromDraft({resourceCpuText: cpusInput.value, resourceMemoryText: memoryInput.value}, snapshot?.targets.find(target => target.id === session.target_id), session.resource_allocation ?? null);
+    if (parsed.error) { error.textContent = parsed.error; return; }
     confirm.disabled = true;
     error.textContent = '';
     try {
@@ -5947,8 +6212,7 @@ function openContainerSettings(session) {
         body: JSON.stringify({
           action: 'set-container-settings',
           session_id: session.id,
-          cpus: cpusInput.value.trim(),
-          memory: memoryInput.value.trim(),
+          resource_allocation: parsed.allocation,
           mounts: mountEditorWire(editor),
         }),
       });
@@ -6108,6 +6372,17 @@ function refreshOpenSubagentContext(id) {
 
 function presentSnapshot(detailChangedIds = []) {
   snapshot = viewerState.metadata;
+  if (!initialWorkspaceSelectionDone) {
+    initialWorkspaceSelectionDone = true;
+    route = parseRoute(location.hash);
+    // Only workspace views; a conversation or sub-agent link opens as linked.
+    if (route.name === 'dashboard' && !route.subagentParentId && notificationRows().length > 0) {
+      const hash = routeHash({ name: 'dashboard', workspaceId: 'notifications' });
+      history.replaceState(history.state, '', `${location.pathname}${location.search}${hash}`);
+      route = parseRoute(hash);
+    }
+  }
+  withdrawResolvedNotifications();
   discardQueuedOperatorActivityIfDisabled();
   activitySignalFailed = false;
   signedOut = false;
@@ -7946,6 +8221,7 @@ function atTail() {
 function scrollToTail() {
   feedScroll.scrollTop = feedScroll.scrollHeight;
   jumpToLatest.classList.add('hidden');
+  scheduleConversationRead();
 }
 
 function entryBody(entry) {
@@ -8067,9 +8343,33 @@ function turnPromptText(entry, previous) {
 function renderEntries(entries, replace) {
   if (typeof reconcileSubmissions === 'function') reconcileSubmissions(currentSession, entries.map(entry => entry.command_id).filter(Boolean));
   const wasAtTail = atTail();
+  const previousOldest = liveHistoryRows.size ? Math.min(...[...liveHistoryRows.values()].map(entry => entry.id)) : Infinity;
+  const anchor = replace && !wasAtTail ? [...feed.children].find(node => node.getBoundingClientRect().bottom > feedScroll.getBoundingClientRect().top) : null;
+  const anchorId = anchor?.dataset.entryId;
+  const anchorTop = anchor?.getBoundingClientRect().top;
+  if (replace) liveHistoryRows.clear();
+  for (const entry of entries) liveHistoryRows.set(entry.stable_id || entry.id, entry);
   if (replace) {
+    const retained = inlineHistory ? [...inlineHistory.entries.values()] : [];
+    const oldest = entries.length ? Math.min(...entries.map(entry => entry.id)) : Infinity;
+    if (inlineHistory && oldest > previousOldest && Number.isFinite(oldest)) {
+      // One loader owns both cursors, including resets during an in-flight page.
+      const boundary = inlineHistory.gap?.boundary ?? previousOldest;
+      inlineHistory.gap = { before: { position: oldest, stable_id: '' }, boundary };
+      earlierMessages.classList.remove('hidden');
+      void loadInlineHistory();
+    }
     feed.replaceChildren();
     entryNodes.clear();
+    for (const entry of retained) {
+      if (entry.position >= oldest) continue;
+      const node = el('article');
+      node.dataset.entryId = entry.stable_id;
+      node.dataset.history = '1';
+      paintEntry(node, entry, null);
+      entryNodes.set(entry.stable_id, node);
+      feed.append(node);
+    }
   }
   let appended = false;
   let lastUserText = null;
@@ -8091,6 +8391,10 @@ function renderEntries(entries, replace) {
     node.dataset.updatedSeq = entry.updated_seq;
     paintEntry(node, entry, unansweredPrompt);
   }
+  const retainedAnchor = inlineHistory && [...inlineHistory.entries.values()].find(row => row.position === Number(anchorId));
+  // Ordinary live rows are keyed by their numeric id; dataset values are strings.
+  const replacementAnchor = anchorId && (entryNodes.get(anchorId) || entryNodes.get(Number(anchorId)) || entryNodes.get(retainedAnchor?.stable_id));
+  if (replacementAnchor) feedScroll.scrollTop += replacementAnchor.getBoundingClientRect().top - anchorTop;
   if (wasAtTail) scrollToTail();
   else if (appended) jumpToLatest.classList.remove('hidden');
   if (typeof renderPendingSubmissions === 'function') renderPendingSubmissions();
@@ -8106,6 +8410,7 @@ let conversationGeneration = 0;
 let conversationRequest = null;
 
 function retireConversationRequest() {
+  resetInlineHistory();
   conversationRequest?.controller.abort();
   conversationRequest = null;
   historyRequest?.controller.abort();
@@ -8185,7 +8490,7 @@ function renderConversationTransition(session) {
     ? ''
     : session.operation?.notice
       || session.configuration_issue
-      || (session.has_error ? 'The operation needs recovery. Use the available action to try again.' : '');
+      || (session.attention === 'failed' ? 'The operation needs recovery. Use the available action to try again.' : '');
   conversationTransitionNotice.textContent = transitionNotice;
   conversationTransitionNotice.hidden = !transitionNotice;
   conversationTransitionCancel.dataset.id = session.id;
@@ -8195,6 +8500,64 @@ function renderConversationTransition(session) {
     'hidden',
     !session.capabilities?.cancel_operation,
   );
+}
+
+// Receipts share the daemon's read cursor with the TUI. Keep one request per
+// session in flight and coalesce scroll/layout events into the next paint.
+const conversationReads = new Map();
+let conversationReadFrame = null;
+function scheduleConversationRead() {
+  if (conversationReadFrame !== null) return;
+  conversationReadFrame = requestAnimationFrame(() => {
+    conversationReadFrame = null;
+    void persistVisibleConversationRead();
+  });
+}
+
+async function persistVisibleConversationRead() {
+  const sessionId = currentSession;
+  // A window on another monitor or behind the active one still reports
+  // `visible`; only a focused window means the person is looking at it.
+  if (document.visibilityState !== 'visible' || !document.hasFocus()
+    || route.name !== 'conversation'
+    || route.sessionId !== sessionId || !sessionId) return;
+  const session = sessionById(sessionId);
+  if (!session?.capabilities?.open || isTransitioningSession(session)) return;
+  const latest = feed.lastElementChild;
+  if (!latest) return;
+  const viewport = feedScroll.getBoundingClientRect();
+  const message = latest.getBoundingClientRect();
+  const bottom = Math.min(viewport.bottom, window.innerHeight);
+  if (message.bottom > bottom || message.bottom <= Math.max(viewport.top, 0)
+    || message.top >= bottom) return;
+  let receipt = conversationReads.get(sessionId);
+  if (!receipt) {
+    receipt = { through: 0, inFlight: false };
+    conversationReads.set(sessionId, receipt);
+  }
+  // Acknowledge what this reader has loaded and seen. Bounding it by the
+  // row's served frontier would stall: the conversation cursor advances
+  // before the row republishes, and a row update schedules no receipt.
+  const through = cursor;
+  if (!Number.isSafeInteger(through) || through <= Math.max(receipt.through, acknowledged)
+    || receipt.inFlight) return;
+  receipt.inFlight = true;
+  try {
+    await request(`/api/conversations/${encodeURIComponent(sessionId)}/read`, {
+      method: 'POST', body: JSON.stringify({ through }),
+    });
+    receipt.through = Math.max(receipt.through, through);
+    if (currentSession === sessionId) acknowledged = Math.max(acknowledged, through);
+    // A newer loaded cursor may have arrived while this request was pending.
+    if (currentSession === sessionId && cursor > through) scheduleConversationRead();
+  } catch (err) {
+    if (currentSession === sessionId) {
+      if (err.message === 'unauthorized') showLogin();
+      else document.querySelector('#conversation-error').textContent = err.message;
+    }
+  } finally {
+    receipt.inFlight = false;
+  }
 }
 
 async function loadConversation(delta = false) {
@@ -8243,21 +8606,7 @@ async function loadConversation(delta = false) {
       ? result.presentation_key
       : null;
     cursor = result.latest_seq;
-    if (cursor > acknowledged) {
-      const through = cursor;
-      await request(`/api/conversations/${encodeURIComponent(sessionId)}/read`, {
-        method: 'POST',
-        signal: operation.controller.signal,
-        body: JSON.stringify({ through }),
-      });
-      const latest = sessionById(sessionId);
-      if (
-        generation !== conversationGeneration
-        || !latest?.capabilities?.open
-        || isTransitioningSession(latest)
-      ) return;
-      acknowledged = through;
-    }
+    scheduleConversationRead();
   } catch (err) {
     const latest = sessionById(sessionId);
     if (
@@ -8344,7 +8693,7 @@ async function openConversation(id) {
 /// pressing it deserves to know which of those is about to happen.
 function renderSessionTitle(node, session) {
   node.textContent = session.title;
-  node.classList.toggle('idle-title', session.is_idle === true);
+  node.classList.toggle('idle-title', session.attention === 'idle');
 }
 
 /// Show the live session's advertised settings, using the harness's
@@ -8634,6 +8983,8 @@ function renderTurnControl(session) {
 }
 
 function renderConversationHeader(session) {
+  renderNotificationDismissal(document.querySelector('.conversation-header'), session,
+    document.querySelector('#conversation-error'));
   syncConversationMode(session);
   renderSessionTitle(document.querySelector('#conversation-title'), session);
   renderPromptSettings(session);
@@ -8745,6 +9096,7 @@ document.querySelector('#login-form').onsubmit = async e => {
       body: JSON.stringify({ code: document.querySelector('#code').value }),
     });
     document.querySelector('#login-error').textContent = '';
+    reconcileDeviceNotifications();
     await restoreRoute();
   } catch (err) {
     document.querySelector('#login-error').textContent = err.message;
@@ -8961,6 +9313,7 @@ resumeSearch.oninput = () => {
   renderResumable();
 };
 
+notificationsBadge.onclick = () => navigate({ name: 'dashboard', workspaceId: 'notifications' });
 workspaceSelect.onchange = () => {
   navigate({ name: 'dashboard', workspaceId: workspaceSelect.value });
 };
@@ -9127,6 +9480,12 @@ async function runSessionAction(dataset, errorNode, extra) {
     if (choice === null) return false;
     extra = { ...extra, delete_branch: choice };
   }
+  if (dataset.action === 'dismiss-notification') {
+    extra = { ...extra, target: JSON.parse(dataset.notificationDismissal) };
+  }
+  if (dataset.action === 'set-session-notifications-ignored') {
+    extra = { ...extra, ignored: !sessionById(dataset.id)?.notifications_ignored };
+  }
   const body = { action: dataset.action, session_id: dataset.id, ...extra };
   if (dataset.action === 'rename') {
     const session = sessionById(dataset.id);
@@ -9139,7 +9498,7 @@ async function runSessionAction(dataset, errorNode, extra) {
     // back to what the session last used.
     body.profile_id = extra?.profile_id || dataset.profile;
     body.target_id = extra?.target_id || dataset.target;
-    body.workspace_id = extra?.workspace_id || dataset.workspace_id || selectedWorkspaceId();
+    body.workspace_id = extra?.workspace_id || dataset.workspace_id || sessionById(dataset.id)?.workspace_id;
     body.queue = extra?.queue || 'start';
     if (extra && Object.prototype.hasOwnProperty.call(extra, 'additional_mounts')) {
       body.additional_mounts = extra.additional_mounts;
@@ -9161,6 +9520,9 @@ async function runSessionAction(dataset, errorNode, extra) {
       });
     } else {
       await request('/api/actions', { method: 'POST', body: JSON.stringify(body) });
+      if (dataset.action === 'dismiss-notification') {
+        dismissedNotifications.set(dataset.id, dataset.notificationDismissal);
+      }
     }
     errorNode.textContent = '';
     await refresh();
@@ -9318,6 +9680,8 @@ feed.onclick = event => {
 
 jumpToLatest.onclick = scrollToTail;
 feedScroll.addEventListener('scroll', () => {
+  scheduleConversationRead();
+  if (!inlineHistory?.failed && feedScroll.scrollTop <= earlierMessages.offsetHeight) void loadInlineHistory();
   if (atTail()) jumpToLatest.classList.add('hidden');
 });
 
@@ -9400,16 +9764,27 @@ promptText.addEventListener('drop', e => {
   const text = e.dataTransfer?.getData('text/plain') || '';
   if (text) insertComposerText(text);
 });
+// A touch keyboard has no Shift+Enter, so where touch is the primary input
+// its Enter key starts a new line and the Send button sends. This one query
+// decides both the key label the keyboard shows and what Enter does.
+const touchComposer = window.matchMedia('(hover: none) and (pointer: coarse)');
+function syncComposerEnterKey() {
+  promptText.setAttribute('enterkeyhint', touchComposer.matches ? 'enter' : 'send');
+}
+syncComposerEnterKey();
+touchComposer.addEventListener('change', syncComposerEnterKey);
 // An active IME composition steers its candidate with Enter and the arrows,
 // so the composer must not read those keys until the composition ends.
 promptText.addEventListener('keydown', e => {
   if (e.isComposing || e.keyCode === 229) return;
   // The palette owns the arrows, Tab and Enter while it is open, and gives
-  // them back the moment it closes.
+  // them back the moment it closes. On a touch keyboard Enter is the only way
+  // to start a new line, so it stays a return key and a tap picks a row.
   if (paletteMatches.length) {
     if (e.key === 'ArrowDown' && moveCommandSelection(1)) return e.preventDefault();
     if (e.key === 'ArrowUp' && moveCommandSelection(-1)) return e.preventDefault();
-    if ((e.key === 'Tab' || e.key === 'Enter') && !e.shiftKey && acceptCommandSelection()) {
+    const accepts = e.key === 'Tab' || (e.key === 'Enter' && !touchComposer.matches);
+    if (accepts && !e.shiftKey && acceptCommandSelection()) {
       return e.preventDefault();
     }
     if (e.key === 'Escape') {
@@ -9432,7 +9807,8 @@ promptText.addEventListener('keydown', e => {
   }
   if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
     e.preventDefault();
-    submitPrompt();
+    if (touchComposer.matches) insertComposerLineBreak();
+    else submitPrompt();
     return;
   }
   if (e.key === 'Enter' && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
@@ -9615,6 +9991,7 @@ if (window.visualViewport) {
   window.visualViewport.addEventListener('scroll', () => syncElicitationFocus());
 }
 window.addEventListener('resize', () => {
+  scheduleConversationRead();
   syncKeyboardInset();
   syncElicitationFocus();
 });
@@ -9665,7 +10042,9 @@ window.addEventListener('offline', () => setConnection('offline'));
 
 // A backgrounded progressive web app gets no `online` event, so the first
 // signal that it is back is somebody unlocking the screen.
+window.addEventListener('focus', scheduleConversationRead);
 document.addEventListener('visibilitychange', () => {
+  scheduleConversationRead();
   if (document.visibilityState === 'visible' && navigator.onLine) reconnect();
 });
 // Clocks are presentation-only updates.  The keyed card nodes remain mounted
@@ -9673,9 +10052,148 @@ document.addEventListener('visibilitychange', () => {
 // tick.
 window.setInterval(updateSessionClocks, 1000);
 if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', event => {
+    if (event.origin !== location.origin || event.data?.type !== 'mj-notification-open') return;
+    try {
+      const target = new URL(event.data.url, location.href);
+      if (target.origin !== location.origin || target.pathname !== '/') return;
+      // Normal routing saves conversation drafts and retains Settings drafts.
+      navigate(parseRoute(target.hash));
+    } catch (error) { console.warn('Could not open notification route', error); }
+  });
   // A registration that fails means the application is not installable, and
   // nothing more. Left uncaught it is an unhandled rejection, which is exactly
   // the page error the reliability suite refuses to see.
   navigator.serviceWorker.register('/service-worker.js').catch(() => {});
 }
 restoreRoute();
+
+// Permission must be requested synchronously from the person's tap (iOS).
+const notificationState = document.querySelector('#device-notification-state');
+const notificationEnable = document.querySelector('#device-notification-enable');
+const notificationDisable = document.querySelector('#device-notification-disable');
+const notificationTest = document.querySelector('#device-notification-test');
+function pushSupported() {
+  return window.isSecureContext && 'Notification' in window && 'serviceWorker' in navigator && 'PushManager' in window;
+}
+async function pushRegistration() {
+  const registration = await navigator.serviceWorker.getRegistration();
+  if (!registration?.active) throw new Error('The app is preparing notifications. Reload and try again.');
+  return registration;
+}
+let notificationSyncPending = 0;
+let notificationSyncError = '';
+async function syncDeviceNotifications(work) {
+  notificationSyncPending += 1;
+  notificationState.textContent = 'Syncing notifications…';
+  notificationEnable.disabled = notificationDisable.disabled = notificationTest.disabled = true;
+  try { await work(); notificationSyncError = ''; }
+  catch (error) { notificationSyncError = error.message; throw error; }
+  finally { notificationSyncPending -= 1; }
+}
+async function refreshDeviceNotifications() {
+  if (notificationSyncPending) return;
+  if (notificationSyncError) {
+    notificationState.textContent = notificationSyncError;
+    notificationEnable.disabled = notificationDisable.disabled = false;
+    notificationTest.disabled = true;
+    return;
+  }
+  if (!pushSupported()) {
+    notificationState.textContent = 'Notifications need a supported browser and HTTPS. On iOS, open the Home Screen app.';
+    notificationEnable.disabled = notificationDisable.disabled = notificationTest.disabled = true;
+    return;
+  }
+  try {
+    const subscription = await (await pushRegistration()).pushManager.getSubscription();
+    const status = subscription ? await request(`/api/push/status?endpoint=${encodeURIComponent(subscription.endpoint)}`) : null;
+    notificationState.textContent = status?.error ? `Notification delivery: ${status.error}` : status?.subscribed ? 'Enabled on this device' : `Not enabled (permission: ${Notification.permission})`;
+    notificationEnable.disabled = !!status?.subscribed && !status?.error;
+    notificationDisable.disabled = notificationTest.disabled = !subscription;
+  } catch (error) { notificationState.textContent = error.message; }
+}
+notificationEnable.onclick = async () => {
+  notificationState.textContent = 'Syncing notifications…';
+  try {
+    const permission = await Notification.requestPermission();
+    if (permission !== 'granted') throw new Error('Notification permission was not granted. Allow it in this browser’s site settings to enable notifications.');
+    await syncDeviceNotifications(async () => MjPush.setEnabled(true, await pushRegistration()));
+    await refreshNotificationOffer();
+    await refreshDeviceNotifications();
+  } catch (error) { notificationSyncError = error.message; await refreshDeviceNotifications(); }
+};
+notificationDisable.onclick = async () => {
+  try {
+    await syncDeviceNotifications(async () => MjPush.setEnabled(false, await pushRegistration()));
+    await refreshDeviceNotifications();
+  } catch (error) { await refreshDeviceNotifications(); }
+};
+notificationTest.onclick = async () => {
+  try {
+    const subscription = await (await pushRegistration()).pushManager.getSubscription();
+    if (!subscription) throw new Error('Enable notifications first.');
+    await request('/api/actions', { method: 'POST', body: JSON.stringify({ action: 'push-test', endpoint: subscription.endpoint }) });
+    notificationState.textContent = 'Test notification requested';
+  } catch (error) { notificationState.textContent = error.message; }
+};
+async function withdrawResolvedNotifications() {
+  if (!pushSupported() || !snapshot) return;
+  try {
+    const registration = await pushRegistration();
+    const notifications = await registration.getNotifications();
+    for (const notification of notifications) {
+      const id = notification.data?.session_id;
+      const session = id && sessionById(id);
+      // Sender and viewer revisions share the daemon's monotonic allocator.
+      // An older/equal snapshot cannot resolve this episode, even if it says Idle.
+      // A different actionable or unavailable attention kind is not resolution.
+      const data = notification.data;
+      if (!data?.episode || !data.observed_revision || snapshot.revision <= data.observed_revision) continue;
+      if (id && (!session || ['idle', 'working', 'inactive', 'unread'].includes(session.attention))) notification.close();
+    }
+  } catch (error) { console.warn('Could not refresh shown notifications', error); }
+}
+let notificationAttentionRefresh;
+function refreshNotificationAttention() {
+  // A suspended phone may have an old row saying Idle when a new push arrives.
+  // Fetch current owner state before deciding which shown cards to withdraw.
+  if (!notificationAttentionRefresh) {
+    notificationAttentionRefresh = refresh().finally(() => { notificationAttentionRefresh = undefined; });
+  }
+}
+window.addEventListener('focus', () => { reconcileDeviceNotifications(); refreshNotificationAttention(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { reconcileDeviceNotifications(); refreshNotificationAttention(); } });
+refreshDeviceNotifications();
+
+async function reconcileDeviceNotifications() {
+  if (!pushSupported()) return;
+  notificationState.textContent = 'Syncing notifications…';
+  try {
+    await syncDeviceNotifications(async () => MjPush.reconcile(await pushRegistration()));
+    await refreshDeviceNotifications();
+  } catch (error) { await refreshDeviceNotifications(); }
+}
+reconcileDeviceNotifications();
+
+async function refreshNotificationOffer() {
+  const offer = document.querySelector('#notification-offer');
+  try {
+    const iosTab = /iPad|iPhone|iPod/.test(navigator.userAgent) && !matchMedia('(display-mode: standalone)').matches && !navigator.standalone;
+    const state = await MjPush.state();
+    const permitted = !('Notification' in window) || Notification.permission === 'default';
+    offer.hidden = !window.isSecureContext || state.enabled || state.dismissed || !permitted || (!iosTab && !pushSupported());
+    document.querySelector('#notification-offer-text').textContent = iosTab ? 'Add Mjolnir to your Home Screen to get notifications' : 'Get notified on this device when a session needs you';
+    document.querySelector('#notification-offer-enable').hidden = iosTab;
+  } catch (error) { console.warn('Could not read notification preference', error); }
+}
+document.querySelector('#notification-offer-enable').onclick = async () => {
+  // Calling this directly keeps the permission request inside the tap gesture.
+  await notificationEnable.onclick();
+  document.querySelector('#notification-offer-error').textContent = notificationState.textContent.startsWith('Enabled') ? '' : notificationState.textContent;
+};
+document.querySelector('#notification-offer-dismiss').onclick = async () => {
+  try { await MjPush.dismiss(); await refreshNotificationOffer(); }
+  catch (error) { document.querySelector('#notification-offer-error').textContent = error.message; }
+};
+refreshNotificationOffer();
+window.addEventListener('focus', refreshNotificationOffer);

@@ -133,7 +133,24 @@ pub const RELAY_STATE_DIGEST_PROTOCOL: u32 = 57;
 /// what the controller names, so the controller syncs on change instead of on
 /// a timer.
 pub const RELAY_CHANGE_WAIT_PROTOCOL: u32 = 58;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_CHANGE_WAIT_PROTOCOL;
+/// 59 adds paged, connection-only project-memory snapshot and replacement
+/// transfers so complete trees need not fit in one relay frame.
+pub const RELAY_PROJECT_MEMORY_TRANSFER_PROTOCOL: u32 = 59;
+/// 60 makes ReserveIdle treat a saved goal as intent, while still refusing
+/// running goals, turns, and other work. Older workers need an observed-idle
+/// checkpoint barrier to bootstrap their replacement without changing goals.
+pub const RELAY_IDLE_GOAL_INTENT_PROTOCOL: u32 = 60;
+/// 61 journals single-attempt handback checks and parent assignment evidence.
+pub const RELAY_HANDBACK_CHECK_PROTOCOL: u32 = 61;
+/// Additive typed GLiDE completed-turn assessment; old readers retain stored action.
+pub const RELAY_GLIDE_TURN_PROTOCOL: u32 = 62;
+/// Optional assessment attention hint, independent of scheduling action.
+pub const RELAY_ATTENTION_PROTOCOL: u32 = 63;
+/// Worker-owned unanswered prose requests.
+pub const RELAY_OPEN_REQUEST_PROTOCOL: u32 = 64;
+/// Structured lifecycle notices for sessions following a pull request.
+pub const RELAY_FOLLOWED_LIFECYCLE_PROTOCOL: u32 = 65;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_FOLLOWED_LIFECYCLE_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 
@@ -167,7 +184,11 @@ pub const RELAY_EVENT_DIGEST_DOMAIN_V2: &[u8] = b"hel-relay-event-v2\0";
 // Revision 19 is breaking: revision-18 readers cannot replay a hook lease carrying a Claude steer.
 // Revision 20 is breaking: terminal receipts no longer carry execution payloads.
 // Revision 21 is breaking: older readers cannot preserve DismissQuestion commands.
-pub const RELAY_STATE_VERSION: u32 = 21;
+// Revision 22 is breaking: older writers cannot preserve handback check admission.
+// Revision 23 is breaking: older writers lose requests and the person-input frontier,
+// and cannot replay child ownership or question-target observations.
+// Revision 24 is breaking: open turns own their autonomous fact; older readers reject the new field.
+pub const RELAY_STATE_VERSION: u32 = 24;
 /// The relay snapshot inside a worker root. Teardown and restore name it from
 /// here rather than repeating the literal.
 pub const RELAY_STATE_FILE: &str = "relay-state.json";

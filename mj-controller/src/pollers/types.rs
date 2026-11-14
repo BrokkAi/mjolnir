@@ -8,13 +8,28 @@ pub struct QuotaRefreshBatch {
     /// (or missing) are probed.
     pub refresh: bool,
     pub profiles: Vec<QuotaRefreshRequest>,
+    /// Claude profiles that are not probed (disabled) but still have live
+    /// session copies. Those hold no refresh token, so the poller keeps their
+    /// grant renewed too (#1490). Never overlaps `profiles`.
+    pub grants: Vec<QuotaRefreshRequest>,
+    /// Access tokens refused by failed turns; a change wakes renewal.
+    pub rejected_logins: BTreeMap<String, std::collections::BTreeSet<String>>,
 }
 
 #[derive(Debug)]
 pub enum QuotaUpdate {
-    Refreshing { profile_ids: Vec<String> },
+    ClaudeGrant {
+        request: QuotaRefreshRequest,
+        check: crate::quota::ClaudeGrantCheck,
+        rejected_logins: std::collections::BTreeSet<String>,
+    },
+    Refreshing {
+        profile_ids: Vec<String>,
+    },
     Report(QuotaRefreshOutcome),
-    Finished { generation: u64 },
+    Finished {
+        generation: u64,
+    },
 }
 
 pub type WorkerPollTarget = RelaySessionTarget;

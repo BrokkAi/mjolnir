@@ -29,6 +29,19 @@ impl StartupSteps {
     }
 }
 
+fn quota_reports_for_viewer(
+    publications: &crate::quota::QuotaReportMap,
+) -> std::collections::BTreeMap<String, crate::quota::ProfileQuota> {
+    publications
+        .iter()
+        .filter_map(|(id, publication)| {
+            publication
+                .effective_report(id)
+                .map(|report| (id.clone(), report))
+        })
+        .collect()
+}
+
 pub(crate) async fn run_server(
     args: ServerArgs,
     termination: tokio_util::sync::CancellationToken,
@@ -49,7 +62,7 @@ pub(crate) async fn run_server(
     daemon_revisions.borrow_and_update();
     workspace_updates.borrow_and_update();
     let mut quota_updates = services.quotas.clone();
-    let mut quotas = quota_updates.borrow_and_update().clone();
+    let mut quotas = quota_reports_for_viewer(&quota_updates.borrow_and_update());
     let api_backend = services.backend.clone();
     let mut revision = daemon_runtime.allocate_revision();
     let mut conversations = mj_core::snapshot_map::SnapshotMap::new();
@@ -164,9 +177,12 @@ pub(crate) async fn run_server(
     startup.finished("load cookie credentials");
     // The documented `/api/v1` surface authenticates with a persisted bearer
     // token and drives sessions through the daemon-side backend.
-    options.set_api_token(crate::server::load_or_create_api_token(
-        &crate::server::api_token_path(),
-    )?);
+    let token = crate::server::load_or_create_api_token(&crate::server::api_token_path())?;
+    daemon_runtime
+        .api_credential
+        .set(token)
+        .map_err(|_| anyhow::anyhow!("API credential already initialized"))?;
+    options.set_api_token(daemon_runtime.api_credential.get().unwrap().clone());
     options.set_subagent_backend(api_backend.clone());
     // A launch onto a target the daemon has no worker binary for is refused at
     // admission, from the configuration as it is on disk right now.
@@ -520,7 +536,7 @@ pub(crate) async fn run_server(
                 }
                 changed = quota_updates.changed() => {
                     if changed.is_err() { anyhow::bail!("daemon quota feed stopped"); }
-                    quotas = quota_updates.borrow_and_update().clone();
+                    quotas = quota_reports_for_viewer(&quota_updates.borrow_and_update());
                     revision = daemon_runtime.allocate_revision();
                     publish_snapshot!('control, revision);
                 }
@@ -917,6 +933,7 @@ pub(crate) async fn run_server(
                     // same disk, so it runs on the same supervised task set
                     // and under the same cap as a new-session preflight.
                     let crate::server::NewPreflightRequest {
+                        profile_id, workspace_id,
                         additional_mounts,
                         bundle_id,
                         target_id,
@@ -963,7 +980,14 @@ pub(crate) async fn run_server(
                     let config = controller.config.clone();
                     let project_validation = project_directory.is_some();
                     let task_termination = termination.clone();
-                    let Ok(upgrade_task) = crate::upgrade::activity("project preflight") else { continue };
+                    // Disposable reads are cancelled with the server during
+                    // handoff. Only confirmed Git repairs mutate machine state.
+                    let upgrade_task = if remote_repairs.is_empty() {
+                        None
+                    } else {
+                        let Ok(work) = crate::upgrade::activity("new-session preflight remote repairs") else { continue };
+                        Some(work)
+                    };
                     preflight_jobs.spawn(async move {
                         let _upgrade_task = upgrade_task;
                         let cancelled = Arc::new(AtomicBool::new(false));
@@ -971,25 +995,13 @@ pub(crate) async fn run_server(
                         let mut blocking = tokio::task::spawn_blocking(move || {
                             let executor = CancellableProcessExecutor::new(cancelled.clone())
                                 .with_deadline(Duration::from_secs(30));
-                            let mount_controller = config_only_controller(config.clone());
-                            for mount in &additional_mounts {
-                                if let Err(error) = mount_controller.validate_mount_source(
-                                    &target_id, &mount.source, &executor,
-                                ) {
-                                    tracing::debug!(%error, "phone attached directory check failed");
-                                    return Err(PreflightFailure::InvalidMount);
-                                }
-                            }
-                            run_new_preflight_with_cancellation(
-                                config,
-                                bundle_id,
-                                target_id,
-                                project_directory,
-                                cancelled,
-                                remote_repairs,
-                            ).map_err(|error| {
-                                tracing::debug!(%error, project_validation, "phone preflight check failed");
-                                if project_validation {
+                            preflight_new_request(config, mj_client::daemon::NewSessionPreflightRequest {
+                                additional_mounts, bundle_id, target_id, project_directory,
+                                remote_repairs, profile_id, workspace_id,
+                            }, executor).map_err(|error| {
+                                if error.downcast_ref::<InvalidNewMount>().is_some() {
+                                    PreflightFailure::InvalidMount
+                                } else if project_validation {
                                     PreflightFailure::Validation
                                 } else {
                                     PreflightFailure::InvalidRepository(format!("{error:#}"))
@@ -1276,7 +1288,9 @@ pub(crate) async fn run_server(
                     if let Some(session_id) = &session_id {
                         action_sessions.insert(action_id, session_id.clone());
                     }
-                    let admission_reply = if matches!(action, ControllerAction::Suspend { .. } | ControllerAction::Move { .. }) {
+                    let admission_reply = if matches!(action, ControllerAction::Suspend { .. } | ControllerAction::Move { .. }
+                        | ControllerAction::PushSubscribe { .. } | ControllerAction::PushRenew { .. }
+                        | ControllerAction::PushUnsubscribe { .. } | ControllerAction::PushTest { .. }) {
                         Some(reply)
                     } else {
                         action_replies.accept(action_id, &action, reply);
@@ -1307,18 +1321,19 @@ pub(crate) async fn run_server(
                                 // Move admission can probe an uncached host and load the
                                 // store. Keep that preparation off the control loop,
                                 // but refuse it before acknowledging the request.
-                                if let ControllerAction::Move { request } = &action {
-                                    anyhow::ensure!(!control.cancelled.load(Ordering::Acquire), "phone action cancelled");
-                                    mj_core::runtime::block_on(daemon_runtime.start_move_session((**request).clone(), control.lifecycle.clone().expect("Move has a lifecycle control")))??;
-                                    if let Some(reply) = admission_reply.take() {
-                                        let _ = reply.send(ActionOutcome::accepted());
+                                let lifecycle = match &action {
+                                    ControllerAction::Move { request } => {
+                                        anyhow::ensure!(!control.cancelled.load(Ordering::Acquire), "phone action cancelled");
+                                        Some(mj_core::runtime::block_on(daemon_runtime.start_move_session((**request).clone(), control.lifecycle.clone().expect("Move has a lifecycle control")))??)
                                     }
-                                }
-                                if let ControllerAction::Suspend { session_id, .. } = &action {
-                                    mj_core::runtime::block_on(daemon_runtime.prepare_suspension(session_id))??;
-                                    if let Some(reply) = admission_reply.take() {
-                                        let _ = reply.send(ActionOutcome::accepted());
-                                    }
+                                    ControllerAction::Suspend { session_id, acknowledge_unpublished_work } => Some(mj_core::runtime::block_on(daemon_runtime.start_suspend_session_controlled(session_id.clone(), *acknowledge_unpublished_work, false, control.lifecycle.clone().expect("Suspend has a lifecycle control")))??),
+                                    _ => None,
+                                };
+                                if let Some(mut started) = lifecycle {
+                                    mj_core::runtime::block_on(started.confirm_acceptance())??;
+                                    if let Some(reply) = admission_reply.take() { let _ = reply.send(ActionOutcome::accepted()); }
+                                    let outcome = mj_core::runtime::block_on(started.wait())??;
+                                    return super::actions::finish_phone_lifecycle(outcome);
                                 }
                                 if control.cancelled.load(Ordering::Acquire) {
                                     bail!("phone action cancelled");

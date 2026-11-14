@@ -155,6 +155,7 @@ pub(super) async fn run_session_actor(
                     publish_view(
                         &target.session_id,
                         ManagedSessionView {
+                            attention: Default::default(),
                             snapshot: Some(connection.snapshot()),
                             connected: true,
                             error: None,
@@ -195,7 +196,7 @@ pub(super) async fn run_session_actor(
                 if lifecycle.return_lease(returned.lease_id) {
                     // A dropped lease returns no connection; `submit_actor_command`
                     // reconnects on demand, so the drain needs no special case.
-                    connection = returned.connection;
+                    connection = returned.connection.map(|connection| *connection);
                     failures = 0;
                     schedule.after(SESSION_SYNC_INTERVAL);
                     // A lease syncs the connection it borrowed, so this actor's
@@ -206,6 +207,7 @@ pub(super) async fn run_session_actor(
                         publish_view(
                             &target.session_id,
                             ManagedSessionView {
+                                attention: Default::default(),
                                 snapshot: Some(returned.snapshot()),
                                 connected: true,
                                 error: None,
@@ -304,6 +306,7 @@ pub(super) async fn run_session_actor(
                             publish_view(
                                 &target.session_id,
                                 ManagedSessionView {
+                                    attention: Default::default(),
                                     snapshot: Some(snapshot),
                                     connected: true,
                                     error: None,
@@ -368,6 +371,7 @@ pub(super) async fn run_session_actor(
                             publish_view(
                                 &target.session_id,
                                 ManagedSessionView {
+                                    attention: Default::default(),
                                     snapshot,
                                     connected: false,
                                     error: Some(if integrity {
@@ -404,6 +408,7 @@ pub(super) async fn run_session_actor(
                             publish_view(
                                 &target.session_id,
                                 ManagedSessionView {
+                                    attention: Default::default(),
                                     snapshot,
                                     connected: false,
                                     error: Some(ViewError::Unreachable(match last_error {
@@ -469,6 +474,7 @@ pub(super) async fn run_session_actor(
                                     publish_view(
                                         &target.session_id,
                                         ManagedSessionView {
+                                            attention: Default::default(),
                                             snapshot,
                                             connected: false,
                                             error: Some(ViewError::Unreachable(format!(
@@ -490,6 +496,7 @@ pub(super) async fn run_session_actor(
                                     publish_view(
                                         &target.session_id,
                                         ManagedSessionView {
+                                            attention: Default::default(),
                                             snapshot,
                                             connected: false,
                                             error: Some(ViewError::Unreachable(
@@ -511,6 +518,7 @@ pub(super) async fn run_session_actor(
                                     publish_view(
                                         &target.session_id,
                                         ManagedSessionView {
+                                            attention: Default::default(),
                                             snapshot,
                                             connected: false,
                                             error: Some(ViewError::Unreachable(format!(
@@ -531,6 +539,7 @@ pub(super) async fn run_session_actor(
                                     publish_view(
                                         &target.session_id,
                                         ManagedSessionView {
+                                            attention: Default::default(),
                                             snapshot,
                                             connected: false,
                                             error: Some(ViewError::Unreachable(format!(
@@ -554,6 +563,7 @@ pub(super) async fn run_session_actor(
                                 Ok(WorkerRecoveryOutcome::TargetMissing) => {
                                     let snapshot = view_tx.borrow().snapshot.clone();
                                     publish_view(&target.session_id, ManagedSessionView {
+                                        attention: Default::default(),
                                         snapshot,
                                         connected: false,
                                         error: Some(ViewError::TargetMissing(
@@ -567,6 +577,7 @@ pub(super) async fn run_session_actor(
                                     publish_view(
                                         &target.session_id,
                                         ManagedSessionView {
+                                            attention: Default::default(),
                                             snapshot,
                                             connected: false,
                                             error: Some(ViewError::TargetMissing(format!(
@@ -587,6 +598,7 @@ pub(super) async fn run_session_actor(
                                     publish_view(
                                         &target.session_id,
                                         ManagedSessionView {
+                                            attention: Default::default(),
                                             snapshot,
                                             connected: false,
                                             error: Some(ViewError::Unreachable(format!(
@@ -732,6 +744,7 @@ pub(super) async fn run_session_actor(
                                         publish_view(
                                             &target.session_id,
                                             ManagedSessionView {
+                                                attention: Default::default(),
                                                 snapshot: Some(snapshot),
                                                 connected: true,
                                                 error: None,
@@ -764,10 +777,12 @@ pub(super) async fn run_session_actor(
                         }
                     }
                     ActorCommand::Reviewer {
+                        queued_at,
                         role,
                         action,
                         reply,
                     } => {
+                        tracing::info!(session_id = %target.session_id, elapsed_ms = queued_at.elapsed().as_millis(), "review actor queue completed");
                         if lifecycle.is_leased()
                             || crate::controller::move_session::move_owns_session(
                                 &target.session_id,
@@ -782,7 +797,9 @@ pub(super) async fn run_session_actor(
                                 "rejecting a reviewer action while the session is leased"
                             );
                             if reply
-                                .send(Err("session is reserved for a lifecycle operation".into()))
+                                .send(Err(anyhow::anyhow!(
+                                    "session is reserved for a lifecycle operation"
+                                )))
                                 .is_err()
                             {
                                 tracing::debug!(
@@ -803,10 +820,12 @@ pub(super) async fn run_session_actor(
                         let previous = reviewer_tails.insert(role.clone(), tail);
                         let target = target.clone();
                         let cancelled = reviewer_cancellation.clone();
+                        let queued_at = std::time::Instant::now();
                         reviewer_tasks.spawn(async move {
                             if let Some(previous) = previous {
                                 let _ = previous.await;
                             }
+                            tracing::info!(session_id = %target.session_id, elapsed_ms = queued_at.elapsed().as_millis(), "review role queue completed");
                             run_reviewer_operation(target, role, action, reply, cached, cancelled)
                                 .await;
                             drop(finished);
@@ -849,6 +868,7 @@ pub(super) async fn run_session_actor(
                             Ok(ref snapshot) => publish_view(
                                 &target.session_id,
                                 ManagedSessionView {
+                                    attention: Default::default(),
                                     snapshot: Some(snapshot.clone()),
                                     connected: true,
                                     error: None,
@@ -896,6 +916,7 @@ pub(super) async fn run_session_actor(
                             Ok(snapshot) => publish_view(
                                 &target.session_id,
                                 ManagedSessionView {
+                                    attention: Default::default(),
                                     snapshot: Some(snapshot.clone()),
                                     connected: true,
                                     error: None,
@@ -969,6 +990,7 @@ pub(super) async fn run_session_actor(
                             Ok(ref snapshot) => publish_view(
                                 &target.session_id,
                                 ManagedSessionView {
+                                    attention: Default::default(),
                                     snapshot: Some(snapshot.clone()),
                                     connected: true,
                                     error: None,
@@ -1232,6 +1254,7 @@ pub(super) async fn deliver_submit(
         Ok(snapshot) => publish_view(
             &target.session_id,
             ManagedSessionView {
+                attention: Default::default(),
                 snapshot: Some(snapshot),
                 connected: true,
                 error: None,
@@ -1413,7 +1436,7 @@ pub(super) async fn run_reviewer_operation(
     target: RelaySessionTarget,
     role: Option<String>,
     action: ReviewerAction,
-    mut reply: oneshot::Sender<std::result::Result<ReviewerOutcome, String>>,
+    mut reply: oneshot::Sender<anyhow::Result<ReviewerOutcome>>,
     cached: Arc<tokio::sync::Mutex<Option<RelayClient>>>,
     cancelled: tokio_util::sync::CancellationToken,
 ) {
@@ -1423,7 +1446,10 @@ pub(super) async fn run_reviewer_operation(
         _ = cancelled.cancelled() => Err(anyhow::anyhow!("reviewer operation cancelled for session lifecycle change")),
         _ = reply.closed() => return,
         result = async {
+            let started = std::time::Instant::now();
             let mut cache = cached.lock().await;
+            tracing::debug!(session_id = %target.session_id, elapsed_ms = started.elapsed().as_millis(), "review connection lock acquired");
+            let started = std::time::Instant::now();
             // Take ownership while a request is in flight: dropping this
             // future closes its connection instead of leaving a late reply
             // available for the next request to misinterpret.
@@ -1431,7 +1457,10 @@ pub(super) async fn run_reviewer_operation(
                 Some(client) => client,
                 None => RelayClient::connect(&target.spec, &target.session_id).await?,
             };
+            tracing::info!(session_id = %target.session_id, elapsed_ms = started.elapsed().as_millis(), "review connection ready");
+            let started = std::time::Instant::now();
             let result = drive_reviewer(&mut client, role, action).await;
+            tracing::info!(session_id = %target.session_id, %operation, elapsed_ms = started.elapsed().as_millis(), success = result.is_ok(), "review worker request completed");
             if result.is_ok() || result.as_ref().is_err_and(is_final_rejection) {
                 *cache = Some(client);
             }
@@ -1441,10 +1470,7 @@ pub(super) async fn run_reviewer_operation(
     if let Err(error) = &result {
         tracing::warn!(session_id = %target.session_id, %operation, error = %error, "reviewer action failed");
     }
-    if reply
-        .send(result.map_err(|error| format!("{error:#}")))
-        .is_err()
-    {
+    if reply.send(result).is_err() {
         tracing::debug!(session_id = %target.session_id, %operation, "reviewer result receiver was already closed");
     }
 }

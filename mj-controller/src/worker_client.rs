@@ -1,7 +1,6 @@
 //! Controller-side client for a session relay's JSON-lines proxy.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
@@ -13,7 +12,6 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, watch};
 
 use crate::targets::{CommandSpec, SSH_MASTER_OPEN_TIMEOUT, SshSessionLease, ssh_refusal};
-use mj_core::config::harness_authentication_marker;
 use mj_core::credentials::{
     CredentialSnapshot, CredentialSyncAction, CredentialSyncHandle, CredentialSyncOutcome,
     CredentialSyncResult, CredentialSyncTarget, SYNC_INTERVAL, StepFailure, SyncAction, SyncStep,
@@ -39,9 +37,9 @@ pub(crate) type SubagentQueueSnapshot = (
 const RELAY_RPC_TIMEOUT: Duration = Duration::from_secs(15);
 const RELAY_SLOW_OPERATION_WARNING: Duration = Duration::from_secs(5);
 /// Starting a target-side proxy may page the full worker executable in and
-/// traverse a container runtime before the relay sees `hello`. That is worker
-/// startup latency, not an ordinary in-connection RPC.
-const RELAY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(300);
+/// traverse a container runtime before the relay sees `hello`. This 60-second
+/// budget applies to both initial connects and reconnect handshakes.
+const RELAY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 /// An attachment can decompress a transport-sized page from cold journal
 /// segments. It remains bounded by the relay frame budget, but cold or loaded
 /// storage needs a filesystem deadline rather than an in-memory RPC deadline.
@@ -170,7 +168,10 @@ pub struct RelayClient {
     subagent_publication: Option<SubagentQueueSnapshot>,
     /// The operational state the worker last sent on this connection and its
     /// digest. A protocol-57 worker skips resending a state that matches it.
-    known_state: Option<(String, mj_core::relay::RelayOperationalState)>,
+    known_state: Option<(
+        String,
+        mj_core::snapshot_map::SharedSnapshot<mj_core::relay::RelayOperationalState>,
+    )>,
     /// The shared-connection session the proxy runs on, held for as long as
     /// the proxy runs.
     ssh_session: Option<SshSessionLease>,

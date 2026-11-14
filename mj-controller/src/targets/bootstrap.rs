@@ -257,12 +257,7 @@ pub(super) fn clone_with_github_token(args: Vec<String>, token: &str) -> (Vec<St
         "mj-github-token".to_owned(),
         "git".to_owned(),
     ];
-    for host in ["github.com", "gist.github.com"] {
-        wrapped.extend([
-            "-c".into(), format!("credential.https://{host}.helper="),
-            "-c".into(), format!("credential.https://{host}.helper=!f() {{ if [ \"$1\" = get ]; then printf '%s\\n' username=x-access-token \"password=$GH_TOKEN\"; fi; }}; f"),
-        ]);
-    }
+    wrapped.extend(mj_core::remote_git::github_token_credential_config());
     debug_assert_eq!(args.first().map(String::as_str), Some("git"));
     wrapped.extend(args.into_iter().skip(1));
     let mut input = token.as_bytes().to_vec();

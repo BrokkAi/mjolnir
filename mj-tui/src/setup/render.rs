@@ -278,6 +278,7 @@ fn render_combo(
         dialog.combo.open_id().is_none_or(|id| id == control.id),
         " values · ↑/↓ select · Tab/Enter accept ",
         PopupSide::Below,
+        ComboBox::DEFAULT_MAX_VISIBLE_ROWS,
         form,
         control.id,
     );
@@ -642,6 +643,7 @@ fn managed_harness_description(kind: mj_core::config::HarnessKind) -> &'static s
         HarnessKind::Muse => "Muse account; container use is supported",
         HarnessKind::OpenCode => "OpenCode provider login or an API key",
         HarnessKind::Dsh => "DeepSeek API key",
+        HarnessKind::Antigravity => "Google OAuth login",
     }
 }
 

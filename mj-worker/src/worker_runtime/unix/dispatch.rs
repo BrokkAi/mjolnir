@@ -46,8 +46,18 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
                 .decision_log(),
         )
     });
+    relay
+        .lock()
+        .expect("relay state lock poisoned")
+        .handback_verdict_client = verdict.clone();
     // Owned by this coordinator: dropping it cancels HTTP requests on every
     // exit path, and joining reports panics instead of losing background errors.
+    let verdict = relay
+        .lock()
+        .expect("relay state lock poisoned")
+        .classifies_turns()
+        .then_some(verdict)
+        .flatten();
     let mut verdict_tasks = tokio::task::JoinSet::new();
     let mut locator_tasks = tokio::task::JoinSet::new();
     let mut verdict_generation = None;
@@ -57,6 +67,26 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
     let mut session_configured = false;
     let mut kimi_poll = tokio::time::interval(KIMI_TASK_POLL_INTERVAL);
     kimi_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut login_reads = tokio::task::JoinSet::new();
+    let initial_login = {
+        let state = relay.lock().expect("relay state lock poisoned");
+        state
+            .authentication_login_path
+            .clone()
+            .map(|path| (state.login_identity.snapshot().0, path))
+    };
+    if let Some((revision, path)) = initial_login {
+        login_reads.spawn(
+            async move {
+                (
+                    revision,
+                    crate::acp::read_claude_login_fingerprint(path).await,
+                )
+            }
+            .with_current_subscriber(),
+        );
+    }
+    recover_authentication(&relay)?;
     dispatch_pending(
         &relay,
         &commands,
@@ -82,7 +112,12 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
             let relay = relay.lock().expect("relay state lock poisoned");
             relay.worker_writes_held() || relay.close_pending()
         };
-        if !held {
+        if !held
+            && relay
+                .lock()
+                .expect("relay state lock poisoned")
+                .classifies_turns()
+        {
             relay
                 .lock()
                 .expect("relay state lock poisoned")
@@ -101,15 +136,17 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
             verdict_tasks.abort_all();
             verdict_generation = None;
         }
-        let pending = (!held)
-            .then(|| {
-                relay
-                    .lock()
-                    .expect("relay state lock poisoned")
+        let pending = {
+            let mut state = relay.lock().expect("relay state lock poisoned");
+            if !held && state.classifies_turns() {
+                state
                     .pending_replied_verdict()
-            })
-            .flatten();
-        if let Some((generation, evidence, assessment)) = pending {
+                    .map(|pending| (pending, state.glide_runtime()))
+            } else {
+                None
+            }
+        };
+        if let Some(((generation, evidence, assessment), (facts, native))) = pending {
             if let Some(client) = verdict.clone() {
                 verdict_tasks.abort_all();
                 verdict_generation = Some(generation);
@@ -120,8 +157,9 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
                     .session_id();
                 verdict_tasks.spawn(
                     async move {
-                        let (attempt, answer) =
-                            client.ask_logged(&session, generation, &evidence).await;
+                        let (attempt, answer) = client
+                            .ask_glide_logged(&session, generation, &evidence, &facts, native)
+                            .await;
                         (generation, assessment, attempt, answer)
                     }
                     .with_current_subscriber(),
@@ -207,6 +245,7 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
                         verdict_tasks.shutdown().await;
                         return Ok(());
                     }
+                    recover_authentication(&relay)?;
                     dispatch_pending(
                         &relay,
                         &commands,
@@ -243,6 +282,7 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
                     verdict_tasks.shutdown().await;
                     return Ok(());
                 }
+                recover_authentication(&relay)?;
                 dispatch_pending(
                     &relay,
                     &commands,
@@ -295,6 +335,18 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
                     .await?;
             }
             _ = verdict_poll.tick(), if verdict.is_some() => {}
+            result = login_reads.join_next(), if !login_reads.is_empty() => {
+                match result {
+                    Some(Ok((revision, Ok(login)))) => {
+                        relay.lock().expect("relay state lock poisoned").login_identity.observe(revision, login);
+                        recover_authentication(&relay)?;
+                        dispatch_pending(&relay, &commands, &mut in_flight, session_configured, &mut user_shells)?;
+                    }
+                    Some(Ok((_, Err(error)))) => tracing::warn!(%error, "could not initialize the Claude login identity"),
+                    Some(Err(error)) => return Err(error).context("Claude login reader failed"),
+                    None => unreachable!("guarded login read task"),
+                }
+            }
             result = verdict_tasks.join_next(), if !verdict_tasks.is_empty() && !held => {
                 match result {
                     Some(Ok((generation, _assessment, mut attempt, answer))) => {
@@ -308,7 +360,7 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
                         }
                         match answer {
                             Ok(answer) => {
-                                let reason = relay.apply_turn_assessment(generation, answer.assessment.expect("client validated unified verdict"))?;
+                                let reason = relay.apply_glide_assessment(generation, answer)?;
                                 attempt.finish("applied", reason);
                                 if reason == "user_input_required"
                                     && let Some(request) = relay.question_locator_request(generation)
@@ -344,6 +396,7 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
                     }
                     _ => {}
                 }
+                recover_authentication(&relay)?;
             }
             result = locator_tasks.join_next(), if !locator_tasks.is_empty() && !held => {
                 match result {
@@ -367,6 +420,18 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
             }
         }
     }
+}
+
+/// Consult the same identity that credential installation publishes. This is
+/// supplemental evidence; neither dispatch nor recovery waits on filesystem I/O.
+fn recover_authentication(relay: &Arc<RelayCell>) -> Result<()> {
+    let mut state = relay.lock().expect("relay state lock poisoned");
+    if let Some((ordinal, _)) = state.authentication_retry_identity()
+        && let Some(login) = state.login_identity.snapshot().1
+    {
+        state.submit_authentication_retry(ordinal, &login)?;
+    }
+    Ok(())
 }
 
 /// What observing a sub-agent's finishing prompt needs from its coordinator:

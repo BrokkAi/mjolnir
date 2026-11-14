@@ -21,6 +21,7 @@ pub(crate) fn apply_session_activity(
     session_id: &str,
     view: &ManagedSessionView,
 ) {
+    dashboard.set_session_attention_for(session_id, view.attention);
     let current_step_started_at_ms = view
         .snapshot
         .as_ref()
@@ -37,11 +38,35 @@ pub(crate) fn apply_session_activity(
         session_id,
         view.snapshot
             .as_ref()
-            .and_then(|snapshot| snapshot.operational.assessment.as_ref())
-            .filter(|assessment| assessment.inferred_question().is_some())
-            .and_then(|assessment| assessment.question_message.clone()),
+            .filter(|_| view.attention == mj_core::attention::SessionAttention::NeedsInput)
+            .and_then(|snapshot| snapshot.operational.question_message().map(str::to_owned)),
+        view.snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.operational.supports_open_request()),
     );
     dashboard.set_session_connectivity(session_id, view.connected);
+    // The session menu's top line reads the current model and effort.
+    let facts = match (
+        view.snapshot.as_ref(),
+        dashboard.session_harness_kind(session_id),
+    ) {
+        (Some(snapshot), Some(harness)) => Some(mj_core::acp::AcpSessionFacts::from_operational(
+            harness,
+            &snapshot.operational.config,
+            &snapshot.operational.config_options,
+            snapshot.operational.modes.as_ref(),
+        )),
+        _ => None,
+    };
+    dashboard.set_session_current_config(
+        session_id,
+        facts
+            .as_ref()
+            .and_then(|facts| facts.current_model().map(str::to_owned)),
+        facts
+            .as_ref()
+            .and_then(|facts| facts.current_effort().map(str::to_owned)),
+    );
 }
 
 /// Apply one worker report and hand the open conversations the sub-agent
@@ -173,6 +198,7 @@ mod tests {
             SessionRecord {
                 oracle_choice: None,
                 oracle: true,
+                notifications_ignored: false,
                 project: None,
                 target_runtime: None,
                 launch_base: None,
@@ -198,8 +224,6 @@ mod tests {
                 target_template_id: "target-1".into(),
                 resource_allocation: None,
                 additional_mounts: Vec::new(),
-                container_cpus: None,
-                container_memory: None,
                 state: SessionState::Running,
                 archived: false,
                 target: None,
@@ -211,6 +235,8 @@ mod tests {
                 viewed_through_event_ordinal: 0,
                 draft_input: String::new(),
                 last_error: None,
+                dismissed_failure: None,
+                failure_generation: 0,
                 last_checkpoint_error: None,
                 checkpoint: None,
             },
@@ -224,6 +250,8 @@ mod tests {
     ) -> RelayOperationalState {
         RelayOperationalState {
             assessment: None,
+            open_request: None,
+            person_input_through: 0,
             assessment_context: None,
             turn_completion: None,
             continuation: Default::default(),
@@ -264,10 +292,11 @@ mod tests {
             agent_info: None,
             runtime: None,
             steering_supported: None,
+            mailbox_delivery: None,
             turn_controls: None,
-            config_options: Vec::new(),
+            config_options: Vec::new().into(),
             modes: None,
-            available_commands: Vec::new(),
+            available_commands: Vec::new().into(),
             config: BTreeMap::new(),
             active_prompt: None,
             queued_prompts: Vec::new(),
@@ -301,14 +330,15 @@ mod tests {
             pending_elicitations: Vec::new(),
         };
         ManagedSessionView {
+            attention: mj_core::attention::SessionAttention::Unreachable,
             snapshot: Some(ManagedSessionSnapshot {
                 window: ProjectionWindow::of(&materialized),
                 materialized,
-                operational,
+                operational: operational.into(),
                 latest_credential_sync_signal: None,
                 worker_build: None,
-                subagent_requests: Vec::new(),
-                subagent_completions: Vec::new(),
+                subagent_requests: Default::default(),
+                subagent_completions: Default::default(),
                 subagent_queue_error: None,
             }),
             connected,
@@ -347,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn activity_projection_keeps_only_current_await_input_target() {
+    fn activity_projection_retains_open_request_target_across_later_assessments() {
         use mj_core::activity::verdict::CompletionEvidence;
         use mj_core::assessment::{Action, Status, TurnAssessment};
 
@@ -365,14 +395,31 @@ mod tests {
         assessment.status = Status::Assessed;
         assessment.action = Some(Action::AwaitInput);
         assessment.question_message = Some("agent:msg_1".into());
-        operational.assessment = Some(Box::new(assessment.clone()));
+        operational.open_request = Some(mj_core::assessment::OpenRequest {
+            question: assessment.inferred_question().unwrap(),
+            question_message: assessment.question_message.clone(),
+        });
+        operational.assessment = Some(std::sync::Arc::new(assessment.clone()));
         let mut view = managed_view(operational, true);
+        view.attention = mj_core::attention::SessionAttention::NeedsInput;
         apply_session_activity(&mut dashboard, "session-1", &view);
         assert_eq!(dashboard.question_message("session-1"), Some("agent:msg_1"));
 
-        assessment.status = Status::Superseded;
-        assessment.reason = "question_dismissed".into();
-        view.snapshot.as_mut().unwrap().operational.assessment = Some(Box::new(assessment));
+        assessment.turn_id = "later-turn".into();
+        assessment.completed_ordinal = 2;
+        assessment.action = Some(Action::Finished);
+        assessment.question_message = None;
+        view.snapshot.as_mut().unwrap().operational.assessment =
+            Some(std::sync::Arc::new(assessment));
+        apply_session_activity(&mut dashboard, "session-1", &view);
+        assert_eq!(dashboard.question_message("session-1"), Some("agent:msg_1"));
+
+        view.attention = mj_core::attention::SessionAttention::Working;
+        apply_session_activity(&mut dashboard, "session-1", &view);
+        assert_eq!(dashboard.question_message("session-1"), None);
+
+        view.attention = mj_core::attention::SessionAttention::Idle;
+        view.snapshot.as_mut().unwrap().operational.open_request = None;
         apply_session_activity(&mut dashboard, "session-1", &view);
         assert_eq!(dashboard.question_message("session-1"), None);
     }
@@ -401,6 +448,7 @@ mod tests {
             "disconnected row was not marked red"
         );
         view.connected = true;
+        view.attention = mj_core::attention::SessionAttention::Working;
         apply_session_activity(&mut dashboard, "session-1", &view);
         let (text, _) = dashboard_text(&mut dashboard);
         assert!(

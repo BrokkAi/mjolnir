@@ -146,6 +146,7 @@ pub(super) async fn run_remote_session_actor(
                 reply,
             },
             ActorCommand::Reviewer {
+                queued_at: _,
                 role,
                 action,
                 reply,
@@ -187,7 +188,9 @@ pub(super) async fn run_remote_session_actor(
                     let _ = reply.send(Err("controller daemon request bridge stopped".into()));
                 }
                 RemoteSessionRequest::Reviewer { reply, .. } => {
-                    let _ = reply.send(Err("controller daemon request bridge stopped".into()));
+                    let _ = reply.send(Err(anyhow::anyhow!(
+                        "controller daemon request bridge stopped"
+                    )));
                 }
             }
             break;

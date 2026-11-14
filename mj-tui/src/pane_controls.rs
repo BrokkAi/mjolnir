@@ -1,6 +1,6 @@
 //! Pin placement and pane menus share the dashboard's component event model.
 use super::*;
-use crate::actions::CommandId;
+use crate::actions::{Availability, CommandId};
 use crate::surface_controls::SurfaceControl;
 use crate::tile_layout::PaneId;
 use mj_chat::components::{ChoiceList, ControlKind, Dialog, Interaction, ListActivation};
@@ -28,6 +28,16 @@ enum PaneOperation {
     /// An informational row in the read-only capacity dropdown.
     Information,
     Workspace(String),
+    /// Move a profile to the front of `[quota] prefer`.
+    PreferProfile(String),
+    /// Empty `[quota] prefer`.
+    ClearLoadBalancing,
+    /// Runs a session command for the session whose row was right-clicked,
+    /// through the same entry point its menu row uses.
+    SessionCommand(String, CommandId),
+    /// Creates a top-level session with this session's settings.
+    NewSessionLike(String),
+    ClearWorkspaceNotifications(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,6 +214,122 @@ impl DashboardState {
         }
     }
 
+    /// The right-click menu on a Quota profile row: load-balancing preference.
+    pub(crate) fn begin_quota_row_menu(&mut self, profile_id: &str, at: (u16, u16)) {
+        let entries = vec![
+            (
+                format!("Prefer {profile_id} in load balancing"),
+                PaneOperation::PreferProfile(profile_id.to_owned()),
+            ),
+            (
+                "Clear load balancing preferences".to_owned(),
+                PaneOperation::ClearLoadBalancing,
+            ),
+        ];
+        self.show_pane_menu("Load balancing", entries, false);
+        if let Some(menu) = self.pane_menu.as_mut() {
+            menu.anchor = Some(Rect::new(at.0, at.1, 1, 1));
+        }
+    }
+
+    /// The right-click menu on a session row. Its entries act on that row's
+    /// session, never on the selected one. A harness-native child has no row
+    /// and no record of its own, so it gets no menu.
+    pub(crate) fn begin_session_row_menu(&mut self, session_id: &str, at: (u16, u16)) {
+        if self.is_native_agent(session_id) || !self.state.sessions.contains_key(session_id) {
+            return;
+        }
+        let entries = vec![
+            (
+                "Dismiss notification".to_owned(),
+                PaneOperation::SessionCommand(
+                    session_id.to_owned(),
+                    CommandId::DismissNotification,
+                ),
+            ),
+            (
+                "Copy session ID".to_owned(),
+                PaneOperation::SessionCommand(session_id.to_owned(), CommandId::CopySessionId),
+            ),
+            (
+                "New session with these settings".to_owned(),
+                PaneOperation::NewSessionLike(session_id.to_owned()),
+            ),
+        ];
+        let first_enabled = entries
+            .iter()
+            .position(|(_, operation)| self.pane_operation_enabled(operation))
+            .unwrap_or(0);
+        self.show_pane_menu("Session", entries, false);
+        if let Some(menu) = self.pane_menu.as_mut() {
+            menu.anchor = Some(Rect::new(at.0, at.1, 1, 1));
+            menu.form.get_mut().set_selected(0, first_enabled);
+        }
+    }
+
+    /// The sessions in `workspace_id` whose notification "Dismiss
+    /// notification" could dismiss now. The workspace menu draws its row and
+    /// runs it from this one answer.
+    fn dismissible_sessions_in(&self, workspace_id: &str) -> Vec<String> {
+        self.state
+            .sessions
+            .values()
+            .filter(|session| session.workspace_id == workspace_id)
+            .filter(|session| {
+                crate::actions::dismiss_notification_available_for(self, &session.id)
+                    == Availability::Ready
+            })
+            .map(|session| session.id.clone())
+            .collect()
+    }
+
+    pub(crate) fn begin_workspace_row_menu(&mut self, workspace_id: &str, at: (u16, u16)) {
+        let entries = vec![(
+            "Clear notifications".to_owned(),
+            PaneOperation::ClearWorkspaceNotifications(workspace_id.to_owned()),
+        )];
+        self.show_pane_menu("Workspace", entries, false);
+        if let Some(menu) = self.pane_menu.as_mut() {
+            menu.anchor = Some(Rect::new(at.0, at.1, 1, 1));
+        }
+    }
+
+    /// Whether a pane-menu row can run now. Both the drawing and the
+    /// activation ask here, so a row that looks disabled cannot be run from
+    /// the keyboard, a digit or the mouse.
+    fn pane_operation_enabled(&self, operation: &PaneOperation) -> bool {
+        match operation {
+            // Clearing an empty preference list does nothing, so the row says
+            // so by being disabled.
+            PaneOperation::ClearLoadBalancing => !self.config.quota.prefer.is_empty(),
+            PaneOperation::SessionCommand(session_id, CommandId::DismissNotification) => {
+                crate::actions::dismiss_notification_available_for(self, session_id)
+                    == Availability::Ready
+            }
+            PaneOperation::SessionCommand(session_id, _)
+            | PaneOperation::NewSessionLike(session_id) => {
+                self.state.sessions.contains_key(session_id)
+            }
+            PaneOperation::ClearWorkspaceNotifications(workspace_id) => {
+                !self.dismissible_sessions_in(workspace_id).is_empty()
+            }
+            _ => true,
+        }
+    }
+
+    /// Runs `id` for `session_id` as its own menu row would: the command acts
+    /// on the named session for exactly this call.
+    fn run_session_command(&mut self, session_id: String, id: CommandId) -> DashboardAction {
+        if !self.state.sessions.contains_key(&session_id) {
+            self.set_notice("This session is no longer available.");
+            return DashboardAction::None;
+        }
+        let saved = self.command_session_override.replace(session_id);
+        let action = self.run_available_command(id);
+        self.command_session_override = saved;
+        action
+    }
+
     pub(crate) fn begin_pin_menu(&mut self, session: String) {
         if !self.state.sessions.contains_key(&session) {
             return;
@@ -363,6 +489,9 @@ impl DashboardState {
         else {
             return DashboardAction::None;
         };
+        if !self.pane_operation_enabled(&operation) {
+            return DashboardAction::None;
+        }
         self.pane_menu = None;
         self.last_row_click = None;
         match operation {
@@ -403,6 +532,35 @@ impl DashboardState {
             PaneOperation::Close(pane) => DashboardAction::ClosePane { pane },
             PaneOperation::Command(id) => self.run_available_command(id),
             PaneOperation::Information => DashboardAction::None,
+            PaneOperation::PreferProfile(profile_id) => {
+                DashboardAction::PreferLoadBalancingProfile { profile_id }
+            }
+            PaneOperation::ClearLoadBalancing => {
+                if self.config.quota.prefer.is_empty() {
+                    DashboardAction::None
+                } else {
+                    DashboardAction::ClearLoadBalancingPreferences
+                }
+            }
+            PaneOperation::SessionCommand(session_id, id) => {
+                self.run_session_command(session_id, id)
+            }
+            PaneOperation::NewSessionLike(session_id) => self.begin_new_session_like(&session_id),
+            PaneOperation::ClearWorkspaceNotifications(workspace_id) => {
+                let dismissals: Vec<_> = self
+                    .dismissible_sessions_in(&workspace_id)
+                    .into_iter()
+                    .filter_map(|session_id| {
+                        let target = self.submit_notification_dismissal(&session_id)?;
+                        Some((session_id, target))
+                    })
+                    .collect();
+                if dismissals.is_empty() {
+                    DashboardAction::None
+                } else {
+                    DashboardAction::DismissNotifications { dismissals }
+                }
+            }
             PaneOperation::Workspace(workspace_id) => {
                 if self.workspace_ids().contains(&workspace_id) {
                     DashboardAction::SelectWorkspace { workspace_id }
@@ -748,13 +906,18 @@ pub(crate) fn render_pane_menu(frame: &mut Frame, area: Rect, dashboard: &Dashbo
             inner,
         );
     } else {
+        let enabled: Vec<bool> = menu
+            .entries
+            .iter()
+            .map(|(_, operation)| dashboard.pane_operation_enabled(operation))
+            .collect();
         ChoiceList::render_with_rows(
             frame,
             inner,
             &items,
             selected,
             &(0..items.len()).map(Some).collect::<Vec<_>>(),
-            &vec![true; items.len()],
+            &enabled,
             &mut form,
             0,
         );
@@ -792,6 +955,86 @@ mod tests {
         assert_eq!(d.browse_pane(), browse);
         assert_eq!(d.pane_session(pin), Some("session-1"));
         assert_eq!(d.pin_id("session-1"), Some(0));
+    }
+
+    /// Right-clicking a Quota profile row offers Prefer and Clear; Clear is
+    /// disabled while no preference is set.
+    #[test]
+    fn quota_row_right_click_offers_load_balancing_preference_and_clear() {
+        let mut d = dashboard_with_session(running_session());
+        let _ = drawn(&mut d, 140, 40);
+        let (profile, at) = {
+            let areas = d.quota_row_areas.borrow();
+            let (id, area) = areas
+                .iter()
+                .find(|(id, _)| id == "codex-1")
+                .expect("codex-1 row")
+                .clone();
+            (id, (area.x + 1, area.y))
+        };
+        assert_eq!(
+            d.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Right), at)),
+            DashboardAction::None
+        );
+        {
+            let menu = d.pane_menu.as_ref().expect("the row's menu opened");
+            let labels: Vec<&str> = menu
+                .entries
+                .iter()
+                .map(|(label, _)| label.as_str())
+                .collect();
+            assert_eq!(
+                labels,
+                [
+                    "Prefer codex-1 in load balancing",
+                    "Clear load balancing preferences"
+                ]
+            );
+        }
+        assert_eq!(
+            d.handle_pane_menu_event(Event::Key(key(KeyCode::Enter))),
+            DashboardAction::PreferLoadBalancingProfile {
+                profile_id: "codex-1".into()
+            }
+        );
+        // With nothing preferred, Clear is disabled: clicking it keeps the menu.
+        d.begin_quota_row_menu(&profile, at);
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal
+            .draw(|frame| render_pane_menu(frame, frame.area(), &d))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..40)
+            .map(|y| {
+                (0..140)
+                    .map(|x| buffer[(x, y)].symbol().to_owned())
+                    .collect()
+            })
+            .collect();
+        let clear_y = rows
+            .iter()
+            .position(|row| row.contains("Clear load balancing preferences"))
+            .expect("Clear row") as u16;
+        let clear_x = rows[usize::from(clear_y)].find("Clear").unwrap() as u16;
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            assert_eq!(
+                d.handle_pane_menu_event(Event::Mouse(mouse_at(kind, (clear_x, clear_y)))),
+                DashboardAction::None,
+                "Clear with no preference set"
+            );
+        }
+        assert!(d.pane_menu.is_some(), "the menu stayed open");
+        // With a preference set, Clear empties it.
+        d.config.quota.prefer = vec!["codex-1".into()];
+        d.begin_quota_row_menu(&profile, at);
+        d.handle_pane_menu_event(Event::Key(key(KeyCode::Down)));
+        assert_eq!(
+            d.handle_pane_menu_event(Event::Key(key(KeyCode::Enter))),
+            DashboardAction::ClearLoadBalancingPreferences
+        );
     }
 
     /// Launch campaign finding D-10: the empty-pane chooser opens in the
@@ -866,7 +1109,7 @@ mod tests {
         d.focus_pane(pin);
         d.focus_prompt();
         assert_eq!(
-            d.dispatch_command(crate::actions::CommandId::UnpinSession),
+            d.dispatch_command(crate::actions::CommandId::PinSession),
             DashboardAction::UnpinSession {
                 session_id: "session-1".into()
             }

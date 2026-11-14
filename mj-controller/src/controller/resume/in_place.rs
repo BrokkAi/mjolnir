@@ -320,9 +320,13 @@ impl Controller {
                 let mut runtime = if mode == InPlaceRestoreMode::Move {
                     mj_core::state::TargetRuntimeSettings::from(&target_template)
                 } else {
-                    record.target_runtime.clone().unwrap_or_else(|| {
-                        mj_core::state::TargetRuntimeSettings::from(&target_template)
-                    })
+                    record
+                        .target_runtime
+                        .as_deref()
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            mj_core::state::TargetRuntimeSettings::from(&target_template)
+                        })
                 };
                 runtime.tool_cache = record
                     .target_runtime
@@ -332,7 +336,7 @@ impl Controller {
                     .target_runtime
                     .as_ref()
                     .and_then(|runtime| runtime.container_settings.clone());
-                record.target_runtime = Some(runtime);
+                record.target_runtime = Some(runtime.into());
                 record.native_session_id =
                     native_continuity.then(|| archive_manifest.session.native_session_id.clone());
                 record.state = SessionState::Provisioning;
@@ -468,7 +472,7 @@ impl Controller {
             .or(restart_intent
                 .as_ref()
                 .and_then(|intent| intent.handoff.as_ref()))
-            .or(previous.checkpoint.as_ref())
+            .or(previous.checkpoint.as_deref())
             .context("session has no checkpoint")?;
         let verified_archive = verify_resume_checkpoint(session_id, checkpoint)?;
         let profile = self
@@ -487,7 +491,9 @@ impl Controller {
         self.validate_muse_resume_destination(previous, profile.kind, target_template_id)?;
         ensure!(
             profile.kind != mj_core::config::HarnessKind::Muse
-                || previous.additional_mounts.is_empty(),
+                || mj_core::state::applied_container_settings(previous)
+                    .additional_mounts
+                    .is_empty(),
             "{} ACP supports one workspace root; attached directories are unsupported",
             profile.kind.display_name()
         );
@@ -626,6 +632,10 @@ impl Controller {
                     )?,
                 );
                 let mut retained = previous.clone();
+                let latest = crate::database::load_session_record(session_id)?
+                    .context("retained session disappeared")?;
+                retained.resource_allocation = latest.resource_allocation;
+                retained.additional_mounts = latest.additional_mounts;
                 retained.state = SessionState::Error;
                 retained.updated_at = now();
                 retained.last_error =

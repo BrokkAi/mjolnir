@@ -182,7 +182,7 @@ the worker holds the turn.
 Automatic upgrades must never cancel accepted work that cannot start again from
 durable state, or use a timeout as permission to stop a busy process. Daemon
 handoff waits only for daemon-owned work: lifecycle operations, startup and
-session recovery, admissions, automatic continuations, and in-flight request and
+session recovery, admissions, quota recovery, and in-flight request and
 response delivery, including after the originating client disconnects. It never
 waits for worker turns, pending questions, or reviews; those live in workers and
 survive the handoff. The wait must take seconds, not minutes. Work that can take
@@ -263,6 +263,15 @@ container sessions run the same harness versions as managed bare workers:
   `mj-core/assets/harnesses/`. The test
   `bridge_fallback_pins_match_the_agent_dev_containerfile` fails if the
   Containerfile and the pins disagree.
+- Claude Code or its bridge: run `python3 tests/e2e/claude_stripped_credentials.py`
+  against the new pin on Linux and on a Mac. Sessions hold a login without a
+  refresh token and rely on Claude Code never refreshing it and rereading a
+  replaced file (#1490); on macOS, also on Claude Code reading that file when
+  the Keychain has no item for the session's config directory (#1491).
+- Antigravity: run `python3 tests/e2e/antigravity_owned_mcp_grants.py`
+  against the new pin. Sessions trust Mjolnir's MCP servers through agy's
+  undocumented project grant file; the script checks that agy still reads it
+  and still matches a grant to the owning server rather than the call title.
 - Muse: update `mj-core/assets/muse/runtime.json`. The image installs Muse
   from that file.
 - dsh-acp: update `DSH_ACP_VERSION` in `mj-core/src/harness_runtime.rs` and
@@ -330,7 +339,7 @@ only when it is one of the following, in priority order:
 3. Integration: two sides that change independently must agree. In this
    project those are the store schema and migrations against data-access code
    and other daemon revisions; the daemon API against mj-client, `mj api`,
-   the TUI, the web viewer and the desktop shell; the relay protocol and
+   the TUI, the web viewer; the relay protocol and
    journal across worker and daemon versions; checkpoint, handoff and other
    persisted formats against their readers; ACP and the pinned harness
    bridges; harness transcripts that we import; the MCP servers we expose;

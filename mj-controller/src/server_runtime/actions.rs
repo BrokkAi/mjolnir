@@ -1,32 +1,6 @@
 use super::*;
 use crate::controller::BranchDisposition;
 
-/// Point the quota refresher at what the configuration currently asks of it,
-/// alongside the worker-poll and credential-sync targets that are rebuilt from
-/// the same reload. A profile added to `config.toml` while the server runs
-/// otherwise reaches the snapshot but never the refresher, and reads "quota
-/// unavailable" until the next restart. The same holds for anything else a
-/// request carries, such as `[quota] runtime`, which decides where each check
-/// runs.
-///
-/// Sending a batch restarts every profile's refresh, which spawns a harness
-/// process per profile, so the batch travels only when the requests differ
-/// from the ones already sent. Reports whether it did.
-pub(crate) fn republish_quota_profiles(
-    controller: &Controller,
-    batch: &mut QuotaRefreshBatch,
-    profiles_tx: &tokio::sync::watch::Sender<QuotaRefreshBatch>,
-) -> bool {
-    let requests = quota_refresh_profiles(controller);
-    if requests == batch.profiles {
-        return false;
-    }
-    batch.generation = batch.generation.saturating_add(1);
-    batch.profiles = requests;
-    profiles_tx.send_replace(batch.clone());
-    true
-}
-
 pub(super) fn request_phone_action_cancellation(
     session_id: &str,
     action_sessions: &std::collections::BTreeMap<u64, String>,
@@ -160,6 +134,33 @@ pub(super) async fn apply_phone_action(
     control: &PhoneActionControl,
 ) -> Result<()> {
     match action {
+        ControllerAction::PushSubscribe { subscription } => {
+            crate::web_push::blocking(move || crate::database::push_subscribe(subscription))
+                .await?;
+            crate::web_push::wake();
+            Ok(())
+        }
+        ControllerAction::PushRenew {
+            old_endpoint,
+            subscription,
+        } => {
+            crate::web_push::blocking(move || {
+                crate::database::push_renew(old_endpoint, subscription)
+            })
+            .await?;
+            crate::web_push::wake();
+            Ok(())
+        }
+        ControllerAction::PushUnsubscribe { endpoint } => {
+            crate::web_push::blocking(move || crate::database::push_unsubscribe(&endpoint)).await?;
+            crate::web_push::wake();
+            Ok(())
+        }
+        ControllerAction::PushTest { endpoint } => {
+            crate::web_push::blocking(move || crate::database::push_test(endpoint)).await?;
+            crate::web_push::wake();
+            Ok(())
+        }
         ControllerAction::RecordOperatorActivity => {
             services.daemon_runtime.record_operator_activity().await;
             Ok(())
@@ -367,21 +368,7 @@ pub(super) async fn apply_phone_action(
             .map(|_| ()),
         ControllerAction::Move { request } => {
             let outcome = services.daemon_runtime.move_session(*request).await?;
-            match outcome.outcome.as_str() {
-                "completed" | "unchanged" | "interrupted" => Ok(()),
-                "cancelled" | "failed" => {
-                    // The daemon keeps detailed diagnostics in its durable
-                    // operation record. Only its safe recovery guidance is
-                    // copied into the phone action error, where the normal
-                    // failed-action path records a visible session error.
-                    let recovery = outcome.recovery.unwrap_or_else(|| {
-                        "Inspect the session and retry Move or Resume with previous settings."
-                            .into()
-                    });
-                    bail!("Move {}: {recovery}", outcome.outcome)
-                }
-                status => bail!("Move returned an unknown outcome: {status}"),
-            }
+            finish_phone_lifecycle(crate::daemon::DaemonReply::MoveOutcome(outcome))
         }
         ControllerAction::Open { .. } => Ok(()),
         ControllerAction::CancelContainerUpgrade { session_id } => {
@@ -455,6 +442,17 @@ pub(super) async fn apply_phone_action(
                 })?;
             Ok(())
         }
+        ControllerAction::DismissNotification { session_id, target } => {
+            services
+                .daemon_runtime
+                .dismiss_notification(session_id, target)
+                .await?;
+            Ok(())
+        }
+        ControllerAction::SetSessionNotificationsIgnored {
+            session_id,
+            ignored,
+        } => controller.set_session_notifications_ignored(&session_id, ignored),
         ControllerAction::TurnControl {
             session_id,
             command,
@@ -539,10 +537,13 @@ pub(super) async fn apply_phone_action(
         }
         ControllerAction::SetContainerSettings {
             session_id,
-            cpus,
-            memory,
+            resource_allocation,
             mounts,
         } => {
+            services
+                .daemon_runtime
+                .validate_container_settings_size(&session_id, resource_allocation.as_ref())
+                .await?;
             // The dialog that edits these owns the suggestion list, so the
             // remembered sources pass through unchanged: the update persists
             // them again beside the new mounts.
@@ -563,8 +564,7 @@ pub(super) async fn apply_phone_action(
             };
             controller.update_session_container_settings(
                 &session_id,
-                cpus,
-                memory,
+                resource_allocation,
                 mounts,
                 mount_history,
                 executor,
@@ -644,6 +644,30 @@ pub(super) async fn apply_phone_action(
         ControllerAction::RefreshQuota { .. } | ControllerAction::RefreshCapacity { .. } => {
             bail!("refresh actions must be handled by the phone control loop")
         }
+    }
+}
+
+pub(super) fn finish_phone_lifecycle(reply: crate::daemon::DaemonReply) -> Result<()> {
+    match reply {
+        crate::daemon::DaemonReply::Done => Ok(()),
+        crate::daemon::DaemonReply::MoveOutcome(outcome) => {
+            match outcome.outcome.as_str() {
+                "completed" | "unchanged" | "interrupted" => Ok(()),
+                "cancelled" | "failed" => {
+                    // The daemon keeps detailed diagnostics in its durable
+                    // operation record. Only its safe recovery guidance is
+                    // copied into the phone action error, where the normal
+                    // failed-action path records a visible session error.
+                    let recovery = outcome.recovery.unwrap_or_else(|| {
+                        "Inspect the session and retry Move or Resume with previous settings."
+                            .into()
+                    });
+                    bail!("Move {}: {recovery}", outcome.outcome)
+                }
+                status => bail!("Move returned an unknown outcome: {status}"),
+            }
+        }
+        _ => bail!("unexpected lifecycle outcome"),
     }
 }
 

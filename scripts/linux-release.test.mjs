@@ -21,7 +21,7 @@ function installer(t, { broken = false, missing = false, corrupt = false, cached
   const tools = join(dir, 'tools');
   const cache = join(dir, '.cache/mjolnir-installer/checksums');
   for (const path of [bin, bundle, tools, cache]) mkdirSync(path, { recursive: true });
-  const companions = ['mj-desktop', 'mj-voice-worker', 'mj-worker-x86_64-unknown-linux-musl', 'mj-worker-aarch64-unknown-linux-musl'];
+  const companions = ['mj-voice-worker', 'mj-worker-x86_64-unknown-linux-musl', 'mj-worker-aarch64-unknown-linux-musl'];
   const old = `#!/bin/bash\necho old\nexit ${cachedBroken ? 1 : 0}\n`;
   writeFileSync(join(bin, 'mj'), old, { mode: 0o755 });
   for (const name of companions) {

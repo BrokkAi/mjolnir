@@ -71,6 +71,15 @@ pub struct GithubWatchConfig {
         skip_serializing_if = "super::is_true"
     )]
     pub enabled: bool,
+    /// Opt in to local relevance scoring instead of sending every item to the proxy.
+    #[serde(skip_serializing_if = "super::is_false")]
+    pub local_inference: bool,
+    /// Select a measured GPU for local inference; false keeps scoring on CPU.
+    #[serde(
+        default = "super::default_true",
+        skip_serializing_if = "super::is_true"
+    )]
+    pub use_gpu: bool,
     /// Delay between polls, bounded to avoid a tight retry loop.
     pub interval_seconds: u64,
     /// GitHub REST API base URL; configurable for isolated fake-server tests.
@@ -87,6 +96,8 @@ impl Default for GithubWatchConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            local_inference: false,
+            use_gpu: true,
             interval_seconds: 60,
             api_base: "https://api.github.com".into(),
         }

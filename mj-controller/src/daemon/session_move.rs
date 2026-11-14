@@ -63,35 +63,6 @@ pub(super) async fn record_quota_move_failure(
     Ok(())
 }
 
-pub(super) fn load_controller_for_resume(request: &ResumeSessionRequest) -> Result<Controller> {
-    let mut controller = Controller::load()?;
-    if let Some(operation) = crate::database::load_move_operation(&request.session_id)?
-        && matches!(
-            operation.phase,
-            mj_core::state::MovePhase::Failed | mj_core::state::MovePhase::Cancelled
-        )
-        && !operation.queue_admission_started
-        && operation.source_profile_id == request.profile_id
-        && operation.source_target_template_id == request.target_template_id
-    {
-        // None in ordinary Resume means inheritance. Restore that inheritance
-        // baseline first so a partial conversion cannot change source sizing.
-        let record = controller
-            .state
-            .sessions
-            .get_mut(&request.session_id)
-            .context("Move recovery session is missing")?;
-        record.resource_allocation = operation.source_resource_allocation;
-        record.additional_mounts = operation.source_additional_mounts;
-        if let Some(previous) = operation.recovery_session {
-            record.container_cpus = previous.container_cpus;
-            record.container_memory = previous.container_memory;
-        }
-        crate::database::save_resumed_session(record, None)?;
-    }
-    Ok(controller)
-}
-
 fn validate_prepared_move_environment(prepared: bool, durable: bool) -> Result<()> {
     ensure!(
         prepared == durable,
@@ -143,7 +114,7 @@ impl RuntimeState {
                     .filter(|target| target.kind == crate::targets::DeploymentCapacityKind::Host)
                     .map(|target| capacity::ContainerCapacityCommitment {
                         target_ids: target.target_ids,
-                        allocation: source.resource_allocation.clone(),
+                        allocation: mj_core::state::counted_container_allocation(source).cloned(),
                     })
             } else {
                 None
@@ -172,6 +143,15 @@ impl RuntimeState {
         self: &Arc<Self>,
         selection: MoveSelection,
     ) -> Result<MovePreparation> {
+        self.prepare_move_session_for(selection, mj_core::activity::MovePurpose::Manual)
+            .await
+    }
+
+    async fn prepare_move_session_for(
+        self: &Arc<Self>,
+        selection: MoveSelection,
+        purpose: mj_core::activity::MovePurpose,
+    ) -> Result<MovePreparation> {
         let (source_harness, source_active, source_has_request_queue) = {
             let controller_owner = self.owner();
             let controller = controller_owner.controller();
@@ -198,11 +178,18 @@ impl RuntimeState {
         } else {
             None
         };
+        let catalog = self
+            .profile_catalog
+            .get()
+            .expect("catalog installed before serving")
+            .clone();
         let mut preparation = blocking(move || {
             let controller = Controller::load()?;
-            mj_core::runtime::block_on(
-                controller.prepare_move_session_controlled(selection, &ProcessExecutor),
-            )?
+            mj_core::runtime::block_on(controller.prepare_move_session_controlled(
+                &catalog,
+                selection,
+                &ProcessExecutor,
+            ))?
         })
         .await?;
         preparation.source_unavailable = source_active
@@ -223,7 +210,18 @@ impl RuntimeState {
             let mut operational = snapshot.operational;
             operational.queued_prompts.clear();
             operational.checkpoint_barrier = None;
-            preparation.active |= !operational.safe_to_replace(source_harness);
+            let purpose = if preparation.in_place && !preparation.cross_harness {
+                purpose
+            } else {
+                mj_core::activity::MovePurpose::Manual
+            };
+            preparation.active |= !operational.safe_to_move(source_harness, purpose);
+            if purpose == mj_core::activity::MovePurpose::QuotaRetry {
+                preparation.fingerprint = crate::controller::move_session::quota_move_fingerprint(
+                    &preparation.fingerprint,
+                    &operational,
+                )?;
+            }
         }
         Ok(preparation)
     }
@@ -234,18 +232,21 @@ impl RuntimeState {
         profile_id: &str,
     ) -> Result<MoveSessionRequest> {
         let preparation = self
-            .prepare_move_session(MoveSelection {
-                oracle: None,
-                oracle_choice: None,
-                session_id: session_id.to_owned(),
-                profile_id: Some(profile_id.to_owned()),
-                target_template_id: None,
-                workspace: Default::default(),
-                clear_resource_allocation: false,
-                additional_mounts: None,
-                resource_allocation: None,
-                subagents: None,
-            })
+            .prepare_move_session_for(
+                MoveSelection {
+                    oracle: None,
+                    oracle_choice: None,
+                    session_id: session_id.to_owned(),
+                    profile_id: Some(profile_id.to_owned()),
+                    target_template_id: None,
+                    workspace: Default::default(),
+                    clear_resource_allocation: false,
+                    additional_mounts: None,
+                    resource_allocation: None,
+                    subagents: None,
+                },
+                mj_core::activity::MovePurpose::QuotaRetry,
+            )
             .await?;
         let blockers: Vec<_> = [
             (!preparation.in_place, "the environment would change"),
@@ -297,8 +298,8 @@ impl RuntimeState {
             self.admit_move_session(request, capacity, None, Some((reason, continuation)))?;
         let state = self.clone();
         tokio::spawn(async move {
-            let channel = result.clone();
-            match Self::wait_lifecycle_result(result).await {
+            let channel = result.result.clone();
+            match Self::wait_lifecycle_result(result.result).await {
                 Ok(DaemonLifecycleResult::Move(_)) => {}
                 Ok(_) => tracing::error!(%session_id, %operation_id,
                     "quota Move returned an unrelated lifecycle result"),
@@ -317,10 +318,9 @@ impl RuntimeState {
         self: &Arc<Self>,
         request: MoveSessionRequest,
         control: LifecycleControl,
-    ) -> Result<()> {
+    ) -> Result<StartedLifecycle> {
         let capacity = self.reserve_container_capacity_for_move(&request).await?;
         self.admit_move_session(request, capacity, Some(control), None)
-            .map(|_| ())
     }
 
     fn admit_move_session(
@@ -329,7 +329,7 @@ impl RuntimeState {
         capacity_lease: Option<capacity::ContainerCapacityLease>,
         control: Option<LifecycleControl>,
         quota_move: Option<(String, mj_core::state::QuotaMoveContinuation)>,
-    ) -> Result<LifecycleWatch> {
+    ) -> Result<StartedLifecycle> {
         let selection = request.preparation.selection.clone();
         let operation_id = request.preparation.operation_id.clone();
         // Preparation resolves inherited settings. Compare those settings,
@@ -347,7 +347,8 @@ impl RuntimeState {
                 selection.profile_id.clone().unwrap_or_default(),
             )
         });
-        let result = self.admit_lifecycle(
+        let (accepted, acceptance) = tokio::sync::watch::channel(None);
+        let result = self.admit_prepared_lifecycle(
             session_id.clone(),
             LifecycleKind::Move,
             super::lifecycle::LifecycleStart {
@@ -358,7 +359,9 @@ impl RuntimeState {
                 move_operation_id: Some(operation_id.clone()),
                 deferrable_admission: None,
             },
+            Some(acceptance),
             move |state, session_id, cancelled| async move {
+                let catalog = state.profile_catalog.get().expect("catalog installed before serving").clone();
                 let _capacity_lease = capacity_lease;
                 let result = state
                     .clone()
@@ -367,8 +370,10 @@ impl RuntimeState {
                         cancelled,
                         |mut controller, executor, manager| async move {
                             controller
-                                .move_session_managed_controlled(
+                                .move_session_managed_controlled_with_admission(
+                                    &catalog,
                                     request, quota_move, &executor, &manager,
+                                    move || { accepted.send_replace(Some(Ok(()))); },
                                 )
                                 .await
                         },
@@ -412,8 +417,8 @@ impl RuntimeState {
         let session_id = selection.session_id.clone();
         let capacity = self.reserve_container_capacity_for_move(&request).await?;
         let result = self.admit_move_session(request, capacity, None, None)?;
-        let channel = result.clone();
-        let result = Self::wait_lifecycle_result(result).await;
+        let channel = result.result.clone();
+        let result = Self::wait_lifecycle_result(result.result).await;
         self.remove_completed_lifecycle(&channel);
         match result {
             Ok(DaemonLifecycleResult::Move(outcome)) => Ok(outcome),
@@ -924,5 +929,33 @@ mod admission_tests {
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+impl RuntimeState {
+    pub(crate) fn move_test_runtime(
+        controller: Controller,
+        manager: SessionManagerControl,
+    ) -> Arc<RuntimeState> {
+        let recovery = crate::recovery::RecoveryCoordinator::spawn(manager.clone());
+        let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
+            manager.clone(),
+            &recovery.observer(),
+        );
+        let state = Arc::new(RuntimeState::new_with_controller_loader(
+            manager,
+            controller,
+            recovery.observer(),
+            upgrades.observer(),
+            Vec::new(),
+            Controller::load,
+        ));
+        state.profile_catalog.get_or_init(|| {
+            crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                tokio_util::sync::CancellationToken::new(),
+            )
+        });
+        state
     }
 }

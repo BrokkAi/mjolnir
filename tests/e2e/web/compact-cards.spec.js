@@ -51,6 +51,7 @@ function session(id, projectKey, projectLabel, options = {}) {
     last_activity_at_ms: options.activity || SERVER_TIME_MS,
     last_message_at_ms: options.message,
     has_error: Boolean(options.hasError),
+    attention: options.attention || 'idle',
     preview: [],
     queued_prompts: Array.from({ length: options.queued || 0 }, (_, index) => ({ id: `queued-${id}-${index}`, text: 'queued' })),
     active_user_shells: [],
@@ -108,7 +109,7 @@ function stateWith(sessions) {
   };
 }
 
-async function mount(page, sessions, holdDetail = null) {
+async function mount(page, sessions, holdDetail = null, initialHash = `#workspace/${WORKSPACE_ID}`) {
   const state = stateWith(sessions);
   state.holdDetail = holdDetail;
   await page.addInitScript(() => {
@@ -193,9 +194,13 @@ async function mount(page, sessions, holdDetail = null) {
     return route.fulfill({ status: 404, body: '' });
   });
 
-  await page.goto(`https://viewer.test/#workspace/${WORKSPACE_ID}`);
+  await page.goto(`https://viewer.test/${initialHash}`);
   await expect(page.locator('#app')).toBeVisible();
-  await expect(page.locator('#sessions .session').first()).toBeVisible();
+  if (initialHash.startsWith('#conversation/')) {
+    await expect(page.locator('#conversation')).toBeVisible();
+  } else {
+    await expect(page.locator('#workspace-select')).toBeVisible();
+  }
   return state;
 }
 
@@ -303,25 +308,29 @@ test('golden_viewer_dashboard', async ({ context }) => {
 
   const compactPage = await context.newPage();
   await fixGoldenTime(compactPage);
-  await mount(compactPage, [
+  const compactState = await mount(compactPage, [
     session('beta-turn', 'project-beta', 'Beta', {
       activity: SERVER_TIME_MS - 1_000,
       title: 'A long session title that occupies one ellipsized line on a narrow phone screen',
       displayLocation: '/work/attention',
       profileId: 'codex',
       hasError: true,
+      attention: 'failed',
       pendingElicitations: [{ id: 'input-1' }],
       queued: 2,
       activityDetails: activity('turn', { turn_started_at_ms: SERVER_TIME_MS - 65_000, step_started_at_ms: SERVER_TIME_MS - 65_000 }),
       isIdle: false,
     }),
-    session('beta-step', 'project-beta', 'Beta', { activity: SERVER_TIME_MS - 2_000, activityDetails: activity('step', { step_started_at_ms: SERVER_TIME_MS - 3_600_000 }), isIdle: false }),
-    session('alpha-background', 'project-alpha', 'Alpha', { activity: SERVER_TIME_MS - 3_000, activityDetails: activity('background', { background_started_at_ms: SERVER_TIME_MS - 65_000, label: 'Indexing' }), isIdle: false }),
+    session('beta-step', 'project-beta', 'Beta', { attention: 'working', activity: SERVER_TIME_MS - 2_000, activityDetails: activity('step', { step_started_at_ms: SERVER_TIME_MS - 3_600_000 }), isIdle: false }),
+    session('alpha-background', 'project-alpha', 'Alpha', { attention: 'working', activity: SERVER_TIME_MS - 3_000, activityDetails: activity('background', { background_started_at_ms: SERVER_TIME_MS - 65_000, label: 'Indexing' }), isIdle: false }),
     session('alpha-idle', 'project-alpha', 'Alpha', { activity: SERVER_TIME_MS - 4_000, activityDetails: activity('idle', { idle_since_ms: SERVER_TIME_MS - 65_000 }) }),
     session('alpha-yesterday', 'project-alpha', 'Alpha', { activity: SERVER_TIME_MS - 4_500, activityDetails: activity('idle', { idle_since_ms: SERVER_TIME_MS - 86_465_000 }) }),
-    session('lifecycle', 'project-lifecycle', 'Lifecycle', { activity: SERVER_TIME_MS - 5_000, activityDetails: activity('lifecycle', { label: 'Starting target' }), isIdle: false }),
-    session('checking-response', 'project-checking', 'Checking', { activity: SERVER_TIME_MS - 5_500, activityDetails: activity('idle', { idle_since_ms: SERVER_TIME_MS - 65_000 }), retryAssessmentPending: true }),
+    session('lifecycle', 'project-lifecycle', 'Lifecycle', { attention: 'working', activity: SERVER_TIME_MS - 5_000, activityDetails: activity('lifecycle', { label: 'Starting target' }), isIdle: false }),
+    session('checking-response', 'project-checking', 'Checking', { attention: 'working', activity: SERVER_TIME_MS - 5_500, activityDetails: activity('idle', { idle_since_ms: SERVER_TIME_MS - 65_000 }), retryAssessmentPending: true }),
     session('unknown-idle', 'project-unknown', 'Unknown', { activity: SERVER_TIME_MS - 6_000, activityDetails: activity('idle') }),
+    session('attention-important', 'project-attention', 'Attention', { attention: 'important', title: 'Important result', pendingElicitations: [{ id: 'stale-form' }] }),
+    session('attention-unreachable', 'project-attention', 'Attention', { attention: 'unreachable', title: 'Unreachable worker' }),
+    session('attention-input', 'project-attention', 'Attention', { attention: 'needs_input', title: 'Input needed' }),
   ]);
   await captureGoldenState(output, compactPage, 'compact cards with attention and activity clocks', await compactPage.evaluate(() => ({
     documentWidth: document.documentElement.scrollWidth,
@@ -341,20 +350,30 @@ test('golden_viewer_dashboard', async ({ context }) => {
       })(),
     })),
   })));
+  compactState.snapshot.launch_failures = [{ id: 'failed-launch', workspace_id: OTHER_WORKSPACE_ID }];
+  await refresh(compactPage, compactState);
+  await compactPage.goto('https://viewer.test/');
+  await expect(compactPage.locator('#launch-failures')).toContainText('A session could not be started.');
+  await expect(compactPage.locator('#workspace-select')).toHaveValue('notifications');
+  await expect(compactPage.locator('#sessions .session')).toHaveCount(4);
+  await captureGoldenState(output, compactPage, 'notifications selected by default');
   await compactPage.close();
 
   const orderedPage = await context.newPage();
   await fixGoldenTime(orderedPage);
   const orderedState = await mount(orderedPage, [
-    session('gamma-message', 'project-gamma', 'Gamma', { message: SERVER_TIME_MS + 3_000, activity: SERVER_TIME_MS + 9_000 }),
-    session('alpha-created', 'project-alpha', 'Alpha', { createdAt: '2030-06-14T00:00:00Z' }),
+    session('gamma-message', 'project-gamma', 'Gamma', { attention: 'important', message: SERVER_TIME_MS + 3_000, activity: SERVER_TIME_MS + 9_000 }),
+    session('alpha-created', 'project-alpha', 'Alpha', { attention: 'needs_input', createdAt: '2030-06-14T00:00:00Z' }),
     session('stopped', 'project-stopped', 'Stopped', { lifecycle: 'suspended', message: SERVER_TIME_MS + 20_000 }),
     session('beta-activity', 'project-beta', 'Beta', { activity: SERVER_TIME_MS + 5_000 }),
+    session('unread-message', 'project-unread', 'Unread', { attention: 'unread', message: SERVER_TIME_MS - 60_000 }),
     session('echo-tie', 'project-echo', 'Echo', { activity: SERVER_TIME_MS + 1_000 }),
     session('delta-tie', 'project-delta', 'Delta', { activity: SERVER_TIME_MS + 1_000 }),
     session('other-workspace', 'project-other', 'Other', { workspaceId: OTHER_WORKSPACE_ID, message: SERVER_TIME_MS + 30_000 }),
   ]);
-  await captureGoldenState(output, orderedPage, 'flat live dashboard sorted by latest message', await orderedPage.evaluate(() => ({
+  await orderedPage.locator('#workspace-select').selectOption(WORKSPACE_ID);
+  await expect(orderedPage.locator('#sessions .session h3')).toHaveText(['gamma-message', 'alpha-created', 'unread-message', 'beta-activity', 'delta-tie', 'echo-tie']);
+  await captureGoldenState(output, orderedPage, 'flat live dashboard sorted by notification band then latest message', await orderedPage.evaluate(() => ({
     cards: [...document.querySelectorAll('#sessions .session')].map(node => ({
       title: node.querySelector('h3')?.textContent,
       meta: node.querySelector('.session-meta')?.innerText,
@@ -516,6 +535,7 @@ test('golden_viewer_dashboard', async ({ context }) => {
 test('child workspace hides idle history while preserving active work and an opened conversation', async ({ page }) => {
   const parent = session('parent', 'project', 'Project', {
     title: 'Parent session',
+    attention: 'needs_input',
     subagentSessionIds: ['idle', 'working', 'blocked', 'failed', 'unknown', 'reviewing'],
   });
   parent.native_subagents = [
@@ -526,20 +546,22 @@ test('child workspace hides idle history while preserving active work and an ope
     { session_id: 'native-disconnected', name: 'Disconnected helper', state: 'disconnected', availability: 'available' },
     { session_id: 'native-unknown', name: 'Unknown helper', state: 'completed', availability: 'unknown' },
   ];
+  parent.native_subagent_attention = { 'native-completed': 'idle', 'native-cancelled': 'idle', 'native-running': 'working', 'native-failed': 'failed', 'native-disconnected': 'unreachable', 'native-unknown': 'idle' };
   const child = (id, options = {}) => session(id, 'project', 'Project', { subagentParentId: 'parent', ...options });
-  const unknown = child('unknown', { activityDetails: { kind: 'unknown' } });
+  const unknown = child('unknown', { attention: 'unknown', activityDetails: { kind: 'unknown' } });
   delete unknown.is_idle;
-  const reviewing = child('reviewing');
+  const reviewing = child('reviewing', { attention: 'working' });
   reviewing.turn_review = { status: 'Preparing reviewer' };
   const state = await mount(page, [
     parent,
     child('idle'),
-    child('working', { isIdle: false, activityDetails: { kind: 'turn' } }),
-    child('blocked', { pendingElicitations: [{ id: 'question', question: 'Need input' }] }),
-    child('failed', { hasError: true }),
+    child('working', { attention: 'working', isIdle: false, activityDetails: { kind: 'turn' } }),
+    child('blocked', { attention: 'needs_input', pendingElicitations: [{ id: 'question', question: 'Need input' }] }),
+    child('failed', { attention: 'failed', hasError: true }),
     unknown,
     reviewing,
   ]);
+  await page.locator('#workspace-select').selectOption(WORKSPACE_ID);
   await expect(card(page, 'parent')).toBeVisible();
   await card(page, 'parent').click();
   await page.locator('#subagents-button').click();
@@ -563,6 +585,7 @@ test('child workspace hides idle history while preserving active work and an ope
   await refresh(page, state);
   await expect(card(page, 'reviewing')).toBeVisible();
   reviewing.turn_review = null;
+  reviewing.attention = 'idle';
   await refresh(page, state);
   await expect(card(page, 'reviewing')).toHaveCount(0);
 
@@ -574,7 +597,11 @@ test('child workspace hides idle history while preserving active work and an ope
   await page.locator('#back').click();
   await expect(page.getByRole('button', { name: 'Hide idle' })).toHaveAttribute('aria-pressed', 'true');
   await expect(card(page, 'idle')).toBeVisible();
+  await page.evaluate(() => { location.hash = '#subagents/parent'; });
+  await expect(page).toHaveURL(/#subagents\/parent$/);
   await page.reload();
+  // A reload with open notifications must not redirect a sub-agent link.
+  await expect(page).toHaveURL(/#subagents\/parent$/);
   await expect(page.getByRole('button', { name: 'Hide idle' })).toHaveAttribute('aria-pressed', 'true');
   await expect(card(page, 'idle')).toBeVisible();
   await page.getByRole('button', { name: 'Hide idle' }).click();
@@ -882,7 +909,14 @@ test('menus follow capabilities, long press cancellation, right click, keyboard,
   await expect(lockedCard).not.toHaveAttribute('role', 'link');
   await openTrigger.click();
   await expect(openMenu).toBeVisible();
-  await expect(openMenu.getByRole('menuitem')).toHaveText(['Changed files…', 'Rename', 'Copy session ID', 'Cancel operation', 'Suspend session…']);
+  await expect(openMenu.getByRole('menuitem')).toHaveText(['Changed files…', 'Ignore', 'Rename', 'Copy session ID', 'Cancel operation', 'Suspend session…']);
+  // The menu's bare top line reads the session's model, effort, and profile.
+  state.snapshot.sessions.find(item => item.id === 'openable').config_options = [
+    { key: 'model', current: 'opus', choices: [] },
+    { key: 'effort', current: 'high', choices: [] },
+  ];
+  await refresh(page, state);
+  await expect(openMenu.locator('.session-menu-info')).toHaveText('opus · high · codex');
   await openMenu.getByRole('menuitem', { name: 'Rename' }).focus();
   await page.keyboard.press('ArrowDown');
   expect(await page.evaluate(() => document.activeElement?.dataset.action)).toBe('copy-session-id');
@@ -931,6 +965,27 @@ test('menus follow capabilities, long press cancellation, right click, keyboard,
   await expect(page.locator('#action-error')).toHaveText('stop failed in fixture');
   expect(confirmed).toBe(true);
 
+  // Dismissal sits in the menu where the TUI puts it, not on the card, and
+  // names the notification the menu showed.
+  const menuSession = state.snapshot.sessions.find(item => item.id === 'openable');
+  menuSession.capabilities.dismiss_notification = true;
+  menuSession.notification_dismissal = { read_through: 10 };
+  await refresh(page, state);
+  await expect(openCard.getByRole('button', { name: 'Dismiss notification' })).toHaveCount(0);
+  await openTrigger.click();
+  await expect(openMenu.getByRole('menuitem')).toHaveText(['Changed files…', 'Dismiss notification', 'Ignore', 'Copy session ID', 'Cancel operation', 'Suspend session…']);
+  await openMenu.getByRole('menuitem', { name: 'Dismiss notification' }).click();
+  await expect.poll(() => state.actions.at(-1)).toEqual({ action: 'dismiss-notification', session_id: 'openable', target: { read_through: 10 } });
+
+  // Ignoring notifications toggles from the same menu, below Dismiss.
+  await openTrigger.click();
+  await openMenu.getByRole('menuitem', { name: 'Ignore' }).click();
+  await expect.poll(() => state.actions.at(-1)).toEqual({ action: 'set-session-notifications-ignored', session_id: 'openable', ignored: true });
+  menuSession.notifications_ignored = true;
+  await refresh(page, state);
+  await openTrigger.click();
+  await expect(openMenu.getByRole('menuitem', { name: 'Stop ignoring' })).toBeVisible();
+
   async function beginPointer(cardLocator) {
     const box = await cardLocator.boundingBox();
     await page.mouse.move(box.x + 16, box.y + box.height / 2);
@@ -971,6 +1026,104 @@ test('menus follow capabilities, long press cancellation, right click, keyboard,
   await expect(openMenu).toBeVisible();
   await page.mouse.up();
   await expect(page).toHaveURL(/#workspace\/workspace-1$/);
+});
+
+test('dismiss clears the input glyph once the daemon lowers attention; ignoring hides it at once', async ({ page }) => {
+  const state = await mount(page, [
+    session('asking', 'project-asking', 'Asking', {
+      attention: 'needs_input',
+      activity: SERVER_TIME_MS - 1_000,
+      capabilities: { dismiss_notification: true },
+    }),
+  ]);
+  const askingCard = card(page, 'asking');
+  const askingMenu = askingCard.locator('.session-menu');
+  const trigger = askingCard.locator('button[aria-label^="Actions for"]');
+  await expect(askingCard.locator('.session-attention')).toContainText('?');
+
+  // The daemon's answer to the dismissal lowers the card's attention; the
+  // glyph follows it. An accepted dismissal hides the glyph at once, before
+  // that answer arrives.
+  const row = state.snapshot.sessions.find(item => item.id === 'asking');
+  row.notification_dismissal = { read_through: 4 };
+  await refresh(page, state);
+  await trigger.click();
+  await askingMenu.getByRole('menuitem', { name: 'Dismiss notification' }).click();
+  await expect.poll(() => state.actions.at(-1)).toEqual({ action: 'dismiss-notification', session_id: 'asking', target: { read_through: 4 } });
+  await expect(askingCard.locator('.session-attention')).not.toContainText('?');
+
+  // A different notification renders again; the dismissal names one target.
+  row.notification_dismissal = { read_through: 5 };
+  await refresh(page, state);
+  await expect(askingCard.locator('.session-attention')).toContainText('?');
+  row.attention = 'idle';
+  row.notification_dismissal = null;
+  row.capabilities.dismiss_notification = false;
+  await refresh(page, state);
+  await expect(askingCard.locator('.session-attention')).not.toContainText('?');
+
+  // Ignoring hides the glyph immediately, without waiting for the daemon.
+  row.attention = 'needs_input';
+  row.notifications_ignored = true;
+  await refresh(page, state);
+  await expect(askingCard.locator('.session-attention')).not.toContainText('?');
+
+  // ...and an ignored session neither counts nor lists on Notifications.
+  // (Retention keeps entries handled during the visit; a reload resets it.)
+  await expect(page.locator('#notifications-badge')).toBeHidden();
+  await page.reload();
+  await expect(page.locator('#notifications-badge')).toBeHidden();
+  await page.locator('#workspace-select').selectOption('notifications');
+  await expect(page.locator('#sessions .session')).toHaveCount(0);
+  await page.locator('#workspace-select').selectOption(WORKSPACE_ID);
+
+  row.notifications_ignored = false;
+  await refresh(page, state);
+  await expect(askingCard.locator('.session-attention')).toContainText('?');
+  await expect(page.locator('#notifications-badge')).toHaveText('1');
+});
+
+test('notifications Clear all dismisses every targeted row and leaves the rest flagged', async ({ page }) => {
+  const a = session('clear-a', 'a', 'A', { attention: 'needs_input', activity: SERVER_TIME_MS - 2000 });
+  const b = session('clear-b', 'b', 'B', { attention: 'important', workspaceId: OTHER_WORKSPACE_ID, activity: SERVER_TIME_MS - 1000 });
+  const broken = session('clear-failed', 'c', 'C', { attention: 'failed', activity: SERVER_TIME_MS });
+  const state = await mount(page, [a, b, broken]);
+  a.notification_dismissal = { read_through: 4 };
+  b.notification_dismissal = { question: { turn_id: 't', completed_ordinal: 7 } };
+  await refresh(page, state);
+  await page.locator('#workspace-select').selectOption('notifications');
+  const clearAll = page.locator('#notifications-clear-all');
+  await expect(clearAll).toBeVisible();
+  await clearAll.click();
+  await expect.poll(() => state.actions
+    .filter(action => action.action === 'dismiss-notification').length).toBe(2);
+  const dismissed = Object.fromEntries(state.actions
+    .filter(action => action.action === 'dismiss-notification')
+    .map(action => [action.session_id, action.target]));
+  expect(dismissed).toEqual({
+    'clear-a': { read_through: 4 },
+    'clear-b': { question: { turn_id: 't', completed_ordinal: 7 } },
+  });
+
+  // Cleared glyphs hide at once and the rows drop out of the count; the
+  // failure carries no dismissal target and stays flagged.
+  await expect(card(page, 'clear-a').locator('.session-attention')).not.toContainText('?');
+  await expect(card(page, 'clear-b').locator('.session-attention')).not.toContainText('!');
+  await expect(card(page, 'clear-failed').locator('.session-attention')).toContainText('×');
+  await expect(page.locator('#notifications-badge')).toHaveText('1');
+  await expect(clearAll).toBeHidden();
+
+  // Once the daemon lowers attention the handled rows stay for the visit,
+  // below the failure that still needs a person.
+  a.attention = 'idle';
+  a.notification_dismissal = null;
+  b.attention = 'idle';
+  b.notification_dismissal = null;
+  await refresh(page, state);
+  const ids = () => page.locator('#sessions .session').evaluateAll(nodes => nodes.map(node => node.dataset.sessionId));
+  expect(await ids()).toEqual(['clear-failed', 'clear-b', 'clear-a']);
+  await expect(page.locator('#notifications-badge')).toHaveText('1');
+  await expect(clearAll).toBeHidden();
 });
 
 test('composer steering survives reconnect and Escape never confirms cancellation', async ({ page }) => {
@@ -1124,28 +1277,129 @@ test('earlier messages page backwards, retry errors, and preserve the live draft
     queries.push(query);
     if (queries.length === 2) return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'History temporarily unavailable' }) });
     return route.fulfill({ contentType: 'application/json', body: JSON.stringify(queries.length === 1 ? {
-      items: [{ role: 'user', text: 'Recent stored request' }], before: { position: 101, stable_id: 'user:101' }, frontier: 200,
-    } : { items: [{ role: 'agent', text: 'First stored answer' }], before: null, frontier: 201 }) });
+      items: [{ position: 0, stable_id: 'user:101', role: 'user', text: 'Recent stored request' }], before: { position: 101, stable_id: 'user:101' }, frontier: 200,
+    } : { items: [{ position: -1, stable_id: 'agent:1', role: 'agent', text: 'First stored answer' }], before: null, frontier: 201 }) });
   });
+  await page.route('**/api/conversations/history*', route => route.fulfill({
+    contentType: 'application/json', body: JSON.stringify(transcript('Live answer\n\n'.repeat(100))),
+  }));
   await card(page, 'history').click();
+  await expect(page.locator('#conversation-feed')).toContainText('Live answer');
   await page.locator('#prompt-text').fill('Keep my draft');
-  await page.getByRole('button', { name: 'Earlier messages', exact: true }).click();
-  const reader = page.getByRole('dialog', { name: 'Earlier messages' });
+  const anchorBefore = await page.evaluate(() => {
+    const scroll = document.querySelector('#conversation-scroll');
+    scroll.scrollTop = 0;
+    const top = document.querySelector('#conversation-feed article').getBoundingClientRect().top;
+    scroll.dispatchEvent(new Event('scroll'));
+    return top;
+  });
+  const reader = page.locator('#conversation-feed');
   await expect(reader).toContainText('Recent stored request');
-  await reader.getByRole('button', { name: 'Load earlier page' }).click();
-  await expect(reader.getByRole('status')).toContainText('History temporarily unavailable');
-  await reader.getByRole('button', { name: 'Retry' }).click();
+  expect(await reader.locator('[data-entry-id="1"]').evaluate(node => node.getBoundingClientRect().top)).toBeCloseTo(anchorBefore, 0);
+  await page.locator('#conversation-scroll').evaluate(node => { node.scrollTop = 0; node.dispatchEvent(new Event('scroll')); });
+  await expect(page.locator('#earlier-messages')).toContainText('History temporarily unavailable');
+  await page.locator('#earlier-messages').click();
   await expect(reader).toContainText('First stored answer');
-  await expect(reader).not.toContainText('Recent stored request');
-  await expect(reader).toContainText('Beginning of conversation');
-  expect(queries).toEqual(['', '?before_position=101&before_id=user%3A101', '?before_position=101&before_id=user%3A101']);
-  await reader.getByRole('button', { name: 'Close', exact: true }).click();
-  await expect(reader).toHaveCount(0);
+  await expect(reader).toContainText('Recent stored request');
+  await expect(page.locator('#earlier-messages')).toBeHidden();
+  expect(queries).toEqual(['?before_position=1&before_id=', '?before_position=101&before_id=user%3A101', '?before_position=101&before_id=user%3A101']);
   await expect(page.locator('#prompt-text')).toHaveText('Keep my draft');
 });
 
-test('earlier messages can be dismissed while loading', async ({ page }) => {
-  await mount(page, [session('history', 'alpha', 'Alpha')]);
+// Hard-won: inline history used stable IDs to match live numeric positions.
+test('inline history leaves live rows intact and continues pages without visible rows', async ({ page }) => {
+  const state = await mount(page, [session('history', 'alpha', 'Alpha')]);
+  await page.addStyleTag({ content: '.entry.tone-thought { display: none; }' });
+  const live = transcript('Newest live answer');
+  live.entries[0].id = 30;
+  live.entries.unshift({ ...live.entries[0], id: 20, lines: ['Complete live row'] });
+  await page.route('**/api/conversations/history*', route => route.fulfill({ json: live }));
+  const queries = [];
+  await page.route('**/api/v1/sessions/history/history*', route => {
+    queries.push(new URL(route.request().url()).search);
+    const pages = [
+      { items: [{ position: 20, stable_id: 'agent:20', role: 'agent', text: 'Restored beginning\nClipped tail' }, { position: 21, stable_id: 'tool:21', role: 'tool', text: 'Collapsed group member' }, { position: 30, stable_id: 'agent:30', role: 'agent', text: 'Newest live answer' }], before: { position: 20, stable_id: 'agent:20' } },
+      { items: [{ position: 10, stable_id: 'thought:10', role: 'thought', text: 'Hidden thinking' }], before: { position: 10, stable_id: 'thought:10' } },
+      { items: [{ position: 1, stable_id: 'user:1', role: 'user', text: 'Oldest stored request' }], before: null },
+    ];
+    return route.fulfill({ json: pages[queries.length - 1] });
+  });
+  await card(page, 'history').click();
+  await expect(page.locator('#conversation-feed')).toContainText('Complete live row');
+  await page.locator('#earlier-messages').click();
+  const reader = page.locator('#conversation-feed');
+  await expect(reader).toContainText('Oldest stored request');
+  await expect(reader).toContainText('Complete live row');
+  await expect(reader.locator('article:visible')).toHaveCount(3);
+  expect(await reader.locator('article:visible').allTextContents()).toEqual([
+    expect.stringContaining('Oldest stored request'), expect.stringContaining('Complete live row'), expect.stringContaining('Newest live answer'),
+  ]);
+  state.snapshot.sessions[0].latest_event_ordinal = 31;
+  await refresh(page, state);
+  await expect(reader).toContainText('Complete live row');
+  await expect(reader.locator('article:visible')).toHaveCount(3);
+  expect(queries).toEqual(['?before_position=20&before_id=', '?before_position=20&before_id=agent%3A20', '?before_position=10&before_id=thought%3A10']);
+  await expect(page.locator('#earlier-messages')).toBeHidden();
+});
+
+// Hard-won: live resets dropped the interval between retained history and the new tail.
+test('inline history fills an advancing live window and keeps older paging', async ({ page }) => {
+  const state = await mount(page, [session('history', 'alpha', 'Alpha')]);
+  const live = transcript('Row 200');
+  live.entries[0].id = 200;
+  live.entries.unshift({ ...live.entries[0], id: 100, lines: ['Row 100'] });
+  await page.route('**/api/conversations/history*', route => route.fulfill({ json: live }));
+  const queries = [];
+  const item = position => ({ position, stable_id: `agent:${position}`, role: 'agent', text: `Row ${position}` });
+  await page.route('**/api/v1/sessions/history/history*', route => {
+    const before = Number(new URL(route.request().url()).searchParams.get('before_position'));
+    queries.push(before);
+    const positions = before === 100 ? [99] : before === 150 ? [100, 120] : [1];
+    // The gap contains rows that have just left the live window.
+    const items = positions.map(item);
+    return route.fulfill({ json: { items, before: before === 99 ? null : { position: positions[0], stable_id: `agent:${positions[0]}` } } });
+  });
+  await card(page, 'history').click();
+  await page.locator('#earlier-messages').click();
+  const reader = page.locator('#conversation-feed');
+  await expect(reader).toContainText('Row 99');
+  live.entries = [{ ...live.entries[0], id: 150, lines: ['Row 150'] }, { ...live.entries[1], id: 250, lines: ['Row 250'] }];
+  state.snapshot.sessions[0].latest_event_ordinal = 251;
+  await refresh(page, state);
+  await expect(reader).toContainText('Row 120');
+  expect(await reader.locator('article').allTextContents()).toEqual([99, 100, 120, 150, 250].map(n => expect.stringContaining(`Row ${n}`)));
+  await page.locator('#conversation-scroll').evaluate(node => { node.scrollTop = 0; node.dispatchEvent(new Event('scroll')); });
+  await expect(reader).toContainText('Row 1');
+  expect(queries).toEqual([100, 150, 99]);
+  await expect(reader.locator('article')).toHaveCount(6);
+});
+
+
+test('replacing the live window keeps a mid-feed live row in place', async ({ page }) => {
+  const state = await mount(page, [session('history', 'alpha', 'Alpha')]);
+  const live = transcript('Row 0');
+  const base = live.entries[0];
+  live.entries = Array.from({ length: 60 }, (_, n) => ({ ...base, id: 10 + n, updated_seq: 10 + n, lines: [`Row ${10 + n}`, 'second line'] }));
+  await page.route('**/api/conversations/history*', route => route.fulfill({ json: live }));
+  await page.route('**/api/v1/sessions/history/history*', route => route.fulfill({ json: { items: [], before: null } }));
+  await card(page, 'history').click();
+  const reader = page.locator('#conversation-feed');
+  await expect(reader).toContainText('Row 69');
+  const scroller = page.locator('#conversation-scroll');
+  await page.locator('#conversation-feed article', { hasText: 'Row 40' }).scrollIntoViewIfNeeded();
+  await scroller.evaluate(node => { node.scrollTop -= 5; node.dispatchEvent(new Event('scroll')); });
+  const rowTop = () => page.locator('#conversation-feed article', { hasText: 'Row 40' }).evaluate(node => node.getBoundingClientRect().top);
+  const before = await rowTop();
+  // The window slides: the oldest rows leave, so content above Row 40 shrinks.
+  live.entries = live.entries.slice(10).concat([{ ...base, id: 70, updated_seq: 70, lines: ['Row 70', 'second line'] }]);
+  state.snapshot.sessions[0].latest_event_ordinal = 71;
+  await refresh(page, state);
+  await expect(reader).toContainText('Row 70');
+  expect(Math.abs((await rowTop()) - before)).toBeLessThanOrEqual(2);
+});
+
+test('inline history ignores a response after navigation', async ({ page }) => {
+  await mount(page, [session('history', 'alpha', 'Alpha'), session('other', 'alpha', 'Alpha')]);
   let release;
   let entered = false;
   await page.route('**/api/v1/sessions/history/history*', async route => {
@@ -1154,12 +1408,9 @@ test('earlier messages can be dismissed while loading', async ({ page }) => {
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ items: [{role: 'agent', text: 'Late answer'}], before: null, frontier: 1 }) });
   });
   await card(page, 'history').click();
-  await page.getByRole('button', { name: 'Earlier messages', exact: true }).click();
-  const reader = page.getByRole('dialog', { name: 'Earlier messages' });
-  await expect(reader.getByRole('status')).toContainText('Loading');
+  await page.locator('#earlier-messages').click();
   await expect.poll(() => entered).toBe(true);
-  await reader.press('Escape');
-  await expect(reader).toHaveCount(0);
+  await page.evaluate(() => { location.hash = '#conversation/other'; });
   release();
   await renderAfterFrame(page);
   await expect(page.getByText('Late answer', { exact: true })).toHaveCount(0);
@@ -1253,9 +1504,9 @@ test('reviewers open their own workspace and stay out of Subagents', async ({ pa
     reviewerSessionIds: ['review-open', 'review-done'],
   });
   const child = (id, options = {}) => session(id, 'project', 'Project', { subagentParentId: 'parent', ...options });
-  const worker = child('worker', { title: 'Worker', isIdle: false });
+  const worker = child('worker', { title: 'Worker', attention: 'working', isIdle: false });
   worker.chat_phase = 'running';
-  const reviewOpen = child('review-open', { title: 'Open reviewer', lifecycle: 'failed', active: true, isIdle: false });
+  const reviewOpen = child('review-open', { title: 'Open reviewer', attention: 'failed', lifecycle: 'failed', active: true, isIdle: false });
   reviewOpen.chat_phase = 'running';
   const reviewDone = child('review-done', { title: 'Done reviewer', lifecycle: 'suspended', active: false, capabilities: { open: false, read_history: true, resume: true } });
   const state = await mount(page, [parent, worker, reviewOpen, reviewDone]);
@@ -1356,4 +1607,109 @@ test('reviewers open their own workspace and stay out of Subagents', async ({ pa
   await expect(page.locator('#reviewers-button')).toBeHidden();
   await expect(page.locator('#reviewers-button-desktop')).toBeHidden();
   await expect(page.locator('#subagents-button')).toHaveText('Subagents · 1');
+});
+
+
+// Hard-won: 6e217adde: rewriting the open workspace select on every snapshot stacked native pickers in Firefox for Android.
+test('notification counts change the badge beside the workspace select, never the select', async ({ page }) => {
+  const a = session('notice-a', 'a', 'A', { attention: 'needs_input', activity: SERVER_TIME_MS - 2000 });
+  const b = session('quiet-b', 'b', 'B', { activity: SERVER_TIME_MS - 1000 });
+  const state = await mount(page, [a, b]);
+  const select = page.locator('#workspace-select');
+  const badge = page.locator('#notifications-badge');
+  await expect(badge).toHaveText('1');
+  await expect(select.locator('option').first()).toHaveText('Notifications');
+  await page.evaluate(() => {
+    window.selectMutations = 0;
+    new MutationObserver(records => { window.selectMutations += records.length; })
+      .observe(document.querySelector('#workspace-select'), { childList: true, subtree: true, characterData: true, attributes: true });
+  });
+
+  b.last_activity_at_ms = SERVER_TIME_MS + 5000;
+  b.attention = 'important';
+  await refresh(page, state);
+  await expect(badge).toHaveText('2');
+  await expect(badge).toHaveAttribute('aria-label', '2 notifications; open Notifications');
+  expect(await page.evaluate(() => window.selectMutations)).toBe(0);
+
+  await badge.click();
+  await expect(select).toHaveValue('notifications');
+  await expect(page.locator('#sessions .session')).toHaveCount(2);
+  a.attention = 'idle';
+  b.attention = 'idle';
+  await refresh(page, state);
+  await expect(badge).toBeHidden();
+});
+
+test('notifications retain handled entries below the band until leaving or reloading', async ({ page }) => {
+  const a = session('notice-a', 'a', 'A', { attention: 'needs_input', activity: SERVER_TIME_MS - 2000 });
+  const b = session('notice-b', 'b', 'B', { attention: 'important', workspaceId: OTHER_WORKSPACE_ID, activity: SERVER_TIME_MS - 1000 });
+  const unread = session('unread-notice', 'unread', 'Unread', { attention: 'unread', activity: SERVER_TIME_MS + 1000 });
+  const state = await mount(page, [a, b, unread]);
+  await page.locator('#workspace-select').selectOption('notifications');
+  const ids = () => page.locator('#sessions .session').evaluateAll(nodes => nodes.map(node => node.dataset.sessionId));
+  expect(await ids()).toEqual(['notice-b', 'notice-a']);
+  await expect(page.locator('#sessions .session[data-session-id="unread-notice"]')).toHaveCount(0);
+  await page.evaluate(() => { window.notificationOption = document.querySelector('#workspace-select option'); });
+  const noticeCard = page.locator('#sessions .session[data-session-id="notice-b"]');
+  await noticeCard.dispatchEvent('pointerdown', { pointerId: 1, button: 0, isPrimary: true, clientX: 10, clientY: 10 });
+  await expect(noticeCard.locator('.session-menu')).toBeVisible();
+  await noticeCard.dispatchEvent('pointerup', { pointerId: 1 });
+  await page.keyboard.press('Escape');
+  b.attention = 'idle';
+  b.lifecycle = 'suspended';
+  b.capabilities = { open: false, resume: true };
+  await refresh(page, state);
+  expect(await ids()).toEqual(['notice-a', 'notice-b']);
+  expect(await page.evaluate(() => document.querySelector('#workspace-select option') === window.notificationOption)).toBe(true);
+  await expect(page.locator('#notifications-badge')).toHaveText('1');
+  await expect(noticeCard.locator('.session-attention-item')).toHaveCount(0);
+  await expect(noticeCard).not.toContainText('Cleared');
+  await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toHaveCount(0);
+  await expect(noticeCard).not.toHaveAttribute('role', 'link');
+  await noticeCard.locator('button[aria-label^="Actions for"]').click();
+  await expect(noticeCard.getByRole('menuitem', { name: 'Resume', exact: true })).toBeVisible();
+  await expect(noticeCard.getByRole('menuitem', { name: 'Changed files…' })).toHaveCount(0);
+  await noticeCard.getByRole('menuitem', { name: 'Resume', exact: true }).click();
+  await expect.poll(() => state.actions.find(action => action.action === 'resume')).toMatchObject({ session_id: 'notice-b', workspace_id: OTHER_WORKSPACE_ID });
+  const c = session('notice-c', 'c', 'C', { attention: 'failed', activity: SERVER_TIME_MS });
+  state.snapshot.sessions.push(c);
+  await refresh(page, state);
+  expect(await ids()).toEqual(['notice-c', 'notice-a', 'notice-b']);
+  b.attention = 'important';
+  await refresh(page, state);
+  expect(await ids()).toEqual(['notice-c', 'notice-b', 'notice-a']);
+  await expect(noticeCard.locator('.session-attention-item')).toHaveCount(1);
+  b.attention = 'idle';
+  await refresh(page, state);
+  expect(await ids()).toEqual(['notice-c', 'notice-a', 'notice-b']);
+  await page.reload();
+  await expect.poll(ids).toEqual(['notice-c', 'notice-a']);
+  a.attention = 'idle';
+  await refresh(page, state);
+  await page.locator('#workspace-select').selectOption(WORKSPACE_ID);
+  await page.locator('#workspace-select').selectOption('notifications');
+  expect(await ids()).toEqual(['notice-c']);
+});
+
+test('initial workspace selection follows notifications without redirecting conversation links', async ({ page }) => {
+  const openNotice = session('load-notice', 'a', 'Notice', { attention: 'needs_input' });
+  await mount(page, [openNotice]);
+  await expect(page).toHaveURL(/#workspace\/notifications$/);
+  await expect(page.locator('#workspace-select')).toHaveValue('notifications');
+
+  const noNotices = await page.context().newPage();
+  await mount(noNotices, [session('load-plain', 'a', 'Plain')]);
+  await expect(noNotices).toHaveURL(new RegExp(`#workspace/${WORKSPACE_ID}$`));
+
+  const other = await page.context().newPage();
+  await mount(other, [openNotice], null, `#workspace/${OTHER_WORKSPACE_ID}`);
+  await expect(other).toHaveURL(/#workspace\/notifications$/);
+
+  const conversation = await page.context().newPage();
+  await mount(conversation, [session('load-conversation', 'a', 'Conversation', {
+    attention: 'important', capabilities: { prompt: true },
+  })], null, '#conversation/load-conversation');
+  await expect(conversation).toHaveURL(/#conversation\/load-conversation$/);
+  await expect(conversation.locator('#conversation')).toBeVisible();
 });

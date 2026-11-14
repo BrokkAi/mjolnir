@@ -57,6 +57,9 @@ pub(super) struct MetadataDigests(pub(super) [Option<[u8; 32]>; METADATA_FIELDS.
 /// read by viewer.js; resume detail, Move, and conversation fields are fetched
 /// from the row route.
 const SUMMARY_FIELDS: &[&str] = &[
+    "attention",
+    "notification_dismissal",
+    "unread_frontier",
     "id",
     "workspace_id",
     "bundle_id",
@@ -70,6 +73,7 @@ const SUMMARY_FIELDS: &[&str] = &[
     "target_id",
     "state",
     "container_upgrade_supported",
+    "resource_allocation",
     "created_at",
     "updated_at",
     "has_error",

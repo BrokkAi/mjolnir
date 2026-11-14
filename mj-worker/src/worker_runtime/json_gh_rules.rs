@@ -104,7 +104,7 @@ pub(super) fn configure_opencode_plugin(
     Ok(())
 }
 
-/// One native permission rule, as OpenCode 2.2.6 lists them in `permissions`.
+/// One native permission rule, as OpenCode 2.2.7 lists them in `permissions`.
 type Rule = (&'static str, &'static str, &'static str);
 
 /// The rules this launch appends after every rule the profile supplies, so
@@ -114,7 +114,7 @@ fn opencode_rules(policy: ExecutionPolicy, denials: OpenCodeDenials) -> Vec<Rule
     if policy == ExecutionPolicy::ConfiguredApprovals {
         rules.extend(GH_COMMANDS.map(|command| ("bash", command, "allow")));
     }
-    // With `execute` allowed, OpenCode 2.2.6 offers MCP tools only through a
+    // With `execute` allowed, OpenCode 2.2.7 offers MCP tools only through a
     // JavaScript `execute` tool ("Code Mode"). Denying it lists the
     // `mj-agents` tools as direct `mj-agents_<tool>` tools, which the
     // delegation policy text and the owned-server approvals name.
@@ -138,7 +138,7 @@ fn configure_opencode(
     let rules = object
         .array_value_or_create("permissions")
         .context("OPENCODE_CONFIG_CONTENT permissions must be an array")?;
-    // OpenCode 2.2.6 concatenates native permission arrays across config documents.
+    // OpenCode 2.2.7 concatenates native permission arrays across config documents.
     // Keeping this as its own document preserves even scalar legacy defaults.
     let wanted = opencode_rules(policy, denials);
     let elements = rules.elements();
@@ -375,7 +375,7 @@ mod tests {
     /// stub provider records what the model is offered; nothing leaves the
     /// machine.
     #[test]
-    #[ignore = "requires MJ_OPENCODE_TEST_BINARY naming OpenCode 2.2.6 and MJ_WORKER_BINARY pointing to the current mj-worker build"]
+    #[ignore = "requires MJ_OPENCODE_TEST_BINARY naming OpenCode 2.2.7 and MJ_WORKER_BINARY pointing to the current mj-worker build"]
     fn live_opencode_offers_mj_agents_directly_and_drops_denied_tools() {
         use std::io::{BufRead, BufReader, Write};
         use std::process::{Command, Stdio};

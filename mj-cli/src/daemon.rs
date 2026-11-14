@@ -13,6 +13,84 @@ pub(crate) use mj_client::daemon::*;
 pub(crate) use mj_client::executable::process_executable_path;
 pub(crate) use mj_controller::daemon::run_daemon_process;
 
+/// Forward machine-owned commands before touching client stores or credentials.
+pub(crate) async fn run_where_daemon_lives(args: &[String], interactive: bool) -> Result<bool> {
+    let interactive = interactive && !args.iter().any(|arg| arg == "--json");
+    let placement = load_daemon_config().await?;
+    if placement.runtime != mj_core::config::DaemonRuntime::Ssh {
+        // Lifecycle commands for a host or container daemon run here, through
+        // management discovery and the engine. Running them inside the
+        // container would start a stopped daemon before reporting on it.
+        if args.first().map(String::as_str) == Some("daemon") {
+            return Ok(false);
+        }
+        return container::exec_in_container(args, interactive).await;
+    }
+    let host = placement
+        .host
+        .as_deref()
+        .context("[daemon] host is required for SSH placement")?;
+    ensure!(
+        !host.starts_with('-'),
+        "[daemon] host cannot be an SSH option"
+    );
+    let instance = placement.instance.clone().unwrap_or_else(|| {
+        mj_core::config::instance_name().unwrap_or_else(|| "default".to_owned())
+    });
+    if args == ["daemon", "status"] {
+        println!("Daemon host: {host}");
+        println!("Daemon instance: {instance}");
+        println!(
+            "Client config: {}",
+            mj_core::config::config_path().display()
+        );
+        let client = this_build();
+        println!("Client build: {}", client.published());
+        match mj_client::daemon::ssh::discover(
+            &placement,
+            &instance,
+            mj_client::daemon::ssh::DiscoveryIntent::Existing,
+        )
+        .await
+        {
+            Ok(endpoint) => {
+                let remote = BuildIdentity::parse(&endpoint.build_version)?;
+                println!("Daemon build: {}", remote.published());
+                println!("same_source: {}", client.same_source(&remote));
+            }
+            Err(error) => eprintln!("Daemon build unavailable: {error:#}"),
+        }
+    }
+    let mut argv = vec![
+        placement.remote_command().to_owned(),
+        "--instance".into(),
+        instance,
+    ];
+    argv.extend_from_slice(args);
+    let mut command = std::process::Command::new("ssh");
+    if interactive {
+        command.arg("-t");
+    }
+    command
+        .args(&placement.ssh_args)
+        .arg(host)
+        .arg(mj_core::targets::daemon_login_command(&argv));
+    let status =
+        tokio::task::spawn_blocking(move || mj_core::subprocess::run_inherited(&mut command))
+            .await
+            .context("SSH command task panicked")??;
+    if status.code() == Some(127) {
+        eprintln!(
+            "[daemon] remote_command {:?} was not found on {host}; install mj remotely with scripts/install.sh (or install the same release)",
+            placement.remote_command()
+        );
+    }
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(true)
+}
+
 pub(crate) mod container;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -201,6 +279,13 @@ async fn running_daemon_blockers() -> Option<Vec<String>> {
 const LOGGED_PHASE: Duration = Duration::from_millis(250);
 
 pub async fn connect_or_start() -> Result<DaemonClient> {
+    connector::DaemonConnector::shared()
+        .await?
+        .connect_or_start(connect_or_start_local)
+        .await
+}
+
+async fn connect_or_start_local() -> Result<DaemonClient> {
     let lock_path = data_dir().join("daemon-start.lock");
     // Most clients find a daemon they can use. Deciding that needs only a
     // shared hold, so a burst of clients reconnecting after a handoff checks
@@ -211,7 +296,6 @@ pub async fn connect_or_start() -> Result<DaemonClient> {
     if std::env::var_os(DEV_RESTART_STALE_DAEMON_ENV).is_none() {
         let shared = acquire_shared_start_guard(lock_path.clone()).await?;
         if let ExistingDaemon::Use(client) = inspect_existing_daemon(&shared).await? {
-            crate::node::ensure_node().await;
             return Ok(client);
         }
     }
@@ -465,8 +549,7 @@ async fn resolve_placement(daemon: &mj_core::config::DaemonConfig) -> Result<Con
 
 async fn load_daemon_config() -> Result<mj_core::config::DaemonConfig> {
     tokio::task::spawn_blocking(|| {
-        mj_core::config::Config::load_from(&mj_core::config::config_path())
-            .map(|config| config.daemon)
+        mj_core::config::DaemonConfig::load_placement(&mj_core::config::config_path())
     })
     .await
     .context("read daemon configuration task failed")?
@@ -490,10 +573,42 @@ pub(crate) fn daemon_runs_this_build(identity: &DaemonIdentity) -> Result<Option
     }))
 }
 
+/// A session is an overlay on the account's login environment. Reconstruct that
+/// base instead of maintaining a second list of target, profile, harness and
+/// shell overrides here. The existing identity also covers older workers.
+fn configure_host_daemon_environment(command: &mut std::process::Command) -> Result<()> {
+    if std::env::var_os("MJ_SESSION_ID").is_some()
+        || std::env::var_os("MJ_SESSION_BASH_ENV").is_some()
+    {
+        let mut environment = mj_core::login_environment::discover()
+            .context("restore account login environment for the daemon")?;
+        for name in ["MJ_CONFIG_DIR", "MJ_DATA_DIR", "MJ_INSTANCE"] {
+            // Absence is significant too: a login script must not redirect the
+            // instance selected by this client.
+            environment.remove(name);
+        }
+        command.env_clear().envs(environment);
+    }
+    // Resolve against the client's cwd before the child changes directory.
+    // config_dir/data_dir own override and named-instance precedence.
+    command.env(
+        "MJ_CONFIG_DIR",
+        std::path::absolute(mj_core::config::config_dir())?,
+    );
+    let data = std::path::absolute(data_dir())?;
+    command.env("MJ_DATA_DIR", &data);
+    if let Some(instance) = std::env::var_os("MJ_INSTANCE") {
+        command.env("MJ_INSTANCE", instance);
+    }
+    command.current_dir(data);
+    Ok(())
+}
+
 /// Start `mj daemon-run` where `[daemon] runtime` says: a detached process on
 /// this computer, or a process in this instance's daemon container. Either way
 /// the result is a host PID the caller follows until the daemon answers.
 async fn launch_daemon(log_path: &Path) -> Result<LaunchedDaemon> {
+    retire_legacy_node();
     // An unreadable file is the daemon's to report: it refuses to start and
     // says why, which is the answer this launch then shows.
     let daemon = load_daemon_config().await.unwrap_or_default();
@@ -531,25 +646,19 @@ async fn launch_daemon(log_path: &Path) -> Result<LaunchedDaemon> {
                 .map(|metadata| metadata.len())
                 .unwrap_or(0);
             let executable = daemon_launch_executable()?;
-            // This launch owns the daemon's endpoint, so the node can find
-            // the daemon while it is still starting: startup recovery runs
-            // its commands on the node.
-            let endpoint = crate::node::NodeEndpoint {
-                address: free_loopback_address()?,
-                token: random_token()?,
-                build_version: mj_client::build_identity::this_build().published(),
-            };
-            crate::node::write_endpoint(&endpoint)?;
             let mut command = std::process::Command::new(executable);
+            configure_host_daemon_environment(&mut command)?;
             command
-                .env("MJ_DAEMON_LISTEN", endpoint.address.to_string())
-                .env("MJ_DAEMON_TOKEN", &endpoint.token)
                 .arg("daemon-run")
                 // This switch makes the invoking development client authoritative. It
                 // has no meaning inside the persistent daemon or its child processes.
                 .env_remove(DEV_RESTART_STALE_DAEMON_ENV);
             command.env_remove("MJ_UPGRADE_RESUME_FILE");
             command.env_remove(DAEMON_CONTAINER_ENV);
+            // A host daemon picks its own endpoint and token; only a container
+            // launcher chooses them.
+            command.env_remove("MJ_DAEMON_LISTEN");
+            command.env_remove("MJ_DAEMON_TOKEN");
             // The program runs through `/proc/self/exe` on Linux, which `ps`
             // would otherwise show as the daemon's name. `mj daemon-run` is
             // what a person looks for (launch finding R13-9); nothing reads
@@ -558,7 +667,6 @@ async fn launch_daemon(log_path: &Path) -> Result<LaunchedDaemon> {
             #[cfg(unix)]
             std::os::unix::process::CommandExt::arg0(&mut command, "mj");
             let pid = mj_core::subprocess::spawn_detached(&mut command, &log_path)?;
-            crate::node::spawn_node()?;
             Ok(LaunchedDaemon {
                 pid,
                 log_offset,
@@ -570,13 +678,22 @@ async fn launch_daemon(log_path: &Path) -> Result<LaunchedDaemon> {
     .context("spawn daemon task failed")?
 }
 
-/// A loopback port nothing listens on now. The daemon binds it moments later;
-/// if something else took it in between, the daemon fails to start and says
-/// which address was taken.
-fn free_loopback_address() -> Result<std::net::SocketAddr> {
-    let probe = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-        .context("find a free loopback port for the daemon")?;
-    probe.local_addr().context("read the free loopback port")
+/// Releases 2.66.0 through 2.70.x started an `mj node` beside every host
+/// daemon. That node exits when it loses its daemon and finds no
+/// `node-endpoint.json`, so removing the file here, after the old daemon is
+/// gone and before its replacement starts, retires it. Delete this once no
+/// supported upgrade starts from those releases.
+fn retire_legacy_node() {
+    let data = data_dir();
+    for name in ["node-endpoint.json", "node-id", "node.lock"] {
+        match fs::remove_file(data.join(name)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(%error, file = name, "could not remove a file of the retired node");
+            }
+        }
+    }
 }
 
 fn random_token() -> Result<String> {
@@ -627,12 +744,6 @@ async fn ping_daemon(client: &mut DaemonClient) -> Result<()> {
     Ok(())
 }
 
-/// Local protocol readiness precedes the asynchronously started HTTP server.
-/// API and desktop callers share this wait instead of asking users to retry.
-pub async fn wait_for_web_viewer(client: &mut DaemonClient) -> Result<String> {
-    wait_for_web_viewer_with_timeout(client, START_TIMEOUT).await
-}
-
 /// Wait for the web access publication that owns all local API connection
 /// details: advertised URL, listener address, and certificate pin.
 pub async fn wait_for_web_access(
@@ -661,16 +772,6 @@ async fn wait_for_web_access_with_timeout(
     })
     .await
     .context("timed out waiting for the web viewer to become ready")?
-}
-
-async fn wait_for_web_viewer_with_timeout(
-    client: &mut DaemonClient,
-    timeout: Duration,
-) -> Result<String> {
-    match wait_for_web_access_with_timeout(client, timeout).await? {
-        mj_client::web::WebViewerAccess::Ready { viewer_url, .. } => Ok(viewer_url),
-        _ => unreachable!("wait_for_web_access_with_timeout returns only Ready"),
-    }
 }
 
 /// How the running daemon's build stands against this client's.
@@ -1038,6 +1139,26 @@ pub struct RestartedDaemon {
 /// faster than they can be replaced, which is a report rather than a race to
 /// keep running.
 const RESTART_ATTEMPTS: usize = 2;
+
+/// Stop this instance, including when the daemon is already absent. The
+/// startup lock is held throughout, so a stop cannot call the daemon absent
+/// while another client is still launching it. Returns whether a running
+/// daemon was stopped.
+pub(crate) async fn stop_instance() -> Result<bool> {
+    mj_core::config::ensure_may_control_store(&data_dir(), "stop the Mjolnir daemon")?;
+    let _startup = acquire_start_guard(data_dir().join("daemon-start.lock")).await?;
+    let mut daemon = match connect_management().await {
+        Ok(daemon) => daemon,
+        Err(error) if daemon_not_running(&error).is_some() => {
+            retire_legacy_node();
+            return Ok(false);
+        }
+        Err(error) => return Err(error.context("Mjolnir daemon is not answering")),
+    };
+    stop_and_wait(&mut daemon).await?;
+    retire_legacy_node();
+    Ok(true)
+}
 
 /// Stop the running Mjolnir daemon and start one from this client's executable.
 ///
@@ -1860,6 +1981,9 @@ pub(crate) fn continue_under_upgraded_build(
 }
 
 pub(crate) async fn upgraded_daemon_executable() -> Result<Option<UpgradeTarget>> {
+    if connector::DaemonConnector::shared().await?.is_ssh() {
+        return Ok(None);
+    }
     let Ok(metadata) = read_metadata_any() else {
         return Ok(None);
     };
@@ -2036,7 +2160,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn api_and_desktop_wait_for_the_viewer_without_a_retry_command() {
+    async fn api_waits_for_the_viewer_without_a_retry_command() {
         let (mut client, task) = viewer_fixture(vec![
             mj_client::web::WebViewerAccess::Starting,
             mj_client::web::WebViewerAccess::Starting,
@@ -2050,10 +2174,11 @@ mod tests {
             },
         ])
         .await;
-        assert_eq!(
-            wait_for_web_viewer(&mut client).await.unwrap(),
-            "http://127.0.0.1:1234"
-        );
+        assert!(matches!(
+            wait_for_web_access(&mut client).await.unwrap(),
+            mj_client::web::WebViewerAccess::Ready { viewer_url, .. }
+                if viewer_url == "http://127.0.0.1:1234"
+        ));
         drop(client);
         task.await.unwrap();
     }
@@ -2070,7 +2195,7 @@ mod tests {
         ])
         .await;
         assert!(
-            wait_for_web_viewer(&mut client)
+            wait_for_web_access(&mut client)
                 .await
                 .unwrap_err()
                 .to_string()
@@ -2082,7 +2207,7 @@ mod tests {
         let start = tokio::time::Instant::now();
         let timeout = Duration::from_millis(100);
         assert!(
-            wait_for_web_viewer_with_timeout(&mut client, timeout)
+            wait_for_web_access_with_timeout(&mut client, timeout)
                 .await
                 .unwrap_err()
                 .to_string()
@@ -2092,6 +2217,90 @@ mod tests {
         drop(client);
         task.await.unwrap();
     }
+    // Hard-won: #1524: a session-launched daemon inherited staged profile homes.
+    #[cfg(unix)]
+    #[test]
+    fn host_daemon_environment_restores_login_and_preserves_instance() {
+        const CHILD: &str = "MJ_TEST_DAEMON_ENVIRONMENT_CHILD";
+        const TEST: &str =
+            "daemon::tests::host_daemon_environment_restores_login_and_preserves_instance";
+        if let Ok(mode) = std::env::var(CHILD) {
+            let mut command = std::process::Command::new("/usr/bin/env");
+            configure_host_daemon_environment(&mut command).unwrap();
+            let output = mj_core::subprocess::run_with_input(&mut command, b"").unwrap();
+            assert!(output.status.success());
+            let output = String::from_utf8(output.stdout).unwrap();
+            let environment: std::collections::BTreeMap<_, _> = output
+                .lines()
+                .filter_map(|line| line.split_once('='))
+                .collect();
+            for name in ["MJ_CONFIG_DIR", "MJ_DATA_DIR", "MJ_INSTANCE"] {
+                let expected = if name == "MJ_INSTANCE" {
+                    std::env::var(name).unwrap()
+                } else {
+                    std::path::absolute(std::env::var_os(name).unwrap())
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .to_owned()
+                };
+                assert_eq!(environment.get(name).copied(), Some(expected.as_str()));
+            }
+            if mode == "session" {
+                for name in [
+                    "MJ_SESSION_ID",
+                    "MJ_SESSION_BASH_ENV",
+                    "MJ_PROFILE_CUSTOM",
+                    "BASH_ENV",
+                ] {
+                    assert!(!environment.contains_key(name), "leaked {name}");
+                }
+                assert_ne!(environment.get("CODEX_HOME"), Some(&"/session/profile"));
+                assert_ne!(environment.get("HOME"), Some(&"/session/home"));
+                assert_ne!(environment.get("TMPDIR"), Some(&"/session/tmp"));
+            } else {
+                assert_eq!(environment.get("CODEX_HOME"), Some(&"/user/custom-codex"));
+            }
+            assert_eq!(
+                command.get_current_dir(),
+                Some(std::path::absolute(data_dir()).unwrap().as_path())
+            );
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("data")).unwrap();
+        for mode in ["session", "ordinary"] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--exact", TEST])
+                .env(CHILD, mode)
+                .current_dir(directory.path())
+                .env("MJ_CONFIG_DIR", "config")
+                .env("MJ_DATA_DIR", "data")
+                .env("MJ_INSTANCE", "1524-daemon-env")
+                .env_remove("MJ_SESSION_ID")
+                .env_remove("MJ_SESSION_BASH_ENV")
+                .env("CODEX_HOME", "/user/custom-codex");
+            if mode == "session" {
+                command
+                    .env("MJ_SESSION_ID", "old-worker-session")
+                    .env("MJ_SESSION_BASH_ENV", "/session/bash-env")
+                    .env("MJ_PROFILE_CUSTOM", "profile-value")
+                    .env("CODEX_HOME", "/session/profile")
+                    .env("HOME", "/session/home")
+                    .env("TMPDIR", "/session/tmp")
+                    .env("BASH_ENV", "/session/bash-env");
+            }
+            let output = mj_core::subprocess::run_with_input(&mut command, b"").unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn detached_daemon_can_launch_after_its_client_binary_is_removed() {
@@ -2199,6 +2408,29 @@ mod tests {
             .expect("a shared hold waited after the replacement ended")
             .unwrap();
     }
+    // Hard-won: ab8be9d0a: stop decided the daemon was absent while a launcher still held the startup lock.
+    #[tokio::test]
+    async fn stopping_an_absent_daemon_waits_for_a_launch_in_progress() {
+        const CHILD: &str = "MJ_TEST_STOP_WAITS_FOR_DAEMON_LAUNCH";
+        const TEST: &str =
+            "daemon::tests::stopping_an_absent_daemon_waits_for_a_launch_in_progress";
+        if crate::test_support::rerun_in_isolated_child(CHILD, TEST) {
+            return;
+        }
+        let startup = acquire_start_guard(data_dir().join("daemon-start.lock"))
+            .await
+            .unwrap();
+        assert!(!metadata_path().exists());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), stop_instance())
+                .await
+                .is_err(),
+            "stop must wait until the launcher finishes before deciding whether the daemon is absent"
+        );
+        drop(startup);
+        assert!(!stop_instance().await.unwrap());
+    }
+
     /// The restart holds one guard across its stop and its start. That is only
     /// safe because the lock is not reentrant: a second acquisition inside the
     /// same process blocks exactly as another process would, so a restart that
@@ -2530,4 +2762,30 @@ mod tests {
             .unwrap();
         assert!(development_workers_changed_since(started, resolve).unwrap());
     }
+}
+
+/// Machine endpoint discovery is always local to this launcher. In particular,
+/// an SSH placement here must not recursively launch another SSH client.
+pub async fn print_endpoint(existing: bool) -> Result<()> {
+    tokio::task::spawn_blocking(|| {
+        let path = mj_core::config::config_path();
+        let placement = mj_core::config::DaemonConfig::load_placement(&path)?;
+        anyhow::ensure!(
+            placement.runtime != mj_core::config::DaemonRuntime::Ssh,
+            "{}: daemon endpoint cannot follow SSH placement; choose host, docker or podman on this machine",
+            path.display()
+        );
+        Ok::<_, anyhow::Error>(())
+    }).await.context("load endpoint placement task failed")??;
+    let mut client = if existing {
+        connect_existing()
+            .await
+            .context("no running daemon available for daemon endpoint --existing")?
+    } else {
+        connect_or_start().await?
+    };
+    let mut endpoint = client.endpoint().await?;
+    endpoint.config_path = Some(mj_core::config::config_path());
+    println!("{}", serde_json::to_string(&endpoint)?);
+    Ok(())
 }

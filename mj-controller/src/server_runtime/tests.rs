@@ -14,7 +14,7 @@ use mj_core::remote_git::Shorthand;
 use mj_core::state::SessionState;
 
 #[test]
-fn web_restart_and_move_use_the_lifecycle_cancellation_control() {
+fn web_suspend_restart_and_move_use_the_lifecycle_cancellation_control() {
     let move_request = serde_json::from_value(serde_json::json!({
         "preparation": {
             "selection": {"session_id": "move-web-session"},
@@ -26,6 +26,10 @@ fn web_restart_and_move_use_the_lifecycle_cancellation_control() {
     }))
     .unwrap();
     for action in [
+        ControllerAction::Suspend {
+            session_id: "suspend-web-session".into(),
+            acknowledge_unpublished_work: true,
+        },
         ControllerAction::Restart {
             session_id: "restart-web-session".into(),
             acknowledge_container_recreation: false,
@@ -38,7 +42,7 @@ fn web_restart_and_move_use_the_lifecycle_cancellation_control() {
         let lifecycle_control = control
             .lifecycle
             .as_ref()
-            .expect("web Restart and Move share their lifecycle cancellation control");
+            .expect("web Suspend, Restart and Move share their lifecycle cancellation control");
         assert!(Arc::ptr_eq(
             &control.cancelled,
             &lifecycle_control.cancelled
@@ -49,6 +53,7 @@ fn web_restart_and_move_use_the_lifecycle_cancellation_control() {
     }
 }
 
+// Hard-won: 92684ad3b: unread-frontier changes must reach the viewer even when attention stays unchanged.
 #[test]
 fn ordinary_web_publications_project_only_changed_rows_at_every_history_size() {
     for count in [100, 10_000, 100_000] {
@@ -60,8 +65,21 @@ fn ordinary_web_publications_project_only_changed_rows_at_every_history_size() {
             controller.state.sessions.insert(id, record);
         }
         let sources = PhoneProjectSources::default();
+        let native = mj_core::native_agent::NativeAgent {
+            owner_session_id: "history-000000".into(),
+            session_id: "native".into(),
+            parent_session_id: None,
+            name: "Inspect".into(),
+            task: String::new(),
+            capabilities: Default::default(),
+            state: mj_core::native_agent::NativeAgentState::Running,
+            availability: Default::default(),
+            availability_reason: None,
+            stable_id: None,
+        };
+        let native_rows = BTreeMap::from([("history-000000".to_owned(), vec![native.clone()])]);
         let views = PhoneSessionViews {
-            native_agents: &Default::default(),
+            native_agents: &native_rows,
             conversations: &Default::default(),
             queued_prompts: &Default::default(),
             active_user_shells: &Default::default(),
@@ -77,12 +95,75 @@ fn ordinary_web_publications_project_only_changed_rows_at_every_history_size() {
             reviews: &Default::default(),
         };
         let mut publisher = publication::ViewerPublication::default();
+        let mut runtime = mj_client::runtime_feed::RuntimeProjection::default();
+        runtime.native_agents.insert(
+            native.view_id(),
+            mj_core::native_agent::NativeAgentSummary {
+                generation_ordinal: 1,
+                agent: native.clone(),
+                projection_ordinal: 0,
+                projection_digest: String::new(),
+                pending_input: false,
+            },
+        );
+        runtime.metadata.session_attention.insert(
+            native.view_id(),
+            mj_core::attention::SessionAttention::Working,
+        );
+        let attention = mj_core::attention::SessionAttention::Important;
+        runtime
+            .metadata
+            .session_attention
+            .insert("history-000000".into(), attention);
+        runtime
+            .metadata
+            .unread_frontiers
+            .insert("history-000000".into(), 80);
+        let runtime_view = mj_client::daemon::RuntimeSessionView::from_managed(
+            "history-000000".into(),
+            mj_client::session::ManagedSessionView {
+                attention,
+                ..Default::default()
+            },
+        );
+        publisher.observe_runtime(&runtime, &mut Default::default(), &mut Default::default());
         let held = publisher.snapshot(&controller, &[], &Default::default(), &views, 1);
+        let viewer = &held.sessions.0["history-000000"];
+        let api = crate::server::api::ApiSession::from(viewer);
+        assert_eq!(
+            serde_json::to_value(&runtime_view).unwrap()["attention"],
+            serde_json::to_value(&api).unwrap()["attention"]
+        );
+        assert_eq!(viewer.attention, runtime_view.attention);
+        assert_eq!(viewer.unread_frontier, Some(80));
+        assert_eq!(
+            viewer.native_subagent_attention["native"],
+            mj_core::attention::SessionAttention::Working
+        );
+        runtime.metadata.session_attention.insert(
+            native.view_id(),
+            mj_core::attention::SessionAttention::Unreachable,
+        );
+        publisher.observe_runtime(&runtime, &mut Default::default(), &mut Default::default());
+        let refreshed = publisher.snapshot(&controller, &[], &Default::default(), &views, 2);
+        assert_eq!(
+            refreshed.sessions.0["history-000000"].native_subagent_attention["native"],
+            mj_core::attention::SessionAttention::Unreachable
+        );
         crate::server::take_viewer_row_visits();
         publisher.snapshot(&controller, &[], &Default::default(), &views, 2);
         assert_eq!(crate::server::take_viewer_row_visits(), 0);
-        publisher.dirty.insert("history-000000".into());
-        publisher.snapshot(&controller, &[], &Default::default(), &views, 3);
+        runtime
+            .metadata
+            .unread_frontiers
+            .insert("history-000000".into(), 99);
+        publisher.observe_runtime(&runtime, &mut Default::default(), &mut Default::default());
+        let frontier_only = publisher.snapshot(&controller, &[], &Default::default(), &views, 3);
+        assert_eq!(
+            frontier_only.sessions.0["history-000000"].unread_frontier,
+            Some(99)
+        );
+        assert_eq!(held.sessions.0["history-000000"].unread_frontier, Some(80));
         assert_eq!(crate::server::take_viewer_row_visits(), 1);
         controller
             .state
@@ -228,6 +309,8 @@ fn move_recovery_projection_exposes_safe_retry_settings_only() {
         source_target_template_id: "source-target".into(),
         source_target: None,
         source_native_session_id: Some("private-native-id".into()),
+        inherited_resource_allocation: None,
+        inherited_additional_mounts: Vec::new(),
         source_additional_mounts: vec![crate::targets::AdditionalMount {
             source: "/source/source".into(),
             destination: "/source/target".into(),
@@ -334,7 +417,7 @@ fn golden_phone_new_session_preflight() {
         effort: None,
     }];
     let mut plain = run_new_preflight(
-        config,
+        config.clone(),
         "hel".into(),
         "raw".into(),
         Some(folder.path().to_path_buf()),
@@ -347,6 +430,28 @@ fn golden_phone_new_session_preflight() {
     )
     .unwrap();
     writeln!(out, "{}", serde_json::to_string_pretty(&plain).unwrap()).unwrap();
+
+    let error = preflight_new_request(
+        config,
+        mj_client::daemon::NewSessionPreflightRequest {
+            workspace_id: String::new(),
+            profile_id: "codex".into(),
+            bundle_id: String::new(),
+            target_id: "raw".into(),
+            project_directory: Some(folder.path().to_path_buf()),
+            remote_repairs: Vec::new(),
+            additional_mounts: vec![crate::targets::AdditionalMount {
+                source: folder.path().to_path_buf(),
+                destination: "/attached".into(),
+                access: crate::targets::MountAccess::Ro,
+            }],
+        },
+        CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false))),
+    )
+    .expect_err("shared preflight refuses mounts on bare targets");
+    writeln!(out, "=== shared HTTP/control launch validation ===").unwrap();
+    writeln!(out, "result: rejected").unwrap();
+    writeln!(out, "reason: {error}").unwrap();
 
     let mut config = Config::default();
     config.targets.insert(
@@ -605,9 +710,11 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
     controller.state.sessions.insert(record.id.clone(), record);
     let operational = RelayOperationalState {
         assessment: None,
+        open_request: None,
+        continuation: Default::default(),
+        person_input_through: 0,
         assessment_context: None,
         turn_completion: None,
-        continuation: Default::default(),
         relay_protocol_version: Some(mj_core::relay::RELAY_PROTOCOL_VERSION),
         native_agents: Vec::new(),
         steering: None,
@@ -643,8 +750,9 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
         agent_info: None,
         runtime: None,
         steering_supported: None,
+        mailbox_delivery: None,
         turn_controls: None,
-        config_options: Vec::new(),
+        config_options: Vec::new().into(),
         modes: Some(SessionModeState::new(
             "default",
             vec![
@@ -658,7 +766,8 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
             ),
             AvailableCommand::new("Review", "agent collision"),
             AvailableCommand::new("INSPECT", "duplicate agent command"),
-        ],
+        ]
+        .into(),
         config: std::collections::BTreeMap::new(),
         active_prompt: None,
         queued_prompts: Vec::new(),
@@ -676,7 +785,8 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
         background_commands: Vec::new(),
         background_work_known: None,
     };
-    let mut operational = std::collections::BTreeMap::from([("session-1".into(), operational)]);
+    let mut operational =
+        std::collections::BTreeMap::from([("session-1".into(), operational.into())]);
     let materialized_activity = std::collections::BTreeMap::from([(
         "session-1".to_owned(),
         crate::server_runtime::snapshot::MaterializedActivity {
@@ -684,7 +794,10 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
             execution: mj_core::state::MaterializedExecutionState::Idle,
         },
     )]);
-    let project = |operational: &std::collections::BTreeMap<String, RelayOperationalState>| {
+    let project = |operational: &std::collections::BTreeMap<
+        String,
+        mj_core::snapshot_map::SharedSnapshot<RelayOperationalState>,
+    >| {
         viewer_snapshot(
             &controller,
             &[],
@@ -796,7 +909,7 @@ fn phone_snapshot_projects_capability_gated_and_agent_commands_with_provenance()
         (Vec::new(), false),
     ] {
         let offers_config = !options.is_empty();
-        operational.get_mut("session-1").unwrap().config_options = options;
+        operational.get_mut("session-1").unwrap().config_options = options.into();
         let names = project(&operational).sessions[0]
             .available_commands
             .iter()
@@ -993,8 +1106,11 @@ fn golden_phone_session_snapshot() {
         .unwrap()
     };
     let operational = BTreeMap::from([
-        ("session-1".to_owned(), operational_state("session-1")),
-        ("child-1".to_owned(), operational_state("child-1")),
+        (
+            "session-1".to_owned(),
+            operational_state("session-1").into(),
+        ),
+        ("child-1".to_owned(), operational_state("child-1").into()),
     ]);
     let native_agent = |state| mj_core::native_agent::NativeAgent {
         availability: Default::default(),
@@ -1024,7 +1140,10 @@ fn golden_phone_session_snapshot() {
     let project =
         |controller: &Controller,
          workspaces: &[mj_core::workspace::WorkspaceRecord],
-         operational: &BTreeMap<String, mj_core::relay::RelayOperationalState>,
+         operational: &BTreeMap<
+            String,
+            mj_core::snapshot_map::SharedSnapshot<mj_core::relay::RelayOperationalState>,
+        >,
          native_agents: &BTreeMap<String, Vec<mj_core::native_agent::NativeAgent>>| {
             viewer_snapshot(
                 controller,
@@ -1093,7 +1212,7 @@ fn golden_phone_session_snapshot() {
             mj_core::activity::verdict::CompletionEvidence::bounded("EndTurn", None),
         );
         assessment.status = status;
-        state.assessment = Some(Box::new(assessment));
+        state.assessment = Some(std::sync::Arc::new(assessment));
         state.retry_assessment_pending = true;
         state.idle_since_ms = Some(1_000);
         let snapshot = project(&controller, &one_workspace, &assessing, &no_native_agents);
@@ -1187,7 +1306,7 @@ fn golden_phone_session_snapshot() {
             diffstats: Vec::new(),
         }
     };
-    let conversations = |entries| {
+    let conversations = |entries: Vec<crate::server::BrowserTranscriptEntry>| {
         mj_core::snapshot_map::SnapshotMap::from([(
             "session-1".to_owned(),
             BrowserTranscript {
@@ -1195,7 +1314,7 @@ fn golden_phone_session_snapshot() {
                 presentation_key: "key".into(),
                 window_start_seq: 1,
                 reset: false,
-                entries,
+                entries: entries.into_iter().map(Arc::new).collect(),
             },
         )])
     };
@@ -1307,7 +1426,14 @@ fn golden_phone_session_snapshot() {
         }),
     );
 
-    let mut quota_controller = controller_with_profiles(&["claude", "claude-unknown", "codex"]);
+    let mut quota_controller =
+        controller_with_profiles(&["agy", "claude", "claude-unknown", "codex"]);
+    quota_controller
+        .config
+        .profiles
+        .get_mut("agy")
+        .unwrap()
+        .kind = HarnessKind::Antigravity;
     quota_controller
         .config
         .profiles
@@ -1335,6 +1461,7 @@ fn golden_phone_session_snapshot() {
     };
     let quota_report = |profile_id: &str, harness: HarnessKind, windows| ProfileQuota {
         paid_credits: None,
+        monthly_price_usd: None,
         banked_resets: None,
         profile_id: profile_id.into(),
         harness,
@@ -1345,6 +1472,39 @@ fn golden_phone_session_snapshot() {
         rate_limited_until_epoch_seconds: None,
     };
     let quota_reports = BTreeMap::from([
+        (
+            "agy".into(),
+            quota_report(
+                "agy",
+                HarnessKind::Antigravity,
+                vec![
+                    quota_window(
+                        "Week",
+                        Some(73),
+                        Some(mj_client::quota::AntigravityQuotaPool::Gemini.model_scope()),
+                        7 * 24 * 60 * 60,
+                    ),
+                    quota_window(
+                        "5H",
+                        Some(48),
+                        Some(mj_client::quota::AntigravityQuotaPool::Gemini.model_scope()),
+                        5 * 60 * 60,
+                    ),
+                    quota_window(
+                        "Week",
+                        Some(0),
+                        Some(mj_client::quota::AntigravityQuotaPool::Claude.model_scope()),
+                        7 * 24 * 60 * 60,
+                    ),
+                    quota_window(
+                        "5H",
+                        Some(81),
+                        Some(mj_client::quota::AntigravityQuotaPool::Claude.model_scope()),
+                        5 * 60 * 60,
+                    ),
+                ],
+            ),
+        ),
         (
             "claude".into(),
             quota_report(
@@ -1406,10 +1566,11 @@ fn golden_phone_session_snapshot() {
     section(
         &mut out,
         "viewer quota windows",
-        "Claude, unknown Claude, and Codex profiles",
+        "Antigravity, Claude, unknown Claude, and Codex profiles",
         &serde_json::json!({
             "profiles": quota_snapshot.profiles.iter().map(|profile| serde_json::json!({
                 "id": profile.id,
+                "quota_pools": profile.quota_pools,
                 "quota": profile.quota,
             })).collect::<Vec<_>>(),
         }),
@@ -1435,7 +1596,6 @@ fn controller_with_profiles(ids: &[&str]) -> Controller {
             phone: Default::default(),
             daemon: Default::default(),
             github: Default::default(),
-            continuation: Default::default(),
             review: Default::default(),
             sessionwiki: Default::default(),
             legacy_startup: (),
@@ -1679,7 +1839,7 @@ async fn phone_projects_resolve_a_sub_agent_from_its_suspended_parent() {
     parent.state = SessionState::Stopped;
     parent.target_template_id = "local".into();
     parent.project_directory = Some(clone.clone());
-    parent.managed_worktree = Some(mj_core::state::ManagedWorktree {
+    parent.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
         kind: mj_core::state::ManagedCheckoutKind::Clone,
         source_project_directory: project.clone(),
         source_repository: project.clone(),
@@ -1687,7 +1847,7 @@ async fn phone_projects_resolve_a_sub_agent_from_its_suspended_parent() {
         branch: "mj/parent".into(),
         target: mj_core::state::ManagedWorktreeTarget::Local,
         base_commit: None,
-    });
+    }));
     let mut child = phone_session("child", 0);
     child.state = SessionState::Stopped;
     child.target_template_id = "local".into();
@@ -1868,6 +2028,7 @@ fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
     SessionRecord {
         oracle_choice: None,
         oracle: true,
+        notifications_ignored: false,
         project: None,
         target_runtime: None,
         launch_base: None,
@@ -1880,8 +2041,6 @@ fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
         create_managed_worktree: None,
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
-        container_cpus: None,
-        container_memory: None,
         id: id.into(),
         title: "Phone launch".into(),
         harness_kind: mj_core::config::HarnessKind::Codex,
@@ -1906,6 +2065,8 @@ fn phone_session(id: &str, viewed_through_event_ordinal: u64) -> SessionRecord {
         viewed_through_event_ordinal,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: None,
     }
@@ -2073,86 +2234,6 @@ fn actions_on_other_sessions_do_not_block_admission_but_same_session_actions_do(
 }
 
 #[test]
-fn a_profile_added_while_the_server_runs_reaches_the_quota_refresher() {
-    let (profiles_tx, profiles_rx) = tokio::sync::watch::channel(QuotaRefreshBatch::default());
-    let mut batch = QuotaRefreshBatch::default();
-    let controller = controller_with_profiles(&["codex"]);
-
-    assert!(republish_quota_profiles(
-        &controller,
-        &mut batch,
-        &profiles_tx
-    ));
-    assert_eq!(
-        profiles_rx
-            .borrow()
-            .profiles
-            .iter()
-            .map(|profile| profile.profile_id.clone())
-            .collect::<Vec<_>>(),
-        vec!["codex".to_owned()]
-    );
-    let first_generation = profiles_rx.borrow().generation;
-
-    // Every finished action reloads the configuration; an unchanged one
-    // must not restart a harness process per profile.
-    assert!(!republish_quota_profiles(
-        &controller,
-        &mut batch,
-        &profiles_tx
-    ));
-    assert_eq!(profiles_rx.borrow().generation, first_generation);
-
-    let grown = controller_with_profiles(&["claude", "codex"]);
-    assert!(republish_quota_profiles(&grown, &mut batch, &profiles_tx));
-    assert_eq!(
-        profiles_rx
-            .borrow()
-            .profiles
-            .iter()
-            .map(|profile| profile.profile_id.clone())
-            .collect::<Vec<_>>(),
-        vec!["claude".to_owned(), "codex".to_owned()]
-    );
-    assert!(profiles_rx.borrow().generation > first_generation);
-}
-
-#[test]
-fn a_quota_runtime_change_reaches_the_quota_refresher() {
-    let (profiles_tx, profiles_rx) = tokio::sync::watch::channel(QuotaRefreshBatch::default());
-    let mut batch = QuotaRefreshBatch::default();
-    let mut controller = controller_with_profiles(&["codex"]);
-    controller.config.quota.runtime = mj_core::config::QuotaRuntimeChoice::Auto;
-    assert!(republish_quota_profiles(
-        &controller,
-        &mut batch,
-        &profiles_tx
-    ));
-    let first_generation = profiles_rx.borrow().generation;
-
-    // The profiles stay as they are; only where a check runs changes.
-    controller.config.quota.runtime = mj_core::config::QuotaRuntimeChoice::Host;
-    assert!(republish_quota_profiles(
-        &controller,
-        &mut batch,
-        &profiles_tx
-    ));
-    let sent = profiles_rx.borrow().clone();
-    assert!(sent.generation > first_generation);
-    assert_eq!(
-        sent.profiles[0].runtime.choice,
-        mj_core::config::QuotaRuntimeChoice::Host
-    );
-
-    assert!(!republish_quota_profiles(
-        &controller,
-        &mut batch,
-        &profiles_tx
-    ));
-    assert_eq!(profiles_rx.borrow().generation, sent.generation);
-}
-
-#[test]
 fn quota_projection_preserves_reset_metadata_and_marks_only_overdue_readings_stale() {
     let controller = controller_with_profiles(&["codex"]);
     let now = std::time::SystemTime::now()
@@ -2164,6 +2245,7 @@ fn quota_projection_preserves_reset_metadata_and_marks_only_overdue_readings_sta
             "codex".to_owned(),
             ProfileQuota {
                 paid_credits: None,
+                monthly_price_usd: None,
                 banked_resets: Some(1),
                 profile_id: "codex".into(),
                 harness: HarnessKind::Codex,

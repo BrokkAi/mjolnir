@@ -4,6 +4,20 @@ use super::*;
 use crate::targets::tests::unwrapped_remote_line;
 
 #[test]
+fn observe_enforcement_requires_configured_approvals_even_on_isolated_targets() {
+    for current in [
+        ExecutionPolicy::ConfiguredApprovals,
+        ExecutionPolicy::Unconstrained,
+    ] {
+        assert_eq!(
+            effective_execution_policy(current, true),
+            ExecutionPolicy::ConfiguredApprovals
+        );
+        assert_eq!(effective_execution_policy(current, false), current);
+    }
+}
+
+#[test]
 fn oracle_launch_requires_a_top_level_session_and_an_effective_choice() {
     let mut session = crate::controller::test_support::checkpoint_test_session("primary");
     let mut choices = mj_core::config::SubagentConfig::default();
@@ -19,7 +33,7 @@ fn oracle_launch_requires_a_top_level_session_and_an_effective_choice() {
     session.oracle = false;
     assert!(!oracle_launch_enabled(&session, false, &choices));
     session.oracle = true;
-    session.oracle_choice = Some(choice);
+    session.oracle_choice = Some(Box::new(choice));
     choices.oracle = None;
     assert!(oracle_launch_enabled(&session, false, &choices));
 }
@@ -779,76 +793,56 @@ fn blank_claude_auth_environment_values_do_not_count_as_logins() {
     assert!(!claude_environment_login_present(&profile, &environment));
 }
 
-#[cfg(target_os = "macos")]
 #[test]
-fn an_apple_container_takes_macs_claude_keychain_login_unless_a_setup_token_does() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+fn macs_claude_keychain_login_is_the_only_staged_login_and_has_no_refresh_token() {
+    use crate::claude_login::fake::FakeKeychain;
+    use mj_core::config::HarnessHost;
 
     const KEYCHAIN_LOGIN: &[u8] =
         br#"{"claudeAiOauth":{"accessToken":"keychain","refreshToken":"keychain-refresh","expiresAt":100}}"#;
-    const PREVIOUS_ACCOUNT_LOGIN: &[u8] =
+    const STAGED_LOGIN: &[u8] = br#"{"claudeAiOauth":{"accessToken":"keychain","expiresAt":100}}"#;
+    // What `stage_profile` copies from a profile home that an earlier release
+    // filled from a session.
+    const LEFTOVER_LOGIN: &[u8] =
         br#"{"claudeAiOauth":{"accessToken":"previous","refreshToken":"previous","expiresAt":200}}"#;
-
-    struct KeychainExecutor {
-        calls: AtomicUsize,
-    }
-
-    impl CommandExecutor for KeychainExecutor {
-        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
-            assert_eq!(command.program, "security");
-            assert_eq!(
-                command.args,
-                [
-                    "find-generic-password",
-                    "-s",
-                    "Claude Code-credentials",
-                    "-w"
-                ]
-            );
-            self.calls.fetch_add(1, Ordering::Relaxed);
-            Ok(CommandOutput {
-                status: 0,
-                stdout: KEYCHAIN_LOGIN.to_vec(),
-                stderr: Vec::new(),
-            })
-        }
-    }
 
     let directory = tempfile::tempdir().unwrap();
     let staged = directory.path().join("profile");
     std::fs::create_dir(&staged).unwrap();
-    let profile = mj_core::config::HarnessProfile {
-        ..mj_core::config::HarnessProfile::new(HarnessKind::Claude, directory.path().join("claude"))
-    };
-    let backend = targets::TargetLocator::AppleContainer {
-        borrowed_from: None,
-        container_id: "hel-session".into(),
-    };
-    let executor = KeychainExecutor {
-        calls: AtomicUsize::new(0),
-    };
+    let staged_login = staged.join(".credentials.json");
+    let profile =
+        mj_core::config::HarnessProfile::new(HarnessKind::Claude, directory.path().join("claude"));
+    let keychain = FakeKeychain::holding(KEYCHAIN_LOGIN);
 
-    stage_claude_keychain_login(&profile, &staged, &backend, true, &executor).unwrap();
-    assert_eq!(executor.calls.load(Ordering::Relaxed), 0);
-    assert!(!staged.join(".credentials.json").exists());
+    // The Keychain holds the login on a Mac only: nothing else asks it.
+    stage_claude_keychain_login(&profile, HarnessHost::Other, &staged, false, &keychain).unwrap();
+    assert!(keychain.calls().is_empty());
 
-    stage_claude_keychain_login(&profile, &staged, &backend, false, &executor).unwrap();
-    assert_eq!(executor.calls.load(Ordering::Relaxed), 1);
-    assert_eq!(
-        std::fs::read(staged.join(".credentials.json")).unwrap(),
-        KEYCHAIN_LOGIN
-    );
+    stage_claude_keychain_login(&profile, HarnessHost::MacOs, &staged, true, &keychain).unwrap();
+    assert!(keychain.calls().is_empty());
+    assert!(!staged_login.exists());
+
+    stage_claude_keychain_login(&profile, HarnessHost::MacOs, &staged, false, &keychain).unwrap();
+    assert_eq!(std::fs::read(&staged_login).unwrap(), STAGED_LOGIN);
 
     // Freshness cannot distinguish a refreshed grant from another account.
     // The current Keychain login stays authoritative even when an earlier
     // staged copy has a later expiry.
-    std::fs::write(staged.join(".credentials.json"), PREVIOUS_ACCOUNT_LOGIN).unwrap();
-    stage_claude_keychain_login(&profile, &staged, &backend, false, &executor).unwrap();
-    assert_eq!(executor.calls.load(Ordering::Relaxed), 2);
-    assert_eq!(
-        std::fs::read(staged.join(".credentials.json")).unwrap(),
-        KEYCHAIN_LOGIN
-    );
+    std::fs::write(&staged_login, LEFTOVER_LOGIN).unwrap();
+    stage_claude_keychain_login(&profile, HarnessHost::MacOs, &staged, false, &keychain).unwrap();
+    assert_eq!(std::fs::read(&staged_login).unwrap(), STAGED_LOGIN);
+
+    // With no Keychain item, or a locked one, a leftover profile-home file is
+    // not a login and is never staged as one.
+    for keychain in [
+        FakeKeychain::default(),
+        FakeKeychain::holding(KEYCHAIN_LOGIN).locked(),
+    ] {
+        std::fs::write(&staged_login, LEFTOVER_LOGIN).unwrap();
+        stage_claude_keychain_login(&profile, HarnessHost::MacOs, &staged, false, &keychain)
+            .unwrap();
+        assert!(!staged_login.exists());
+    }
 }
 
 #[test]
@@ -1255,16 +1249,16 @@ fn starting_a_worker_uses_private_logs_without_touching_incumbent_files() {
         );
         session.target = Some(match &locator {
             targets::TargetLocator::LocalBare { worker_root } => {
-                mj_core::state::TargetLocator::LocalBare {
+                Box::new(mj_core::state::TargetLocator::LocalBare {
                     worker_root: worker_root.into(),
-                }
+                })
             }
             targets::TargetLocator::LocalPodman { container_id, .. } => {
-                mj_core::state::TargetLocator::LocalPodman {
+                Box::new(mj_core::state::TargetLocator::LocalPodman {
                     container_id: container_id.clone(),
                     borrowed_from: None,
                     workspace_storage: Default::default(),
-                }
+                })
             }
             _ => unreachable!(),
         });
@@ -2280,6 +2274,19 @@ fn bridge_fallback_pins_match_the_agent_dev_containerfile() {
              {MUSE_ACP_VERSION}; a stale check fails only when the image is published"
     );
     assert!(CONTAINERFILE.contains("OPENCODE_DISABLE_AUTOUPDATE=1"));
+    let antigravity: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../mj-core/assets/antigravity/runtime.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        antigravity["version"],
+        mj_core::harness_runtime::ANTIGRAVITY_VERSION
+    );
+    assert!(CONTAINERFILE.contains(
+        "COPY mj-core/assets/antigravity/runtime.json /opt/mjolnir/antigravity-runtime.json"
+    ));
+    assert!(CONTAINERFILE.contains("RUN python3 /opt/mjolnir/install-antigravity.py /opt/mjolnir/antigravity-runtime.json /usr/local/bin"));
+    assert!(CONTAINERFILE.contains("ENV AGY_CLI_DISABLE_AUTO_UPDATE=true"));
 
     for package in [
         format!("@moonshot-ai/kimi-code@{KIMI_VERSION}"),
@@ -2658,6 +2665,7 @@ fn a_session_without_project_memory_launches_without_memory() {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            claude_permission_mode: None,
             aws: None,
             ..mj_core::config::HarnessProfile::new(
                 kind,
@@ -2744,6 +2752,7 @@ fn project_memory_replica_is_separate_from_controller_attachment_directories() {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            claude_permission_mode: None,
             aws: None,
             ..mj_core::config::HarnessProfile::new(
                 kind,
@@ -2755,9 +2764,9 @@ fn project_memory_replica_is_separate_from_controller_attachment_directories() {
         session.last_profile = kind.id().into();
         session.target_template_id = "localhost".into();
         session.project_directory = Some(project.clone());
-        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: worker_root.clone(),
-        });
+        }));
 
         let (launch, memory, _) = worker_launch_config(
             &session,
@@ -2837,6 +2846,7 @@ fn zai_profile(home: &Path) -> mj_core::config::HarnessProfile {
         guardian_review_model: None,
         codex_profile: None,
         muse_auto_review: None,
+        claude_permission_mode: None,
         aws: None,
     }
 }
@@ -3141,6 +3151,7 @@ fn deepseek_profile(home: &Path) -> mj_core::config::HarnessProfile {
         guardian_review_model: None,
         codex_profile: None,
         muse_auto_review: None,
+        claude_permission_mode: None,
         aws: None,
     }
 }
@@ -3478,7 +3489,8 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
             | HarnessKind::Grok
             | HarnessKind::Muse
             | HarnessKind::OpenCode
-            | HarnessKind::Dsh => &[],
+            | HarnessKind::Dsh
+            | HarnessKind::Antigravity => &[],
         };
         let home = tempfile::tempdir().unwrap();
         let skill = format!("{}/review/SKILL.md", kind.synced_skill_dirs()[0]);
@@ -3498,6 +3510,7 @@ fn staging_leaves_harness_owned_skills_to_the_harness() {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            claude_permission_mode: None,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.path().to_path_buf())
         };
@@ -3688,10 +3701,6 @@ fn the_jev_switch_reaches_the_worker_and_removes_the_key() {
     )
     .unwrap()
     .0;
-    for environment in [&mut launch.target_environment, &mut launch.environment] {
-        environment.insert("TYPESAFE_API_KEY".into(), "secret".into());
-    }
-
     let mut on = launch.clone();
     apply_jev_switch(&mut on, true);
     assert_eq!(on.target_environment, launch.target_environment);
@@ -3699,21 +3708,8 @@ fn the_jev_switch_reaches_the_worker_and_removes_the_key() {
 
     apply_jev_switch(&mut launch, false);
     for environment in [&launch.target_environment, &launch.environment] {
-        assert!(!environment.contains_key("TYPESAFE_API_KEY"));
         assert_eq!(
             environment.get(mj_core::jev::DISABLED_ENVIRONMENT),
-            Some(&"1".to_owned())
-        );
-    }
-
-    // The continuation switch travels the same way, and only when off.
-    let mut continuing = launch.clone();
-    super::launch::apply_continuation_switch(&mut continuing, true);
-    assert_eq!(continuing.environment, launch.environment);
-    super::launch::apply_continuation_switch(&mut launch, false);
-    for environment in [&launch.target_environment, &launch.environment] {
-        assert_eq!(
-            environment.get(mj_core::jev::CONTINUATION_DISABLED_ENVIRONMENT),
             Some(&"1".to_owned())
         );
     }
@@ -3853,6 +3849,7 @@ fn codex_login_profile(home: &Path, auth_mode: &str) -> mj_core::config::Harness
         guardian_review_model: None,
         codex_profile: None,
         muse_auto_review: None,
+        claude_permission_mode: None,
         aws: None,
     }
 }
@@ -3896,9 +3893,9 @@ fn launches_on_every_target(
     local.target_template_id = "localhost".into();
     local.project_directory = Some(project.path().to_path_buf());
     let local_root = format!("/home/me/.local/share/hel/workers/{parent_id}");
-    local.target = Some(mj_core::state::TargetLocator::LocalBare {
+    local.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: local_root.clone().into(),
-    });
+    }));
     let localhost = worker_launch_config(
         &local,
         profile,
@@ -4293,9 +4290,9 @@ fn a_custom_provider_session_carries_its_key_and_runs_from_a_private_home() {
     session.last_profile = "glm".into();
     session.target_template_id = "localhost".into();
     session.project_directory = Some(project.path().to_path_buf());
-    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: "/home/me/.local/share/hel/workers/session-glm".into(),
-    });
+    }));
 
     let (launch, _, target_home) = worker_launch_config(
         &session,
@@ -4388,9 +4385,9 @@ fn raw_local_muse_launches_with_guardian_approvals() {
     session.last_profile = "muse".into();
     session.target_template_id = "localhost".into();
     session.project_directory = Some(project.path().to_path_buf());
-    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: "/home/me/.local/share/hel/workers/session-muse".into(),
-    });
+    }));
     let profile = mj_core::config::HarnessProfile {
         ..mj_core::config::HarnessProfile::new(HarnessKind::Muse, PathBuf::from("/profiles/muse"))
     };
@@ -4748,6 +4745,7 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         reviewer_launch: None,
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
+        subagent_kind: None,
         agent_mailboxes_enabled: true,
         subtle_subagents: true,
         initial_model: None,
@@ -4771,6 +4769,8 @@ fn remote_upgrade_prepares_managed_harness_without_touching_running_worker() {
         native_session_id: None,
         project_memory: None,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
+        observe_policy: None,
     };
 
     // A host of its own, so no other test has claimed this store's collection.
@@ -4892,6 +4892,7 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
         session_id: session.id.clone(),
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
+        subagent_kind: None,
         agent_mailboxes_enabled: true,
         subtle_subagents: true,
         initial_model: None,
@@ -4912,6 +4913,8 @@ fn legacy_worker_upgrade_relinks_cache_configuration_without_native_mbx() {
         native_session_id: None,
         project_memory: None,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
+        observe_policy: None,
     };
     let executor = CacheLinkExecutor {
         commands: RefCell::new(Vec::new()),
@@ -4999,6 +5002,7 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         reviewer_launch: None,
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
+        subagent_kind: None,
         agent_mailboxes_enabled: true,
         subtle_subagents: true,
         initial_model: None,
@@ -5022,6 +5026,8 @@ fn local_upgrade_preflight_uses_current_binary_and_preserves_launch_policy() {
         native_session_id: None,
         project_memory: None,
         execution_policy: ExecutionPolicy::ConfiguredApprovals,
+        claude_permission_mode: Default::default(),
+        observe_policy: None,
     };
     let locator = targets::TargetLocator::LocalBare {
         worker_root: "/worker/session-local".into(),
@@ -5190,7 +5196,7 @@ fn recovery_preserves_launch_config_until_a_matching_worker_source_is_available(
         },
     };
     let mut record = crate::controller::test_support::checkpoint_test_session(session_id);
-    record.target = Some(plan.source_target.clone());
+    record.target = Some(Box::new(plan.source_target.clone()));
     crate::database::save_session(&record).unwrap();
     let error = crate::session_manager::recover_worker_controlled(
         plan.clone(),
@@ -5378,6 +5384,13 @@ fn fixture_home_entries(kind: HarnessKind) -> &'static [(&'static str, bool)] {
         ],
         // dsh-acp keeps only its sessions, written atomically through a
         // temporary file beside each record.
+        HarnessKind::Antigravity => &[
+            ("antigravity-cli/antigravity-oauth-token", true),
+            ("AGENTS.md", true),
+            ("skills/review/SKILL.md", true),
+            ("antigravity-cli/conversations/old.db", false),
+            ("settings.json", false),
+        ],
         HarnessKind::Dsh => &[
             ("AGENTS.md", true),
             ("skills/review/SKILL.md", true),
@@ -5440,6 +5453,7 @@ fn a_staged_home_gets_the_login_and_settings_and_no_native_history() {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            claude_permission_mode: None,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.path().to_path_buf())
         };
@@ -5561,6 +5575,10 @@ fn login_bytes(kind: HarnessKind, generation: i64) -> Vec<u8> {
                 "expires": 1_790_000_000_000_i64 + generation * 1000,
             },
         }]),
+        HarnessKind::Antigravity => serde_json::json!({"token": {
+            "access_token": format!("access-{generation}"), "refresh_token": "stable-refresh",
+            "expiry": format!("2026-09-{:02}T09:00:00Z", 10 + generation),
+        }}),
         HarnessKind::Dsh => panic!("DSH keeps no login; its key comes from DEEPSEEK_API_KEY"),
     };
     serde_json::to_vec(&login).unwrap()
@@ -5598,6 +5616,7 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            claude_permission_mode: None,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.clone())
         };
@@ -5618,9 +5637,9 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
         session.last_profile = kind.id().into();
         session.target_template_id = "localhost".into();
         session.project_directory = Some(project.clone());
-        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: worker_root.clone(),
-        });
+        }));
 
         let (launch, _, target_home) = worker_launch_config(
             &session,
@@ -5687,6 +5706,15 @@ fn a_rotated_login_reaches_the_staged_home_of_a_session_on_this_machine() {
             continue;
         }
         stage_profile(&profile, &launch.harness_home).unwrap();
+        // #1490: a staged Claude login never carries the refresh token the
+        // daemon alone may spend; the profile's own file keeps it.
+        if kind.copies_omit_refresh_token() {
+            let staged: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&endpoint).unwrap()).unwrap();
+            assert!(staged["claudeAiOauth"].get("refreshToken").is_none());
+            assert_eq!(staged["claudeAiOauth"]["accessToken"], "access-1");
+            assert_eq!(std::fs::read(&canonical).unwrap(), login_bytes(kind, 1));
+        }
 
         // The profile's login rotates while the session runs.
         std::fs::write(&canonical, login_bytes(kind, 2)).unwrap();
@@ -5749,6 +5777,7 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            claude_permission_mode: None,
             aws: None,
             ..mj_core::config::HarnessProfile::new(kind, home.clone())
         };
@@ -5764,9 +5793,9 @@ fn closing_a_local_session_removes_its_staged_home_and_memory_replica() {
         session.last_profile = kind.id().into();
         session.target_template_id = "localhost".into();
         session.project_directory = Some(project.clone());
-        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: worker_root.clone(),
-        });
+        }));
         let (_, memory, target_home) = worker_launch_config(
             &session,
             &profile,
@@ -6255,6 +6284,7 @@ fn fixed_delegation_guidance_is_private_exact_and_idempotent() {
 /// 30 s for one debug build on a busy disk. An unchanged source is now
 /// recognised from its path, size, mtime, inode and ctime.
 // Hard-won: 8b62e1b: rehashing unchanged worker sources delayed daemon startup by tens of seconds
+// Hard-won: daemon heap profile: resolving an unchanged pinned copy still rescanned the executable.
 #[test]
 fn an_unchanged_worker_source_is_not_read_again_when_pinning() {
     let directory = tempfile::tempdir().unwrap();
@@ -6264,6 +6294,8 @@ fn an_unchanged_worker_source_is_not_read_again_when_pinning() {
 
     let first = copy_worker_source_to_cache(&source, &cache).unwrap();
     verify_worker_build_indexed(&cache, &source).unwrap();
+    assert_eq!(indexed_pinned_worker(&cache, &first), Some(first.clone()));
+    verify_worker_build_indexed(&cache, &first).unwrap();
 
     // Damage the pinned copy without changing its length. A pin that read
     // the source or re-hashed the copy would notice; the indexed one does not.
@@ -6272,6 +6304,8 @@ fn an_unchanged_worker_source_is_not_read_again_when_pinning() {
         vec![0_u8; std::fs::metadata(&source).unwrap().len() as usize],
     )
     .unwrap();
+    assert!(indexed_pinned_worker(&cache, &first).is_none());
+    assert!(verify_worker_build_indexed(&cache, &first).is_err());
     assert_eq!(copy_worker_source_to_cache(&source, &cache).unwrap(), first);
     verify_worker_build_indexed(&cache, &source).unwrap();
 
@@ -6398,9 +6432,9 @@ fn launching_where_the_role_cannot_apply_announces_why() {
     let mut session = crate::controller::test_support::checkpoint_test_session(id);
     session.last_profile = "bedrock".into();
     session.target_template_id = "localhost".into();
-    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: format!("/home/me/.local/share/hel/workers/{id}").into(),
-    });
+    }));
     let controller = Controller {
         config,
         state: mj_core::state::State {

@@ -15,6 +15,7 @@ mod attachment;
 mod auto_afk;
 mod composer_drafts;
 pub(crate) mod io;
+mod login_terminal;
 mod loop_stalls;
 mod read_receipts;
 mod shutdown;
@@ -367,6 +368,7 @@ pub(crate) struct DashboardContext {
     daemon_running_again_since: Option<std::time::Instant>,
     /// Terminal input remains owned by this event loop, including during Setup.
     events: Option<event::EventStream>,
+    login: Option<login_terminal::ActiveLogin>,
     /// The startup splash, drawn in place of the dashboard until it has
     /// played out. Everything behind it is already running.
     splash: Option<crate::splash::SplashPlayback>,
@@ -544,7 +546,7 @@ pub(crate) struct DashboardContext {
 /// One worker publication, kept together while background projections coalesce.
 pub(crate) struct MaterializedProjection {
     materialized: MaterializedSession,
-    assessment: Option<Box<mj_core::assessment::TurnAssessment>>,
+    assessment: Option<std::sync::Arc<mj_core::assessment::TurnAssessment>>,
 }
 
 impl From<MaterializedSession> for MaterializedProjection {
@@ -560,7 +562,7 @@ impl From<mj_core::state::ManagedSessionSnapshot> for MaterializedProjection {
     fn from(snapshot: mj_core::state::ManagedSessionSnapshot) -> Self {
         Self {
             materialized: snapshot.materialized,
-            assessment: snapshot.operational.assessment,
+            assessment: snapshot.operational.assessment.clone(),
         }
     }
 }
@@ -588,6 +590,14 @@ fn enqueue_materialized_projection(
 /// The top level of the Git worktree `mj` was started in, or `None` outside
 /// one. The new-session wizard offers it as the local project.
 fn launch_repository_top_level() -> Option<std::path::PathBuf> {
+    if mj_core::config::DaemonConfig::load_placement(&mj_core::config::config_path())
+        .ok()?
+        .runtime
+        == mj_core::config::DaemonRuntime::Ssh
+    {
+        return None;
+    }
+
     let directory = std::env::current_dir().ok()?;
     let output = std::process::Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
@@ -793,6 +803,10 @@ pub(crate) async fn run_dashboard_for_workspace(
                 // Nothing behind the splash has been seen, so nothing there
                 // should act on input yet.
                 if context.splash.is_some() {
+                    continue;
+                }
+                if context.login.is_some() {
+                    context.login_event(event);
                     continue;
                 }
                 // The user acting is the strongest signal there is about which
@@ -1008,13 +1022,15 @@ pub(crate) async fn run_dashboard_for_workspace(
             // and history I/O, dictation, and the session view. They run
             // whether or not the chat is on screen, which is what keeps an
             // off-screen chat current.
-            () = paced(feed_gate, pump_chats(&mut context.chats)) => {
-                context.loop_stalls.woke("chats");
+            update = paced(feed_gate, login_terminal::pump(&mut context.login, &mut context.chats)) => {
+                context.loop_stalls.woke("conversation terminals");
                 pacer.mark();
-                // A warm chat may be hidden by another tab or selection.
-                // Only conversations that were on screen advance their read
-                // receipts.
-                context.acknowledge_visible_chats();
+                if let Some(update) = update {
+                    context.accept_login_update(update);
+                } else {
+                    // Only conversations visible in the frame advance receipts.
+                    context.acknowledge_visible_chats();
+                }
             }
             update = paced(feed_gate, context.quota.wait()), if context.quota.is_open() => {
                 context.loop_stalls.woke("quota");
@@ -1137,15 +1153,11 @@ pub(crate) async fn run_dashboard_for_workspace(
             if let Some(check) = context.dashboard.take_availability_check() {
                 actions::apply_dashboard_action(&mut context, check).await?;
             }
-            // Settings shows whether each saved profile has a login. Reading
-            // those files belongs off the loop; this is the one place that
+            // Settings shows whether each saved profile has a daemon login.
+            // Request status off the loop; this is the one place that
             // starts it so every surface that opens Settings is covered.
             if let Some(generation) = context.dashboard.take_profile_login_refresh() {
-                io::spawn_profile_login_statuses(
-                    generation,
-                    context.dashboard.config().clone(),
-                    context.dashboard_io_tx.clone(),
-                );
+                io::spawn_profile_login_statuses(generation, context.dashboard_io_tx.clone());
             }
             if let Some((generation, profile_id)) = context.dashboard.take_setup_login() {
                 actions::apply_dashboard_action(
@@ -1401,6 +1413,7 @@ impl DashboardContext {
     /// the launch itself is doing.
     fn ready_for_a_hint(&self) -> bool {
         self.splash.is_none()
+            && self.login.is_none()
             && !self.startup.pick_pending()
             && self.opening_chat_sessions.is_empty()
             && !self.dashboard.modal_open()
@@ -1667,7 +1680,7 @@ impl DashboardContext {
         for (pane, session) in self.dashboard.pane_sessions() {
             self.open_chat_session_into(pane, &session);
         }
-        if let Some(session) = self.dashboard.take_navigation_session() {
+        if let Some(session) = self.dashboard.take_session_to_open() {
             self.open_chat_session(&session);
             self.dashboard.focus_prompt();
         }
@@ -1696,6 +1709,8 @@ impl DashboardContext {
         if self.shutdown_requested_at.is_some() {
             return;
         }
+        // Closing this disposable stream never waits for the login process.
+        drop(self.login.take());
         // Timed from here so saving the drafts below counts toward the quit.
         let requested_at = Instant::now();
         self.collect_prepared_startup_prompts();
@@ -1763,7 +1778,7 @@ impl DashboardContext {
     pub(super) fn acknowledge_visible_chats(&mut self) {
         // Freeze the final receipt set so ongoing worker output cannot keep
         // extending shutdown while its existing saves drain.
-        if self.shutdown_requested_at.is_some() {
+        if self.shutdown_requested_at.is_some() || self.login.is_some() {
             return;
         }
         let mut sessions = self.drawn_chat_sessions.clone();
@@ -1885,6 +1900,15 @@ impl DashboardContext {
         );
         dashboard.set_workspace_names(workspace_names);
         dashboard.set_launch_recency(launch_recency);
+        dashboard.set_session_attention(bootstrap.projection.metadata.session_attention.clone());
+        dashboard.set_unread_frontiers(bootstrap.projection.metadata.unread_frontiers.clone());
+        dashboard.set_notification_dismissals(
+            bootstrap
+                .projection
+                .metadata
+                .notification_dismissals
+                .clone(),
+        );
         // Sessions inherit this host's Git author identity; the first new
         // session of the run makes sure there is one.
         dashboard.require_git_identity_check();
@@ -2000,6 +2024,7 @@ impl DashboardContext {
             notices,
             daemon_running_again_since: None,
             events: Some(events),
+            login: None,
             splash: None,
             chats: BTreeMap::new(),
             runtime_sessions: Default::default(),

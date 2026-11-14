@@ -31,6 +31,7 @@ fn zai_profile(home: &Path, base_url: &str) -> HarnessProfile {
         guardian_review_model: None,
         codex_profile: None,
         muse_auto_review: None,
+        claude_permission_mode: None,
         aws: None,
     }
 }
@@ -178,6 +179,7 @@ fn golden_quota_compact_row() {
     ) -> ProfileQuota {
         ProfileQuota {
             paid_credits: None,
+            monthly_price_usd: None,
             banked_resets: None,
             profile_id: profile_id.into(),
             harness,
@@ -401,6 +403,7 @@ fn codex_quota_request(
         environment,
         cwd: directory.to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
+        opencode_usage_priced: false,
         runtime: crate::quota::QuotaRuntimeConfig::host(),
     }
 }
@@ -920,6 +923,7 @@ async fn an_unreachable_grok_reports_the_failure_instead_of_a_zero_reading() {
             )]),
             cwd: directory.path().to_path_buf(),
             codex_source: CodexQuotaSource::ChatGptLogin,
+            opencode_usage_priced: false,
             runtime: crate::quota::QuotaRuntimeConfig::host(),
         },
         None,
@@ -982,6 +986,7 @@ async fn muse_quota_refresh_recovers_and_populates_dashboard_windows() {
         environment: BTreeMap::from([("TBH_MINT_BASE_URL".into(), format!("http://{address}"))]),
         cwd: directory.path().to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
+        opencode_usage_priced: false,
         runtime: crate::quota::QuotaRuntimeConfig::host(),
     };
     let mut manager = QuotaManager::default();
@@ -1087,6 +1092,7 @@ async fn quota_failure_and_recovery_are_logged_once(log: crate::test_log::Captur
         environment: BTreeMap::from([("TBH_MINT_BASE_URL".into(), format!("http://{address}"))]),
         cwd: directory.path().to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
+        opencode_usage_priced: false,
         runtime: crate::quota::QuotaRuntimeConfig::host(),
     };
     // Lines logged at exactly info that contain `text`.
@@ -1210,6 +1216,7 @@ fn retry_after_is_seconds_or_an_http_date_and_the_hold_is_bounded() {
 fn quota_report(refreshed_at: u64, remaining: Option<u8>) -> ProfileQuota {
     ProfileQuota {
         paid_credits: None,
+        monthly_price_usd: None,
         banked_resets: None,
         profile_id: "claude".into(),
         harness: HarnessKind::Claude,
@@ -1285,6 +1292,7 @@ async fn expired_claude_credentials_report_login_expired() {
             environment: BTreeMap::new(),
             cwd: directory.path().to_path_buf(),
             codex_source: CodexQuotaSource::ChatGptLogin,
+            opencode_usage_priced: false,
             runtime: crate::quota::QuotaRuntimeConfig::host(),
         },
         None,
@@ -1541,6 +1549,7 @@ while IFS= read -r line; do :; done
         ]),
         cwd: directory.path().to_path_buf(),
         codex_source: CodexQuotaSource::ChatGptLogin,
+        opencode_usage_priced: false,
         runtime: crate::quota::QuotaRuntimeConfig::host(),
     };
 
@@ -1722,4 +1731,76 @@ fn only_the_process_with_the_database_writer_keeps_quota_reset_times() {
             .unwrap(),
         1
     );
+}
+
+/// An OpenCode credential database with one row, matching the shape
+/// `opencode_logins` reads.
+fn write_opencode_login(home: &Path, integration: &str, value: &str) {
+    let data = home.join(".data/opencode");
+    std::fs::create_dir_all(&data).unwrap();
+    let connection = rusqlite::Connection::open(data.join("opencode.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE credential (id text PRIMARY KEY, integration_id text, label text NOT NULL, \
+             value text NOT NULL, connector_id text, method_id text, active integer, \
+             time_created integer NOT NULL, time_updated integer NOT NULL)",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO credential VALUES ('cred_1', ?1, 'login', ?2, NULL, NULL, 1, 1, 1)",
+            rusqlite::params![integration, value],
+        )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn opencode_reports_api_for_a_profile_signed_in_only_with_a_stored_api_key() {
+    let home = tempfile::tempdir().unwrap();
+    write_opencode_login(home.path(), "openrouter", r#"{"type":"key","key":"sk-1"}"#);
+    let profile = HarnessProfile {
+        enabled: true,
+        ..HarnessProfile::new(HarnessKind::OpenCode, home.path().to_path_buf())
+    };
+    let request = QuotaRefreshRequest::for_profile(
+        "ds8bit",
+        &profile,
+        home.path().to_path_buf(),
+        QuotaRuntimeConfig::host(),
+    );
+    assert!(
+        request.opencode_usage_priced,
+        "a stored login that is itself a plain API key is still billed by usage"
+    );
+    let (outcome, _) = refresh_profile_with_cache_root(request, None, None).await;
+    assert_eq!(outcome.report.extra.as_deref(), Some(API_LABEL));
+}
+
+#[tokio::test]
+async fn opencode_stays_unreported_when_a_stored_login_is_oauth() {
+    let home = tempfile::tempdir().unwrap();
+    write_opencode_login(
+        home.path(),
+        "anthropic",
+        r#"{"type":"oauth","refresh":"r","access":"a","expires":1}"#,
+    );
+    let profile = HarnessProfile {
+        enabled: true,
+        environment: [("OPENROUTER_API_KEY".to_owned(), "sk-env".to_owned())]
+            .into_iter()
+            .collect(),
+        ..HarnessProfile::new(HarnessKind::OpenCode, home.path().to_path_buf())
+    };
+    let request = QuotaRefreshRequest::for_profile(
+        "mixed",
+        &profile,
+        home.path().to_path_buf(),
+        QuotaRuntimeConfig::host(),
+    );
+    assert!(
+        !request.opencode_usage_priced,
+        "an OAuth login leaves billing unknown even beside an environment key for another provider"
+    );
+    let (outcome, _) = refresh_profile_with_cache_root(request, None, None).await;
+    assert_eq!(outcome.report.extra.as_deref(), Some(NOT_REPORTED_LABEL));
 }

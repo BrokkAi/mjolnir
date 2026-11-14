@@ -17,7 +17,8 @@
 
 mod locking;
 pub use locking::{
-    CLAUDE_REFRESH_LOCK_WAIT, CredentialInstall, CredentialWriteGuard, install_credentials_if_newer,
+    CLAUDE_REFRESH_LOCK_WAIT, CredentialInstall, CredentialWriteGuard,
+    canonical_login_is_replaced_by, install_credentials_if_newer, install_session_credentials,
 };
 
 use crate::hex::lower_hex;
@@ -49,6 +50,39 @@ pub const SYNC_INTERVAL: Duration = Duration::from_secs(60);
 
 pub fn credential_fingerprint(bytes: &[u8]) -> String {
     lower_hex(Sha256::digest(bytes))
+}
+
+/// The staged OAuth login, excluding setup tokens and API-key/Bedrock launches.
+pub fn claude_oauth_login_path(
+    environment: &std::collections::BTreeMap<String, String>,
+) -> Option<PathBuf> {
+    if [
+        CLAUDE_OAUTH_TOKEN_ENV,
+        "ANTHROPIC_API_KEY",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+    ]
+    .iter()
+    .any(|key| {
+        environment
+            .get(*key)
+            .is_some_and(|value| !value.is_empty() && value != "0")
+    }) {
+        return None;
+    }
+    let home = Path::new(environment.get(HarnessKind::Claude.home_env())?);
+    Some(crate::config::harness_authentication_marker(
+        HarnessKind::Claude,
+        home,
+    ))
+}
+
+/// Identity of the access token itself. Stripping a refresh token or rewriting
+/// the JSON cannot authorize recovery of a prompt that used the same login.
+pub fn claude_access_token_fingerprint(bytes: &[u8]) -> Option<String> {
+    let login: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let token = login.pointer("/claudeAiOauth/accessToken")?.as_str()?;
+    (!token.is_empty()).then(|| credential_fingerprint(token.as_bytes()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,6 +261,68 @@ pub fn credential_expiry(kind: HarnessKind, bytes: &[u8]) -> Option<i64> {
     kind.credential_expiry_ms(&serde_json::from_slice(bytes).ok()?)
 }
 
+impl HarnessKind {
+    /// Whether the credential copies this host hands to a harness process omit
+    /// the refresh token, so the daemon stays the grant's only refresher.
+    ///
+    /// Claude Code refreshes five minutes before `expiresAt`, under a lock that
+    /// covers only its own config directory. Every copy that carries the
+    /// rotating single-use refresh token can therefore spend it, and a refresh
+    /// inside a copy nobody pulls back leaves the host holding a spent token
+    /// (#1490). Without the key, Claude Code never refreshes or writes the file
+    /// and rereads a replaced one by modification time.
+    ///
+    /// The same on every host. Where the host's own login lives is
+    /// [`HarnessKind::login_store`]'s business (on macOS it is the Keychain,
+    /// which the sync reads and the refresher renews); the copies are files
+    /// either way.
+    pub fn copies_omit_refresh_token(self) -> bool {
+        self == Self::Claude
+    }
+}
+
+/// The bytes of a Claude credential copy without `claudeAiOauth.refreshToken`.
+/// The key is removed, never set to `""`, which Claude Code reads as "login
+/// ended"; an existing `""` is left alone. Callers decide whether a copy is
+/// stripped ([`HarnessKind::copies_omit_refresh_token`]). Other harnesses, and
+/// a document that is not Claude's JSON shape, are unchanged.
+pub fn credential_copy_for_harness(kind: HarnessKind, bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    use std::borrow::Cow;
+
+    if !credential_holds_refresh_token(kind, bytes) {
+        return Cow::Borrowed(bytes);
+    }
+    let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return Cow::Borrowed(bytes);
+    };
+    let Some(oauth) = json
+        .get_mut("claudeAiOauth")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return Cow::Borrowed(bytes);
+    };
+    oauth.remove("refreshToken");
+    match serde_json::to_vec(&json) {
+        Ok(stripped) => Cow::Owned(stripped),
+        Err(_) => Cow::Borrowed(bytes),
+    }
+}
+
+/// Whether a Claude credential carries a refresh token its holder could
+/// spend. An empty string is the "login ended" marker, not a token. Other
+/// harnesses report none here.
+pub fn credential_holds_refresh_token(kind: HarnessKind, bytes: &[u8]) -> bool {
+    kind == HarnessKind::Claude
+        && serde_json::from_slice::<serde_json::Value>(bytes)
+            .ok()
+            .and_then(|json| {
+                json.pointer("/claudeAiOauth/refreshToken")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|token| !token.is_empty())
+            })
+            .unwrap_or(false)
+}
+
 /// Muse's Meta login records its access-token expiry in epoch seconds. A
 /// refresh moves it forward, so it both orders copies and says when the login
 /// runs out. A stored API key has none.
@@ -240,6 +336,11 @@ impl HarnessKind {
     /// Read [`credential_freshness`] out of this harness's own credential JSON.
     pub fn credential_freshness_ms(self, json: &serde_json::Value) -> Option<i64> {
         match self {
+            Self::Antigravity => {
+                chrono::DateTime::parse_from_rfc3339(json.get("token")?.get("expiry")?.as_str()?)
+                    .ok()
+                    .map(|expiry| expiry.timestamp_millis())
+            }
             Self::Claude => json.get("claudeAiOauth")?.get("expiresAt")?.as_i64(),
             Self::Codex => {
                 let last_refresh = json.get("last_refresh")?.as_str()?;
@@ -280,7 +381,7 @@ impl HarnessKind {
             Self::Muse => muse_login_expiry_ms(json),
             // None of these has a proactive-refresh path, so none reports an
             // expiry Hel would act on: each refreshes its own tokens on demand.
-            Self::Grok | Self::OpenCode | Self::Dsh => None,
+            Self::Grok | Self::OpenCode | Self::Dsh | Self::Antigravity => None,
         }
     }
 
@@ -297,6 +398,7 @@ impl HarnessKind {
             // dsh-acp has no login; its profiles authenticate with an API
             // key, so `login_command` refuses before this is reached.
             Self::Dsh => Vec::new(),
+            Self::Antigravity => vec!["acp".into(), "--login".into(), "--disable-telemetry".into()],
         };
         (self.cli_binary_name().to_owned(), arguments)
     }
@@ -335,7 +437,7 @@ pub fn validate_credential_payload(_kind: HarnessKind, bytes: &[u8]) -> Result<(
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LoginStatus {
     /// A credential the harness can start from is present.
     SignedIn,
@@ -465,7 +567,7 @@ pub fn write_credential_file(kind: HarnessKind, path: &Path, bytes: &[u8]) -> Re
 /// Full-phrase markers that a harness rejected the session's credentials.
 /// Kept tight on purpose: a false positive costs one redundant sync and one
 /// notice, but a noisy list would train operators to ignore both.
-const AUTH_FAILURE_PHRASES: [&str; 8] = [
+const AUTH_FAILURE_PHRASES: [&str; 9] = [
     "oauth session expired and could not be refreshed",
     "please run /login",
     "authorization grant is invalid",
@@ -483,6 +585,8 @@ const AUTH_FAILURE_PHRASES: [&str; 8] = [
     // Hel's own marker for a turn the bridge failed with ACP `auth_required`.
     // The bridge's wording ("Authentication required") is too generic to match.
     "acp auth_required",
+    // Codex ACP can refuse workspace routing while loading a parked session.
+    "workspace routing discovery unauthorized (401)",
 ];
 
 /// Machine-readable authentication errors must be complete identifiers. This
@@ -538,9 +642,10 @@ pub fn turn_diagnostic_reports_auth_failure(diagnostic: &TurnDiagnostic) -> bool
         return false;
     }
     diagnostic.code.as_deref().is_some_and(|code| {
-        AUTH_FAILURE_ERROR_KINDS
-            .iter()
-            .any(|kind| code.eq_ignore_ascii_case(kind))
+        code == agent_client_protocol::ErrorCode::AUTH_REQUIRED.to_string()
+            || AUTH_FAILURE_ERROR_KINDS
+                .iter()
+                .any(|kind| code.eq_ignore_ascii_case(kind))
     }) || contains_auth_failure_signature(&diagnostic.message)
 }
 
@@ -654,7 +759,15 @@ pub fn login_command(profile: &HarnessProfile) -> Result<(String, Vec<String>)> 
 /// exists, where "this profile needs no login" is not a useful answer: it only
 /// wants the program name to run `--version` against.
 pub fn native_login_command(profile: &HarnessProfile) -> (String, Vec<String>) {
-    profile.kind.native_login_command()
+    let (command, mut args) = profile.kind.native_login_command();
+    if profile.kind == HarnessKind::Antigravity {
+        // agy selects its login with an argument, not our staging variable.
+        args.extend([
+            "--gemini-dir".into(),
+            crate::target_path::text(&profile.home),
+        ]);
+    }
+    (command, args)
 }
 
 /// One live session the coordinator may reconcile with its profile.

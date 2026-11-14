@@ -119,7 +119,10 @@ container layer, transient copy-on-write mounts, borrowed child containers and
 unsupported engine settings produce a preservation refusal before the worker
 is stopped. In particular, a default Docker session with its workspace in the
 container layer cannot use this upgrade path. Apple containers are unsupported.
-There is no destructive fallback.
+Nitro sandboxes (`kind = "nitro"`) are supported: the sandbox's root disk is
+replaced with a clone of the new image in place, its workspace and `/tmp`
+volumes are kept, and the old root disk stays on the host until the new worker
+is ready. There is no destructive fallback.
 
 Preview and queue through the CLI:
 

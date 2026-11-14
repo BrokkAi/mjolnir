@@ -136,12 +136,25 @@ pub(in crate::controller) enum LatchExclusivity {
     /// but only on a session with nothing to lose: it defers instead of
     /// interrupting work, and it never restarts the worker.
     HoldThroughIdleClose,
+    /// A quota Move preserves the active goal but defers for all new work.
+    HoldThroughQuotaClose,
 }
 
 impl LatchExclusivity {
+    pub(in crate::controller) fn close_purpose(self) -> Option<mj_core::activity::MovePurpose> {
+        match self {
+            Self::HoldThroughIdleClose => Some(mj_core::activity::MovePurpose::Manual),
+            Self::HoldThroughQuotaClose => Some(mj_core::activity::MovePurpose::QuotaRetry),
+            _ => None,
+        }
+    }
+
     /// Whether this checkpoint keeps its connection until the relay is sealed.
     pub(in crate::controller) fn holds_through_close(self) -> bool {
-        matches!(self, Self::HoldThroughClose | Self::HoldThroughIdleClose)
+        matches!(
+            self,
+            Self::HoldThroughClose | Self::HoldThroughIdleClose | Self::HoldThroughQuotaClose
+        )
     }
 }
 

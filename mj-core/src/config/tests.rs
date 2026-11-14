@@ -103,6 +103,7 @@ fn zai_profile(home: &Path, environment: BTreeMap<String, String>) -> HarnessPro
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         muse_auto_review: None,
+        claude_permission_mode: None,
         aws: None,
         codex_profile: None,
     }
@@ -134,6 +135,7 @@ fn only_a_codex_profile_that_uses_an_api_key_keeps_the_openai_key_variables() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         muse_auto_review: None,
+        claude_permission_mode: None,
         aws: None,
         codex_profile: None,
         ..HarnessProfile::new(kind, home.to_path_buf())
@@ -825,7 +827,6 @@ fn sample_config() -> Config {
         phone: PhoneConfig::default(),
         daemon: Default::default(),
         github: GithubConfig::default(),
-        continuation: Default::default(),
         review: ReviewConfig::default(),
         sessionwiki: SessionWikiConfig::default(),
         subagents: SubagentConfig::default(),
@@ -1394,6 +1395,8 @@ fn github_app_configuration_is_optional_and_round_trips() {
     configured.github.watch.interval_seconds = 30;
     configured.github.watch.api_base = "http://127.0.0.1:9411".into();
     configured.github.watch.enabled = false;
+    configured.github.watch.local_inference = true;
+    configured.github.watch.use_gpu = false;
     assert!(!configured.github_events_enabled());
     configured.save_to(&path).unwrap();
     let body = fs::read_to_string(&path).unwrap();
@@ -1423,7 +1426,8 @@ fn github_app_configuration_is_optional_and_round_trips() {
         (Some(true), Some(false), false),
         (Some(true), Some(true), true),
     ] {
-        let mut body = "version = 17\n".to_owned();
+        // Automatic continuation was removed (#1532); its section still loads.
+        let mut body = "version = 17\n[continuation]\nenabled = false\n".to_owned();
         if let Some(enabled) = legacy {
             body.push_str(&format!("[mailbox]\nenabled = {enabled}\n"));
         }
@@ -1436,6 +1440,7 @@ fn github_app_configuration_is_optional_and_round_trips() {
         loaded.save_to(&path).unwrap();
         let saved = fs::read_to_string(&path).unwrap();
         assert!(!saved.contains("[mailbox]"), "{saved}");
+        assert!(!saved.contains("[continuation]"), "{saved}");
         assert_eq!(
             Config::load_from(&path).unwrap().github.watch.enabled,
             expected
@@ -2926,10 +2931,42 @@ host = "mac.example.com"
 kind = "apple-container"
 machine = "mac"
 image = "example.invalid/agent:latest"
+[machines.ec2]
+kind = "ssh"
+host = "ec2.example.com"
+[targets.ec2-nitro]
+kind = "nitro"
+machine = "ec2"
 "#
     );
     fs::write(&path, &source).unwrap();
     let config = Config::load_from(&path).unwrap();
+    // A Nitro sandbox is the same shape: a stored `nitro` runtime on an SSH
+    // machine fuses into the remote kind, and a saved file never mentions it.
+    let TargetTemplate::SshNitro { ssh, container } = &config.targets["ec2-nitro"] else {
+        panic!("nitro on an ssh machine must fuse into the remote kind");
+    };
+    assert_eq!(ssh.host, "ec2.example.com");
+    assert_eq!(container.image, DEFAULT_CONTAINER_IMAGE);
+    assert_eq!(runtime_kind_name(&config.targets["ec2-nitro"]), "nitro");
+    assert_eq!(config.targets["ec2-nitro"].kind_name(), "ssh-nitro");
+    assert!(config.targets["ec2-nitro"].execution_policy() == ExecutionPolicy::Unconstrained);
+    assert!(super::container_memory_is_hard_limit(
+        &config.targets["ec2-nitro"]
+    ));
+    // No machine can host a sandbox but an SSH one.
+    fs::write(
+        directory.path().join("local.toml"),
+        format!(
+            "version = {CONFIG_VERSION}\n[targets.here]\nkind = \"nitro\"\nmachine = \"local\"\n"
+        ),
+    )
+    .unwrap();
+    let error = Config::load_from(&directory.path().join("local.toml")).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("runs on an SSH machine"),
+        "{error:#}"
+    );
     let TargetTemplate::SshAppleContainer { ssh, container } = &config.targets["mac-apple"] else {
         panic!("apple-container on an ssh machine must fuse into the remote kind");
     };
@@ -2946,6 +2983,8 @@ image = "example.invalid/agent:latest"
     assert!(saved.contains("kind = \"apple-container\""), "{saved}");
     assert!(saved.contains("machine = \"mac\""), "{saved}");
     assert!(!saved.contains("ssh-apple-container"), "{saved}");
+    assert!(saved.contains("kind = \"nitro\""), "{saved}");
+    assert!(!saved.contains("ssh-nitro"), "{saved}");
     assert_eq!(Config::load_from(&path).unwrap().targets, config.targets);
 }
 
@@ -3227,6 +3266,7 @@ fn native_continuity_follows_the_codex_model_service_not_only_the_harness() {
         legacy_subagents: Default::default(),
         guardian_review_model: None,
         muse_auto_review: None,
+        claude_permission_mode: None,
         aws: None,
         codex_profile: codex_profile.map(str::to_owned),
         ..HarnessProfile::new(kind, home.to_path_buf())
@@ -3461,6 +3501,7 @@ fn setup_additions_recognizes_equivalent_profile_homes() {
             legacy_subagents: Default::default(),
             guardian_review_model: None,
             muse_auto_review: None,
+            claude_permission_mode: None,
             aws: None,
             codex_profile: None,
             ..HarnessProfile::new(HarnessKind::Claude, home)

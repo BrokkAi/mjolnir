@@ -6,6 +6,92 @@ use crate::config::{
 use crate::remote_git::Shorthand;
 use crate::targets::MountAccess;
 
+// Hard-won: e569a20c5: unanswered input must follow the latest outcome and user response.
+#[test]
+fn unanswered_input_outcome_tracks_answers_and_current_completion() {
+    use crate::assessment::{Action, Status, TurnAssessment};
+    let mut session = MaterializedSession::empty("input");
+    session.last_turn_outcome = Some(MaterializedTurnOutcome {
+        command_id: "turn".into(),
+        accepted_ordinal: None,
+        turn_start_position: None,
+        completed_ordinal: 10,
+        completed_at_ms: 10,
+        outcome: TurnOutcomeKind::Completed {
+            stop_reason: "AwaitingInput".into(),
+        },
+        answered_through: None,
+        diagnostic: None,
+        usage: None,
+        work_facts: None,
+    });
+    assert!(session.unanswered_input_outcome(None, None).is_some());
+    let mut assessment = TurnAssessment::pending(
+        "turn".into(),
+        10,
+        10,
+        crate::activity::verdict::CompletionEvidence {
+            stop_reason: "EndTurn".into(),
+            diagnostic: None,
+        },
+    );
+    assessment.status = Status::Assessed;
+    assessment.action = Some(Action::AwaitInput);
+    session.last_turn_outcome.as_mut().unwrap().outcome = TurnOutcomeKind::Completed {
+        stop_reason: "EndTurn".into(),
+    };
+    assert!(
+        session
+            .unanswered_input_outcome(Some(&assessment), None)
+            .is_some()
+    );
+    assessment.completed_ordinal = 9;
+    assert!(
+        session
+            .unanswered_input_outcome(Some(&assessment), None)
+            .is_none()
+    );
+    assessment.completed_ordinal = 10;
+    session.transcript.push(user_item(11, ""));
+    assert!(
+        session
+            .unanswered_input_outcome(Some(&assessment), None)
+            .is_none()
+    );
+    let watermark = session.latest_user_position();
+    session.transcript.clear();
+    assert!(
+        session
+            .unanswered_input_outcome(Some(&assessment), watermark)
+            .is_none()
+    );
+    session.queued_prompts.push(MaterializedQueuedPrompt {
+        accepted_ordinal: None,
+        command_id: "queued".into(),
+        kind: QueuedCommandKind::Prompt,
+        content: vec![],
+        queued_at_ms: 11,
+    });
+    assert!(
+        session
+            .unanswered_input_outcome(Some(&assessment), None)
+            .is_none()
+    );
+    session.queued_prompts.clear();
+    session.active_turn = Some(MaterializedTurn {
+        command_id: "active".into(),
+        accepted_ordinal: None,
+        turn_start_position: 11,
+        started_at_ms: 11,
+        steered_into: None,
+    });
+    assert!(
+        session
+            .unanswered_input_outcome(Some(&assessment), None)
+            .is_none()
+    );
+}
+
 #[test]
 fn session_build_cache_defaults_optional_legacy_fields() {
     let cache: SessionBuildCache = serde_json::from_value(serde_json::json!({
@@ -105,7 +191,7 @@ fn projection_window_keeps_whole_turns_and_unsettled_content() {
     pending_window.trim(&mut pending, 1024);
     assert_eq!(
         pending.transcript.len(),
-        2500,
+        1200,
         "late streaming data keeps its original turn"
     );
 }
@@ -115,8 +201,8 @@ fn snapshot(session: MaterializedSession, window: ProjectionWindow) -> ManagedSe
         materialized: session,
         window,
         worker_build: None,
-        subagent_requests: Vec::new(),
-        subagent_completions: Vec::new(),
+        subagent_requests: Default::default(),
+        subagent_completions: Default::default(),
         subagent_queue_error: None,
         operational: serde_json::from_value(serde_json::json!({
             "session_id": "session-1",
@@ -196,6 +282,7 @@ fn sample_state() -> State {
     let session = SessionRecord {
         oracle_choice: None,
         oracle: true,
+        notifications_ignored: false,
         project: None,
         target_runtime: None,
         launch_base: None,
@@ -207,8 +294,6 @@ fn sample_state() -> State {
         create_managed_worktree: None,
         workspace_id: crate::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
-        container_cpus: None,
-        container_memory: None,
         container_workspace: None,
         id: "0123456789abcdef".into(),
         title: "Build Hel".into(),
@@ -229,11 +314,11 @@ fn sample_state() -> State {
             access: MountAccess::Cow,
         }],
         state: SessionState::Running,
-        target: Some(TargetLocator::LocalPodman {
+        target: Some(Box::new(TargetLocator::LocalPodman {
             borrowed_from: None,
             container_id: "afb67d".into(),
             workspace_storage: Default::default(),
-        }),
+        })),
         native_session_id: Some("native-1".into()),
         acp_session_title: Some("Build Hel".into()),
         session_title_override: None,
@@ -242,13 +327,15 @@ fn sample_state() -> State {
         viewed_through_event_ordinal: 0,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: None,
-        checkpoint: Some(CheckpointMetadata {
+        checkpoint: Some(Box::new(CheckpointMetadata {
             archive_path: PathBuf::from("sessions/0123456789abcdef.hel.zip"),
             sha256: "a".repeat(64),
             created_at: "2026-08-09T12:01:00Z".into(),
             event_frontier: 42,
-        }),
+        })),
     };
     State {
         last_oracle_choices: Default::default(),
@@ -271,13 +358,24 @@ fn container_capacity_counts_owners_and_provisioning_but_not_borrowed_children()
         memory_bytes: 8 << 30,
     });
 
+    let mut runtime = parent
+        .target_runtime
+        .as_deref()
+        .cloned()
+        .unwrap_or_else(|| (&sample_config().targets["podman"]).into());
+    runtime.container_settings = Some(ContainerSettings::requested(&parent));
+    parent.target_runtime = Some(std::sync::Arc::new(runtime));
+    parent.resource_allocation = Some(SessionResourceAllocation::Container {
+        cpus: 8,
+        memory_bytes: 16 << 30,
+    });
     let mut child = parent.clone();
     child.id = "fedcba9876543210".into();
-    child.target = Some(TargetLocator::LocalPodman {
+    child.target = Some(Box::new(TargetLocator::LocalPodman {
         borrowed_from: Some(parent.id.clone()),
         container_id: "afb67d".into(),
         workspace_storage: Default::default(),
-    });
+    }));
 
     let mut provisioning = parent.clone();
     provisioning.id = "0011223344556677".into();
@@ -287,14 +385,44 @@ fn container_capacity_counts_owners_and_provisioning_but_not_borrowed_children()
         cpus: 2,
         memory_bytes: 4 << 30,
     });
+    // A removed locator during upgrade recovery does not erase its applied snapshot.
+    assert_eq!(
+        applied_container_settings(&provisioning).resource_allocation,
+        parent
+            .target_runtime
+            .as_ref()
+            .unwrap()
+            .container_settings
+            .as_ref()
+            .unwrap()
+            .resource_allocation
+            .as_ref()
+    );
 
     let capacity = host_container_capacity(
         HostContainerSize {
             cpus: 10,
             memory_bytes: 20 << 30,
         },
+        false,
         &["podman".into()],
         [&parent, &child, &provisioning],
+    );
+    // A boot-time pool is already net of the host's own needs: the same
+    // commitments leave exactly the reserve more.
+    let pool = host_container_capacity(
+        HostContainerSize {
+            cpus: 10,
+            memory_bytes: 20 << 30,
+        },
+        true,
+        &["podman".into()],
+        [&parent, &child, &provisioning],
+    );
+    assert_eq!(pool.reserved.memory_bytes, 0);
+    assert_eq!(
+        pool.remaining.memory_bytes,
+        capacity.remaining.memory_bytes + capacity.reserved.memory_bytes
     );
 
     assert_eq!(
@@ -339,6 +467,27 @@ fn container_capacity_counts_owners_and_provisioning_but_not_borrowed_children()
     assert!(warning.contains("more CPUs"));
     assert!(warning.contains("more RAM"));
     assert!(warning.contains("still start"));
+
+    // Hard-won: #1538: a container created at the target's defaults was
+    // counted at a later, smaller Container settings request.
+    let mut defaults = parent.clone();
+    let mut runtime = defaults.target_runtime.as_deref().cloned().unwrap();
+    runtime
+        .container_settings
+        .as_mut()
+        .expect("the parent records its applied settings")
+        .resource_allocation = None;
+    defaults.target_runtime = Some(std::sync::Arc::new(runtime));
+    let unknown = host_container_capacity(
+        HostContainerSize {
+            cpus: 10,
+            memory_bytes: 20 << 30,
+        },
+        false,
+        &["podman".into()],
+        [&defaults],
+    );
+    assert!(!unknown.complete);
 }
 
 #[test]
@@ -349,6 +498,7 @@ fn an_unrecorded_owner_allocation_makes_remaining_capacity_unknown() {
             cpus: 10,
             memory_bytes: 20 << 30,
         },
+        false,
         &["podman".into()],
         state.sessions.values(),
     );
@@ -392,7 +542,6 @@ fn sample_config() -> Config {
         phone: Default::default(),
         daemon: Default::default(),
         github: Default::default(),
-        continuation: Default::default(),
         review: Default::default(),
         sessionwiki: Default::default(),
         subagents: Default::default(),
@@ -456,13 +605,9 @@ fn session_records_written_before_container_overrides_still_load() {
     assert!(object.remove("container_memory").is_none());
 
     let loaded: SessionRecord = serde_json::from_value(json).expect("load older session");
-    assert_eq!(loaded.container_cpus, None);
-    assert_eq!(loaded.container_memory, None);
     assert_eq!(loaded, session);
 
-    let mut edited = session.clone();
-    edited.container_cpus = Some("4".into());
-    edited.container_memory = Some("8g".into());
+    let edited = session.clone();
     let round_tripped: SessionRecord =
         serde_json::from_str(&serde_json::to_string(&edited).expect("serialize"))
             .expect("reload edited session");
@@ -474,7 +619,7 @@ fn a_sub_agent_child_takes_its_project_identity_from_its_parent() {
     let config = sample_config();
     let mut parent = sample_session();
     parent.id = "parent-session".into();
-    parent.managed_worktree = Some(ManagedWorktree {
+    parent.managed_worktree = Some(Box::new(ManagedWorktree {
         kind: Default::default(),
         source_project_directory: PathBuf::from("/home/test/Projects/source"),
         source_repository: PathBuf::from("/home/test/Projects/source"),
@@ -482,7 +627,7 @@ fn a_sub_agent_child_takes_its_project_identity_from_its_parent() {
         branch: "mj/parent-session".into(),
         target: ManagedWorktreeTarget::Local,
         base_commit: None,
-    });
+    }));
     parent.project_directory = Some(PathBuf::from("/worktrees/parent-session"));
     // A child is launched into the parent's worktree checkout, which is named
     // after the parent session, and owns no worktree of its own.
@@ -634,7 +779,7 @@ fn managed_checkout_record(
         })
         .join(id);
     session.project_directory = project_directory;
-    session.managed_worktree = Some(ManagedWorktree {
+    session.managed_worktree = Some(Box::new(ManagedWorktree {
         kind,
         source_project_directory: repository.join("packages/app"),
         source_repository: repository,
@@ -645,7 +790,7 @@ fn managed_checkout_record(
         },
         target,
         base_commit: None,
-    });
+    }));
     session
 }
 
@@ -656,20 +801,20 @@ fn checkout_derivation_covers_attached_managed_bundle_and_borrowed_records() {
     let mut local_non_git = checkout_session("local-non-git");
     local_non_git.project_directory = Some(PathBuf::from("/work/plain-directory"));
     local_non_git.create_managed_worktree = Some(true);
-    local_non_git.target = Some(TargetLocator::LocalBare {
+    local_non_git.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: PathBuf::from("/var/lib/mj/workers/local-non-git"),
-    });
+    }));
     state
         .sessions
         .insert(local_non_git.id.clone(), local_non_git.clone());
 
     let mut ssh_raw = checkout_session("ssh-raw");
     ssh_raw.project_directory = Some(PathBuf::from("/home/dev/project"));
-    ssh_raw.target = Some(TargetLocator::SshBare {
+    ssh_raw.target = Some(Box::new(TargetLocator::SshBare {
         host: "dev.example.test".into(),
         workspace: PathBuf::from("/home/dev"),
         worker_id: None,
-    });
+    }));
     state.sessions.insert(ssh_raw.id.clone(), ssh_raw.clone());
 
     let raw_worktree_path =
@@ -704,18 +849,21 @@ fn checkout_derivation_covers_attached_managed_bundle_and_borrowed_records() {
         .insert(bundle_workspace.id.clone(), bundle_workspace.clone());
     let mut saved_project_workspace = checkout_session("saved-project-workspace");
     let bundle = sample_config().bundles["hel"].clone();
-    saved_project_workspace.project = Some(crate::repository::ProjectBundleSnapshot {
-        identities: BTreeMap::from([(
-            "hel".into(),
-            crate::repository::RepositoryIdentity::from_remote(
-                "https://github.com/BrokkAi/hel.git",
-            )
-            .expect("valid repository identity"),
-        )]),
-        bundle,
-        network_sources: Default::default(),
-        plain_directories: Default::default(),
-    });
+    saved_project_workspace.project = Some(
+        crate::repository::ProjectBundleSnapshot {
+            identities: BTreeMap::from([(
+                "hel".into(),
+                crate::repository::RepositoryIdentity::from_remote(
+                    "https://github.com/BrokkAi/hel.git",
+                )
+                .expect("valid repository identity"),
+            )]),
+            bundle,
+            network_sources: Default::default(),
+            plain_directories: Default::default(),
+        }
+        .into(),
+    );
     state.sessions.insert(
         saved_project_workspace.id.clone(),
         saved_project_workspace.clone(),
@@ -903,7 +1051,7 @@ fn project_source_uses_bundle_repository_and_ignores_managed_worktree_destinatio
     session.project_directory = Some(PathBuf::from(
         "/home/test/Projects/source/.mj/worktrees/0123456789abcdef",
     ));
-    session.managed_worktree = Some(ManagedWorktree {
+    session.managed_worktree = Some(Box::new(ManagedWorktree {
         kind: Default::default(),
         source_project_directory: PathBuf::from("/home/test/Projects/source/crate"),
         source_repository: PathBuf::from("/home/test/Projects/source"),
@@ -911,7 +1059,7 @@ fn project_source_uses_bundle_repository_and_ignores_managed_worktree_destinatio
         branch: "mj/0123456789abcdef".into(),
         target: ManagedWorktreeTarget::Local,
         base_commit: None,
-    });
+    }));
     let source = session.project_source(&config);
     assert_eq!(source.short, "source");
     assert_eq!(source.full, "/home/test/Projects/source");
@@ -1796,11 +1944,11 @@ fn harness_titles_are_normalized_to_one_complete_line() {
 #[test]
 fn locator_rejects_parent_traversal() {
     let mut state = sample_state();
-    state.sessions.first_value_mut().unwrap().target = Some(TargetLocator::SshBare {
+    state.sessions.first_value_mut().unwrap().target = Some(Box::new(TargetLocator::SshBare {
         host: "builder".into(),
         workspace: PathBuf::from("~/hel/../other"),
         worker_id: None,
-    });
+    }));
     assert!(
         state
             .validate()
@@ -1825,17 +1973,17 @@ fn borrowed_ssh_bare_locator_validates_by_its_worker_identity() {
         worker_id: Some(worker_id.into()),
     };
 
-    session.target = Some(borrowed(
+    session.target = Some(Box::new(borrowed(
         &child_id,
         ".local/share/hel/workspaces/parent-session",
-    ));
+    )));
     state.validate().unwrap();
 
     let session = state.sessions.first_value_mut().unwrap();
-    session.target = Some(borrowed(
+    session.target = Some(Box::new(borrowed(
         "someone-else",
         ".local/share/hel/workspaces/parent-session",
-    ));
+    )));
     assert!(
         state
             .validate()
@@ -1845,7 +1993,10 @@ fn borrowed_ssh_bare_locator_validates_by_its_worker_identity() {
     );
 
     let session = state.sessions.first_value_mut().unwrap();
-    session.target = Some(borrowed(&child_id, ".local/share/hel/../parent-session"));
+    session.target = Some(Box::new(borrowed(
+        &child_id,
+        ".local/share/hel/../parent-session",
+    )));
     assert!(state.validate().is_err());
 }
 

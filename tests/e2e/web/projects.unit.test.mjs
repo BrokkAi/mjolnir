@@ -13,6 +13,8 @@ import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 const { LAB_SPECS, LAB_VARIABLES } = require('./lab-env.js');
+const playwrightPackage = require.resolve('playwright/package.json');
+const playwrightCli = path.join(path.dirname(playwrightPackage), require(playwrightPackage).bin.playwright);
 
 /// The files Playwright would actually run for a project, with no lab
 /// environment in sight.
@@ -20,8 +22,8 @@ function listedFiles(project) {
   const environment = { ...process.env };
   for (const name of LAB_VARIABLES) delete environment[name];
   const listing = spawnSync(
-    path.join(here, 'node_modules/.bin/playwright'),
-    ['test', '--list', '--project', project, '--reporter', 'json'],
+    process.execPath,
+    [playwrightCli, 'test', '--list', '--project', project, '--reporter', 'json'],
     { cwd: here, env: environment, encoding: 'utf8' },
   );
   assert.equal(listing.status, 0, `listing the ${project} project failed: ${listing.stderr}`);

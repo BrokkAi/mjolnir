@@ -13,7 +13,8 @@ pub(super) fn append_hel_target_environment(
         | targets::TargetLocator::AppleContainer { .. }
         | targets::TargetLocator::SshPodman { .. }
         | targets::TargetLocator::SshDocker { .. }
-        | targets::TargetLocator::SshAppleContainer { .. } => MJ_CONTAINER_ENVIRONMENT.to_owned(),
+        | targets::TargetLocator::SshAppleContainer { .. }
+        | targets::TargetLocator::SshNitro { .. } => MJ_CONTAINER_ENVIRONMENT.to_owned(),
         targets::TargetLocator::AwsEc2 { workspace, .. } => format!(
             "## Mjolnir disposable environment\n\nThis session runs on a disposable Mjolnir EC2 instance. When the session closes, Mjolnir checkpoints everything in project workspace directories under `$HOME/{workspace}`, including committed work, staged and unstaged changes, and untracked files. Mjolnir then terminates the instance.\n\nEverything outside `$HOME/{workspace}`, including installed packages, the rest of `$HOME`, and `/tmp`, is ephemeral and will be lost. Keep durable results in the workspace or push them to a remote.\n\nNew workspaces start on their own session branch from the default network fetch remote’s default branch. Local unpublished commits and uncommitted files are not copied. Use normal git push to publish the current branch to the configured network push destination. Closing saves a checkpoint; it does not publish commits or update the original local checkout. Resumed sessions restore their saved work.\n"
         ),
@@ -32,18 +33,23 @@ pub(super) fn append_container_storage_guidance(
     native_temporary_storage: bool,
     attachments: &[targets::AdditionalMount],
 ) -> Result<()> {
-    let podman_workspace = match target {
+    // Whether the workspace sits on storage of its own that the guidance
+    // should name: a Podman volume or helper path, or a Nitro sandbox's volume.
+    let workspace_mounted = match target {
         targets::TargetLocator::LocalPodman {
             workspace_storage, ..
         }
         | targets::TargetLocator::SshPodman {
             workspace_storage, ..
-        } => Some(workspace_storage),
-        targets::TargetLocator::LocalDocker { .. } | targets::TargetLocator::SshDocker { .. } => {
-            None
-        }
-        targets::TargetLocator::AppleContainer { .. }
-        | targets::TargetLocator::SshAppleContainer { .. } => None,
+        } => !matches!(
+            workspace_storage,
+            targets::PodmanWorkspaceLocator::ContainerLayer
+        ),
+        targets::TargetLocator::SshNitro { .. } => true,
+        targets::TargetLocator::LocalDocker { .. }
+        | targets::TargetLocator::SshDocker { .. }
+        | targets::TargetLocator::AppleContainer { .. }
+        | targets::TargetLocator::SshAppleContainer { .. } => false,
         _ => return Ok(()),
     };
     let heading = "## Mjolnir container storage\n\n";
@@ -51,9 +57,7 @@ pub(super) fn append_container_storage_guidance(
     if native_temporary_storage {
         guidance.push_str("`/tmp` is a private disk-backed volume outside the container's writable overlay. Use it for disposable temporary files. Its contents are excluded from checkpoints and are lost when the session stops or restarts.\n\n");
     }
-    if podman_workspace
-        .is_some_and(|storage| !matches!(storage, targets::PodmanWorkspaceLocator::ContainerLayer))
-    {
+    if workspace_mounted {
         let workspace = targets::container_workspace_root(workspace);
         guidance.push_str(&format!(
             "The workspace storage is mounted at `{workspace}`. "
@@ -350,11 +354,16 @@ pub(in crate::controller) fn container_upload_ownership_args(
     worker_root: &str,
     paths: &[&str],
 ) -> Vec<String> {
-    let root_user = if engine == "podman" { "0:0" } else { "0" };
-    let mut args = vec![
-        "exec".into(),
-        "--user".into(),
-        root_user.into(),
+    // The microVM engine runs every exec as the session's configured user,
+    // which is root (see the run arguments), so it needs no user flag.
+    let user_flag: Vec<String> = match engine {
+        "podman" => vec!["--user".into(), "0:0".into()],
+        targets::MICROVM_ENGINE => Vec::new(),
+        _ => vec!["--user".into(), "0".into()],
+    };
+    let mut args = vec!["exec".into()];
+    args.extend(user_flag);
+    args.extend([
         container_id.into(),
         "sh".into(),
         "-c".into(),
@@ -362,7 +371,7 @@ pub(in crate::controller) fn container_upload_ownership_args(
         r#"set -eu; owner=$(stat -c '%u:%g' -- "$1"); shift; chown -R "$owner" -- "$@""#.into(),
         "sh".into(),
         worker_root.into(),
-    ];
+    ]);
     args.extend(paths.iter().map(|path| (*path).to_owned()));
     args
 }
@@ -469,6 +478,7 @@ pub(super) fn install_mbx_shims(
         targets::TargetLocator::LocalBare { .. }
         | targets::TargetLocator::AppleContainer { .. }
         | targets::TargetLocator::SshAppleContainer { .. }
+        | targets::TargetLocator::SshNitro { .. }
         | targets::TargetLocator::AwsEc2 { .. }
         | targets::TargetLocator::SshBare { .. } => {
             bail!("the build cache is only installed into Podman and Docker containers")
@@ -518,6 +528,7 @@ pub(super) fn remove_generated_mbx_shims(
         targets::TargetLocator::LocalBare { .. }
         | targets::TargetLocator::AppleContainer { .. }
         | targets::TargetLocator::SshAppleContainer { .. }
+        | targets::TargetLocator::SshNitro { .. }
         | targets::TargetLocator::AwsEc2 { .. }
         | targets::TargetLocator::SshBare { .. } => {
             bail!("the build cache is only installed into Podman and Docker containers")
@@ -566,6 +577,7 @@ pub(super) fn verify_mbx_binary(
         targets::TargetLocator::LocalBare { .. }
         | targets::TargetLocator::AppleContainer { .. }
         | targets::TargetLocator::SshAppleContainer { .. }
+        | targets::TargetLocator::SshNitro { .. }
         | targets::TargetLocator::AwsEc2 { .. }
         | targets::TargetLocator::SshBare { .. } => {
             bail!("the build cache is only installed into Podman and Docker containers")
@@ -627,6 +639,7 @@ pub(super) fn link_mbx_configuration(
         targets::TargetLocator::LocalBare { .. }
         | targets::TargetLocator::AppleContainer { .. }
         | targets::TargetLocator::SshAppleContainer { .. }
+        | targets::TargetLocator::SshNitro { .. }
         | targets::TargetLocator::AwsEc2 { .. }
         | targets::TargetLocator::SshBare { .. } => {
             bail!("the build cache is only installed into Podman and Docker containers")
@@ -681,6 +694,7 @@ pub(super) fn link_legacy_mbx_configuration(
         targets::TargetLocator::LocalBare { .. }
         | targets::TargetLocator::AppleContainer { .. }
         | targets::TargetLocator::SshAppleContainer { .. }
+        | targets::TargetLocator::SshNitro { .. }
         | targets::TargetLocator::AwsEc2 { .. }
         | targets::TargetLocator::SshBare { .. } => {
             bail!("the build cache is only installed into Podman and Docker containers")
@@ -922,6 +936,9 @@ pub(super) fn install_worker_profile_files(
         }
         | targets::TargetLocator::SshAppleContainer {
             ssh, container_id, ..
+        }
+        | targets::TargetLocator::SshNitro {
+            ssh, container_id, ..
         } => {
             let engine = locator
                 .container_engine()
@@ -979,8 +996,11 @@ pub(super) fn install_worker_profile_files(
                 vec![
                     "sh".into(),
                     "-c".into(),
-                    r#"exec "$0" cp "$HOME/$1/." "$2""#.into(),
-                    engine.into(),
+                    format!(
+                        r#"exec {} cp "$HOME/$1/." "$2""#,
+                        targets::engine_shell_words(engine)
+                    ),
+                    "mj-profile-copy".into(),
                     format!("{upload}/profile"),
                     format!("{container_id}:{profile_home}"),
                 ],
@@ -1008,7 +1028,7 @@ pub(super) fn install_worker_profile_files(
             for args in remote {
                 execute_checked(
                     executor,
-                    crate::targets::ssh_command(ssh, args)
+                    crate::targets::ssh_command_owned(ssh, targets::with_engine_argv(args))
                         .purpose("install remote container worker"),
                 )?;
             }
@@ -1348,7 +1368,6 @@ mod profile_archive_tests {
 
     struct SystemTar {
         streams: Cell<usize>,
-        host: mj_core::node::NodeCommandHost,
     }
     impl CommandExecutor for SystemTar {
         fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
@@ -1361,109 +1380,83 @@ mod profile_archive_tests {
         ) -> Result<CommandOutput> {
             self.streams.set(self.streams.get() + 1);
             let script = command.args.last().context("missing remote command")?;
-            use mj_core::targets::CommandHost;
-            self.host.run(
-                &CommandSpec::new("sh", ["-c", script]),
-                Some(input),
-                &|| false,
-            )
+            mj_core::targets::ProcessExecutor
+                .execute_with_stdin(&CommandSpec::new("sh", ["-c", script]), input)
         }
     }
 
     // Hard-won: #1483: recursive scp spent 162 seconds on a 17 MB profile.
     // Hard-won: #1187: BSD chmod treats -- after the mode as a filename.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn streamed_profile_roundtrips_through_system_tar_without_per_file_commands() {
-        let (daemon_side, node_side) = tokio::io::duplex(64 * 1024);
-        let server = tokio::spawn(mj_core::node::serve(node_side));
-        let (client, driver) = mj_core::node::NodeClient::handshake(daemon_side)
-            .await
-            .unwrap();
-        let driver = tokio::spawn(driver);
-        let (slot, receiver) = tokio::sync::watch::channel(Some(client));
-        let host = mj_core::node::NodeCommandHost::new(
-            receiver,
-            tokio::runtime::Handle::current(),
-            tokio_util::sync::CancellationToken::new(),
+    #[test]
+    fn streamed_profile_roundtrips_through_system_tar_without_per_file_commands() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("staged profile");
+        let nested = source.join("plugins/日本語");
+        fs::create_dir_all(&nested).unwrap();
+        // The production archive is over 8 MiB.
+        let mut payload = vec![0; 8 * 1024 * 1024 + 70_000];
+        getrandom::fill(&mut payload).unwrap();
+        fs::write(nested.join("tool data"), &payload).unwrap();
+        fs::set_permissions(nested.join("tool data"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::create_dir(source.join("empty")).unwrap();
+        fs::write(source.join(".credentials.json"), b"synthetic credentials").unwrap();
+        symlink("plugins/日本語/tool data", source.join("linked plugin")).unwrap();
+        let destination = temp.path().join("remote profile");
+        let executor = SystemTar {
+            streams: Cell::new(0),
+        };
+        upload_profile_archive(
+            &executor,
+            &SshTarget {
+                destination: "unused".into(),
+                ssh_args: vec![],
+            },
+            &source,
+            destination.to_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(executor.streams.get(), 1);
+        assert_eq!(
+            fs::read(destination.join("plugins/日本語/tool data")).unwrap(),
+            payload
         );
-        let checked = tokio::task::spawn_blocking(move || {
-            use std::os::unix::fs::{PermissionsExt, symlink};
-            let temp = tempfile::tempdir().unwrap();
-            let source = temp.path().join("staged profile");
-            let nested = source.join("plugins/日本語");
-            fs::create_dir_all(&nested).unwrap();
-            // The production archive is over 8 MiB; #1482 also reported failures
-            // near that size when data crossed a node. Exercise the real node path.
-            let mut payload = vec![0; 8 * 1024 * 1024 + 70_000];
-            getrandom::fill(&mut payload).unwrap();
-            fs::write(nested.join("tool data"), &payload).unwrap();
-            fs::set_permissions(nested.join("tool data"), fs::Permissions::from_mode(0o755))
-                .unwrap();
-            fs::create_dir(source.join("empty")).unwrap();
-            fs::write(source.join(".credentials.json"), b"synthetic credentials").unwrap();
-            symlink("plugins/日本語/tool data", source.join("linked plugin")).unwrap();
-            let destination = temp.path().join("remote profile");
-            let executor = SystemTar {
-                streams: Cell::new(0),
-                host,
-            };
-            upload_profile_archive(
-                &executor,
-                &SshTarget {
-                    destination: "unused".into(),
-                    ssh_args: vec![],
-                },
-                &source,
-                destination.to_str().unwrap(),
-            )
-            .unwrap();
-            assert_eq!(executor.streams.get(), 1);
-            assert_eq!(
-                fs::read(destination.join("plugins/日本語/tool data")).unwrap(),
-                payload
-            );
-            assert_eq!(
-                fs::read(destination.join("linked plugin")).unwrap(),
-                payload
-            );
-            assert!(
-                !destination
-                    .join("linked plugin")
-                    .symlink_metadata()
-                    .unwrap()
-                    .file_type()
-                    .is_symlink()
-            );
-            assert!(destination.join("empty").is_dir());
-            assert_eq!(
-                fs::read(destination.join(".credentials.json")).unwrap(),
-                b"synthetic credentials"
-            );
-            assert_eq!(
-                destination
-                    .join(".credentials.json")
-                    .metadata()
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o077,
-                0
-            );
-            assert_eq!(
-                destination
-                    .join("plugins/日本語/tool data")
-                    .metadata()
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o700
-            );
-        })
-        .await;
-        drop(slot);
-        driver.await.unwrap().unwrap();
-        server.await.unwrap().unwrap();
-        checked.unwrap();
+        assert_eq!(
+            fs::read(destination.join("linked plugin")).unwrap(),
+            payload
+        );
+        assert!(
+            !destination
+                .join("linked plugin")
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(destination.join("empty").is_dir());
+        assert_eq!(
+            fs::read(destination.join(".credentials.json")).unwrap(),
+            b"synthetic credentials"
+        );
+        assert_eq!(
+            destination
+                .join(".credentials.json")
+                .metadata()
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o077,
+            0
+        );
+        assert_eq!(
+            destination
+                .join("plugins/日本語/tool data")
+                .metadata()
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
     }
 }

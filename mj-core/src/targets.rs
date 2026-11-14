@@ -228,11 +228,6 @@ pub struct CommandSpec {
     /// environment, serialized plan, or debug representation.
     #[serde(skip)]
     sensitive_stdin: Option<SensitiveCommandInput>,
-    /// The command works on the daemon's own data (its checkpoint archives,
-    /// its store), so it runs where the daemon runs rather than on the node.
-    /// Executor-local, never serialized.
-    #[serde(skip)]
-    in_daemon: bool,
 }
 
 impl CommandSpec {
@@ -261,7 +256,6 @@ impl CommandSpec {
             ssh_session_probe: false,
             ssh_start_marker: false,
             sensitive_stdin: None,
-            in_daemon: false,
         }
     }
 
@@ -327,8 +321,8 @@ impl CommandSpec {
     ///
     /// An `ssh` command's remote line is prefixed to print [`SSH_START_MARKER`]
     /// first. The reader of its stdout must strip it and report the start to
-    /// the lease's [`StartGate`] (see [`SessionCommand::gate`]); the executors,
-    /// the node and `spawn_session_proxy` do. A command without a session
+    /// the lease's [`StartGate`] (see [`SessionCommand::gate`]); the executors
+    /// and `spawn_session_proxy` do. A command without a session
     /// request is returned unchanged. `executor` runs the master check and,
     /// when needed, the opener. `walk` is the command's walk across the
     /// connection's shards: a command that retries after a refusal passes the
@@ -420,17 +414,11 @@ impl CommandSpec {
         self
     }
 
-    pub(crate) fn sensitive_stdin(&self) -> Option<&[u8]> {
+    /// The command-owned input, for executors and test fakes.
+    pub fn sensitive_stdin(&self) -> Option<&[u8]> {
         self.sensitive_stdin
             .as_ref()
             .map(|input| input.0.as_slice())
-    }
-
-    /// Run where the daemon runs: the command reads or writes the daemon's own
-    /// data, which only the daemon can reach.
-    pub fn in_daemon(mut self) -> Self {
-        self.in_daemon = true;
-        self
     }
 }
 
@@ -593,122 +581,6 @@ impl SessionCommand<'_> {
     }
 }
 
-/// A [`CommandSpec`] as it travels to a node, carrying the executor-local
-/// fields that its own serialization leaves out. Only the node protocol uses
-/// this form; plans and stores keep the redacted one.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NodeRun {
-    pub spec: CommandSpec,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub arg0: Option<String>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub sensitive_output: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub preserve_children_on_cancel: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sensitive_stdin: Option<Vec<u8>>,
-    /// The caller streams stdin after the description; otherwise the child's
-    /// stdin is empty (or `sensitive_stdin`).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub streamed_stdin: bool,
-}
-
-impl std::fmt::Debug for NodeRun {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("NodeRun")
-            .field("spec", &self.spec)
-            .field("streamed_stdin", &self.streamed_stdin)
-            .finish_non_exhaustive()
-    }
-}
-
-impl CommandSpec {
-    /// The command with every field a node needs to run it exactly as this
-    /// process would. With streamed stdin, the caller supplies the body and
-    /// command-owned input is omitted from the description.
-    pub fn to_node_run(&self, streamed_stdin: bool) -> NodeRun {
-        let mut spec = self.clone();
-        // The spec never serializes this field. Drop its shared reference too:
-        // streaming callers keep the bytes at the source, outside the command.
-        spec.sensitive_stdin = None;
-        NodeRun {
-            spec,
-            #[cfg(unix)]
-            arg0: self.arg0.clone(),
-            #[cfg(not(unix))]
-            arg0: None,
-            sensitive_output: self.sensitive_output,
-            preserve_children_on_cancel: self.preserve_children_on_cancel,
-            sensitive_stdin: if streamed_stdin {
-                None
-            } else {
-                self.sensitive_stdin().map(<[u8]>::to_vec)
-            },
-            streamed_stdin,
-        }
-    }
-}
-
-impl NodeRun {
-    pub fn into_spec(self) -> CommandSpec {
-        let mut spec = self.spec;
-        #[cfg(unix)]
-        {
-            spec.arg0 = self.arg0;
-        }
-        spec.sensitive_output = self.sensitive_output;
-        spec.preserve_children_on_cancel = self.preserve_children_on_cancel;
-        spec.sensitive_stdin = self
-            .sensitive_stdin
-            .map(|input| SensitiveCommandInput(Arc::new(input)));
-        spec
-    }
-}
-
-/// Where this process's commands run. In the daemon that is its node, the
-/// process on the computer holding the user's files; everywhere else it is
-/// unset and commands run here. Installed once at daemon startup, so every
-/// executor in the daemon makes the same choice and none runs a command
-/// locally behind the node's back.
-pub trait CommandHost: Send + Sync {
-    /// Run `command` to completion with `input` as its stdin (or none),
-    /// abandoning it once `is_cancelled` turns true. Errors keep the text the
-    /// executing side gave them, so "operation cancelled" stays recognisable.
-    fn run(
-        &self,
-        command: &CommandSpec,
-        input: Option<&mut (dyn Read + Send)>,
-        is_cancelled: &(dyn Fn() -> bool + Sync),
-    ) -> Result<CommandOutput>;
-
-    /// Start `command` as a live stream: stdin, stdout and stderr flow while
-    /// it runs. Long-lived proxies run this way.
-    fn open_stream<'a>(
-        &'a self,
-        command: &CommandSpec,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<crate::node::NodeExec>> + Send + 'a>,
-    >;
-}
-
-static COMMAND_HOST: std::sync::OnceLock<Arc<dyn CommandHost>> = std::sync::OnceLock::new();
-
-/// Send every command this process runs to `host`. Only the daemon calls
-/// this, once, before it runs any command.
-pub fn install_command_host(host: Arc<dyn CommandHost>) -> Result<()> {
-    COMMAND_HOST
-        .set(host)
-        .map_err(|_| anyhow::anyhow!("a command host is already installed"))
-}
-
-/// The host that runs `command`, or `None` to run it in this process. Every
-/// caller that starts a process asks this, so none decides on its own.
-pub fn command_host(command: &CommandSpec) -> Option<&'static Arc<dyn CommandHost>> {
-    COMMAND_HOST.get().filter(|_| !command.in_daemon)
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandOutput {
     pub status: i32,
@@ -742,6 +614,11 @@ pub struct DeploymentCapacityTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeploymentCapacityUsage {
+    /// Whether `memory_total_bytes` is a pool set aside for sessions at boot
+    /// (a Nitro host's sandbox memory) rather than the host's RAM. A pool is
+    /// already net of the host's own needs, so admission applies no reserve
+    /// to it.
+    pub memory_pool: bool,
     pub cpu_percent: Option<u8>,
     pub memory_used_bytes: u64,
     pub memory_total_bytes: u64,
@@ -1169,25 +1046,11 @@ impl ProcessExecutor {
         command: &CommandSpec,
         gate: Option<&Arc<StartGate>>,
     ) -> Result<CommandOutput> {
-        if gate.is_some() || command.sensitive_stdin.is_some() {
-            // A session that reports its start is read through the shared
-            // collector; with no cancellation it only ends when the child does.
-            return CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false)))
-                .run_once(command, gate);
-        }
-        let started = Instant::now();
-        let output = configured_command(command)
-            .stdin(Stdio::null())
-            .output()
-            .with_context(|| format!("run {} for {}", command.program, command.purpose))?;
-        let status = output.status.code().unwrap_or(-1);
-        Ok(finished_command(
-            command,
-            started,
-            status,
-            output.stdout,
-            output.stderr,
-        ))
+        // One path for both executors: the child gets its own process group,
+        // output is drained for a bounded time after it exits, and leftover
+        // descendants are killed. With no cancellation it only ends when the
+        // child does.
+        CancellableProcessExecutor::new(Arc::new(AtomicBool::new(false))).run_once(command, gate)
     }
 }
 
@@ -1199,9 +1062,6 @@ impl CommandExecutor for ProcessExecutor {
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         crate::runtime::off_async_worker(|| {
             let _running = BlockingOperation::command(command);
-            if let Some(host) = command_host(command) {
-                return host.run(command, None, &|| false);
-            }
             with_ssh_refusal_retry(command, self, None, |command, gate| {
                 self.run_once(command, gate)
             })
@@ -1215,9 +1075,6 @@ impl CommandExecutor for ProcessExecutor {
     ) -> Result<CommandOutput> {
         crate::runtime::off_async_worker(|| {
             let _running = BlockingOperation::command(command);
-            if let Some(host) = command_host(command) {
-                return host.run(command, Some(input), &|| false);
-            }
             // The stream is not read until the session has started, so a
             // refused session is retried with the same stream. Plain process
             // execution is not cancellable, so a transfer only ends when the
@@ -1400,6 +1257,9 @@ fn stream_command_with_stdin(
 #[derive(Clone)]
 pub struct CancellableProcessExecutor {
     cancelled: Arc<AtomicBool>,
+    token: Option<tokio_util::sync::CancellationToken>,
+    #[cfg(unix)]
+    foreground_terminal: bool,
     deadline: Option<(Instant, Duration)>,
 }
 
@@ -1420,12 +1280,32 @@ impl CancellableProcessExecutor {
     pub fn new(cancelled: Arc<AtomicBool>) -> Self {
         Self {
             cancelled,
+            token: None,
+            #[cfg(unix)]
+            foreground_terminal: false,
             deadline: None,
         }
     }
 
+    /// Use the supervising login's cancellation for blocking preparation.
+    /// Interactive account shells need foreground terminal ownership even
+    /// though their output is captured and cancellation owns their group.
+    #[cfg(unix)]
+    pub fn with_foreground_terminal(mut self) -> Self {
+        self.foreground_terminal = true;
+        self
+    }
+
+    pub fn with_cancellation(mut self, token: tokio_util::sync::CancellationToken) -> Self {
+        self.token = Some(token);
+        self
+    }
+
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
+        self.token
+            .as_ref()
+            .is_some_and(|token| token.is_cancelled())
+            || self.cancelled.load(Ordering::Acquire)
             || self
                 .deadline
                 .is_some_and(|(deadline, _)| Instant::now() >= deadline)
@@ -1434,6 +1314,9 @@ impl CancellableProcessExecutor {
     pub fn with_timeout(timeout: Duration) -> Self {
         Self {
             cancelled: Arc::new(AtomicBool::new(false)),
+            token: None,
+            #[cfg(unix)]
+            foreground_terminal: false,
             deadline: Some((Instant::now() + timeout, timeout)),
         }
     }
@@ -1447,6 +1330,10 @@ impl CancellableProcessExecutor {
 
     fn cancellation_message(&self, purpose: &str) -> String {
         if !self.cancelled.load(Ordering::Acquire)
+            && !self
+                .token
+                .as_ref()
+                .is_some_and(|token| token.is_cancelled())
             && let Some((deadline, timeout)) = self.deadline
             && Instant::now() >= deadline
         {
@@ -1696,11 +1583,18 @@ impl CancellableProcessExecutor {
         command: &CommandSpec,
         gate: Option<&Arc<StartGate>>,
     ) -> Result<CommandOutput> {
+        let mut process = cancellable_command(command);
+        #[cfg(unix)]
+        let _foreground = if self.foreground_terminal {
+            crate::subprocess::ForegroundGroup::prepare(&mut process)?
+        } else {
+            None
+        };
         if let Some(input) = &command.sensitive_stdin {
             let mut input = std::io::Cursor::new(input.0.as_slice());
             // Owned bytes, so each attempt gets its own reader.
             return stream_command_with_stdin(
-                cancellable_command(command),
+                process,
                 command,
                 &mut input,
                 &|| self.is_cancelled(),
@@ -1709,7 +1603,7 @@ impl CancellableProcessExecutor {
         }
         let started = Instant::now();
         self.check_cancelled(&command.purpose)?;
-        let mut child = cancellable_command(command)
+        let mut child = process
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1782,12 +1676,6 @@ impl CommandExecutor for CancellableProcessExecutor {
     fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
         crate::runtime::off_async_worker(|| {
             let _running = BlockingOperation::command(command);
-            if let Some(host) = command_host(command) {
-                return self.describe_cancellation(
-                    command,
-                    host.run(command, None, &|| self.is_cancelled()),
-                );
-            }
             self.describe_cancellation(
                 command,
                 with_ssh_refusal_retry(
@@ -1809,9 +1697,6 @@ impl CommandExecutor for CancellableProcessExecutor {
             command,
             crate::runtime::off_async_worker(|| {
                 let _running = BlockingOperation::command(command);
-                if let Some(host) = command_host(command) {
-                    return host.run(command, Some(input), &|| self.is_cancelled());
-                }
                 // The stream is not read until the session has started, so a
                 // refused session is retried with the same stream. The child
                 // runs in its own process group so cancellation can kill the
@@ -1934,25 +1819,50 @@ pub fn validate_inherited_environment_name(name: &str) -> Result<()> {
 
 impl CommandPlan {
     /// Supply one container environment value without placing it in the
-    /// Podman/SSH argument vector. The target launcher reads the value from
-    /// stdin, exports it, and asks the container engine to inherit it by name.
+    /// Podman/SSH argument vector. See [`Self::provide_target_environment_secrets`].
     pub fn provide_target_environment_secret(
         &mut self,
         target: &TargetTemplate,
         name: &str,
         value: &str,
     ) -> Result<()> {
-        validate_inherited_environment_name(name)?;
+        self.provide_target_environment_secrets(target, &[(name.to_owned(), value.to_owned())])
+    }
+
+    /// Supply container environment values without placing them in the
+    /// Podman/SSH argument vector. The target launcher reads one value per
+    /// line from stdin, exports each, and the container engine is asked to
+    /// inherit it by name (`--env NAME`).
+    pub fn provide_target_environment_secrets(
+        &mut self,
+        target: &TargetTemplate,
+        secrets: &[(String, String)],
+    ) -> Result<()> {
         ensure!(
-            !value.as_bytes().contains(&b'\n') && !value.as_bytes().contains(&b'\r'),
-            "secret environment value cannot contain a newline"
+            !secrets.is_empty(),
+            "no secret environment values to supply"
         );
+        let mut read_and_export = String::new();
+        let mut input = Vec::new();
+        for (index, (name, value)) in secrets.iter().enumerate() {
+            validate_inherited_environment_name(name)?;
+            ensure!(
+                secrets[..index].iter().all(|(earlier, _)| earlier != name),
+                "secret environment variable {name} is supplied twice"
+            );
+            ensure!(
+                !value.as_bytes().contains(&b'\n') && !value.as_bytes().contains(&b'\r'),
+                "secret environment value cannot contain a newline"
+            );
+            read_and_export.push_str(&format!("IFS= read -r {name} || exit 1; export {name}; "));
+            input.extend_from_slice(value.as_bytes());
+            input.push(b'\n');
+        }
         let command = self
             .commands
             .iter_mut()
             .find(|command| command.creates_target)
             .context("provisioning plan has no target creation command")?;
-        let read_and_export = format!("IFS= read -r {name} || exit 1; export {name};");
         match target {
             TargetTemplate::LocalPodman(_)
             | TargetTemplate::LocalDocker(_)
@@ -1961,7 +1871,7 @@ impl CommandPlan {
                 let args = std::mem::take(&mut command.args);
                 command.args = vec![
                     "-c".to_owned(),
-                    format!("{read_and_export} exec \"$@\""),
+                    format!("{read_and_export}exec \"$@\""),
                     "mj-secret-env".to_owned(),
                     program,
                 ];
@@ -1969,19 +1879,18 @@ impl CommandPlan {
             }
             TargetTemplate::SshPodman { .. }
             | TargetTemplate::SshDocker { .. }
-            | TargetTemplate::SshAppleContainer { .. } => {
+            | TargetTemplate::SshAppleContainer { .. }
+            | TargetTemplate::SshNitro { .. } => {
                 let remote = command
                     .args
                     .last_mut()
                     .context("remote container command has no SSH command argument")?;
-                *remote = format!("{read_and_export} exec {remote}");
+                *remote = format!("{read_and_export}exec {remote}");
             }
             TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => {
                 bail!("target does not support inherited container environment")
             }
         }
-        let mut input = value.as_bytes().to_vec();
-        input.push(b'\n');
         command.sensitive_stdin = Some(SensitiveCommandInput(Arc::new(input)));
         Ok(())
     }
@@ -2320,6 +2229,108 @@ pub enum ImageHost {
     SshPodman(SshTarget),
     SshDocker(SshTarget),
     SshAppleContainer(SshTarget),
+    /// The `mj-worker microvm` engine on an EC2 host; see [`MICROVM_ENGINE`].
+    SshNitro(SshTarget),
+}
+
+/// The name of the Nitro Sandbox host engine, `mj-worker microvm`. It
+/// implements the subset of Podman's verbs, flags and output formats that
+/// Mjolnir drives over SSH, so most call sites treat it like `podman`.
+pub const MICROVM_ENGINE: &str = "microvm";
+
+/// Where the host engine's worker binary lives on an SSH host, relative to
+/// the login home. The daemon installs it there before the first engine call
+/// (see the controller's `ensure_microvm_engine`); this is the only place
+/// that names the path.
+pub const MICROVM_ENGINE_WORKER: &str = ".local/share/hel/microvm/hel";
+
+/// The argument vector that runs `engine` on its host, up to the verb.
+///
+/// Podman, Docker and Apple's `container` are one program. The microVM engine
+/// is the installed worker run as root. `sudo` needs an absolute path and
+/// ssh quotes every argument, so the login shell cannot expand `$HOME`; the
+/// inner `sh` does it before `sudo` starts. Everything after this prefix
+/// reaches the engine unchanged, including stdin, stdout and the exit status.
+pub fn engine_argv(engine: &str) -> Vec<String> {
+    engine_argv_with_env(engine, &[])
+}
+
+/// [`engine_argv`] for a command whose engine must inherit the environment
+/// variables `names` from the ssh command's environment. `sudo` resets the
+/// environment, so the microVM engine's prefix preserves exactly these; a
+/// value on the command line would be logged by `sudo` and visible in `ps`.
+/// Other engines inherit the whole environment and ignore `names`.
+pub fn engine_argv_with_env(engine: &str, names: &[String]) -> Vec<String> {
+    if engine == MICROVM_ENGINE {
+        vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            format!(
+                r#"exec {} "$@""#,
+                engine_shell_words_with_env(engine, names)
+            ),
+            "mj-microvm".to_owned(),
+        ]
+    } else {
+        vec![engine.to_owned()]
+    }
+}
+
+/// `engine` as the words of a shell command line, for a script that runs it:
+/// `exec $(engine_shell_words) volume rm "$volume"`. The words contain `$HOME`
+/// for the microVM engine, so they belong inside a script that does not quote
+/// them away, never in an argument that ssh quotes.
+pub fn engine_shell_words(engine: &str) -> String {
+    engine_shell_words_with_env(engine, &[])
+}
+
+/// [`engine_shell_words`] preserving the environment variables `names`
+/// through `sudo`; see [`engine_argv_with_env`].
+pub fn engine_shell_words_with_env(engine: &str, names: &[String]) -> String {
+    if engine == MICROVM_ENGINE {
+        let preserve = if names.is_empty() {
+            String::new()
+        } else {
+            format!("--preserve-env={} ", names.join(","))
+        };
+        format!(r#"sudo -n {preserve}"$HOME/{MICROVM_ENGINE_WORKER}" {MICROVM_ENGINE}"#)
+    } else {
+        engine.to_owned()
+    }
+}
+
+/// `args` with a leading engine name expanded to the command that runs it.
+pub fn with_engine_argv(mut args: Vec<String>) -> Vec<String> {
+    if args.first().is_some_and(|first| first == MICROVM_ENGINE) {
+        let verbs = args.split_off(1);
+        let mut argv = engine_argv(MICROVM_ENGINE);
+        argv.extend(verbs);
+        argv
+    } else {
+        args
+    }
+}
+
+/// `engine` followed by `args`, as one command.
+pub fn engine_command(
+    engine: &str,
+    args: impl IntoIterator<Item = impl Into<String>>,
+) -> CommandSpec {
+    let mut argv = engine_argv(engine);
+    argv.extend(args.into_iter().map(Into::into));
+    let program = argv.remove(0);
+    CommandSpec::new(program, argv)
+}
+
+/// `engine` followed by `args`, run on the SSH host.
+pub fn ssh_engine_command(
+    ssh: &SshTarget,
+    engine: &str,
+    args: impl IntoIterator<Item = impl Into<String>>,
+) -> CommandSpec {
+    let mut argv = engine_argv(engine);
+    argv.extend(args.into_iter().map(Into::into));
+    ssh_command_owned(ssh, argv)
 }
 
 impl ImageHost {
@@ -2328,6 +2339,7 @@ impl ImageHost {
             Self::LocalPodman | Self::SshPodman(_) => "podman",
             Self::LocalDocker | Self::SshDocker(_) => "docker",
             Self::AppleContainer | Self::SshAppleContainer(_) => "container",
+            Self::SshNitro(_) => MICROVM_ENGINE,
         }
     }
 
@@ -2340,17 +2352,24 @@ impl ImageHost {
             Self::SshPodman(ssh) => format!("podman on {}", ssh.destination),
             Self::SshDocker(ssh) => format!("docker on {}", ssh.destination),
             Self::SshAppleContainer(ssh) => format!("apple container on {}", ssh.destination),
+            Self::SshNitro(ssh) => format!("nitro sandboxes on {}", ssh.destination),
         }
     }
 
-    /// Run `args` (an engine command line) on this host.
+    /// Run `args` (an engine command line, starting with the engine's name)
+    /// on this host.
     pub fn command(&self, args: Vec<String>, purpose: String) -> CommandSpec {
         match self {
             Self::LocalPodman | Self::LocalDocker | Self::AppleContainer => {
                 CommandSpec::new(args[0].clone(), args[1..].iter().cloned())
             }
-            Self::SshPodman(ssh) | Self::SshDocker(ssh) | Self::SshAppleContainer(ssh) => {
-                ssh_command_owned(ssh, args)
+            Self::SshPodman(ssh)
+            | Self::SshDocker(ssh)
+            | Self::SshAppleContainer(ssh)
+            | Self::SshNitro(ssh) => {
+                let mut argv = engine_argv(&args[0]);
+                argv.extend(args.into_iter().skip(1));
+                ssh_command_owned(ssh, argv)
             }
         }
         .purpose(purpose)
@@ -2501,6 +2520,10 @@ pub enum TargetTemplate {
         ssh: SshTarget,
         container: ContainerTemplate,
     },
+    SshNitro {
+        ssh: SshTarget,
+        container: ContainerTemplate,
+    },
 }
 
 fn default_ssh_prefix() -> String {
@@ -2597,6 +2620,15 @@ pub enum TargetLocator {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         borrowed_from: Option<String>,
     },
+    SshNitro {
+        ssh: SshTarget,
+        container_id: String,
+        /// The session that owns the sandbox when this locator is a
+        /// sub-agent child borrowing its parent's sandbox; `None` when the
+        /// session owns the sandbox itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
+    },
 }
 
 impl TargetTemplate {
@@ -2605,6 +2637,7 @@ impl TargetTemplate {
             Self::LocalPodman(_) | Self::SshPodman { .. } => Some("podman"),
             Self::LocalDocker(_) | Self::SshDocker { .. } => Some("docker"),
             Self::AppleContainer(_) | Self::SshAppleContainer { .. } => Some("container"),
+            Self::SshNitro { .. } => Some(MICROVM_ENGINE),
             _ => None,
         }
     }
@@ -2624,6 +2657,9 @@ impl TargetTemplate {
             }
             Self::SshAppleContainer { ssh, container } => {
                 Some((ImageHost::SshAppleContainer(ssh.clone()), container))
+            }
+            Self::SshNitro { ssh, container } => {
+                Some((ImageHost::SshNitro(ssh.clone()), container))
             }
             Self::LocalBare | Self::SshBare { .. } => None,
         }
@@ -2652,6 +2688,7 @@ impl TargetLocator {
             Self::SshPodman { .. } => "ssh-podman",
             Self::SshDocker { .. } => "ssh-docker",
             Self::SshAppleContainer { .. } => "ssh-apple-container",
+            Self::SshNitro { .. } => "ssh-nitro",
         }
     }
 
@@ -2660,6 +2697,7 @@ impl TargetLocator {
             Self::LocalPodman { .. } | Self::SshPodman { .. } => Some("podman"),
             Self::LocalDocker { .. } | Self::SshDocker { .. } => Some("docker"),
             Self::AppleContainer { .. } | Self::SshAppleContainer { .. } => Some("container"),
+            Self::SshNitro { .. } => Some(MICROVM_ENGINE),
             _ => None,
         }
     }
@@ -2798,7 +2836,8 @@ pub fn workspace_for(template: &TargetTemplate, session_id: &str) -> Result<Stri
         | TargetTemplate::AppleContainer(_)
         | TargetTemplate::SshPodman { .. }
         | TargetTemplate::SshDocker { .. }
-        | TargetTemplate::SshAppleContainer { .. } => {
+        | TargetTemplate::SshAppleContainer { .. }
+        | TargetTemplate::SshNitro { .. } => {
             bail!("container targets use the session's recorded container workspace")
         }
         TargetTemplate::SshBare {
@@ -2859,6 +2898,9 @@ pub fn locator_command(locator: &TargetLocator, args: Vec<String>) -> CommandSpe
         }
         | TargetLocator::SshAppleContainer {
             ssh, container_id, ..
+        }
+        | TargetLocator::SshNitro {
+            ssh, container_id, ..
         } => {
             let remote = drained_container_exec(
                 locator.container_engine().expect("remote container"),
@@ -2880,7 +2922,8 @@ pub fn worker_root(locator: &TargetLocator, session_id: &str) -> Result<String> 
         | TargetLocator::AppleContainer { .. }
         | TargetLocator::SshPodman { .. }
         | TargetLocator::SshDocker { .. }
-        | TargetLocator::SshAppleContainer { .. } => {
+        | TargetLocator::SshAppleContainer { .. }
+        | TargetLocator::SshNitro { .. } => {
             format!("/var/lib/hel/workers/{session_id}")
         }
         TargetLocator::AwsEc2 { .. } => format!(".local/share/hel/workers/{session_id}"),
@@ -2906,7 +2949,7 @@ pub fn container_exec(
 ) -> CommandSpec {
     let mut command_args = vec!["exec".to_owned(), "-i".to_owned(), container_id.to_owned()];
     command_args.extend(args.into_iter().map(Into::into));
-    CommandSpec::new(engine, command_args)
+    engine_command(engine, command_args)
 }
 
 /// A container exec run on a remote host over SSH, through the output drain
@@ -3230,11 +3273,14 @@ mod executor_tests {
     /// A stand-in for `ssh` that is refused by the server on its first call and
     /// connects on the next, the way a host at its `MaxStartups` ceiling
     /// behaves once the daemon's burst drains.
+    ///
+    /// The count is written to a scratch file and renamed into place, so a
+    /// deadline that kills the script mid-write never leaves an empty counter.
     fn flaky_ssh_script(directory: &Path, refusals: u32) -> CommandSpec {
         let counter = directory.join("attempts");
         let script = format!(
             "count=$(cat {counter} 2>/dev/null || echo 0)\n\
-             echo $((count + 1)) > {counter}\n\
+             echo $((count + 1)) > {counter}.tmp && mv {counter}.tmp {counter}\n\
              if [ \"$count\" -lt {refusals} ]; then\n\
              echo 'kex_exchange_identification: Connection closed by 10.0.0.1 port 22' >&2\n\
              exit 255\n\
@@ -3420,13 +3466,21 @@ mod executor_tests {
             }
             .expect_err("a server that never lets the command in fails after the bound");
             let message = format!("{error:#}");
-            assert!(started.elapsed() < Duration::from_secs(10), "{message}");
+            let elapsed = started.elapsed();
+            assert!(elapsed < Duration::from_secs(10), "{message}");
             for needle in ["build@10.0.0.1", "MaxStartups", "firewall", "kex_exchange"] {
                 assert!(message.contains(needle), "{needle} missing: {message}");
             }
+            // Each attempt spawns several processes, so how many fit in the
+            // bound depends on the machine. Check that the caller retried and
+            // that the bound, not an attempt count, ended the retries.
             assert!(
-                attempts(directory.path()) > 3,
+                attempts(directory.path()) >= 2,
                 "cancellable: {cancellable}, retried within the bound"
+            );
+            assert!(
+                elapsed >= Duration::from_millis(400),
+                "cancellable: {cancellable}, stopped before the bound after {elapsed:?}"
             );
         }
     }

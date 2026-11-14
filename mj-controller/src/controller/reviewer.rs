@@ -161,7 +161,7 @@ mod tests {
             .unwrap(),
             _ => TargetTemplate::LocalBare,
         };
-        session.target = Some(locator);
+        session.target = Some(Box::new(locator));
         let mut config = Config::default();
         config.targets.insert("local".into(), template);
         for (id, kind) in [
@@ -181,6 +181,7 @@ mod tests {
                     guardian_review_model: None,
                     codex_profile: None,
                     muse_auto_review: None,
+                    claude_permission_mode: None,
                     aws: None,
                     ..mj_core::config::HarnessProfile::new(kind, home)
                 },

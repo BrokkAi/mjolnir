@@ -301,6 +301,7 @@ mod tests {
             code: Some("internal_error".into()),
             http_status: Some(500),
             reset_at: None,
+            login_fingerprint: None,
         });
         assert_eq!(turn.result().reason, Some(OutcomeReason::ProviderFailure));
         assert_eq!(turn.result().kind, TurnResultKind::Failed);

@@ -329,6 +329,47 @@ pub(crate) fn prune_pending_messages_for_stopped_children() -> Result<usize> {
     )
 }
 
+/// A question forwarded to a parent invites a `send_message` answer. When the
+/// asking child can no longer receive one, the pending invitation can only
+/// fail; remove it. Accepted history stays.
+pub(crate) fn prune_stale_subagent_questions() -> Result<usize> {
+    submit_database_write("prune stale subagent questions", |connection| {
+        prune_stale_subagent_questions_with(connection)
+    })
+}
+
+pub(super) fn prune_stale_subagent_questions_with(connection: &Connection) -> Result<usize> {
+    let rows = connection
+            .prepare(
+                "SELECT mailbox_outbox.event_key, sessions.state
+                 FROM mailbox_outbox
+                 LEFT JOIN sessions
+                   ON sessions.session_id = json_extract(mailbox_outbox.event_json, '$.body.from.id')
+                 WHERE mailbox_outbox.accepted_at IS NULL
+                   AND mailbox_outbox.event_key LIKE 'subagent-question-%'",
+            )?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut removed = 0;
+    for (key, state) in rows {
+        // A child row that is gone entirely can receive nothing either.
+        let receivable = state
+            .as_deref()
+            .and_then(mj_core::state::SessionState::from_stored)
+            .is_some_and(mj_core::state::SessionState::can_receive_child_work);
+        if receivable {
+            continue;
+        }
+        removed += connection.execute(
+            "DELETE FROM mailbox_outbox WHERE event_key=?1 AND accepted_at IS NULL",
+            [key],
+        )?;
+    }
+    Ok(removed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,6 +394,105 @@ mod tests {
             false,
         )
         .unwrap();
+    }
+
+    fn enqueue_question(connection: &Connection, parent: &str, child: &str, key: &str) {
+        let event = mj_core::mailbox::MailboxEvent {
+            key: key.into(),
+            source: "session_message".into(),
+            wake: true,
+            created_at_ms: 1,
+            body: mj_core::mailbox::MailboxEventBody::SessionMessage {
+                from: mj_core::mailbox::Sender::Session {
+                    id: child.into(),
+                    title: child.into(),
+                },
+                text: format!(
+                    "Your sub-agent asked this question: pick one. Answer with send_message to session_id {child}."
+                ),
+            },
+        };
+        enqueue_mailbox_event_with(
+            connection,
+            key,
+            parent,
+            &serde_json::to_string(&event).unwrap(),
+            true,
+            true,
+        )
+        .unwrap();
+    }
+
+    // Hard-won: #1345: a forwarded question outlived the child that could
+    // receive its answer; delivery then invited a send_message that failed.
+    /// Pending questions from children that stopped, closed, or vanished are
+    /// pruned; a live child's question and accepted delivery history stay.
+    #[test]
+    fn stale_child_questions_are_pruned_but_live_and_accepted_ones_stay() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("mj.sqlite3");
+        let mut parent = super::super::tests::session("parent", "project");
+        parent.state = SessionState::Running;
+        save_session_to(&path, &parent).unwrap();
+        for (child, state) in [
+            ("running-child", SessionState::Running),
+            ("stopped-child", SessionState::Stopped),
+            ("gone-child", SessionState::Running),
+        ] {
+            let mut record = super::super::tests::session(child, "project");
+            record.state = state;
+            save_session_to(&path, &record).unwrap();
+        }
+        let connection = open(&path).unwrap();
+        enqueue_question(
+            &connection,
+            "parent",
+            "running-child",
+            "subagent-question-running-child-1",
+        );
+        enqueue_question(
+            &connection,
+            "parent",
+            "stopped-child",
+            "subagent-question-stopped-child-1",
+        );
+        enqueue_question(
+            &connection,
+            "parent",
+            "gone-child",
+            "subagent-question-gone-child-1",
+        );
+        enqueue_question(
+            &connection,
+            "parent",
+            "stopped-child",
+            "subagent-question-stopped-child-2",
+        );
+        // Accepted delivery history is not pruned.
+        connection
+            .execute(
+                "UPDATE mailbox_outbox SET accepted_at='now' WHERE event_key='subagent-question-stopped-child-2'",
+                [],
+            )
+            .unwrap();
+        // The child row disappearing entirely is terminal too. The deletion
+        // trigger removes rows addressed TO it; questions FROM it remain.
+        connection
+            .execute("DELETE FROM sessions WHERE session_id='gone-child'", [])
+            .unwrap();
+        assert_eq!(prune_stale_subagent_questions_with(&connection).unwrap(), 2);
+        let remaining = |pattern: &str| {
+            connection
+                .query_row(
+                    "SELECT count(*) FROM mailbox_outbox WHERE event_key LIKE ?1",
+                    [pattern],
+                    |row| row.get::<_, u64>(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(remaining("subagent-question-running-child-%"), 1);
+        assert_eq!(remaining("subagent-question-stopped-child-%"), 1);
+        assert_eq!(remaining("subagent-question-gone-child-%"), 0);
     }
 
     fn complete_clear(path: &Path, fail: bool) -> Result<()> {
@@ -471,6 +611,101 @@ mod tests {
             assert_eq!(inserted, Enqueued::TargetGone, "{gone}");
             assert_eq!(rows(gone), 0, "{gone}");
         }
+    }
+
+    /// Revision 130: a watch outlives its creator while a live session is
+    /// interested in the item, and goes with its last follower.
+    #[test]
+    fn a_watch_outlives_its_creator_while_a_live_session_is_interested() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("mj.sqlite3");
+        for id in ["creator", "creator-alone", "follower", "second", "idle"] {
+            save_session_to(&path, &super::super::tests::session(id, "project")).unwrap();
+        }
+        let connection = open(&path).unwrap();
+        let watch = |number: i64, creator: Option<&str>| {
+            connection
+                .execute(
+                    "INSERT INTO github_watch_items(owner, repo, number, creator_session_id, kind,
+                         title, url, created_at, timeline_at, timeline_id, review_comments_at,
+                         review_comments_id, processed_at)
+                     VALUES ('acme', 'repo', ?1, ?2, 'pull_request', 't', 'u', 'c', 'c', 0, 'c', 0, 'c')",
+                    params![number, creator],
+                )
+                .unwrap();
+        };
+        let classify = |number: i64, session: &str, created: bool| {
+            connection
+                .execute(
+                    "INSERT INTO github_watch_classifications(owner, repo, number, session_id,
+                         kind, title, url, created_at, interested, created)
+                     VALUES ('acme', 'repo', ?1, ?2, 'pull_request', 't', 'u', 'c', 1, ?3)",
+                    params![number, session, created],
+                )
+                .unwrap();
+        };
+        let creator_of = |number: i64| -> Option<Option<String>> {
+            connection
+                .query_row(
+                    "SELECT creator_session_id FROM github_watch_items WHERE number = ?1",
+                    [number],
+                    |row| row.get(0),
+                )
+                .optional()
+                .unwrap()
+        };
+        // 1: a creator and a follower. 2: a creator and nobody else.
+        // 3: no creator, two followers. 4: no creator, one follower.
+        watch(1, Some("creator"));
+        classify(1, "creator", true);
+        classify(1, "follower", false);
+        watch(2, Some("creator-alone"));
+        classify(2, "creator-alone", true);
+        watch(3, None);
+        classify(3, "follower", false);
+        classify(3, "second", false);
+        watch(4, None);
+        classify(4, "second", false);
+
+        // Deleted: the follower keeps watch 1; watch 2 has no one left.
+        connection
+            .execute("DELETE FROM sessions WHERE session_id = 'creator'", [])
+            .unwrap();
+        assert_eq!(creator_of(1), Some(None));
+        connection
+            .execute(
+                "UPDATE sessions SET state = 'destroyed-with-data-loss' WHERE session_id = 'creator-alone'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(creator_of(2), None);
+
+        // Destroyed: a creator-less watch stays while one follower is left and
+        // goes with the last one.
+        connection
+            .execute(
+                "UPDATE sessions SET state = 'destroyed-with-data-loss' WHERE session_id = 'second'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            creator_of(3),
+            Some(None),
+            "the other follower is still live"
+        );
+        assert_eq!(creator_of(4), None, "its only follower is gone");
+        connection
+            .execute("DELETE FROM sessions WHERE session_id = 'follower'", [])
+            .unwrap();
+        assert_eq!(creator_of(1), None);
+        assert_eq!(creator_of(3), None);
+
+        // A watch with no creator can still be inserted; one for a creator
+        // that is gone cannot.
+        watch(5, None);
+        watch(6, Some("creator"));
+        assert_eq!(creator_of(5), Some(None));
+        assert_eq!(creator_of(6), None);
     }
 
     #[test]

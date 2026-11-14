@@ -100,10 +100,7 @@ pub fn session_digest(session: &MaterializedSession) -> SessionContext {
                 text
             }
             TranscriptBody::Tool { call, .. } => {
-                if let Ok(call) = serde_json::from_value::<
-                    agent_client_protocol::v1::schema::ToolCall,
-                >(call.clone())
-                {
+                if let Ok(call) = call.decode() {
                     files.extend(
                         call.locations
                             .iter()
@@ -238,7 +235,7 @@ mod tests {
                 content: vec![json!({"type":"text","text":"second #2"})],
             },
             TranscriptBody::Tool {
-                call: json!({"toolCallId":"t","title":"Read https://github.com/owner/repo/pull/4", "status":"completed","locations":[{"path":"src/lib.rs"}]}),
+                call: json!({"toolCallId":"t","title":"Read https://github.com/owner/repo/pull/4", "status":"completed","locations":[{"path":"src/lib.rs"}]}).into(),
                 terminal_outputs: vec![],
                 terminal_refs: vec![],
                 presentation: None,

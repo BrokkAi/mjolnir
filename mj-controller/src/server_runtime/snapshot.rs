@@ -19,8 +19,10 @@ pub(super) struct PhoneSessionViews<'a> {
     /// What each managed session's relay last reported. This is where the
     /// projection learns what the agent can do, rather than guessing from the
     /// durable record, which knows only what was configured.
-    pub(super) operational:
-        &'a std::collections::BTreeMap<String, mj_core::relay::RelayOperationalState>,
+    pub(super) operational: &'a std::collections::BTreeMap<
+        String,
+        mj_core::snapshot_map::SharedSnapshot<mj_core::relay::RelayOperationalState>,
+    >,
     /// Durable activity watermarks delivered with the materialized worker
     /// snapshots. Keeping this in the control-loop cache avoids a database
     /// read while rendering each viewer snapshot.
@@ -248,6 +250,7 @@ pub(super) fn session_capabilities(
                     | crate::server::ViewerOperationKind::Cleanup
             )
         }),
+        dismiss_notification: session.notification_dismissal.is_some(),
         rename: !session.transitioning,
         // A Move that holds the source environment refuses Resume; it is
         // retried or the session is destroyed.
@@ -310,10 +313,12 @@ pub(super) fn phone_prompt_blocks(
 pub(super) fn phone_commands(
     session: &crate::server::ViewerSession,
     operational: Option<&mj_core::relay::RelayOperationalState>,
-) -> Vec<crate::server::ViewerMjCommand> {
+) -> std::sync::Arc<Vec<crate::server::ViewerMjCommand>> {
     use crate::server::ViewerCommandSource;
     use agent_client_protocol::v1::schema::AvailableCommandInput;
 
+    static BASE_COMMANDS: std::sync::OnceLock<std::sync::Arc<Vec<crate::server::ViewerMjCommand>>> =
+        std::sync::OnceLock::new();
     let command =
         |name: &str, description: &str, argument: Option<&str>| crate::server::ViewerMjCommand {
             name: name.to_owned(),
@@ -321,14 +326,18 @@ pub(super) fn phone_commands(
             source: ViewerCommandSource::Mj,
             argument: argument.map(str::to_owned),
         };
-    let mut commands = vec![
-        command("help", "show available Mjolnir and agent commands", None),
-        command(
-            "detach",
-            "leave the conversation without stopping the worker",
-            None,
-        ),
-    ];
+    let mut commands = BASE_COMMANDS
+        .get_or_init(|| {
+            std::sync::Arc::new(vec![
+                command("help", "show available Mjolnir and agent commands", None),
+                command(
+                    "detach",
+                    "leave the conversation without stopping the worker",
+                    None,
+                ),
+            ])
+        })
+        .clone();
     let option = |key: &str| {
         session
             .config_options
@@ -336,14 +345,18 @@ pub(super) fn phone_commands(
             .any(|option| option.key == key)
     };
     if session.capabilities.set_config && !session.config_options.is_empty() {
-        commands.push(command(
+        std::sync::Arc::make_mut(&mut commands).push(command(
             "config",
             "change any setting advertised by the active agent",
             Some("key [value]"),
         ));
     }
     if option("model") {
-        commands.push(command("model", "change the active model", Some("value")));
+        std::sync::Arc::make_mut(&mut commands).push(command(
+            "model",
+            "change the active model",
+            Some("value"),
+        ));
     }
     // Same condition as the dashboard (`AcpSurface::supports_fast_mode`):
     // the harness advertises `fast-mode` with both on and off.
@@ -353,25 +366,33 @@ pub(super) fn phone_commands(
                 .iter()
                 .all(|value| option.choices.iter().any(|choice| choice.value == *value))
     }) {
-        commands.push(command("fast", "toggle Codex Fast mode", None));
+        std::sync::Arc::make_mut(&mut commands).push(command(
+            "fast",
+            "toggle Codex Fast mode",
+            None,
+        ));
     }
     if option("effort") {
-        commands.push(command(
+        std::sync::Arc::make_mut(&mut commands).push(command(
             "effort",
             "change the active reasoning effort",
             Some("value"),
         ));
     }
     if session.plan_mode_active.is_some() && session.capabilities.set_plan_mode {
-        commands.push(command("plan", "toggle plan mode", Some("message")));
-        commands.push(command(
+        std::sync::Arc::make_mut(&mut commands).push(command(
+            "plan",
+            "toggle plan mode",
+            Some("message"),
+        ));
+        std::sync::Arc::make_mut(&mut commands).push(command(
             "implement",
             "leave plan mode and implement",
             Some("instruction"),
         ));
     }
     if session.capabilities.prompt || session.turn_review.is_some() {
-        commands.push(command(
+        std::sync::Arc::make_mut(&mut commands).push(command(
             "review",
             "review the finished turn now, or report how review is configured",
             Some("status"),
@@ -381,7 +402,7 @@ pub(super) fn phone_commands(
     // is unavailable for this session. An agent cannot claim one and turn a
     // locally interpreted slash command into a misleading palette entry.
     if session.capabilities.clear_context {
-        commands.push(command(
+        std::sync::Arc::make_mut(&mut commands).push(command(
             "clear",
             "start a new conversation and clear pending mail, keeping workspace and history",
             None,
@@ -421,7 +442,7 @@ pub(super) fn phone_commands(
             }
             _ => None,
         });
-        commands.push(crate::server::ViewerMjCommand {
+        std::sync::Arc::make_mut(&mut commands).push(crate::server::ViewerMjCommand {
             name: name.to_owned(),
             description: advertised.description.trim().to_owned(),
             source: ViewerCommandSource::Agent,
@@ -609,9 +630,16 @@ pub(super) fn viewer_snapshot_selected(
             windows: quota
                 .windows
                 .iter()
-                .filter(|window| window.model_scope.is_none())
+                .filter(|window| {
+                    window.model_scope.is_none()
+                        || quota.harness == mj_core::config::HarnessKind::Antigravity
+                })
                 .map(|window| crate::server::ViewerQuotaWindow {
                     label: window.label.clone(),
+                    pool: (quota.harness == mj_core::config::HarnessKind::Antigravity)
+                        .then(|| mj_client::quota::AntigravityQuotaPool::of_window(window))
+                        .flatten()
+                        .map(|pool| pool.label().to_owned()),
                     resets_at_epoch_seconds: window.resets_at_epoch_seconds,
                     reset_countdown_style: window.reset_countdown_style(),
                     banked_resets: quota.banked_resets_for_window(window),
@@ -648,10 +676,9 @@ pub(super) fn viewer_snapshot_selected(
             .0
             .get_mut(&session_id)
             .expect("selected session");
-        session.move_recovery = move_recoveries
-            .get(&session.id)
-            .cloned()
-            .map(|recovery| recovery.with_public_failure(session.launch_error.as_deref()));
+        session.move_recovery = move_recoveries.get(&session.id).cloned().map(|recovery| {
+            Box::new(recovery.with_public_failure(session.launch_error.as_deref()))
+        });
         if let Some(record) = controller.state.sessions.get(&session.id)
             && let Some(source) = project_sources.source(record, controller)
         {
@@ -713,7 +740,7 @@ pub(super) fn viewer_snapshot_selected(
             );
         }
         session.prompt_images_supported = prompt_images.contains(&session.id);
-        session.operation = operations.get(&session.id).cloned();
+        session.operation = operations.get(&session.id).cloned().map(Box::new);
         // Runtime ownership takes precedence over the durable record. Move
         // can still look Running while its old conversation is no longer a
         // valid destination, and stopped cleanup/destroy operations have no
@@ -734,7 +761,7 @@ pub(super) fn viewer_snapshot_selected(
         {
             session.state = crate::server::LAUNCHING_STATE.to_owned();
         }
-        let live = operational.get(&session.id);
+        let live = operational.get(&session.id).map(|state| &**state);
         session.storage_problem = controller
             .state
             .sessions
@@ -743,8 +770,8 @@ pub(super) fn viewer_snapshot_selected(
         session.native_subagents = native_agents.get(&session.id).cloned().unwrap_or_default();
         session.targeted_turn_control_supported =
             live.is_some_and(|state| state.supports_targeted_turn_control());
-        session.turn_controls = live.and_then(|s| s.turn_controls.clone());
-        session.steering = live.and_then(|s| s.steering.clone());
+        session.turn_controls = live.and_then(|s| s.turn_controls.clone()).map(Box::new);
+        session.steering = live.and_then(|s| s.steering.clone()).map(Box::new);
         session.active_prompt_id =
             live.and_then(|s| s.active_prompt.as_ref().map(|p| p.command_id.clone()));
         session.cancelling_prompt_id = live.and_then(|s| s.cancelling_prompt_id.clone());
@@ -788,10 +815,7 @@ pub(super) fn viewer_snapshot_selected(
                     )
                 })
             && session.operation.is_none();
-        session.question_message = question_message(
-            live.and_then(|state| state.assessment.as_deref()),
-            &activity_state,
-        );
+        session.question_message = question_message(live, session.attention);
         session.activity_state = Some(activity_state);
         let facts = live.map(|state| {
             mj_core::acp::AcpSessionFacts::from_operational(
@@ -830,12 +854,13 @@ pub(super) fn viewer_snapshot_selected(
             let turn_started_at = turn_started_at_ms
                 .and_then(|started_at_ms| u64::try_from(started_at_ms).ok())
                 .map(|started_at_ms| started_at_ms / 1_000);
-            session.capacity_retry = state.capacity_retry.clone();
+            session.capacity_retry = state.capacity_retry.clone().map(Box::new);
             session.quota_recovery = state
                 .continuation
                 .quota_recovery
                 .clone()
-                .filter(|r| !r.submitted);
+                .filter(|r| !r.submitted)
+                .map(Box::new);
             let activity = mj_client::usage_format::SessionActivity::of(state);
             session.retry_assessment_pending = activity.checking_response;
             let activity_details =
@@ -859,7 +884,8 @@ pub(super) fn viewer_snapshot_selected(
             .map(mj_core::acp::AcpSessionFacts::plan_mode_active);
         session.turn_review = reviews
             .get(&session.id)
-            .map(crate::server::ViewerTurnReview::from_runtime);
+            .map(crate::server::ViewerTurnReview::from_runtime)
+            .map(Box::new);
         // Two capability inputs the session row itself does not carry: whether
         // its configured target template runs a container, and whether any
         // session in its sub-agent tree has a turn running. The InterruptAll
@@ -949,71 +975,60 @@ pub(super) fn viewer_snapshot_selected(
 }
 
 fn question_message(
-    assessment: Option<&mj_core::assessment::TurnAssessment>,
-    activity_state: &mj_core::activity::ActivityState,
+    live: Option<&mj_core::relay::RelayOperationalState>,
+    attention: mj_core::attention::SessionAttention,
 ) -> Option<String> {
-    assessment
-        .filter(|assessment| {
-            assessment.inferred_question().is_some()
-                && matches!(
-                    activity_state,
-                    mj_core::activity::ActivityState::Idle { .. }
-                )
-        })
-        .and_then(|assessment| assessment.question_message.clone())
+    if attention != mj_core::attention::SessionAttention::NeedsInput {
+        return None;
+    }
+    live?.question_message().map(str::to_owned)
 }
 
 #[cfg(test)]
 mod question_message_tests {
     use super::question_message;
 
-    fn assessment(
-        status: mj_core::assessment::Status,
-        action: mj_core::assessment::Action,
-    ) -> mj_core::assessment::TurnAssessment {
-        let mut assessment = mj_core::assessment::TurnAssessment::pending(
-            "turn-1".into(),
+    #[test]
+    fn legacy_unknown_request_and_current_empty_request_are_distinct() {
+        use mj_core::assessment::{Action, Status, TurnAssessment};
+        use mj_core::attention::SessionAttention;
+        let mut live =
+            mj_core::relay::RelaySnapshot::new("compatibility".into()).operational_state();
+        let mut assessment = TurnAssessment::pending(
+            "turn".into(),
             1,
             1,
             mj_core::activity::verdict::CompletionEvidence::bounded("EndTurn", None),
         );
-        assessment.status = status;
-        assessment.action = Some(action);
-        assessment.question_message = Some("agent:msg_question".into());
-        assessment
-    }
-
-    #[test]
-    fn question_message_requires_current_await_input_and_idle_activity() {
-        let idle = mj_core::activity::ActivityState::Idle { since_ms: None };
-        let current = assessment(
-            mj_core::assessment::Status::Assessed,
-            mj_core::assessment::Action::AwaitInput,
+        assessment.status = Status::Assessed;
+        assessment.action = Some(Action::AwaitInput);
+        assessment.question_message = Some("agent:legacy".into());
+        live.assessment = Some(std::sync::Arc::new(assessment));
+        live.relay_protocol_version = Some(mj_core::relay::RELAY_OPEN_REQUEST_PROTOCOL - 1);
+        assert_eq!(
+            question_message(Some(&live), SessionAttention::NeedsInput).as_deref(),
+            Some("agent:legacy")
+        );
+        live.relay_protocol_version = Some(mj_core::relay::RELAY_OPEN_REQUEST_PROTOCOL);
+        assert_eq!(
+            question_message(Some(&live), SessionAttention::NeedsInput),
+            None
+        );
+        live.open_request = Some(mj_core::assessment::OpenRequest {
+            question: mj_core::assessment::InferredQuestion {
+                turn_id: "older".into(),
+                completed_ordinal: 0,
+            },
+            question_message: Some("agent:original".into()),
+        });
+        assert_eq!(
+            question_message(Some(&live), SessionAttention::NeedsInput).as_deref(),
+            Some("agent:original")
         );
         assert_eq!(
-            question_message(Some(&current), &idle).as_deref(),
-            Some("agent:msg_question")
+            question_message(Some(&live), SessionAttention::Working),
+            None
         );
-
-        let dismissed = assessment(
-            mj_core::assessment::Status::Superseded,
-            mj_core::assessment::Action::AwaitInput,
-        );
-        let mut dismissed = dismissed;
-        dismissed.reason = "question_dismissed".into();
-        assert_eq!(question_message(Some(&dismissed), &idle), None);
-
-        let finished = assessment(
-            mj_core::assessment::Status::Assessed,
-            mj_core::assessment::Action::Finished,
-        );
-        assert_eq!(question_message(Some(&finished), &idle), None);
-
-        let busy = mj_core::activity::ActivityState::Turn {
-            started_at_ms: None,
-            last_activity_at_ms: None,
-        };
-        assert_eq!(question_message(Some(&current), &busy), None);
     }
 }
 
@@ -1031,7 +1046,7 @@ pub(super) fn viewer_activity_details(
             mj_client::usage_format::SessionActivityKind::Lifecycle
             | mj_client::usage_format::SessionActivityKind::Goal
             | mj_client::usage_format::SessionActivityKind::Expecting
-            | mj_client::usage_format::SessionActivityKind::CheckingContinuation => {
+            | mj_client::usage_format::SessionActivityKind::CheckingQuota => {
                 ViewerActivityKind::Lifecycle
             }
         },

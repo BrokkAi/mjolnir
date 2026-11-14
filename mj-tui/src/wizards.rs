@@ -4,7 +4,7 @@ mod projects;
 use projects::{ProjectPicker, ProjectTab};
 mod move_files;
 mod render;
-mod resources;
+pub(crate) mod resources;
 mod subagents;
 pub(crate) use picker::*;
 pub(crate) use render::*;
@@ -712,6 +712,7 @@ fn target_label(target: &TargetTemplate) -> &'static str {
         TargetTemplate::SshPodman { .. } => "Podman over SSH",
         TargetTemplate::SshDocker { .. } => "Docker over SSH",
         TargetTemplate::SshAppleContainer { .. } => "Apple container over SSH",
+        TargetTemplate::SshNitro { .. } => "EC2 Nitro sandbox",
     }
 }
 

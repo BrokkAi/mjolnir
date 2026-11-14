@@ -26,7 +26,6 @@ fn utility(
     backend: &targets::TargetLocator,
     id: &str,
     command: &WorkspaceCommand,
-    in_daemon: bool,
 ) -> Result<serde_json::Value> {
     use super::super::worker_binary::{IMAGE_WORKER, WorkerInstall};
     let executable = match WorkerInstall::for_target(backend, executor)? {
@@ -61,13 +60,6 @@ fn utility(
         vec![executable, "worker".into(), "move-workspace".into()],
         "prepare or verify Move workspace",
     )?;
-    // Verification reads the controller's staging directory; only the daemon
-    // can reach its own data.
-    let command_spec = if in_daemon {
-        command_spec.in_daemon()
-    } else {
-        command_spec
-    };
     let output = executor.execute_with_stdin(
         &command_spec,
         &mut std::io::Cursor::new(serde_json::to_vec(command)?),
@@ -589,8 +581,28 @@ impl Controller {
             &WorkspaceCommand::Inspect {
                 repositories: repositories(&layout),
             },
-            false,
         )?)?;
+        // A sandbox is a VM behind the engine: the Move transport (an rsync
+        // container run on the destination, or a mounted staging directory)
+        // has no equivalent there yet. Say so now instead of failing in the
+        // middle of a transfer.
+        let destination = selection
+            .target_template_id
+            .as_deref()
+            .and_then(|target| self.config.targets.get(target));
+        if matches!(layout.backend, targets::TargetLocator::SshNitro { .. })
+            || matches!(
+                destination,
+                Some(mj_core::config::TargetTemplate::SshNitro { .. })
+            )
+        {
+            assessment.blockers.push(
+                "Move does not support Nitro sandbox targets yet. Close this session and start a \
+                 new one on the other target; the workspace stays in the checkpoint."
+                    .into(),
+            );
+            return Ok(assessment);
+        }
         let source_requirement = if targets::is_container(&layout.backend) {
             CONTAINER_RSYNC_REQUIREMENT
         } else {
@@ -657,10 +669,7 @@ impl Controller {
         let program = local_args.remove(0);
         storage_probe(
             executor,
-            CommandSpec::new(program, local_args)
-                .purpose("check controller Move staging space")
-                // The controller's staging directory is the daemon's own data.
-                .in_daemon(),
+            CommandSpec::new(program, local_args).purpose("check controller Move staging space"),
             "Controller",
             "controller",
             1,
@@ -798,18 +807,10 @@ impl Controller {
                 } => workspace_prefix.clone(),
                 _ => mj_core::config::data_dir(),
             };
-            let command = at_host(destination_ssh.as_ref(), storage_arguments(&path))
-                .purpose("check destination Move staging and workspace space");
-            // A local destination's staging directory is the daemon's data; a
-            // remote one is reached through the node's SSH session.
-            let command = if destination_ssh.is_none() {
-                command.in_daemon()
-            } else {
-                command
-            };
             storage_probe(
                 executor,
-                command,
+                at_host(destination_ssh.as_ref(), storage_arguments(&path))
+                    .purpose("check destination Move staging and workspace space"),
                 "Destination",
                 "destination",
                 2,
@@ -878,7 +879,6 @@ impl Controller {
                     selection: operation.selection.workspace.clone(),
                     destination: transfer.source_stage.clone(),
                 },
-                false,
             )?;
             operation.workspace_transfer.as_mut().unwrap().phase = WorkspaceTransferPhase::Captured;
             crate::database::save_move_operation(operation)?;
@@ -908,7 +908,6 @@ impl Controller {
                 &WorkspaceCommand::Verify {
                     source: transfer.controller_stage.clone(),
                 },
-                true,
             )?;
             operation.workspace_transfer.as_mut().unwrap().phase =
                 WorkspaceTransferPhase::Downloaded;
@@ -1023,7 +1022,6 @@ impl Controller {
                 source: stage,
                 repositories,
             },
-            false,
         )?;
         operation.workspace_transfer.as_mut().unwrap().phase = WorkspaceTransferPhase::Restored;
         crate::database::save_move_operation(&operation)?;
@@ -1128,7 +1126,7 @@ impl Controller {
                     self.cleanup_prepared_move_destination(&mut saved, executor)?;
                 }
                 if let Some(locator) = &current.target
-                    && Some(locator) != prepared.as_ref()
+                    && Some(locator.as_ref()) != prepared.as_ref()
                 {
                     super::super::environment::retire_session_environment(
                         current,
@@ -1145,6 +1143,10 @@ impl Controller {
                     "{error:#}; source environment retained for Move retry"
                 ));
                 source.updated_at = now();
+                let latest =
+                    crate::database::load_session_record(id)?.context("Move source disappeared")?;
+                source.resource_allocation = latest.resource_allocation;
+                source.additional_mounts = latest.additional_mounts;
                 let environment =
                     crate::database::move_source_environment(&operation.operation_id)?
                         .context("Move rollback lost its source environment")?;
@@ -1184,9 +1186,9 @@ mod tests {
         let id = "11111111111111111111111111111111";
         let mut source = managed_worktree_session(repository.path(), id);
         source.target_template_id = "local-bare".into();
-        source.target = Some(mj_core::state::TargetLocator::LocalBare {
+        source.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: directory.path().join(id),
-        });
+        }));
         std::fs::create_dir_all(directory.path().join(id)).unwrap();
         std::fs::write(directory.path().join(id).join("worker-evidence"), "keep").unwrap();
         let checkout = source
@@ -1208,9 +1210,9 @@ mod tests {
         crate::database::save_move_operation(&operation).unwrap();
         crate::database::retain_move_source(&operation).unwrap();
         let mut destination = source.clone();
-        destination.target = Some(mj_core::state::TargetLocator::LocalBare {
+        destination.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: directory.path().join("destination").join(id),
-        });
+        }));
         crate::database::save_session(&destination).unwrap();
         let controller = Controller {
             config: resume_compatibility_config(),
@@ -1369,9 +1371,9 @@ mod tests {
         session.state = SessionState::Closing;
         let source_root = mj_core::config::data_dir().join("source-workers").join(id);
         std::fs::create_dir_all(&source_root).unwrap();
-        session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: source_root.clone(),
-        });
+        }));
         let mut operation = super::super::tests::source_recovery_operation(&session);
         operation
             .selection
@@ -1418,9 +1420,9 @@ mod tests {
             .join(id);
         std::fs::create_dir_all(&destination_root).unwrap();
         let destination_session = controller.state.sessions.get_mut(id).unwrap();
-        destination_session.target = Some(mj_core::state::TargetLocator::LocalBare {
+        destination_session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: destination_root.clone(),
-        });
+        }));
         destination_session.project_directory = Some(destination.path().into());
         controller.restore_move_workspace(id, &executor).unwrap();
         operation = crate::database::load_move_operation(id).unwrap().unwrap();

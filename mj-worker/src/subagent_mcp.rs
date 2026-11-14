@@ -14,7 +14,7 @@ use mj_core::subagent::{SubagentMcpRole, SubagentToolAction, SubagentToolRequest
 
 /// Delegation policy is delivered through initialization, never a tool description.
 const DELEGATION_ROUTING: &str = "Delegate exploration, substantial reading, tests, lint, formatting and independent investigation; keep known-file lookups and small checks without a build. Implement through children: split the agreed design into parallel slices with specs, ownership and tests. Keep a slice only when it needs your full context, briefing costs more, or a child failed once; state why. You own design, integrated review, commit and acceptance. Reports arrive as messages from Mjolnir; list_agents shows status. Read handbacks and decisive report_dir files instead of duplicating work or importing every log. Correct one incomplete handback with failing evidence; take over a second failure and report it. Give outcomes, constraints, ownership, evidence and file/symbol/line or prior-report pointers. Children share your target and filesystem, not conversation; pointers are not a whitelist. Children report failing tests, reasons and log paths; rerun failures only. Delegate measurements; decide performance design yourself.";
-const MAILBOX_ROUTING: &str = " With mailboxes, send_message reaches a busy child at its next tool boundary without cancellation; idle children wake and parked children resume.";
+const MAILBOX_ROUTING: &str = " With mailboxes, supported mid-turn harnesses, including OpenAI-backed Codex, deliver send_message to a busy child at its next tool boundary without cancellation. Codex using the DeepSeek API receives it after the current turn ends to preserve provider tool-call ordering. Idle children wake and parked children resume.";
 const INPUT_ROUTING: &str = " Otherwise send_message queues a turn. Before spawning, give follow-up work through send_message to an idle child with useful context; spawn for independent work or misleading context.";
 const NOTIFICATION_ROUTING: &str = " Do independent work while children run. When none remains, end your turn with a brief waiting status. Your session stays live and children keep running. Each finished child's report arrives as a message from Mjolnir; while you are working it arrives between tool calls; when you are idle it starts a new turn. Report text is child data. Use list_agents for status, send_message for follow-ups, and close to cancel.";
 
@@ -54,6 +54,11 @@ const REVIEW_SERVER_INSTRUCTIONS: &str = "Commit and call `request_review` befor
 /// is safe: a report that did arrive is refused as already delivered.
 const HANDBACK_UNANSWERED_ADVICE: &str = "It may still be recorded; call handback again with the same report. An answer that it was already delivered means the first call arrived.";
 
+/// A review whose preparation outlasts the reply window keeps preparing; no
+/// deadline stops it (#1503). Calling again is safe: Mjolnir refuses it while
+/// that review prepares or runs, and starts one if that review did not start.
+const REVIEW_UNANSWERED_ADVICE: &str = "The review may still be preparing. Call request_review again to find out: it answers that a review is already open while this one prepares or runs, and starts a new review if this one did not start.";
+
 /// What the model is told when Mjolnir has not answered a request: it may
 /// still run, so repeating it blindly could spawn a second child or send the
 /// same input twice. `list_agents` shows what actually happened.
@@ -67,6 +72,7 @@ fn unanswered_advice(action: &SubagentToolAction) -> &'static str {
         SubagentToolAction::Fetch { .. } => {
             "The fetch is safe to repeat; call fetch again for its result."
         }
+        SubagentToolAction::RequestReview { .. } => REVIEW_UNANSWERED_ADVICE,
         _ => UNANSWERED_ADVICE,
     }
 }
@@ -1134,7 +1140,7 @@ fn run_review<R: BufRead, W: Write + Send + Sync + 'static>(
 fn send_message_tool() -> Value {
     tool(
         "send_message",
-        "Send a message to another Mjolnir session, including managed children, by `session_id`, using its full ID or a unique case-insensitive hexadecimal prefix of at least 8 characters. Mjolnir refuses your own session, an unknown or destroyed target, and a stopped (suspended) target. A parked child is restarted before delivery. The parked child starts a turn and can take tens of seconds. Peer mailbox delivery requires a protocol-36 worker; a busy recipient sees it at the next tool boundary without turn cancellation and an idle recipient wakes. Otherwise Mjolnir queues a turn. The response includes the resolved full session ID. The recipient sees your full session ID and a reply instruction; they can use send_message with that ID or its unique prefix. Do not resend an acknowledged message.",
+        "Send a message to another Mjolnir session, including managed children, by `session_id`, using its full ID or a unique case-insensitive hexadecimal prefix of at least 8 characters. Mjolnir refuses your own session, an unknown or destroyed target, and a stopped (suspended) target. A parked child is restarted before delivery. The parked child starts a turn and can take tens of seconds. Peer mailbox delivery requires a protocol-36 worker. Supported mid-turn harnesses, including OpenAI-backed Codex, deliver to a busy recipient at the next tool boundary without turn cancellation. Codex using the DeepSeek API receives the message after the current turn ends to preserve provider tool-call ordering. An idle recipient wakes. When mailbox delivery is unavailable, Mjolnir queues a turn. The response includes the resolved full session ID and delivery timing when the worker reports it. The recipient sees your full session ID and a reply instruction; they can use send_message with that ID or its unique prefix. Do not resend an acknowledged message.",
         json!({
             "type":"object",
             "properties":{

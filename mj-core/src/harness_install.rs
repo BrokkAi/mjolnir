@@ -163,9 +163,10 @@ impl Located {
 /// where a harness comes from; sessions, the model-discovery probe, `mj login`
 /// and quota checks all ask it.
 ///
-/// `environment` is already resolved: the caller merged the account's login
-/// environment into it, so this never starts a login shell. `command` and
-/// `args` are the launch the controller described. A command
+/// `environment` is already resolved: worker callers include the account's
+/// login environment, while interactive login callers pass their terminal
+/// environment. This function never starts a login shell. `command` and `args`
+/// are the launch the controller described. A command
 /// that is not Mjolnir's built-in launch ([`crate::harness_runtime::fallback_launch`]
 /// or a bare npm bridge name) is the profile's own and is kept as given.
 ///
@@ -186,6 +187,9 @@ pub async fn locate(
     let bridge = npm_bridge(harness).filter(|bridge| bridge.matches_launcher(command, args));
     let built_in = bridge.is_some()
         || crate::harness_runtime::is_fallback_launch(harness, execution_policy, command, args);
+    if harness == HarnessKind::Antigravity && !built_in {
+        return Ok(Located::unchosen(command, args));
+    }
     match policy {
         HarnessRuntimePolicy::Image if built_in => {
             locate_in_image(harness, execution_policy, environment).await
@@ -201,6 +205,27 @@ pub async fn locate(
                 .map(Located::managed)
         }
         HarnessRuntimePolicy::Ambient if !built_in => Ok(Located::unchosen(command, args)),
+        HarnessRuntimePolicy::Ambient if harness == HarnessKind::Antigravity => {
+            if let Some(program) =
+                crate::program_path::find_antigravity_program(environment).await?
+                && antigravity_matches_pin(&program, environment).await?
+            {
+                return Ok(Located {
+                    command: program.clone(),
+                    args: native_acp_args(harness, execution_policy, environment)?,
+                    environment: BTreeMap::from([(
+                        "AGY_CLI_DISABLE_AUTO_UPDATE".into(),
+                        "true".into(),
+                    )]),
+                    entrypoint: Some(program.clone()),
+                    cli_entrypoint: Some(program),
+                    managed: None,
+                });
+            }
+            resolve_with_environment(harness, execution_policy, environment)
+                .await
+                .map(Located::managed)
+        }
         HarnessRuntimePolicy::Ambient => {
             if let Some(bridge) = bridge {
                 if let Some(selected) = compatible_bridge(harness, bridge, environment).await? {
@@ -232,6 +257,43 @@ pub async fn locate(
     }
 }
 
+fn native_acp_args(
+    harness: HarnessKind,
+    policy: ExecutionPolicy,
+    environment: &BTreeMap<String, String>,
+) -> Result<Vec<String>> {
+    let mut args: Vec<String> = harness
+        .bridge_args(policy)
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    if harness == HarnessKind::Antigravity {
+        let home = environment
+            .get(harness.home_env())
+            .context("Antigravity staged home is missing")?;
+        args.extend(["--gemini-dir".into(), home.clone()]);
+    }
+    Ok(args)
+}
+
+async fn antigravity_matches_pin(
+    program: &Path,
+    environment: &BTreeMap<String, String>,
+) -> Result<bool> {
+    let mut command = tokio::process::Command::new(program);
+    command
+        .arg("--version")
+        .env_clear()
+        .envs(environment)
+        .env("AGY_CLI_DISABLE_AUTO_UPDATE", "true");
+    let output = crate::subprocess::capture(&mut command)
+        .await
+        .context("check target agy version")?;
+    Ok(output.status.success()
+        && String::from_utf8_lossy(&output.stdout).trim()
+            == crate::harness_runtime::ANTIGRAVITY_VERSION)
+}
+
 /// The image's own programs for `harness`, by the names the agent-dev image
 /// installs on `PATH`: the ACP bridge, the native harness the launch runs, and
 /// the harness's command-line program.
@@ -243,6 +305,7 @@ fn image_programs(harness: HarnessKind) -> (&'static str, &'static str, &'static
         HarnessKind::Kimi => ("kimi", "kimi", "kimi"),
         HarnessKind::Grok => ("grok", "grok", "grok"),
         HarnessKind::OpenCode => ("opencode", "opencode", "opencode"),
+        HarnessKind::Antigravity => ("agy", "agy", "agy"),
         HarnessKind::Dsh => ("dsh-acp", "dsh-acp", "dsh-acp"),
     }
 }
@@ -329,19 +392,30 @@ async fn locate_in_image(
                 ],
             )
         }
+        HarnessKind::Antigravity => {
+            ensure!(
+                antigravity_matches_pin(&bridge, environment).await?,
+                "the daemon's image must provide agy {}; use an agent-dev image of this release",
+                crate::harness_runtime::ANTIGRAVITY_VERSION
+            );
+            (
+                bridge,
+                native_acp_args(harness, execution_policy, environment)?,
+            )
+        }
         HarnessKind::Kimi | HarnessKind::Grok => (
             bridge,
-            harness
-                .bridge_args(execution_policy)
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
+            native_acp_args(harness, execution_policy, environment)?,
         ),
     };
     Ok(Located {
         command,
         args,
-        environment: BTreeMap::new(),
+        environment: if harness == HarnessKind::Antigravity {
+            BTreeMap::from([("AGY_CLI_DISABLE_AUTO_UPDATE".into(), "true".into())])
+        } else {
+            BTreeMap::new()
+        },
         entrypoint: Some(entrypoint),
         cli_entrypoint: Some(cli),
         managed: None,
@@ -395,7 +469,11 @@ fn target_native_harness_is_available(
         HarnessKind::Kimi => "kimi",
         HarnessKind::Grok => "grok",
         HarnessKind::OpenCode => "opencode",
-        HarnessKind::Codex | HarnessKind::Claude | HarnessKind::Muse | HarnessKind::Dsh => {
+        HarnessKind::Codex
+        | HarnessKind::Claude
+        | HarnessKind::Muse
+        | HarnessKind::Dsh
+        | HarnessKind::Antigravity => {
             return Ok(false);
         }
     };
@@ -605,6 +683,9 @@ async fn resolve_at_async(
     if harness == HarnessKind::OpenCode {
         launch_environment.insert("OPENCODE_DISABLE_AUTOUPDATE".into(), "1".into());
     }
+    if harness == HarnessKind::Antigravity {
+        launch_environment.insert("AGY_CLI_DISABLE_AUTO_UPDATE".into(), "true".into());
+    }
     // Muse launches its adapter the way the other npm bridges do: the target's
     // own `muse-acp` when present, otherwise npx fetches the pinned package.
     let (command, args) = if harness == HarnessKind::Muse {
@@ -634,11 +715,7 @@ async fn resolve_at_async(
     } else {
         (
             install.join(selected.entrypoint),
-            harness
-                .bridge_args(execution_policy)
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
+            native_acp_args(harness, execution_policy, &environment)?,
         )
     };
     Ok(ManagedHarness {
@@ -656,7 +733,9 @@ async fn resolve_at_async(
 
 async fn lock_file(file: File, shared: bool, purpose: &str) -> Result<FileLock> {
     let started = Instant::now();
+    let cancellation = crate::subprocess::preparation_cancellation();
     loop {
+        anyhow::ensure!(!cancellation.is_cancelled(), "preparation cancelled");
         let result = if shared {
             file.try_lock_shared()
         } else {
@@ -675,7 +754,10 @@ async fn lock_file(file: File, shared: bool, purpose: &str) -> Result<FileLock> 
                 INSTALL_LOCK_TIMEOUT.as_secs()
             );
         }
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(25)) => {},
+            _ = cancellation.cancelled() => bail!("preparation cancelled"),
+        }
     }
 }
 
@@ -765,6 +847,7 @@ async fn install_into(
         HarnessKind::Grok => install_grok(staging.path(), environment).await?,
         HarnessKind::Muse => install_muse_native(staging.path(), environment).await?,
         HarnessKind::OpenCode => install_opencode(staging.path(), environment).await?,
+        HarnessKind::Antigravity => install_antigravity(staging.path(), environment).await?,
         HarnessKind::Dsh => {
             unreachable!("DSH has no managed installation; resolve returns before installing")
         }
@@ -927,6 +1010,50 @@ fn pending_install_scripts(stdout: &str) -> Result<Vec<String>> {
     Ok(pending)
 }
 
+/// The Linux artifacts are static musl builds, verified to have no ELF program
+/// interpreter. They run on glibc and musl targets regardless of the worker's
+/// own compilation target. Metadata acquisition also verified Google's SHA-512.
+async fn install_antigravity(staging: &Path, environment: &BTreeMap<String, String>) -> Result<()> {
+    let metadata = serde_json::from_str(include_str!("../assets/antigravity/runtime.json"))?;
+    install_antigravity_from_metadata(staging, environment, &metadata).await
+}
+
+async fn install_antigravity_from_metadata(
+    staging: &Path,
+    environment: &BTreeMap<String, String>,
+    metadata: &serde_json::Value,
+) -> Result<()> {
+    ensure!(
+        metadata["version"] == crate::harness_runtime::ANTIGRAVITY_VERSION,
+        "Antigravity download metadata does not match the managed runtime pin"
+    );
+    let key = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let platform = metadata["platforms"]
+        .get(&key)
+        .with_context(|| format!("Antigravity has no managed runtime for {key}"))?;
+    let field = |name: &str| {
+        platform[name]
+            .as_str()
+            .with_context(|| format!("missing Antigravity artifact field {name}"))
+    };
+    let archive = staging.join("agy.tar.gz");
+    download_verified_async(field("url")?, &archive, field("sha256")?, environment).await?;
+    let bin = staging.join("bin");
+    std::fs::create_dir_all(&bin)?;
+    let executable = bin.join("agy");
+    let archive_for_extract = archive.clone();
+    let output = executable.clone();
+    tokio::task::spawn_blocking(move || {
+        extract_archive_file(&archive_for_extract, Path::new("antigravity"), &output)
+    })
+    .await
+    .context("Antigravity extraction task failed")??;
+    std::fs::remove_file(archive)?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o755))?;
+    Ok(())
+}
+
 /// Install the native Muse server a managed Muse session drives.
 ///
 /// The `@brokkai/muse-acp` adapter comes from its pinned npm package, which
@@ -1047,7 +1174,9 @@ async fn download_verified_async(
     expected: &str,
     environment: &BTreeMap<String, String>,
 ) -> Result<()> {
-    let result = async {
+    let cancellation = crate::subprocess::preparation_cancellation();
+    anyhow::ensure!(!cancellation.is_cancelled(), "preparation cancelled");
+    let work = async {
         download_verified_inner(url, destination, environment).await?;
         let actual = crate::worker_launch::worker_executable_digest(destination)?;
         anyhow::ensure!(
@@ -1056,8 +1185,11 @@ async fn download_verified_async(
             destination.display()
         );
         Ok(())
-    }
-    .await;
+    };
+    let result = tokio::select! {
+        result = work => result,
+        _ = cancellation.cancelled() => Err(anyhow!("preparation cancelled")),
+    };
     if result.is_err() {
         let _ = std::fs::remove_file(destination);
     }
@@ -1972,9 +2104,13 @@ mod tests {
         ))
         .unwrap();
 
+        // The installed file was just written by this process, so it runs
+        // through `/bin/sh` rather than being exec'd: see `install_fake_command`
+        // on ETXTBSY.
+        let launcher = staging.join("bin/kimi");
+        assert!(entrypoint_is_executable(&launcher));
         let output =
-            crate::subprocess::run_with_input(&mut Command::new(staging.join("bin/kimi")), &[])
-                .unwrap();
+            crate::subprocess::run_with_input(Command::new("/bin/sh").arg(&launcher), &[]).unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout, b"kimi-fixture\n");
     }
@@ -2009,6 +2145,9 @@ mod tests {
         .unwrap();
         std::fs::rename(&staging, &relocated).unwrap();
 
+        // The launchers were just written by this process, so they run through
+        // `/bin/sh` rather than being exec'd: see `install_fake_command` on
+        // ETXTBSY. `sh` still opens `agent` through its relative link.
         for launcher in ["grok", "agent"] {
             let path = relocated.join("bin").join(launcher);
             if launcher == "agent" {
@@ -2016,10 +2155,229 @@ mod tests {
             } else {
                 assert!(path.is_file());
             }
-            let output = crate::subprocess::run_with_input(&mut Command::new(path), &[]).unwrap();
+            assert!(entrypoint_is_executable(&path));
+            let output =
+                crate::subprocess::run_with_input(Command::new("/bin/sh").arg(&path), &[]).unwrap();
             assert!(output.status.success());
             assert_eq!(output.stdout, b"grok-fixture\n");
         }
+    }
+
+    #[test]
+    fn antigravity_archive_is_verified_before_extracting_the_native_entrypoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("fixture.tar.gz");
+        let body = b"#!/bin/sh\nprintf 'agy-fixture\\n'\n";
+        let encoder = flate2::write::GzEncoder::new(
+            File::create(&archive).unwrap(),
+            flate2::Compression::default(),
+        );
+        let mut builder = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "antigravity", &body[..])
+            .unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+        let server = ArtifactServer::serve(std::fs::read(&archive).unwrap());
+        let mut metadata: serde_json::Value =
+            serde_json::from_str(include_str!("../assets/antigravity/runtime.json")).unwrap();
+        metadata["platforms"][current_node_platform()]["url"] = server.url.clone().into();
+        metadata["platforms"][current_node_platform()]["sha256"] =
+            crate::worker_launch::worker_executable_digest(&archive)
+                .unwrap()
+                .into();
+        let staging = temp.path().join("install");
+        std::fs::create_dir(&staging).unwrap();
+        run_async(install_antigravity_from_metadata(
+            &staging,
+            &BTreeMap::new(),
+            &metadata,
+        ))
+        .unwrap();
+        // Just extracted by this process, so it runs through `/bin/sh` rather
+        // than being exec'd: see `install_fake_command` on ETXTBSY.
+        let entrypoint = staging.join("bin/agy");
+        assert!(entrypoint_is_executable(&entrypoint));
+        let output =
+            crate::subprocess::run_with_input(Command::new("/bin/sh").arg(&entrypoint), &[])
+                .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"agy-fixture\n");
+        let failed = temp.path().join("failed");
+        std::fs::create_dir(&failed).unwrap();
+        metadata["platforms"][current_node_platform()]["sha256"] = "wrong".into();
+        let error = run_async(install_antigravity_from_metadata(
+            &failed,
+            &BTreeMap::new(),
+            &metadata,
+        ))
+        .unwrap_err();
+        assert!(error.to_string().contains("checksum mismatch"));
+        assert!(!failed.join("agy.tar.gz").exists());
+        assert!(!failed.join("bin/agy").exists());
+    }
+
+    // Hard-won: #1520: Antigravity bypassed managed preparation and failed on empty targets.
+    #[test]
+    fn antigravity_runtime_policies_resolve_one_pinned_cli_and_preserve_the_account() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("account with spaces");
+        let cache = temp.path().join("cache");
+        let root = cache.join("mjolnir/harnesses/antigravity");
+        let selected = pin(HarnessKind::Antigravity);
+        std::fs::create_dir_all(&root).unwrap();
+        complete_fake(
+            &root,
+            HarnessKind::Antigravity,
+            selected.install_id,
+            selected.entrypoint,
+        );
+        let managed_path = root.join(selected.install_id).join(selected.entrypoint);
+        let tools = temp.path().join("tools");
+        std::fs::create_dir(&tools).unwrap();
+        let environment = BTreeMap::from([
+            ("HOME".into(), temp.path().to_string_lossy().into_owned()),
+            (
+                "XDG_CACHE_HOME".into(),
+                cache.to_string_lossy().into_owned(),
+            ),
+            ("PATH".into(), tools.to_string_lossy().into_owned()),
+            (
+                "MJ_ANTIGRAVITY_HOME".into(),
+                home.to_string_lossy().into_owned(),
+            ),
+        ]);
+        let policy = ExecutionPolicy::Unconstrained;
+        let (command, args) =
+            crate::harness_runtime::fallback_launch(HarnessKind::Antigravity, policy);
+        let resolve = |runtime| {
+            run_async(locate(
+                runtime,
+                HarnessKind::Antigravity,
+                policy,
+                Path::new(&command),
+                &args,
+                &environment,
+            ))
+        };
+        let missing = resolve(HarnessRuntimePolicy::Ambient).unwrap();
+        assert_eq!(missing.command, managed_path);
+        assert!(missing.managed.is_some());
+        assert_eq!(missing.environment["AGY_CLI_DISABLE_AUTO_UPDATE"], "true");
+        assert!(
+            missing
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--gemini-dir", home.to_str().unwrap()])
+        );
+        assert!(
+            missing
+                .args
+                .iter()
+                .any(|arg| arg == "--dangerously-skip-permissions")
+        );
+        let ambient = tools.join("agy");
+        // Lookup canonicalizes executable symlinks; use a real script rather
+        // than the shared fake-command dispatcher's symlink.
+        std::fs::write(
+            &ambient,
+            format!(
+                "#!/bin/sh\n[ \"$AGY_CLI_DISABLE_AUTO_UPDATE\" = true ] || exit 23\necho {}\n",
+                crate::harness_runtime::ANTIGRAVITY_VERSION
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&ambient, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let matching = resolve(HarnessRuntimePolicy::Ambient).unwrap();
+        // Canonical, like the lookup: macOS keeps temporary directories under
+        // the /var -> /private/var link.
+        assert_eq!(matching.command, ambient.canonicalize().unwrap());
+        assert!(matching.managed.is_none());
+        let managed = resolve(HarnessRuntimePolicy::Managed).unwrap();
+        assert_eq!(managed.command, managed_path);
+        std::fs::write(&ambient, "#!/bin/sh\necho 0.0.0\n").unwrap();
+        assert_eq!(
+            resolve(HarnessRuntimePolicy::Ambient).unwrap().command,
+            managed_path
+        );
+        assert!(
+            resolve(HarnessRuntimePolicy::Image)
+                .unwrap_err()
+                .to_string()
+                .contains("image must provide agy")
+        );
+        let custom = run_async(locate(
+            HarnessRuntimePolicy::Managed,
+            HarnessKind::Antigravity,
+            policy,
+            Path::new("/custom/agy"),
+            &[],
+            &environment,
+        ))
+        .unwrap();
+        assert_eq!(custom.command, Path::new("/custom/agy"));
+        assert!(custom.managed.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "downloads the pinned Antigravity artifact into an isolated cache"]
+    async fn antigravity_real_install_is_concurrent_reusable_and_keeps_its_lease() {
+        let temp = tempfile::tempdir().unwrap();
+        let environment = BTreeMap::from([
+            ("HOME".into(), temp.path().to_string_lossy().into_owned()),
+            (
+                "XDG_CACHE_HOME".into(),
+                temp.path().join("cache").to_string_lossy().into_owned(),
+            ),
+            (
+                "MJ_ANTIGRAVITY_HOME".into(),
+                temp.path()
+                    .join("login with spaces")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        ]);
+        let policy = ExecutionPolicy::ConfiguredApprovals;
+        let (command, args) =
+            crate::harness_runtime::fallback_launch(HarnessKind::Antigravity, policy);
+        let resolve = || {
+            locate(
+                HarnessRuntimePolicy::Managed,
+                HarnessKind::Antigravity,
+                policy,
+                Path::new(&command),
+                &args,
+                &environment,
+            )
+        };
+        let (first, second) = tokio::join!(resolve(), resolve());
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert_eq!(first.command, second.command);
+        let mut probe = tokio::process::Command::new(&first.command);
+        probe.arg("--version").envs(&first.environment);
+        let output = crate::subprocess::capture(&mut probe).await.unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            crate::harness_runtime::ANTIGRAVITY_VERSION
+        );
+        let managed = first.managed.as_ref().unwrap();
+        let root = managed.cache_root.join("antigravity");
+        gc_harness_root(&root, "a-newer-pin").unwrap();
+        assert!(first.command.exists());
+        let third = resolve().await.unwrap();
+        assert_eq!(third.command, first.command);
+        let executable = first.command.clone();
+        drop(first);
+        drop(second);
+        drop(third);
+        gc_harness_root(&root, "a-newer-pin").unwrap();
+        assert!(!executable.exists());
     }
 
     #[test]
@@ -2590,6 +2948,10 @@ mod tests {
                     home.path().to_string_lossy().into_owned(),
                 ),
                 ("PATH".to_owned(), path.to_string_lossy().into_owned()),
+                (
+                    "MJ_ANTIGRAVITY_HOME".to_owned(),
+                    home.path().to_string_lossy().into_owned(),
+                ),
             ])
         };
         for harness in HarnessKind::ALL {
@@ -2612,6 +2974,10 @@ mod tests {
         }
         let codex = npm_bridge(HarnessKind::Codex).unwrap();
         let versions = [
+            (
+                "agy",
+                crate::harness_runtime::ANTIGRAVITY_VERSION.to_owned(),
+            ),
             ("codex-acp", format!("{} {}", codex.package, codex.version)),
             (
                 "claude-agent-acp",
@@ -2649,6 +3015,15 @@ mod tests {
             ))
             .unwrap_or_else(|error| panic!("{}: {error:#}", harness.display_name()));
             assert!(located.managed.is_none());
+            if harness == HarnessKind::Antigravity {
+                assert_eq!(located.environment["AGY_CLI_DISABLE_AUTO_UPDATE"], "true");
+                assert!(
+                    located
+                        .args
+                        .windows(2)
+                        .any(|pair| pair == ["--gemini-dir", home.path().to_str().unwrap()])
+                );
+            }
             assert!(
                 located
                     .cli_entrypoint

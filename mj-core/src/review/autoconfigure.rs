@@ -1,7 +1,8 @@
 //! Ordered reviewer defaults from advertised enabled-profile models.
 use crate::acp::SessionConfigChoice;
 use crate::config::SubagentChoice;
-use crate::review::settings::{ReviewModelFamily, model_version_cmp};
+use crate::model_catalog::{self, model_version_cmp};
+use crate::review::settings::ReviewModelFamily;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,7 +45,8 @@ pub fn fallback_effort(requested: &str, choices: &[SessionConfigChoice]) -> Opti
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelOffer {
     pub choice: SessionConfigChoice,
-    /// Enabled profiles offering this exact value.
+    pub identity: String,
+    /// Enabled profiles offering this model identity.
     pub profiles: usize,
     /// Those profiles that are not usage-priced. A profile whose billing is
     /// unknown counts as a subscription.
@@ -52,7 +54,7 @@ pub struct ModelOffer {
 }
 
 /// Merge each enabled profile's advertised models, flagged usage-priced or
-/// not, into one offer per distinct value, in first-seen order.
+/// not, into one offer per distinct identity, in first-seen order.
 pub fn model_offers<'a>(
     profiles: impl IntoIterator<Item = (&'a [SessionConfigChoice], bool)>,
 ) -> Vec<ModelOffer> {
@@ -60,17 +62,16 @@ pub fn model_offers<'a>(
     for (models, usage_priced) in profiles {
         let mut seen = std::collections::BTreeSet::new();
         for choice in models {
-            if !seen.insert(choice.value.as_str()) {
+            let identity = model_catalog::choice_model_id(choice);
+            if !seen.insert(identity.clone()) {
                 continue;
             }
-            let index = match offers
-                .iter()
-                .position(|offer| offer.choice.value == choice.value)
-            {
+            let index = match offers.iter().position(|offer| offer.identity == identity) {
                 Some(index) => index,
                 None => {
                     offers.push(ModelOffer {
                         choice: choice.clone(),
+                        identity,
                         profiles: 0,
                         subscription_profiles: 0,
                     });
@@ -80,6 +81,10 @@ pub fn model_offers<'a>(
             offers[index].profiles += 1;
             offers[index].subscription_profiles += usize::from(!usage_priced);
         }
+    }
+    let choices = model_catalog::merged_choices(offers.iter().map(|offer| offer.choice.clone()));
+    for (offer, choice) in offers.iter_mut().zip(choices) {
+        offer.choice = choice;
     }
     offers
 }
@@ -99,9 +104,7 @@ pub fn offers_drafted_family(
     all: &[SessionConfigChoice],
     drafted: &[SubagentChoice],
 ) -> bool {
-    let family = |value: &str| {
-        ReviewModelFamily::for_model(&crate::usage::model_catalog::model_id(all, value))
-    };
+    let family = |value: &str| ReviewModelFamily::for_model(&model_catalog::model_id(all, value));
     let drafted = drafted
         .iter()
         .filter_map(|choice| family(&choice.model))
@@ -145,21 +148,17 @@ fn full_model(id: &str) -> bool {
 /// family full models precede reduced variants, then a subscription value
 /// beats one only usage-priced profiles offer, then the value offered by
 /// more enabled profiles wins, then the newest version. Reviewers are load-balanced only across
-/// profiles that offer their exact value, so this keeps reviews on
+/// profiles that offer the same resolved identity, so this keeps reviews on
 /// subscriptions and spread over as many profiles as possible.
 pub fn autoconfigure(
     offers: &[ModelOffer],
     efforts: impl Fn(&str) -> Option<Vec<SessionConfigChoice>>,
 ) -> Option<Autoconfigured> {
-    let models = offers
-        .iter()
-        .map(|offer| offer.choice.clone())
-        .collect::<Vec<_>>();
     // Each family keeps its best (offer, identity) pair; identities decide
     // versions, values are what the reviewer is launched with.
     let mut selected: BTreeMap<ReviewModelFamily, (&ModelOffer, String)> = BTreeMap::new();
     for offer in offers {
-        let id = crate::usage::model_catalog::model_id(&models, &offer.choice.value);
+        let id = offer.identity.clone();
         let Some(family) = ReviewModelFamily::for_model(&id) else {
             continue;
         };
@@ -204,9 +203,9 @@ pub fn autoconfigure(
                 effort: used,
             }
         };
-    use ReviewModelFamily::{DeepSeek, Grok, Kimi, Sol, Sonnet, Terra};
-    let preset = if selected.contains_key(&Terra) && selected.contains_key(&Sol) {
-        [(Terra, "high"), (Sol, "medium")]
+    use ReviewModelFamily::{DeepSeek, Grok, Kimi, Sonnet, Terra};
+    let preset = if selected.contains_key(&Terra) {
+        vec![(Terra, "high"); 3]
     } else {
         let family = [Sonnet, DeepSeek, Grok, Kimi]
             .into_iter()
@@ -230,7 +229,7 @@ pub fn autoconfigure(
                     )
                     .map(|(family, _)| family.clone())
             })?;
-        [(family.clone(), "high"), (family, "high")]
+        vec![(family, "high"); 2]
     };
     let mut adjusted = Vec::new();
     let reviewers = preset
@@ -246,6 +245,44 @@ pub fn autoconfigure(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Hard-won: #1534: alias spellings hid shared capacity and could double-count a profile.
+    #[test]
+    fn model_offers_count_each_profile_once_per_identity_across_harness_aliases() {
+        let recorded: BTreeMap<String, Vec<SessionConfigChoice>> = serde_json::from_str(
+            include_str!("../../tests/fixtures/claude-antigravity-models.json"),
+        )
+        .unwrap();
+        let mut claude = recorded["claude"].clone();
+        claude.push(recorded["antigravity"][2].clone());
+        let offers = model_offers([(&claude[..], false), (&recorded["antigravity"][..], false)]);
+        let sonnet = offers
+            .iter()
+            .find(|offer| offer.identity == "claude-sonnet-5-5")
+            .unwrap();
+        assert_eq!((sonnet.profiles, sonnet.subscription_profiles), (2, 2));
+        assert_eq!(
+            offers
+                .iter()
+                .find(|offer| offer.identity == "claude-sonnet-5")
+                .unwrap()
+                .profiles,
+            1
+        );
+        // An older, more widely offered alias must remain pinned to that
+        // version when Autoconfigure prefers its larger subscription pool.
+        let mut stale = recorded["claude"].clone();
+        stale[1].name = "Sonnet 5".into();
+        let offers = model_offers([
+            (&stale[..], false),
+            (&stale[..], false),
+            (&claude[..], false),
+        ]);
+        assert_eq!(
+            autoconfigure(&offers, |_| None).unwrap().reviewers[0].model,
+            "claude-sonnet-5"
+        );
+    }
 
     fn choices(ids: &[&str]) -> Vec<SessionConfigChoice> {
         ids.iter()
@@ -281,22 +318,33 @@ mod tests {
 
     #[test]
     fn known_efforts_choose_nearest_lower_then_lowest_and_report_adjustments() {
-        let models = choices(&["gpt-6-terra", "gpt-6-sol"]);
-        let configured = autoconfigure(&merged_model_offers(&models), |model| {
-            Some(if model.ends_with("terra") {
-                choices(&["low", "max"])
-            } else {
-                choices(&["high", "xhigh"])
-            })
-        })
+        let nearest_lower = autoconfigure(
+            &merged_model_offers(&choices(&["gpt-6-terra", "gpt-6-sol"])),
+            |_| Some(choices(&["low", "max"])),
+        )
         .unwrap();
-        assert_eq!(configured.reviewers[0].effort.as_deref(), Some("low"));
-        assert_eq!(configured.reviewers[1].effort.as_deref(), Some("high"));
-        assert_eq!(configured.adjusted.len(), 2);
-        assert_eq!(configured.adjusted[0].requested, "high");
-        assert_eq!(configured.adjusted[0].used.as_deref(), Some("low"));
-        assert_eq!(configured.adjusted[1].requested, "medium");
-        assert_eq!(configured.adjusted[1].used.as_deref(), Some("high"));
+        assert!(
+            nearest_lower
+                .reviewers
+                .iter()
+                .all(|choice| choice.effort.as_deref() == Some("low"))
+        );
+        assert_eq!(nearest_lower.adjusted.len(), 3);
+        assert_eq!(nearest_lower.adjusted[0].requested, "high");
+        assert_eq!(nearest_lower.adjusted[0].used.as_deref(), Some("low"));
+        let lowest = autoconfigure(
+            &merged_model_offers(&choices(&["claude-sonnet-4.5"])),
+            |_| Some(choices(&["xhigh", "max"])),
+        )
+        .unwrap();
+        assert!(
+            lowest
+                .reviewers
+                .iter()
+                .all(|choice| choice.effort.as_deref() == Some("xhigh"))
+        );
+        assert_eq!(lowest.adjusted.len(), 2);
+        assert_eq!(lowest.adjusted[1].used.as_deref(), Some("xhigh"));
     }
 
     // Hard-won: ed508ae8c: stripping Kimi Code's provider selected an older Kimi model.
@@ -316,11 +364,19 @@ mod tests {
                     "claude-sonnet-4.5",
                     "grok-4.6",
                 ],
-                &[("gpt-6.10-terra", "high"), ("gpt-6.1-sol", "medium")],
+                &[
+                    ("gpt-6.10-terra", "high"),
+                    ("gpt-6.10-terra", "high"),
+                    ("gpt-6.10-terra", "high"),
+                ],
             ),
             (
                 &["gpt-6-terra", "gpt-6-sol", "grok-4.6"],
-                &[("gpt-6-terra", "high"), ("gpt-6-sol", "medium")],
+                &[
+                    ("gpt-6-terra", "high"),
+                    ("gpt-6-terra", "high"),
+                    ("gpt-6-terra", "high"),
+                ],
             ),
             (
                 &["claude-sonnet-4.5", "deepseek-v4-pro"],
@@ -450,7 +506,7 @@ mod tests {
 
     #[test]
     fn subscription_models_beat_newer_latest_aliases_from_a_usage_priced_profile() {
-        let expected = expect(&[("gpt-6.1-terra", "high"), ("gpt-6.1-sol", "medium")]);
+        let expected = expect(&[("gpt-6.1-terra", "high"); 3]);
         // The live catalog: four codex and six claude profiles, one OpenRouter profile.
         let mut profiles = vec![(true, OPENROUTER)];
         profiles.extend(std::iter::repeat_n((false, CODEX), 4));
@@ -488,7 +544,7 @@ mod tests {
                 (false, &["grok-4.6"]),
                 (true, &["claude-sonnet-4.5", "gpt-6.1-terra"]),
             ]),
-            expect(&[("claude-sonnet-4.5", "high"), ("claude-sonnet-4.5", "high")])
+            expect(&[("gpt-6.1-terra", "high"); 3])
         );
     }
 
@@ -500,7 +556,7 @@ mod tests {
                 (false, &["gpt-6-terra", "gpt-6.1-sol", "claude-sonnet-4.5"]),
                 (false, &["gpt-6.1-terra", "gpt-6-sol", "claude-sonnet-5"]),
             ]),
-            expect(&[("gpt-6-terra", "high"), ("gpt-6-sol", "medium")])
+            expect(&[("gpt-6-terra", "high"); 3])
         );
     }
 
@@ -511,7 +567,7 @@ mod tests {
                 (false, &["gpt-6-terra", "gpt-6.1-terra", "gpt-6-sol"]),
                 (false, &["gpt-6-terra", "gpt-6.1-terra", "gpt-6-sol"]),
             ]),
-            expect(&[("gpt-6.1-terra", "high"), ("gpt-6-sol", "medium")])
+            expect(&[("gpt-6.1-terra", "high"); 3])
         );
     }
 

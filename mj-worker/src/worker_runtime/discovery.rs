@@ -81,6 +81,7 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
     let launch = LaunchSpec {
         operator_away: Default::default(),
         imported_logins: None,
+        login_identity: Default::default(),
         subagent_policy: mj_core::subagent::SubagentPolicy::Native,
         managed_subagent: false,
         subagent_mcp_socket: None,
@@ -109,6 +110,8 @@ pub async fn discover_profile_config(spec: ProfileProbeSpec) -> Result<ProfileCo
         initial_model: None,
         harness: spec.harness,
         execution_policy: policy,
+        claude_permission_mode: Default::default(),
+        observe_policy: None,
         acp_activity: Default::default(),
         step_clock: Default::default(),
         tools_in_flight: Default::default(),
@@ -333,6 +336,7 @@ for line in sys.stdin:
         let launch = LaunchSpec {
             operator_away: Default::default(),
             imported_logins: None,
+            login_identity: Default::default(),
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             managed_subagent: false,
@@ -353,6 +357,8 @@ for line in sys.stdin:
             initial_model: None,
             harness: mj_core::config::HarnessKind::Kimi,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
+            claude_permission_mode: Default::default(),
+            observe_policy: None,
             acp_activity: Default::default(),
             step_clock: Default::default(),
             tools_in_flight: Default::default(),

@@ -568,6 +568,14 @@ pub enum TargetTemplate {
         #[serde(flatten)]
         container: ContainerTemplate,
     },
+    /// An AWS Nitro Sandbox: one Firecracker microVM per session on an EC2
+    /// host reached over SSH, driven by `mj-worker microvm` as root.
+    SshNitro {
+        #[serde(flatten)]
+        ssh: SshConnection,
+        #[serde(flatten)]
+        container: ContainerTemplate,
+    },
 }
 
 impl TargetTemplate {
@@ -598,7 +606,8 @@ impl TargetTemplate {
             | Self::AppleContainer { container }
             | Self::SshPodman { container, .. }
             | Self::SshDocker { container, .. }
-            | Self::SshAppleContainer { container, .. } => Some(container),
+            | Self::SshAppleContainer { container, .. }
+            | Self::SshNitro { container, .. } => Some(container),
             _ => None,
         }
     }
@@ -611,7 +620,8 @@ impl TargetTemplate {
             | Self::AppleContainer { container }
             | Self::SshPodman { container, .. }
             | Self::SshDocker { container, .. }
-            | Self::SshAppleContainer { container, .. } => Some(container),
+            | Self::SshAppleContainer { container, .. }
+            | Self::SshNitro { container, .. } => Some(container),
             _ => None,
         }
     }
@@ -628,6 +638,7 @@ impl TargetTemplate {
             Self::SshPodman { .. } => "ssh-podman",
             Self::SshDocker { .. } => "ssh-docker",
             Self::SshAppleContainer { .. } => "ssh-apple-container",
+            Self::SshNitro { .. } => "ssh-nitro",
         }
     }
 
@@ -647,7 +658,8 @@ impl TargetTemplate {
             | Self::AppleContainer { container }
             | Self::SshPodman { container, .. }
             | Self::SshDocker { container, .. }
-            | Self::SshAppleContainer { container, .. } => container.build_cache = None,
+            | Self::SshAppleContainer { container, .. }
+            | Self::SshNitro { container, .. } => container.build_cache = None,
             Self::LocalBare | Self::AwsEc2 { .. } | Self::SshBare { .. } => {}
         }
         stripped
@@ -739,6 +751,19 @@ impl TargetTemplate {
                 }
                 Ok(())
             }
+            // A Nitro sandbox keeps its workspace on a named volume the
+            // engine creates; no other storage shape exists.
+            Self::SshNitro { ssh, container } => {
+                ssh.validate(id)?;
+                container.validate(id)?;
+                if !container.workspace_storage.is_default() {
+                    bail!(
+                        "target template {id:?} workspace storage is only supported by Podman; \
+                         a Nitro sandbox always uses a volume"
+                    );
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -751,7 +776,8 @@ impl From<&TargetTemplate> for crate::state::ResourceAllocationKind {
             | TargetTemplate::AppleContainer { .. }
             | TargetTemplate::SshPodman { .. }
             | TargetTemplate::SshDocker { .. }
-            | TargetTemplate::SshAppleContainer { .. } => Self::Container,
+            | TargetTemplate::SshAppleContainer { .. }
+            | TargetTemplate::SshNitro { .. } => Self::Container,
             TargetTemplate::AwsEc2 { .. } => Self::AwsEc2,
             TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => Self::Fixed,
         }
@@ -779,6 +805,7 @@ pub fn is_container_target(template: &TargetTemplate) -> bool {
             | TargetTemplate::SshPodman { .. }
             | TargetTemplate::SshDocker { .. }
             | TargetTemplate::SshAppleContainer { .. }
+            | TargetTemplate::SshNitro { .. }
     )
 }
 
@@ -786,13 +813,17 @@ pub fn is_container_target(template: &TargetTemplate) -> bool {
 ///
 /// Apple's `container` runs each session in its own VM, and the macOS
 /// Virtualization framework does not return memory the guest frees, so a
-/// long-lived session's footprint grows toward its configured size. Every
-/// other runtime's limit is a cgroup ceiling that an idle container does not
-/// use, so its host may be overcommitted with a warning.
+/// long-lived session's footprint grows toward its configured size. A Nitro
+/// sandbox takes its memory from a pool reserved at boot, which cannot be
+/// overcommitted. Every other runtime's limit is a cgroup ceiling that an
+/// idle container does not use, so its host may be overcommitted with a
+/// warning.
 pub fn container_memory_is_hard_limit(template: &TargetTemplate) -> bool {
     matches!(
         template,
-        TargetTemplate::AppleContainer { .. } | TargetTemplate::SshAppleContainer { .. }
+        TargetTemplate::AppleContainer { .. }
+            | TargetTemplate::SshAppleContainer { .. }
+            | TargetTemplate::SshNitro { .. }
     )
 }
 
@@ -806,9 +837,18 @@ pub fn mount_history_host(template: &TargetTemplate) -> Option<&str> {
         | TargetTemplate::AwsEc2 { .. } => Some("local"),
         TargetTemplate::SshPodman { ssh, .. }
         | TargetTemplate::SshDocker { ssh, .. }
-        | TargetTemplate::SshAppleContainer { ssh, .. } => Some(&ssh.host),
+        | TargetTemplate::SshAppleContainer { ssh, .. }
+        | TargetTemplate::SshNitro { ssh, .. } => Some(&ssh.host),
         TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => None,
     }
+}
+
+/// Whether a launch surface should offer attached host directories for
+/// `template`. A Nitro sandbox is a VM that cannot attach one, but a request
+/// that carries attachments (an API call, a resumed session) is still
+/// accepted: the launch drops them and says so, instead of refusing.
+pub fn offers_attached_directories(template: &TargetTemplate) -> bool {
+    mount_history_host(template).is_some() && !matches!(template, TargetTemplate::SshNitro { .. })
 }
 
 /// The host key whose project-directory history belongs to `template`.
@@ -824,7 +864,8 @@ pub fn project_history_host(template: &TargetTemplate) -> Option<&str> {
         | TargetTemplate::AwsEc2 { .. }
         | TargetTemplate::SshPodman { .. }
         | TargetTemplate::SshDocker { .. }
-        | TargetTemplate::SshAppleContainer { .. } => None,
+        | TargetTemplate::SshAppleContainer { .. }
+        | TargetTemplate::SshNitro { .. } => None,
     }
 }
 
@@ -836,7 +877,8 @@ pub fn container_size_host(template: &TargetTemplate) -> Option<&str> {
         | TargetTemplate::AppleContainer { .. } => Some("local"),
         TargetTemplate::SshPodman { ssh, .. }
         | TargetTemplate::SshDocker { ssh, .. }
-        | TargetTemplate::SshAppleContainer { ssh, .. } => Some(&ssh.host),
+        | TargetTemplate::SshAppleContainer { ssh, .. }
+        | TargetTemplate::SshNitro { ssh, .. } => Some(&ssh.host),
         TargetTemplate::LocalBare
         | TargetTemplate::SshBare { .. }
         | TargetTemplate::AwsEc2 { .. } => None,

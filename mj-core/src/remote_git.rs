@@ -527,6 +527,28 @@ pub fn is_github_https_url(source: &str) -> bool {
     Url::parse(source.trim()).is_ok_and(|url| url.scheme() == "https" && is_github_web_host(&url))
 }
 
+/// `git -c` arguments that answer credential requests for GitHub's web hosts
+/// with the token in the child's `GH_TOKEN`. Git matches a scoped helper
+/// against the server it actually contacts, so a host whose Git
+/// configuration rewrites github.com (`url.*.insteadOf`) to a mirror never
+/// sees the token, and the host's own helpers still answer for the mirror.
+/// The empty value first clears any host helper scoped to the same URL.
+pub fn github_token_credential_config() -> Vec<String> {
+    ["github.com", "gist.github.com"]
+        .into_iter()
+        .flat_map(|host| {
+            [
+                "-c".to_owned(),
+                format!("credential.https://{host}.helper="),
+                "-c".to_owned(),
+                format!(
+                    "credential.https://{host}.helper=!f() {{ if [ \"$1\" = get ]; then printf '%s\\n' username=x-access-token \"password=$GH_TOKEN\"; fi; }}; f"
+                ),
+            ]
+        })
+        .collect()
+}
+
 /// The owner and repository of a GitHub source, in the case written. Accepts
 /// the spellings [`resolve_repository`] does, including `owner/repository`.
 pub fn github_owner_repo(source: &str) -> Option<(String, String)> {

@@ -15,7 +15,7 @@ pub enum ReviewModelFamily {
 }
 impl ReviewModelFamily {
     pub fn for_model(model: &str) -> Option<Self> {
-        let model = crate::usage::pricing::normalize_model(model);
+        let model = crate::model_catalog::normalize_model(model);
         // Kimi Code qualifies its version as `kimi-code/k3`, so the
         // provider segment is part of the family identity.
         if model.rsplit('/').nth(1) == Some("kimi-code") {
@@ -90,42 +90,6 @@ impl ResolvedReviewSettings {
 fn model_matches_family(id: &str, family: &str) -> bool {
     let id = id.to_ascii_lowercase();
     id.split(['-', '_', '.', '/']).any(|part| part == family)
-}
-
-/// Shared with utility inference: moving aliases precede numbered versions.
-pub fn model_version_cmp(left: &str, right: &str) -> std::cmp::Ordering {
-    let alias = |id: &str| {
-        u8::from(
-            id.split(['-', '_', '.'])
-                .any(|p| matches!(p, "latest" | "next")),
-        )
-    };
-    let numbers = |id: &str| {
-        // A context capacity such as K3's `-256k` is not a release version.
-        id.split(['-', '_', '.', '/'])
-            .filter(|part| {
-                !part
-                    .strip_suffix('k')
-                    .or_else(|| part.strip_suffix('m'))
-                    .is_some_and(|size| {
-                        !size.is_empty() && size.bytes().all(|b| b.is_ascii_digit())
-                    })
-            })
-            .flat_map(|part| part.split(|c: char| !c.is_ascii_digit()))
-            .filter(|p| !p.is_empty())
-            .filter_map(|p| p.parse::<u64>().ok())
-            .collect::<Vec<_>>()
-    };
-    alias(left)
-        .cmp(&alias(right))
-        .then_with(|| numbers(left).cmp(&numbers(right)))
-        // Highspeed is a same-version speed variant, not a newer model.
-        .then_with(|| {
-            right
-                .ends_with("-highspeed")
-                .cmp(&left.ends_with("-highspeed"))
-        })
-        .then_with(|| left.cmp(right))
 }
 
 /// Whether a review can choose a reviewer for a session with `session`'s

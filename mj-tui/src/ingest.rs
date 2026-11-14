@@ -48,10 +48,12 @@ pub(crate) struct SessionOperationDisplay {
 pub(crate) struct SessionDetail {
     pub(crate) materialized_applied_event_ordinal: Option<u64>,
     pub(crate) current_turn_started_at: Option<u64>,
-    pub(crate) awaiting_input: bool,
     pub(crate) question_message: Option<String>,
-    pub(crate) dismissible_question: Option<mj_core::assessment::InferredQuestion>,
-    pub(crate) question_dismissal: Option<QuestionDismissal>,
+    pub(crate) supports_open_request: bool,
+    /// The latest-turn rule, used only for workers before relay protocol 64,
+    /// whose questions may have no daemon dismissal target.
+    pub(crate) legacy_awaiting_input: bool,
+    pub(crate) notification_dismissal: Option<NotificationDismissalState>,
     pub(crate) last_activity_at_ms: Option<u64>,
     pub(crate) last_agent_message: Option<Arc<str>>,
     pub(crate) last_user_message: Option<Arc<str>>,
@@ -84,13 +86,16 @@ pub(crate) struct SessionDetail {
     pub(crate) projection: MaterializedProjectionCache,
     /// The Sessions row's rendering of the message it shows.
     pub(crate) output_preview: crate::render::OutputPreviewCache,
+    /// The session's current model and effort as its worker reports them.
+    pub(crate) current_model: Option<Arc<str>>,
+    pub(crate) current_effort: Option<Arc<str>>,
 }
 
 #[derive(Debug)]
-pub(crate) enum QuestionDismissal {
-    Submitting(mj_core::assessment::InferredQuestion),
+pub(crate) enum NotificationDismissalState {
+    Submitting(mj_core::attention::NotificationDismissal),
     Accepted {
-        question: mj_core::assessment::InferredQuestion,
+        target: mj_core::attention::NotificationDismissal,
         ordinal: u64,
     },
 }
@@ -107,10 +112,6 @@ impl SessionDetail {
             .iter()
             .filter(|ordinal| **ordinal > through)
             .count();
-    }
-
-    pub(crate) fn has_unread(&self) -> bool {
-        self.unread_agent_messages > 0 || self.unread_interruptions > 0
     }
 
     pub(crate) fn clear_unread(&mut self) {
@@ -207,6 +208,7 @@ fn agent_activity_text(item: &TranscriptItem) -> Option<Arc<str>> {
             mj_core::transcript::materialized_chunks_text(chunks)
         }
         TranscriptBody::Tool { call, .. } => call
+            .value()
             .get("title")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("[invalid tool call]")
@@ -247,8 +249,7 @@ pub struct PreparedMaterializedSessionDetail {
     pub(crate) session_id: String,
     pub(crate) applied_event_ordinal: u64,
     pub(crate) current_turn_started_at: Option<u64>,
-    pub(crate) awaiting_input: bool,
-    pub(crate) dismissible_question: Option<mj_core::assessment::InferredQuestion>,
+    pub(crate) legacy_awaiting_input: bool,
     pub(crate) last_activity_at_ms: Option<u64>,
     pub(crate) last_agent_message: Option<Arc<str>>,
     pub(crate) last_user_message: Option<Arc<str>>,
@@ -335,8 +336,8 @@ impl PreparedMaterializedSessionDetail {
         Self::from_assessed_materialized(session, None, viewed_through_event_ordinal, previous)
     }
 
-    /// Keep the worker's verdict paired with the projection it describes, so
-    /// delayed background projections cannot attach it to a different turn.
+    /// Build transcript detail; semantic attention is served separately by the
+    /// daemon, except the latest-turn rule kept for pre-64 workers.
     pub fn from_assessed_materialized(
         session: MaterializedSession,
         assessment: Option<&mj_core::assessment::TurnAssessment>,
@@ -452,27 +453,7 @@ impl PreparedMaterializedSessionDetail {
                 created_at_ms: prompt.queued_at_ms,
             })
             .collect();
-        let awaiting_input = session.active_turn.is_none()
-            && session.queued_prompts.is_empty()
-            && session.last_turn_outcome.as_ref().is_some_and(|outcome| {
-                outcome.requires_input(assessment)
-                    && !session.transcript.iter().any(|item| {
-                        matches!(item.body, TranscriptBody::User { .. })
-                            && item.position > outcome.completed_ordinal
-                    })
-            });
-        let dismissible_question = awaiting_input
-            .then(|| {
-                assessment
-                    .filter(|a| {
-                        session
-                            .last_turn_outcome
-                            .as_ref()
-                            .is_some_and(|o| a.applies_to(o))
-                    })
-                    .and_then(|a| a.inferred_question())
-            })
-            .flatten();
+        let legacy_awaiting_input = session.unanswered_input_outcome(assessment, None).is_some();
         let pending_elicitations = session.pending_elicitations.clone();
         let session_id = session.session_id.clone();
         let applied_event_ordinal = session.applied_event_ordinal;
@@ -490,8 +471,7 @@ impl PreparedMaterializedSessionDetail {
             session_id,
             applied_event_ordinal,
             current_turn_started_at,
-            awaiting_input,
-            dismissible_question,
+            legacy_awaiting_input,
             last_activity_at_ms,
             last_agent_message: last_agent_message
                 .as_ref()
@@ -543,6 +523,52 @@ pub(crate) struct CapacityDetail {
 }
 
 impl DashboardState {
+    pub fn set_session_attention_for(
+        &mut self,
+        session_id: &str,
+        attention: mj_core::attention::SessionAttention,
+    ) {
+        if self.served_attention.get(session_id) != Some(&attention) {
+            self.served_attention
+                .insert(session_id.to_owned(), attention);
+        }
+    }
+    pub fn set_unread_frontiers(
+        &mut self,
+        frontiers: mj_core::snapshot_map::SnapshotMap<String, u64>,
+    ) {
+        self.unread_frontiers = frontiers;
+    }
+
+    pub fn set_notification_dismissals(
+        &mut self,
+        targets: mj_core::snapshot_map::SnapshotMap<
+            String,
+            mj_core::attention::NotificationDismissal,
+        >,
+    ) {
+        for (id, detail) in self.session_details.iter_mut() {
+            if let Some(NotificationDismissalState::Accepted { target, .. }) =
+                &detail.notification_dismissal
+                && matches!(
+                    target,
+                    mj_core::attention::NotificationDismissal::Failure(_)
+                )
+                && targets.get(id) != Some(target)
+            {
+                detail.notification_dismissal = None;
+            }
+        }
+        self.notification_dismissals = targets;
+    }
+    pub fn set_session_attention(
+        &mut self,
+        attention: mj_core::snapshot_map::SnapshotMap<String, mj_core::attention::SessionAttention>,
+    ) {
+        if self.served_attention != attention {
+            *self.served_attention = attention;
+        }
+    }
     pub fn set_workspace_names(&mut self, names: BTreeMap<String, String>) {
         self.workspace_names = names;
         let workspace_name = self
@@ -668,18 +694,10 @@ impl DashboardState {
                         rows.remove(child);
                         self.session_details.remove(child);
                         self.project_sources.remove(child);
-                        self.viewed_failures.remove(child);
                     }
                 }
                 self.session_details.remove(id);
                 self.project_sources.remove(id);
-            }
-            if self
-                .viewed_failures
-                .get(id)
-                .is_some_and(|seen| record.as_ref().is_none_or(|record| !seen.matches(record)))
-            {
-                self.viewed_failures.remove(id);
             }
         }
         state.sessions = rows;
@@ -1226,12 +1244,11 @@ impl DashboardState {
         }
         detail.materialized_applied_event_ordinal = Some(prepared.applied_event_ordinal);
         detail.current_turn_started_at = prepared.current_turn_started_at;
-        detail.awaiting_input = prepared.awaiting_input;
-        detail.dismissible_question = prepared.dismissible_question;
-        if matches!(&detail.question_dismissal,
-            Some(QuestionDismissal::Accepted { ordinal, .. }) if prepared.applied_event_ordinal >= *ordinal)
+        detail.legacy_awaiting_input = prepared.legacy_awaiting_input;
+        if matches!(&detail.notification_dismissal,
+            Some(NotificationDismissalState::Accepted { target: mj_core::attention::NotificationDismissal::Question(_), ordinal }) if prepared.applied_event_ordinal >= *ordinal)
         {
-            detail.question_dismissal = None;
+            detail.notification_dismissal = None;
         }
         detail.last_activity_at_ms = prepared.last_activity_at_ms;
         detail.last_agent_message = prepared.last_agent_message;
@@ -1296,59 +1313,174 @@ impl DashboardState {
         true
     }
 
-    pub(crate) fn question_dismissal_pending(&self, session_id: &str) -> bool {
+    pub(crate) fn notification_dismissal_pending(&self, session_id: &str) -> bool {
         self.session_details
             .get(session_id)
-            .is_some_and(|detail| detail.question_dismissal.is_some())
+            .is_some_and(|detail| detail.notification_dismissal.is_some())
     }
 
-    pub(crate) fn begin_dismiss_question(&mut self) -> crate::DashboardAction {
-        let Some(session_id) = self.command_session_id().map(str::to_owned) else {
+    pub(crate) fn notification_dismissal_target(
+        &self,
+        session_id: &str,
+    ) -> Option<mj_core::attention::NotificationDismissal> {
+        self.notification_dismissals.get(session_id).cloned()
+    }
+
+    pub(crate) fn begin_dismiss_notification(&mut self) -> crate::DashboardAction {
+        // While the resume dialog is open, `d` acts on its selected row only;
+        // a native or archive row must not fall through to the dashboard
+        // selection behind the dialog.
+        let target = if matches!(self.mode, crate::Mode::ResumeDialog(_)) {
+            self.resume_command_session_id()
+        } else {
+            self.command_session_id()
+        };
+        let Some(session_id) = target.map(str::to_owned) else {
             return crate::DashboardAction::None;
         };
-        let Some(detail) = self.session_details.get_mut(&session_id) else {
-            return crate::DashboardAction::None;
-        };
-        let Some(question) = detail.dismissible_question.clone() else {
-            return crate::DashboardAction::None;
-        };
-        detail.question_dismissal = Some(QuestionDismissal::Submitting(question.clone()));
-        crate::DashboardAction::DismissQuestion {
-            session_id,
-            question,
+        self.begin_dismiss_notification_for(&session_id)
+            .unwrap_or(crate::DashboardAction::None)
+    }
+
+    /// Starts the dismissal of one session's current notification, unless one
+    /// is already being submitted for it.
+    pub(crate) fn begin_dismiss_notification_for(
+        &mut self,
+        session_id: &str,
+    ) -> Option<crate::DashboardAction> {
+        if self.notification_dismissal_pending(session_id) {
+            return None;
+        }
+        let target = self.submit_notification_dismissal(session_id)?;
+        Some(crate::DashboardAction::DismissNotification {
+            session_id: session_id.to_owned(),
+            target,
+        })
+    }
+
+    /// Marks the session's current notification as being dismissed and
+    /// returns its target, or `None` when it has nothing to dismiss. Every
+    /// dismissal starts here, so its result is matched against this mark.
+    pub(crate) fn submit_notification_dismissal(
+        &mut self,
+        session_id: &str,
+    ) -> Option<mj_core::attention::NotificationDismissal> {
+        let target = self.notification_dismissal_target(session_id)?;
+        let detail = self
+            .session_details
+            .entry(session_id.to_owned())
+            .or_default();
+        detail.notification_dismissal =
+            Some(NotificationDismissalState::Submitting(target.clone()));
+        Some(target)
+    }
+
+    pub fn notification_dismissal_finished(
+        &mut self,
+        session_id: &str,
+        target: mj_core::attention::NotificationDismissal,
+        result: Result<u64, String>,
+    ) {
+        match self.apply_notification_dismissal(session_id, target, result) {
+            Some(Ok(())) => self.set_notice("Notification dismissed."),
+            Some(Err(error)) => {
+                self.set_notice(format!("Could not dismiss notification: {error}"));
+            }
+            None => {}
         }
     }
 
-    pub fn question_dismissal_finished(
+    /// The results of one "Clear notifications": each applied as a single
+    /// dismissal is, then one notice, so a later success cannot hide an
+    /// earlier failure.
+    pub fn notifications_dismissed(
+        &mut self,
+        results: Vec<(
+            String,
+            mj_core::attention::NotificationDismissal,
+            Result<u64, String>,
+        )>,
+    ) {
+        let mut cleared = 0usize;
+        let mut failures = Vec::new();
+        for (session_id, target, result) in results {
+            match self.apply_notification_dismissal(&session_id, target, result) {
+                Some(Ok(())) => cleared += 1,
+                Some(Err(error)) => failures.push(error),
+                None => {}
+            }
+        }
+        let count = |n| crate::widgets::counted(n, "notification", "notifications");
+        match failures.as_slice() {
+            [] if cleared == 0 => {}
+            [] => self.set_notice(format!("Cleared {}.", count(cleared))),
+            [first, ..] if cleared == 0 => self.set_notice(format!(
+                "Could not dismiss {}: {first}",
+                count(failures.len())
+            )),
+            [first, ..] => self.set_notice(format!(
+                "Cleared {}; could not dismiss {}: {first}",
+                count(cleared),
+                failures.len()
+            )),
+        }
+    }
+
+    /// Applies one dismissal result to the session it was submitted for.
+    /// `None` when the notification has since changed and the result no
+    /// longer applies.
+    fn apply_notification_dismissal(
         &mut self,
         session_id: &str,
-        question: mj_core::assessment::InferredQuestion,
+        target: mj_core::attention::NotificationDismissal,
         result: Result<u64, String>,
-    ) {
-        let Some(detail) = self.session_details.get_mut(session_id) else {
-            return;
-        };
-        let current = match &detail.question_dismissal {
-            Some(QuestionDismissal::Submitting(current))
-            | Some(QuestionDismissal::Accepted {
-                question: current, ..
-            }) => current == &question,
+    ) -> Option<Result<(), String>> {
+        let detail = self.session_details.get_mut(session_id)?;
+        let current = match &detail.notification_dismissal {
+            Some(NotificationDismissalState::Submitting(current))
+            | Some(NotificationDismissalState::Accepted {
+                target: current, ..
+            }) => current == &target,
             None => false,
         };
         if !current {
-            return;
+            return None;
         }
         match result {
             Ok(ordinal) => {
-                detail.question_dismissal = detail
-                    .materialized_applied_event_ordinal
-                    .is_none_or(|applied| applied < ordinal)
-                    .then_some(QuestionDismissal::Accepted { question, ordinal });
-                self.set_notice("Question dismissed.");
+                if matches!(
+                    target,
+                    mj_core::attention::NotificationDismissal::Failure(_)
+                ) {
+                    detail.notification_dismissal = (self.notification_dismissals.get(session_id)
+                        == Some(&target))
+                    .then_some(NotificationDismissalState::Accepted { target, ordinal });
+                } else if matches!(
+                    target,
+                    mj_core::attention::NotificationDismissal::ReadThrough(_)
+                ) {
+                    detail.update_unread(ordinal);
+                    if let Some(record) = self.state.sessions.get_mut(session_id) {
+                        record.viewed_through_event_ordinal =
+                            record.viewed_through_event_ordinal.max(ordinal);
+                    }
+                    // The daemon persisted the receipt before replying, so a
+                    // read dismissal is complete now. Waiting for a worker
+                    // projection would block a parked session forever.
+                    detail.notification_dismissal = None;
+                } else {
+                    // A question dismissal completes only once the worker's
+                    // command reaches the projection.
+                    detail.notification_dismissal = detail
+                        .materialized_applied_event_ordinal
+                        .is_none_or(|applied| applied < ordinal)
+                        .then_some(NotificationDismissalState::Accepted { target, ordinal });
+                }
+                Some(Ok(()))
             }
             Err(error) => {
-                detail.question_dismissal = None;
-                self.set_notice(format!("Could not dismiss question: {error}"));
+                detail.notification_dismissal = None;
+                Some(Err(error))
             }
         }
     }
@@ -1367,6 +1499,14 @@ impl DashboardState {
                 .expect("session detail was just inserted")
                 .current_step_started_at_ms = timestamp_ms;
         }
+    }
+
+    /// The session's harness kind, for harness-specific readings of its state.
+    pub fn session_harness_kind(&self, session_id: &str) -> Option<mj_core::config::HarnessKind> {
+        self.state
+            .sessions
+            .get(session_id)
+            .map(|record| record.harness_kind)
     }
 
     /// Record what a session is doing beyond its turn clock, so a row can say
@@ -1390,12 +1530,39 @@ impl DashboardState {
         }
     }
 
-    /// The current open question target, if the worker located one.
-    pub fn set_question_message(&mut self, session_id: &str, target: Option<String>) {
-        self.session_details
+    /// The session's current model and effort as its worker reports them, for
+    /// the session menu's top line.
+    pub fn set_session_current_config(
+        &mut self,
+        session_id: &str,
+        model: Option<String>,
+        effort: Option<String>,
+    ) {
+        let detail = self
+            .session_details
             .entry(session_id.to_owned())
-            .or_default()
-            .question_message = target;
+            .or_default();
+        let model = model.map(Arc::from);
+        let effort = effort.map(Arc::from);
+        if detail.current_model != model || detail.current_effort != effort {
+            detail.current_model = model;
+            detail.current_effort = effort;
+        }
+    }
+
+    /// The current open question target, if the worker located one.
+    pub fn set_question_message(
+        &mut self,
+        session_id: &str,
+        target: Option<String>,
+        supports_open_request: bool,
+    ) {
+        let detail = self
+            .session_details
+            .entry(session_id.to_owned())
+            .or_default();
+        detail.question_message = target;
+        detail.supports_open_request = supports_open_request;
     }
 
     pub fn question_message(&self, session_id: &str) -> Option<&str> {

@@ -52,6 +52,8 @@ fn prepare_checked(
         TargetTemplate::AwsEc2 { .. }
             | TargetTemplate::AppleContainer { .. }
             | TargetTemplate::SshAppleContainer { .. }
+            // A sandbox is a VM with no way to mount a host directory.
+            | TargetTemplate::SshNitro { .. }
     ) {
         return Ok(None);
     }

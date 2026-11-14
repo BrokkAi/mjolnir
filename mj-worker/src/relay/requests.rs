@@ -168,6 +168,7 @@ impl DurableRelay {
             | RelayRequest::InstallGithubToken { .. }
             | RelayRequest::RemoveGithubToken
             | RelayRequest::ProjectMemorySnapshot
+            | RelayRequest::ProjectMemoryTransfer { .. }
             | RelayRequest::HistoryQuery { .. }
             | RelayRequest::CompleteHistoryRequest { .. }
             | RelayRequest::InstallProjectMemorySnapshot { .. }

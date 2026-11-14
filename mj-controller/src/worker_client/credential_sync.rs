@@ -1,5 +1,7 @@
 use super::*;
 use crate::session_manager::{RelayConnectionJob, RelayJobDeferred, SessionManagerControl};
+use mj_core::config::harness_authentication_marker;
+use mj_core::credentials::{credential_copy_for_harness, credential_holds_refresh_token};
 
 /// How a reconciliation reaches each session's worker.
 #[derive(Clone)]
@@ -703,12 +705,14 @@ pub(super) async fn reconcile_profile_guarded(
                 CanonicalSkills::failed(&format!("skills collection task stopped: {error}"))
             }),
     );
+    let login = login_for_pass(targets).await;
     let pass_context = PassContext {
         relays,
         gate,
         runtime,
         skills: &skills,
         slopcop_login: &slopcop_login,
+        login: &login,
         triggered_by,
         steps,
     };
@@ -1000,6 +1004,7 @@ struct PassContext<'a> {
     runtime: Option<&'a Arc<crate::daemon::RuntimeState>>,
     skills: &'a Arc<CanonicalSkills>,
     slopcop_login: &'a HostSlopcopLogin,
+    login: &'a PassLogin,
     triggered_by: Option<&'a str>,
     steps: &'a SessionSteps,
 }
@@ -1109,6 +1114,7 @@ async fn reconcile_target(
         runtime,
         skills,
         slopcop_login,
+        login,
         triggered_by,
         steps,
     } = context;
@@ -1137,7 +1143,10 @@ async fn reconcile_target(
             skills,
             &github,
             aws_credentials,
-            slopcop_login,
+            HostLogins {
+                slopcop: slopcop_login,
+                harness: login,
+            },
             hold,
         )
         .await
@@ -1904,9 +1913,172 @@ impl CanonicalSkills {
 
 /// The profile's login as the controller holds it.
 pub(super) struct CanonicalLogin {
-    pub(super) path: std::path::PathBuf,
+    /// How the controller reads and writes it.
+    pub(super) access: LoginAccess,
     pub(super) credential: CredentialSnapshot,
     pub(super) bytes: Vec<u8>,
+}
+
+/// A login as read from where its store keeps it.
+type LoginRead = Result<(CredentialSnapshot, Vec<u8>), String>;
+
+/// How the controller reads and writes a profile's login: its store
+/// ([`mj_core::config::HarnessKind::login_store`]) and the bounded `security`
+/// tool a macOS login needs.
+#[derive(Clone)]
+pub(super) struct LoginAccess {
+    store: mj_core::config::HarnessLoginStore,
+    security: Arc<dyn crate::targets::CommandExecutor + Send + Sync>,
+    /// The credential file whose directory carries the locks a Keychain write
+    /// takes, when not Claude Code's own `~/.claude` (tests).
+    lock_marker: Option<std::path::PathBuf>,
+}
+
+impl LoginAccess {
+    pub(super) fn new(
+        store: mj_core::config::HarnessLoginStore,
+        security: Arc<dyn crate::targets::CommandExecutor + Send + Sync>,
+    ) -> Self {
+        Self {
+            store,
+            security,
+            lock_marker: None,
+        }
+    }
+
+    #[cfg(all(test, unix))]
+    pub(super) fn with_lock_marker(mut self, marker: std::path::PathBuf) -> Self {
+        self.lock_marker = Some(marker);
+        self
+    }
+
+    /// The daemon's `security` lookup, bounded because it can wait on a
+    /// Keychain prompt.
+    fn bounded(store: mj_core::config::HarnessLoginStore) -> Self {
+        Self::new(
+            store,
+            Arc::new(crate::targets::BoundedProcessExecutor::new(
+                crate::setup::KEYCHAIN_READ_TIMEOUT,
+            )),
+        )
+    }
+
+    fn file(marker: std::path::PathBuf) -> Self {
+        Self::bounded(mj_core::config::HarnessLoginStore::File { marker })
+    }
+
+    /// The login as it is now: a file, or the Keychain item. Blocking.
+    fn read(&self, kind: mj_core::config::HarnessKind) -> Result<(CredentialSnapshot, Vec<u8>)> {
+        match &self.store {
+            mj_core::config::HarnessLoginStore::File { marker } => {
+                read_credential_file(kind, marker)
+            }
+            mj_core::config::HarnessLoginStore::MacKeychain => {
+                // A locked Keychain is an error here: treating it as "no
+                // login" would let the sync act on a login that merely could
+                // not be read.
+                match crate::setup::read_claude_keychain_login(&*self.security)? {
+                    crate::setup::KeychainLogin::Present(bytes) => {
+                        Ok((CredentialSnapshot::of(kind, &bytes), bytes))
+                    }
+                    crate::setup::KeychainLogin::Missing => {
+                        Ok((CredentialSnapshot::absent(), Vec::new()))
+                    }
+                    crate::setup::KeychainLogin::Unreadable { status } => Err(anyhow!(
+                        "the macOS Keychain could not be read (security exited with status {status})"
+                    )),
+                }
+            }
+        }
+    }
+
+    /// [`LoginAccess::read`] off the scheduler thread.
+    async fn read_blocking(
+        &self,
+        kind: mj_core::config::HarnessKind,
+    ) -> Result<(CredentialSnapshot, Vec<u8>)> {
+        let access = self.clone();
+        tokio::task::spawn_blocking(move || access.read(kind))
+            .await
+            .context("read profile credentials task stopped")?
+    }
+
+    /// Adopt a session's fresher login as the profile's: into its file, or on
+    /// a Mac into the Keychain. See
+    /// [`mj_core::credentials::install_credentials_if_newer`], and
+    /// [`crate::claude_login::install_keychain_login_if_newer`] for the Keychain.
+    async fn install_if_newer(
+        &self,
+        kind: mj_core::config::HarnessKind,
+        bytes: &[u8],
+    ) -> Result<mj_core::credentials::CredentialInstall> {
+        match &self.store {
+            mj_core::config::HarnessLoginStore::File { marker } => {
+                mj_core::credentials::install_credentials_if_newer(kind, marker, bytes).await
+            }
+            mj_core::config::HarnessLoginStore::MacKeychain => {
+                let lock_marker = match &self.lock_marker {
+                    Some(marker) => marker.clone(),
+                    None => self.store.lock_marker()?,
+                };
+                crate::claude_login::install_keychain_login_if_newer(
+                    &lock_marker,
+                    self.security.clone(),
+                    bytes,
+                )
+                .await
+            }
+        }
+    }
+}
+
+/// The host's logins a pass reads once for all of a profile's sessions.
+pub(super) struct HostLogins<'a> {
+    pub(super) slopcop: &'a HostSlopcopLogin,
+    pub(super) harness: &'a PassLogin,
+}
+
+/// Where a pass finds the profile's login. Decided once per pass, from
+/// [`mj_core::config::HarnessKind::login_store`], so every session of the
+/// profile agrees on it.
+pub(super) enum PassLogin {
+    /// A file (or a login database): each session reads it when its turn
+    /// comes, so a refresh during the pass is seen.
+    PerSession,
+    /// The macOS Keychain, read once for the whole pass: every session of the
+    /// profile reconciles against the same item, and each read spawns
+    /// `security`. A read that is slightly stale by the time a late session
+    /// is reached is harmless: a pull rereads under the locks and installs
+    /// only a strictly newer login, and a push of an older login is refused by
+    /// the session for being older.
+    Keychain {
+        read: Arc<LoginRead>,
+        access: LoginAccess,
+    },
+}
+
+/// Decide where the pass finds the profile's login, and read it when that is
+/// the Keychain and any of the pass's sessions needs it.
+async fn login_for_pass(targets: &[CredentialSyncTarget]) -> PassLogin {
+    let Some(target) = targets.iter().find(|target| !target.skips_login_file_sync) else {
+        return PassLogin::PerSession;
+    };
+    let store = target.harness.login_store(
+        mj_core::config::HarnessHost::current(),
+        &target.profile_home,
+    );
+    if store != mj_core::config::HarnessLoginStore::MacKeychain {
+        return PassLogin::PerSession;
+    }
+    let access = LoginAccess::bounded(store);
+    let read = access
+        .read_blocking(target.harness)
+        .await
+        .map_err(|error| format!("{error:#}"));
+    PassLogin::Keychain {
+        read: Arc::new(read),
+        access,
+    }
 }
 
 /// What one session is reconciled against, read on the controller before its
@@ -1925,24 +2097,46 @@ impl SessionCanonical {
         target: &CredentialSyncTarget,
         skills: Arc<CanonicalSkills>,
         github: GithubSync,
+        login: &PassLogin,
     ) -> Self {
         let read_login = || -> Result<CanonicalLogin> {
-            let path = harness_authentication_marker(target.harness, &target.profile_home);
             // A login database is read where the harness keeps it; the
             // profile home holds no copy of it.
-            let (credential, bytes) = if target.harness.keeps_logins_in_database() {
-                match crate::opencode_logins::home_logins(&target.profile_home)? {
-                    Some(bytes) => (CredentialSnapshot::of(target.harness, &bytes), bytes),
-                    None => (CredentialSnapshot::absent(), Vec::new()),
+            if target.harness.keeps_logins_in_database() {
+                let marker = harness_authentication_marker(target.harness, &target.profile_home);
+                let (credential, bytes) =
+                    match crate::opencode_logins::home_logins(&target.profile_home)? {
+                        Some(bytes) => (CredentialSnapshot::of(target.harness, &bytes), bytes),
+                        None => (CredentialSnapshot::absent(), Vec::new()),
+                    };
+                return Ok(CanonicalLogin {
+                    access: LoginAccess::file(marker),
+                    credential,
+                    bytes,
+                });
+            }
+            match login {
+                // The pass read the Keychain for every session of the profile.
+                PassLogin::Keychain { read, access } => {
+                    let (credential, bytes) =
+                        read.as_ref().clone().map_err(|error| anyhow!("{error}"))?;
+                    Ok(CanonicalLogin {
+                        access: access.clone(),
+                        credential,
+                        bytes,
+                    })
                 }
-            } else {
-                read_credential_file(target.harness, &path)?
-            };
-            Ok(CanonicalLogin {
-                path,
-                credential,
-                bytes,
-            })
+                PassLogin::PerSession => {
+                    let marker =
+                        harness_authentication_marker(target.harness, &target.profile_home);
+                    let (credential, bytes) = read_credential_file(target.harness, &marker)?;
+                    Ok(CanonicalLogin {
+                        access: LoginAccess::file(marker),
+                        credential,
+                        bytes,
+                    })
+                }
+            }
         };
         Self {
             // A profile without a login file has nothing to read.
@@ -1979,12 +2173,13 @@ pub(super) async fn reconcile_session(
     skills: &Arc<CanonicalSkills>,
     github: &GithubSync,
     aws: &AwsSync,
-    slopcop_login: &HostSlopcopLogin,
+    host: HostLogins<'_>,
     hold: JobHold,
 ) -> Result<Option<SessionSync>> {
-    let mut canonical = SessionCanonical::read(target, skills.clone(), github.clone());
+    let mut canonical =
+        SessionCanonical::read(target, skills.clone(), github.clone(), host.harness);
     canonical.aws = aws.clone();
-    canonical.slopcop_login = slopcop_login.clone();
+    canonical.slopcop_login = host.slopcop.clone();
     run_on_session(relays, target, SyncWork::Full(Box::new(canonical)), hold).await
 }
 
@@ -2123,7 +2318,7 @@ pub(super) async fn reconcile_on(
                 match reconcile_credentials(
                     client,
                     target,
-                    &login.path,
+                    &login.access,
                     &login.credential,
                     &login.bytes,
                     actions,
@@ -2409,7 +2604,7 @@ impl RelayConnectionJob for CredentialSyncJob {
 pub(super) async fn reconcile_credentials(
     client: &mut RelayClient,
     target: &CredentialSyncTarget,
-    canonical_path: &Path,
+    access: &LoginAccess,
     canonical: &CredentialSnapshot,
     canonical_bytes: &[u8],
     actions: &mut Vec<CredentialSyncAction>,
@@ -2427,11 +2622,25 @@ pub(super) async fn reconcile_credentials(
         }
         return Ok(None);
     }
+    let kind = target.harness;
     let mut current = canonical.clone();
     let mut bytes = canonical_bytes.to_owned();
     let mut unchanged = true;
     loop {
-        match reconcile(&current, &session) {
+        // What the session should hold: the profile's login, as a harness may
+        // hold it. For Claude that omits the refresh token, so the copy can
+        // never spend the grant the daemon alone refreshes (#1490).
+        let desired_bytes = if kind.copies_omit_refresh_token() {
+            credential_copy_for_harness(kind, &bytes).into_owned()
+        } else {
+            bytes.clone()
+        };
+        let desired = if current.present {
+            CredentialSnapshot::of(kind, &desired_bytes)
+        } else {
+            CredentialSnapshot::absent()
+        };
+        match session_copy_action(kind, &current, &desired, &session) {
             SyncAction::None => {
                 if current.present
                     && session.present
@@ -2447,17 +2656,34 @@ pub(super) async fn reconcile_credentials(
                 }
                 // Only this original, identical snapshot can identify the login
                 // the failing session held. A concurrent refresh is not evidence
-                // that the newly observed login was refused.
+                // that the newly observed login was refused. A copy without the
+                // refresh token holds the same login.
                 return Ok((unchanged
                     && current.present
                     && session.present
-                    && current.fingerprint == session.fingerprint)
+                    && session.fingerprint == desired.fingerprint)
                     .then_some(current));
             }
             SyncAction::Push => {
-                let installed = client.install_credentials(&bytes).await?;
-                if installed.present && installed.fingerprint == current.fingerprint {
+                let installed = client.install_credentials(&desired_bytes).await?;
+                if installed.present && installed.fingerprint == desired.fingerprint {
+                    log_credential_transfer("pushed", target, &session, &installed);
                     actions.push(CredentialSyncAction::Pushed);
+                    return Ok(None);
+                }
+                if kind.copies_omit_refresh_token()
+                    && installed == session
+                    && installed.freshness_epoch_ms == desired.freshness_epoch_ms
+                {
+                    // A worker that predates the same-expiry delivery rule
+                    // keeps the copy it has. It converges when the next
+                    // refresh moves the profile's expiry forward, which that
+                    // worker does accept.
+                    tracing::debug!(
+                        session_id = %target.session_id,
+                        profile_id = %target.profile_id,
+                        "the session's worker keeps its same-expiry credential copy; it will take the next refresh"
+                    );
                     return Ok(None);
                 }
                 anyhow::ensure!(
@@ -2469,47 +2695,112 @@ pub(super) async fn reconcile_credentials(
             }
             SyncAction::Pull => {
                 let received = client.read_credentials().await?;
-                validate_credential_payload(target.harness, &received).with_context(|| {
+                validate_credential_payload(kind, &received).with_context(|| {
                     format!(
                         "session {} returned an unusable credential file",
                         target.session_id
                     )
                 })?;
-                let incoming = CredentialSnapshot::of(target.harness, &received);
-                let installed = mj_core::credentials::install_credentials_if_newer(
-                    target.harness,
-                    canonical_path,
-                    &received,
-                )
-                .await
-                .with_context(|| {
-                    format!(
-                        "install fresher credentials from session {} for profile {}",
-                        target.session_id, target.profile_id
-                    )
-                })?;
-                if installed.installed {
-                    actions.push(CredentialSyncAction::Pulled);
+                let incoming = CredentialSnapshot::of(kind, &received);
+                // A copy without the refresh token cannot become the
+                // profile's login, however late it expires, nor bring back a
+                // login the host no longer has (a logout).
+                if kind.copies_omit_refresh_token()
+                    && !credential_holds_refresh_token(kind, &received)
+                {
+                    tracing::debug!(
+                        session_id = %target.session_id,
+                        profile_id = %target.profile_id,
+                        "the session's credential copy expires later but holds no refresh token; leaving both alone"
+                    );
                     return Ok(None);
                 }
-                anyhow::ensure!(
-                    installed.snapshot != current || incoming != session,
-                    "profile {} retained its credentials without accepting the newer session login or observing a changed snapshot",
-                    target.profile_id
-                );
-                session = incoming;
+                // Into where the profile's login is kept: its file, or on a
+                // Mac the Keychain (#1491 review: a session that refreshed
+                // the shared grant holds the only live refresh token).
+                let installed = access
+                    .install_if_newer(kind, &received)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "install fresher credentials from session {} for profile {}",
+                            target.session_id, target.profile_id
+                        )
+                    })?;
+                if installed.installed {
+                    log_credential_transfer("pulled", target, &current, &installed.snapshot);
+                    actions.push(CredentialSyncAction::Pulled);
+                    if !kind.copies_omit_refresh_token() {
+                        return Ok(None);
+                    }
+                    // The adopted login still sits in the session with its
+                    // refresh token: fall through to reread the profile and
+                    // push the copy without it back.
+                } else {
+                    anyhow::ensure!(
+                        installed.snapshot != current || incoming != session,
+                        "profile {} retained its credentials without accepting the newer session login or observing a changed snapshot",
+                        target.profile_id
+                    );
+                    session = incoming;
+                }
             }
         }
         // A destination retained a different generation. Reconcile that actual
         // state now, rather than turning a stale decision into a clean check.
         // Every repeat follows a changed snapshot; no lock spans relay I/O.
         unchanged = false;
-        let path = canonical_path.to_owned();
-        let kind = target.harness;
-        (current, bytes) = tokio::task::spawn_blocking(move || read_credential_file(kind, &path))
-            .await
-            .context("reread profile credentials task stopped")??;
+        (current, bytes) = access.read_blocking(kind).await?;
     }
+}
+
+/// Which way a session's copy and the profile's login converge. `desired` is
+/// the profile's login as the session may hold it.
+///
+/// A harness whose copies omit the refresh token never lets a copy replace the
+/// profile unless it is strictly newer (it carries its own login): a copy that
+/// merely expires later has no refresh token to adopt. Otherwise the session
+/// is pushed whenever it differs from `desired`, so a copy staged before that
+/// rule, which still holds the refresh token, converges at the same expiry.
+fn session_copy_action(
+    kind: mj_core::config::HarnessKind,
+    canonical: &CredentialSnapshot,
+    desired: &CredentialSnapshot,
+    session: &CredentialSnapshot,
+) -> SyncAction {
+    let action = reconcile(canonical, session);
+    if !kind.copies_omit_refresh_token() || action == SyncAction::Pull {
+        return action;
+    }
+    if !canonical.present {
+        return action;
+    }
+    if !session.present {
+        return SyncAction::Push;
+    }
+    if session.fingerprint == desired.fingerprint
+        || (canonical.freshness_epoch_ms.is_none() && session.freshness_epoch_ms.is_none())
+    {
+        return SyncAction::None;
+    }
+    SyncAction::Push
+}
+
+/// Record which way a login moved, never its bytes.
+fn log_credential_transfer(
+    direction: &str,
+    target: &CredentialSyncTarget,
+    old: &CredentialSnapshot,
+    new: &CredentialSnapshot,
+) {
+    tracing::info!(
+        direction,
+        profile_id = %target.profile_id,
+        session_id = %target.session_id,
+        old_expires_at_ms = ?old.freshness_epoch_ms,
+        new_expires_at_ms = ?new.freshness_epoch_ms,
+        "synchronized a harness login"
+    );
 }
 
 /// The export of a profile with no logins.

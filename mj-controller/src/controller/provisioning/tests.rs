@@ -336,9 +336,9 @@ fn credential_free_container_creation_omits_runtime_token_environment() {
     assert!(run_args.iter().all(|arg| !arg.contains("runtime-secret")));
     assert!(run_args.iter().any(|arg| arg == "NON_SECRET_SETTING=keep"));
     for command in &plan.commands {
-        let input = command.to_node_run(false).sensitive_stdin;
+        let input = command.sensitive_stdin();
         if command.purpose.starts_with("clone ") {
-            assert_eq!(input.as_deref(), Some(b"checkout-secret\n".as_slice()));
+            assert_eq!(input, Some(b"checkout-secret\n".as_slice()));
         } else {
             assert!(input.is_none());
         }
@@ -572,11 +572,11 @@ fn subagent_placement_failure_keeps_unverifiable_cleanup_pending() {
     // recorded: the parent's container with no owner, which no child can
     // verify.
     let record = controller.state.sessions.get_mut(&child_id).unwrap();
-    record.target = Some(mj_core::state::TargetLocator::SshDocker {
+    record.target = Some(Box::new(mj_core::state::TargetLocator::SshDocker {
         host: "builder".into(),
         container_id: targets::resource_name("0123456789abcdef0123456789abcdef").unwrap(),
         borrowed_from: None,
-    });
+    }));
     crate::database::save_lifecycle_session(record).unwrap();
 
     let executor = RecordingExecutor::succeeding();
@@ -765,18 +765,18 @@ fn startup_cleanup_fixture() -> (Controller, String) {
     config.save().unwrap();
     let mut parent = crate::controller::test_support::checkpoint_test_session(PROVISIONED_SESSION);
     parent.project_directory = Some(mj_core::config::data_dir());
-    parent.target = Some(TargetLocator::LocalBare {
+    parent.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: mj_core::config::data_dir().join(PROVISIONED_SESSION),
-    });
+    }));
     crate::database::save_session(&parent).unwrap();
     let child_id = "fedcba9876543210fedcba9876543210";
     let mut child = crate::controller::test_support::checkpoint_test_session(child_id);
     child.state = SessionState::StartupCleanup;
     child.last_error = Some("fixture launch failed".into());
     child.project_directory = Some(mj_core::config::data_dir());
-    child.target = Some(TargetLocator::LocalBare {
+    child.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: mj_core::config::data_dir().join(child_id),
-    });
+    }));
     crate::database::save_subagent_session(
         &child,
         &mj_core::subagent::SubagentRecord {
@@ -916,6 +916,7 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
     let mut session = SessionRecord {
         oracle_choice: None,
         oracle: true,
+        notifications_ignored: false,
         project: None,
         target_runtime: Some((&serde_json::from_str::<TargetTemplate>(
             r#"{"kind":"ssh-bare","host":"builder","user":"original","permissions":"yolo","workspace_prefix":"workspaces"}"#
@@ -930,8 +931,6 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
         create_managed_worktree: None,
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
-        container_cpus: None,
-        container_memory: None,
         id: session_id.into(),
         title: "new session".into(),
         harness_kind: mj_core::config::HarnessKind::Kimi,
@@ -947,11 +946,11 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
         resource_allocation: None,
         additional_mounts: Vec::new(),
         state: SessionState::Disconnected,
-        target: Some(TargetLocator::SshBare {
+        target: Some(Box::new(TargetLocator::SshBare {
             host: "builder".into(),
             workspace: format!(".local/share/hel/workspaces/{session_id}").into(),
             worker_id: None,
-        }),
+        })),
         native_session_id: None,
         acp_session_title: None,
         session_title_override: None,
@@ -960,6 +959,8 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
         viewed_through_event_ordinal: 0,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+            failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: None,
     };
@@ -1146,13 +1147,13 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
     }
     let checkout = PathBuf::from("/srv/project/.mj/clones").join(&session_id);
     let record = controller.state.sessions.get_mut(&session_id).unwrap();
-    record.target = Some(TargetLocator::SshBare {
+    record.target = Some(Box::new(TargetLocator::SshBare {
         host: "builder".into(),
         workspace: format!(".local/share/hel/workspaces/{session_id}").into(),
         worker_id: None,
-    });
+    }));
     record.project_directory = Some(checkout.clone());
-    record.managed_worktree = Some(mj_core::state::ManagedWorktree {
+    record.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
         kind: mj_core::state::ManagedCheckoutKind::Clone,
         source_project_directory: "/srv/project".into(),
         source_repository: "/srv/project".into(),
@@ -1160,7 +1161,7 @@ fn a_failed_launch_is_recorded_before_its_target_is_removed() {
         branch: "main".into(),
         target: mj_core::state::ManagedWorktreeTarget::Local,
         base_commit: None,
-    });
+    }));
     controller.persist_session_state(&session_id).unwrap();
     let refused = RefuseStop(Mutex::new(0));
     controller

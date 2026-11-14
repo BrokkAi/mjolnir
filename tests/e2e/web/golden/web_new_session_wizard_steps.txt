@@ -22,7 +22,7 @@ Step 2 of 3 · Project
 Choose an existing directory. Review whether to create an isolated clone before launching.
 
 Recent projects on this host
-
+Choose a recent project…
 /work/a
 Project files
 
@@ -32,7 +32,7 @@ Browse folders
 Back
 Next
 Cancel
-controls: [{"tag":"button","id":null,"label":"/work/a","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-directory","label":null,"value":"/work/a","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-browse","label":"Browse folders","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"select","id":"new-recent-project","label":"Choose a recent project…\n/work/a","value":"/work/a","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-directory","label":null,"value":"/work/a","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-browse","label":"Browse folders","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 0
 project creation requests: 0
 === one profile omits Account but keeps Where to run: Step 3 of 3 · Review (390x844) ===
@@ -104,7 +104,7 @@ Step 3 of 4 · Project
 Choose an existing directory. Review whether to create an isolated clone before launching.
 
 Recent projects on this host
-
+Choose a recent project…
 /work/a
 Project files
 
@@ -114,7 +114,7 @@ Browse folders
 Back
 Next
 Cancel
-controls: [{"tag":"button","id":null,"label":"/work/a","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-directory","label":null,"value":"/work/a","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-browse","label":"Browse folders","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"select","id":"new-recent-project","label":"Choose a recent project…\n/work/a","value":"/work/a","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-directory","label":null,"value":"/work/a","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-browse","label":"Browse folders","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 0
 project creation requests: 0
 === several profiles keep Account: Step 4 of 4 · Review (390x844) ===
@@ -170,7 +170,7 @@ Step 2 of 3 · Project
 Choose an existing directory. Review whether to create an isolated clone before launching.
 
 Recent projects on this host
-
+Choose a recent project…
 /work/a
 Project files
 
@@ -180,7 +180,7 @@ Browse folders
 Back
 Next
 Cancel
-controls: [{"tag":"button","id":null,"label":"/work/a","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-directory","label":null,"value":"/work/a","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-browse","label":"Browse folders","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"select","id":"new-recent-project","label":"Choose a recent project…\n/work/a","value":"/work/a","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-directory","label":null,"value":"/work/a","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-browse","label":"Browse folders","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 0
 project creation requests: 0
 === only usable raw target omits Where to run: Step 3 of 3 · Review (390x844) ===
@@ -252,7 +252,7 @@ Step 3 of 4 · Project
 Choose an existing directory. Review whether to create an isolated clone before launching.
 
 Recent projects on this host
-
+Choose a recent project…
 /work/a
 Project files
 
@@ -262,7 +262,7 @@ Browse folders
 Back
 Next
 Cancel
-controls: [{"tag":"button","id":null,"label":"/work/a","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-directory","label":null,"value":"/work/a","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-browse","label":"Browse folders","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
+controls: [{"tag":"select","id":"new-recent-project","label":"Choose a recent project…\n/work/a","value":"/work/a","checked":null,"disabled":false,"pressed":null},{"tag":"input","id":"new-project-directory","label":null,"value":"/work/a","checked":false,"disabled":false,"pressed":null},{"tag":"button","id":"new-project-browse","label":"Browse folders","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 0
 project creation requests: 0
 === unknown target remains offered: Step 4 of 4 · Review (390x844) ===

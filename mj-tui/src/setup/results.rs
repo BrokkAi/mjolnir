@@ -315,6 +315,7 @@ impl DashboardState {
                 let SetupDetection {
                     scope,
                     config,
+                    profile_readiness,
                     mut rejected_runtimes,
                     machines,
                 } = detection;
@@ -428,6 +429,13 @@ impl DashboardState {
                     &added,
                     &rejected_runtimes,
                 ));
+                for (id, missing) in profile_readiness {
+                    if let Some(reason) = missing
+                        && let Some(notice) = &mut dialog.notice
+                    {
+                        notice.push_str(&format!(" {id}: {reason}"));
+                    }
+                }
                 // A runtimes run replaces the Detection results view's blocks;
                 // a profiles run says nothing about runtimes, so it leaves the
                 // last report alone until Settings closes.

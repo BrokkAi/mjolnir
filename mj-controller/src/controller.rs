@@ -5,6 +5,7 @@ mod cache_host;
 pub(crate) mod checkpoint;
 mod container_upgrade;
 mod environment;
+pub(crate) use environment::StoppedWorker;
 mod git_cache;
 mod github_app;
 mod lifecycle;
@@ -83,8 +84,8 @@ pub(crate) use backend::backend_locator;
 pub(crate) use backend::controller_github_token;
 pub use backend::image_refresh_plan;
 pub(crate) use backend::validate_resource_allocation;
-pub use backend::wait_for_ec2_ssh;
 pub(crate) use backend::{LocalEngineReadiness, is_missing_command, local_engine_readiness};
+pub use backend::{wait_for_ec2_reboot, wait_for_ec2_ssh};
 pub use github_app::GithubBundleSelectionError;
 pub(crate) use github_app::{
     GithubAppTokenProvider, github_token_for_session, install_configured_session_github_token,
@@ -119,6 +120,7 @@ pub use resume::{
     raw_conversion_preview_for,
 };
 pub use subagents::{RegisterSubagentRequest, stopped_subagent, subagent_has_handed_back};
+pub(crate) use worker_binary::ensure_microvm_engine;
 pub use worker_binary::{
     WorkerBinaryAvailability, native_worker_binary_prerequisite, pin_worker_binary_sources,
     ssh_worker_binary_prerequisite, warm_worker_binary_sources,
@@ -466,12 +468,11 @@ fn interpret_repository_source(source: &str) -> Result<InterpretedRepositorySour
     let expanded = mj_core::path_input::expand_local(Path::new(source))?;
     let candidate = expanded.as_path();
     if candidate.exists() {
+        // Local Git reads only; like `root_identity`, they get no deadline.
         let resolved = mj_core::repository::resolve_directory(
             candidate,
             None,
-            &mj_core::targets::CancellableProcessExecutor::with_timeout(
-                std::time::Duration::from_secs(8),
-            ),
+            &mj_core::targets::ProcessExecutor,
         )?;
         let identity = resolved.identity;
         let name = identity.name();
@@ -613,6 +614,7 @@ pub struct SessionLaunchOptions {
     pub session_title_override: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct SessionResumeOptions {
     pub additional_mounts: Option<Vec<AdditionalMount>>,
     pub resource_allocation: Option<SessionResourceAllocation>,
@@ -782,7 +784,8 @@ impl Controller {
                 .with_context(|| format!("inspect resource source {}", source.display()))?,
             TargetTemplate::SshPodman { ssh, .. }
             | TargetTemplate::SshDocker { ssh, .. }
-            | TargetTemplate::SshAppleContainer { ssh, .. } => {
+            | TargetTemplate::SshAppleContainer { ssh, .. }
+            | TargetTemplate::SshNitro { ssh, .. } => {
                 targets::ssh_directory_exists(&SshTarget::from(ssh), source, executor)?
             }
             TargetTemplate::LocalBare | TargetTemplate::SshBare { .. } => {
@@ -840,7 +843,7 @@ impl Controller {
         &mut self,
         session_id: &str,
         error: anyhow::Error,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
     ) -> Result<anyhow::Error> {
         let original = provisioning::note_new_session_launch_failure(session_id, &error);
         let cleanup_error = self
@@ -1093,20 +1096,19 @@ impl Controller {
             oracle_notice = Some(mj_core::state::ORACLE_UNAVAILABLE_NOTICE.to_owned());
         }
         let record = SessionRecord {
-            oracle_choice,
+            oracle_choice: oracle_choice.map(Box::new),
             oracle: oracle_enabled,
-            project,
+            notifications_ignored: false,
+            project: project.map(std::sync::Arc::new),
             target_runtime: Some(template.into()),
             build_cache: None,
             create_managed_worktree,
             launch_base,
             launch_branch,
-            checkout,
+            checkout: checkout.map(Box::new),
             publication: None,
             subagents: Some(subagents),
             archived: false,
-            container_cpus: None,
-            container_memory: None,
             // Recorded for every new session, container-backed or not, so a
             // later move into a container already knows the path its checkout
             // will occupy. Only sessions that predate per-session container
@@ -1120,7 +1122,7 @@ impl Controller {
             bundle_id,
             project_directory,
             managed_worktree: None,
-            review,
+            review: review.map(Box::new),
             no_project_memory,
             no_github_events,
             no_github_credentials: no_github_credentials || !self.config.github.session_credentials,
@@ -1137,6 +1139,8 @@ impl Controller {
             viewed_through_event_ordinal: 0,
             draft_input: initial_prompt.unwrap_or_default(),
             last_error: None,
+            dismissed_failure: None,
+            failure_generation: 0,
             last_checkpoint_error: None,
             checkpoint: None,
         };
@@ -1200,6 +1204,27 @@ impl Controller {
         record.session_title_override = Some(title.clone());
         record.updated_at = updated_at;
         Ok(title)
+    }
+
+    /// Change only whether the session raises notifications. Archiving-style
+    /// display preference: the durable write and the in-memory record move
+    /// together, and nothing else about the session is rewritten.
+    pub fn set_session_notifications_ignored(
+        &mut self,
+        session_id: &str,
+        ignored: bool,
+    ) -> Result<()> {
+        ensure!(
+            self.state.sessions.contains_key(session_id),
+            "unknown session {session_id}"
+        );
+        crate::database::set_session_notifications_ignored(session_id, ignored)?;
+        self.state
+            .sessions
+            .get_mut(session_id)
+            .expect("session was checked before updating its flag")
+            .notifications_ignored = ignored;
+        Ok(())
     }
 
     /// Move a session, and the sub-agents under it, to another workspace.
@@ -1466,8 +1491,7 @@ impl Controller {
     pub fn update_session_container_settings(
         &mut self,
         session_id: &str,
-        cpus: Option<String>,
-        memory: Option<String>,
+        resource_allocation: Option<SessionResourceAllocation>,
         additional_mounts: Vec<targets::AdditionalMount>,
         mount_history: Vec<std::path::PathBuf>,
         executor: &impl CommandExecutor,
@@ -1493,13 +1517,21 @@ impl Controller {
             }
             self.validate_mount_source(&session.target_template_id, &mount.source, executor)?;
         }
-        let cpus = cpus.filter(|value| !value.trim().is_empty());
-        let memory = memory.filter(|value| !value.trim().is_empty());
+        let template = self
+            .config
+            .targets
+            .get(&session.target_template_id)
+            .context("session target template is missing")?;
+        backend::validate_resource_allocation(template, resource_allocation.as_ref())?;
+        if resource_allocation != session.resource_allocation
+            && let Some(allocation) = &resource_allocation
+        {
+            allocation.validate_minimum_useful_container()?;
+        }
         let updated_at = now();
         crate::database::set_session_container_settings(
             session_id,
-            cpus.as_deref(),
-            memory.as_deref(),
+            resource_allocation.as_ref(),
             &additional_mounts,
             &updated_at,
         )?;
@@ -1526,8 +1558,7 @@ impl Controller {
             .sessions
             .get_mut(session_id)
             .expect("session was checked before updating its container settings");
-        record.container_cpus = cpus;
-        record.container_memory = memory;
+        record.resource_allocation = resource_allocation;
         record.additional_mounts = additional_mounts;
         record.updated_at = updated_at;
         Ok(())
@@ -1632,7 +1663,8 @@ pub(super) fn removable_profile_root(
         | targets::TargetLocator::AppleContainer { .. }
         | targets::TargetLocator::SshPodman { .. }
         | targets::TargetLocator::SshDocker { .. }
-        | targets::TargetLocator::SshAppleContainer { .. } => {
+        | targets::TargetLocator::SshAppleContainer { .. }
+        | targets::TargetLocator::SshNitro { .. } => {
             format!("/var/lib/hel/profiles/{session_id}")
         }
         targets::TargetLocator::AwsEc2 { .. } | targets::TargetLocator::SshBare { .. } => {
@@ -1764,3 +1796,6 @@ pub fn config_only_controller(config: Config) -> Controller {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use mbx::install::MBX_TEST_RELEASE_URL;

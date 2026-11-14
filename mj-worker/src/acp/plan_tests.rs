@@ -563,7 +563,7 @@ fn claude_plan_approval_selects_the_deployment_mode_without_clearing_context() {
                     &request,
                     implement(),
                     HarnessKind::Claude,
-                    policy,
+                    HarnessKind::Claude.execution_enforcement(policy),
                 )
                 .unwrap() else {
                     panic!("offered mode must be selected directly");
@@ -589,7 +589,7 @@ fn claude_missing_auto_is_an_error_and_missing_bypass_requires_a_continuation() 
             &request,
             implement(),
             HarnessKind::Claude,
-            ExecutionPolicy::ConfiguredApprovals
+            HarnessKind::Claude.execution_enforcement(ExecutionPolicy::ConfiguredApprovals)
         )
         .err()
         .unwrap()
@@ -601,7 +601,7 @@ fn claude_missing_auto_is_an_error_and_missing_bypass_requires_a_continuation() 
             &request,
             implement(),
             HarnessKind::Claude,
-            ExecutionPolicy::Unconstrained
+            HarnessKind::Claude.execution_enforcement(ExecutionPolicy::Unconstrained)
         )
         .unwrap(),
         PlanPermissionAnswer::ContinueInBypass
@@ -610,7 +610,7 @@ fn claude_missing_auto_is_an_error_and_missing_bypass_requires_a_continuation() 
         &request,
         ElicitationResponse::Decline,
         HarnessKind::Claude,
-        ExecutionPolicy::Unconstrained,
+        HarnessKind::Claude.execution_enforcement(ExecutionPolicy::Unconstrained),
     )
     .unwrap() else {
         panic!("decline is native")
@@ -692,6 +692,7 @@ impl PlanProbe {
         let spec = LaunchSpec {
             operator_away: Default::default(),
             imported_logins: None,
+            login_identity: Default::default(),
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             managed_subagent,
@@ -712,14 +713,13 @@ impl PlanProbe {
             initial_model: None,
             harness,
             execution_policy: policy,
+            claude_permission_mode: Default::default(),
+            observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock: StepClock::default(),
             tools_in_flight: Default::default(),
             turn_context: Default::default(),
-            verdict: Some(crate::acp::VerdictSource::Direct {
-                key: String::new(),
-                endpoint: String::new(),
-            }),
+            verdict: Some(crate::acp::VerdictSource::Disabled),
             stall_policy: None,
         };
         let operator_away = spec.operator_away.clone();
@@ -772,18 +772,26 @@ impl PlanProbe {
         }
         let new = probe.message().await;
         assert_eq!(new["method"], "session/new");
+        // Hard-won: 49d62f2d8: the all-harness fixture omitted Antigravity's default mode.
         probe
             .result(
                 &new,
                 if legacy_modes {
+                    let mut modes = json!([
+                        {"id": "plan", "name": "Plan"}, {"id": "auto", "name": "Auto"},
+                        {"id": "bypassPermissions", "name": "Bypass"},
+                        {"id": "agent", "name": "Agent"},
+                        {"id": "agent-full-access", "name": "Full access"},
+                        {"id": "allowAll", "name": "Allow all"}
+                    ]);
+                    if harness == HarnessKind::Antigravity {
+                        modes
+                            .as_array_mut()
+                            .unwrap()
+                            .push(json!({"id": "default", "name": "Default"}));
+                    }
                     json!({"sessionId": "plan-session", "configOptions": options.clone(), "modes": {
-                        "currentModeId": "plan", "availableModes": [
-                            {"id": "plan", "name": "Plan"}, {"id": "auto", "name": "Auto"},
-                            {"id": "bypassPermissions", "name": "Bypass"},
-                            {"id": "agent", "name": "Agent"},
-                            {"id": "agent-full-access", "name": "Full access"},
-                            {"id": "allowAll", "name": "Allow all"}
-                        ]
+                        "currentModeId": "plan", "availableModes": modes
                     }})
                 } else {
                     json!({"sessionId": "plan-session", "configOptions": options.clone()})
@@ -1916,11 +1924,15 @@ fn bridge_exit_plan_request(policy: ExecutionPolicy, plan: bool) -> Value {
 
 fn offered(request: &Value, policy: ExecutionPolicy) -> Vec<(String, String)> {
     let request: RequestPermissionRequest = serde_json::from_value(request.clone()).unwrap();
-    permission_choices(&request, HarnessKind::Claude, policy)
-        .choices
-        .into_iter()
-        .map(|choice| (choice.option_id.to_string(), choice.title))
-        .collect()
+    permission_choices(
+        &request,
+        HarnessKind::Claude,
+        HarnessKind::Claude.execution_enforcement(policy),
+    )
+    .choices
+    .into_iter()
+    .map(|choice| (choice.option_id.to_string(), choice.title))
+    .collect()
 }
 
 fn pairs(expected: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -2702,7 +2714,7 @@ fn gh_permission_security_boundary() {
         (json!({"command":["gh-evil","issue"]}), false),
         (json!({"command":"gh"}), true),
         (json!({"command":"gh issue view 123"}), true),
-        // DSH v0.5.0 run_command forwards executable and args unchanged.
+        // DSH v0.6.0 run_command forwards executable and args unchanged.
         (
             json!({"command":"gh", "args":["issue", "view", "123"]}),
             true,

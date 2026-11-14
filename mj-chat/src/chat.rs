@@ -265,6 +265,12 @@ pub enum ChatAction {
     OpenSubagents,
     OpenReviewers,
     Prompt(String),
+    ResendSubmission {
+        command_id: String,
+    },
+    DismissSubmission {
+        command_id: String,
+    },
     RunShell(String),
     RemoveQueuedPrompt {
         id: String,
@@ -1068,6 +1074,9 @@ impl ChatState {
                 self.unconverted_prefix,
                 std::mem::take(&mut self.entries),
             );
+            if self.has_inline_submissions() {
+                self.sync_inline_submissions();
+            }
             // Reusing entry rows is safe only after the collapse topology is
             // recomputed. A tool can become completed without changing the
             // transcript length, joining or splitting a collapsed streak.

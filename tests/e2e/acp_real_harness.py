@@ -260,7 +260,10 @@ repositories = [{{ id = "fixture", github = {quote(args.repository)}, destinatio
         self.cli("workspaces", "create", "acp-test", "--json")
         info = self.cli("api-info", "--json")
         self.base_url = info["base_url"]
-        self.token = Path(info["token_path"]).read_text().strip()
+        token = subprocess.run(self.command("api-token"), env=self.env, capture_output=True,
+                               text=True, timeout=self.timeout)
+        assert token.returncode == 0, token.stderr
+        self.token = token.stdout.strip()
         for case in ("complete", "cancel", "consumer-death"):
             client = Client(self, case)
             session = client.new_session()

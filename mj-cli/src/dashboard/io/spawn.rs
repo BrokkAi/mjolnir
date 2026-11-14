@@ -401,61 +401,30 @@ pub(crate) fn spawn_first_run_setup(
             // The daemon owns its configuration and its environment. In
             // container placement this discovery runs inside the container,
             // not against the client's host home.
-            let (summary, errors) = mj_core::runtime::block_on(async {
+            mj_core::runtime::block_on(async {
                 let mut daemon = crate::daemon::connect_or_start().await?;
-                let summary = daemon.run_first_run_setup().await?;
-                let errors = if summary.is_some() {
-                    daemon.run_doctor().await?
-                } else {
-                    Vec::new()
+                // An existing installation picks up agents installed since its
+                // last launch through the startup availability check.
+                let Some(summary) = daemon.run_first_run_setup().await? else {
+                    return Ok(None);
                 };
-                Ok::<_, anyhow::Error>((summary, errors))
-            })??;
-            // An existing installation picks up agents installed since its
-            // last launch through the startup availability check.
-            let Some(summary) = summary else {
-                return Ok(None);
-            };
-            report(
-                "first-run setup",
-                &progress,
-                DashboardIoUpdate::FirstRunConfigured(summary),
-            );
-            Ok(Some(errors))
+                report(
+                    "first-run setup",
+                    &progress,
+                    DashboardIoUpdate::FirstRunConfigured(summary),
+                );
+                // Setup is saved by now. A daemon handoff abandons the check,
+                // so its failure is reported as a check, not as failed setup.
+                let errors = daemon.run_doctor().await.unwrap_or_else(|error| {
+                    vec![format!(
+                        "Could not check prerequisites: {error:#}. Run `mj doctor` to check them."
+                    )]
+                });
+                Ok::<_, anyhow::Error>(Some(errors))
+            })?
         },
         DashboardIoUpdate::FirstRunChecked,
     )
-}
-
-/// What probing one machine found, as the dashboard reports it.
-fn machine_runtime_probe(probe: mj_controller::setup::MachineProbe) -> mj_tui::MachineRuntimeProbe {
-    use mj_controller::setup::MachineProbeOutcome;
-    let finding = match &probe.outcome {
-        MachineProbeOutcome::Answered(_) => mj_tui::MachineFinding::Answered {
-            runtimes: probe.runtimes(),
-            rejected: probe
-                .rejected()
-                .map(|runtime| RejectedRuntime {
-                    kind: runtime.kind.name().to_owned(),
-                    label: runtime.kind.label().to_owned(),
-                    detail: runtime.detail.clone(),
-                    remediation: runtime.remediation.clone(),
-                })
-                .collect(),
-        },
-        MachineProbeOutcome::Unreachable {
-            detail,
-            remediation,
-        } => mj_tui::MachineFinding::Unreachable {
-            detail: detail.clone(),
-            remediation: remediation.clone(),
-        },
-    };
-    mj_tui::MachineRuntimeProbe {
-        machine_id: probe.machine_id,
-        machine: probe.machine,
-        finding,
-    }
 }
 
 /// Check what is there and add what is new, off the event loop: this
@@ -470,48 +439,12 @@ pub(crate) fn spawn_availability_check(
         tracker,
         "checking what is available",
         updates,
-        move |cancelled| {
-            use mj_controller::setup::{self, DEFAULT_IMAGE};
-            // Only quitting stops the check. A host that runs out the
-            // deadline fails its own probe; every other answer still lands.
-            let quit = cancelled.clone();
-            let executor =
-                CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(60));
-            let report =
-                setup::check_availability(&mj_core::config::config_path(), &executor, &|| {
-                    quit.load(std::sync::atomic::Ordering::Acquire)
-                })?;
-            let path = std::env::var_os("PATH");
-            let local = report
-                .local
-                .into_iter()
-                .map(|runtime| {
-                    let (_, template) = setup::local_runtime_target(runtime.kind, DEFAULT_IMAGE);
-                    let installed = mj_controller::targets::local_engine_command(&template)
-                        .is_some_and(|engine| {
-                            mj_controller::targets::program_on_path(engine, path.as_deref())
-                        });
-                    let missing = (!runtime.usable()).then(|| match runtime.remediation {
-                        Some(fix) => format!("{} {fix}", runtime.detail.trim()),
-                        None => runtime.detail,
-                    });
-                    (
-                        runtime.kind.name().to_owned(),
-                        mj_tui::LocalEngine { missing, installed },
-                    )
-                })
-                .collect();
-            Ok(mj_tui::AvailabilityChecked {
-                profiles: report.profiles,
-                local,
-                machines: report
-                    .machines
-                    .into_iter()
-                    .map(machine_runtime_probe)
-                    .collect(),
-                added_profiles: report.added_profiles,
-                added_runtimes: report.added_runtimes,
-            })
+        move |cancelled| match machine_request(
+            mj_client::daemon::DaemonAction::CheckAvailability,
+            cancelled,
+        )? {
+            mj_client::daemon::DaemonReply::Availability(report) => Ok(report),
+            _ => anyhow::bail!("daemon returned an unexpected availability reply"),
         },
         move |result| DashboardIoUpdate::AvailabilityChecked { generation, result },
     )
@@ -520,17 +453,17 @@ pub(crate) fn spawn_availability_check(
 /// Read saved-profile sign-in status off the dashboard's loop.
 pub(crate) fn spawn_profile_login_statuses(
     generation: u64,
-    config: Config,
     updates: UnboundedSender<DashboardIoUpdate>,
 ) -> JoinHandle<()> {
     spawn_io(
         "reading profile sign-in status",
         updates,
-        move || {
-            let executor = mj_controller::targets::BoundedProcessExecutor::new(
-                std::time::Duration::from_secs(10),
-            );
-            Ok(mj_controller::profile_login::statuses(&config, &executor))
+        move || match machine_request(
+            mj_client::daemon::DaemonAction::ProfileLoginStatuses,
+            Arc::new(AtomicBool::new(false)),
+        )? {
+            mj_client::daemon::DaemonReply::ProfileLoginStatuses(statuses) => Ok(statuses),
+            _ => anyhow::bail!("daemon returned an unexpected profile login status reply"),
         },
         move |result| DashboardIoUpdate::ProfileLoginStatuses { generation, result },
     )
@@ -550,56 +483,12 @@ pub(crate) fn spawn_setup_discovery(
             DetectScope::Runtimes => "detecting runtimes",
         },
         updates,
-        move |cancelled| {
-            use mj_controller::setup::{self, DEFAULT_IMAGE};
-            let executor =
-                CancellableProcessExecutor::new(cancelled).with_deadline(Duration::from_secs(30));
-            let mut config = Config::default();
-            let mut rejected_runtimes = Vec::new();
-            let mut machine_probes = Vec::new();
-            match scope {
-                DetectScope::Profiles => {
-                    config = setup::profiles_config(&setup::discover_profiles(&executor));
-                    setup::reference_secret_api_keys(&mut config, &mj_core::config::config_path());
-                }
-                DetectScope::Runtimes => {
-                    // The machines are other hosts, probed while this one is.
-                    let (local, machines) = std::thread::scope(|scope| {
-                        let machines = scope.spawn(|| setup::probe_machines(&machines, &executor));
-                        let local = setup::discover_runtimes(&executor);
-                        let machines = machines
-                            .join()
-                            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-                        (local, machines)
-                    });
-                    machine_probes = machines.into_iter().map(machine_runtime_probe).collect();
-                    for runtime in local {
-                        if runtime.usable() {
-                            let (id, target) =
-                                setup::local_runtime_target(runtime.kind, DEFAULT_IMAGE);
-                            config.targets.insert(id.to_owned(), target);
-                        } else {
-                            rejected_runtimes.push(RejectedRuntime {
-                                kind: runtime.kind.name().to_owned(),
-                                label: runtime.kind.label().to_owned(),
-                                detail: runtime.detail,
-                                remediation: runtime.remediation,
-                            });
-                        }
-                    }
-                    #[cfg(unix)]
-                    config.targets.insert(
-                        "localhost".into(),
-                        mj_core::config::TargetTemplate::LocalBare,
-                    );
-                }
-            }
-            Ok(SetupDetection {
-                scope,
-                config,
-                rejected_runtimes,
-                machines: machine_probes,
-            })
+        move |cancelled| match machine_request(
+            mj_client::daemon::DaemonAction::DiscoverSetup { scope, machines },
+            cancelled,
+        )? {
+            mj_client::daemon::DaemonReply::SetupDiscovery(report) => Ok(*report),
+            _ => anyhow::bail!("daemon returned an unexpected discovery reply"),
         },
         move |result| DashboardIoUpdate::SetupDiscovered { generation, result },
     )
@@ -637,6 +526,26 @@ pub(crate) fn spawn_setup_save(
     )
 }
 
+pub(crate) fn spawn_quota_preferences_save(
+    prefer: Vec<String>,
+    updates: UnboundedSender<DashboardIoUpdate>,
+    tracker: CriticalOperationTracker,
+) -> JoinHandle<()> {
+    spawn_critical_async(
+        tracker,
+        "saving load-balancing preferences",
+        updates,
+        SAVE_ACK_TIMEOUT,
+        async move {
+            daemon::connect_or_start()
+                .await?
+                .set_quota_preferences(prefer)
+                .await
+        },
+        move |result| DashboardIoUpdate::QuotaPreferencesSaved { result },
+    )
+}
+
 pub(crate) fn spawn_spinner_style_save(
     style: mj_core::config::SpinnerStyle,
     updates: UnboundedSender<DashboardIoUpdate>,
@@ -647,11 +556,23 @@ pub(crate) fn spawn_spinner_style_save(
         "saving spinner style",
         updates,
         move || {
-            Config::update(|config| {
-                config.spinner = style;
-                Ok(())
-            })
-            .map(|(config, ())| config)
+            mj_core::runtime::block_on(async move {
+                let mut client = daemon::connect_or_start().await?;
+                match client
+                    .request(mj_client::daemon::DaemonAction::SaveSpinnerStyle { style })
+                    .await?
+                {
+                    mj_client::daemon::DaemonReply::Done => {}
+                    reply => anyhow::bail!("unexpected spinner save reply: {reply:?}"),
+                }
+                match client
+                    .request(mj_client::daemon::DaemonAction::Configuration)
+                    .await?
+                {
+                    mj_client::daemon::DaemonReply::Configuration(config) => Ok(*config),
+                    reply => anyhow::bail!("unexpected configuration reply: {reply:?}"),
+                }
+            })?
         },
         |result| DashboardIoUpdate::SpinnerStyleSaved { result },
     )
@@ -686,9 +607,6 @@ pub(crate) fn spawn_project_source_resolution(
     )
 }
 
-/// A controller that answers target questions from configuration alone.
-pub(crate) use mj_controller::controller::config_only_controller;
-
 /// What every session lifecycle operation needs to run off the loop.
 pub(crate) struct LifecycleOperationRequest {
     pub(crate) session_id: String,
@@ -699,14 +617,37 @@ pub(crate) struct LifecycleOperationRequest {
     pub(crate) updates: UnboundedSender<DashboardLifecycleUpdate>,
 }
 
-/// Runs one session lifecycle operation on a blocking task.
-///
-/// Every one of them asks the daemon, which owns lifecycle/recovery
-/// serialization, and answers on the lifecycle channel whatever happens.
+/// Keeps client ownership until the daemon confirms lifecycle admission.
+pub(crate) struct LifecycleSubmission(
+    Arc<std::sync::Mutex<Option<mj_client::operations::CriticalOperationGuard>>>,
+);
+
+impl LifecycleSubmission {
+    pub(crate) async fn submit(
+        self,
+        client: &mut daemon::DaemonClient,
+        request: daemon::SessionLifecycleRequest,
+    ) -> Result<daemon::LifecycleReceipt> {
+        let receipt = client.start_session_lifecycle(request).await?;
+        self.release();
+        Ok(receipt)
+    }
+
+    fn release(&self) {
+        let guard = self
+            .0
+            .lock()
+            .expect("lifecycle submission ownership")
+            .take();
+        drop(guard);
+    }
+}
+
+/// Protect submission, then follow daemon-owned work without holding quit.
 pub(crate) fn spawn_lifecycle_operation(
     request: LifecycleOperationRequest,
     tracker: CriticalOperationTracker,
-    work: impl FnOnce(Arc<AtomicBool>) -> Result<LifecycleSuccess> + Send + 'static,
+    work: impl FnOnce(Arc<AtomicBool>, LifecycleSubmission) -> Result<LifecycleSuccess> + Send + 'static,
 ) {
     let LifecycleOperationRequest {
         session_id,
@@ -715,15 +656,26 @@ pub(crate) fn spawn_lifecycle_operation(
         cancelled,
         updates,
     } = request;
-    let guard = tracker.begin_cancellable(
+    let submission = LifecycleSubmission(Arc::new(std::sync::Mutex::new(Some(tracker.begin(
         format!(
-            "{} session {session_name}",
+            "submitting {} for session {session_name}",
             kind.label().to_ascii_lowercase()
         ),
-        cancelled.clone(),
-    );
-    tokio::task::spawn_blocking(move || {
-        let result = work(cancelled.clone()).map_err(|error| format!("{error:#}"));
+    )))));
+    tokio::spawn(async move {
+        let worker_cancelled = cancelled.clone();
+        // Failed or panicking submission must report its uncertainty before
+        // quit is released; successful submission releases at the receipt.
+        let worker_submission = LifecycleSubmission(Arc::clone(&submission.0));
+        let result =
+            match tokio::task::spawn_blocking(move || work(worker_cancelled, worker_submission))
+                .await
+            {
+                Ok(result) => result.map_err(crate::pollers::DashboardLifecycleFailure::from),
+                Err(error) => Err(crate::pollers::DashboardLifecycleFailure::Failed(format!(
+                    "session lifecycle operation task failed: {error}"
+                ))),
+            };
         report(
             "session lifecycle operation",
             &updates,
@@ -733,7 +685,7 @@ pub(crate) fn spawn_lifecycle_operation(
                 operation: cancelled.clone(),
             },
         );
-        drop(guard);
+        submission.release();
     });
 }
 
@@ -881,6 +833,28 @@ pub(crate) fn spawn_dashboard_rename(
     );
 }
 
+pub(crate) fn spawn_dashboard_notifications_ignored(
+    session_id: String,
+    session_name: &str,
+    ignored: bool,
+    updates: UnboundedSender<DashboardIoUpdate>,
+    tracker: CriticalOperationTracker,
+) {
+    spawn_critical_async(
+        tracker,
+        format!("changing notification setting for {session_name}"),
+        updates,
+        SAVE_ACK_TIMEOUT,
+        async move {
+            daemon::connect_existing()
+                .await?
+                .set_session_notifications_ignored(session_id, ignored)
+                .await
+        },
+        move |result| DashboardIoUpdate::NotificationsIgnored { ignored, result },
+    );
+}
+
 pub(crate) fn spawn_dashboard_change_workspace(
     session_id: String,
     session_name: &str,
@@ -964,8 +938,7 @@ pub(crate) fn spawn_quota_refresh_request(updates: UnboundedSender<DashboardIoUp
 /// What the container editor asks the controller to persist.
 pub(crate) struct ContainerSettingsRequest {
     pub(crate) session_id: String,
-    pub(crate) cpus: Option<String>,
-    pub(crate) memory: Option<String>,
+    pub(crate) resource_allocation: Option<mj_core::state::SessionResourceAllocation>,
     pub(crate) additional_mounts: Vec<mj_controller::targets::AdditionalMount>,
     pub(crate) mount_history: Vec<std::path::PathBuf>,
 }
@@ -985,8 +958,7 @@ pub(crate) fn spawn_dashboard_container_settings(
         async move {
             let ContainerSettingsRequest {
                 session_id,
-                cpus,
-                memory,
+                resource_allocation,
                 additional_mounts,
                 mount_history,
             } = request;
@@ -994,8 +966,7 @@ pub(crate) fn spawn_dashboard_container_settings(
                 .await?
                 .set_session_container_settings(
                     session_id,
-                    cpus,
-                    memory,
+                    resource_allocation,
                     additional_mounts,
                     mount_history,
                 )
@@ -1170,6 +1141,8 @@ pub(crate) fn spawn_imported_session_apply(
         "saving imported session",
         updates,
         move || {
+            // Move the staging guard too: disjoint captures otherwise drop it before upload.
+            let _archive_directory = imported._archive_directory;
             let session = imported
                 .controller
                 .state
@@ -1183,13 +1156,6 @@ pub(crate) fn spawn_imported_session_apply(
                 .get(&session.bundle_id)
                 .cloned()
                 .context("import worker did not return its session bundle")?;
-            persist_imported_session(
-                &session,
-                Some(crate::daemon::ImportedBundle {
-                    bundle_id: session.bundle_id.clone(),
-                    bundle: bundle.clone(),
-                }),
-            )?;
             Ok(ImportedDashboardSessionApply {
                 harness: imported.harness,
                 native_session_id: pending.native_session_id,
@@ -1250,20 +1216,24 @@ pub(crate) fn spawn_checkpoint_archive_size_refresh(
     updates: UnboundedSender<DashboardIoUpdate>,
 ) {
     tokio::task::spawn_blocking(move || {
-        let sizes = targets
-            .iter()
-            .map(|(session_id, path)| {
-                let size = match std::fs::metadata(path) {
-                    Ok(metadata) => Some(metadata.len()),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                    Err(error) => {
-                        tracing::warn!(path = %path.display(), %error, "could not read checkpoint archive size");
-                        None
-                    }
+        let sizes = match machine_request(
+            mj_client::daemon::DaemonAction::CheckpointArchiveSizes {
+                paths: targets.clone(),
+            },
+            Arc::new(AtomicBool::new(false)),
+        ) {
+            Ok(mj_client::daemon::DaemonReply::CheckpointArchiveSizes(sizes)) => sizes,
+            result => {
+                let error = match result {
+                    Err(error) => format!("{error:#}"),
+                    Ok(reply) => format!("unexpected archive size reply: {reply:?}"),
                 };
-                (session_id.clone(), size)
-            })
-            .collect();
+                targets
+                    .keys()
+                    .map(|id| (id.clone(), Err(error.clone())))
+                    .collect()
+            }
+        };
         report(
             "checkpoint archive sizes",
             &updates,
@@ -1306,6 +1276,7 @@ pub(crate) fn spawn_dashboard_create_session(
             target_template_id,
             additional_mounts,
             resource_allocation,
+            carried,
         } = action.clone()
         else {
             return;
@@ -1360,9 +1331,9 @@ pub(crate) fn spawn_dashboard_create_session(
                         remember_launch_choices: true,
                         remember_container_size,
                         review,
-                        no_project_memory: false,
-                        no_github_events: false,
-                        no_github_credentials: false,
+                        no_project_memory: carried.no_project_memory,
+                        no_github_events: carried.no_github_events,
+                        no_github_credentials: carried.no_github_credentials,
                         at: None,
                         branch: None,
                         base: None,
@@ -1444,7 +1415,7 @@ fn follow_daemon_creation(
         Ok::<_, anyhow::Error>(LifecycleSuccess::Created)
     })
     .and_then(|result| result)
-    .map_err(|error| format!("{error:#}"));
+    .map_err(crate::pollers::DashboardLifecycleFailure::from);
     report(
         operation,
         lifecycle_updates,
@@ -1726,6 +1697,31 @@ pub(crate) fn spawn_dashboard_restore_session(
             cancelled,
         );
     });
+}
+
+/// Each disposable read owns a connection. Superseding the input closes that
+/// connection, allowing the daemon to stop its executor and reap its children.
+pub(crate) fn machine_request(
+    action: mj_client::daemon::DaemonAction,
+    cancelled: Arc<AtomicBool>,
+) -> Result<mj_client::daemon::DaemonReply> {
+    mj_core::runtime::block_on(async move {
+        let request = async move {
+            let mut client = daemon::connect_or_start().await?;
+            client.request(action).await
+        };
+        tokio::pin!(request);
+        loop {
+            tokio::select! {
+                result = &mut request => return result,
+                _ = tokio::time::sleep(Duration::from_millis(10)) => {
+                    if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                        anyhow::bail!("machine request cancelled");
+                    }
+                }
+            }
+        }
+    })?
 }
 
 #[cfg(test)]

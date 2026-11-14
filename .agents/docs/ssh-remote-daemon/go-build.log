@@ -1,0 +1,54 @@
+   Compiling rustix v1.1.4
+   Compiling event-listener v5.4.2
+   Compiling futures-lite v2.6.1
+   Compiling concurrent-queue v2.5.0
+   Compiling brokk-mj-core v2.71.0 (/home/jonathan/Projects/mjolnir-wt/1514-go-docs/mj-core)
+   Compiling tokio v1.52.3
+   Compiling event-listener-strategy v0.5.4
+   Compiling futures-concurrency v7.7.1
+   Compiling async-channel v2.5.0
+   Compiling blocking v1.7.0
+   Compiling tokio-util v0.7.18
+   Compiling tokio-rustls v0.26.4
+   Compiling tower v0.5.3
+   Compiling async-compression v0.4.50
+   Compiling fs-err v3.3.0
+   Compiling tokio-stream v0.1.19
+   Compiling agent-client-protocol v5.0.0
+   Compiling h2 v0.4.14
+   Compiling tower-http v0.6.11
+   Compiling hyper v1.10.1
+   Compiling hyper-util v0.1.20
+   Compiling hyper-rustls v0.27.9
+   Compiling axum-server v0.7.3
+   Compiling axum v0.8.9
+   Compiling reqwest v0.13.4
+   Compiling jsonschema v0.46.10
+   Compiling brokk-anvil-client v0.28.6
+   Compiling xattr v1.6.1
+   Compiling tempfile v3.27.0
+   Compiling crossterm v0.29.0
+   Compiling wayland-backend v0.3.16
+   Compiling gethostname v1.1.0
+   Compiling fd-lock v4.0.4
+   Compiling tar v0.4.46
+   Compiling x11rb v0.13.2
+   Compiling wayland-client v0.31.15
+   Compiling ratatui-crossterm v0.1.0
+   Compiling reedline v0.51.0
+   Compiling wayland-protocols v0.32.13
+   Compiling rat-event v2.1.0
+   Compiling ratatui v0.30.0
+   Compiling rat-focus v2.1.1
+   Compiling wayland-protocols-wlr v0.3.12
+   Compiling wl-clipboard-rs v0.9.3
+   Compiling arboard v3.6.1
+   Compiling brokk-mj-transcript v2.71.0 (/home/jonathan/Projects/mjolnir-wt/1514-go-docs/mj-transcript)
+   Compiling brokk-mj-checkpoint v2.71.0 (/home/jonathan/Projects/mjolnir-wt/1514-go-docs/mj-checkpoint)
+   Compiling brokk-mj-review v2.71.0 (/home/jonathan/Projects/mjolnir-wt/1514-go-docs/mj-review)
+   Compiling brokk-mj-client v2.71.0 (/home/jonathan/Projects/mjolnir-wt/1514-go-docs/mj-client)
+   Compiling brokk-mj-chat v2.71.0 (/home/jonathan/Projects/mjolnir-wt/1514-go-docs/mj-chat)
+   Compiling brokk-mj-controller v2.71.0 (/home/jonathan/Projects/mjolnir-wt/1514-go-docs/mj-controller)
+   Compiling brokk-mj-tui v2.71.0 (/home/jonathan/Projects/mjolnir-wt/1514-go-docs/mj-tui)
+   Compiling brokk-mjolnir v2.71.0 (/home/jonathan/Projects/mjolnir-wt/1514-go-docs/mj-cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4m 11s

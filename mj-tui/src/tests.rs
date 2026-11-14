@@ -45,6 +45,25 @@ fn retained_subagents_do_not_count_as_working_after_profile_move() {
             }
         })
         .collect();
+    for agent in &agents[..17] {
+        crate::test_support::serve_attention(
+            &mut dashboard,
+            &[&agent.agent.view_id()],
+            mj_core::attention::SessionAttention::Idle,
+        );
+    }
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &[&agents[17].agent.view_id()],
+        mj_core::attention::SessionAttention::Failed,
+    );
+    for agent in &agents[18..] {
+        crate::test_support::serve_attention(
+            &mut dashboard,
+            &[&agent.agent.view_id()],
+            mj_core::attention::SessionAttention::Unreachable,
+        );
+    }
     dashboard.set_native_agents(agents.clone());
     parent.last_profile = "destination-profile".into();
     let mut state = State::default();
@@ -777,6 +796,7 @@ fn the_detach_chord_quits_without_mutating_any_dashboard_modal() {
         Vec::new(),
         Vec::new(),
         Default::default(),
+        "/work/repo".into(),
     );
 
     let mut confirm = dashboard_with_session(stopped_session());
@@ -1182,6 +1202,28 @@ fn subagent_scope_filters_attention_without_selecting_an_idle_child() {
         .unwrap()
         .unread_agent_messages = 1;
 
+    dashboard.set_session_attention_for("e-unread", mj_core::attention::SessionAttention::Unread);
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &["a-idle", "b-parked"],
+        mj_core::attention::SessionAttention::Idle,
+    );
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &[
+            "c-working",
+            "f-provisioning",
+            "g-checkpointing",
+            "h-closing",
+            "i-destroying",
+        ],
+        mj_core::attention::SessionAttention::Working,
+    );
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &["d-blocked"],
+        mj_core::attention::SessionAttention::NeedsInput,
+    );
     dashboard.focus_sessions();
     dashboard.handle_key(key(KeyCode::Char('I')));
     assert_eq!(dashboard.selected_session_id(), Some(parent.as_str()));
@@ -1434,6 +1476,7 @@ fn workspace_switch_restores_selection_and_pane_layout_without_losing_local_edit
 }
 
 // Hard-won: 19a4148: mark-all-read cleared unread state in other workspaces.
+// Hard-won: 92684ad3b: mark-read skipped output hidden behind working attention.
 #[test]
 fn mark_all_read_leaves_another_workspaces_session_unread() {
     let mut dashboard = dashboard_with_attention_mix();
@@ -1444,8 +1487,28 @@ fn mark_all_read_leaves_another_workspaces_session_unread() {
             id,
             vec![agent_message(4, "unread response")],
         );
-        assert!(dashboard.session_details[id].has_unread(), "{id}");
+        let served = if id == "done" {
+            mj_core::attention::SessionAttention::Working
+        } else {
+            mj_core::attention::SessionAttention::Unread
+        };
+        dashboard.set_session_attention_for(id, served);
+        assert_eq!(
+            dashboard.attention_level(id),
+            if id == "done" {
+                AttentionLevel::Working
+            } else {
+                AttentionLevel::Unread
+            },
+            "{id}"
+        );
     }
+
+    dashboard.set_unread_frontiers(
+        [("done".into(), 4), ("remote".into(), 4)]
+            .into_iter()
+            .collect(),
+    );
 
     assert_eq!(
         chord(&mut dashboard, CommandId::MarkAllRead),
@@ -1454,12 +1517,34 @@ fn mark_all_read_leaves_another_workspaces_session_unread() {
         }
     );
     assert!(
-        dashboard.session_details["remote"].has_unread(),
+        dashboard.attention_level("remote") == AttentionLevel::Unread,
         "a session in another workspace keeps its unread marker"
     );
     assert_eq!(
         dashboard.state.sessions["remote"].viewed_through_event_ordinal,
         0
+    );
+    assert_eq!(
+        dashboard.state.sessions["done"].viewed_through_event_ordinal,
+        4
+    );
+    dashboard.set_session_attention_for("done", mj_core::attention::SessionAttention::Idle);
+    dashboard.set_unread_frontiers([("remote".into(), 4)].into_iter().collect());
+    assert_eq!(dashboard.attention_level("done"), AttentionLevel::Idle);
+    dashboard.set_session_attention_for("done", mj_core::attention::SessionAttention::Important);
+    dashboard.set_notification_dismissals(
+        [(
+            "done".into(),
+            mj_core::attention::NotificationDismissal::ReadThrough(5),
+        )]
+        .into_iter()
+        .collect(),
+    );
+    assert_eq!(
+        chord(&mut dashboard, CommandId::MarkAllRead),
+        DashboardAction::MarkAllRead {
+            receipts: vec![("done".into(), 5)]
+        }
     );
 }
 
@@ -1550,6 +1635,47 @@ fn clicks_on_different_rows_do_not_count_as_a_double_click() {
         1,
         "the second click's row is selected"
     );
+}
+
+/// Right-clicking a session row opens a small menu for that row's session,
+/// anchored at the click, without moving the selection. The full session menu
+/// stays behind the row's menu button.
+#[test]
+fn right_click_on_a_session_row_opens_its_context_menu() {
+    let mut dashboard = dashboard_with_conversations(3);
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
+    terminal
+        .draw(|frame| render(frame, &mut dashboard))
+        .expect("draw row hitboxes");
+    let second_row = dashboard
+        .session_row_areas
+        .get(1)
+        .map(|(_, area)| *area)
+        .expect("second row has a hitbox");
+    let selected = dashboard.selected_visible_index();
+    let action = dashboard.handle_mouse(mouse_at_row(
+        MouseEventKind::Down(MouseButton::Right),
+        second_row,
+        0,
+    ));
+    assert_eq!(action, DashboardAction::None);
+    assert!(
+        matches!(dashboard.mode, Mode::Dashboard),
+        "the full session menu stays closed"
+    );
+    assert!(
+        dashboard.pane_menu.is_some(),
+        "the row's context menu opened"
+    );
+    let lines = crate::test_support::drawn(&mut dashboard, 120, 40);
+    let rows = [
+        "Dismiss notification",
+        "Copy session ID",
+        "New session with these settings",
+    ]
+    .map(|label| crate::test_support::point(&lines, label).1);
+    assert!(rows.windows(2).all(|pair| pair[0] < pair[1]), "{rows:?}");
+    assert_eq!(dashboard.selected_visible_index(), selected);
 }
 
 /// A dashboard with `count` running sessions, each carrying a numbered
@@ -1989,6 +2115,18 @@ fn dashboard_with_attention_mix() -> DashboardState {
         },
         BTreeMap::new(),
     );
+    dashboard.set_session_attention(mj_core::snapshot_map::SnapshotMap::from([
+        (
+            "asks".into(),
+            mj_core::attention::SessionAttention::NeedsInput,
+        ),
+        (
+            "remote".into(),
+            mj_core::attention::SessionAttention::NeedsInput,
+        ),
+        ("done".into(), mj_core::attention::SessionAttention::Unread),
+        ("quiet".into(), mj_core::attention::SessionAttention::Idle),
+    ]));
     dashboard.set_workspace_names(BTreeMap::from([
         ("default".into(), "Default".into()),
         ("other".into(), "Other".into()),
@@ -2005,6 +2143,7 @@ fn dashboard_with_attention_mix() -> DashboardState {
         .get_mut("done")
         .unwrap()
         .unread_agent_messages = 1;
+    dashboard.set_unread_frontiers([("done".into(), 4)].into_iter().collect());
     dashboard
 }
 
@@ -2105,6 +2244,11 @@ fn session_order_and_attention_are_derived_once_per_change_and_follow_it() {
         .get_mut("quiet")
         .unwrap()
         .pending_elicitations = vec![question("quiet")];
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &["quiet"],
+        mj_core::attention::SessionAttention::NeedsInput,
+    );
     drawn(&mut dashboard, 160, 40);
     drawn(&mut dashboard, 160, 40);
     assert_eq!(dashboard.attention_level("quiet"), AttentionLevel::Waiting);
@@ -2143,6 +2287,11 @@ fn a_failed_stop_is_a_failure_for_the_queue_as_well_as_the_row() {
     session.state = SessionState::Closing;
     session.last_error = Some("the worker would not stop".into());
 
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &["quiet"],
+        mj_core::attention::SessionAttention::Failed,
+    );
     assert_eq!(dashboard.attention_level("quiet"), AttentionLevel::Failed);
     assert_eq!(
         dashboard
@@ -2153,6 +2302,7 @@ fn a_failed_stop_is_a_failure_for_the_queue_as_well_as_the_row() {
     );
 }
 
+// Hard-won: #1517: missing daemon attention hid the unread sessions after a failure was viewed.
 #[test]
 fn viewing_one_failure_reveals_the_five_unread_sessions_without_relabeling_them() {
     let mut failed = running_session();
@@ -2168,13 +2318,26 @@ fn viewing_one_failure_reveals_the_five_unread_sessions_without_relabeling_them(
     }
     dashboard.set_state(state);
     for index in 0..5 {
-        let detail = dashboard
-            .session_details
-            .get_mut(&format!("done-{index}"))
-            .unwrap();
+        let id = format!("done-{index}");
+        let detail = dashboard.session_details.get_mut(&id).unwrap();
         detail.agent_message_latest_content_ordinals = vec![1];
         detail.unread_agent_messages = 1;
+        crate::test_support::serve_attention(
+            &mut dashboard,
+            &[&id],
+            mj_core::attention::SessionAttention::Unread,
+        );
     }
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &["failed"],
+        mj_core::attention::SessionAttention::Failed,
+    );
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &["done-0", "done-1", "done-2", "done-3", "done-4"],
+        mj_core::attention::SessionAttention::Unread,
+    );
     dashboard.select_active_session("failed");
     assert_eq!(
         dashboard.workspace_attention_summary("default"),
@@ -2188,54 +2351,53 @@ fn viewing_one_failure_reveals_the_five_unread_sessions_without_relabeling_them(
         "a terminal-too-small warning does not show the failure"
     );
 
+    let identity =
+        mj_core::attention::FailureIdentity::of(&dashboard.state.sessions["failed"]).unwrap();
+    dashboard.set_notification_dismissals(
+        [(
+            "failed".into(),
+            mj_core::attention::NotificationDismissal::Failure(identity.clone()),
+        )]
+        .into_iter()
+        .collect(),
+    );
     let screen = drawn(&mut dashboard, 140, 40).join("\n");
     assert!(screen.contains("worker stopped unexpectedly"), "{screen}");
     dashboard.acknowledge_render();
+    let actions = dashboard.take_drawn_failure_dismissals();
+    assert!(
+        matches!(actions.as_slice(), [DashboardAction::DismissNotification { session_id, target: mj_core::attention::NotificationDismissal::Failure(failure) }] if session_id == "failed" && failure == &identity)
+    );
+    assert_eq!(
+        dashboard.workspace_attention_summary("default"),
+        Some((AttentionLevel::Failed, 1)),
+        "only the daemon changes the alert"
+    );
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &["failed"],
+        mj_core::attention::SessionAttention::Inactive,
+    );
+    dashboard.set_notification_dismissals(Default::default());
     assert_eq!(
         dashboard.workspace_attention_summary("default"),
         Some((AttentionLevel::Unread, 5))
     );
-    assert_eq!(
-        dashboard.attention_badge_summary(),
-        Some((AttentionLevel::Unread, 5))
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &["failed"],
+        mj_core::attention::SessionAttention::Failed,
     );
-    assert_eq!(
-        dashboard.attention_level("failed"),
-        AttentionLevel::Failed,
-        "reading a failure does not fix the failed session"
-    );
-
-    dashboard.set_state(dashboard.state.clone());
     assert_eq!(
         dashboard.workspace_attention_summary("default"),
-        Some((AttentionLevel::Unread, 5)),
-        "refreshing unchanged state must not resurrect the notice"
-    );
-    let mut state = dashboard.state.clone();
-    state.sessions.get_mut("failed").unwrap().last_error = Some("a different failure".into());
-    dashboard.set_state(state);
-    assert_eq!(
-        dashboard.workspace_attention_summary("default"),
-        Some((AttentionLevel::Failed, 1)),
-        "a new error needs attention again"
-    );
-    drawn(&mut dashboard, 140, 40);
-    dashboard.acknowledge_render();
-    let mut state = dashboard.state.clone();
-    state.sessions.get_mut("failed").unwrap().state = SessionState::Running;
-    dashboard.set_state(state.clone());
-    state.sessions.get_mut("failed").unwrap().state = SessionState::Error;
-    dashboard.set_state(state);
-    assert_eq!(
-        dashboard.workspace_attention_summary("default"),
-        Some((AttentionLevel::Failed, 1)),
-        "a later failure after recovery is a new episode even with the same text"
+        Some((AttentionLevel::Failed, 1))
     );
 }
 
 // Hard-won: bed9102: terminal failures inflated badges and queued an unopenable session.
+// Hard-won: 0db309adc: prefix+o reopened the resume dialog on the same stopped failure, so traversal never advanced.
 #[test]
-fn a_session_without_a_row_is_not_counted_by_the_badge_or_the_queue() {
+fn a_stopped_notification_is_a_row_and_attention_advances() {
     let mut dashboard = dashboard_with_attention_mix();
     dashboard.set_active_workspace(Some("default".into()));
     assert_eq!(
@@ -2243,30 +2405,83 @@ fn a_session_without_a_row_is_not_counted_by_the_badge_or_the_queue() {
         Some((AttentionLevel::Waiting, 1))
     );
 
-    // A data-loss session is a terminal failure the Sessions pane never lists;
-    // the tab badge and the attention queue must not point at it either.
-    for state in [SessionState::DestroyedWithDataLoss, SessionState::Lost] {
-        dashboard.state.sessions.get_mut("quiet").unwrap().state = state;
-        assert_eq!(dashboard.attention_level("quiet"), AttentionLevel::Failed);
+    for state in [
+        SessionState::Stopped,
+        SessionState::DestroyedWithDataLoss,
+        SessionState::Lost,
+    ] {
+        let record = dashboard.state.sessions.get_mut("quiet").unwrap();
+        record.state = state;
+        record.last_error = Some("resume failed".into());
+        let failure = mj_core::attention::FailureIdentity::of(record).unwrap();
+        crate::test_support::serve_attention(
+            &mut dashboard,
+            &["quiet"],
+            mj_core::attention::SessionAttention::Failed,
+        );
+        dashboard.set_notification_dismissals(
+            [(
+                "quiet".into(),
+                mj_core::attention::NotificationDismissal::Failure(failure.clone()),
+            )]
+            .into_iter()
+            .collect(),
+        );
         assert!(
-            !dashboard
+            dashboard
                 .ordered_sessions()
                 .iter()
                 .any(|session| session.id == "quiet"),
-            "{state:?} has no row in the pane"
+            "{state:?} is listed while its failure needs a person"
         );
         assert_eq!(
             dashboard.workspace_attention_summary("default"),
-            Some((AttentionLevel::Waiting, 1)),
-            "{state:?} must not turn the badge red or raise its count"
+            Some((AttentionLevel::Failed, 1)),
+            "{state:?} needs a person"
         );
+
+        // The first press selects the stopped row without opening anything;
+        // the second moves on to the question instead of returning to it.
+        dashboard.select_active_session("done");
+        let action = dashboard.step_attention(1);
         assert!(
-            !dashboard
-                .attention_queue()
-                .iter()
-                .any(|entry| entry.session_id == "quiet"),
-            "{state:?} must not be in the attention queue"
+            matches!(action, DashboardAction::None),
+            "{state:?}: {action:?}"
         );
+        assert_eq!(dashboard.selected_session_id(), Some("quiet"));
+        assert_eq!(dashboard.focus, Focus::Sessions);
+        assert!(matches!(dashboard.mode, Mode::Dashboard));
+        let action = dashboard.step_attention(1);
+        assert!(
+            matches!(&action, DashboardAction::Open { session_id } if session_id == "asks"),
+            "{state:?}: {action:?}"
+        );
+
+        // Enter resumes a stopped record and refuses one with nothing left.
+        dashboard.select_active_session("quiet");
+        dashboard.focus_sessions();
+        dashboard.handle_key(key(KeyCode::Enter));
+        if state == SessionState::Stopped {
+            assert!(matches!(dashboard.mode, Mode::Resume(_)), "{state:?}");
+            dashboard.mode = Mode::Dashboard;
+        } else {
+            assert!(matches!(dashboard.mode, Mode::Dashboard), "{state:?}");
+            let notice = dashboard.notices.current().unwrap_or_default();
+            assert!(notice.contains("Use Destroy"), "{state:?}: {notice}");
+        }
+
+        dashboard.focus_sessions();
+        let action = dashboard.dispatch_command(CommandId::DismissNotification);
+        assert!(
+            matches!(&action, DashboardAction::DismissNotification { session_id, .. } if session_id == "quiet"),
+            "{state:?}: {action:?}"
+        );
+        dashboard.notification_dismissal_finished(
+            "quiet",
+            mj_core::attention::NotificationDismissal::Failure(failure),
+            Ok(0),
+        );
+        dashboard.set_notification_dismissals(Default::default());
     }
 
     // An error state still has a row, so it still counts.
@@ -2274,6 +2489,49 @@ fn a_session_without_a_row_is_not_counted_by_the_badge_or_the_queue() {
     assert_eq!(
         dashboard.workspace_attention_summary("default"),
         Some((AttentionLevel::Failed, 1))
+    );
+
+    // In another workspace, reached from the Workspaces pane, the switch still
+    // lands on the row with Sessions focused, and the host opens nothing.
+    dashboard.state.sessions.get_mut("quiet").unwrap().state = SessionState::Running;
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &["quiet"],
+        mj_core::attention::SessionAttention::Idle,
+    );
+    dashboard.state.sessions.get_mut("remote").unwrap().state = SessionState::Stopped;
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &["remote"],
+        mj_core::attention::SessionAttention::Failed,
+    );
+    dashboard.select_active_session("done");
+    dashboard.focus = Focus::Workspaces;
+    let action = dashboard.step_attention(1);
+    assert_eq!(
+        action,
+        DashboardAction::SelectWorkspace {
+            workspace_id: "other".into()
+        }
+    );
+    dashboard.set_active_workspace(Some("other".into()));
+    assert_eq!(dashboard.take_session_to_open(), None);
+    // The host then releases every pane holding a suspended session, as
+    // `open_chat_session_into` does after a switch. Browse keeps the row.
+    for (pane, session) in dashboard.pane_sessions() {
+        if dashboard.pane_session_is_suspended(&session) {
+            dashboard.release_suspended_pane(pane, &session);
+        }
+    }
+    assert_eq!(dashboard.selected_session_id(), Some("remote"));
+    assert_eq!(dashboard.focus, Focus::Sessions);
+    let action = dashboard.step_attention(1);
+    assert_eq!(
+        action,
+        DashboardAction::SelectWorkspace {
+            workspace_id: "default".into()
+        },
+        "the next press leaves the stopped row for the question"
     );
 }
 
@@ -2324,7 +2582,7 @@ fn short_workspace_names_keep_their_attention_badges() {
             .find(|(id, _)| id == "default")
             .expect("workspace tab");
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(area.right() - 3, area.y)].symbol(), "!", "{name}");
+        assert_eq!(buffer[(area.right() - 3, area.y)].symbol(), "?", "{name}");
         assert_eq!(buffer[(area.right() - 2, area.y)].symbol(), "1", "{name}");
     }
 }
@@ -2346,6 +2604,25 @@ fn golden_attention_navigation() {
     );
     writeln!(output, "{}", attention_values(&ranked)).expect("write attention levels");
 
+    let mut stopped = dashboard_with_attention_mix();
+    stopped.set_active_workspace(Some("default".into()));
+    let record = stopped.state.sessions.get_mut("quiet").unwrap();
+    record.state = SessionState::Stopped;
+    record.last_error = Some("resume failed: target unavailable".into());
+    crate::test_support::serve_attention(
+        &mut stopped,
+        &["quiet"],
+        mj_core::attention::SessionAttention::Failed,
+    );
+    stopped.select_active_session("quiet");
+    append_attention_state(
+        &mut output,
+        "stopped failure remains a row",
+        &mut stopped,
+        140,
+        40,
+    );
+
     let mut urgent = dashboard_with_attention_mix();
     urgent.set_active_workspace(Some("default".into()));
     urgent.set_session_reviews([mj_client::review::RuntimeReviewView {
@@ -2361,7 +2638,18 @@ fn golden_attention_navigation() {
         status: "the review failed".into(),
         verdict: None,
     }]);
+    crate::test_support::serve_attention(
+        &mut urgent,
+        &["remote"],
+        mj_core::attention::SessionAttention::Unreachable,
+    );
     urgent.set_session_connectivity("remote", false);
+    crate::test_support::serve_attention(
+        &mut urgent,
+        &["asks"],
+        mj_core::attention::SessionAttention::Failed,
+    );
+
     append_attention_state(
         &mut output,
         "failure, unreachable worker, and question",
@@ -2400,6 +2688,12 @@ fn golden_attention_navigation() {
     )
     .expect("write waiting badge style");
     badges.set_session_connectivity("done", false);
+    crate::test_support::serve_attention(
+        &mut badges,
+        &["done"],
+        mj_core::attention::SessionAttention::Unreachable,
+    );
+
     append_attention_state(
         &mut output,
         "unreachable badge replaces unread",
@@ -2420,6 +2714,12 @@ fn golden_attention_navigation() {
     )
     .expect("write unreachable badge style");
     badges.state.sessions.get_mut("quiet").unwrap().state = SessionState::Error;
+    crate::test_support::serve_attention(
+        &mut badges,
+        &["quiet"],
+        mj_core::attention::SessionAttention::Failed,
+    );
+
     append_attention_state(
         &mut output,
         "failure badge replaces lower levels",
@@ -2534,6 +2834,170 @@ fn golden_attention_navigation() {
     )
     .expect("write wrapped action");
 
+    let mut tied = dashboard_with_attention_mix();
+    crate::test_support::serve_attention(
+        &mut tied,
+        &["done"],
+        mj_core::attention::SessionAttention::NeedsInput,
+    );
+    tied.set_active_workspace(Some("default".into()));
+    tied.session_details
+        .get_mut("done")
+        .unwrap()
+        .pending_elicitations = vec![question("done")];
+    for (id, activity) in [("asks", 10), ("done", 20), ("remote", 30)] {
+        tied.session_details
+            .get_mut(id)
+            .unwrap()
+            .last_activity_at_ms = Some(activity);
+    }
+    tied.select_active_session("quiet");
+    let action = chord(&mut tied, CommandId::NextAttention);
+    append_attention_state(
+        &mut output,
+        "equal urgency prefers the current workspace then newest activity",
+        &mut tied,
+        140,
+        40,
+    );
+    writeln!(output, "{}", attention_values(&tied)).unwrap();
+    writeln!(
+        output,
+        "action: {action:?}; selected: {:?}",
+        tied.selected_session_id()
+    )
+    .unwrap();
+    tied.set_active_workspace(Some("other".into()));
+    writeln!(
+        output,
+        "after switching workspace: {}",
+        attention_values(&tied)
+    )
+    .unwrap();
+    tied.set_active_workspace(Some("default".into()));
+    tied.state.sessions.get_mut("remote").unwrap().state = SessionState::Error;
+    crate::test_support::serve_attention(
+        &mut tied,
+        &["remote"],
+        mj_core::attention::SessionAttention::Failed,
+    );
+
+    tied.select_active_session("quiet");
+    let action = chord(&mut tied, CommandId::NextAttention);
+    writeln!(
+        output,
+        "higher urgency elsewhere: {}; action: {action:?}",
+        attention_values(&tied)
+    )
+    .unwrap();
+
+    let mut cycling = dashboard_with_attention_mix();
+    cycling.state.sessions.get_mut("done").unwrap().workspace_id = "third".into();
+    cycling
+        .session_details
+        .get_mut("done")
+        .unwrap()
+        .pending_elicitations = vec![question("done")];
+    crate::test_support::serve_attention(
+        &mut cycling,
+        &["done"],
+        mj_core::attention::SessionAttention::NeedsInput,
+    );
+    cycling.set_active_workspace(Some("default".into()));
+    cycling.select_active_session("quiet");
+    for command in [CommandId::NextAttention, CommandId::PreviousAttention] {
+        let mut visited = Vec::new();
+        for _ in 0..6 {
+            // Hard-won: c7d63771d: changing workspace preference during navigation stranded notifications.
+            let action = chord(&mut cycling, command);
+            if let DashboardAction::SelectWorkspace { workspace_id } = action {
+                cycling.set_active_workspace(Some(workspace_id));
+                cycling.take_session_to_open();
+            }
+            visited.push(cycling.selected_session_id().unwrap().to_owned());
+        }
+        writeln!(output, "three-workspace {command:?}: {visited:?}").unwrap();
+    }
+    cycling.set_active_workspace(Some("third".into()));
+    cycling.select_active_session("done");
+    let action = chord(&mut cycling, CommandId::PreviousAttention);
+    writeln!(
+        output,
+        "manual selection resets workspace preference: {action:?}"
+    )
+    .unwrap();
+
+    for interruption in [
+        "session selection",
+        "workspace switch",
+        "resolved notification",
+    ] {
+        let mut interrupted = dashboard_with_attention_mix();
+        interrupted
+            .state
+            .sessions
+            .get_mut("done")
+            .unwrap()
+            .workspace_id = "third".into();
+        interrupted
+            .state
+            .sessions
+            .get_mut("quiet")
+            .unwrap()
+            .workspace_id = "other".into();
+        for (id, activity) in [("asks", 40), ("remote", 30), ("done", 20), ("quiet", 10)] {
+            let detail = interrupted.session_details.get_mut(id).unwrap();
+            detail.pending_elicitations = vec![question(id)];
+            detail.last_activity_at_ms = Some(activity);
+        }
+        interrupted.set_active_workspace(Some("default".into()));
+        crate::test_support::serve_attention(
+            &mut interrupted,
+            &["asks", "remote", "done", "quiet"],
+            mj_core::attention::SessionAttention::NeedsInput,
+        );
+
+        interrupted.select_active_session("asks");
+        let action = chord(&mut interrupted, CommandId::NextAttention);
+        assert_eq!(
+            action,
+            DashboardAction::SelectWorkspace {
+                workspace_id: "other".into()
+            }
+        );
+        interrupted.set_active_workspace(Some("other".into()));
+        interrupted.take_session_to_open();
+        match interruption {
+            "session selection" => interrupted.select_active_session("remote"),
+            "workspace switch" => {
+                interrupted.set_active_workspace(Some("default".into()));
+                interrupted.set_active_workspace(Some("other".into()));
+            }
+            "resolved notification" => interrupted
+                .session_details
+                .get_mut("remote")
+                .unwrap()
+                .pending_elicitations
+                .clear(),
+            _ => unreachable!(),
+        }
+        if interruption == "resolved notification" {
+            crate::test_support::serve_attention(
+                &mut interrupted,
+                &["remote"],
+                mj_core::attention::SessionAttention::Idle,
+            );
+        }
+        // Hard-won: 01e5b6981: restoring the same selection retained an earlier workspace's preference.
+        // Hard-won: 406dfc203: resolving a selected notification retained the earlier preference.
+        let action = chord(&mut interrupted, CommandId::NextAttention);
+        writeln!(
+            output,
+            "workspace preference after {interruption}: {action:?}"
+        )
+        .unwrap();
+    }
+
     let mut folded = dashboard_with_attention_mix();
     folded.set_active_workspace(Some("default".into()));
     let before_fold = append_attention_state(
@@ -2586,6 +3050,11 @@ fn golden_attention_navigation() {
         .get_mut("done")
         .unwrap()
         .unread_agent_messages = 0;
+    crate::test_support::serve_attention(
+        &mut folded,
+        &["asks", "remote", "done"],
+        mj_core::attention::SessionAttention::Idle,
+    );
     let action = chord(&mut folded, CommandId::NextAttention);
     append_attention_state(
         &mut output,
@@ -2674,10 +3143,16 @@ fn golden_attention_navigation() {
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("!1 Default (current)"))
+            .any(|line| line.contains("?1 Default (current)"))
     );
-    assert!(lines.iter().any(|line| line.contains("!1 Other")));
+    assert!(lines.iter().any(|line| line.contains("?1 Other")));
     dropdown.state.sessions.get_mut("remote").unwrap().state = SessionState::Error;
+    crate::test_support::serve_attention(
+        &mut dropdown,
+        &["remote"],
+        mj_core::attention::SessionAttention::Failed,
+    );
+
     let lines = append_attention_state(
         &mut output,
         "open workspace dropdown updates an inactive failure badge",
@@ -2745,6 +3220,11 @@ fn golden_attention_navigation() {
         .unwrap()
         .pending_elicitations
         .clear();
+    crate::test_support::serve_attention(
+        &mut priority,
+        &["asks"],
+        mj_core::attention::SessionAttention::Idle,
+    );
     let ids = priority
         .ordered_sessions()
         .into_iter()
@@ -2760,6 +3240,71 @@ fn golden_attention_navigation() {
     writeln!(output, "priority session ids after answer: {ids:?}")
         .expect("write updated priority order");
 
+    let mut important = dashboard_with_attention_mix();
+    for id in ["asks", "remote"] {
+        important
+            .session_details
+            .get_mut(id)
+            .unwrap()
+            .pending_elicitations
+            .clear();
+    }
+    crate::test_support::serve_attention(
+        &mut important,
+        &["asks", "remote"],
+        mj_core::attention::SessionAttention::Idle,
+    );
+    important.set_active_workspace(Some("default".into()));
+    important.set_current_session(None);
+    crate::test_support::serve_attention(
+        &mut important,
+        &["done"],
+        mj_core::attention::SessionAttention::Important,
+    );
+    important
+        .session_details
+        .get_mut("done")
+        .unwrap()
+        .last_agent_message = Some("Review the deployment result".into());
+    assert!(important.notification_events(0).is_empty());
+    let notices = important.notification_events(2_000);
+    let notice = notices
+        .iter()
+        .find(|notice| notice.session_id == "done")
+        .expect("Important is notified despite unread output");
+    assert_eq!(notice.level, AttentionLevel::Important);
+    assert_eq!(notice.body, "Review the deployment result");
+    assert_eq!(
+        important.terminal_title().as_deref(),
+        Some("mj · 1 important")
+    );
+    writeln!(
+        output,
+        "Important notices: {notices:?}; title: {:?}",
+        important.terminal_title()
+    )
+    .unwrap();
+    append_attention_state(
+        &mut output,
+        "Important retains its own glyph, footer and queue level",
+        &mut important,
+        140,
+        40,
+    );
+    assert!(
+        important
+            .attention_queue()
+            .iter()
+            .any(|entry| entry.session_id == "done" && entry.level == AttentionLevel::Important)
+    );
+    important.select_active_session("asks");
+    writeln!(
+        output,
+        "next Important action: {:?}",
+        important.step_attention(1)
+    )
+    .unwrap();
+    assert_eq!(important.selected_session_id(), Some("done"));
     mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "attention-navigation", &output);
 }
 
@@ -2828,6 +3373,12 @@ fn dashboard_with_an_unread_reply_off_screen() -> DashboardState {
     );
     reply.execution = MaterializedExecutionState::Idle;
     dashboard.apply_materialized_session(&reply);
+    // Attention, including unread, arrives in the host publication.
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &["beta"],
+        mj_core::attention::SessionAttention::Unread,
+    );
     dashboard
 }
 
@@ -2945,6 +3496,11 @@ fn idle_suspension_runs_immediately_and_working_suspension_warns() {
         .get_mut("session-1")
         .unwrap()
         .current_turn_started_at = Some(1);
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &["session-1"],
+        mj_core::attention::SessionAttention::Working,
+    );
     assert_eq!(
         dashboard.attention_level("session-1"),
         AttentionLevel::Working
@@ -2992,7 +3548,7 @@ fn idle_managed_clone_suspension_requires_publication_confirmation() {
     let mut session = running_session();
     let root = std::path::PathBuf::from("/srv/project/.mj/clones/session-1");
     session.project_directory = Some(root.clone());
-    session.managed_worktree = Some(mj_core::state::ManagedWorktree {
+    session.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
         kind: mj_core::state::ManagedCheckoutKind::Clone,
         source_project_directory: "/srv/project".into(),
         source_repository: "/srv/project".into(),
@@ -3000,7 +3556,7 @@ fn idle_managed_clone_suspension_requires_publication_confirmation() {
         branch: "master".into(),
         target: mj_core::state::ManagedWorktreeTarget::Local,
         base_commit: Some("1".repeat(40)),
-    });
+    }));
     let mut dashboard = dashboard_with_session(session);
     dashboard.focus_sessions();
     assert_eq!(
@@ -3041,9 +3597,9 @@ fn git_status_fixture() -> mj_core::local_git::SessionGitStatus {
 fn a_long_branch_name_is_elided_in_the_middle_so_the_marker_keeps_its_counts() {
     let mut session = running_session();
     session.session_title_override = Some("alpha".into());
-    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: "/work".into(),
-    });
+    }));
     let mut dashboard = dashboard_with_session(session);
     dashboard.focus_sessions();
     // The 35 characters a managed worktree's own branch name costs.
@@ -3075,9 +3631,9 @@ fn a_long_branch_name_is_elided_in_the_middle_so_the_marker_keeps_its_counts() {
 #[test]
 fn git_probes_cover_visible_live_sessions_about_once_a_minute() {
     let mut session = running_session();
-    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: "/work".into(),
-    });
+    }));
     let mut dashboard = dashboard_with_session(session);
     let start = std::time::Instant::now();
     assert_eq!(dashboard.git_probe_candidates(start, 2), ["session-1"]);
@@ -3111,12 +3667,12 @@ fn git_probes_reach_every_session_when_more_are_due_than_one_pass_reads() {
         worker_root: "/work".into(),
     };
     let mut first = running_session();
-    first.target = Some(target.clone());
+    first.target = Some(Box::new(target.clone()));
     let mut dashboard = dashboard_with_session(first);
     for id in ["session-2", "session-3", "session-4"] {
         let mut session = running_session();
         session.id = id.into();
-        session.target = Some(target.clone());
+        session.target = Some(Box::new(target.clone()));
         dashboard.state.sessions.insert(id.into(), session);
     }
     let start = std::time::Instant::now();
@@ -3340,6 +3896,12 @@ fn native_agent_pane_survives_refresh_and_blocks_managed_session_actions() {
         state: NativeAgentState::Running,
     };
     let id = agent.view_id();
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &[&id],
+        mj_core::attention::SessionAttention::Working,
+    );
+
     let projection = mj_core::state::MaterializedSession::empty(&id);
     dashboard.set_native_agents(vec![NativeAgentView {
         generation_ordinal: 1,
@@ -3448,6 +4010,11 @@ fn native_nested_scope_keys_preserve_filters_and_filter_editing() {
             .collect(),
     );
 
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &[&child_id, &grandchild_id],
+        mj_core::attention::SessionAttention::Working,
+    );
     dashboard.focus_sessions();
     dashboard.handle_key(key(KeyCode::Char('I')));
     dashboard.handle_key(key(KeyCode::Char('/')));
@@ -3610,6 +4177,11 @@ fn a_subagent_question_marks_its_parent_for_attention() {
         .get_mut("child-session")
         .unwrap()
         .pending_elicitations = vec![question("child-session")];
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &[&parent, "child-session"],
+        mj_core::attention::SessionAttention::NeedsInput,
+    );
 
     // The parent's own turn still runs, so its turn controls still apply.
     dashboard.command_session_override = Some(parent.clone());
@@ -3671,6 +4243,12 @@ fn a_subagent_question_marks_its_parent_for_attention() {
         .unwrap()
         .pending_elicitations
         .clear();
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &[&parent, "child-session"],
+        mj_core::attention::SessionAttention::Working,
+    );
+
     assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Working);
 
     // The parent's own question was seen; a child's form that arrives while
@@ -3680,6 +4258,12 @@ fn a_subagent_question_marks_its_parent_for_attention() {
         .get_mut(&parent)
         .unwrap()
         .pending_elicitations = vec![question(&parent)];
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &[&parent],
+        mj_core::attention::SessionAttention::NeedsInput,
+    );
+
     dashboard.set_current_session(Some(&parent));
     assert!(dashboard.notification_events(3_000).is_empty());
     dashboard.set_current_session(None);
@@ -3688,6 +4272,12 @@ fn a_subagent_question_marks_its_parent_for_attention() {
         .get_mut("child-session")
         .unwrap()
         .pending_elicitations = vec![question("child-session")];
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &[&parent, "child-session"],
+        mj_core::attention::SessionAttention::NeedsInput,
+    );
+
     assert!(dashboard.notification_events(3_000).is_empty());
     let due = dashboard.notification_events(5_000);
     assert_eq!(due.len(), 1, "{due:?}");
@@ -3758,6 +4348,11 @@ fn a_reviewer_question_names_the_reviewer_and_leads_to_its_workspace() {
         .get_mut("child-session")
         .unwrap()
         .pending_elicitations = vec![question("child-session")];
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &[&parent, "child-session"],
+        mj_core::attention::SessionAttention::NeedsInput,
+    );
 
     let lines = drawn(&mut dashboard, 120, 40);
     assert!(
@@ -3795,6 +4390,11 @@ fn a_childs_reviewer_question_reaches_the_top_level_row() {
         .get_mut("reviewer-session")
         .unwrap()
         .pending_elicitations = vec![question("reviewer-session")];
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &[&parent, "child-session", "reviewer-session"],
+        mj_core::attention::SessionAttention::NeedsInput,
+    );
 
     assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Waiting);
     let lines = drawn(&mut dashboard, 120, 40);
@@ -3846,6 +4446,12 @@ fn parent_suspension_warns_only_about_subagents_still_at_their_task() {
         .get_mut("child-session")
         .unwrap()
         .current_turn_started_at = Some(1);
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &["child-session"],
+        mj_core::attention::SessionAttention::Working,
+    );
+
     assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Idle);
     assert_eq!(
         dashboard.dispatch_command(CommandId::SuspendSession),
@@ -4345,6 +4951,11 @@ fn a_subagent_the_worker_reports_as_running_counts_as_working_for_its_parent() {
         },
     );
 
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &["child-session"],
+        mj_core::attention::SessionAttention::Working,
+    );
     assert_eq!(
         dashboard.attention_level("child-session"),
         AttentionLevel::Working,

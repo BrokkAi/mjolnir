@@ -92,7 +92,7 @@ impl Controller {
                     let record = self.state.sessions.get_mut(session_id).unwrap();
                     record.state = SessionState::Running;
                     record.native_session_id = Some(artifact.native_session_id.clone());
-                    record.checkpoint = Some(artifact.metadata.clone());
+                    record.checkpoint = Some(Box::new(artifact.metadata.clone()));
                     record.updated_at = now();
                     record.last_error = None;
                     record.last_checkpoint_error = None;
@@ -116,7 +116,7 @@ impl Controller {
                     persist_ms = persist_started.elapsed().as_millis() as u64,
                     "checkpoint metadata persisted"
                 );
-                prune_replaced_checkpoint(previous.checkpoint.as_ref(), &artifact.metadata);
+                prune_replaced_checkpoint(previous.checkpoint.as_deref(), &artifact.metadata);
                 release_projection_behind_checkpoint(session_id, &artifact.metadata);
                 if let Err(error) = latched.complete().await {
                     // Only journal retention is at stake. A barrier that is
@@ -218,7 +218,7 @@ impl Controller {
         let installed = crate::database::record_recovery_success_if_current(
             session_id,
             expected_target,
-            previous_checkpoint.as_ref(),
+            previous_checkpoint.as_deref(),
             &artifact.native_session_id,
             &artifact.metadata,
         );
@@ -255,7 +255,7 @@ impl Controller {
                 "recovery checkpoint was saved, but the relay could not be told to release the history it covers: {error:#}"
             );
         }
-        prune_replaced_checkpoint(previous_checkpoint.as_ref(), &artifact.metadata);
+        prune_replaced_checkpoint(previous_checkpoint.as_deref(), &artifact.metadata);
         release_projection_behind_checkpoint(session_id, &artifact.metadata);
         Ok(artifact)
     }

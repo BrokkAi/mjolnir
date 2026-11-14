@@ -84,7 +84,6 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
         phone: Default::default(),
         daemon: Default::default(),
         github: Default::default(),
-        continuation: Default::default(),
         review: Default::default(),
         sessionwiki: Default::default(),
         legacy_startup: (),
@@ -142,6 +141,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
             SessionRecord {
                 oracle_choice: None,
                 oracle: true,
+                notifications_ignored: false,
                 project: None,
                 target_runtime: None,
                 launch_base: None,
@@ -154,8 +154,6 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
                 create_managed_worktree: None,
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
                 archived: false,
-                container_cpus: None,
-                container_memory: None,
                 id: "session-1".into(),
                 title: "Build Hel".into(),
                 harness_kind: HarnessKind::Codex,
@@ -180,6 +178,8 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
                 viewed_through_event_ordinal: 0,
                 draft_input: String::new(),
                 last_error: Some("secret-token at /highly/secret/codex".into()),
+                dismissed_failure: None,
+                failure_generation: 0,
                 last_checkpoint_error: None,
                 checkpoint: None,
             },
@@ -903,12 +903,12 @@ fn session_review_count_overrides_phone_status_projection() {
         2
     ];
     state.sessions.get_mut("session-1").unwrap().review =
-        Some(mj_core::config::SessionReview::Push {
+        Some(Box::new(mj_core::config::SessionReview::Push {
             reviewers: Some(vec![mj_core::config::SubagentChoice {
                 model: "model-b".into(),
                 effort: None,
             }]),
-        });
+        }));
     let snapshot = ViewerSnapshot::from_config_state(&config, &state, 9);
     assert_eq!(snapshot.review_config.reviewers.len(), 2);
     let session = snapshot.sessions.get("session-1").unwrap();
@@ -1692,7 +1692,7 @@ async fn guardian_permission_mode_is_hidden_and_refused_by_api() {
     ] {
         let enforcement = harness.resolve_execution_enforcement(
             mj_core::config::ExecutionPolicy::ConfiguredApprovals,
-            false,
+            mj_core::config::ApprovalChoices::default(),
         );
         let (app, mut actions, _, _, _) = app_with_snapshot(|snapshot| {
             let session = &mut snapshot.sessions[0];
@@ -2783,8 +2783,7 @@ fn terminal_session_actions_validate_against_their_published_capabilities() {
     };
     let container_settings = || ControllerAction::SetContainerSettings {
         session_id: "session-1".into(),
-        cpus: None,
-        memory: None,
+        resource_allocation: None,
         mounts: Vec::new(),
     };
     let restart = || ControllerAction::Restart {
@@ -3274,7 +3273,7 @@ fn resume_action_refuses_a_target_the_session_cannot_use() {
     });
     assert_eq!(
         snapshot.sessions[0].incompatible_resume_targets,
-        vec!["raw".to_owned()]
+        Arc::<[Arc<str>]>::from(vec![Arc::from("raw")])
     );
 
     let error = validate_action(
@@ -3567,7 +3566,10 @@ async fn conversation_endpoint_returns_authenticated_bounded_deltas() {
                 tool_status: None,
                 diffstats: Vec::new(),
             },
-        ],
+        ]
+        .into_iter()
+        .map(Arc::new)
+        .collect(),
     };
     let (app, _, _, _, _) =
         app_with_conversations(BTreeMap::from([("session-1".into(), transcript)]));
@@ -3649,7 +3651,10 @@ async fn conversation_endpoint_rejects_cached_transcript_during_transition() {
             tone: "agent",
             tool_status: None,
             diffstats: Vec::new(),
-        }],
+        }]
+        .into_iter()
+        .map(Arc::new)
+        .collect(),
     };
     let (app, _, _, _, _) = app_with(
         BTreeMap::from([("session-1".into(), transcript)]),
@@ -3891,6 +3896,7 @@ async fn live_state_and_the_service_worker_are_never_stored() {
 #[tokio::test]
 async fn shell_assets_revalidate_with_strong_content_etags() {
     for path in [
+        "/push-sync.js",
         "/",
         "/viewer.css",
         "/viewer.js",
@@ -4463,7 +4469,8 @@ async fn logout_blocks_delayed_renewal_and_rejects_previously_renewed_cookies() 
 async fn desktop_and_legacy_cookies_keep_their_original_expiry() {
     let options = detached_options();
     let key = options.cookie_key.clone();
-    let desktop = mint_desktop_session_cookie(&key).unwrap();
+    // Cookies from the retired desktop shell remain valid until expiry.
+    let desktop = signed_cookie_value(&key, "retired-desktop-viewer", now_unix() + 3600);
     let legacy = signed_cookie_value(&key, "legacy-viewer", now_unix() + 3600);
     let app = router(options);
     for value in [desktop, legacy] {
@@ -5051,13 +5058,10 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
             serde_json::json!({"path": ["profiles", "claude"]}),
         ),
         root(),
-        (
-            "/api/settings/page",
-            serde_json::json!({"path": ["continuation"]}),
-        ),
+        ("/api/settings/page", serde_json::json!({"path": ["phone"]})),
         (
             "/api/settings/edit",
-            serde_json::json!({"page": ["continuation"], "edit": {"kind": "toggle", "path": ["continuation", "enabled"]}}),
+            serde_json::json!({"page": ["phone"], "edit": {"kind": "toggle", "path": ["phone", "enabled"]}}),
         ),
         root(),
         (
@@ -5124,7 +5128,7 @@ async fn settings_routes_hide_literal_secrets_and_save_through_the_shared_model(
     assert!(saved.contains(SECRET), "{saved}");
     assert!(saved.contains(RUNTIME_SECRET), "{saved}");
     let saved = Config::load_from(&path).unwrap();
-    assert!(!saved.continuation.enabled);
+    assert!(!saved.phone.enabled);
     assert_eq!(
         serde_json::to_value(&saved.subagents).unwrap()["straightforward"]["model"],
         "opus"
@@ -5418,4 +5422,84 @@ async fn settings_review_autoconfigure_returns_preset_draft_without_saving() {
     );
     assert!(reply["draft"]["review"].get("profile").is_none());
     assert_eq!(std::fs::read(&path).unwrap(), stored);
+}
+
+#[tokio::test]
+async fn github_relevance_daemon_notices_snapshot_golden() {
+    use crate::github_relevance::Notices;
+    use crate::github_student::{
+        StudentDevice, StudentDeviceFallbackReason, StudentFailureKind, StudentNotice,
+    };
+    let notices = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let capture = notices.clone();
+    let sink = Notices::new(move |text| {
+        let mut notices = capture.lock().unwrap();
+        let id = notices.len() as u64 + 1;
+        notices.push(mj_client::daemon::RuntimeNotice {
+            id,
+            session_id: String::new(),
+            text,
+        });
+    });
+    sink.observe(Some((
+        Some(StudentFailureKind::Download),
+        "private download details",
+    )));
+    sink.observe(Some((Some(StudentFailureKind::Download), "same episode")));
+    sink.observe(None);
+    for notice in [
+        StudentNotice::DeviceFallback {
+            from: StudentDevice::Cuda,
+            reason: StudentDeviceFallbackReason::Slower {
+                gpu_ms: 20,
+                cpu_ms: 10,
+            },
+        },
+        StudentNotice::DeviceFallback {
+            from: StudentDevice::CoreMl,
+            reason: StudentDeviceFallbackReason::Failed(StudentFailureKind::Load),
+        },
+        StudentNotice::DeviceFallback {
+            from: StudentDevice::DirectMl,
+            reason: StudentDeviceFallbackReason::Failed(StudentFailureKind::Inference),
+        },
+        StudentNotice::InferenceFailing {
+            cause: "private inference details".into(),
+        },
+        StudentNotice::InferenceFailing {
+            cause: "same episode".into(),
+        },
+        StudentNotice::InferenceRecovered,
+        StudentNotice::CudaLibrariesMissing {
+            missing: vec!["libcudnn.so.9".into()],
+        },
+        StudentNotice::GpuAfterRestart,
+        StudentNotice::PlatformUnsupported,
+        StudentNotice::WindowsRuntimeMissing {
+            missing: vec!["MSVCP140.dll".into()],
+        },
+    ] {
+        sink.student_notice(notice);
+    }
+    let notices = notices.lock().unwrap().clone();
+    let (app, _, _, _, _) = app_with_snapshot(move |snapshot| snapshot.notices = notices);
+    let cookie = login_cookie(&app).await;
+    let response = app
+        .oneshot(
+            Request::get("/api/snapshot")
+                .header(COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(!snapshot["notices"].to_string().contains("private"));
+    mj_core::golden::assert_golden(
+        env!("CARGO_MANIFEST_DIR"),
+        "github-relevance-notices",
+        &serde_json::to_string_pretty(&snapshot["notices"]).unwrap(),
+    );
 }

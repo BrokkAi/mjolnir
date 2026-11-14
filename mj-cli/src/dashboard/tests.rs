@@ -84,6 +84,7 @@ fn populated_dashboard_with(adjust: impl FnOnce(&mut State)) -> DashboardState {
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 muse_auto_review: None,
+                claude_permission_mode: None,
                 aws: None,
                 codex_profile: None,
                 environment: Default::default(),
@@ -129,6 +130,7 @@ fn populated_dashboard_with(adjust: impl FnOnce(&mut State)) -> DashboardState {
             mj_core::state::SessionRecord {
                 oracle_choice: None,
                 oracle: true,
+                notifications_ignored: false,
                 project: None,
                 target_runtime: None,
                 launch_base: None,
@@ -141,8 +143,6 @@ fn populated_dashboard_with(adjust: impl FnOnce(&mut State)) -> DashboardState {
                 create_managed_worktree: None,
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
                 archived: false,
-                container_cpus: None,
-                container_memory: None,
                 id: id.into(),
                 title: title.into(),
                 harness_kind: mj_core::config::HarnessKind::Codex,
@@ -167,6 +167,8 @@ fn populated_dashboard_with(adjust: impl FnOnce(&mut State)) -> DashboardState {
                 viewed_through_event_ordinal: 0,
                 draft_input: String::new(),
                 last_error: None,
+                dismissed_failure: None,
+                failure_generation: 0,
                 last_checkpoint_error: None,
                 checkpoint: None,
             },
@@ -842,15 +844,17 @@ async fn a_title_from_the_harness_reaches_the_conversation_header_with_the_row()
         raw_observation: None,
         session_id: session_id.to_owned(),
         view: mj_controller::session_manager::ManagedSessionView {
+            attention: Default::default(),
             snapshot: Some(mj_core::state::ManagedSessionSnapshot {
                 window: mj_core::state::ProjectionWindow::of(&materialized),
                 materialized,
                 operational: mj_core::relay::RelaySnapshot::new(session_id.to_owned())
-                    .operational_state(),
+                    .operational_state()
+                    .into(),
                 latest_credential_sync_signal: None,
                 worker_build: None,
-                subagent_requests: Vec::new(),
-                subagent_completions: Vec::new(),
+                subagent_requests: Default::default(),
+                subagent_completions: Default::default(),
                 subagent_queue_error: None,
             }),
             connected: true,
@@ -899,6 +903,7 @@ fn missing_target_poll_preserves_the_daemon_notice() {
         raw_observation: None,
         session_id: "missing-target".into(),
         view: mj_controller::session_manager::ManagedSessionView {
+            attention: Default::default(),
             snapshot: None,
             connected: false,
             error: Some(mj_controller::session_manager::ViewError::TargetMissing(
@@ -917,6 +922,7 @@ fn live_session(id: &str, created_at: &str) -> mj_core::state::SessionRecord {
     mj_core::state::SessionRecord {
         oracle_choice: None,
         oracle: true,
+        notifications_ignored: false,
         project: None,
         target_runtime: None,
         launch_base: None,
@@ -929,8 +935,6 @@ fn live_session(id: &str, created_at: &str) -> mj_core::state::SessionRecord {
         create_managed_worktree: None,
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
-        container_cpus: None,
-        container_memory: None,
         id: id.into(),
         title: id.into(),
         harness_kind: mj_core::config::HarnessKind::Codex,
@@ -955,6 +959,8 @@ fn live_session(id: &str, created_at: &str) -> mj_core::state::SessionRecord {
         viewed_through_event_ordinal: 0,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: None,
     }
@@ -1188,15 +1194,15 @@ async fn a_prose_question_survives_worker_polling_and_background_projection() {
 
     let mut dashboard = populated_dashboard();
     let mut relay = mj_core::relay::RelaySnapshot::new("session-1".into());
-    relay.assessment = Some(assessment.clone());
+    relay.assessment = Some(std::sync::Arc::new(assessment.clone()));
     let snapshot = mj_core::state::ManagedSessionSnapshot {
         window: mj_core::state::ProjectionWindow::of(&materialized),
         materialized: materialized.clone(),
-        operational: relay.operational_state(),
+        operational: relay.operational_state().into(),
         latest_credential_sync_signal: None,
         worker_build: None,
-        subagent_requests: Vec::new(),
-        subagent_completions: Vec::new(),
+        subagent_requests: Default::default(),
+        subagent_completions: Default::default(),
         subagent_queue_error: None,
     };
     let projection = crate::pollers::apply_worker_poll_update(
@@ -1205,6 +1211,7 @@ async fn a_prose_question_survives_worker_polling_and_background_projection() {
             raw_observation: None,
             session_id: "session-1".into(),
             view: mj_controller::session_manager::ManagedSessionView {
+                attention: Default::default(),
                 snapshot: Some(snapshot),
                 connected: true,
                 error: None,
@@ -1246,6 +1253,10 @@ async fn a_prose_question_survives_worker_polling_and_background_projection() {
     };
     let prepared = result.unwrap();
     assert!(dashboard.apply_prepared_materialized_session(*prepared));
+    dashboard.set_session_attention_for(
+        "session-1",
+        mj_core::attention::SessionAttention::NeedsInput,
+    );
     assert_eq!(
         dashboard.attention_level("session-1"),
         mj_tui::AttentionLevel::Waiting
@@ -1275,6 +1286,8 @@ async fn a_prose_question_survives_worker_polling_and_background_projection() {
     // A verdict for a different completion or one already superseded cannot
     // revive a question, even if its old action was AwaitInput.
     for status in [Status::Consumed, Status::Superseded] {
+        dashboard
+            .set_session_attention_for("session-1", mj_core::attention::SessionAttention::Idle);
         let mut stale = assessment.clone();
         stale.status = status;
         let prepared = PreparedMaterializedSessionDetail::from_assessed_materialized(

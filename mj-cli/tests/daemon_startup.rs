@@ -90,9 +90,6 @@ exit 64
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     let mut daemon = daemon_command.spawn().unwrap();
-    // The daemon starts Apple container through its node, the process that
-    // runs its commands on this computer, as the launcher provides one.
-    let _node = common::start_test_node(&daemon_command, &data);
 
     let deadline = Instant::now() + Duration::from_secs(30);
     while !started.exists() {
@@ -251,6 +248,7 @@ fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
     // Restore the review table before migrations 104 and 106 add these columns.
     // Restore prompt_history before migration 116 adds its triggers, search table and command column.
     // Hard-won: #1187: revision-121 cleanup triggers referenced tables removed by this legacy fixture.
+    // Hard-won: 128c9a3de: revision-126 fixtures omitted historical harness constraints.
     connection
         .execute_batch(
             "ALTER TABLE session_moves DROP COLUMN source_environment_id;
@@ -302,7 +300,12 @@ fn old_store(storage: &common::DaemonStorage) -> std::path::PathBuf {
          PRAGMA writable_schema=ON;
          UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '')
              WHERE type='table' AND name='sessions';
+         UPDATE sqlite_schema SET sql=replace(sql, 'harness_kind TEXT NOT NULL',
+             'harness_kind TEXT NOT NULL CHECK(harness_kind IN (''codex'',''claude'',''kimi'',''grok'',''deepseek'',''muse'',''zcode''))')
+             WHERE type='table' AND name IN ('sessions','hidden_native_sessions');
          PRAGMA writable_schema=RESET;
+         ALTER TABLE sessions ADD COLUMN container_cpus TEXT;
+         ALTER TABLE sessions ADD COLUMN container_memory TEXT;
          DELETE FROM schema_migrations WHERE version > 43;
          UPDATE schema_compatibility SET minimum_compatible_version = 43;
          PRAGMA user_version = 43;",
@@ -454,9 +457,8 @@ fn a_daemon_reports_a_fresh_identity_for_each_start() {
 
 #[cfg(target_os = "linux")]
 // Hard-won: 92b39c9da: suspending the launcher's session deleted the daemon's working directory.
-// Hard-won: a97c0e7bc: node inherited a deleted checkout and every npm startup probe exited with status 7.
 #[test]
-fn daemon_and_node_working_directories_survive_removal_of_the_launching_checkout() {
+fn daemon_working_directory_survives_removal_of_the_launching_checkout() {
     let storage = upgrade_storage();
     let home = storage.path().join("home");
     let checkout = storage.path().join("checkout");
@@ -479,56 +481,21 @@ fn daemon_and_node_working_directories_survive_removal_of_the_launching_checkout
         serde_json::from_slice(&fs::read(storage.path().join("data/daemon.json")).unwrap())
             .unwrap();
     let daemon_cwd = std::path::PathBuf::from(format!("/proc/{}/cwd", metadata.pid));
-    // The node is a detached sibling, so identify this fixture's node by its
-    // instance data directory rather than relying on process parentage.
-    let data_environment = format!("MJ_DATA_DIR={}", storage.path().join("data").display());
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let node_cwd = loop {
-        let node = fs::read_dir("/proc")
-            .unwrap()
-            .filter_map(Result::ok)
-            .find(|entry| {
-                let Ok(command) = fs::read(entry.path().join("cmdline")) else {
-                    return false;
-                };
-                command.split(|byte| *byte == 0).nth(1) == Some(b"node".as_slice())
-                    && fs::read(entry.path().join("environ")).is_ok_and(|environment| {
-                        environment
-                            .split(|byte| *byte == 0)
-                            .any(|entry| entry == data_environment.as_bytes())
-                    })
-            });
-        if let Some(node) = node {
-            let cwd = node.path().join("cwd");
-            // exec happens before main changes directory.
-            if fs::read_link(&cwd).unwrap() == home {
-                break cwd;
-            }
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "node never entered the stable home directory"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    };
     fs::remove_dir(&checkout).unwrap();
-    for cwd in [daemon_cwd, node_cwd] {
-        let output = mj_core::subprocess::run_with_input(
-            Command::new("git")
-                .args(["config", "--global", "--includes", "--null", "--list"])
-                .env("HOME", &home)
-                .current_dir(&cwd),
-            &[],
-        )
-        .unwrap();
-        assert!(
-            output.status.success(),
-            "{}: {}",
-            cwd.display(),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(fs::read_link(cwd).unwrap(), home);
-    }
+    let output = mj_core::subprocess::run_with_input(
+        Command::new("git")
+            .args(["config", "--global", "--includes", "--null", "--list"])
+            .env("HOME", &home)
+            .current_dir(&daemon_cwd),
+        &[],
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read_link(daemon_cwd).unwrap(), home);
 }
 
 #[test]
@@ -1655,4 +1622,320 @@ fn review_start_fails_with_the_reason_the_daemon_refused_it() {
         "{log}"
     );
     assert!(!log.contains("review started"), "{log}");
+}
+
+/// Real daemon/control/PTY/harness boundary, including a disconnected login.
+// Hard-won: 9952f0845: preparation helpers in their own groups survived a closed login pane
+#[cfg(unix)]
+#[test]
+fn daemon_login_terminal_writes_daemon_profile_and_disconnect_kills_harness_group() {
+    for ending in 0..3 {
+        daemon_login_cleanup(ending);
+    }
+}
+
+#[cfg(unix)]
+fn daemon_login_cleanup(ending: u8) {
+    use mj_client::daemon::login_terminal::{TerminalInput, TerminalOutput};
+    use mj_client::daemon::{DaemonClient, DaemonMetadata, read_frame, write_frame};
+    use mj_core::config::{Config, HarnessKind, HarnessProfile};
+    use std::time::{Duration, Instant};
+    let storage = upgrade_storage();
+    let user = storage.path().join("user");
+    let tools = storage.path().join("tools");
+    let home = user.join(".config/opencode");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&tools).unwrap();
+    mj_core::test_hooks::install_fake_command(
+        &tools,
+        "opencode",
+        r#"
+if [ "$1 $2" != 'auth login' ]; then exit 1; fi
+login_home="$XDG_CONFIG_HOME/opencode"
+if [ -e "$login_home/cancel" ]; then
+  sleep 600 & child=$!
+  printf '%s' "$child" > "$login_home/child"
+  printf 'waiting'
+  wait
+else
+  head -c 131072 /dev/zero | tr '\000' x
+  printf '\nCode: '
+  read -r code
+  stty size > "$login_home/size"
+  printf '%s' "$code" > "$login_home/credential"
+  printf 'saved\n'
+fi
+"#,
+    );
+    let path = format!("{}:/usr/bin:/bin", tools.display());
+    let mut config = Config::default();
+    config.phone.enabled = false;
+    let mut profile = HarnessProfile::new(HarnessKind::OpenCode, home.clone());
+    profile.environment.insert("PATH".into(), path.clone());
+    config.profiles.insert("fixture".into(), profile);
+    let preparation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    preparation.set_nonblocking(true).unwrap();
+    let preparation_address = preparation.local_addr().unwrap();
+    let after_cancel = storage.path().join("written-after-cancel");
+    let helper = storage.path().join("preparation.py");
+    fs::write(
+        &helper,
+        format!(
+            r#"
+import os, socket
+s = socket.create_connection(('127.0.0.1', {port}))
+s.sendall((str(os.getpid()) + '\n').encode())
+s.recv(1)
+open({output:?}, 'w').write('helper survived cancellation')
+"#,
+            port = preparation_address.port(),
+            output = after_cancel.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    mj_core::test_hooks::install_fake_command(
+        &tools,
+        "node",
+        &format!("exec /usr/bin/python3 '{}'", helper.display()),
+    );
+    let mut prepared_profile =
+        HarnessProfile::new(HarnessKind::Claude, storage.path().join("claude"));
+    prepared_profile
+        .environment
+        .insert("PATH".into(), path.clone());
+    prepared_profile
+        .environment
+        .insert("HOME".into(), user.to_string_lossy().into_owned());
+    prepared_profile.environment.insert(
+        "XDG_CACHE_HOME".into(),
+        storage.path().join("cache").to_string_lossy().into_owned(),
+    );
+    config
+        .profiles
+        .insert("preparation".into(), prepared_profile);
+    config
+        .save_to(&storage.path().join("config/config.toml"))
+        .unwrap();
+    let mut command = upgrade_command(&storage);
+    common::AgentIsolation::under(storage.path()).apply(&mut command);
+    command
+        .arg("daemon-run")
+        .env("HOME", &user)
+        .env("XDG_CONFIG_HOME", user.join(".config"))
+        .env("XDG_DATA_HOME", user.join(".local/share"))
+        .env("PATH", path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(fs::File::create(storage.path().join("login-daemon.log")).unwrap());
+    let mut daemon = command.spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let metadata = loop {
+        if let Ok(bytes) = fs::read(storage.path().join("data/daemon.json"))
+            && let Ok(metadata) = serde_json::from_slice::<DaemonMetadata>(&bytes)
+        {
+            break metadata;
+        }
+        assert!(
+            daemon.try_wait().unwrap().is_none(),
+            "login test daemon exited"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "login test daemon failed to publish metadata"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            // Hard-won: 9952f0845: preparation helpers in their own groups survived a closed login pane
+            // The real managed Node probe owns this helper's separate group.
+            // Its socket is a readiness barrier and a post-cancellation write
+            // trigger: killing the group must close it without writing the file.
+            let preparation = tokio::net::TcpListener::from_std(preparation).unwrap();
+            {
+                use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+                let client = DaemonClient::connect(metadata.clone()).await.unwrap();
+                let terminal = client
+                    .login_terminal("preparation".into(), 80, 24)
+                    .await
+                    .unwrap();
+                eprintln!("login ending={ending}: waiting for helper readiness");
+                let (helper, _) = preparation.accept().await.unwrap();
+                eprintln!("login ending={ending}: helper connected");
+                let mut helper = tokio::io::BufReader::new(helper);
+                let mut pid = String::new();
+                helper.read_line(&mut pid).await.unwrap();
+                let pid: i32 = pid.trim().parse().unwrap();
+                assert_eq!(
+                    unsafe { libc::getpgid(pid) },
+                    pid,
+                    "preparation helper needs its own group"
+                );
+                eprintln!("login ending={ending}: helper ready pid={pid}");
+                if ending == 0 {
+                    drop(terminal);
+                } else if ending == 1 {
+                    let reply = DaemonClient::connect(metadata.clone())
+                        .await
+                        .unwrap()
+                        .request(mj_client::daemon::DaemonAction::PrepareUpgrade)
+                        .await
+                        .unwrap();
+                    assert!(matches!(reply, mj_client::daemon::DaemonReply::Done));
+                    drop(terminal);
+                } else {
+                    // Simulate daemon death: all duplicated masters close in
+                    // the kernel. Child cleanup cannot depend on a daemon wait.
+                    daemon.kill().unwrap();
+                    daemon.wait().unwrap();
+                    drop(terminal);
+                }
+                eprintln!("login ending={ending}: waiting for helper EOF");
+                let mut byte = [0];
+                assert_eq!(helper.read(&mut byte).await.unwrap(), 0);
+                let _ = helper.get_mut().write_all(b"write").await;
+                eprintln!("login ending={ending}: helper EOF received");
+                while unsafe { libc::kill(-pid, 0) } == 0 {
+                    tokio::task::yield_now().await;
+                }
+                assert!(
+                    !after_cancel.exists(),
+                    "cancelled preparation wrote after its owner exited"
+                );
+                if ending > 0 {
+                    return;
+                }
+            }
+            for mode in 0..3 {
+                let disconnect = mode > 0;
+                if disconnect {
+                    fs::write(home.join("cancel"), "").unwrap();
+                }
+                let client = DaemonClient::connect(metadata.clone()).await.unwrap();
+                let mut terminal = client
+                    .login_terminal("fixture".into(), 80, 24)
+                    .await
+                    .unwrap();
+                let mut transcript = Vec::new();
+                loop {
+                    match read_frame::<TerminalOutput>(&mut terminal.stream)
+                        .await
+                        .unwrap()
+                    {
+                        TerminalOutput::Bytes(bytes) => transcript.extend(bytes),
+                        other => panic!(
+                            "login failed before prompt: {other:?}; {}",
+                            String::from_utf8_lossy(&transcript)
+                        ),
+                    }
+                    if transcript.ends_with(if disconnect { b"waiting" } else { b"Code: " }) {
+                        break;
+                    }
+                }
+                if disconnect {
+                    let child: i32 = fs::read_to_string(home.join("child"))
+                        .unwrap()
+                        .parse()
+                        .unwrap();
+                    if mode == 1 {
+                        // Fill the PTY input while the harness is not reading;
+                        // disconnect must still reach the process-group owner.
+                        write_frame(
+                            &mut terminal.stream,
+                            &TerminalInput::Bytes(vec![b'x'; 131072]),
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    if mode == 2 {
+                        let reply = DaemonClient::connect(metadata.clone())
+                            .await
+                            .unwrap()
+                            .request(mj_client::daemon::DaemonAction::PrepareUpgrade)
+                            .await
+                            .unwrap();
+                        assert!(matches!(reply, mj_client::daemon::DaemonReply::Done));
+                        loop {
+                            match read_frame::<TerminalOutput>(&mut terminal.stream).await {
+                                Ok(TerminalOutput::Failed(message)) => {
+                                    assert!(message.contains("retry Login"));
+                                    break;
+                                }
+                                Ok(TerminalOutput::Bytes(_)) => {}
+                                // The daemon aborts disposable connection tasks on
+                                // handoff. The pane renders EOF as a retry notice.
+                                Err(error) => {
+                                    let error = error
+                                        .root_cause()
+                                        .downcast_ref::<std::io::Error>()
+                                        .expect("handoff connection I/O error");
+                                    assert!(matches!(
+                                        error.kind(),
+                                        std::io::ErrorKind::UnexpectedEof
+                                            | std::io::ErrorKind::ConnectionReset
+                                    ));
+                                    break;
+                                }
+                                other => panic!("handoff did not end terminal: {other:?}"),
+                            }
+                        }
+                    }
+                    drop(terminal);
+                    loop {
+                        #[cfg(target_os = "linux")]
+                        let alive = fs::read_to_string(format!("/proc/{child}/stat"))
+                            .is_ok_and(|state| state.split_whitespace().nth(2) != Some("Z"));
+                        #[cfg(not(target_os = "linux"))]
+                        let alive = unsafe { libc::kill(child, 0) == 0 };
+                        if !alive {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                } else {
+                    assert!(transcript.len() > 131072);
+                    write_frame(
+                        &mut terminal.stream,
+                        &TerminalInput::Resize {
+                            cols: 100,
+                            rows: 40,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    write_frame(
+                        &mut terminal.stream,
+                        &TerminalInput::Bytes(b"daemon-code\n".to_vec()),
+                    )
+                    .await
+                    .unwrap();
+                    loop {
+                        match read_frame::<TerminalOutput>(&mut terminal.stream)
+                            .await
+                            .unwrap()
+                        {
+                            TerminalOutput::Bytes(bytes) => transcript.extend(bytes),
+                            TerminalOutput::Exited { code } => {
+                                assert_eq!(code, 0, "{}", String::from_utf8_lossy(&transcript));
+                                break;
+                            }
+                            TerminalOutput::Failed(error) => panic!("{error}"),
+                        }
+                    }
+                    assert_eq!(
+                        fs::read_to_string(home.join("credential")).unwrap(),
+                        "daemon-code"
+                    );
+                    assert_eq!(
+                        fs::read_to_string(home.join("size")).unwrap().trim(),
+                        "40 100"
+                    );
+                    assert!(String::from_utf8_lossy(&transcript).contains("saved"));
+                }
+            }
+        })
+        .await
+        .expect("daemon login integration timed out");
+    });
+    daemon.wait().unwrap();
 }

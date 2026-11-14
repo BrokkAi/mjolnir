@@ -50,6 +50,16 @@ pub(crate) struct LegacyMailboxEvent<'a> {
 }
 
 impl MailboxEvent {
+    /// Parent instructions are assignments only for the child's handback check.
+    pub fn handback_assignment(&self) -> Option<(String, &str)> {
+        match &self.body {
+            MailboxEventBody::ParentMessage { text } => {
+                Some((format!("subagent-input-mailbox-{}", self.key), text))
+            }
+            _ => None,
+        }
+    }
+
     /// Full message text, as distinct from an informational mailbox event.
     pub fn message_text(&self) -> Option<&str> {
         match &self.body {
@@ -285,6 +295,8 @@ pub enum MailboxEventBody {
         number: u64,
         title: String,
         actor: String,
+        #[serde(default, skip_serializing_if = "LifecycleRecipient::is_creator")]
+        recipient: LifecycleRecipient,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repo: Option<String>,
     },
@@ -329,8 +341,12 @@ impl MailboxEventBody {
             | Self::GithubComment { .. }
             | Self::GithubReview { .. }
             | Self::GithubReviewComment { .. }
-            | Self::GithubPullRequestLifecycle { .. }
             | Self::PlainText { .. } => crate::relay::RELAY_LEGACY_MAILBOX_PROTOCOL,
+            Self::GithubPullRequestLifecycle {
+                recipient: LifecycleRecipient::Interested,
+                ..
+            } => crate::relay::RELAY_FOLLOWED_LIFECYCLE_PROTOCOL,
+            Self::GithubPullRequestLifecycle { .. } => crate::relay::RELAY_LEGACY_MAILBOX_PROTOCOL,
         }
     }
 }
@@ -342,6 +358,20 @@ pub enum MailboxPullRequestChange {
     Merged,
     ClosedWithoutMerging,
     Reopened,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleRecipient {
+    #[default]
+    Creator,
+    Interested,
+}
+
+impl LifecycleRecipient {
+    pub fn is_creator(&self) -> bool {
+        matches!(self, Self::Creator)
+    }
 }
 
 /// Shared, human-readable account of an event's type and short description.
@@ -740,6 +770,7 @@ pub fn describe_mailbox_event(event: &MailboxEvent) -> MailboxEventDescription {
             number,
             title,
             actor,
+            recipient,
             repo,
         } => {
             let reference = item_reference(repo.as_deref(), *number);
@@ -750,16 +781,31 @@ pub fn describe_mailbox_event(event: &MailboxEvent) -> MailboxEventDescription {
             } else {
                 format!(" by {actor}")
             };
-            let (line, transcript_line) = match change {
-                MailboxPullRequestChange::Merged => (
+            let (line, transcript_line) = match (recipient, change) {
+                (LifecycleRecipient::Interested, MailboxPullRequestChange::Merged) => (
+                    format!("PR {reference} \"{title}\" was merged{by_clause}."),
+                    format!("PR {reference} was merged{by_clause}."),
+                ),
+                (
+                    LifecycleRecipient::Interested,
+                    MailboxPullRequestChange::ClosedWithoutMerging,
+                ) => (
+                    format!("PR {reference} \"{title}\" was closed without merging."),
+                    format!("PR {reference} was closed without merging."),
+                ),
+                (LifecycleRecipient::Interested, MailboxPullRequestChange::Reopened) => (
+                    format!("PR {reference} \"{title}\" was reopened."),
+                    format!("PR {reference} was reopened."),
+                ),
+                (LifecycleRecipient::Creator, MailboxPullRequestChange::Merged) => (
                     format!("Your PR {reference} \"{title}\" was merged{by_clause}."),
                     format!("Your PR {reference} was merged{by_clause}."),
                 ),
-                MailboxPullRequestChange::ClosedWithoutMerging => (
+                (LifecycleRecipient::Creator, MailboxPullRequestChange::ClosedWithoutMerging) => (
                     format!("Your PR {reference} \"{title}\" was closed without merging."),
                     format!("Your PR {reference} was closed without merging."),
                 ),
-                MailboxPullRequestChange::Reopened => (
+                (LifecycleRecipient::Creator, MailboxPullRequestChange::Reopened) => (
                     format!("Your PR {reference} \"{title}\" was reopened."),
                     format!("Your PR {reference} was reopened."),
                 ),
@@ -903,6 +949,43 @@ pub enum MailboxDeliveryPath {
     ToolHook,
     Prompt,
     Wake,
+}
+
+/// When a mailbox message reaches a recipient that is already working.
+///
+/// The recipient's worker decides this once and publishes it in its
+/// operational state; senders and the daemon read that fact and never derive
+/// it from configuration themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MailboxDeliveryMode {
+    /// The message arrives at the recipient's next tool boundary, without
+    /// ending the turn.
+    ToolBoundary,
+    /// The message waits for the current turn to end, then arrives with the
+    /// next prompt or starts a wake turn.
+    TurnBoundary,
+}
+
+impl MailboxDeliveryMode {
+    /// What a Codex session on `provider` accepts. `None` is Codex's default
+    /// OpenAI provider.
+    ///
+    /// Codex records a `PostToolUse` hook's context as a developer message
+    /// between a tool call and its output. DeepSeek's chat API rejects any
+    /// history holding a tool call that its output does not immediately
+    /// follow, so one mid-turn delivery poisons every later request of the
+    /// session (#1277). A provider pointing at DeepSeek's service therefore
+    /// waits for the turn boundary; other providers retain tool-boundary
+    /// delivery, since no rejection has been observed for them. The provider
+    /// is recognized by its host through `CodexProvider::kind`, the same
+    /// classification quota and utility calls use.
+    pub fn for_codex_provider(provider: Option<&crate::codex_provider::CodexProvider>) -> Self {
+        match provider.map(crate::codex_provider::CodexProvider::kind) {
+            Some(crate::codex_provider::CodexProviderKind::DeepSeek) => Self::TurnBoundary,
+            _ => Self::ToolBoundary,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1212,6 +1295,15 @@ mod tests {
                 number: 4623,
                 title: "Model Rust built-in macro values for CQ07".into(),
                 actor: "dave".into(),
+                recipient: LifecycleRecipient::Creator,
+                repo: None,
+            }),
+            event(MailboxEventBody::GithubPullRequestLifecycle {
+                change: MailboxPullRequestChange::Merged,
+                number: 4623,
+                title: "Model Rust built-in macro values for CQ07".into(),
+                actor: "dave".into(),
+                recipient: LifecycleRecipient::Interested,
                 repo: None,
             }),
             event(MailboxEventBody::GithubPullRequestLifecycle {
@@ -1219,6 +1311,7 @@ mod tests {
                 number: 4624,
                 title: "PR without a known merger".into(),
                 actor: String::new(),
+                recipient: LifecycleRecipient::Creator,
                 repo: None,
             }),
             event(MailboxEventBody::GithubPullRequestLifecycle {
@@ -1226,6 +1319,7 @@ mod tests {
                 number: 4625,
                 title: "Legacy PR without a known merger".into(),
                 actor: "unknown".into(),
+                recipient: LifecycleRecipient::Creator,
                 repo: None,
             }),
             MailboxEvent {

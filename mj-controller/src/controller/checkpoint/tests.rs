@@ -75,9 +75,9 @@ fn managed_worktree_export_capture(
     let worktree_head =
         crate::controller::test_support::test_git(&worktree_root, &["rev-parse", "HEAD"]);
 
-    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: PathBuf::from("/home/dev/.local/share/hel/workers/session"),
-    });
+    }));
     let mut state = State::default();
     state.sessions.insert(session_id.into(), session);
     let controller = Controller {
@@ -125,15 +125,15 @@ fn a_plain_project_directory_is_captured_without_git() {
     let session_id = plain.id.clone();
     plain.state = SessionState::Stopped;
     plain.target_template_id = "local-bare".into();
-    plain.target = Some(mj_core::state::TargetLocator::LocalBare {
+    plain.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: PathBuf::from("/home/dev/.local/share/hel/workers/session"),
-    });
+    }));
     plain.project_directory = Some(directory.path().to_path_buf());
     let mut recorded = project.clone();
     recorded
         .plain_directories
         .insert(recorded.bundle.primary_repo.clone());
-    plain.project = Some(recorded);
+    plain.project = Some(recorded.into());
     let mut state = State::default();
     state.sessions.insert(session_id.clone(), plain);
     let controller = Controller {
@@ -207,12 +207,12 @@ fn startup_reconciliation_only_removes_unreferenced_controller_checkpoints() {
     }
     let mut state = State::default();
     let mut session = checkpoint_test_session(session_id);
-    session.checkpoint = Some(CheckpointMetadata {
+    session.checkpoint = Some(Box::new(CheckpointMetadata {
         archive_path: directory.path().join(&referenced_name),
         sha256: "c".repeat(64),
         created_at: "2026-08-12T00:00:00Z".into(),
         event_frontier: 7,
-    });
+    }));
     state.sessions.insert(session_id.into(), session);
 
     assert_eq!(
@@ -251,8 +251,8 @@ fn checkpoint_barrier_snapshot(cursor: &RelayCursor) -> ManagedSessionSnapshot {
     materialized.applied_event_ordinal = cursor.ordinal;
     materialized.applied_event_digest = cursor.digest.clone();
     ManagedSessionSnapshot {
-        subagent_requests: Vec::new(),
-        subagent_completions: Vec::new(),
+        subagent_requests: Default::default(),
+        subagent_completions: Default::default(),
         subagent_queue_error: None,
         window: mj_core::state::ProjectionWindow::of(&materialized),
         materialized,
@@ -260,6 +260,8 @@ fn checkpoint_barrier_snapshot(cursor: &RelayCursor) -> ManagedSessionSnapshot {
         worker_build: None,
         operational: mj_core::relay::RelayOperationalState {
             assessment: None,
+            open_request: None,
+            person_input_through: 0,
             assessment_context: None,
             turn_completion: None,
             continuation: Default::default(),
@@ -300,10 +302,11 @@ fn checkpoint_barrier_snapshot(cursor: &RelayCursor) -> ManagedSessionSnapshot {
             agent_info: None,
             runtime: None,
             steering_supported: None,
+            mailbox_delivery: None,
             turn_controls: None,
-            config_options: Vec::new(),
+            config_options: Vec::new().into(),
             modes: None,
-            available_commands: Vec::new(),
+            available_commands: Vec::new().into(),
             config: BTreeMap::new(),
             active_prompt: None,
             queued_prompts: Vec::new(),
@@ -321,7 +324,8 @@ fn checkpoint_barrier_snapshot(cursor: &RelayCursor) -> ManagedSessionSnapshot {
             last_harness_turn_started_ordinal: None,
             background_commands: Vec::new(),
             background_work_known: None,
-        },
+        }
+        .into(),
     }
 }
 #[test]
@@ -706,6 +710,7 @@ fn a_working_session_defers_but_close_waits_for_cancellation_before_recovery() {
         &snapshot,
         "checkpoint-1",
         BarrierBusyPolicy::DeferWhileRunning,
+        HarnessKind::Codex,
         false,
         false,
     )
@@ -727,6 +732,7 @@ fn a_working_session_defers_but_close_waits_for_cancellation_before_recovery() {
             &snapshot,
             "checkpoint-1",
             BarrierBusyPolicy::InterruptWhileRunning,
+            HarnessKind::Codex,
             false,
             false,
         )
@@ -736,6 +742,7 @@ fn a_working_session_defers_but_close_waits_for_cancellation_before_recovery() {
         &snapshot,
         "checkpoint-1",
         BarrierBusyPolicy::InterruptWhileRunning,
+        HarnessKind::Codex,
         true,
         true,
     )
@@ -761,6 +768,7 @@ fn a_working_session_defers_but_close_waits_for_cancellation_before_recovery() {
         &snapshot,
         "checkpoint-1",
         BarrierBusyPolicy::DeferWhileRunning,
+        HarnessKind::Codex,
         true,
         false,
     )
@@ -778,6 +786,7 @@ fn a_working_session_defers_but_close_waits_for_cancellation_before_recovery() {
         &snapshot,
         "checkpoint-1",
         BarrierBusyPolicy::DeferWhileRunning,
+        HarnessKind::Codex,
         true,
         false,
     )
@@ -939,6 +948,7 @@ fn export_spec_schema_mismatch_is_detected_from_the_parse_error() {
 }
 pub(crate) const LATCH_RELAY_ROOT: &str = "MJ_TEST_LATCH_RELAY_ROOT";
 pub(crate) const LATCH_RELAY_MAX_PROTOCOL: &str = "MJ_TEST_LATCH_RELAY_MAX_PROTOCOL";
+const LATCH_REJECT_PROJECT_MEMORY: &str = "MJ_TEST_LATCH_REJECT_PROJECT_MEMORY";
 pub(crate) const LATCH_RECORD_SUBAGENT_ADMISSION: &str = "MJ_TEST_LATCH_RECORD_SUBAGENT_ADMISSION";
 pub(crate) const LATCH_DROP_ADMISSION_CLOSE_REPLY: &str =
     "MJ_TEST_LATCH_DROP_ADMISSION_CLOSE_REPLY";
@@ -1023,7 +1033,7 @@ fn latch_relay_child_serves_stdio() {
     println!();
     let checkpoint_only = std::env::var_os(LATCH_CHECKPOINT_ONLY).is_some();
     // Queue-only connections never own or write the control journal.
-    let mut relay = None;
+    let mut relay: Option<mj_worker::relay::DurableRelay> = None;
     let ready_at = Instant::now()
         + Duration::from_millis(
             std::env::var(LATCH_RELAY_STARTUP_DELAY_MS)
@@ -1046,9 +1056,49 @@ fn latch_relay_child_serves_stdio() {
     while let Some(request) =
         mj_core::relay::read_relay_frame(&mut reader).expect("read a relay request")
     {
+        if std::env::var_os(LATCH_REJECT_PROJECT_MEMORY).is_some() {
+            assert!(
+                !request.request.method_name().contains("project_memory"),
+                "idle worker upgrade must not require a project-memory transfer"
+            );
+        }
         let max_protocol = std::env::var(LATCH_RELAY_MAX_PROTOCOL)
             .ok()
-            .and_then(|value| value.parse::<u32>().ok());
+            .and_then(|value| value.parse::<u32>().ok())
+            .or(Some(mj_core::relay::RELAY_CHANGE_WAIT_PROTOCOL));
+        if Path::new(&root).join("upgrade-goal-peer").exists() {
+            use std::io::Write as _;
+            let name = match &request.request {
+                mj_core::relay::RelayRequest::Submit {
+                    command: RelayCommand::BeginCheckpoint { .. },
+                    ..
+                } => "begin_checkpoint",
+                mj_core::relay::RelayRequest::Submit {
+                    command: RelayCommand::CancelTurn,
+                    ..
+                } => "cancel_turn",
+                _ => request.request.method_name(),
+            };
+            let mut log = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(Path::new(&root).join("upgrade-requests.log"))
+                .unwrap();
+            writeln!(log, "{name}").unwrap();
+            if max_protocol
+                .is_some_and(|version| version < mj_core::relay::RELAY_IDLE_GOAL_INTENT_PROTOCOL)
+                && let mj_core::relay::RelayRequest::ReserveIdle { command_id } = &request.request
+            {
+                assert!(
+                    relay.as_ref().is_some_and(|relay| relay
+                        .operational_state()
+                        .checkpoint_barrier
+                        .as_deref()
+                        == Some(command_id.as_str())),
+                    "old worker's initial ReserveIdle rejects goal intent; only accepted-barrier confirmation is valid"
+                );
+            }
+        }
         let payload = match &request.request {
             mj_core::relay::RelayRequest::Hello { supported, .. } => {
                 let negotiated = max_protocol
@@ -1201,6 +1251,52 @@ fn latch_relay_child_serves_stdio() {
                 "checkpoint submitted before current ACP startup finished"
             );
         }
+        if std::env::var("MJ_TEST_QUOTA_BARRIER_RACE").as_deref() == Ok("1") {
+            if matches!(
+                &request.request,
+                mj_core::relay::RelayRequest::Submit {
+                    command: RelayCommand::BeginCheckpoint { .. },
+                    ..
+                }
+            ) {
+                relay
+                    .record_observation(mj_core::relay::RelayObservation::HarnessTurnStarted {
+                        started_at_ms: mj_core::clock::epoch_millis(),
+                    })
+                    .unwrap();
+            }
+            assert!(
+                !matches!(
+                    &request.request,
+                    mj_core::relay::RelayRequest::Submit {
+                        command: RelayCommand::CancelTurn,
+                        ..
+                    }
+                ),
+                "automatic quota Move cancelled new work"
+            );
+        }
+        let late_turn = Path::new(&root).join("upgrade-late-turn");
+        if late_turn.exists()
+            && matches!(
+                request.request,
+                mj_core::relay::RelayRequest::Status | mj_core::relay::RelayRequest::Attach { .. }
+            )
+        {
+            std::fs::remove_file(late_turn).unwrap();
+            relay
+                .record_observation(mj_core::relay::RelayObservation::HarnessTurnStarted {
+                    started_at_ms: mj_core::clock::epoch_millis(),
+                })
+                .unwrap();
+            relay
+                .record_observation(mj_core::relay::RelayObservation::HarnessTurnSettled {
+                    autonomous: None,
+                    origin: Some("test autonomous completion".into()),
+                    prompt_in_flight: false,
+                })
+                .unwrap();
+        }
         #[cfg(unix)]
         hold_named_relay_command(&request.request);
         // The harness keeps talking while a checkpoint barrier holds: this
@@ -1259,7 +1355,21 @@ fn latch_relay_child_serves_stdio() {
                 break;
             }
         }
-        let response = if reject_release && requests_checkpoint_release(&request) {
+        let response = if Path::new(&root).join("upgrade-held-reviewer").exists()
+            && matches!(
+                request.request,
+                mj_core::relay::RelayRequest::ReserveIdle { .. }
+            ) {
+            mj_core::relay::RelayResponseEnvelope {
+                request_id: request.request_id,
+                protocol_version: request.protocol_version,
+                body: mj_core::relay::RelayResponseBody::Ok {
+                    payload: mj_core::relay::RelayResponsePayload::IdleReservation {
+                        ordinal: None,
+                    },
+                },
+            }
+        } else if reject_release && requests_checkpoint_release(&request) {
             unparseable_request_response(&request)
         } else if matches!(
             request.request,
@@ -1538,7 +1648,9 @@ pub(crate) fn latch_relay_target(
         spec.env.insert(LATCH_CHECKPOINT_ONLY.into(), "1".into());
     }
     for key in [
+        "MJ_TEST_QUOTA_BARRIER_RACE",
         LATCH_RELAY_MAX_PROTOCOL,
+        LATCH_REJECT_PROJECT_MEMORY,
         LATCH_RECORD_SUBAGENT_ADMISSION,
         LATCH_DROP_ADMISSION_CLOSE_REPLY,
     ] {
@@ -1639,6 +1751,8 @@ async fn worker_upgrade_defers_a_busy_turn_and_keeps_steering_on_the_same_connec
         IsolatedTest::new(test_name)
             .env(LATCH_TEST_CHILD, "1")
             .env("MJ_INSTANCE", "upgrade-in-flight-test")
+            .env(LATCH_RELAY_MAX_PROTOCOL, "58")
+            .env(LATCH_REJECT_PROJECT_MEMORY, "1")
             .isolated_store(directory.path())
             .run();
         return;
@@ -1648,15 +1762,12 @@ async fn worker_upgrade_defers_a_busy_turn_and_keeps_steering_on_the_same_connec
     let starts = root.path().join("starts");
     crate::database::save_session(&checkpoint_test_session(LATCH_RELAY_SESSION)).unwrap();
     let channels = crate::session_manager::spawn_session_manager().unwrap();
-    channels
-        .targets
-        .send(vec![latch_relay_target(
-            root.path(),
-            Some(&starts),
-            ReleaseSupport::Supported,
-            true,
-        )])
-        .unwrap();
+    let mut target =
+        latch_relay_target(root.path(), Some(&starts), ReleaseSupport::Supported, true);
+    target.project_memory = Some(crate::session_manager::ProjectMemorySyncTarget {
+        canonical_root: root.path().join("memory"),
+    });
+    channels.targets.send(vec![target]).unwrap();
     let handle = channels
         .control
         .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
@@ -1689,6 +1800,7 @@ async fn worker_upgrade_defers_a_busy_turn_and_keeps_steering_on_the_same_connec
         .unwrap();
     handle.sync_now().await.unwrap();
     let snapshot = handle.view().snapshot.unwrap();
+    assert_eq!(snapshot.operational.relay_protocol_version, Some(58));
     assert!(snapshot.operational.checkpoint_barrier.is_none());
     assert_eq!(
         snapshot.operational.steering.as_ref().unwrap().command_id,
@@ -1729,7 +1841,7 @@ async fn a_ready_unchanged_worker_settles_an_abandoned_boot_on_the_next_sync() {
         worker_root: root.clone(),
     };
     let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
-    session.target = Some(durable_target.clone());
+    session.target = Some(Box::new(durable_target.clone()));
     crate::database::save_session(&session).unwrap();
     let mut target = latch_relay_target(&root, None, ReleaseSupport::Supported, false);
     let restarted = root.join("unexpected-restart");
@@ -1798,48 +1910,113 @@ async fn a_ready_unchanged_worker_settles_an_abandoned_boot_on_the_next_sync() {
     channels.shutdown.shutdown().await.unwrap();
 }
 
+// Hard-won: #1498: idle goal upgrades must preserve reviewer admission and reject later native turns.
 #[cfg(unix)]
 #[tokio::test]
 async fn worker_upgrade_reservation_releases_after_abandonment() {
     if std::env::var_os(LATCH_TEST_CHILD).is_none() {
-        let directory = tempfile::tempdir().unwrap();
         let test_name = format!(
             "{}::worker_upgrade_reservation_releases_after_abandonment",
             module_path!()
                 .strip_prefix("mj_controller::")
                 .unwrap_or(module_path!())
         );
-        IsolatedTest::new(test_name)
-            .env(LATCH_TEST_CHILD, "1")
-            .env("MJ_INSTANCE", "upgrade-in-flight-test")
-            .isolated_store(directory.path())
-            .run();
+        for protocol in [58, 59, 60] {
+            let directory = tempfile::tempdir().unwrap();
+            IsolatedTest::new(test_name.clone())
+                .env(LATCH_TEST_CHILD, protocol.to_string())
+                .env("MJ_INSTANCE", "upgrade-in-flight-test")
+                .env(LATCH_RELAY_MAX_PROTOCOL, protocol.to_string())
+                .env(LATCH_REJECT_PROJECT_MEMORY, "1")
+                .isolated_store(directory.path())
+                .run();
+        }
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
     let root = tempfile::tempdir().unwrap();
+    let protocol: u32 = std::env::var(LATCH_TEST_CHILD).unwrap().parse().unwrap();
+    std::fs::write(
+        root.path().join("upgrade-goal-peer"),
+        b"scoped legacy upgrade peer",
+    )
+    .unwrap();
     crate::database::save_session(&checkpoint_test_session(LATCH_RELAY_SESSION)).unwrap();
-    let channels = crate::session_manager::spawn_session_manager().unwrap();
-    channels
-        .targets
-        .send(vec![latch_relay_target(
-            root.path(),
-            None,
-            ReleaseSupport::Supported,
-            false,
-        )])
+    let mut relay =
+        mj_worker::relay::DurableRelay::open(root.path(), LATCH_RELAY_SESSION, "1.0.0").unwrap();
+    relay
+        .record_observation(mj_core::relay::RelayObservation::SessionOpened {
+            native_session_id: "native-session".into(),
+            resumed: true,
+            native_continuity_lost: false,
+            replaced_unused_native_session_id: None,
+        })
         .unwrap();
+    relay
+        .record_observation(mj_core::relay::RelayObservation::SessionConfigured {
+            config_options: Vec::new(),
+        })
+        .unwrap();
+    relay.record_session_update(serde_json::from_value(serde_json::json!({
+        "sessionUpdate":"session_info_update", "_meta": {
+            "goal":{"objective":"Retain the idle durable goal", "status":"active", "createdAt":42},
+            "execution":{"version":1,"status":"idle"}
+        }
+    })).unwrap()).unwrap();
+    let preserved_goal = relay.operational_state().goal;
+    drop(relay);
+    let channels = crate::session_manager::spawn_session_manager().unwrap();
+    let mut target = latch_relay_target(root.path(), None, ReleaseSupport::Supported, false);
+    target.project_memory = Some(crate::session_manager::ProjectMemorySyncTarget {
+        canonical_root: root.path().join("memory"),
+    });
+    channels.targets.send(vec![target]).unwrap();
     let handle = channels
         .control
         .wait_for_session(LATCH_RELAY_SESSION, Duration::from_secs(10))
         .await
         .unwrap();
     wait_until_the_actor_is_safe_to_replace(&handle, HarnessKind::Codex).await;
+    // The peer's private reviewer admission is deliberately absent from its
+    // public activity snapshot. ReserveIdle must still confirm its absence.
+    let reviewer = root.path().join("upgrade-held-reviewer");
+    std::fs::write(&reviewer, b"review capture still running").unwrap();
+    assert!(
+        IdleWorkspaceLease::acquire_for_upgrade(&handle, HarnessKind::Codex)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        reviewer.exists(),
+        "deferral must leave admitted review work alive"
+    );
+    handle.sync_now().await.unwrap();
+    assert_eq!(
+        handle.view().snapshot.unwrap().operational.goal,
+        preserved_goal
+    );
+    std::fs::remove_file(reviewer).unwrap();
+    wait_until_the_actor_is_safe_to_replace(&handle, HarnessKind::Codex).await;
     let mut lease = IdleWorkspaceLease::acquire_for_upgrade(&handle, HarnessKind::Codex)
         .await
         .unwrap()
         .expect("idle worker");
+    assert_eq!(lease.protocol_version(), protocol);
     assert!(lease.verify_for_upgrade().await.unwrap());
+    assert_eq!(
+        lease.lease.connection_mut().operational().goal,
+        preserved_goal
+    );
+    // Native AIR can arrive while the barrier is held. A start and finish
+    // after ready invalidates its original cut even though the worker is idle again.
+    std::fs::write(root.path().join("upgrade-late-turn"), b"start and finish").unwrap();
+    assert!(!lease.verify_for_upgrade().await.unwrap());
+    let operational = lease.lease.connection_mut().operational();
+    assert!(operational.checkpoint_barrier.is_some());
+    assert_eq!(operational.execution, RelayExecutionState::Idle);
+    assert!(operational.harness_turn.is_none());
+    assert_eq!(operational.goal, preserved_goal);
     drop(lease);
     wait_until_the_actor_is_safe_to_replace(&handle, HarnessKind::Codex).await;
     let mut lease = IdleWorkspaceLease::acquire_for_upgrade(&handle, HarnessKind::Codex)
@@ -1847,6 +2024,10 @@ async fn worker_upgrade_reservation_releases_after_abandonment() {
         .unwrap()
         .expect("abandoned barrier recovered");
     assert!(lease.verify_for_upgrade().await.unwrap());
+    assert_eq!(
+        lease.lease.connection_mut().operational().goal,
+        preserved_goal
+    );
     let first = handle
         .enqueue_submit(
             "first-after-upgrade".into(),
@@ -1872,6 +2053,35 @@ async fn worker_upgrade_reservation_releases_after_abandonment() {
         first_ordinal < second_ordinal,
         "queued prompts retain their identity and order"
     );
+    handle.sync_now().await.unwrap();
+    assert_eq!(
+        handle.view().snapshot.unwrap().operational.goal,
+        preserved_goal
+    );
+    let requests = std::fs::read_to_string(root.path().join("upgrade-requests.log")).unwrap();
+    assert!(
+        requests.lines().any(|name| name == "reserve_idle"),
+        "all versions confirm reviewer admission through ReserveIdle"
+    );
+    assert_eq!(
+        requests.lines().any(|name| name == "begin_checkpoint"),
+        protocol < mj_core::relay::RELAY_IDLE_GOAL_INTENT_PROTOCOL
+    );
+    assert!(!requests.lines().any(|name| name == "cancel_turn"));
+    if protocol < mj_core::relay::RELAY_IDLE_GOAL_INTENT_PROTOCOL {
+        let begin = requests
+            .lines()
+            .position(|name| name == "begin_checkpoint")
+            .unwrap();
+        let confirm = requests
+            .lines()
+            .position(|name| name == "reserve_idle")
+            .unwrap();
+        assert!(
+            begin < confirm,
+            "legacy admission establishes the barrier before reviewer confirmation"
+        );
+    }
     channels.shutdown.shutdown().await.unwrap();
 }
 
@@ -2124,8 +2334,8 @@ async fn releasing_a_checkpoint_after_capture_defers_only_the_recovery_floor() {
     let mut dispatched = None;
     for attempt in 0.. {
         let snapshot = relay.sync_snapshot().await.unwrap();
-        if let Some(active) = snapshot.operational.active_prompt {
-            dispatched = Some(active);
+        if let Some(active) = &snapshot.operational.active_prompt {
+            dispatched = Some(active.clone());
             break;
         }
         assert!(attempt < 200, "a released barrier still froze ACP dispatch");
@@ -2459,10 +2669,10 @@ async fn a_close_latch_reuses_an_unchanged_archive_and_exports_after_new_content
     let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
     session.target_template_id = "removed-local".into();
     session.target_runtime = Some((&TargetTemplate::LocalBare).into());
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: data_directory.join("workers").join(LATCH_RELAY_SESSION),
-    });
-    session.checkpoint = Some(checkpoint.clone());
+    }));
+    session.checkpoint = Some(Box::new(checkpoint.clone()));
     crate::database::save_session(&session).unwrap();
 
     let mut config = Config::default();
@@ -2788,9 +2998,9 @@ async fn a_deferred_routine_checkpoint_leaves_no_stage_on_its_target() {
     let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
     session.target_template_id = "removed-local".into();
     session.target_runtime = Some((&TargetTemplate::LocalBare).into());
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: worker_root.clone(),
-    });
+    }));
     crate::database::save_session(&session).unwrap();
     let mut config = Config::default();
     config.profiles.insert(
@@ -3221,10 +3431,10 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
     let mut session = checkpoint_test_session(LATCH_RELAY_SESSION);
     session.target_template_id = "local".into();
     session.project_directory = Some(repository.path().to_owned());
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: data_directory.join("workers").join(LATCH_RELAY_SESSION),
-    });
-    session.checkpoint = Some(checkpoint.clone());
+    }));
+    session.checkpoint = Some(Box::new(checkpoint.clone()));
     crate::database::save_session(&session).unwrap();
 
     // `validate_move_checkpoint` re-reads the configuration from disk and
@@ -3296,8 +3506,10 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
         selection: selection.clone(),
         source_profile_id: "codex".into(),
         source_target_template_id: "local".into(),
-        source_target: session.target.clone(),
+        source_target: session.target.clone().map(|v| *v),
         source_native_session_id: session.native_session_id.clone(),
+        inherited_resource_allocation: None,
+        inherited_additional_mounts: Vec::new(),
         source_additional_mounts: Vec::new(),
         source_resource_allocation: None,
         destination_target: None,
@@ -3378,7 +3590,7 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
     );
     let sealed = &controller.state.sessions[LATCH_RELAY_SESSION];
     assert_eq!(sealed.state, SessionState::Closing);
-    assert_eq!(sealed.checkpoint.as_ref(), Some(&checkpoint));
+    assert_eq!(sealed.checkpoint.as_deref(), Some(&checkpoint));
     assert_eq!(sealed.target, session.target);
     assert_eq!(operation.checkpoint.as_ref(), Some(&checkpoint));
     // The durable record has to agree: recovery reads it, not this process.
@@ -3578,10 +3790,10 @@ async fn close_cut_controller_with(
     session.state = state;
     session.target_template_id = "removed-local".into();
     session.target_runtime = Some((&TargetTemplate::LocalBare).into());
-    session.target = Some(TargetLocator::LocalBare {
+    session.target = Some(Box::new(TargetLocator::LocalBare {
         worker_root: data_directory.join("workers").join(LATCH_RELAY_SESSION),
-    });
-    session.checkpoint = Some(checkpoint);
+    }));
+    session.checkpoint = Some(Box::new(checkpoint));
     crate::database::save_session(&session).unwrap();
 
     let mut config = Config::default();
@@ -3819,13 +4031,13 @@ async fn a_queued_container_upgrade_yields_handoff_and_cancels_without_interrupt
         .sessions
         .get_mut(LATCH_RELAY_SESSION)
         .unwrap();
-    record.target = Some(TargetLocator::LocalPodman {
+    record.target = Some(Box::new(TargetLocator::LocalPodman {
         container_id: name.clone(),
         workspace_storage: mj_core::state::PodmanWorkspaceLocator::Volume {
             name: format!("{name}-workspace"),
         },
         borrowed_from: None,
-    });
+    }));
     record.target_runtime = Some(
         (&TargetTemplate::LocalPodman {
             container: serde_json::from_value(serde_json::json!({})).unwrap(),
@@ -3975,7 +4187,7 @@ async fn restart_recaptures_an_error_session_after_its_worker_is_gone() {
         false,
     )
     .unwrap();
-    let worker_root = match &target {
+    let worker_root = match &*target {
         TargetLocator::LocalBare { worker_root } => worker_root.clone(),
         other => panic!("expected the retained local target, got {other:?}"),
     };
@@ -4042,7 +4254,7 @@ async fn restart_recaptures_an_error_session_after_its_worker_is_gone() {
     assert_eq!(sealed.target, Some(target));
     assert_eq!(sealed.last_error, None);
     assert!(sealed.last_checkpoint_error.is_none());
-    assert_eq!(sealed.checkpoint.as_ref(), Some(&old_checkpoint));
+    assert_eq!(sealed.checkpoint.as_deref(), Some(old_checkpoint.as_ref()));
     let intent = crate::database::load_session_restart(LATCH_RELAY_SESSION)
         .unwrap()
         .unwrap();

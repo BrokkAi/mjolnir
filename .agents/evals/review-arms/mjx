@@ -1,0 +1,11 @@
+#!/bin/bash
+# Runs the installed mj against the private review-arms instance with a clean
+# environment, so the daemon does not inherit this session's CODEX_HOME,
+# CLAUDE_CONFIG_DIR, MJ_SESSION_ID or tool-cache variables.
+B="${REVIEW_ARMS_DIR:-/mnt/optane/review-arms-20261113}/instance"
+exec env -i HOME="$HOME" USER="${USER:-jonathan}" LOGNAME="${LOGNAME:-jonathan}" \
+  LANG="${LANG:-C.UTF-8}" SHELL=/bin/bash TERM=dumb \
+  PATH="/home/jonathan/.cargo/bin:/home/jonathan/.local/bin:/home/jonathan/.nvm/versions/node/v24.15.0/bin:/usr/local/bin:/usr/bin:/bin" \
+  XDG_RUNTIME_DIR="/run/user/$(id -u)" \
+  MJ_CONFIG_DIR="$B/config" MJ_DATA_DIR="$B/data" \
+  /home/jonathan/.cargo/bin/mj "$@"

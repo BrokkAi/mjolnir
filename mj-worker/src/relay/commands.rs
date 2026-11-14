@@ -209,7 +209,7 @@ impl DurableRelay {
     fn validate_turn_control(&self, command: &RelayCommand) -> Result<(), String> {
         match command {
             RelayCommand::DismissQuestion { question } => {
-                if self.snapshot.assessment.as_ref().and_then(|a| a.inferred_question()).as_ref()
+                if self.snapshot.open_request().map(|request| &request.question)
                     != Some(question)
                     || self.snapshot.active_prompt.is_some()
                     || self.snapshot.harness_turn.is_some()
@@ -830,41 +830,15 @@ impl DurableRelay {
                 )));
             }
         }
-        if let RelayCommand::ContinueAuthorizedWork {
-            expected,
-            user_command_id,
-            completed_command_id,
-            attempt,
-        } = &command
-        {
-            let state = &self.snapshot.continuation;
-            let facts = self.activity_facts();
-            // A background command that Jev judged idle does not hold this
-            // back, and plan mode does not either: the prompt cannot get past
-            // plan approval, and Jev already weighs whether input is needed.
-            if self.snapshot.assessment.as_ref().is_some_and(|a| {
-                !a.current() || a.action != Some(mj_core::assessment::Action::Continue)
-            }) || !self.snapshot.assessment_questions.is_empty()
-                || state.quota_recovery.as_ref().is_some_and(|r| !r.submitted)
-                || self.snapshot.goal.budget_limited()
-                || !state.eligible()
-                || state.user_command_id.as_ref() != Some(user_command_id)
-                || state.completed_command_id.as_ref() != Some(completed_command_id)
-                || *attempt != state.attempts + 1
-                || self.snapshot.latest_ordinal != expected.ordinal
-                || self.snapshot.latest_digest != expected.digest
-                || !mj_core::activity::can_submit(&facts)
-                || mj_core::activity::driver_present(&facts)
-                || !self.snapshot.queued_prompts.is_empty()
-                || self.pending_close_barrier_id().is_some()
-            {
-                return Ok(Err(relay_protocol_error(
-                    RelayErrorCode::InvalidState,
-                    "continuation evidence is stale or the allowance is exhausted",
-                    false,
-                    None,
-                )));
-            }
+        // Legacy: automatic continuation was removed (#1532). Journals still
+        // replay the command, but a live one is never accepted.
+        if matches!(&command, RelayCommand::ContinueAuthorizedWork { .. }) {
+            return Ok(Err(relay_protocol_error(
+                RelayErrorCode::InvalidState,
+                "automatic continuation is no longer supported",
+                false,
+                None,
+            )));
         }
         if let RelayCommand::SeedAssessmentContext { expected, context } = &command
             && (expected.ordinal != self.snapshot.latest_ordinal
@@ -1657,6 +1631,80 @@ impl DurableRelay {
             && self.pending_close_barrier_id().is_none()
     }
 
+    /// One owner decides whether the interrupted turn still belongs to us.
+    /// The completion and its login evidence are durable; a newer prompt,
+    /// cancellation or another driver always wins over credential recovery.
+    #[cfg_attr(not(unix), allow(dead_code))] // The worker control runtime is Unix-only.
+    pub(crate) fn authentication_retry_identity(&self) -> Option<(u64, &str)> {
+        let facts = self.activity_facts();
+        if self.verdict_harness != Some(mj_core::config::HarnessKind::Claude)
+            || self.snapshot.continuation.quota_suppressed
+            || !self.snapshot.assessment_questions.is_empty()
+            || self.snapshot.goal.budget_limited()
+            || self
+                .snapshot
+                .goal
+                .snapshot
+                .as_ref()
+                .is_some_and(|g| g.status == "paused")
+            || !mj_core::activity::can_submit(&facts)
+            || mj_core::activity::driver_present(&facts)
+            || self.pending_checkpoint_barrier()
+            || self.pending_close_barrier_id().is_some()
+        {
+            return None;
+        }
+        let completed = &self.snapshot.turn_completion.as_ref()?.command_id;
+        let receipt = self.snapshot.handled_commands.get(completed)?;
+        let ordinal = receipt.terminal_ordinal?;
+        if self
+            .snapshot
+            .latest_prompt_accepted_ordinal
+            .is_some_and(|input| input > receipt.accepted_ordinal)
+            || self
+                .snapshot
+                .last_harness_turn_started_ordinal
+                .is_some_and(|start| start > ordinal)
+        {
+            return None;
+        }
+        let RelayCommandOutcome::Prompt {
+            diagnostic: Some(diagnostic),
+            ..
+        } = receipt.outcome.as_ref()?
+        else {
+            return None;
+        };
+        mj_core::credentials::turn_diagnostic_reports_auth_failure(diagnostic)
+            .then_some((ordinal, diagnostic.login_fingerprint.as_deref()?))
+    }
+
+    #[cfg_attr(not(unix), allow(dead_code))] // The worker control runtime is Unix-only.
+    pub(crate) fn submit_authentication_retry(
+        &mut self,
+        expected: u64,
+        login: &str,
+    ) -> Result<bool> {
+        let Some((ordinal, rejected)) = self.authentication_retry_identity() else {
+            return Ok(false);
+        };
+        if ordinal != expected || rejected == login {
+            return Ok(false);
+        }
+        let id = mj_core::continuation::GeneratedPrompt::AuthenticationRetry.command_id(ordinal);
+        self.submit_command(
+            &id,
+            RelayCommand::Prompt {
+                prompt: mj_core::continuation::prompt_blocks(),
+            },
+        )?
+        .map_err(|error| anyhow!("submit authentication recovery: {error:?}"))?;
+        self.append_relay_event(Some(&id), RelayObservation::Notice {
+            message: "Claude's login changed after an authentication failure. Automatically continuing the interrupted work.".into(),
+        })?;
+        Ok(true)
+    }
+
     pub fn capacity_retry_deadline(&self) -> Option<i64> {
         self.snapshot
             .capacity_retry
@@ -2125,11 +2173,30 @@ impl DurableRelay {
 
     /// Atomically lease pending mailbox events and eligible Claude steers to
     /// one harness hook.
+    ///
+    /// A `PostToolUse` drain (Codex) carries a payload only when the worker
+    /// resolved the session's provider as accepting tool-boundary delivery;
+    /// see `MailboxDeliveryMode::for_codex_provider`. Otherwise it answers
+    /// empty and leaves events for turn-boundary delivery (wake turns and
+    /// prompt context), so an unresolved or unsafe provider never receives a
+    /// developer message between a tool call and its output (#1277).
+    /// `PostToolBatch` drains are unaffected.
     pub fn drain_mailbox(&mut self, hook_event: &str) -> Result<RelayResponsePayload> {
         anyhow::ensure!(
             matches!(hook_event, "PostToolUse" | "PostToolBatch"),
             "unsupported mailbox hook event"
         );
+        if hook_event == "PostToolUse"
+            && self.mailbox_delivery_mode
+                != Some(mj_core::mailbox::MailboxDeliveryMode::ToolBoundary)
+        {
+            return Ok(RelayResponsePayload::MailboxDrained {
+                lease_id: None,
+                text: None,
+                count: 0,
+                contexts: Vec::new(),
+            });
+        }
         self.expire_mailbox_hook_lease_at(epoch_millis())?;
         if self.snapshot.mailbox_hook_lease.is_some() {
             return Ok(RelayResponsePayload::MailboxDrained {

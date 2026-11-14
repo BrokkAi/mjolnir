@@ -55,7 +55,7 @@ fn on_dedicated_thread<T: Send>(work: impl FnOnce() -> Result<T> + Send) -> Resu
 }
 
 mod launch;
-pub(in crate::controller) use launch::WorkerFilePreparation;
+pub(in crate::controller) use launch::{LaunchHistory, WorkerFilePreparation};
 mod staging;
 pub(super) use staging::*;
 mod project_memory;
@@ -77,6 +77,8 @@ mod install;
 pub(super) use install::*;
 mod store;
 use store::*;
+mod microvm;
+pub(crate) use microvm::ensure_microvm_engine;
 mod upgrade;
 pub(crate) use upgrade::*;
 mod process;

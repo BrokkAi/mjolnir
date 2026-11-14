@@ -19,6 +19,10 @@ pub mod move_workspace;
 pub mod mailbox_hook;
 mod mcp_stdio;
 pub mod memory_mcp;
+pub mod observe;
+// Firecracker, vsock, TAP devices and PID 1 duties exist only on Linux.
+#[cfg(target_os = "linux")]
+pub mod microvm;
 pub mod review;
 pub mod subagent_mcp;
 

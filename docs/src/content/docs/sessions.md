@@ -49,6 +49,8 @@ Each workspace tab carries the most urgent symbol among its own sessions and how
 
 `prefix+o` opens the next session that needs you, in that order, and switches workspace when the next one is on another tab. `prefix+a` marks every session read, which clears only the `✓` reason; questions, failures, and unreachable sessions stay flagged. See [Sessions that need you](/terminal-surface/#sessions-that-need-you).
 
+A stopped session whose failure needs you stays in Sessions until you resume it, dismiss the notification, or destroy it. `prefix+o` selects its row. Enter resumes it, and `.` opens its actions, which include **Dismiss notification** and **Destroy session**.
+
 ## Create a session
 
 Press **Create**, `n`, `N`, or `prefix+c` anywhere in the terminal
@@ -73,7 +75,7 @@ offer this choice. Opening an empty workspace does not create a session.
 
 Provisioning runs in the background. The new row appears immediately in Sessions, its status changes as each launch stage completes, and a failure remains visible with useful diagnostics. `prefix+shift+c` cancels an in-flight launch without blocking the rest of the dashboard.
 
-Per-session CPU, memory, and attachment choices live in Mjolnir's state database, not `config.toml`. Container edits made later through the command palette (`prefix+:`) → **Container settings** take effect when that container is next created.
+Per-session CPU, memory, and attachment choices live in Mjolnir's state database, not `config.toml`. Container settings use the same allocation as New, Resume, and Move: whole CPUs and memory in GiB. Saving validates the size; host admission runs when the next container is created. A running container continues to count at its applied size until then. Container edits made later through the command palette (`prefix+:`) → **Container settings** take effect when that container is next created.
 
 ## Work, queue, and cancel
 
@@ -102,11 +104,11 @@ Silence is different. A turn can send nothing at all for a long time and be perf
 
 An adapter can write its final message, make its commit, then fail to send the reply that closes the turn. Jev now has a conservative recovery for this case: after 40 minutes of silence, it ends the tracked turn when there are no open tools, background commands, or queued prompts, the current reply sounds like a handback with probability at least 0.80, and the classifier sees no current failure with probability at least 0.90. A separate finished-work judgment can also qualify. The reply judgment checks whether the agent appears to be stopping; it does not claim that every requested task is complete or start more work. The harness connection stays open, so a late reply may still appear in the transcript; `mj wait` reports the tracked turn as finished. The separate `MJ_TURN_STALL_TIMEOUT_MS` option still fails a turn with reason `harness_inactive` after the configured silence, and is off by default because it also ends healthy turns that are merely slow.
 
-Mjolnir automatically uses TypeSafe's Jev classifier to distinguish a question from ongoing work. By default, it sends bounded recent prompt and assistant text, tool titles, and activity counts through Mjolnir's public Cloudflare proxy to TypeSafe after a minute of silence and after a completed reply. Running-turn requests include the durable user instructions so Jev can judge what the agent was asked to do. No API key is required. With `TYPESAFE_API_KEY` set, or a key in `~/.secrets/typesafe_api_key`, requests go directly to TypeSafe using your key; the daemon forwards that key to container and SSH workers. During a running turn, a confident user-input verdict marks the turn as waiting for you (`mj wait` returns `input_required`); the harness may still be running. After at least 40 minutes of silence, a closing-reply verdict can end the tracked turn only when there are no open tools, background commands, or queued prompts and no confident failure. After a completed reply, Jev also considers sessions whose harness still lists background tasks. A confident finished or user-input verdict shows the agent as idle, while preserving the task list and stop controls. A confident background-work verdict retains the background activity status when tasks are recorded, or shows “expecting the agent to continue” otherwise. New foreground activity or changed task inventory invalidates the inference. Low confidence, rate limits, and API failures preserve the existing activity; a valid answer, including an uncertain one, is kept until the evidence changes, and only failed requests are retried, after one minute and backing off to five.
+Mjolnir uses GLiDE (Fastino) through its hosted proxy for classification. The completed-turn verdict sends recent conversation and activity evidence; the AFK repeated-question check sends the current and previously declined questions; the question locator sends the latest user message and candidate assistant replies. No local provider key is used. During a running turn, a confident user-input verdict marks the turn as waiting for you (`mj wait` returns `input_required`); the harness may still be running. After at least 40 minutes of silence, a closing-reply verdict can end the tracked turn only when there are no open tools, background commands, or queued prompts and no confident failure. After a completed reply, Jev also considers sessions whose harness still lists background tasks. A confident finished or user-input verdict shows the agent as idle, while preserving the task list and stop controls. A confident background-work verdict retains the background activity status when tasks are recorded, or shows “expecting the agent to continue” otherwise. New foreground activity or changed task inventory invalidates the inference. Low confidence, rate limits, and API failures preserve the existing activity; a valid answer, including an uncertain one, is kept until the evidence changes, and only failed requests are retried, after one minute and backing off to five.
 
 The same check decides when a session is quiet, meaning its worker can be replaced by an upgrade, checkpointed, or moved without losing anything. A turn, a tool call, a queued message, or an active goal always keeps a session busy; so does a background task that has just finished, for up to a minute, because Claude Code answers every finished background command with a turn of its own and the process facts lag that turn by a second or two. When the only thing left is a background command or agent terminal, Jev is asked whether anyone still depends on it; a confident "no" (for example a `sleep`, an idle watcher, or a server left up for later use) lets the session count as quiet, and the process is stopped with the worker. Your own shells are never judged this way. Without a confident answer the old rule applies: any leftover background work keeps the session busy. The proxy does not log request content and limits requests per client IP; users sharing an IP share that allowance.
 
-Jev checks are recorded in local diagnostic logs, including scores, thresholds, timing, classifier questions, exact submitted JSON, and the actual application outcome. A positive assessment and an accepted continuation are recorded separately. Ordinary checks and retries do not add transcript messages. When the classifier identifies a running turn as waiting for input, the transcript shows: **Classifier: The agent appears to be waiting for you. The harness may still be running.** When it ends a stale turn, the notice says the agent appeared to be wrapping up and that the harness may still be running.
+Jev checks are recorded in local diagnostic logs, including scores, thresholds, timing, classifier questions, exact submitted JSON, and the actual application outcome. Ordinary checks and retries do not add transcript messages. When the classifier identifies a running turn as waiting for input, the transcript shows: **Classifier: The agent appears to be waiting for you. The harness may still be running.** When it ends a stale turn, the notice says the agent appeared to be wrapping up and that the harness may still be running.
 
 Exact inputs contain conversation text and live runtime facts. They are stored in `jev-decisions/decisions.*.jsonl` under the daemon data directory and each worker root, with four rotating 8 MiB segments per owner. HTTP authentication headers and configured TypeSafe keys are not recorded. The hosted proxy does not log request content. Details expire through rotation; no permanent audit database or history backfill is created.
 
@@ -120,15 +122,38 @@ open the session's action menu. The menu groups its actions under dividers:
 - **Organize**: **Rename…**, **Pin…**, and **Unpin**.
 - **Lifecycle**: **Container settings** (container sessions only), **Move…**,
   **Suspend…**, and **Restart**.
-- After a plain divider: **Copy session ID** and **Destroy…**.
+- After a plain divider: **Destroy…**.
+
+A **Copy session ID** button sits in the menu's top right corner.
 
 The menu leaves out an action that does not apply to the session. An action
 that applies but cannot run yet stays in the menu, greyed, with the reason.
 
 **Copy session ID** puts the session's full ID on the clipboard, for commands
 such as `mj wait --session <id>`. The footer confirms the copy with the ID's
-first eight characters. The command palette (`prefix+:`) lists the same action
-under the session's name.
+first eight characters.
+
+Right-clicking a session row in the terminal opens a small menu at the pointer,
+for that row's session and without moving the selection:
+
+- **Dismiss notification**, greyed while the session has nothing to dismiss.
+- **Copy session ID**, the same copy as above.
+- **New session with these settings** starts a new top-level session at once,
+  with no dialog, using the session's profile, runtime, workspace, project,
+  attached directories, delegation and oracle choices, review setting, GitHub
+  and project-memory opt-outs, and container size. It leaves behind the
+  title, conversation, parent link, and any managed worktree, for which it
+  asks for a new one. A model or effort picked inside the session is not
+  copied; the profile supplies them. If the profile or workspace can no longer
+  be used, the new session takes another one and the footer says so. If the
+  runtime or project can no longer be used, the new-session wizard opens
+  instead.
+
+Right-clicking a workspace tab opens **Clear notifications** at the pointer.
+It dismisses each dismissible notification in that workspace, including
+sub-agent sessions; the item is disabled when there is nothing to dismiss.
+Errors and forms have nothing to dismiss and stay flagged, and the notice
+bar reports any dismissal the daemon refuses.
 
 ## Detach and reattach
 
@@ -681,27 +706,12 @@ After a Mjolnir upgrade, live workers are replaced at their next quiet point, wh
 
 Continue with [durability and recovery](/durability/) for the archive guarantees, or [troubleshooting](/troubleshooting/) when a launch, checkpoint, or resume fails.
 
-## Automatic continuation
+## Quota recovery
 
-Mjolnir can continue work the agent has explicitly left unfinished when your earlier messages already request it. For example, if you asked for an implementation and tests, “Implemented; shall I run tests?” can trigger a continuation without another reply from you.
+When a turn ends at a subscription limit, Mjolnir resumes the session one minute after the limit resets, by sending a fixed prompt that asks the agent to continue the work you already requested. This also applies to turns the agent started on its own, and to sessions with background work still running. If the usage limit stopped a Codex goal, Mjolnir resumes the goal instead. A goal that has used up its own token budget is never resumed automatically; resume it yourself. New input from you or interrupting the session cancels a pending recovery.
 
-This is enabled by default. Uncheck **Enabled** under **Settings → Continuation** to disable it, or set:
+The session shows **Checking quota** while Mjolnir works out the reset time. Quota recovery relies on the Jev turn classifier to recognize a quota stop, so it follows the **Settings → Privacy → Jev (hosted service)** switch: with `[jev] enabled = false` it does not run. It skips child sessions. Workers older than relay protocol 25 are not recovered automatically until they are replaced.
 
-```toml
-[continuation]
-enabled = false
-```
-
-Continuation also needs Jev: with `[jev] enabled = false` it does not run, whatever `[continuation]` says, and the Continuation row in Settings reads **Off · Jev is off (Privacy)**.
-
-The session shows **Checking continuation** while Jev checks the conversation. A continuation appears as **Continuing requested work automatically · 1 of 3**. The diagnostic logs contain the evidence and outcome. There are at most three automatic continuations between your messages. New input or interrupting the session cancels a pending check. Push review runs when the agent requests it before pushing.
-
-Mjolnir checks every turn that ends, including a turn the agent starts on its own, for example when a background task it was waiting for finishes.
-
-Continuation supplies no new approval. It does not resolve missing information, genuine decisions, plan approvals, credentials, or external blockers. It skips child sessions, failed turns, sessions waiting on a question, and unsupported older workers. A classifier failure or uncertain result leaves the session waiting normally.
-
-When a background command, a sub-agent, or an active goal will still move the session on, a continuation waits. Mjolnir checks again when that work stops, or when Jev judges that the background work is idle, such as a command that only sleeps.
-
-When a turn ends at a subscription limit, Mjolnir schedules a continuation for one minute after the limit resets. This also applies to turns the agent started on its own, and to sessions with background work still running. If the usage limit stopped a Codex goal, Mjolnir resumes the goal instead. A goal that has used up its own token budget is never continued automatically; resume it yourself.
-
-The check uses user messages since the last context reset and recent assistant replies, including earlier exchanges that establish what “go ahead” refers to. It excludes tool history and generated prompts. Evidence has size limits; required user history is never clipped to fit. TypeSafe processes this text, through the public Jev proxy when no local TypeSafe key is configured. The proxy does not log or store message bodies.
+The `set-container-settings` API action accepts `resource_allocation`, for example
+`{"kind":"container","cpus":4,"memory_bytes":8589934592}`, alongside `session_id`
+and `mounts`. The old `cpus` and `memory` string fields are refused.

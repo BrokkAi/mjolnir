@@ -195,7 +195,7 @@ impl ChatState {
             || self.harness_turn_stoppable()
             || matches!(
                 self.session_activity.state().last_known(),
-                mj_core::activity::ActivityState::CheckingContinuation
+                mj_core::activity::ActivityState::CheckingQuota
             )
             || (self.session_activity.capacity_retry.is_some()
                 || self.session_activity.quota_recovery.is_some())
@@ -518,7 +518,7 @@ impl ChatState {
 
     /// Mirrors the session's own review choice, which `mj new` can set.
     pub fn set_session_review(&mut self, session: &mj_core::state::SessionRecord) {
-        self.session_review = session.review.clone();
+        self.session_review = session.review.as_deref().cloned();
         self.review_unavailable = session.review_unavailable();
     }
 

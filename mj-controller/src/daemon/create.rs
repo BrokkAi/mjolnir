@@ -450,12 +450,18 @@ impl RuntimeState {
             Ok((controller.config, policy))
         })
         .await?;
+        let validation_timing =
+            crate::launch_timing::LaunchPhaseTimer::new("", "validate subagent choices");
         crate::controller::profile_config::validate_session_subagent_policy(
+            self.profile_catalog
+                .get()
+                .expect("catalog installed before serving"),
             &config,
             &request.profile_id,
             &policy,
         )
         .await?;
+        drop(validation_timing);
         if let Some(allocation) = request.resource_allocation.as_ref() {
             validate_minimum_container_allocation(allocation)?;
         }
@@ -779,6 +785,11 @@ mod delegation_replay_tests {
         config.save().unwrap();
         let workspace = crate::database::create_workspace("launch choices").unwrap();
         let runtime = crate::daemon::tests::test_runtime_state();
+        runtime.profile_catalog.get_or_init(|| {
+            crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                tokio_util::sync::CancellationToken::new(),
+            )
+        });
         let path = GoPreferences::path();
         for remember in [false, true, false] {
             let before = std::fs::read(&path).ok();
@@ -922,6 +933,11 @@ mod delegation_replay_tests {
         });
         crate::database::save_session(&legacy).unwrap();
         let runtime = crate::daemon::tests::test_runtime_state();
+        runtime.profile_catalog.get_or_init(|| {
+            crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                tokio_util::sync::CancellationToken::new(),
+            )
+        });
         let request = mj_client::daemon::CreateSessionRequest {
             oracle: None,
             oracle_choice: None,
@@ -1005,6 +1021,11 @@ mod delegation_replay_tests {
             let relation = crate::daemon::tests::runtime_test_subagent(&child_id, "parent");
             crate::database::save_subagent_session(&child, &relation).unwrap();
             let runtime = crate::daemon::tests::test_runtime_state();
+            runtime.profile_catalog.get_or_init(|| {
+                crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                    tokio_util::sync::CancellationToken::new(),
+                )
+            });
             let replayed = runtime
                 .start_subagent_session(crate::controller::RegisterSubagentRequest {
                     no_github_credentials: false,

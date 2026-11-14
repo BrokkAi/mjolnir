@@ -12,7 +12,7 @@ pub struct RelayEventPage {
 
 #[derive(Debug, Clone)]
 pub struct RelayCatchUp {
-    pub state: RelayOperationalState,
+    pub state: mj_core::snapshot_map::SharedSnapshot<RelayOperationalState>,
     pub frontier: RelayCursor,
     pub first_page: RelayEventPage,
 }

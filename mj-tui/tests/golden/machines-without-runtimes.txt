@@ -39,13 +39,13 @@ Enter open · / searc                                                           
 │ default                                                                                                                                  │
 ╰───────────────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
 ╭ Sessions ─────────  │ Settings › Runtimes                                                                          │                     │
-│ Create   Open   Fi  │ Add a runtime and choose its machine, or use Detect runtimes to find what every machine can  │                     │
-│hel ───────────────  │ run.                                                                                         │                     │
+│ Create   Open   Fi  │ Add a runtime and choose its machine, or use Detect runtimes to probe every machine. Add SSH │                     │
+│hel ───────────────  │ hosts under Machines.                                                                        │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │   podman                          10 settings  ›                         Add                 │                     │
 │  │ No messages yet  │   builder                         4 settings  ›                          Detect runtimes     │                     │
-│  │                  │   builder-docker                  10 settings  ›                         Detection results   │                     │
-│                     │                                                                                              │                     │
+│  │                  │   builder-docker                  10 settings  ›                         Machines            │                     │
+│                     │                                                                          Detection results   │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -111,13 +111,13 @@ Enter open · / searc                                                           
 │ default                                                                                                                                  │
 ╰───────────────────  ╭ × Settings ──────────────────────────────────────────────────────────────────────────────────╮                     │
 ╭ Sessions ─────────  │ Settings › Runtimes                                                                          │                     │
-│ Create   Open   Fi  │ Add a runtime and choose its machine, or use Detect runtimes to find what every machine can  │                     │
-│hel ───────────────  │ run.                                                                                         │                     │
+│ Create   Open   Fi  │ Add a runtime and choose its machine, or use Detect runtimes to probe every machine. Add SSH │                     │
+│hel ───────────────  │ hosts under Machines.                                                                        │                     │
 │› ■ ACP pretty name  │                                                                                              │                     │
 │  Stopped  podman    │   podman                          10 settings  ›                         Add                 │                     │
 │  │ No messages yet  │   builder                         4 settings  ›                          Detect runtimes     │                     │
-│  │                  │   builder-docker                  10 settings  ›                         Detection results   │                     │
-│                     │                                                                                              │                     │
+│  │                  │   builder-docker                  10 settings  ›                         Machines            │                     │
+│                     │                                                                          Detection results   │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │

@@ -77,6 +77,7 @@ fn child_progress_uses_the_published_turn_and_report_together() {
 fn quota(profile_id: &str, harness: HarnessKind, remaining: &[u8]) -> ProfileQuota {
     ProfileQuota {
         paid_credits: None,
+        monthly_price_usd: None,
         banked_resets: None,
         profile_id: profile_id.into(),
         harness,
@@ -104,6 +105,7 @@ fn quota(profile_id: &str, harness: HarnessKind, remaining: &[u8]) -> ProfileQuo
 fn usage_priced(profile_id: &str) -> ProfileQuota {
     ProfileQuota {
         paid_credits: None,
+        monthly_price_usd: None,
         banked_resets: None,
         profile_id: profile_id.into(),
         harness: HarnessKind::Codex,
@@ -153,6 +155,9 @@ struct RecordingExports {
     registered: std::sync::Mutex<Option<crate::controller::RegisterSubagentRequest>>,
     override_call: std::sync::Mutex<Option<(String, Vec<mj_core::subagent::ReviewOverride>)>>,
     base_call: std::sync::Mutex<Option<(String, String, Option<String>)>>,
+    quota_publications: tokio::sync::watch::Sender<crate::quota::QuotaReportMap>,
+    quota_refreshes:
+        std::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<crate::daemon::QuotaRefreshIntent>>,
 }
 
 impl ExportRuntime for RecordingExports {
@@ -254,7 +259,7 @@ async fn selection_backend_refusing(
         .await;
     // Spawns draw profiles weighted by quota left, so any quota at all would
     // let `parent` win some draws; with none it always ranks behind `codex-high`.
-    let quotas = BTreeMap::from([
+    let quotas: crate::quota::QuotaReportMap = BTreeMap::from([
         (
             "parent".to_owned(),
             quota("parent", HarnessKind::Codex, &[80, 0]),
@@ -264,12 +269,28 @@ async fn selection_backend_refusing(
             quota("codex-high", HarnessKind::Codex, &[60, 55]),
         ),
         ("deepseek".to_owned(), usage_priced("deepseek")),
-    ]);
+    ])
+    .into_iter()
+    .map(|(id, report)| {
+        (
+            id,
+            crate::quota::QuotaReportPublication {
+                login_error: None,
+                cache_identity: "test-identity".into(),
+                report: Some(report),
+            },
+        )
+    })
+    .collect();
+    let (quota_publications, quota_updates) = tokio::sync::watch::channel(quotas.clone());
+    let (quota_refresh, quota_refreshes) = tokio::sync::mpsc::unbounded_channel();
     let exports = Arc::new(RecordingExports {
         parent: parent_record("parent-1", "parent"),
         registered: std::sync::Mutex::new(None),
         override_call: std::sync::Mutex::new(None),
         base_call: std::sync::Mutex::new(None),
+        quota_publications,
+        quota_refreshes: std::sync::Mutex::new(quota_refreshes),
     });
     let backend = Arc::new(
         ApiBackend::new(
@@ -284,9 +305,62 @@ async fn selection_backend_refusing(
         )
         .with_profile_catalog(catalog)
         .with_quota_reports(Arc::new(std::sync::Mutex::new(quotas)))
+        .with_quota_publications(quota_updates)
+        .with_quota_refresh(quota_refresh)
         .with_rejected_logins(Arc::new(std::sync::Mutex::new(rejected_logins))),
     );
     (backend, exports)
+}
+
+#[tokio::test]
+async fn quota_reader_waits_for_matching_publication_and_returns_completed_errors() {
+    let (backend, exports) = selection_backend(SAME_MODELS, None).await;
+    let completed = {
+        let mut reports = backend.quota_reports.lock().unwrap();
+        let completed = reports
+            .get_mut("codex-high")
+            .unwrap()
+            .report
+            .take()
+            .unwrap();
+        exports.quota_publications.send_replace(reports.clone());
+        completed
+    };
+    let pending = backend.quota_report("codex-high", "test-identity").unwrap();
+    let crate::server_runtime::api::QuotaRead::Pending(wait) = pending else {
+        panic!("pending profile unexpectedly had a completed report");
+    };
+    assert!(exports.quota_refreshes.lock().unwrap().try_recv().is_err());
+
+    // Publishing after lookup must wake the receiver returned by that lookup.
+    {
+        let mut reports = backend.quota_reports.lock().unwrap();
+        let report = reports.get_mut("codex-high").unwrap();
+        report.report = Some(completed);
+        let report = report.report.as_mut().unwrap();
+        report.error = Some("provider temporarily unavailable".into());
+        exports.quota_publications.send_replace(reports.clone());
+    }
+    wait.wait().await.unwrap();
+    let crate::server_runtime::api::QuotaRead::Ready(report) =
+        backend.quota_report("codex-high", "test-identity").unwrap()
+    else {
+        panic!("completed provider error remained pending");
+    };
+    assert_eq!(
+        report.error.as_deref(),
+        Some("provider temporarily unavailable")
+    );
+    assert!(matches!(
+        backend
+            .quota_report("codex-high", "edited-native-source")
+            .unwrap(),
+        crate::server_runtime::api::QuotaRead::Pending(_)
+    ));
+    assert_eq!(
+        exports.quota_refreshes.lock().unwrap().try_recv().unwrap(),
+        crate::daemon::QuotaRefreshIntent::ReconcileSources
+    );
 }
 
 const SAME_MODELS: &[(&str, &[&str])] = &[
@@ -340,15 +414,31 @@ async fn spawn_runs_the_child_on_the_profile_with_the_most_quota_that_offers_the
     {
         let mut reports = backend.quota_reports.lock().unwrap();
         for report in reports.values_mut() {
-            for window in &mut report.windows {
+            for window in &mut report.report.as_mut().unwrap().windows {
                 window.remaining_percent = Some(0);
             }
         }
-        reports.get_mut("parent").unwrap().banked_resets = Some(100);
-        reports.get_mut("parent").unwrap().paid_credits =
-            mj_client::quota::PaidCredits::limited(0.0);
-        reports.get_mut("codex-high").unwrap().paid_credits =
-            mj_client::quota::PaidCredits::limited(12.75);
+        reports
+            .get_mut("parent")
+            .unwrap()
+            .report
+            .as_mut()
+            .unwrap()
+            .banked_resets = Some(100);
+        reports
+            .get_mut("parent")
+            .unwrap()
+            .report
+            .as_mut()
+            .unwrap()
+            .paid_credits = mj_client::quota::PaidCredits::limited(0.0);
+        reports
+            .get_mut("codex-high")
+            .unwrap()
+            .report
+            .as_mut()
+            .unwrap()
+            .paid_credits = mj_client::quota::PaidCredits::limited(12.75);
     }
     let result = backend
         .execute_subagent_tool("parent-1".into(), spawn_with())
@@ -749,6 +839,8 @@ fn ready_view(model: &str) -> ManagedSessionView {
         .expect("the fixture describes a select the schema accepts");
     let operational = mj_core::relay::RelayOperationalState {
         assessment: None,
+        open_request: None,
+        person_input_through: 0,
         assessment_context: None,
         turn_completion: None,
         continuation: Default::default(),
@@ -787,10 +879,11 @@ fn ready_view(model: &str) -> ManagedSessionView {
         agent_info: None,
         runtime: None,
         steering_supported: None,
+        mailbox_delivery: None,
         turn_controls: None,
-        config_options: vec![option],
+        config_options: vec![option].into(),
         modes: None,
-        available_commands: Vec::new(),
+        available_commands: Vec::new().into(),
         config: BTreeMap::new(),
         active_prompt: None,
         queued_prompts: Vec::new(),
@@ -809,13 +902,14 @@ fn ready_view(model: &str) -> ManagedSessionView {
         background_work_known: None,
     };
     ManagedSessionView {
+        attention: Default::default(),
         snapshot: Some(mj_core::state::ManagedSessionSnapshot {
-            subagent_requests: Vec::new(),
-            subagent_completions: Vec::new(),
+            subagent_requests: Default::default(),
+            subagent_completions: Default::default(),
             subagent_queue_error: None,
             window: mj_core::state::ProjectionWindow::of(&materialized),
             materialized,
-            operational,
+            operational: operational.into(),
             latest_credential_sync_signal: None,
             worker_build: None,
         }),
@@ -870,6 +964,7 @@ fn parent_record(id: &str, profile: &str) -> SessionRecord {
     SessionRecord {
         oracle_choice: None,
         oracle: true,
+        notifications_ignored: false,
         project: None,
         target_runtime: None,
         launch_base: None,
@@ -885,8 +980,6 @@ fn parent_record(id: &str, profile: &str) -> SessionRecord {
         build_cache: None,
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
-        container_cpus: None,
-        container_memory: None,
         id: id.to_owned(),
         title: "parent".into(),
         harness_kind: HarnessKind::Codex,
@@ -911,6 +1004,8 @@ fn parent_record(id: &str, profile: &str) -> SessionRecord {
         viewed_through_event_ordinal: 0,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: None,
     }
@@ -2037,6 +2132,81 @@ fn a_child_whose_login_was_refused_fails_naming_its_profile_and_the_fix() {
         "{entry}"
     );
 
+    // #1508: a session-load refusal has no new failed turn. Its lifecycle
+    // failure must take precedence over the previous delivered answer.
+    let mut parked = record.clone();
+    parked.state = SessionState::Parked;
+    let mut old_login_failure = finished_turn("previous-login-failure");
+    old_login_failure.outcome = mj_core::state::TurnOutcomeKind::Completed {
+        stop_reason: "authentication_error".into(),
+    };
+    assert!(mj_core::subagent::turn_failed_on_login(&old_login_failure));
+    let mut old_provider_failure = finished_turn("previous-provider-failure");
+    old_provider_failure.outcome = mj_core::state::TurnOutcomeKind::Completed {
+        stop_reason: "error".into(),
+    };
+    old_provider_failure.diagnostic = Some(mj_core::diagnostic::TurnDiagnostic {
+        message: "the old provider outage".into(),
+        code: Some("service".into()),
+        http_status: Some(503),
+        reset_at: None,
+        login_fingerprint: None,
+    });
+    assert!(provider_failure(&old_provider_failure).is_some());
+    for old_failure in [&old_login_failure, &old_provider_failure] {
+        for (failure, login_invalid) in [
+            (
+                "login_invalid: workspace routing discovery unauthorized (401); run `mj login --profile codex4` for target ec2",
+                true,
+            ),
+            (
+                "could not start the parked sub-agent: process exhaustion (Cannot fork)",
+                false,
+            ),
+        ] {
+            parked.last_error = Some(failure.into());
+            let current = project_child_failure(
+                child_failure_source(Some(&parked), Some(old_failure)),
+                Some("codex4"),
+                Some("old turn summary"),
+            );
+            assert!(current.failed_turn.is_none());
+            assert!(current.provider_failure.is_none());
+            let lifecycle_progress = ChildProgress {
+                login_failure: current.login_failure,
+                failed_turn: current.failed_turn,
+                provider_failure: current.provider_failure,
+                report: ReportState::Delivered("previous answer".into()),
+                answer: None,
+                ..progress.clone()
+            };
+            let (state, output, finished) = subagent_status(
+                Some(&parked),
+                Some(&summary),
+                None,
+                None,
+                false,
+                &lifecycle_progress,
+            );
+            assert_eq!(state, "failed", "{failure}");
+            assert!(finished, "{failure}");
+            let entry = super::wait_agent_entry(
+                "child",
+                &state,
+                output,
+                finished,
+                &lifecycle_progress,
+                false,
+            );
+            assert_eq!(entry["output"], failure);
+            if login_invalid {
+                assert_eq!(entry["failure"]["kind"], "login_invalid");
+            } else {
+                assert!(entry.get("failure").is_none(), "{entry}");
+            }
+        }
+    }
+
     // A report the child did hand back is still its report.
     let delivered = ChildProgress {
         report: ReportState::Delivered("done".into()),
@@ -2500,6 +2670,8 @@ fn message_backend_for_session(
         .unwrap()
         .operational
         .relay_protocol_version = Some(protocol);
+    view.snapshot.as_mut().unwrap().operational.mailbox_delivery =
+        Some(mj_core::mailbox::MailboxDeliveryMode::TurnBoundary);
     let session = ScriptedSession {
         inner: FakeSession {
             session_id: session_id.into(),
@@ -2594,6 +2766,11 @@ async fn send_message_to_parked_child_unparks_once_and_legacy_request_uses_the_s
         assert_eq!(result["child_session_id"], "child-1");
         assert!(result.get("session_id").is_none());
         assert!(result.get("turn_id").is_none());
+        assert_eq!(result["mailbox_delivery"], "turn_boundary");
+        assert_eq!(
+            result["note"],
+            "If the recipient is working, delivery is deferred until its current turn ends."
+        );
     }
     let pending = crate::database::pending_mailbox_events(10).unwrap();
     assert_eq!(pending.len(), 1, "a request retry inserts one outbox event");
@@ -2769,9 +2946,12 @@ async fn send_message_to_parked_child_unparks_once_and_legacy_request_uses_the_s
         .execute_subagent_tool("parent-1".into(), cached_alias)
         .await;
     assert!(!alias_answer.is_error, "{}", alias_answer.message);
+    let alias_result: serde_json::Value = serde_json::from_str(&alias_answer.message).unwrap();
+    assert_eq!(alias_result["via"], "mailbox");
+    assert_eq!(alias_result["mailbox_delivery"], "turn_boundary");
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&alias_answer.message).unwrap()["via"],
-        "mailbox"
+        alias_result["note"],
+        "If the recipient is working, delivery is deferred until its current turn ends."
     );
     let pending = crate::database::pending_mailbox_events(10).unwrap();
     assert!(
@@ -2818,6 +2998,11 @@ async fn send_message_to_peer_queues_typed_event_with_the_calling_session_as_sen
     assert!(!answer.is_error, "{}", answer.message);
     let result: serde_json::Value = serde_json::from_str(&answer.message).unwrap();
     assert_eq!(result["via"], "mailbox");
+    assert_eq!(result["mailbox_delivery"], "turn_boundary");
+    assert_eq!(
+        result["note"],
+        "If the recipient is working, delivery is deferred until its current turn ends."
+    );
     let pending = crate::database::pending_mailbox_events(10).unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].target_session_id, "peer-1");
@@ -5713,11 +5898,12 @@ async fn child_provider_retry_keeps_listings_notifications_and_parking_pending()
         code: Some("service".into()),
         http_status: None,
         reset_at: None,
+        login_fingerprint: None,
     });
     snapshot.materialized.applied_event_ordinal = turn.completed_ordinal;
     snapshot.materialized.applied_event_digest = format!("{:064x}", turn.completed_ordinal);
     snapshot.materialized.last_turn_outcome = Some(turn.clone());
-    snapshot.operational.assessment = Some(Box::new(TurnAssessment::pending(
+    snapshot.operational.assessment = Some(std::sync::Arc::new(TurnAssessment::pending(
         turn.command_id.clone(),
         turn.completed_ordinal,
         turn.completed_at_ms,
@@ -5746,7 +5932,7 @@ async fn child_provider_retry_keeps_listings_notifications_and_parking_pending()
     pending(&backend_for(disconnected), "disconnected").await;
 
     let snapshot = view.snapshot.as_mut().unwrap();
-    let assessment = snapshot.operational.assessment.as_mut().unwrap();
+    let assessment = std::sync::Arc::make_mut(snapshot.operational.assessment.as_mut().unwrap());
     assessment.status = Status::Scheduled;
     assessment.action = Some(Action::RetryProvider);
     let mut retry = CapacityRetry::new(1, turn.completed_ordinal, 1);
@@ -5799,7 +5985,7 @@ async fn child_provider_retry_keeps_listings_notifications_and_parking_pending()
     snapshot.materialized.applied_event_digest = format!("{:064x}", 20);
     snapshot.materialized.last_turn_outcome = Some(turn.clone());
     snapshot.operational.capacity_retry = None;
-    snapshot.operational.assessment = Some(Box::new(TurnAssessment::pending(
+    snapshot.operational.assessment = Some(std::sync::Arc::new(TurnAssessment::pending(
         turn.command_id.clone(),
         turn.completed_ordinal,
         turn.completed_at_ms,
@@ -5811,14 +5997,16 @@ async fn child_provider_retry_keeps_listings_notifications_and_parking_pending()
 
     // Classification can decline another retry. That failure must reach the
     // parent, with no earlier notification having consumed its identity.
-    view.snapshot
-        .as_mut()
-        .unwrap()
-        .operational
-        .assessment
-        .as_mut()
-        .unwrap()
-        .status = Status::Assessed;
+    std::sync::Arc::make_mut(
+        view.snapshot
+            .as_mut()
+            .unwrap()
+            .operational
+            .assessment
+            .as_mut()
+            .unwrap(),
+    )
+    .status = Status::Assessed;
     assert!(
         crate::session_manager::DelegationObservation::from_view(&view)
             .unwrap()
@@ -5861,6 +6049,7 @@ async fn provider_failed_child_report_names_its_turn_profile_and_backoff() {
         code: Some("limit".into()),
         http_status: None,
         reset_at: None,
+        login_fingerprint: None,
     };
     let mut conversation = mj_core::state::MaterializedSession::empty("child-1");
     conversation.applied_event_ordinal = 9;
@@ -5967,10 +6156,10 @@ struct OracleExports {
 impl OracleExports {
     fn new() -> Arc<Self> {
         let mut primary = parent_record("parent-1", "parent");
-        primary.oracle_choice = Some(mj_core::config::SubagentChoice {
+        primary.oracle_choice = Some(Box::new(mj_core::config::SubagentChoice {
             model: "luna".into(),
             effort: Some("low".into()),
-        });
+        }));
         Arc::new(Self {
             records: std::sync::Mutex::new(BTreeMap::from([("parent-1".to_owned(), primary)])),
             requests: Default::default(),
@@ -6094,7 +6283,19 @@ async fn oracle_backend(exports: Arc<OracleExports>) -> Arc<ApiBackend> {
             quota("codex-high", HarnessKind::Codex, &[60, 55]),
         ),
         ("deepseek".to_owned(), usage_priced("deepseek")),
-    ]);
+    ])
+    .into_iter()
+    .map(|(id, report)| {
+        (
+            id,
+            crate::quota::QuotaReportPublication {
+                login_error: None,
+                cache_identity: "test-identity".into(),
+                report: Some(report),
+            },
+        )
+    })
+    .collect();
     let (submitted, _delivered) = mpsc::unbounded_channel();
     let mut view = ready_view("model");
     view.snapshot
@@ -6308,10 +6509,12 @@ async fn ask_oracle_refuses_a_child_and_a_session_without_an_oracle() {
     for (oracle, choice) in [(false, true), (true, false)] {
         let mut primary = parent_record("parent-1", "parent");
         primary.oracle = oracle;
-        primary.oracle_choice = choice.then(|| mj_core::config::SubagentChoice {
-            model: "luna".into(),
-            effort: None,
-        });
+        primary.oracle_choice = choice
+            .then(|| mj_core::config::SubagentChoice {
+                model: "luna".into(),
+                effort: None,
+            })
+            .map(Box::new);
         exports
             .records
             .lock()

@@ -238,11 +238,15 @@ impl Controller {
                     workspace_id,
                     candidate.locator,
                 );
-                record.target_runtime =
-                    Some(record.target_runtime_settings(&self.config)?.into_owned());
+                record.target_runtime = Some(
+                    record
+                        .target_runtime_settings(&self.config)?
+                        .into_owned()
+                        .into(),
+                );
                 record.no_github_credentials = no_github_credentials;
                 record.container_workspace = container_workspace;
-                record.project = Some(project);
+                record.project = Some(project.into());
                 (record, true)
             }
         };
@@ -332,7 +336,7 @@ impl Controller {
         target_id: &str,
         confirmation: &str,
         all_instances: bool,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
         if confirmation != session_id {
             bail!("refusing destructive recovery: --confirm must exactly match the session ID");
@@ -477,6 +481,7 @@ fn adopted_container_workspace(
             | targets::TargetLocator::SshPodman { .. }
             | targets::TargetLocator::SshDocker { .. }
             | targets::TargetLocator::SshAppleContainer { .. }
+            | targets::TargetLocator::SshNitro { .. }
     ) {
         return None;
     }
@@ -520,6 +525,7 @@ fn adopted_session_record(
     SessionRecord {
         oracle_choice: None,
         oracle: true,
+        notifications_ignored: false,
         project: None,
         target_runtime: None,
         launch_base: None,
@@ -533,8 +539,6 @@ fn adopted_session_record(
         create_managed_worktree: None,
         workspace_id,
         archived: false,
-        container_cpus: None,
-        container_memory: None,
         id: session_id.to_owned(),
         title: format!("Recovered {}", &session_id[..session_id.len().min(8)]),
         harness_kind,
@@ -550,7 +554,7 @@ fn adopted_session_record(
         resource_allocation: None,
         additional_mounts: Vec::new(),
         state: SessionState::Disconnected,
-        target: Some(locator),
+        target: Some(Box::new(locator)),
         native_session_id: None,
         acp_session_title: None,
         session_title_override: None,
@@ -559,6 +563,8 @@ fn adopted_session_record(
         viewed_through_event_ordinal: 0,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: None,
     }
@@ -655,6 +661,25 @@ fn scan_target_workers(
                 executor,
                 ssh_spec(ssh, remote),
                 "scan remote Docker workers",
+            )?;
+            candidates_from_container_json(target_id, template, &output.stdout)?
+        }
+        TargetTemplate::SshNitro { ssh, .. } => {
+            // The engine lists sandboxes as Podman lists containers: `ps`
+            // with a label filter, a JSON array with a `Labels` object.
+            let remote = targets::with_engine_argv(vec![
+                targets::MICROVM_ENGINE.into(),
+                "ps".into(),
+                "--all".into(),
+                "--filter".into(),
+                format!("label={}=true", targets::MANAGED_LABEL),
+                "--format".into(),
+                "json".into(),
+            ]);
+            let output = execute_scan(
+                executor,
+                ssh_spec(ssh, remote),
+                "scan remote Nitro sandbox workers",
             )?;
             candidates_from_container_json(target_id, template, &output.stdout)?
         }
@@ -888,6 +913,11 @@ fn candidates_from_container_json(
                         container_id: generated,
                     }
                 }
+                TargetTemplate::SshNitro { ssh, .. } => TargetLocator::SshNitro {
+                    borrowed_from: None,
+                    host: ssh.host.clone(),
+                    container_id: generated,
+                },
                 _ => return None,
             };
             Some(RecoveryCandidate {
@@ -1204,6 +1234,21 @@ fn recovery_backend_locator(
                 bail!("recovery SSH Apple container host does not match target template")
             }
             targets::TargetLocator::SshAppleContainer {
+                borrowed_from: None,
+                ssh: SshTarget::from(ssh),
+                container_id: container_id.clone(),
+            }
+        }
+        (
+            TargetTemplate::SshNitro { ssh, .. },
+            TargetLocator::SshNitro {
+                host, container_id, ..
+            },
+        ) => {
+            if host != &ssh.host {
+                bail!("recovery SSH Nitro host does not match target template")
+            }
+            targets::TargetLocator::SshNitro {
                 borrowed_from: None,
                 ssh: SshTarget::from(ssh),
                 container_id: container_id.clone(),
@@ -1667,11 +1712,11 @@ mod tests {
         let mut record = errored_podman_session(session_id);
         // The same failure, except the record kept its locator: the session's
         // own forced destroy still reaches the container, so recovery stays out.
-        record.target = Some(TargetLocator::LocalPodman {
+        record.target = Some(Box::new(TargetLocator::LocalPodman {
             container_id: targets::resource_name(session_id).unwrap(),
             workspace_storage: PodmanWorkspaceLocator::ContainerLayer,
             borrowed_from: None,
-        });
+        }));
         let (controller, executor) = podman_scan_controller(record);
 
         let scan = controller.scan_orphan_workers(&executor, true);

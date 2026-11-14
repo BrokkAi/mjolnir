@@ -28,6 +28,13 @@ pub struct MailboxEventResponse {
 pub struct SessionMessageResponse {
     pub session_id: String,
     pub via: String,
+    /// Worker-reported delivery timing for mailbox messages. Omitted when
+    /// the live worker has not published this capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mailbox_delivery: Option<mj_core::mailbox::MailboxDeliveryMode>,
+    /// Human-readable explanation when delivery waits for the recipient turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<u64>,
     /// Internal routing detail used to preserve the shipped child-tool result
@@ -97,6 +104,8 @@ impl From<&mj_core::relay::RelayOperationalState> for ApiBackgroundWork {
 /// needs something new.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApiSession {
+    #[serde(default)]
+    pub attention: mj_core::attention::SessionAttention,
     /// Tasks currently observed by the daemon, including their stop capability.
     #[serde(default)]
     pub background_tasks: Vec<crate::server::ViewerBackgroundTask>,
@@ -148,6 +157,9 @@ pub struct ApiSession {
     /// Why this session's target cannot take writes: its disk is full.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_problem: Option<String>,
+    /// Profile login failure reported by the daemon, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_login_error: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     /// How the last finished prompt ended. Absent unless the caller asked for
@@ -168,6 +180,7 @@ pub struct ApiSession {
 impl From<&ViewerSession> for ApiSession {
     fn from(session: &ViewerSession) -> Self {
         Self {
+            attention: session.attention,
             background_tasks: session.background_tasks.clone(),
             assessment: None,
             subagents: session.subagents.clone(),
@@ -191,12 +204,13 @@ impl From<&ViewerSession> for ApiSession {
             has_error: session.has_error,
             error: session.launch_error.clone(),
             storage_problem: session.storage_problem.clone(),
+            profile_login_error: None,
             created_at: session.created_at.clone(),
             updated_at: session.updated_at.clone(),
             last_turn_outcome: None,
             last_turn_diagnostic: None,
             config_options: session.config_options.clone(),
-            turn_controls: session.turn_controls.clone(),
+            turn_controls: session.turn_controls.as_deref().cloned(),
             pending_elicitations: session.pending_elicitations.clone(),
         }
     }

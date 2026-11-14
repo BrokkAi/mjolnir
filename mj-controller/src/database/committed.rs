@@ -131,7 +131,7 @@ pub struct CommittedState {
     /// Each session's latest startup group, keyed by session. A session with
     /// no group has no entry. API status readers ask this record instead of
     /// the store, and a change to it publishes a revision.
-    pub startup_groups: SnapshotMap<String, Vec<StartupDelivery>>,
+    pub startup_groups: SnapshotMap<String, StartupGroupStatus>,
     /// Each sub-agent child's recorded report, keyed by child session. A
     /// child with nothing recorded has no entry.
     pub subagent_reports: SnapshotMap<String, mj_core::subagent::SubagentReport>,
@@ -197,8 +197,9 @@ impl CommittedState {
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for session_id in session_ids {
-            let group = startup::load_latest_startup_group_with(&transaction, &session_id)?;
-            if !group.is_empty() {
+            if let Some(group) =
+                startup::load_latest_startup_status_with(&transaction, &session_id)?
+            {
                 startup_groups.insert(session_id, group);
             }
         }
@@ -266,6 +267,7 @@ pub(super) fn finish_operation(
     }
     let transaction =
         connection.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+    let mut interns = None;
     let mut state = previous.state.clone();
     let mut moves = previous.moves.clone();
     let mut native_agents = previous.native_agents.clone();
@@ -339,7 +341,35 @@ pub(super) fn finish_operation(
                 }
             }
             "session" => {
-                let record = state_io::load_session_with(&transaction, key)?;
+                // Most writes (drafts, titles, lifecycle fields) leave the
+                // project and runtime unchanged: reuse this record's values.
+                // Only a changed value consults the pool over all sessions.
+                let previous = state.sessions.get(key);
+                let mut local = state_io::SessionInterns::from_record(previous)?;
+                let mut record =
+                    state_io::load_session_interned_with(&transaction, key, &mut local)?;
+                fn fresh<T>(
+                    value: &Option<std::sync::Arc<T>>,
+                    old: Option<&Option<std::sync::Arc<T>>>,
+                ) -> bool {
+                    value.as_ref().is_some_and(|value| {
+                        old.and_then(Option::as_ref)
+                            .is_none_or(|old| !std::sync::Arc::ptr_eq(old, value))
+                    })
+                }
+                let new_shared_value = record.as_ref().is_some_and(|record| {
+                    fresh(&record.project, previous.map(|old| &old.project))
+                        || fresh(
+                            &record.target_runtime,
+                            previous.map(|old| &old.target_runtime),
+                        )
+                });
+                if new_shared_value && let Some(record) = record.as_mut() {
+                    if interns.is_none() {
+                        interns = Some(state_io::SessionInterns::from_state(&state)?);
+                    }
+                    interns.as_mut().unwrap().share(record)?;
+                }
                 let membership_changed = state.sessions.contains_key(key) != record.is_some();
                 if state.sessions.get(key) != record.as_ref() {
                     match record {
@@ -478,8 +508,7 @@ pub(super) fn finish_operation(
                 }
             }
             "startup" => {
-                let group = startup::load_latest_startup_group_with(&transaction, key)?;
-                let group = (!group.is_empty()).then_some(group);
+                let group = startup::load_latest_startup_status_with(&transaction, key)?;
                 if startup_groups.get(key) != group.as_ref() {
                     match group {
                         Some(group) => {
@@ -743,7 +772,9 @@ mod tests {
         for session in ["first", "second"] {
             assert_eq!(
                 queued.startup_groups[session],
-                startup::load_latest_startup_group_with(&reader, session).unwrap()
+                startup::load_latest_startup_status_with(&reader, session)
+                    .unwrap()
+                    .unwrap()
             );
         }
 
@@ -767,10 +798,9 @@ mod tests {
             })
             .unwrap();
         let after = owner.writer.committed_state().unwrap();
-        assert_eq!(after.startup_groups["first"][0].phase, "failed");
         assert_eq!(
-            after.startup_groups["first"][0].error.as_deref(),
-            Some("refused")
+            after.startup_groups["first"].failure,
+            Some(Some("refused".to_owned()))
         );
         assert_eq!(
             after.subagent_reports["first"].handback.as_ref(),

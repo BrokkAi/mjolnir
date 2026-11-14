@@ -52,6 +52,7 @@ mod dialogs;
 mod go;
 mod ingest;
 mod keybinds;
+pub mod login_terminal;
 mod modal_surface;
 mod notify;
 mod row_index;
@@ -224,6 +225,40 @@ const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 /// every release and nobody reads them as a claim about the running version.
 const TEST_VERSION_LABEL: &str = "vX.Y.Z";
 
+/// Settings a launch copies from an existing session because the wizard has
+/// no step for them: "New session with these settings" sets them, and every
+/// wizard launch leaves them at their defaults.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CarriedLaunchSettings {
+    pub no_project_memory: bool,
+    pub no_github_events: bool,
+    pub no_github_credentials: bool,
+    /// What the copy changed because a setting could not apply now, in a
+    /// sentence the launch notices show.
+    pub note: Option<String>,
+}
+
+impl CarriedLaunchSettings {
+    /// `notice` followed by the note, when the copy changed something.
+    pub fn annotate(&self, notice: String) -> String {
+        match &self.note {
+            Some(note) => format!("{notice} {note}"),
+            None => notice,
+        }
+    }
+}
+
+impl DashboardAction {
+    /// `notice` for a launch, followed by what a copied launch changed. Any
+    /// other action leaves it as it is.
+    pub fn annotate_launch_notice(&self, notice: String) -> String {
+        match self {
+            Self::CreateSession { carried, .. } => carried.annotate(notice),
+            _ => notice,
+        }
+    }
+}
+
 /// A side effect requested by the dashboard.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DashboardAction {
@@ -333,6 +368,8 @@ pub enum DashboardAction {
         target_template_id: String,
         additional_mounts: Vec<AdditionalMount>,
         resource_allocation: Option<SessionResourceAllocation>,
+        /// Choices the wizard does not offer, copied from another session.
+        carried: CarriedLaunchSettings,
     },
     /// Resolve all network sources for an isolated session and leave the
     /// creation wizard open until the person reviews that plan.
@@ -556,10 +593,25 @@ pub enum DashboardAction {
     MarkAllRead {
         receipts: Vec<(String, u64)>,
     },
-    DismissQuestion {
+    DismissNotification {
         session_id: String,
-        question: mj_core::assessment::InferredQuestion,
+        target: mj_core::attention::NotificationDismissal,
     },
+    DismissNotifications {
+        dismissals: Vec<(String, mj_core::attention::NotificationDismissal)>,
+    },
+    /// Toggle whether the session raises bell, desktop, and push
+    /// notifications.
+    SetSessionNotificationsIgnored {
+        session_id: String,
+        ignored: bool,
+    },
+    /// Move a profile to the front of `[quota] prefer`.
+    PreferLoadBalancingProfile {
+        profile_id: String,
+    },
+    /// Empty `[quota] prefer`.
+    ClearLoadBalancingPreferences,
     OpenResumeDialog,
     ImportSession {
         profile_id: String,
@@ -596,6 +648,7 @@ pub enum DashboardAction {
     },
     CancelImport,
     ConfirmImportBundle {
+        project_root: std::path::PathBuf,
         create_managed_worktree: Option<bool>,
         accepted: bool,
     },
@@ -612,7 +665,7 @@ pub enum DashboardAction {
         original: String,
         updated: String,
     },
-    /// Save a managed profile and then hand the terminal to its sign-in flow.
+    /// Save a managed profile and then open its sign-in modal.
     SaveSetupAndLogin {
         generation: u64,
         original: String,
@@ -621,8 +674,8 @@ pub enum DashboardAction {
     },
     /// Open the guided chooser for a harness Mjolnir installs itself.
     OpenManagedSetup,
-    /// Hand the terminal to `mj login` for the selected profile, then resume
-    /// the dashboard. The generation anchors the result to the open dialog.
+    /// Open the selected profile's sign-in flow in a dashboard modal. The
+    /// generation anchors the result to the open dialog.
     SetupLogin {
         generation: u64,
         profile_id: String,
@@ -635,8 +688,7 @@ pub enum DashboardAction {
     /// the container is created.
     SaveContainerSettings {
         session_id: String,
-        cpus: Option<String>,
-        memory: Option<String>,
+        resource_allocation: Option<SessionResourceAllocation>,
         additional_mounts: Vec<AdditionalMount>,
         mount_history: Vec<std::path::PathBuf>,
     },
@@ -892,6 +944,11 @@ pub struct DashboardPasteTarget {
 }
 
 pub struct DashboardState {
+    pub(crate) unread_frontiers: mj_core::snapshot_map::SnapshotMap<String, u64>,
+    pub(crate) notification_dismissals:
+        mj_core::snapshot_map::SnapshotMap<String, mj_core::attention::NotificationDismissal>,
+    pub(crate) served_attention:
+        Tracked<mj_core::snapshot_map::SnapshotMap<String, mj_core::attention::SessionAttention>>,
     paste_revision: u64,
     pending_welcome: Option<welcome::WelcomeDialog>,
     operator_presence: operator_away::OperatorPresence,
@@ -1011,6 +1068,9 @@ pub struct DashboardState {
     /// Keyboard commands use this geometry to anchor the details dropdown.
     pub(crate) capacity_disks_areas: RefCell<Vec<Option<Rect>>>,
     pub(crate) quota_index: usize,
+    /// Last rendered Quota row bounds, by profile id, for the row's
+    /// right-click menu.
+    pub(crate) quota_row_areas: RefCell<Vec<(String, Rect)>>,
     pub(crate) focus: Focus,
     /// The independently selected sizes of Sessions, Targets, and Quota.
     pane_sizes: PaneSizes,
@@ -1018,9 +1078,9 @@ pub struct DashboardState {
     navigation: conversation_navigation::ConversationNavigation,
     pub(crate) browse_pane: Option<tile_layout::PaneId>,
     pub(crate) pin_ids: BTreeMap<String, u32>,
-    pub(crate) navigation_session: Option<String>,
+    pub(crate) pending_navigation: Option<dashboard_sessions::PendingNavigation>,
     /// When a workspace switch was requested for a child, open its parent's
-    /// Sub-agents view before restoring `navigation_session`.
+    /// Sub-agents view before restoring `pending_navigation`.
     pub(crate) navigation_subagent_parent: Option<String>,
     pub(crate) pane_menu: Option<pane_controls::PaneMenu>,
     /// Whether the focused pane fills the conversation band on its own. The
@@ -1093,8 +1153,8 @@ pub struct DashboardState {
     /// The sessions currently needing a person and whether each has been
     /// reported, for [`DashboardState::notification_events`].
     pub(crate) attention_episodes: BTreeMap<String, crate::notify::AttentionEpisode>,
-    pub(crate) viewed_failures: BTreeMap<String, crate::notify::ViewedFailure>,
-    pub(crate) drawn_failures: BTreeMap<String, crate::notify::ViewedFailure>,
+    pub(crate) attention_navigation: Option<dashboard_sessions::AttentionNavigation>,
+    pub(crate) rendered_failure_dismissals: BTreeSet<String>,
     /// The pane, row index, and time of the most recent left click on a
     /// session row, so the next click can be recognized as a double click.
     last_row_click: Option<(Focus, usize, Instant)>,
@@ -1279,6 +1339,9 @@ impl DashboardState {
             session_order: RefCell::default(),
             checkpoint_archive_sizes: BTreeMap::new(),
             stopped_records: Default::default(),
+            unread_frontiers: Default::default(),
+            notification_dismissals: Default::default(),
+            served_attention: Tracked::new(Default::default()),
             launch_recency,
             recent_launch: None,
             container_upgrade_sessions: BTreeSet::new(),
@@ -1297,6 +1360,7 @@ impl DashboardState {
             container_capacities: BTreeMap::new(),
             target_storage: Vec::new(),
             capacity_disks_areas: RefCell::new(Vec::new()),
+            quota_row_areas: RefCell::new(Vec::new()),
             version_label: if cfg!(test) {
                 TEST_VERSION_LABEL
             } else {
@@ -1327,7 +1391,7 @@ impl DashboardState {
             browse_pane: None,
             pin_ids: BTreeMap::new(),
 
-            navigation_session: None,
+            pending_navigation: None,
             navigation_subagent_parent: None,
             pane_menu: None,
             conversation_zoomed: false,
@@ -1353,8 +1417,8 @@ impl DashboardState {
             pane_maximize_enabled: [true; DASHBOARD_PANE_COUNT],
             collapsed_project_keys: Default::default(),
             attention_episodes: BTreeMap::new(),
-            viewed_failures: BTreeMap::new(),
-            drawn_failures: BTreeMap::new(),
+            attention_navigation: None,
+            rendered_failure_dismissals: BTreeSet::new(),
             last_row_click: None,
             mode: Mode::Dashboard,
             pending_welcome: None,

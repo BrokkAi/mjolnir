@@ -9,8 +9,81 @@ pub fn worker_daemon_identity_script(worker_root: &str) -> String {
 hel_root={root}
 hel_match="hel worker run --root $hel_root"
 hel_match_home="hel worker run --root $HOME/$hel_root"
+# Minimal Linux images need not install procps. The same process facts are in
+# /proc, so use them when `ps` is absent; the controller runs this on the host
+# itself, where /proc is the kernel's own record.
 hel_ps() {{
-    ps -ww "$@" 2>/dev/null || ps "$@" 2>/dev/null
+    if type ps >/dev/null 2>&1; then
+        ps -ww "$@" 2>/dev/null || ps "$@" 2>/dev/null
+        return $?
+    fi
+    if [ -r /proc/self/stat ]; then
+        hel_proc_ps "$@"
+        return $?
+    fi
+    echo "cannot list processes: ps is not installed and /proc is unavailable" >&2
+    return 127
+}}
+hel_proc_args() {{
+    tr '\0' ' ' 2>/dev/null < "/proc/$1/cmdline"
+}}
+hel_proc_processes() {{
+    for hel_proc in /proc/[0-9]*; do
+        hel_proc_pid=${{hel_proc#/proc/}}
+        [ -r "$hel_proc/cmdline" ] || continue
+        printf '%s %s\n' "$hel_proc_pid" "$(hel_proc_args "$hel_proc_pid")"
+    done
+}}
+hel_proc_table() {{
+    for hel_proc in /proc/[0-9]*; do
+        hel_stat=
+        IFS= read -r hel_stat < "$hel_proc/stat" || continue
+        hel_proc_pid=${{hel_proc#/proc/}}
+        hel_rest=${{hel_stat##*) }}
+        set -- $hel_rest
+        printf '%s %s %s %s\n' "$hel_proc_pid" "$2" "$3" "$1"
+    done
+}}
+hel_proc_ps() {{
+    case "$1 $2" in
+        "-o args=")
+            [ "$3" = "-p" ] || return 2
+            [ -r "/proc/$4/cmdline" ] || return 1
+            hel_proc_args "$4"
+            printf '\n'
+            ;;
+        "-o stat=")
+            [ "$3" = "-p" ] || return 2
+            hel_stat=
+            IFS= read -r hel_stat < "/proc/$4/stat" || return 1
+            hel_rest=${{hel_stat##*) }}
+            set -- $hel_rest
+            printf '%s\n' "$1"
+            ;;
+        "-eo pid=,args=")
+            hel_proc_processes
+            ;;
+        "-eo pgid=,stat=")
+            hel_proc_table | awk '{{ print $3, $4 }}'
+            ;;
+        "-eo pid=,ppid=,pgid=")
+            hel_proc_table | awk '{{ print $1, $2, $3 }}'
+            ;;
+        "-eo pid=,stat=")
+            hel_proc_table | awk '{{ print $1, $4 }}'
+            ;;
+        "-eo args=")
+            for hel_proc in /proc/[0-9]*; do
+                [ -r "$hel_proc/cmdline" ] || continue
+                hel_proc_args "${{hel_proc#/proc/}}"
+                printf '\n'
+            done
+            ;;
+        *)
+            echo "unsupported process listing without ps: $*" >&2
+            return 2
+            ;;
+    esac
 }}
 hel_is_worker() {{
     hel_args=$(hel_ps -o args= -p "$1") || return 1
@@ -75,6 +148,8 @@ if hel_recorded_worker >/dev/null; then
     hel_report_worker_state
     exit 0
 fi
+# A failed process listing cannot establish that the worker is absent.
+hel_processes=$(hel_ps -eo pid=,args=) || exit $?
 while read -r hel_pid hel_args; do
     case "$hel_pid" in
         '' | *[!0-9]*) continue ;;
@@ -84,7 +159,7 @@ while read -r hel_pid hel_args; do
         *"$hel_match"*|*"$hel_match_home"*) hel_report_worker_state; exit 0 ;;
     esac
 done <<MJ_PS
-$(hel_ps -eo pid=,args=)
+$hel_processes
 MJ_PS
 printf 'dead\n'
 "#,
@@ -92,14 +167,28 @@ printf 'dead\n'
     script
 }
 
-/// Stop the detached worker daemon rooted at `worker_root`.
+/// Stop the detached worker daemon rooted at `worker_root`: TERM, then KILL
+/// after two seconds. Use this when the session continues from the root, so
+/// the worker and its harness can shut down in order.
 ///
 /// The daemon leads its own process group, so the signal goes to the group
 /// first to take the agent down with it. Shells disagree about how to write a
 /// negative PID (`dash` rejects `--`), hence the two forms before the
 /// single-process fallback for daemons predating the group leadership.
 pub fn stop_worker_daemon_script(worker_root: &str) -> String {
+    worker_daemon_stop_script(worker_root, 2)
+}
+
+/// Kill a retired worker daemon rooted at `worker_root`, and its process tree,
+/// at once. Only for retirement: the caller removes the root next, and a sealed
+/// checkpoint (or a discard) means nothing in it needs an orderly shutdown.
+pub fn kill_worker_daemon_script(worker_root: &str) -> String {
+    worker_daemon_stop_script(worker_root, 0)
+}
+
+fn worker_daemon_stop_script(worker_root: &str, term_grace_seconds: u32) -> String {
     let mut script = worker_daemon_identity_script(worker_root);
+    script.push_str(&format!("\nhel_term_grace={term_grace_seconds}\n"));
     script.push_str(
         r#"
 hel_signal() {
@@ -174,13 +263,15 @@ hel_stop() {
         hel_group=legacy
     }
     hel_snapshot_tree "$1"
-    hel_signal TERM "$1" || true
     hel_waited=0
-    while [ "$hel_waited" -lt 2 ]; do
-        hel_running "$1" || { hel_status=$?; [ "$hel_status" -eq 1 ] && return 0; return "$hel_status"; }
-        sleep 1
-        hel_waited=$((hel_waited + 1))
-    done
+    if [ "$hel_term_grace" -gt 0 ]; then
+        hel_signal TERM "$1" || true
+        while [ "$hel_waited" -lt "$hel_term_grace" ]; do
+            hel_running "$1" || { hel_status=$?; [ "$hel_status" -eq 1 ] && return 0; return "$hel_status"; }
+            sleep 1
+            hel_waited=$((hel_waited + 1))
+        done
+    fi
     hel_signal KILL "$1" || true
     hel_kill_tree
     hel_waited=0
@@ -271,6 +362,7 @@ pub fn clear_relay_state_plan(
         | TargetLocator::SshPodman { .. }
         | TargetLocator::SshDocker { .. }
         | TargetLocator::SshAppleContainer { .. }
+        | TargetLocator::SshNitro { .. }
         | TargetLocator::AwsEc2 { .. } => None,
     })
 }
@@ -370,6 +462,22 @@ mod tests {
             output.status.code().unwrap_or(-1),
             String::from_utf8_lossy(&output.stdout).trim().to_owned(),
         )
+    }
+
+    /// A PATH holding the tools the stop script needs, but deliberately no
+    /// `ps`, as on a minimal Linux image without procps.
+    #[cfg(target_os = "linux")]
+    fn path_without_ps() -> tempfile::TempDir {
+        let bin = tempfile::tempdir().unwrap();
+        let search = std::env::var_os("PATH").unwrap();
+        for name in ["awk", "cat", "head", "rm", "sed", "sh", "sleep", "tr"] {
+            let source = std::env::split_paths(&search)
+                .map(|directory| directory.join(name))
+                .find(|path| path.is_file())
+                .unwrap_or_else(|| panic!("{name} is not on the test PATH"));
+            std::os::unix::fs::symlink(source, bin.path().join(name)).unwrap();
+        }
+        bin
     }
 
     // Hard-won: c29b1379c: an in-place Move's relay reset made review rescan the checkout and refuse it.
@@ -564,54 +672,69 @@ mod tests {
     /// The harness runs in a process group of its own, so the worker leader's
     /// group empties as soon as the leader exits. The stop must still wait for
     /// the harness, or the `rm` that follows races its last writes (I2-9).
+    /// Retirement's kill must take the same tree without the TERM grace.
     // Hard-won: 2f859c8f: a harness outlived its worker group and raced removal of staged state.
     #[test]
     #[cfg(target_os = "linux")]
     fn stopping_worker_waits_for_a_harness_in_its_own_process_group() {
         use std::os::unix::process::CommandExt;
-        let outside = tempfile::tempdir().unwrap();
-        let root = outside.path().join("worker");
-        std::fs::create_dir_all(root.join("profile")).unwrap();
-        // The harness ignores TERM and keeps writing into the staged home.
-        let harness = format!(
-            "trap \"\" TERM; echo $$ > {out}/harness; while :; do echo x >> profile/state.sqlite-wal; sleep 0.05; done",
-            out = outside.path().display()
-        );
-        let mut leader = std::process::Command::new("sh")
-            .args(["-c", &format!("setsid sh -c '{harness}' & wait")])
-            .current_dir(&root)
-            .process_group(0)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
+        for sends_term in [true, false] {
+            let stop_script = if sends_term {
+                stop_worker_daemon_script
+            } else {
+                kill_worker_daemon_script
+            };
+            let outside = tempfile::tempdir().unwrap();
+            let root = outside.path().join("worker");
+            std::fs::create_dir_all(root.join("profile")).unwrap();
+            // The harness ignores TERM and keeps writing into the staged home.
+            let harness = format!(
+                "trap \"\" TERM; echo $$ > {out}/harness; while :; do echo x >> profile/state.sqlite-wal; sleep 0.05; done",
+                out = outside.path().display()
+            );
+            // The leader records a TERM, then exits as it would without the trap.
+            let leader_script = format!(
+                "trap 'echo term > {out}/leader-term' TERM; setsid sh -c '{harness}' & wait",
+                out = outside.path().display()
+            );
+            let mut leader = std::process::Command::new("sh")
+                .args(["-c", &leader_script])
+                .current_dir(&root)
+                .process_group(0)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !outside.path().join("harness").exists() {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            std::fs::write(
+                root.join(mj_core::relay::WORKER_STARTUP_FILE),
+                serde_json::to_vec(&serde_json::json!({"pid": leader.id(), "process_birth": mj_core::subprocess::process_birth_identity(leader.id()).unwrap()})).unwrap(),
+            )
             .unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !outside.path().join("harness").exists() {
-            assert!(std::time::Instant::now() < deadline);
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            let root_path = root.to_string_lossy().into_owned();
+            let script = format!("{}\nrm -rf -- \"$hel_root\"\n", stop_script(&root_path));
+            let (status, _) = run_script(&script);
+            let _ = leader.wait();
+            assert_eq!(status, 0, "the stop and the removal succeed");
+            assert!(!root.exists(), "the removal is complete");
+            let harness = std::fs::read_to_string(outside.path().join("harness")).unwrap();
+            let (_, state) = run_script(&format!("ps -o stat= -p {}", harness.trim()));
+            assert!(
+                state.is_empty() || state.starts_with('Z'),
+                "harness survived: {state}"
+            );
+            assert_eq!(
+                outside.path().join("leader-term").exists(),
+                sends_term,
+                "only the graceful stop sends TERM before KILL"
+            );
         }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        std::fs::write(
-            root.join(mj_core::relay::WORKER_STARTUP_FILE),
-            serde_json::to_vec(&serde_json::json!({"pid": leader.id(), "process_birth": mj_core::subprocess::process_birth_identity(leader.id()).unwrap()})).unwrap(),
-        )
-        .unwrap();
-        let root_path = root.to_string_lossy().into_owned();
-        let script = format!(
-            "{}\nrm -rf -- \"$hel_root\"\n",
-            stop_worker_daemon_script(&root_path)
-        );
-        let (status, _) = run_script(&script);
-        let _ = leader.wait();
-        assert_eq!(status, 0, "the stop and the removal succeed");
-        assert!(!root.exists(), "the removal is complete");
-        let harness = std::fs::read_to_string(outside.path().join("harness")).unwrap();
-        let (_, state) = run_script(&format!("ps -o stat= -p {}", harness.trim()));
-        assert!(
-            state.is_empty() || state.starts_with('Z'),
-            "harness survived: {state}"
-        );
     }
 
     /// The script runs through the target's own shell and awk. macOS awk
@@ -653,5 +776,54 @@ mod tests {
                 Err(e) => panic!("{shell}: {e}"),
             }
         }
+    }
+
+    /// A local bare host need not install procps. Cleanup used to return 2
+    /// without printing anything when `ps` was missing, so the session could
+    /// not be closed. `/proc` holds the same facts on Linux.
+    // Hard-won: #1516: local bare destroy failed with status 2 on a host without ps.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn stopping_a_worker_uses_proc_when_ps_is_not_installed() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::process::CommandExt;
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().to_string_lossy().into_owned();
+        let hel = root.path().join("hel");
+        std::fs::write(&hel, "#!/bin/sh\nwhile :; do sleep 1; done\n").unwrap();
+        std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut child = std::process::Command::new(&hel)
+            .args(["worker", "run", "--root", &root_path])
+            .process_group(0)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let _group = mj_core::subprocess::ProcessGroupGuard::new(Some(child.id()));
+        std::fs::write(
+            root.path().join(mj_core::relay::WORKER_PID_FILE),
+            child.id().to_string(),
+        )
+        .unwrap();
+        let script = format!(
+            "{}\nrm -rf -- {}\n",
+            stop_worker_daemon_script(&root_path),
+            posix_quote(&root_path),
+        );
+        let bin = path_without_ps();
+        let output = std::process::Command::new("sh")
+            .args(["-c", &script])
+            .env("PATH", bin.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "status {:?}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let _ = child.wait();
+        assert!(!root.path().exists(), "the worker root is removed");
     }
 }

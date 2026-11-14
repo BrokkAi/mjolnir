@@ -34,6 +34,7 @@ impl ViewError {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ManagedSessionView {
+    pub attention: mj_core::attention::SessionAttention,
     pub snapshot: Option<ManagedSessionSnapshot>,
     pub connected: bool,
     pub error: Option<ViewError>,
@@ -41,7 +42,7 @@ pub struct ManagedSessionView {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RelayAttachment {
-    pub state: RelayOperationalState,
+    pub state: mj_core::snapshot_map::SharedSnapshot<RelayOperationalState>,
     pub events: Vec<RelayEvent>,
     pub through_ordinal: u64,
     pub through_digest: String,

@@ -795,6 +795,11 @@ impl ComboBox {
     /// The compact affordance appended to a collapsed choice value.
     pub const GLYPH: &'static str = "▾";
 
+    /// How many options a dropdown shows at once, matching chat
+    /// autocomplete's compact surface. A caller with less room to spare
+    /// passes its own cap to [`Self::render`].
+    pub const DEFAULT_MAX_VISIBLE_ROWS: usize = 8;
+
     /// [`Self::GLYPH`] in the symbol set in force.
     pub fn glyph() -> &'static str {
         theme::glyphs().dropdown
@@ -807,6 +812,7 @@ impl ComboBox {
     }
 
     /// Draws a combobox and, when expanded, its anchored popup.
+    /// `max_visible_rows` caps how many options the popup shows at once.
     #[allow(clippy::too_many_arguments)]
     pub fn render<K: Copy + Eq>(
         frame: &mut Frame<'_>,
@@ -819,6 +825,7 @@ impl ComboBox {
         enabled: bool,
         title: &str,
         preferred_side: PopupSide,
+        max_visible_rows: usize,
         form: &mut Form<K>,
         id: K,
     ) -> Option<(Rect, Rect)> {
@@ -846,6 +853,7 @@ impl ComboBox {
                 area,
                 u16::try_from(width).unwrap_or(u16::MAX),
                 options.len(),
+                max_visible_rows,
                 title,
                 preferred_side,
             )

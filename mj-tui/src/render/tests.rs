@@ -85,6 +85,11 @@ fn append_dashboard_golden(
 }
 
 fn clear_session_activity(dashboard: &mut DashboardState, session_id: &str) {
+    crate::test_support::serve_attention(
+        dashboard,
+        &[session_id],
+        mj_core::attention::SessionAttention::Idle,
+    );
     let detail = dashboard
         .session_details
         .get_mut(session_id)
@@ -121,6 +126,12 @@ fn pending_questions_mark_the_session_and_minimized_navigator() {
         .expect("valid test question"),
     ];
     dashboard.apply_materialized_session(&session);
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &["session-1"],
+        mj_core::attention::SessionAttention::NeedsInput,
+    );
+
     let mut foreign = running_session();
     foreign.id = "foreign-session".into();
     foreign.workspace_id = "other-workspace".into();
@@ -147,7 +158,7 @@ fn pending_questions_mark_the_session_and_minimized_navigator() {
     let minimized = drawn(&mut dashboard, 120, 40).join("\n");
     assert!(minimized.contains("Question"), "{minimized}");
     assert!(
-        minimized.contains("Sessions [!1]") || minimized.contains("!1"),
+        minimized.contains("Sessions [?1]") || minimized.contains("?1"),
         "{minimized}"
     );
 }
@@ -427,9 +438,7 @@ fn pane_size_controls_are_styled_registered_and_clickable_without_moving_focus()
 
 /// The band a row draws, derived exactly as the renderer derives it: the
 /// shared attention ladder first, then the live-session colours.
-fn band(detail: Option<&SessionDetail>, unreachable: bool, state: SessionState) -> Color {
-    let level =
-        crate::dashboard_sessions::attention_level(detail, None, state, unreachable, false, false);
+fn band(detail: Option<&SessionDetail>, level: AttentionLevel, state: SessionState) -> Color {
     session_band_color(level, detail, state)
 }
 
@@ -440,7 +449,11 @@ fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
         ..SessionDetail::default()
     };
     assert_eq!(
-        band(Some(&normal), false, SessionState::Running),
+        band(
+            Some(&normal),
+            AttentionLevel::Working,
+            SessionState::Running
+        ),
         theme::palette().session_activity
     );
 
@@ -450,7 +463,11 @@ fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
         ..SessionDetail::default()
     };
     assert_eq!(
-        band(Some(&unread), false, SessionState::Running),
+        band(
+            Some(&unread),
+            AttentionLevel::Working,
+            SessionState::Running
+        ),
         theme::palette().session_activity,
         "a running turn is activity, whatever is still unread"
     );
@@ -460,14 +477,22 @@ fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
         ..SessionDetail::default()
     };
     assert_eq!(
-        band(Some(&unread_idle), false, SessionState::Running),
+        band(
+            Some(&unread_idle),
+            AttentionLevel::Unread,
+            SessionState::Running
+        ),
         theme::palette().session_attention,
         "a finished turn nobody has read wants a person"
     );
 
     let read_idle = SessionDetail::default();
     assert_eq!(
-        band(Some(&read_idle), false, SessionState::Running),
+        band(
+            Some(&read_idle),
+            AttentionLevel::Idle,
+            SessionState::Running
+        ),
         theme::palette().session_idle
     );
 
@@ -480,7 +505,11 @@ fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
         ..SessionDetail::default()
     };
     assert_eq!(
-        band(Some(&foreground), false, SessionState::Running),
+        band(
+            Some(&foreground),
+            AttentionLevel::Working,
+            SessionState::Running
+        ),
         theme::palette().session_activity,
         "foreground work is not idle"
     );
@@ -500,7 +529,11 @@ fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
         ..SessionDetail::default()
     };
     assert_eq!(
-        band(Some(&unread_background), false, SessionState::Running),
+        band(
+            Some(&unread_background),
+            AttentionLevel::Working,
+            SessionState::Running
+        ),
         theme::palette().session_activity,
         "background work is still work, not something waiting on a person"
     );
@@ -509,7 +542,11 @@ fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
         ..SessionDetail::default()
     };
     assert_eq!(
-        band(Some(&read_background), false, SessionState::Running),
+        band(
+            Some(&read_background),
+            AttentionLevel::Working,
+            SessionState::Running
+        ),
         theme::palette().session_activity,
         "background work is not idle after it has been read"
     );
@@ -519,7 +556,11 @@ fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
         ..SessionDetail::default()
     };
     assert_eq!(
-        band(Some(&interrupted_idle), false, SessionState::Running),
+        band(
+            Some(&interrupted_idle),
+            AttentionLevel::Unread,
+            SessionState::Running
+        ),
         theme::palette().session_attention,
         "an unread interruption needs attention"
     );
@@ -530,7 +571,11 @@ fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
         ..SessionDetail::default()
     };
     assert_eq!(
-        band(Some(&interrupted_running), false, SessionState::Running),
+        band(
+            Some(&interrupted_running),
+            AttentionLevel::Working,
+            SessionState::Running
+        ),
         theme::palette().session_activity,
         "a running turn is activity, whatever is still unread"
     );
@@ -554,34 +599,50 @@ fn summary_band_colors_prioritize_attention_activity_and_lifecycle() {
         ..SessionDetail::default()
     };
     assert_eq!(
-        band(Some(&needs_input), false, SessionState::Running),
+        band(
+            Some(&needs_input),
+            AttentionLevel::Waiting,
+            SessionState::Running
+        ),
         theme::palette().session_attention,
         "pending input overrides the idle blue"
     );
 
     assert_eq!(
-        band(Some(&read_idle), false, SessionState::Provisioning),
+        band(
+            Some(&read_idle),
+            AttentionLevel::Working,
+            SessionState::Provisioning
+        ),
         theme::palette().session_activity,
         "provisioning is a lifecycle state, not a live idle session"
     );
     assert_eq!(
-        band(Some(&read_idle), false, SessionState::Error),
+        band(
+            Some(&read_idle),
+            AttentionLevel::Failed,
+            SessionState::Error
+        ),
         theme::palette().session_error,
         "error overrides idle"
     );
     assert_eq!(
-        band(None, false, SessionState::Running),
+        band(None, AttentionLevel::Idle, SessionState::Running),
         theme::palette().session_activity,
         "unknown detail stays at the default"
     );
 
     assert_eq!(
-        band(Some(&unread), true, SessionState::Running),
+        band(
+            Some(&unread),
+            AttentionLevel::Unreachable,
+            SessionState::Running
+        ),
         theme::palette().session_error,
         "an unreachable worker is red, overriding every other state"
     );
     assert_eq!(
-        band(None, true, SessionState::Running),
+        band(None, AttentionLevel::Unreachable, SessionState::Running),
         theme::palette().session_error
     );
 }
@@ -931,6 +992,7 @@ fn now_seconds() -> u64 {
 
 fn host_usage(cpu_percent: u8) -> mj_core::targets::DeploymentCapacityUsage {
     mj_core::targets::DeploymentCapacityUsage {
+        memory_pool: false,
         cpu_percent: Some(cpu_percent),
         memory_used_bytes: 1,
         memory_total_bytes: 4,
@@ -944,6 +1006,7 @@ fn host_usage(cpu_percent: u8) -> mj_core::targets::DeploymentCapacityUsage {
 fn weekly_quota(profile_id: &str, remaining: u8) -> ProfileQuota {
     ProfileQuota {
         paid_credits: None,
+        monthly_price_usd: None,
         banked_resets: None,
         profile_id: profile_id.into(),
         harness: HarnessKind::Claude,
@@ -986,6 +1049,7 @@ fn weekly_and_five_hour_quota(profile_id: &str, weekly: u8, five_hour: u8) -> Pr
 fn api_quota(profile_id: &str) -> ProfileQuota {
     ProfileQuota {
         paid_credits: None,
+        monthly_price_usd: None,
         banked_resets: None,
         profile_id: profile_id.into(),
         harness: HarnessKind::Codex,
@@ -1191,7 +1255,13 @@ fn the_minimized_list_colours_a_session_row_by_state() {
         buffer[(cell_column(&lines[row], "ACP pretty"), row as u16)].fg
     };
 
-    let healthy = minimized_sessions_dashboard(1, 1);
+    let mut healthy = minimized_sessions_dashboard(1, 1);
+    crate::test_support::serve_attention(
+        &mut healthy,
+        &["session-00"],
+        mj_core::attention::SessionAttention::Idle,
+    );
+
     assert_eq!(colour_of(healthy), theme::palette().session_idle);
 
     let mut busy = minimized_sessions_dashboard(1, 1);
@@ -1199,6 +1269,11 @@ fn the_minimized_list_colours_a_session_row_by_state() {
         .get_mut("session-00")
         .expect("the session detail")
         .current_turn_started_at = Some(1);
+    crate::test_support::serve_attention(
+        &mut busy,
+        &["session-00"],
+        mj_core::attention::SessionAttention::Working,
+    );
     assert_eq!(colour_of(busy), theme::palette().session_activity);
 
     let mut failed = minimized_sessions_dashboard(1, 1);
@@ -1210,6 +1285,11 @@ fn the_minimized_list_colours_a_session_row_by_state() {
             .expect("the session");
         session.state = SessionState::Error;
     }
+    crate::test_support::serve_attention(
+        &mut failed,
+        &["session-00"],
+        mj_core::attention::SessionAttention::Failed,
+    );
     assert_eq!(colour_of(failed), theme::palette().session_error);
 }
 
@@ -1447,6 +1527,11 @@ fn a_failed_session_draws_a_red_summary_at_both_pane_sizes() {
             dashboard_with_session(session)
         };
         failed.set_pane_size(SupportPane::Sessions, size);
+        crate::test_support::serve_attention(
+            &mut failed,
+            &["session-1"],
+            mj_core::attention::SessionAttention::Failed,
+        );
 
         let row_colour = |dashboard: &mut DashboardState| {
             let mut terminal = Terminal::new(TestBackend::new(120, 44)).expect("terminal");
@@ -1822,6 +1907,7 @@ fn now_epoch_seconds() -> u64 {
 
 fn host_capacity_usage() -> DeploymentCapacityUsage {
     DeploymentCapacityUsage {
+        memory_pool: false,
         cpu_percent: Some(37),
         memory_used_bytes: 3,
         memory_total_bytes: 4,
@@ -1838,6 +1924,7 @@ fn capacity_pane_never_presents_missing_readings_as_zero_resource_use() {
     dashboard.apply_deployment_capacity(
         "local",
         Ok(Some(DeploymentCapacityUsage {
+            memory_pool: false,
             cpu_percent: None,
             memory_used_bytes: 0,
             memory_total_bytes: 0,
@@ -2679,7 +2766,13 @@ fn cpu_report_subagent_navigation_restores_the_parent_view_after_workspace_switc
             workspace_id: "other".into()
         }
     );
-    assert_eq!(dashboard.navigation_session.as_deref(), Some("kid-a"));
+    assert_eq!(
+        dashboard
+            .pending_navigation
+            .as_ref()
+            .map(|pending| pending.session_id.as_str()),
+        Some("kid-a")
+    );
     assert_eq!(
         dashboard.navigation_subagent_parent.as_deref(),
         Some(parent.as_str())
@@ -2688,10 +2781,7 @@ fn cpu_report_subagent_navigation_restores_the_parent_view_after_workspace_switc
     dashboard.set_active_workspace(Some("other".into()));
     assert_eq!(dashboard.subagent_parent_id(), Some(parent.as_str()));
     assert_eq!(dashboard.selected_session_id(), Some("kid-a"));
-    assert_eq!(
-        dashboard.take_navigation_session().as_deref(),
-        Some("kid-a")
-    );
+    assert_eq!(dashboard.take_session_to_open().as_deref(), Some("kid-a"));
 }
 
 #[test]
@@ -2806,16 +2896,16 @@ fn session_cpu_report_nests_subagents_under_their_parent_with_the_tree_total() {
     let mut state = dashboard.state.clone();
     for (id, borrowed) in [(&parent, None), (&"kid-a".to_owned(), Some(parent.clone()))] {
         state.sessions.get_mut(id).unwrap().target =
-            Some(mj_core::state::TargetLocator::LocalDocker {
+            Some(Box::new(mj_core::state::TargetLocator::LocalDocker {
                 container_id: "shared-container".into(),
                 borrowed_from: borrowed,
-            });
+            }));
     }
     // A separately sampled child, including after moving away from the shared container.
     state.sessions.get_mut("kid-b").unwrap().target =
-        Some(mj_core::state::TargetLocator::LocalBare {
+        Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: "/independent".into(),
-        });
+        }));
     dashboard.set_state(state);
     let mut cpu = dashboard
         .session_cpu
@@ -2867,10 +2957,10 @@ fn session_cpu_report_nests_subagents_under_their_parent_with_the_tree_total() {
     let shared_state = dashboard.state.clone();
     let mut moved = shared_state.clone();
     moved.sessions.get_mut(&parent).unwrap().target =
-        Some(mj_core::state::TargetLocator::LocalDocker {
+        Some(Box::new(mj_core::state::TargetLocator::LocalDocker {
             container_id: "destination-container".into(),
             borrowed_from: None,
-        });
+        }));
     dashboard.set_state(moved);
     golden.push_str(&format!(
         "\n\nOwner moved; source child sampled independently\n{}",
@@ -3149,6 +3239,7 @@ fn golden_dashboard_session_render() {
     let mut dashboard = dashboard_with_session(running_session());
     apply_materialized_transcript(&mut dashboard, numbered_conversation(2));
     clear_session_activity(&mut dashboard, "session-1");
+    dashboard.set_session_attention_for("session-1", mj_core::attention::SessionAttention::Unread);
     dashboard
         .session_details
         .get_mut("session-1")
@@ -3529,6 +3620,7 @@ fn golden_dashboard_resource_panels() {
     dashboard.apply_deployment_capacity(
         "local",
         Ok(Some(DeploymentCapacityUsage {
+            memory_pool: false,
             cpu_percent: Some(37),
             memory_used_bytes: 3,
             memory_total_bytes: 4,
@@ -3578,6 +3670,7 @@ fn golden_dashboard_resource_panels() {
             "codex-1".into(),
             ProfileQuota {
                 paid_credits: None,
+                monthly_price_usd: None,
                 banked_resets: None,
                 profile_id: "codex-1".into(),
                 harness: HarnessKind::Codex,
@@ -3604,6 +3697,7 @@ fn golden_dashboard_resource_panels() {
             "claude-1".into(),
             ProfileQuota {
                 paid_credits: None,
+                monthly_price_usd: None,
                 banked_resets: None,
                 profile_id: "claude-1".into(),
                 harness: HarnessKind::Claude,
@@ -3675,6 +3769,7 @@ fn golden_dashboard_resource_panels() {
     );
     let claude_quota = |profile_id: &str, fable: Option<u8>| ProfileQuota {
         paid_credits: None,
+        monthly_price_usd: None,
         banked_resets: None,
         profile_id: profile_id.into(),
         harness: HarnessKind::Claude,
@@ -3755,6 +3850,7 @@ fn golden_dashboard_resource_panels() {
 
     let quota = ProfileQuota {
         paid_credits: None,
+        monthly_price_usd: None,
         banked_resets: None,
         profile_id: "codex-1".into(),
         harness: HarnessKind::Codex,
@@ -3800,6 +3896,7 @@ fn golden_dashboard_resource_panels() {
 
     let quota = ProfileQuota {
         paid_credits: None,
+        monthly_price_usd: None,
         banked_resets: Some(1),
         profile_id: "codex-1".into(),
         harness: HarnessKind::Codex,
@@ -3841,6 +3938,49 @@ fn golden_dashboard_resource_panels() {
         80,
         28,
         &mut dashboard,
+    );
+
+    let mut agy_config = config();
+    agy_config.profiles.insert(
+        "agy".into(),
+        mj_core::config::HarnessProfile::new(HarnessKind::Antigravity, "/profiles/agy"),
+    );
+    let mut agy_quota = weekly_and_five_hour_quota("agy", 73, 48);
+    agy_quota.harness = HarnessKind::Antigravity;
+    for window in &mut agy_quota.windows {
+        window.model_scope = Some(
+            mj_client::quota::AntigravityQuotaPool::Gemini
+                .model_scope()
+                .into(),
+        );
+    }
+    let mut claude_pool = weekly_and_five_hour_quota("agy", 0, 81);
+    for window in &mut claude_pool.windows {
+        window.model_scope = Some(
+            mj_client::quota::AntigravityQuotaPool::Claude
+                .model_scope()
+                .into(),
+        );
+    }
+    agy_quota.windows.extend(claude_pool.windows);
+    let mut dashboard = DashboardState::new(
+        agy_config,
+        State::default(),
+        BTreeMap::from([("agy".into(), agy_quota)]),
+    );
+    dashboard.focus = Focus::Quota;
+    dashboard.quota_index = 1;
+    append_dashboard_golden(
+        &mut output,
+        "Antigravity Gemini and Claude quota pools",
+        140,
+        28,
+        &mut dashboard,
+    );
+    dashboard.begin_profile_rename();
+    assert!(
+        matches!(&dashboard.mode, Mode::ConfigId(editor) if editor.old_id == "agy"),
+        "the Claude quota row still selects the agy profile"
     );
 
     mj_core::golden::assert_golden(
@@ -4022,6 +4162,16 @@ fn golden_operator_away_dialog() {
                 ),
             );
             classified.push((materialized, assessment));
+            let id = format!("waiting-{index}");
+            crate::test_support::serve_attention(
+                &mut dashboard,
+                &[&id],
+                if index == 3 {
+                    mj_core::attention::SessionAttention::Idle
+                } else {
+                    mj_core::attention::SessionAttention::NeedsInput
+                },
+            );
         }
         dashboard.set_operator_presence(mj_core::state::OperatorPresence {
             away: true,
@@ -4035,6 +4185,11 @@ fn golden_operator_away_dialog() {
                 .unwrap()
                 .pending_elicitations
                 .clear();
+            crate::test_support::serve_attention(
+                &mut dashboard,
+                &["waiting-0"],
+                mj_core::attention::SessionAttention::Idle,
+            );
             append_dashboard_golden(
                 &mut output,
                 "AFK classifier intervention only",
@@ -4043,6 +4198,11 @@ fn golden_operator_away_dialog() {
                 &mut dashboard,
             );
             for (mut materialized, assessment) in classified {
+                crate::test_support::serve_attention(
+                    &mut dashboard,
+                    &[&materialized.session_id],
+                    mj_core::attention::SessionAttention::Idle,
+                );
                 materialized.applied_event_ordinal += 1;
                 materialized.pending_elicitations.clear();
                 let assessment = assessment.map(|mut assessment| {

@@ -160,6 +160,12 @@ fn every_harness_reports_expiry_only_where_hel_can_refresh_ahead_of_it() {
             Some(1_756_000_000_000),
             Some(1_756_000_000_000),
         ),
+        (
+            HarnessKind::Antigravity,
+            br#"{"token":{"access_token":"a","refresh_token":"r","expiry":"2026-08-17T02:19:01.724226598Z"}}"#.to_vec(),
+            Some(1_786_933_141_724),
+            None,
+        ),
         // DSH has no login; a file in its place orders nothing.
         (
             HarnessKind::Dsh,
@@ -323,6 +329,11 @@ fn a_missing_credential_file_reads_as_an_absent_snapshot() {
 
 #[test]
 fn auth_failure_phrases_match_and_near_misses_do_not() {
+    // Hard-won: #1508: Codex ACP session-load refusals bypassed login classification.
+    assert!(auth_failure_signature(
+        HarnessKind::Codex,
+        r#"ACP protocol failed: Internal error: "load ACP session 01a1c46e-48d2-7ef0-a803-ce37deb2e2d8: Internal error: {\"details\": \"workspace routing discovery unauthorized (401)\"}""#
+    ));
     assert!(auth_failure_signature(
         HarnessKind::Claude,
         "Error: OAuth session expired and could not be refreshed"
@@ -952,4 +963,176 @@ fn a_kimi_token_refusal_is_an_auth_failure() {
         HarnessKind::Kimi,
         "The token was rejected by the linter; see the log."
     ));
+}
+
+/// A Claude login with the given expiry whose refresh token is `refresh`, or
+/// none, as a harness copy holds it.
+fn claude_login(expires_at: i64, refresh: Option<&str>) -> Vec<u8> {
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&claude_credentials(expires_at)).unwrap();
+    let oauth = json["claudeAiOauth"].as_object_mut().unwrap();
+    match refresh {
+        Some(token) => oauth.insert("refreshToken".into(), token.into()),
+        None => oauth.remove("refreshToken"),
+    };
+    serde_json::to_vec(&json).unwrap()
+}
+
+#[test]
+fn a_claude_harness_copy_omits_the_refresh_token_and_nothing_else() {
+    let host = claude_login(1_000, Some("host-refresh"));
+    let copy = credential_copy_for_harness(HarnessKind::Claude, &host);
+    let json: serde_json::Value = serde_json::from_slice(&copy).unwrap();
+    assert!(
+        !json["claudeAiOauth"]
+            .as_object()
+            .unwrap()
+            .contains_key("refreshToken")
+    );
+    assert_eq!(json["claudeAiOauth"]["accessToken"], "access");
+    assert_eq!(json["claudeAiOauth"]["expiresAt"], 1_000);
+    assert_eq!(json["claudeAiOauth"]["scopes"][0], "user:inference");
+    // The copy is stable, so equal inputs have equal fingerprints.
+    assert_eq!(
+        copy,
+        credential_copy_for_harness(HarnessKind::Claude, &host)
+    );
+
+    // `""` means "login ended" to Claude Code, so it is never written, and an
+    // existing one is not turned into a missing key.
+    let ended = claude_login(1_000, Some(""));
+    assert_eq!(
+        credential_copy_for_harness(HarnessKind::Claude, &ended).as_ref(),
+        ended.as_slice()
+    );
+    // Other harnesses and unreadable documents keep their bytes.
+    let codex = codex_credentials("2026-01-01T00:00:00Z");
+    assert_eq!(
+        credential_copy_for_harness(HarnessKind::Codex, &codex).as_ref(),
+        codex.as_slice()
+    );
+    assert_eq!(
+        credential_copy_for_harness(HarnessKind::Claude, b"synthetic credentials").as_ref(),
+        b"synthetic credentials"
+    );
+}
+
+/// #1490: a copy without the refresh token never takes the profile's login
+/// from it, however late it expires, and a copy staged before that rule, which
+/// still holds the refresh token, is replaced at the same expiry.
+#[tokio::test]
+async fn claude_installs_never_drop_the_hosts_refresh_token_and_converge_copies() {
+    let directory = tempfile::tempdir().unwrap();
+    let host = directory.path().join("host/.credentials.json");
+    let session = directory.path().join("session/.credentials.json");
+    for path in [&host, &session] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    }
+    let with_token = claude_login(1_000, Some("host-refresh"));
+    let stripped = credential_copy_for_harness(HarnessKind::Claude, &with_token).into_owned();
+    std::fs::write(&host, &with_token).unwrap();
+
+    // (b) A later-expiring copy without the token does not replace the host.
+    let later_stripped = claude_login(9_000, None);
+    let outcome = install_credentials_if_newer(HarnessKind::Claude, &host, &later_stripped)
+        .await
+        .unwrap();
+    assert!(!outcome.installed);
+    assert_eq!(std::fs::read(&host).unwrap(), with_token);
+    // A later copy that carries its own login does.
+    let own_login = claude_login(9_000, Some("session-refresh"));
+    assert!(
+        install_credentials_if_newer(HarnessKind::Claude, &host, &own_login)
+            .await
+            .unwrap()
+            .installed
+    );
+    std::fs::write(&host, &with_token).unwrap();
+    // A host without a login (after a logout) is not handed a stripped copy
+    // nothing can renew; a copy with its own login still signs it in.
+    let signed_out = directory.path().join("signed-out/.credentials.json");
+    let outcome = install_credentials_if_newer(HarnessKind::Claude, &signed_out, &later_stripped)
+        .await
+        .unwrap();
+    assert!(!outcome.installed);
+    assert!(!signed_out.exists());
+    assert!(
+        install_credentials_if_newer(HarnessKind::Claude, &signed_out, &own_login)
+            .await
+            .unwrap()
+            .installed
+    );
+
+    // (a) A copy holding the host's refresh token at the same expiry is
+    // replaced by the stripped copy, but only under the session-copy rule.
+    std::fs::write(&session, &with_token).unwrap();
+    assert!(
+        !install_credentials_if_newer(HarnessKind::Claude, &session, &stripped)
+            .await
+            .unwrap()
+            .installed
+    );
+    let outcome = install_session_credentials(HarnessKind::Claude, &session, &stripped)
+        .await
+        .unwrap();
+    assert!(outcome.installed);
+    assert_eq!(std::fs::read(&session).unwrap(), stripped);
+
+    // An older delivery never replaces a copy that expires later (it may be a
+    // login of its own that the daemon has yet to pull), nor does a delivery
+    // that carries a token at the same expiry.
+    let newer_own = claude_login(2_000, Some("session-refresh"));
+    std::fs::write(&session, &newer_own).unwrap();
+    for incoming in [&stripped, &with_token] {
+        assert!(
+            !install_session_credentials(HarnessKind::Claude, &session, incoming)
+                .await
+                .unwrap()
+                .installed
+        );
+        assert_eq!(std::fs::read(&session).unwrap(), newer_own);
+    }
+}
+
+// Hard-won: d633dfdbd: signing in a custom Antigravity home used the default account.
+#[cfg(unix)]
+#[test]
+fn antigravity_login_keeps_the_default_account_untouched() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let default = root.path().join(".gemini");
+    let selected = root.path().join("other Google account");
+    let marker = HarnessKind::Antigravity.credential_file_name();
+    std::fs::create_dir_all(default.join("antigravity-cli")).unwrap();
+    std::fs::write(default.join(marker), b"default-account").unwrap();
+    let shim = root.path().join("agy");
+    // A CLI-side fake uses agy's documented argument, and otherwise its
+    // default home; the Mjolnir-only environment variable cannot select it.
+    std::fs::write(
+        &shim,
+        r#"#!/bin/sh
+selected="$HOME/.gemini"
+while [ "$#" -gt 0 ]; do
+    case "$1" in --gemini-dir) shift; selected="$1" ;; esac
+    shift
+done
+mkdir -p "$selected/antigravity-cli"
+printf signed-in > "$selected/antigravity-cli/antigravity-oauth-token"
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let profile = HarnessProfile::new(HarnessKind::Antigravity, selected.clone());
+    let (program, args) = login_command(&profile).unwrap();
+    let status = std::process::Command::new(root.path().join(program))
+        .args(args)
+        .env("HOME", root.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        std::fs::read(default.join(marker)).unwrap(),
+        b"default-account"
+    );
+    assert_eq!(std::fs::read(selected.join(marker)).unwrap(), b"signed-in");
 }

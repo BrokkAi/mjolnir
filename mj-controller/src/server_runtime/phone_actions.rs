@@ -293,6 +293,7 @@ impl PhoneActionControl {
         let lifecycle = matches!(
             action,
             ControllerAction::New { .. }
+                | ControllerAction::Suspend { .. }
                 | ControllerAction::Restart { .. }
                 | ControllerAction::Move { .. }
         )

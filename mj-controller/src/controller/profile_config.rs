@@ -25,21 +25,6 @@ pub async fn subagent_options(
     .await
 }
 
-/// Setup probes its draft without saving it or changing the live configuration.
-pub async fn subagent_options_for(
-    config: Config,
-    parent: String,
-    model: Option<String>,
-) -> Result<mj_core::subagent::SubagentOptions> {
-    subagent_options_with(&config, &parent, model, |id, model| {
-        let draft = config.clone();
-        serialized(id.clone(), move |cancelled| {
-            discover_from_config(&draft, &id, model, false, cancelled)
-        })
-    })
-    .await
-}
-
 /// The catalog's probe. `refresh` probes bypass the process-global cache:
 /// they exist because something outside the profile definition (a home edit
 /// the catalog owner detected, an expired entry) may have changed what the
@@ -63,7 +48,8 @@ pub(crate) async fn discover_for(
 /// Validate the session's straightforward choice, and its subtle choice when
 /// it has one, against enabled profiles. Subtle is optional; straightforward
 /// is not.
-pub async fn validate_session_subagent_policy(
+pub(crate) async fn validate_session_subagent_policy(
+    catalog: &Arc<crate::server_runtime::profile_catalog::ProfileCatalog>,
     config: &Config,
     profile_id: &str,
     policy: &mj_core::subagent::SubagentPolicy,
@@ -78,9 +64,11 @@ pub async fn validate_session_subagent_policy(
         .enabled_profile(profile_id)
         .context("parent profile unavailable")?
         .kind;
-    if !kind.supports_delegation_tools() && !policy.is_native() {
+    // None asks for no Mjolnir sub-agents at all, so any harness accepts it;
+    // only a Mjolnir policy needs the delegation tools.
+    if !kind.supports_delegation_tools() && policy.uses_mjolnir() {
         return Err(refuse(format!(
-            "{} sessions use their harness's own delegation; Mjolnir sub-agents and the None choice need a Claude, Codex, DSH, or OpenCode profile",
+            "{} sessions use their harness's own delegation; Mjolnir sub-agents need a Claude, Codex, DSH, or OpenCode profile",
             kind.display_name()
         )));
     }
@@ -106,16 +94,24 @@ pub async fn validate_session_subagent_policy(
                 .into(),
         ));
     }
-    for task_type in [SubagentTaskType::Straightforward, SubagentTaskType::Subtle] {
+    let task_types = [SubagentTaskType::Straightforward, SubagentTaskType::Subtle];
+    let models = task_types
+        .iter()
+        .filter_map(|task_type| {
+            config
+                .subagents
+                .effective_choice(policy, *task_type)
+                .map(|choice| choice.model.clone())
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let options = catalog
+        .admission_options(config, profile_id, models)
+        .await?;
+    for task_type in task_types {
         let Some(choice) = config.subagents.effective_choice(policy, task_type) else {
             continue;
         };
-        let options = subagent_options_for(
-            config.clone(),
-            profile_id.to_owned(),
-            Some(choice.model.clone()),
-        )
-        .await?;
+        let options = &options[&choice.model];
         options
             .validate(choice)
             .map_err(|message| refuse(format!("[subagents.{}]: {message}", task_type.id())))?;
@@ -143,26 +139,38 @@ where
         .map(|(id, _)| id.clone())
         .collect::<Vec<_>>();
     let mut options = mj_core::subagent::SubagentOptions::default();
-    let results = futures::future::join_all(candidates.into_iter().map(|id| {
-        let model = model.clone();
+    let defaults = futures::future::join_all(candidates.into_iter().map(|id| async move {
+        let result = probe(id.clone(), None)
+            .await
+            .map(|choices| choices.restricted_to(&config.profiles[&id].models));
+        (id, result)
+    }))
+    .await;
+    let models = defaults
+        .iter()
+        .filter_map(|(_, result)| result.as_ref().ok())
+        .flat_map(|choices| choices.models.iter().cloned())
+        .collect::<Vec<_>>();
+    let identity = model
+        .as_deref()
+        .map(|model| mj_core::model_catalog::model_id(&models, model));
+    let results = futures::future::join_all(defaults.into_iter().map(|(id, result)| {
+        let identity = identity.as_deref();
+        let model = model.as_deref();
         async move {
             let result = async {
-                // Both probes apply the profile's `models` list, so a hidden
-                // model is never offered or accepted for delegation. The
-                // model-specific probe runs only for a model the list allows.
-                let allowed = &config.profiles[&id].models;
-                let mut choices = probe(id.clone(), None).await?.restricted_to(allowed);
-                if let Some(model) = model
-                    .as_ref()
-                    .filter(|model| choices.models.iter().any(|choice| &choice.value == *model))
-                {
-                    // That probe switches to the requested model, so restrict
-                    // its list with the default as the kept model, as the
-                    // default probe did.
+                let mut choices = result?;
+                if let Some(offer) = identity.and_then(|identity| {
+                    mj_core::model_catalog::offer(
+                        &choices.models,
+                        identity,
+                        model.unwrap_or(identity),
+                    )
+                }) {
                     let default = choices.model.clone();
-                    let mut specific = probe(id.clone(), Some(model.clone())).await?;
+                    let mut specific = probe(id.clone(), Some(offer.value)).await?;
                     let selected = std::mem::replace(&mut specific.model, default);
-                    specific = specific.restricted_to(allowed);
+                    specific = specific.restricted_to(&config.profiles[&id].models);
                     specific.model = selected;
                     choices = specific;
                 }
@@ -176,10 +184,14 @@ where
     for (id, result) in results {
         match result {
             Ok(choices) => {
-                if model
-                    .as_ref()
-                    .is_some_and(|model| choices.models.iter().any(|choice| &choice.value == model))
-                {
+                if identity.as_deref().is_some_and(|identity| {
+                    mj_core::model_catalog::offer(
+                        &choices.models,
+                        identity,
+                        model.as_deref().unwrap_or(identity),
+                    )
+                    .is_some()
+                }) {
                     for choice in choices.efforts {
                         if !options
                             .efforts
@@ -190,19 +202,12 @@ where
                         }
                     }
                 }
-                for choice in choices.models {
-                    if !options
-                        .models
-                        .iter()
-                        .any(|existing| existing.value == choice.value)
-                    {
-                        options.models.push(choice);
-                    }
-                }
+                options.models.extend(choices.models);
             }
             Err(error) => options.unavailable.push(format!("{id}: {error:#}")),
         }
     }
+    options.models = mj_core::model_catalog::merged_choices(options.models);
     Ok(options)
 }
 
@@ -350,7 +355,7 @@ pub(crate) fn observation_check(
 pub(crate) async fn observe(
     profile_id: String,
     worker_build: String,
-    state: mj_core::relay::RelayOperationalState,
+    state: mj_core::snapshot_map::SharedSnapshot<mj_core::relay::RelayOperationalState>,
     check: ObservationCheck,
 ) -> Result<bool> {
     let stored = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -442,16 +447,6 @@ fn discover_blocking(
 pub(crate) struct Discovery {
     pub choices: ProfileConfig,
     pub probed: bool,
-}
-
-fn discover_from_config(
-    config: &Config,
-    profile_id: &str,
-    model: Option<String>,
-    refresh: bool,
-    cancelled: Arc<std::sync::atomic::AtomicBool>,
-) -> Result<ProfileConfig> {
-    Ok(discover_with_provenance(config, profile_id, model, refresh, cancelled)?.choices)
 }
 
 fn discover_with_provenance(
@@ -743,6 +738,69 @@ mod tests {
     use mj_core::refusal::Refusal;
     use std::cell::{Cell, RefCell};
 
+    // Hard-won: #1534 review: a first-listed older alias hid the newer profile during admission.
+    #[tokio::test]
+    async fn subagent_options_preserve_versions_sharing_the_same_launch_alias() {
+        let config = crate::server_runtime::profile_catalog::test_config(&[
+            ("a-stale", mj_core::config::HarnessKind::Claude),
+            ("newer", mj_core::config::HarnessKind::Claude),
+        ]);
+        let recorded: BTreeMap<String, Vec<mj_core::acp::SessionConfigChoice>> =
+            serde_json::from_str(include_str!(
+                "../../../mj-core/tests/fixtures/claude-antigravity-models.json"
+            ))
+            .unwrap();
+        let recorded = &recorded;
+        let calls = &RefCell::new(Vec::new());
+        let options = subagent_options_with(
+            &config,
+            "newer",
+            Some("claude-sonnet-5-5".into()),
+            |id, model| async move {
+                calls.borrow_mut().push((id.clone(), model.clone()));
+                let mut models = recorded["claude"].clone();
+                if id == "a-stale" {
+                    models[1].name = "Sonnet 5".into();
+                }
+                let effort = mj_core::acp::SessionConfigChoice {
+                    value: "high".into(),
+                    name: "High".into(),
+                    description: None,
+                };
+                let selected = model.is_some();
+                if let Some(model) = &model {
+                    assert_eq!((id.as_str(), model.as_str()), ("newer", "sonnet"));
+                }
+                Ok(ProfileConfig {
+                    model: model.or_else(|| Some("opus".into())),
+                    models,
+                    efforts: if selected { vec![effort] } else { vec![] },
+                    observed_at: 0,
+                })
+            },
+        )
+        .await
+        .unwrap();
+        options
+            .validate(&mj_core::config::SubagentChoice {
+                model: "claude-sonnet-5-5".into(),
+                effort: Some("high".into()),
+            })
+            .unwrap();
+        assert_eq!(
+            mj_core::model_catalog::model_id(&options.models, "sonnet"),
+            "claude-sonnet-5-5"
+        );
+        assert_eq!(
+            calls
+                .borrow()
+                .iter()
+                .filter(|(_, model)| model.is_some())
+                .count(),
+            1
+        );
+    }
+
     /// A profile's `models` list hides a model from delegation as well as
     /// from pickers: session creation must not accept a sub-agent model that
     /// later selection cannot find.
@@ -789,6 +847,36 @@ mod tests {
             .unwrap();
         assert_eq!(values(&allowed), ["default", "allowed"]);
         assert_eq!(allowed.efforts.len(), 1);
+    }
+
+    #[test]
+    #[ignore = "requires MJ_ANTIGRAVITY_TEST_HOME with a copied Google login and MJ_WORKER_BINARY pointing to the current mj-worker build"]
+    fn live_antigravity_profile_discovery_reads_base_models_and_efforts() {
+        let home = std::path::PathBuf::from(
+            std::env::var_os("MJ_ANTIGRAVITY_TEST_HOME").expect("set copied Google login home"),
+        );
+        let profile = HarnessProfile::new(mj_core::config::HarnessKind::Antigravity, home);
+        let choices = probe_profile(
+            "antigravity-discovery-test",
+            &profile,
+            Default::default(),
+            None,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .unwrap();
+        assert!(
+            choices
+                .models
+                .iter()
+                .any(|choice| choice.value == "gemini-3.8-flash")
+        );
+        assert!(choices.efforts.iter().any(|choice| choice.value == "low"));
+        assert!(
+            !choices
+                .models
+                .iter()
+                .any(|choice| choice.value == "gemini-4-carbon-high")
+        );
     }
 
     // Hard-won: #1284: discovery staged Muse credentials outside its XDG home.
@@ -958,7 +1046,15 @@ mod tests {
                     effort: effort.map(str::to_owned),
                 })),
             };
-            let result = validate_session_subagent_policy(&draft, "unsaved", &policy).await;
+            let result = validate_session_subagent_policy(
+                &crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                    CancellationToken::new(),
+                ),
+                &draft,
+                "unsaved",
+                &policy,
+            )
+            .await;
             if available {
                 result.unwrap();
             } else {
@@ -970,6 +1066,7 @@ mod tests {
             }
         }
         validate_session_subagent_policy(
+            &crate::server_runtime::profile_catalog::ProfileCatalog::new(CancellationToken::new()),
             &draft,
             "unsaved",
             &mj_core::subagent::SubagentPolicy::Mjolnir {
@@ -984,6 +1081,7 @@ mod tests {
         .unwrap();
         // Subtle is optional: the straightforward choice alone is enough.
         validate_session_subagent_policy(
+            &crate::server_runtime::profile_catalog::ProfileCatalog::new(CancellationToken::new()),
             &draft,
             "unsaved",
             &mj_core::subagent::SubagentPolicy::Mjolnir {
@@ -995,6 +1093,7 @@ mod tests {
         .unwrap();
         draft.subagents.straightforward = None;
         let missing = validate_session_subagent_policy(
+            &crate::server_runtime::profile_catalog::ProfileCatalog::new(CancellationToken::new()),
             &draft,
             "unsaved",
             &mj_core::subagent::SubagentPolicy::Mjolnir {
@@ -1015,9 +1114,11 @@ mod tests {
             missing.to_string().contains("[subagents.straightforward]"),
             "subtle alone is never enough: {missing:#}"
         );
-        let options = subagent_options_for(draft, "unsaved".into(), Some("chosen".into()))
-            .await
-            .unwrap();
+        let options =
+            crate::server_runtime::profile_catalog::ProfileCatalog::new(CancellationToken::new())
+                .options_for(&draft, "unsaved", Some("chosen".into()))
+                .await
+                .unwrap();
         assert_eq!(options.models, catalog.models);
         assert_eq!(options.efforts, catalog.efforts);
         assert!(options.unavailable.is_empty());
@@ -1432,6 +1533,7 @@ mod tests {
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            claude_permission_mode: None,
             aws: None,
             models: Default::default(),
             legacy_subagents: None,
@@ -1456,6 +1558,8 @@ mod tests {
         fn observed() -> RelayOperationalState {
             RelayOperationalState {
                 assessment: None,
+                open_request: None,
+                person_input_through: 0,
                 assessment_context: None,
                 turn_completion: None,
                 continuation: Default::default(),
@@ -1493,6 +1597,7 @@ mod tests {
                 agent_info: None,
                 runtime: None,
                 steering_supported: None,
+                mailbox_delivery: None,
                 turn_controls: None,
                 config_options: vec![
                     SessionConfigOption::select(
@@ -1505,9 +1610,10 @@ mod tests {
                         ]),
                     )
                     .category(SessionConfigOptionCategory::ThoughtLevel),
-                ],
+                ]
+                .into(),
                 modes: None,
-                available_commands: Vec::new(),
+                available_commands: Vec::new().into(),
                 config: BTreeMap::new(),
                 active_prompt: None,
                 queued_prompts: Vec::new(),
@@ -1545,7 +1651,7 @@ mod tests {
             !observe(
                 "muse".into(),
                 String::new(),
-                observed(),
+                observed().into(),
                 ObservationCheck::NoProbe,
             )
             .await
@@ -1568,7 +1674,7 @@ mod tests {
             observe(
                 "codex".into(),
                 String::new(),
-                observed(),
+                observed().into(),
                 ObservationCheck::NoProbe,
             )
             .await
@@ -1584,6 +1690,7 @@ mod tests {
             mj_core::config::HarnessKind::Dsh,
             mj_core::config::HarnessKind::OpenCode,
             mj_core::config::HarnessKind::Grok,
+            mj_core::config::HarnessKind::Muse,
         ] {
             let mut config = Config::default();
             config.profiles.insert(
@@ -1595,6 +1702,7 @@ mod tests {
                     guardian_review_model: None,
                     codex_profile: None,
                     muse_auto_review: None,
+                    claude_permission_mode: None,
                     aws: None,
                     models: Default::default(),
                     legacy_subagents: None,
@@ -1602,6 +1710,9 @@ mod tests {
                 },
             );
             let error = validate_session_subagent_policy(
+                &crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                    CancellationToken::new(),
+                ),
                 &config,
                 "parent",
                 &mj_core::subagent::SubagentPolicy::Mjolnir {
@@ -1626,9 +1737,24 @@ mod tests {
                         .contains("Claude, Codex, DSH, or OpenCode")
                 );
             }
+            // None asks for no Mjolnir sub-agents at all; every harness
+            // accepts it, including one without delegation tools (#1284).
+            validate_session_subagent_policy(
+                &crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                    CancellationToken::new(),
+                ),
+                &config,
+                "parent",
+                &mj_core::subagent::SubagentPolicy::None,
+            )
+            .await
+            .unwrap();
             // Native keeps a harness's own sub-agents; DSH has none, so an
             // explicit Native is refused with the two choices it offers.
             let native = validate_session_subagent_policy(
+                &crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                    CancellationToken::new(),
+                ),
                 &config,
                 "parent",
                 &mj_core::subagent::SubagentPolicy::Native,
@@ -1647,6 +1773,9 @@ mod tests {
                 );
                 // The default for an omitted policy is accepted.
                 validate_session_subagent_policy(
+                    &crate::server_runtime::profile_catalog::ProfileCatalog::new(
+                        CancellationToken::new(),
+                    ),
                     &config,
                     "parent",
                     &mj_core::subagent::SubagentPolicy::default_for(kind),

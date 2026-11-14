@@ -255,8 +255,11 @@ def trim_middle(text):
 GENERATED_PROMPT_PREFIXES = (
     "auto-continue-",
     "quota-retry-",
+    "auth-retry-",
     "review-forward-",
     "archive-",
+    "subagent-spawn-",
+    "subagent-input-",
     "subagent-",
     "mailbox-wake-",
     "handback-reminder-",
@@ -265,7 +268,7 @@ GENERATED_PROMPT_PREFIXES = (
     "capacity-retry-",
 )
 # Retry ids end in the ordinal of the turn they retry; nothing else matches.
-ORDINAL_PREFIXES = ("server-retry-", "capacity-retry-")
+ORDINAL_PREFIXES = ("server-retry-", "capacity-retry-", "auth-retry-")
 PARENT_WAIT_PROMPT_TEXT = "One or more sub-agents finished. Call wait to collect their reports."
 CONTEXT_BOUNDARY_PREFIX = "context-cleared:"
 

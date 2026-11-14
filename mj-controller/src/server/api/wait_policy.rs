@@ -121,7 +121,7 @@ impl WaitObservation {
     /// Jev is still reading its reply, or while a sub-agent child still owes
     /// its report for it. Nothing that starts a new command holds it: a turn
     /// the harness starts itself, background work, an expected continuation,
-    /// Mjolnir's automatic continuation, a later prompt or a goal. Those are
+    /// a later prompt or a goal. Those are
     /// what the session does next.
     ///
     /// How it ended is the harness outcome, except where the turn's own

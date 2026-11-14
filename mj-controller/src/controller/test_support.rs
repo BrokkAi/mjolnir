@@ -26,6 +26,7 @@ pub(crate) fn checkpoint_test_session(session_id: &str) -> SessionRecord {
     SessionRecord {
         oracle_choice: None,
         oracle: true,
+        notifications_ignored: false,
         project: None,
         target_runtime: None,
         launch_base: None,
@@ -38,8 +39,6 @@ pub(crate) fn checkpoint_test_session(session_id: &str) -> SessionRecord {
         create_managed_worktree: None,
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
-        container_cpus: None,
-        container_memory: None,
         id: session_id.into(),
         title: "checkpoint transition".into(),
         harness_kind: mj_core::config::HarnessKind::Codex,
@@ -64,6 +63,8 @@ pub(crate) fn checkpoint_test_session(session_id: &str) -> SessionRecord {
         viewed_through_event_ordinal: 0,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: None,
     }
@@ -218,6 +219,7 @@ pub(crate) fn checkpoint_archive_input(
             command_ledger: None,
             assessment_state: Some(
                 serde_json::to_value(mj_core::assessment::Checkpoint {
+                    open_request: None,
                     version: 1,
                     context: Some(Default::default()),
                     assessment: None,
@@ -308,7 +310,7 @@ pub(super) fn managed_raw_session(target: ManagedWorktreeTarget) -> SessionRecor
         },
         &worktree_root.to_string_lossy(),
     );
-    session.managed_worktree = Some(ManagedWorktree {
+    session.managed_worktree = Some(Box::new(ManagedWorktree {
         kind: Default::default(),
         source_project_directory: repository.clone(),
         source_repository: repository,
@@ -316,7 +318,7 @@ pub(super) fn managed_raw_session(target: ManagedWorktreeTarget) -> SessionRecor
         branch: format!("mj/{session_id}"),
         target,
         base_commit: None,
-    });
+    }));
     session
 }
 
@@ -525,7 +527,7 @@ fn managed_checkout_session(
     session.bundle_id = "remote-project-abcdef".into();
     session.target_template_id = "local-bare".into();
     session.project_directory = Some(worktree.worktree_root.clone());
-    session.managed_worktree = Some(worktree);
+    session.managed_worktree = Some(Box::new(worktree));
     session
 }
 

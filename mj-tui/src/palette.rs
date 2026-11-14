@@ -11,6 +11,7 @@
 //! It replaces the old session edit dialog, which existed only because the
 //! footer had no room for three more hints.
 
+use mj_core::state::SessionResourceAllocation;
 use std::cell::RefCell;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -76,6 +77,8 @@ pub(crate) enum PaletteControl {
     Run,
     /// The combobox anchored on the "Change workspace" row.
     Workspace,
+    /// The copy button in a session menu's top right.
+    CopySessionId,
 }
 
 impl CommandPalette {
@@ -120,10 +123,11 @@ impl CommandPalette {
 
 const SESSION_MENU_COMMANDS: &[CommandId] = &[
     CommandId::ChangedFiles,
-    CommandId::DismissQuestion,
+    CommandId::DismissNotification,
+    CommandId::OpenWaitingQuestion,
+    CommandId::IgnoreNotifications,
     CommandId::RenameSession,
     CommandId::PinSession,
-    CommandId::UnpinSession,
     CommandId::ChangeWorkspace,
     CommandId::ContainerSettings,
     CommandId::MoveSession,
@@ -131,7 +135,6 @@ const SESSION_MENU_COMMANDS: &[CommandId] = &[
     CommandId::RestartSession,
     CommandId::UpgradeContainer,
     CommandId::InterruptAll,
-    CommandId::CopySessionId,
     CommandId::DestroySession,
 ];
 
@@ -167,6 +170,17 @@ fn session_menu_entries(dashboard: &DashboardState) -> Vec<PaletteEntry> {
 /// container settings it carries into its next container.
 fn session_facts(dashboard: &DashboardState, session: &SessionRecord) -> Vec<Line<'static>> {
     let mut facts = Vec::new();
+    // The bare top line reads like the session row's info: no field labels.
+    let detail = dashboard.session_details.get(&session.id);
+    let mut top: Vec<&str> = Vec::new();
+    if let Some(model) = detail.and_then(|detail| detail.current_model.as_deref()) {
+        top.push(model);
+    }
+    if let Some(effort) = detail.and_then(|detail| detail.current_effort.as_deref()) {
+        top.push(effort);
+    }
+    top.push(&session.last_profile);
+    facts.push(Line::raw(top.join(" · ")));
     let fact = |label: &str, value: String| {
         Line::from(vec![
             Span::styled(format!("{label:<11}"), theme::muted()),
@@ -288,11 +302,14 @@ fn session_facts(dashboard: &DashboardState, session: &SessionRecord) -> Vec<Lin
     }
 
     let mut container = Vec::new();
-    if let Some(cpus) = &session.container_cpus {
+    if let Some(SessionResourceAllocation::Container { cpus, memory_bytes }) =
+        &session.resource_allocation
+    {
         container.push(format!("{cpus} CPUs"));
-    }
-    if let Some(memory) = &session.container_memory {
-        container.push(format!("{memory} memory"));
+        container.push(format!(
+            "{} GiB memory",
+            crate::wizards::resources::memory_gib_text(*memory_bytes)
+        ));
     }
     if !session.additional_mounts.is_empty() {
         container.push(crate::widgets::counted(
@@ -337,16 +354,56 @@ fn first_ready(entries: &[PaletteEntry]) -> usize {
         .unwrap_or(0)
 }
 
-fn session_menu_label(id: CommandId) -> String {
+fn session_menu_label(
+    dashboard: &DashboardState,
+    palette: &CommandPalette,
+    id: CommandId,
+) -> String {
     let label = match id {
         // Opens a second choice, so it carries the menu's submenu glyph.
         CommandId::ChangeWorkspace => {
             return format!("Change Workspace {}", theme::glyphs().navigate);
         }
+        // One row that flips with the session's preference.
+        CommandId::IgnoreNotifications => {
+            return if palette
+                .session_id
+                .as_deref()
+                .and_then(|id| dashboard.state.sessions.get(id))
+                .is_some_and(|session| session.notifications_ignored)
+            {
+                "Stop ignoring".to_owned()
+            } else {
+                "Ignore".to_owned()
+            };
+        }
+        // One row that flips with the pin state, like Ignore's.
+        CommandId::PinSession => {
+            return if palette
+                .session_id
+                .as_deref()
+                .and_then(|id| dashboard.pin_id(id))
+                .is_some()
+            {
+                "Unpin".to_owned()
+            } else {
+                "Pin…".to_owned()
+            };
+        }
+        // Names the child the row's own status line names.
+        CommandId::OpenWaitingQuestion => {
+            return match palette
+                .session_id
+                .as_deref()
+                .and_then(|id| dashboard.waiting_child_kind(id))
+            {
+                Some(mj_core::subagent::SubagentKind::Reviewer) => "Open reviewer question",
+                _ => "Open sub-agent question",
+            }
+            .to_owned();
+        }
         CommandId::OpenSession => "Open",
         CommandId::RenameSession => "Rename…",
-        CommandId::PinSession => "Pin…",
-        CommandId::UnpinSession => "Unpin",
         CommandId::MoveSession => "Move…",
         CommandId::SuspendSession => "Suspend…",
         CommandId::RestartSession => "Restart",
@@ -707,6 +764,13 @@ impl DashboardState {
         };
         match interaction {
             Some(Interaction::Cancel) => self.cancel_modal(),
+            Some(Interaction::Activate(PaletteControl::CopySessionId)) => {
+                let session_id = palette.session_id.clone();
+                self.mode = Mode::Dashboard;
+                return session_id.map_or(DashboardAction::None, |session_id| {
+                    DashboardAction::CopySessionId { session_id }
+                });
+            }
             Some(Interaction::Edit(PaletteControl::Query, edit)) => {
                 TextField::apply(&mut palette.query, edit);
                 self.rebuild_palette_entries();
@@ -768,7 +832,8 @@ impl DashboardState {
 /// One drawn row: either a group heading or a command.
 enum PaletteLine {
     Heading(String),
-    Separator,
+    /// An empty row between session-menu sections.
+    Blank,
     /// The entry's index into `entries`, so the highlight can be placed.
     Command(usize),
 }
@@ -780,26 +845,30 @@ fn palette_lines(dashboard: &DashboardState, palette: &CommandPalette) -> Vec<Pa
         let mut section = None;
         for (index, entry) in palette.entries.iter().enumerate() {
             let next = match entry.id {
-                CommandId::OpenSession | CommandId::ChangedFiles | CommandId::DismissQuestion => 0,
-                CommandId::RenameSession
-                | CommandId::PinSession
-                | CommandId::UnpinSession
-                | CommandId::ChangeWorkspace => 1,
+                CommandId::OpenSession
+                | CommandId::ChangedFiles
+                | CommandId::DismissNotification
+                | CommandId::OpenWaitingQuestion
+                | CommandId::IgnoreNotifications => 0,
+                CommandId::RenameSession | CommandId::PinSession | CommandId::ChangeWorkspace => 1,
                 CommandId::ContainerSettings
                 | CommandId::MoveSession
                 | CommandId::SuspendSession
                 | CommandId::RestartSession
                 | CommandId::UpgradeContainer
-                | CommandId::InterruptAll => 2,
-                CommandId::CopySessionId | CommandId::DestroySession => 3,
+                | CommandId::InterruptAll
+                | CommandId::DestroySession => 2,
                 _ => continue,
             };
             if section != Some(next) {
+                // An empty row sets one section off from the last.
+                if section.is_some() {
+                    lines.push(PaletteLine::Blank);
+                }
                 match next {
                     0 => lines.push(PaletteLine::Heading("Content".to_owned())),
                     1 => lines.push(PaletteLine::Heading("Organize".to_owned())),
-                    2 => lines.push(PaletteLine::Heading("Lifecycle".to_owned())),
-                    _ => lines.push(PaletteLine::Separator),
+                    _ => lines.push(PaletteLine::Heading("Lifecycle".to_owned())),
                 }
                 section = Some(next);
             }
@@ -850,7 +919,7 @@ pub(crate) fn render_palette(
     let facts_height = if facts.is_empty() { 0 } else { facts.len() + 1 };
     // The popup grows with the complete list. The shared modal helper clamps
     // it to the usable terminal bounds when the list cannot fit.
-    let extra_height = facts_height + if palette.session_only { 3 } else { 5 };
+    let extra_height = facts_height + 5;
     let popup_height =
         u16::try_from(lines.len().saturating_add(extra_height).max(5)).unwrap_or(u16::MAX);
     let popup = centered_modal(frame, surfaces, 72, popup_height, area);
@@ -858,9 +927,12 @@ pub(crate) fn render_palette(
     let rows = if palette.session_only {
         Layout::default()
             .direction(Direction::Vertical)
+            // One blank row of margin at the top and at the bottom.
             .constraints([
+                Constraint::Length(1),
                 Constraint::Length(u16::try_from(facts_height).unwrap_or(u16::MAX)),
                 Constraint::Min(1),
+                Constraint::Length(1),
                 Constraint::Length(1),
             ])
             .split(inner)
@@ -875,14 +947,17 @@ pub(crate) fn render_palette(
             ])
             .split(inner)
     };
-    let list_row = rows[1];
-    let description_row = rows[2];
+    let (list_row, description_row) = if palette.session_only {
+        (rows[2], rows[3])
+    } else {
+        (rows[1], rows[2])
+    };
     if !facts.is_empty() {
         let facts_row = Rect::new(
-            rows[0].x.saturating_add(2),
-            rows[0].y,
-            rows[0].width.saturating_sub(2),
-            rows[0].height.saturating_sub(1),
+            rows[1].x.saturating_add(2),
+            rows[1].y,
+            rows[1].width.saturating_sub(2),
+            rows[1].height.saturating_sub(1),
         );
         frame.render_widget(Paragraph::new(facts), facts_row);
     }
@@ -915,7 +990,24 @@ pub(crate) fn render_palette(
     }
     let outer = outer.title_bottom(mj_chat::components::DialogShell::hints(true));
     frame.render_widget(outer, popup);
-    if !palette.session_only {
+    if palette.session_only {
+        // The session id copies from an ordinary button in the body's first
+        // row, at the right. That row is the menu's top margin: the title sits
+        // on the border above it and the facts start in the row below, so the
+        // button cannot overlap either. It leaves the command list to
+        // lifecycle and content work.
+        let enabled = matches!(
+            (spec(CommandId::CopySessionId).available)(dashboard),
+            Availability::Ready
+        );
+        Dialog::render_actions_aligned(
+            frame,
+            rows[0],
+            &[(PaletteControl::CopySessionId, "Copy session ID", enabled)],
+            &mut form,
+            mj_chat::components::RowAlign::Right,
+        );
+    } else {
         TextField::render(
             frame,
             rows[0],
@@ -968,13 +1060,10 @@ pub(crate) fn render_palette(
                     ),
                 ])
             }
-            PaletteLine::Separator => {
+            PaletteLine::Blank => {
                 row_map.push(None);
                 enabled.push(false);
-                Line::styled(
-                    format!("  {}", theme::glyphs().rule.repeat(width.saturating_sub(2))),
-                    theme::border(false),
-                )
+                Line::default()
             }
             PaletteLine::Command(index) => {
                 row_map.push(Some(*index));
@@ -998,7 +1087,7 @@ pub(crate) fn render_palette(
                 let key_width = Line::raw(keys.as_str()).width();
                 let label_width = width.saturating_sub(key_width + 4);
                 let label = if palette.session_only {
-                    session_menu_label(entry.id)
+                    session_menu_label(dashboard, palette, entry.id)
                 } else {
                     spec.label.to_owned()
                 };
@@ -1245,13 +1334,13 @@ mod tests {
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
         dashboard.begin_palette();
-        type_query(&mut dashboard, "unpin");
+        type_query(&mut dashboard, "dismiss");
         let joined = drawn(&mut dashboard, 120, 30).join("\n");
         assert!(
-            joined.contains("Unpin session — This session is not pinned."),
+            joined.contains("Dismiss notification — No dismissible notification is active."),
             "{joined}"
         );
-        assert!(!joined.contains("(this session"), "{joined}");
+        assert!(!joined.contains("[No dismissible"), "{joined}");
     }
 
     // Hard-won: e063b7f41d77: palette command availability stayed stale after session creation finished.
@@ -1265,10 +1354,13 @@ mod tests {
         );
         dashboard.begin_session_palette();
         drawn(&mut dashboard, 120, 30);
-        assert_eq!(selected_command(&dashboard), Some(CommandId::PinSession));
+        assert_eq!(
+            selected_command(&dashboard),
+            Some(CommandId::IgnoreNotifications)
+        );
         dashboard.finish_session_operation("session-1");
         drawn(&mut dashboard, 120, 30);
-        dashboard.handle_key(key(KeyCode::Up));
+        dashboard.handle_key(key(KeyCode::Down));
         assert_eq!(selected_command(&dashboard), Some(CommandId::RenameSession));
         dashboard.handle_key(key(KeyCode::Enter));
         assert!(matches!(dashboard.mode, Mode::Rename(_)));
@@ -1288,10 +1380,6 @@ mod tests {
         }
     }
 
-    /// The menu says what the row's figure is made of: the tree total, the
-    /// session's own share, and how many members were measured.
-    /// Copy session ID sits under the plain divider, directly above Destroy,
-    /// and hands the host the session's full ID to put on the clipboard.
     /// The open session menu as its lines: a named divider as `[name]`, the
     /// unnamed divider as `---`, and each command by its menu label.
     fn session_menu_layout(dashboard: &DashboardState) -> Vec<String> {
@@ -1302,10 +1390,58 @@ mod tests {
             .into_iter()
             .map(|line| match line {
                 PaletteLine::Heading(heading) => format!("[{heading}]"),
-                PaletteLine::Separator => "---".to_owned(),
-                PaletteLine::Command(index) => session_menu_label(palette.entries[index].id),
+                PaletteLine::Blank => String::new(),
+                PaletteLine::Command(index) => {
+                    session_menu_label(dashboard, palette, palette.entries[index].id)
+                }
             })
             .collect()
+    }
+
+    /// The menu opens with the session's model, effort, and profile as one
+    /// bare line above the labeled facts.
+    #[test]
+    fn the_session_menu_opens_with_model_effort_and_profile() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.set_session_current_config(
+            "session-1",
+            Some("gpt-6.1-sol".to_owned()),
+            Some("high".to_owned()),
+        );
+        dashboard.dispatch_command(CommandId::SessionActions);
+        let lines = drawn(&mut dashboard, 120, 40);
+        let info = point(&lines, "gpt-6.1-sol · high · codex-1");
+        let content = point(&lines, "Content");
+        assert!(info.1 < content.1, "the info line sits above the sections");
+    }
+
+    /// The menu's Ignore row is one option that says which way it flips.
+    #[test]
+    fn the_ignore_row_reads_the_sessions_notification_preference() {
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.dispatch_command(CommandId::SessionActions);
+        assert!(
+            session_menu_layout(&dashboard).contains(&"Ignore".to_owned()),
+            "{:?}",
+            session_menu_layout(&dashboard)
+        );
+        dashboard.handle_key(key(KeyCode::Esc));
+        assert!(
+            matches!(dashboard.mode, Mode::Dashboard),
+            "Esc closes the menu"
+        );
+        dashboard
+            .state
+            .sessions
+            .get_mut("session-1")
+            .expect("the fixture session")
+            .notifications_ignored = true;
+        dashboard.dispatch_command(CommandId::SessionActions);
+        assert!(
+            session_menu_layout(&dashboard).contains(&"Stop ignoring".to_owned()),
+            "{:?}",
+            session_menu_layout(&dashboard)
+        );
     }
 
     /// R10-2: a native child's menu offered Rename, Pin, Restart and Destroy,
@@ -1588,6 +1724,19 @@ mod tests {
         );
     }
 
+    /// Right-clicks the first session row and returns the screen with the
+    /// row's context menu open.
+    fn right_click_first_row(dashboard: &mut DashboardState) -> Vec<String> {
+        let _ = drawn(dashboard, 120, 40);
+        let row = dashboard.session_row_areas[0].1;
+        dashboard.handle_mouse(mouse_at(
+            MouseEventKind::Down(MouseButton::Right),
+            (row.x + 1, row.y),
+        ));
+        drawn(dashboard, 120, 40)
+    }
+
+    // Hard-won: 92684ad3b: dismissing a question must also acknowledge its unread turn.
     #[test]
     fn golden_session_action_menu() {
         let mut output = String::new();
@@ -1599,12 +1748,14 @@ mod tests {
         append_golden_state(&mut output, "session action menu", 120, 40, &lines);
 
         let mut session = running_session();
+        session.resource_allocation = Some(SessionResourceAllocation::Container {
+            cpus: 4,
+            memory_bytes: 8 << 30,
+        });
         session.subagents = Some(SubagentPolicy::Mjolnir {
             straightforward: None,
             subtle: None,
         });
-        session.container_cpus = Some("4".into());
-        session.container_memory = Some("8g".into());
         let mut dashboard = dashboard_with_session(session);
         dashboard.focus_sessions();
         dashboard.begin_session_palette();
@@ -1636,6 +1787,48 @@ mod tests {
 
         let mut dashboard = dashboard_with_session(running_session());
         dashboard.focus_sessions();
+        let lines = right_click_first_row(&mut dashboard);
+        append_golden_state(
+            &mut output,
+            "row context menu, nothing to dismiss",
+            120,
+            40,
+            &lines,
+        );
+        let dismiss = point(&lines, "Dismiss notification");
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            let action = dashboard.handle_mouse(mouse_at(kind, dismiss));
+            append_golden_value(&mut output, "disabled context Dismiss click", action);
+        }
+        let action = dashboard.handle_key(key(KeyCode::Char('1')));
+        append_golden_value(&mut output, "disabled context Dismiss digit", action);
+        let action = dashboard.handle_key(key(KeyCode::Enter));
+        append_golden_value(&mut output, "context menu Enter opens on Copy", action);
+        let lines = drawn(&mut dashboard, 120, 40);
+        append_golden_state(&mut output, "after the context menu copy", 120, 40, &lines);
+
+        // The workspace context menu uses the rendered tab hitbox.
+        let mut dashboard = dashboard_with_session(running_session());
+        let _ = drawn(&mut dashboard, 120, 40);
+        let (_, workspace) = &dashboard.workspace_tab_areas[0];
+        dashboard.handle_mouse(mouse_at(
+            MouseEventKind::Down(MouseButton::Right),
+            (workspace.x, workspace.y),
+        ));
+        let lines = drawn(&mut dashboard, 120, 40);
+        append_golden_state(
+            &mut output,
+            "workspace menu, no dismissible notifications",
+            120,
+            40,
+            &lines,
+        );
+
+        let mut dashboard = dashboard_with_session(running_session());
+        dashboard.focus_sessions();
         dashboard.begin_session_palette();
         let lines = drawn(&mut dashboard, 120, 40);
         let copy = point(&lines, "Copy session ID");
@@ -1650,25 +1843,31 @@ mod tests {
         dashboard.focus_sessions();
         dashboard.begin_session_palette();
         let lines = drawn(&mut dashboard, 120, 40);
-        let unpin = point(&lines, "Unpin");
-        dashboard.handle_key(key(KeyCode::Down));
+        let dismiss = point(&lines, "Dismiss notification");
         dashboard.handle_key(key(KeyCode::Down));
         append_golden_value(
             &mut output,
-            "keyboard selection after skipping disabled Unpin",
+            "keyboard selection after skipping disabled Dismiss",
             selected_command(&dashboard),
         );
-        let down = dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), unpin));
-        append_golden_value(&mut output, "disabled Unpin mouse-down action", down);
-        let up = dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), unpin));
-        append_golden_value(&mut output, "disabled Unpin mouse-up action", up);
+        let down =
+            dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), dismiss));
+        append_golden_value(&mut output, "disabled Dismiss mouse-down action", down);
+        let up = dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), dismiss));
+        append_golden_value(&mut output, "disabled Dismiss mouse-up action", up);
         append_golden_value(
             &mut output,
             "selection after disabled click",
             selected_command(&dashboard),
         );
         let lines = drawn(&mut dashboard, 120, 40);
-        append_golden_state(&mut output, "disabled Unpin remains open", 120, 40, &lines);
+        append_golden_state(
+            &mut output,
+            "disabled Dismiss remains open",
+            120,
+            40,
+            &lines,
+        );
 
         let session = running_session();
         let mut dashboard = dashboard_with_session(session.clone());
@@ -1713,9 +1912,27 @@ mod tests {
         );
         assessment.status = mj_core::assessment::Status::Assessed;
         assessment.action = Some(mj_core::assessment::Action::AwaitInput);
+        crate::test_support::serve_attention(
+            &mut dashboard,
+            &[&session.id],
+            mj_core::attention::SessionAttention::NeedsInput,
+        );
+
         let project = |dashboard: &mut DashboardState,
                        materialized: &mj_core::state::MaterializedSession,
                        assessment: &mj_core::assessment::TurnAssessment| {
+            dashboard.set_notification_dismissals(
+                assessment
+                    .inferred_question()
+                    .map(|question| {
+                        (
+                            materialized.session_id.clone(),
+                            mj_core::attention::NotificationDismissal::Question(question),
+                        )
+                    })
+                    .into_iter()
+                    .collect(),
+            );
             dashboard.apply_prepared_materialized_session(
                 crate::PreparedMaterializedSessionDetail::from_assessed_materialized(
                     materialized.clone(),
@@ -1726,18 +1943,60 @@ mod tests {
             );
         };
         project(&mut dashboard, &materialized, &assessment);
+        let _ = drawn(&mut dashboard, 120, 40);
+        let (_, workspace) = &dashboard.workspace_tab_areas[0];
+        dashboard.handle_mouse(mouse_at(
+            MouseEventKind::Down(MouseButton::Right),
+            (workspace.x, workspace.y),
+        ));
+        let lines = drawn(&mut dashboard, 120, 40);
+        append_golden_state(
+            &mut output,
+            "workspace menu, dismissible notification",
+            120,
+            40,
+            &lines,
+        );
+        // Hard-won: workspace Clear notifications: results of dismissals the
+        // batch never marked as submitting were silently discarded.
+        let clear = dashboard.handle_key(key(KeyCode::Enter));
+        append_golden_value(&mut output, "workspace clear notifications", &clear);
+        let DashboardAction::DismissNotifications { dismissals } = clear else {
+            panic!("Clear notifications dismisses the workspace's notifications");
+        };
+        dashboard.notifications_dismissed(
+            dismissals
+                .into_iter()
+                .map(|(session_id, target)| (session_id, target, Err("daemon refused".into())))
+                .collect(),
+        );
+        append_golden_value(
+            &mut output,
+            "notice after a refused workspace clear",
+            dashboard.notices.current(),
+        );
+        dashboard.clear_notice();
         dashboard.focus_sessions();
+        let lines = right_click_first_row(&mut dashboard);
+        append_golden_state(
+            &mut output,
+            "row context menu, dismissible notification",
+            120,
+            40,
+            &lines,
+        );
+        dashboard.handle_key(key(KeyCode::Esc));
         dashboard.begin_session_palette();
         let lines = drawn(&mut dashboard, 120, 40);
         append_golden_state(&mut output, "active prose question", 120, 40, &lines);
-        let dismiss = point(&lines, "Dismiss question");
+        let dismiss = point(&lines, "Dismiss notification");
         dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), dismiss));
         let action =
             dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), dismiss));
         append_golden_value(&mut output, "dismiss exact question", &action);
-        let DashboardAction::DismissQuestion {
+        let DashboardAction::DismissNotification {
             session_id,
-            question,
+            target: question,
         } = action
         else {
             panic!("dismissal action");
@@ -1745,7 +2004,7 @@ mod tests {
         dashboard.begin_session_palette();
         let lines = drawn(&mut dashboard, 120, 40);
         append_golden_state(&mut output, "dismissal in flight", 120, 40, &lines);
-        dashboard.question_dismissal_finished(
+        dashboard.notification_dismissal_finished(
             &session_id,
             question.clone(),
             Err("Worker disconnected".into()),
@@ -1756,22 +2015,33 @@ mod tests {
             crate::AttentionLevel::Waiting
         );
         assert_eq!(
-            (spec(CommandId::DismissQuestion).available)(&dashboard),
+            (spec(CommandId::DismissNotification).available)(&dashboard),
             Availability::Ready
         );
         assert!(matches!(
-            dashboard.dispatch_command(CommandId::DismissQuestion),
-            DashboardAction::DismissQuestion { .. }
+            dashboard.dispatch_command(CommandId::DismissNotification),
+            DashboardAction::DismissNotification { .. }
         ));
-        dashboard.question_dismissal_finished(&session_id, question.clone(), Ok(5));
+        dashboard.notification_dismissal_finished(&session_id, question.clone(), Ok(5));
         assert_ne!(
-            (spec(CommandId::DismissQuestion).available)(&dashboard),
+            (spec(CommandId::DismissNotification).available)(&dashboard),
             Availability::Ready,
             "an acknowledgement alone must not enable another request before publication"
         );
         assessment.status = mj_core::assessment::Status::Superseded;
         assessment.reason = "question_dismissed".into();
         materialized.applied_event_ordinal = 6;
+        crate::test_support::serve_attention(
+            &mut dashboard,
+            &[&session_id],
+            mj_core::attention::SessionAttention::Idle,
+        );
+        dashboard
+            .state
+            .sessions
+            .get_mut(&session_id)
+            .unwrap()
+            .viewed_through_event_ordinal = 3;
         project(&mut dashboard, &materialized, &assessment);
         assert_ne!(
             dashboard.attention_level(&session_id),
@@ -1791,31 +2061,114 @@ mod tests {
         assessment.completed_ordinal = 8;
         assessment.status = mj_core::assessment::Status::Assessed;
         assessment.reason = "user_input_required".into();
+        crate::test_support::serve_attention(
+            &mut dashboard,
+            &[&session_id],
+            mj_core::attention::SessionAttention::NeedsInput,
+        );
         project(&mut dashboard, &materialized, &assessment);
         assert_eq!(
-            (spec(CommandId::DismissQuestion).available)(&dashboard),
+            (spec(CommandId::DismissNotification).available)(&dashboard),
             Availability::Ready
         );
-        let DashboardAction::DismissQuestion { question: next, .. } =
-            dashboard.dispatch_command(CommandId::DismissQuestion)
+        let DashboardAction::DismissNotification { target: next, .. } =
+            dashboard.dispatch_command(CommandId::DismissNotification)
         else {
             panic!("new dismissal");
         };
-        dashboard.question_dismissal_finished(&session_id, question, Ok(5));
+        dashboard.notification_dismissal_finished(&session_id, question, Ok(5));
         assert!(
-            dashboard.question_dismissal_pending(&session_id),
+            dashboard.notification_dismissal_pending(&session_id),
             "an old callback cannot finish the new request"
         );
         assessment.status = mj_core::assessment::Status::Superseded;
         assessment.reason = "question_dismissed".into();
         materialized.applied_event_ordinal = 11;
+        crate::test_support::serve_attention(
+            &mut dashboard,
+            &[&session_id],
+            mj_core::attention::SessionAttention::Idle,
+        );
         project(&mut dashboard, &materialized, &assessment);
-        dashboard.question_dismissal_finished(&session_id, next, Ok(10));
-        assert!(!dashboard.question_dismissal_pending(&session_id));
+        dashboard.notification_dismissal_finished(&session_id, next, Ok(10));
+        assert!(!dashboard.notification_dismissal_pending(&session_id));
         append_golden_value(
             &mut output,
             "publication before acknowledgement",
             dashboard.notice(),
+        );
+
+        dashboard.set_notification_dismissals(
+            [(
+                session_id.clone(),
+                mj_core::attention::NotificationDismissal::ReadThrough(12),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        dashboard
+            .set_session_attention_for(&session_id, mj_core::attention::SessionAttention::Unread);
+        let detail = dashboard.session_details.get_mut(&session_id).unwrap();
+        detail.agent_message_latest_content_ordinals = vec![12];
+        detail.unread_agent_messages = 1;
+        assert_eq!(
+            dashboard.attention_level(&session_id),
+            crate::dashboard_sessions::AttentionLevel::Unread
+        );
+        let DashboardAction::DismissNotification { target, .. } =
+            dashboard.dispatch_command(CommandId::DismissNotification)
+        else {
+            panic!("unread dismissal");
+        };
+        assert_eq!(
+            target,
+            mj_core::attention::NotificationDismissal::ReadThrough(12)
+        );
+        // A parked session has no worker projection to clear the request.
+        dashboard
+            .session_details
+            .get_mut(&session_id)
+            .unwrap()
+            .materialized_applied_event_ordinal = None;
+        dashboard.notification_dismissal_finished(&session_id, target, Ok(12));
+        // Hard-won: 6a0981b02: a read dismissal on a parked session stayed pending forever.
+        assert!(!dashboard.notification_dismissal_pending(&session_id));
+        dashboard
+            .set_session_attention_for(&session_id, mj_core::attention::SessionAttention::Idle);
+        dashboard.set_notification_dismissals(Default::default());
+        assert_eq!(
+            dashboard.attention_level(&session_id),
+            crate::dashboard_sessions::AttentionLevel::Idle
+        );
+        append_golden_value(&mut output, "unread dismissed", dashboard.notice());
+
+        // A parent marked only by its sub-agent's open form has nothing of
+        // its own to dismiss; the row in Dismiss's place goes to the child.
+        let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
+        crate::test_support::set_working(&mut dashboard, &parent);
+        crate::test_support::set_working(&mut dashboard, "child-session");
+        dashboard
+            .session_details
+            .get_mut("child-session")
+            .unwrap()
+            .pending_elicitations = vec![crate::test_support::question("child-session")];
+        crate::test_support::serve_attention(
+            &mut dashboard,
+            &[&parent, "child-session"],
+            mj_core::attention::SessionAttention::NeedsInput,
+        );
+        dashboard.focus_sessions();
+        dashboard.begin_session_palette();
+        let lines = drawn(&mut dashboard, 120, 40);
+        append_golden_state(&mut output, "sub-agent question menu", 120, 40, &lines);
+        let open = point(&lines, "Open sub-agent question");
+        dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), open));
+        let action = dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), open));
+        append_golden_value(&mut output, "open sub-agent question action", action);
+        append_golden_value(
+            &mut output,
+            "selected after opening the sub-agent question",
+            dashboard.selected_session_id(),
         );
 
         mj_core::golden::assert_golden(env!("CARGO_MANIFEST_DIR"), "session-action-menu", &output);

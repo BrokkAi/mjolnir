@@ -298,7 +298,8 @@ impl DashboardState {
             | TargetTemplate::AppleContainer { .. }
             | TargetTemplate::SshPodman { .. }
             | TargetTemplate::SshDocker { .. }
-            | TargetTemplate::SshAppleContainer { .. } => {
+            | TargetTemplate::SshAppleContainer { .. }
+            | TargetTemplate::SshNitro { .. } => {
                 let limits = self.host_limits(&target_id);
                 let remembered = container_size_host(target)
                     .and_then(|host| self.state.container_sizes.get(host))
@@ -333,7 +334,7 @@ impl DashboardState {
         }
     }
 
-    pub(in crate::wizards) fn host_limits(&self, target_id: &str) -> Option<(u64, u64)> {
+    pub(crate) fn host_limits(&self, target_id: &str) -> Option<(u64, u64)> {
         self.capacity_details
             .values()
             .find(|detail| detail.target.target_ids.iter().any(|id| id == target_id))

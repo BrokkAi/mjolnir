@@ -623,8 +623,18 @@ mod tests {
         // when the worker's away resolution arrives.
         page_for(&path, "pre-away", vec![requested()], false).unwrap();
         let mut connection = open(&path).unwrap();
-        assert!(super::super::operator_away::set_with(&mut connection, true).unwrap());
-        assert!(!super::super::operator_away::set_with(&mut connection, true).unwrap());
+        assert!(
+            super::super::operator_away::set_with(&mut connection, true, std::time::Duration::ZERO)
+                .unwrap()
+        );
+        assert!(
+            !super::super::operator_away::set_with(
+                &mut connection,
+                true,
+                std::time::Duration::ZERO
+            )
+            .unwrap()
+        );
         assert_eq!(
             load_state_from(&path).unwrap().operator_presence,
             OperatorPresence {
@@ -665,10 +675,14 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(current.pending_elicitations.is_empty());
+        let outputs =
+            mj_core::transcript::TerminalOutputs::of(current.transcript.iter().map(AsRef::as_ref));
         let transcript = current
             .transcript
             .iter()
-            .map(|item| mj_transcript::transcript::transcript_item_text(item))
+            .map(|item| {
+                mj_transcript::transcript::transcript_item_text_with_outputs(item, &outputs)
+            })
             .collect::<Vec<_>>()
             .join("\n");
         assert!(transcript.contains("Not shown because you were away: Which architecture?"));
@@ -679,9 +693,23 @@ mod tests {
         connection
             .execute("DELETE FROM api_events WHERE session_id='late'", [])
             .unwrap();
-        assert!(super::super::operator_away::set_with(&mut connection, false).unwrap());
+        assert!(
+            super::super::operator_away::set_with(
+                &mut connection,
+                false,
+                std::time::Duration::ZERO
+            )
+            .unwrap()
+        );
         // Repeating the same write and rebuilding a projection emit nothing twice.
-        assert!(!super::super::operator_away::set_with(&mut connection, false).unwrap());
+        assert!(
+            !super::super::operator_away::set_with(
+                &mut connection,
+                false,
+                std::time::Duration::ZERO
+            )
+            .unwrap()
+        );
         assert_eq!(
             load_state_from(&path).unwrap().operator_presence,
             OperatorPresence {
@@ -1013,6 +1041,53 @@ mod tests {
                 .unwrap(),
             3
         );
+    }
+
+    // Hard-won: #1345: a stopped child's forwarded question invited a
+    // send_message answer the child could never receive.
+    #[test]
+    fn a_child_that_cannot_receive_work_gets_no_forwarded_question() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stale-question.sqlite");
+        let mut parent = super::super::tests::session("parent", "project-1");
+        parent.state = SessionState::Running;
+        save_session_to(&path, &parent).unwrap();
+        let mut child = super::super::tests::session("session-1", "project-1");
+        child.state = SessionState::Stopped;
+        save_session_to(&path, &child).unwrap();
+        open(&path).unwrap().execute(
+            "INSERT INTO subagent_sessions(child_session_id,parent_session_id,request_key,record_json) VALUES ('session-1','parent','session-1','{}')",
+            [],
+        ).unwrap();
+        let question = ElicitationRequest::from_acp_params("elicitation-1", serde_json::json!({
+            "mode":"form", "sessionId":"session-1", "message":"Which architecture?",
+            "requestedSchema":{"type":"object", "properties":{"choice":{"type":"string", "enum":["Thin", "Thick"]}}}
+        })).unwrap();
+        page(
+            &path,
+            vec![RelayObservation::ElicitationRequested { request: question }],
+            false,
+        )
+        .unwrap();
+        let count = |connection: &Connection| {
+            connection
+                .query_row("SELECT count(*) FROM mailbox_outbox", [], |r| {
+                    r.get::<_, u64>(0)
+                })
+                .unwrap()
+        };
+        assert_eq!(open(&path).map(|c| count(&c)).unwrap(), 0);
+        // The question stays pending for the stopped child, but reconciliation
+        // must not forward it either.
+        let mut connection = open(&path).unwrap();
+        assert_eq!(
+            super::super::subagent_questions::reconcile_pending_subagent_questions_with(
+                &mut connection
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(count(&connection), 0);
     }
 
     #[test]
@@ -1631,7 +1706,7 @@ mod tests {
         super::super::schema::restore_github_v84_schema(&connection);
         super::super::schema::restore_pre101_subagent_preference(&connection);
         super::super::schema::restore_review_state_schema(&connection, 56);
-        connection.execute_batch("DROP TABLE checkpoint_operations; DELETE FROM schema_migrations WHERE version >= 57; UPDATE schema_compatibility SET minimum_compatible_version = 56; DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 56;").unwrap();
+        connection.execute_batch("DROP TABLE checkpoint_operations; DELETE FROM schema_migrations WHERE version >= 57; UPDATE schema_compatibility SET minimum_compatible_version = 56; DROP TABLE IF EXISTS operator_away_requests; DROP TABLE IF EXISTS operator_away_workers; DROP TABLE IF EXISTS operator_away; DROP TABLE IF EXISTS subagent_accounting; DROP TABLE IF EXISTS session_turn_selections; ALTER TABLE subagent_sessions DROP COLUMN notification_epoch; ALTER TABLE session_restart_intents DROP COLUMN automatic; ALTER TABLE mailbox_outbox DROP COLUMN failure; PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=replace(sql, '''startup-cleanup'',', '') WHERE type='table' AND name='sessions'; PRAGMA writable_schema=RESET; PRAGMA user_version = 56;").unwrap();
         drop(connection);
         forget_verified_schema(&path);
         let page = load_api_events_from(&path, &ApiEventFilter::default(), Some(0), 100).unwrap();
@@ -1668,12 +1743,12 @@ mod tests {
             tx.commit().unwrap();
         }
         record.state = SessionState::Running;
-        record.checkpoint = Some(CheckpointMetadata {
+        record.checkpoint = Some(Box::new(CheckpointMetadata {
             archive_path: dir.path().join("verified.tar"),
             sha256: "a".repeat(64),
             created_at: "2026-09-27T12:00:00Z".into(),
             event_frontier: 0,
-        });
+        }));
         {
             let tx = connection.transaction().unwrap();
             assert!(save_requested_checkpoint_with(&tx, &record, "stale-owner").is_err());
@@ -1737,12 +1812,12 @@ mod tests {
             let path = dir.path().join("events.sqlite");
             let mut record = super::super::tests::session("session-1", "project-1");
             record.state = SessionState::Running;
-            record.checkpoint = Some(CheckpointMetadata {
+            record.checkpoint = Some(Box::new(CheckpointMetadata {
                 archive_path: dir.path().join("previous.tar"),
                 sha256: "a".repeat(64),
                 created_at: "2026-09-27T12:00:00Z".into(),
                 event_frontier: 0,
-            });
+            }));
             save_session_to(&path, &record).unwrap();
             let previous = record.checkpoint.clone();
             let previous_warning = record.last_checkpoint_error.clone();

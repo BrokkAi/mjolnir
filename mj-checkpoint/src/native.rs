@@ -1,5 +1,6 @@
 //! Native harness storage shared by import and checkpoint restoration.
 
+pub mod antigravity;
 pub mod muse;
 
 use std::path::{Path, PathBuf};

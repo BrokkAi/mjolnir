@@ -474,6 +474,7 @@ impl SetupDialog {
             "context_window_bytes": null,
             "guardian_review_model": null,
             "codex_profile": null,
+            "claude_permission_mode": null,
         });
         self.draft["profiles"]
             .as_object_mut()

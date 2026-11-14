@@ -6,7 +6,7 @@ use mj_core::config::{TargetTemplate, raw_project_context_id};
 use mj_core::go::GoRecipe;
 use mj_core::state::SessionRecord;
 
-use crate::{DashboardAction, DashboardState};
+use crate::{CarriedLaunchSettings, DashboardAction, DashboardState};
 
 const SIMPLE_TARGET_ID: &str = "localhost";
 
@@ -81,7 +81,7 @@ impl DashboardState {
                 session.state.is_active()
                     && session.target_template_id == SIMPLE_TARGET_ID
                     && session.create_managed_worktree == Some(true)
-                    && session.review == Some(mj_core::config::SessionReview::Off)
+                    && session.review.as_deref() == Some(&mj_core::config::SessionReview::Off)
             });
             if let Some(session) = startup {
                 let session_id = session.id.clone();
@@ -207,6 +207,7 @@ impl DashboardState {
                 .then_some(mj_core::config::SessionReview::Off),
             additional_mounts: recipe.additional_mounts,
             resource_allocation: recipe.resource_allocation,
+            carried: CarriedLaunchSettings::default(),
         }
     }
 

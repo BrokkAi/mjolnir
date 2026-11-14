@@ -49,9 +49,7 @@ test('conversation deltas carry the last presentation key and accept older respo
   const renders = [];
   const responses = [
     { entries: [{ id: 1 }], latest_seq: 5, presentation_key: 'key one', reset: false },
-    {},
     { entries: [{ id: 2 }], latest_seq: 6, reset: false },
-    {},
   ];
   const context = vm.createContext({
     currentSession: 'session/1',
@@ -63,6 +61,7 @@ test('conversation deltas carry the last presentation key and accept older respo
     cursor: 0,
     presentationKey: null,
     acknowledged: 0,
+    scheduleConversationRead: () => {},
     URLSearchParams,
     encodeURIComponent,
     JSON,
@@ -90,7 +89,7 @@ test('conversation deltas carry the last presentation key and accept older respo
 
   await vm.runInContext('loadConversation(true)', context);
   assert.equal(
-    requests[2].url,
+    requests[1].url,
     '/api/conversations/session%2F1?after_seq=5&presentation_key=key+one',
   );
   assert.equal(context.presentationKey, null, 'missing keys remain compatible with an older server');
@@ -317,7 +316,7 @@ test('session titles stay blue while truly idle and clear blue when activity res
     textContent: '',
     classList: { toggle: (name, enabled) => enabled ? classes.add(name) : classes.delete(name) },
   };
-  const context = vm.createContext({ node, session: { title: 'Test session', is_idle: true } });
+  const context = vm.createContext({ node, session: { title: 'Test session', attention: 'idle' } });
   vm.runInContext(sourceBetween('function renderSessionTitle(', '\nfunction renderConversationHeader('), context);
   vm.runInContext('renderSessionTitle(node, session)', context);
   assert.equal(node.textContent, 'Test session');
@@ -326,12 +325,13 @@ test('session titles stay blue while truly idle and clear blue when activity res
   context.session.latest_event_ordinal = 20;
   vm.runInContext('renderSessionTitle(node, session)', context);
   assert.ok(classes.has('idle-title'));
-  context.session.is_idle = false;
+  context.session.attention = 'working';
   vm.runInContext('renderSessionTitle(node, session)', context);
   assert.ok(!classes.has('idle-title'));
-  delete context.session.is_idle;
+  delete context.session.attention;
   vm.runInContext('renderSessionTitle(node, session)', context);
   assert.ok(!classes.has('idle-title'), 'unknown activity is not confirmed idle');
+
 });
 
 test('project preflight prevents duplicate checks and ignores a cancelled wizard response', async () => {
@@ -649,6 +649,7 @@ test('offline shell uses a Mjolnir cache without caching live requests', async (
   const context = vm.createContext({
     URL,
     caches,
+    importScripts() {},
     self,
     fetch(request) {
       operations.push(['fetch', request.url]);
@@ -671,6 +672,7 @@ test('offline shell uses a Mjolnir cache without caching live requests', async (
         '/',
         '/viewer.css',
         '/viewer.js',
+        '/push-sync.js',
         '/manifest.webmanifest',
         '/icon.svg',
       ],
@@ -1473,4 +1475,128 @@ test('review settings action renders a button that sends its action id', () => {
   assert.equal(control.textContent, 'Autoconfigure');
   control.onclick();
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{page: ['review'], edit: {kind: 'action', id: 'review.autoconfigure'}}]);
+  const controls = [];
+  context.pendingActions = new Set();
+  context.container = {
+    querySelector: () => controls[0],
+    append: control => controls.push(control),
+  };
+  context.button = label => ({ textContent: label, dataset: {}, remove: () => controls.pop() });
+  context.runSessionAction = (dataset, error, extra) => calls.push({ dataset, extra });
+  context.session = { id: 's', capabilities: {}, notification_dismissal: { read_through: 10 } };
+  vm.runInContext(sourceBetween('function renderNotificationDismissal(', '\nfunction updateSessionMenu('), context);
+  vm.runInContext('renderNotificationDismissal(container, session, null)', context);
+  assert.equal(controls.length, 0, 'no dismissal control without capability');
+  context.session.capabilities.dismiss_notification = true;
+  vm.runInContext('renderNotificationDismissal(container, session, null)', context);
+  assert.equal(controls[0].textContent, 'Dismiss notification');
+  context.session.notification_dismissal = { read_through: 11 };
+  controls[0].onclick({ stopPropagation() {} });
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[1])), {
+    dataset: { dismissNotification: 'true', action: 'dismiss-notification', id: 's', notificationDismissal: '{"read_through":10}' },
+  });
+  context.pendingActions.add('dismiss-notification:s');
+  vm.runInContext('renderNotificationDismissal(container, session, null)', context);
+  assert.equal(controls[0].disabled, true);
+  context.session.capabilities.dismiss_notification = false;
+  vm.runInContext('renderNotificationDismissal(container, session, null)', context);
+  assert.equal(controls.length, 0, 'withdrawing capability removes dismissal control');
+});
+
+
+// Hard-won: 92684ad3b: browser read receipts need the same served frontier as workspace mark-read.
+test('conversation receipts require a visible focused caught-up conversation and coalesce monotonic cursors', async () => {
+  const frames = [];
+  const sent = [];
+  let finish;
+  let focused = true;
+  const context = vm.createContext({
+    currentSession: 's', route: { name: 'conversation', sessionId: 's' },
+    cursor: 42, acknowledged: 0,
+    session: { capabilities: { open: true }, attention: 'working', unread_frontier: 42 },
+    document: { visibilityState: 'hidden', hasFocus: () => focused, querySelector: () => ({ textContent: '' }) },
+    window: { innerHeight: 800 },
+    feedScroll: { getBoundingClientRect: () => ({ top: 100, bottom: 700 }) },
+    feed: { lastElementChild: { getBoundingClientRect: () => ({ top: 500, bottom: 650 }) } },
+    sessionById: () => context.session,
+    isTransitioningSession: () => false,
+    requestAnimationFrame: fn => { frames.push(fn); return frames.length; },
+    request: (url, options) => { sent.push([url, JSON.parse(options.body).through]); return new Promise(resolve => { finish = resolve; }); },
+    showLogin: () => assert.fail('unexpected login'),
+  });
+  vm.runInContext(sourceBetween('const conversationReads = new Map();', '\nasync function loadConversation('), context);
+  await vm.runInContext('persistVisibleConversationRead()', context);
+  assert.equal(sent.length, 0, 'hidden pages do not read');
+  context.document.visibilityState = 'visible';
+  focused = false;
+  await vm.runInContext('persistVisibleConversationRead()', context);
+  // Hard-won: 8edb31e9f: a visible but unfocused window cleared Important alerts.
+  assert.equal(sent.length, 0, 'a visible window without focus does not read');
+  focused = true;
+  context.feed.lastElementChild.getBoundingClientRect = () => ({ top: 900, bottom: 1000 });
+  await vm.runInContext('persistVisibleConversationRead()', context);
+  assert.equal(sent.length, 0, 'scrolling away from latest does not read');
+  context.feed.lastElementChild.getBoundingClientRect = () => ({ top: 500, bottom: 650 });
+  vm.runInContext('scheduleConversationRead(); scheduleConversationRead(); scheduleConversationRead()', context);
+  assert.equal(frames.length, 1);
+  frames.shift()();
+  assert.deepEqual(sent, [['/api/conversations/s/read', 42]]);
+  context.cursor = 43;
+  context.session.unread_frontier = 43;
+  await vm.runInContext('persistVisibleConversationRead()', context);
+  assert.equal(sent.length, 1, 'only one receipt is in flight');
+  finish();
+  await new Promise(resolve => setImmediate(resolve));
+  frames.shift()();
+  assert.equal(sent[1][1], 43);
+  finish();
+  await new Promise(resolve => setImmediate(resolve));
+  context.cursor = 41;
+  await vm.runInContext('persistVisibleConversationRead()', context);
+  assert.equal(sent.length, 2, 'older loaded cursors never move the frontier back');
+  context.cursor = 50;
+  context.session.unread_frontier = 44;
+  const loaded = vm.runInContext('persistVisibleConversationRead()', context);
+  // Hard-won: 6a0981b02: receipts bounded by the row's lagging frontier left seen output unread.
+  assert.equal(sent[2][1], 50, 'acknowledges everything loaded and seen, even before the row republishes');
+  finish();
+  await loaded;
+  context.cursor = 51;
+  context.route.name = 'sessions';
+  await vm.runInContext('persistVisibleConversationRead()', context);
+  assert.equal(sent.length, 3, 'closed conversations do not read');
+});
+
+
+test('notification snapshot retains handled entries below the notification band until a new visit', () => {
+  const context = vm.createContext({ sessionMessageMs: row => row.time, dismissedNotifications: new Map() });
+  vm.runInContext(sourceBetween('function hasNotification(', '/// Whether a session is a sub-agent'), context);
+  vm.runInContext(sourceBetween('class NotificationSnapshot {', '\nfunction notificationRows()'), context);
+  const update = (rows, allRows = rows) => JSON.parse(vm.runInContext(`JSON.stringify(notificationSnapshot.update(${JSON.stringify(rows)}, ${JSON.stringify(allRows)}))`, context));
+  const a = { id: 'a', time: 1, attention: 'needs_input' }, b = { id: 'b', time: 2, attention: 'important' }, c = { id: 'c', time: 3, attention: 'failed' };
+  assert.deepEqual(update([a, b]).map(entry => entry.row.id), ['b', 'a']);
+  const handled = { ...b, attention: 'working', capabilities: { open: false } };
+  let retained = update([a], [a, handled]);
+  assert.deepEqual(retained.map(entry => entry.row.id), ['a', 'b']);
+  assert.equal(retained[1].row.capabilities.open, false);
+  assert.deepEqual(update([a, c], [a, handled, c]).map(entry => entry.row.id), ['c', 'a', 'b']);
+  assert.deepEqual(update([a, b, c]).map(entry => entry.row.id), ['c', 'b', 'a']);
+  retained = update([a, c]);
+  assert.equal(retained[2].row.lifecycle, 'destroyed');
+  assert.deepEqual(retained[2].row.capabilities, {});
+  vm.runInContext('notificationSnapshot.reset()', context);
+  assert.deepEqual(update([a, c]).map(entry => entry.row.id), ['c', 'a']);
+});
+
+// Hard-won: 437e04dc6: an empty expiry event skipped durable reconciliation.
+test('service worker delegates empty expiry to shared reconcile and reports failures', async () => {
+  const listeners = new Map();
+  const registration = {};
+  const seen = [];
+  const context = vm.createContext({ importScripts() {}, self: { registration, addEventListener: (name, callback) => listeners.set(name, callback) }, MjPush: { reconcile: async (...args) => { seen.push(args); throw new Error('offline'); } }, console: { warn() {} } });
+  vm.runInContext(serviceWorkerSource, context);
+  let pending;
+  listeners.get('pushsubscriptionchange')({ oldSubscription: { endpoint: 'old' }, newSubscription: null, waitUntil: promise => { pending = promise; } });
+  await assert.rejects(pending, /offline/);
+  assert.deepEqual(seen, [[registration, 'old']]);
 });

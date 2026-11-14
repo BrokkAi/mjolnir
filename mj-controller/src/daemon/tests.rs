@@ -101,15 +101,15 @@ fn restart_keeps_relay_ownership_through_checkpoint_and_can_recover_closing_stat
 #[test]
 fn restart_recovery_requires_the_checkpoint_bound_to_its_intent() {
     let mut record = runtime_test_session("session-1", "workspace", SessionState::Closing);
-    record.target = Some(mj_core::state::TargetLocator::LocalBare {
+    record.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: "/tmp/session-1".into(),
-    });
-    record.checkpoint = Some(mj_core::state::CheckpointMetadata {
+    }));
+    record.checkpoint = Some(Box::new(mj_core::state::CheckpointMetadata {
         archive_path: "/tmp/session-1.tar".into(),
         sha256: "fresh-checkpoint".into(),
         created_at: "2026-10-03T00:00:00Z".into(),
         event_frontier: 7,
-    });
+    }));
     let mut intent = crate::database::SessionRestartIntent {
         session_id: "session-1".into(),
         operation_id: "restart-1".into(),
@@ -127,7 +127,7 @@ fn restart_recovery_requires_the_checkpoint_bound_to_its_intent() {
     assert!(!restart::restart_checkpoint_matches(&record, &intent));
     intent.checkpoint_sha256 = Some("fresh-checkpoint".into());
     assert!(restart::restart_checkpoint_matches(&record, &intent));
-    intent.handoff = record.checkpoint.clone();
+    intent.handoff = record.checkpoint.clone().map(|v| *v);
     intent.handoff.as_mut().unwrap().sha256 = "handoff".into();
     assert!(!restart::restart_checkpoint_matches(&record, &intent));
     intent.checkpoint_sha256 = Some("handoff".into());
@@ -170,11 +170,11 @@ async fn restart_target_probe_only_allows_fallback_for_a_proven_missing_target()
     let state = test_runtime_state();
     let mut controller = state.controller_projection();
     let mut missing = runtime_test_session("session-1", "workspace", SessionState::Closing);
-    missing.target = Some(mj_core::state::TargetLocator::LocalPodman {
+    missing.target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
         borrowed_from: None,
         container_id: mj_core::targets::resource_name("session-1").unwrap(),
         workspace_storage: Default::default(),
-    });
+    }));
     controller
         .state
         .sessions
@@ -185,9 +185,9 @@ async fn restart_target_probe_only_allows_fallback_for_a_proven_missing_target()
     assert!(restart::fallback_is_safe(unavailable));
 
     let mut reachable = runtime_test_session("bare-session", "workspace", SessionState::Closing);
-    reachable.target = Some(mj_core::state::TargetLocator::LocalBare {
+    reachable.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: "/tmp/bare-session".into(),
-    });
+    }));
     controller
         .state
         .sessions
@@ -200,11 +200,11 @@ async fn restart_target_probe_only_allows_fallback_for_a_proven_missing_target()
 
     let mut apple = runtime_test_session("apple-session", "workspace", SessionState::Closing);
     apple.target_template_id = "mac-apple".into();
-    apple.target = Some(mj_core::state::TargetLocator::SshAppleContainer {
+    apple.target = Some(Box::new(mj_core::state::TargetLocator::SshAppleContainer {
         borrowed_from: None,
         host: "mac.test".into(),
         container_id: mj_core::targets::resource_name("apple-session").unwrap(),
-    });
+    }));
     controller.config.targets.insert(
         "mac-apple".into(),
         serde_json::from_value(serde_json::json!({
@@ -302,7 +302,7 @@ async fn close_with_an_action_at_a_held_relay_command<T, F, Fut>(
     crate::session_manager::ManagedSessionHandle,
 )
 where
-    F: FnOnce(Arc<RuntimeState>) -> Fut,
+    F: FnOnce(Arc<RuntimeState>, LifecycleControl) -> Fut,
     Fut: std::future::Future<Output = T>,
 {
     use crate::controller::checkpoint::tests::{LATCH_RELAY_HOLD_PATH, LATCH_RELAY_SESSION};
@@ -323,10 +323,32 @@ where
         Vec::new(),
         Controller::load,
     ));
+    // A phone cancel before admission must not persist Closing or register work.
+    let cancelled = LifecycleControl::default();
+    assert!(cancelled.request_cancel("phone cancellation before admission"));
+    assert!(
+        state
+            .start_suspend_session_controlled(LATCH_RELAY_SESSION.into(), true, false, cancelled,)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        crate::database::load_state().unwrap().sessions[LATCH_RELAY_SESSION].state,
+        SessionState::Running
+    );
+    assert!(!state.owner().lifecycle.contains_key(LATCH_RELAY_SESSION));
+    let control = LifecycleControl::default();
     let hold = PathBuf::from(std::env::var_os(LATCH_RELAY_HOLD_PATH).unwrap());
     let closing = tokio::spawn({
         let state = state.clone();
-        async move { state.suspend_session(LATCH_RELAY_SESSION.into()).await }
+        let control = control.clone();
+        async move {
+            let started = state
+                .start_suspend_session_controlled(LATCH_RELAY_SESSION.into(), true, false, control)
+                .await?;
+            RuntimeState::wait_lifecycle_result(started.result).await?;
+            Ok(())
+        }
     });
     tokio::time::timeout(Duration::from_secs(30), async {
         while !hold.with_extension("reached").exists() {
@@ -335,7 +357,7 @@ where
     })
     .await
     .expect("the close never reached the held relay command");
-    let acted = at_hold(state.clone()).await;
+    let acted = at_hold(state.clone(), control).await;
     std::fs::write(hold.with_extension("release"), b"go").unwrap();
     let outcome = tokio::time::timeout(Duration::from_secs(60), closing)
         .await
@@ -375,6 +397,7 @@ fn in_held_close_child(test: &str, held: &str) -> bool {
 /// say `Destroying` yet. A cancel that arrives there is refused, and the
 /// target teardown that follows runs to the end.
 // Hard-won: #1218: a cancel accepted after the suspend's checkpoint commit failed its teardown
+// Hard-won: #1507: phone cancellation must share the admitted close commit control.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_cancel_after_the_close_commits_is_refused_and_the_teardown_finishes() {
@@ -387,7 +410,8 @@ async fn a_cancel_after_the_close_commits_is_refused_and_the_teardown_finishes()
     }
     let _writer = crate::database::install_isolated_test_writer();
     let (outcome, cancel, channels, _handle) =
-        close_with_an_action_at_a_held_relay_command(|state| async move {
+        close_with_an_action_at_a_held_relay_command(|state, control| async move {
+            assert!(!control.request_cancel("phone cancellation after commit"));
             state
                 .cancel_lifecycle_with_intent(LATCH_RELAY_SESSION)
                 .await
@@ -421,6 +445,7 @@ async fn a_cancel_after_the_close_commits_is_refused_and_the_teardown_finishes()
 /// still taking its checkpoint wins, so the close stops before its point of
 /// no return. No teardown runs, the relay is not sealed, and the session keeps
 /// running with its target and checkpoint.
+// Hard-won: #1507: a pre-admission phone cancel was ignored by the new Suspend owner.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_cancel_before_the_close_commits_leaves_the_session_running() {
@@ -441,10 +466,12 @@ async fn a_cancel_before_the_close_commits_leaves_the_session_running() {
     std::fs::create_dir_all(&worker_root).unwrap();
     std::fs::write(worker_root.join("still-here"), b"no teardown ran").unwrap();
     let (outcome, cancel, channels, handle) =
-        close_with_an_action_at_a_held_relay_command(|state| async move {
-            state
-                .cancel_lifecycle_with_intent(LATCH_RELAY_SESSION)
-                .await
+        close_with_an_action_at_a_held_relay_command(|_state, control| async move {
+            ensure!(
+                control.request_cancel("phone cancellation before commit"),
+                "phone cancellation refused"
+            );
+            Ok::<_, anyhow::Error>(())
         })
         .await;
     cancel.expect("a cancel before the commit is accepted");
@@ -500,7 +527,7 @@ fn startup_reports_every_in_flight_state_that_no_operation_owns() {
         ("moving", SessionState::Provisioning, None),
     ] {
         let mut session = runtime_test_session(id, "workspace", session_state);
-        session.target = session_target;
+        session.target = session_target.map(Box::new);
         state.sessions.insert(id.into(), session);
     }
     let controller = Controller {
@@ -537,7 +564,7 @@ fn a_stop_on_a_record_left_mid_close_routes_to_recovery() {
     });
     for state in [SessionState::Closing, SessionState::Destroying] {
         let mut session = runtime_test_session("session", "workspace", state);
-        session.target = target.clone();
+        session.target = target.clone().map(Box::new);
         assert_eq!(
             close_route(Some(&session), false),
             CloseRoute::RecoverInterrupted
@@ -553,7 +580,7 @@ fn a_stop_on_a_record_left_mid_close_routes_to_recovery() {
     }
 
     let mut running = runtime_test_session("session", "workspace", SessionState::Running);
-    running.target = target.clone();
+    running.target = target.clone().map(Box::new);
     assert_eq!(close_route(Some(&running), false), CloseRoute::Graceful);
     assert_eq!(close_route(None, false), CloseRoute::Graceful);
 
@@ -564,7 +591,7 @@ fn a_stop_on_a_record_left_mid_close_routes_to_recovery() {
         close_route(Some(&provisioning), false),
         CloseRoute::SettleWithoutCheckpoint
     );
-    provisioning.target = target.clone();
+    provisioning.target = target.clone().map(Box::new);
     assert_eq!(
         close_route(Some(&provisioning), false),
         CloseRoute::SettleWithoutCheckpoint
@@ -579,7 +606,7 @@ fn a_stop_on_a_record_left_mid_close_routes_to_recovery() {
     // A failed session that still names its target keeps a workspace worth
     // checkpointing, so it takes the graceful close.
     let mut failed_with_target = failed.clone();
-    failed_with_target.target = target.clone();
+    failed_with_target.target = target.clone().map(Box::new);
     assert_eq!(
         close_route(Some(&failed_with_target), false),
         CloseRoute::Graceful
@@ -606,7 +633,7 @@ fn a_stop_on_a_record_left_mid_close_routes_to_recovery() {
 
     let mut stopped = runtime_test_session("session", "workspace", SessionState::Stopped);
     assert_eq!(close_route(Some(&stopped), false), CloseRoute::Done);
-    stopped.target = target;
+    stopped.target = target.map(Box::new);
     assert_eq!(
         close_route(Some(&stopped), false),
         CloseRoute::DeferredCleanup
@@ -882,16 +909,20 @@ async fn a_quota_refresh_request_wakes_the_daemons_poller_and_fails_without_one(
         .await
         .expect_err("no quota poller is attached, so nothing can probe");
 
-    let (wake, mut woken) = tokio::sync::mpsc::channel(1);
+    let (wake, mut woken) = tokio::sync::mpsc::unbounded_channel();
     state.attach_quota_refresh(wake);
     for _ in 0..3 {
-        // A request that arrives while one is pending is one request.
         handle_action(DaemonAction::RefreshQuota, &metadata, &state, &cancellation)
             .await
             .expect("refresh quota");
     }
-    woken.try_recv().expect("the poller was woken");
-    assert!(woken.try_recv().is_err(), "requests coalesce");
+    for _ in 0..3 {
+        assert_eq!(
+            woken.try_recv().expect("the poller receives every intent"),
+            QuotaRefreshIntent::Force
+        );
+    }
+    assert!(woken.try_recv().is_err());
 }
 
 #[tokio::test]
@@ -941,6 +972,7 @@ async fn workspace_deletion_guard_ignores_global_client_presence() {
     state.owner().lifecycle.insert(
         "session-a".into(),
         ActiveLifecycle {
+            acceptance: tokio::sync::watch::channel(Some(Ok(()))).1,
             move_operation_id: None,
             restart_intent: None,
             upgrade_work: Arc::new(Mutex::new(None)),
@@ -970,6 +1002,7 @@ async fn checkpoint_lifecycle_guard_is_per_session() {
     state.owner().lifecycle.insert(
         "session-b".into(),
         ActiveLifecycle {
+            acceptance: tokio::sync::watch::channel(Some(Ok(()))).1,
             move_operation_id: None,
             restart_intent: None,
             upgrade_work: Arc::new(Mutex::new(None)),
@@ -1443,7 +1476,35 @@ async fn daemon_client_eof_does_not_cancel_a_submitted_mutation() {
     let _ = server.await.expect("daemon task panicked");
 }
 
-pub(super) fn runtime_test_session(
+/// Matching configuration for records produced by runtime_test_session.
+pub(super) fn runtime_test_config() -> Config {
+    use mj_core::config::{
+        HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository, TargetTemplate,
+    };
+    let mut config = Config::default();
+    config.profiles.insert(
+        "codex".into(),
+        HarnessProfile::new(HarnessKind::Codex, PathBuf::from("/home/dev/.codex")),
+    );
+    config
+        .targets
+        .insert("local".into(), TargetTemplate::LocalBare);
+    config.bundles.insert(
+        "project".into(),
+        ProjectBundle {
+            primary_repo: "main".into(),
+            repositories: vec![ProjectRepository {
+                id: "main".into(),
+                local: Some(PathBuf::from("/workspace/project")),
+                destination: PathBuf::from("."),
+                ..Default::default()
+            }],
+        },
+    );
+    config
+}
+
+pub(crate) fn runtime_test_session(
     id: &str,
     workspace_id: &str,
     state: SessionState,
@@ -1451,6 +1512,7 @@ pub(super) fn runtime_test_session(
     SessionRecord {
         oracle_choice: None,
         oracle: true,
+        notifications_ignored: false,
         project: None,
         target_runtime: None,
         launch_base: None,
@@ -1476,8 +1538,6 @@ pub(super) fn runtime_test_session(
         target_template_id: "local".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),
-        container_cpus: None,
-        container_memory: None,
         state,
         archived: false,
         target: None,
@@ -1489,6 +1549,8 @@ pub(super) fn runtime_test_session(
         viewed_through_event_ordinal: 0,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: None,
     }
@@ -1558,6 +1620,7 @@ async fn daemon_records_definitive_missing_workspaces_without_an_attached_surfac
     });
     assert!(state.attachments.lock().unwrap().is_empty());
     let mut view = ManagedSessionView {
+        attention: Default::default(),
         snapshot: None,
         connected: false,
         error: Some(ViewError::Unreachable(
@@ -1606,12 +1669,12 @@ async fn missing_target_retry_completes_a_committed_transition() {
     let _writer = crate::database::install_isolated_test_writer();
     let workspace = crate::database::create_workspace("Missing target retry").unwrap();
     let mut session = runtime_test_session("missing", &workspace.id, SessionState::Running);
-    session.checkpoint = Some(mj_core::state::CheckpointMetadata {
+    session.checkpoint = Some(Box::new(mj_core::state::CheckpointMetadata {
         archive_path: "/isolated/recovery.zip".into(),
         sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
         created_at: "2026-09-03T00:00:00Z".into(),
         event_frontier: 1,
-    });
+    }));
     crate::database::save_session(&session).unwrap();
     static RELOADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     fn fail_first_reload() -> Result<Controller> {
@@ -2644,6 +2707,7 @@ fn only_a_shutdown_cancel_reports_that_the_daemon_stopped() {
     let operation = |kind: LifecycleKind, control: LifecycleControl| {
         let (_completed, result) = tokio::sync::watch::channel(None);
         ActiveLifecycle {
+            acceptance: tokio::sync::watch::channel(Some(Ok(()))).1,
             move_operation_id: None,
             restart_intent: None,
             upgrade_work: Arc::new(Mutex::new(None)),
@@ -2696,6 +2760,7 @@ async fn completed_stop_stays_visible_until_cleanup_takes_ownership() {
     state.owner().lifecycle.insert(
         "cleanup-gap".into(),
         ActiveLifecycle {
+            acceptance: tokio::sync::watch::channel(Some(Ok(()))).1,
             move_operation_id: None,
             restart_intent: None,
             upgrade_work: Arc::new(Mutex::new(None)),
@@ -3158,11 +3223,11 @@ async fn a_waiting_close_preserves_the_intent_of_reserved_restart_teardown() {
 async fn a_close_removing_the_target_stops_offering_cancellation() {
     let state = test_runtime_state();
     let mut session = runtime_test_session("destroying", "workspace", SessionState::Closing);
-    session.target = Some(mj_core::state::TargetLocator::LocalPodman {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
         borrowed_from: None,
         container_id: "a".repeat(64),
         workspace_storage: Default::default(),
-    });
+    }));
     state.owner().edit_sessions(|sessions| {
         sessions.insert(session.id.clone(), session.clone());
     });
@@ -3638,6 +3703,8 @@ pub(super) fn ready_startup_view() -> ManagedSessionView {
     let materialized = mj_core::state::MaterializedSession::empty("session-1");
     let operational = mj_core::relay::RelayOperationalState {
         assessment: None,
+        open_request: None,
+        person_input_through: 0,
         assessment_context: None,
         turn_completion: None,
         continuation: Default::default(),
@@ -3676,10 +3743,11 @@ pub(super) fn ready_startup_view() -> ManagedSessionView {
         agent_info: None,
         runtime: None,
         steering_supported: None,
+        mailbox_delivery: None,
         turn_controls: None,
-        config_options: Vec::new(),
+        config_options: Vec::new().into(),
         modes: None,
-        available_commands: Vec::new(),
+        available_commands: Vec::new().into(),
         config: BTreeMap::new(),
         active_prompt: None,
         queued_prompts: Vec::new(),
@@ -3698,13 +3766,14 @@ pub(super) fn ready_startup_view() -> ManagedSessionView {
         activity: None,
     };
     ManagedSessionView {
+        attention: Default::default(),
         snapshot: Some(mj_core::state::ManagedSessionSnapshot {
-            subagent_requests: Vec::new(),
-            subagent_completions: Vec::new(),
+            subagent_requests: Default::default(),
+            subagent_completions: Default::default(),
             subagent_queue_error: None,
             window: mj_core::state::ProjectionWindow::of(&materialized),
             materialized,
-            operational,
+            operational: operational.into(),
             latest_credential_sync_signal: None,
             worker_build: None,
         }),
@@ -4090,10 +4159,10 @@ async fn a_current_worker_in_an_older_container_keeps_its_environment() {
         SessionState::Running,
     );
     session.target_template_id = "docker".into();
-    session.target = Some(mj_core::state::TargetLocator::LocalDocker {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalDocker {
         borrowed_from: None,
         container_id: mj_core::targets::resource_name("session-1").unwrap(),
-    });
+    }));
     let template = mj_core::config::TargetTemplate::LocalDocker {
         container: serde_json::from_value(serde_json::json!({})).unwrap(),
     };
@@ -4101,7 +4170,7 @@ async fn a_current_worker_in_an_older_container_keeps_its_environment() {
     let mut applied = mj_core::state::ContainerSettings::requested(&session);
     applied.default_image = Some(Some("ghcr.io/brokkai/mjolnir/agent-dev:2.51.0".into()));
     runtime.container_settings = Some(applied);
-    session.target_runtime = Some(runtime);
+    session.target_runtime = Some(runtime.into());
     crate::database::save_session(&session).unwrap();
     let state = test_runtime_state();
     let controller = Controller {
@@ -4228,6 +4297,8 @@ async fn failed_container_preparation_can_be_cancelled_after_result_publication(
     );
     saved.last_error = None;
     saved.updated_at = session.updated_at.clone();
+    // Recording the failure advanced the database-owned generation.
+    saved.failure_generation = session.failure_generation;
     assert_eq!(saved, session);
 
     // A late upgrade Cancel must not cancel the next ordinary operation.
@@ -4310,11 +4381,11 @@ async fn recovered_container_replacement_keeps_commit_authority_after_failure() 
         SessionState::Running,
     );
     record.target_template_id = "podman".into();
-    record.target = Some(mj_core::state::TargetLocator::LocalPodman {
+    record.target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
         container_id: mj_core::targets::resource_name("session-1").unwrap(),
         workspace_storage: Default::default(),
         borrowed_from: None,
-    });
+    }));
     crate::database::save_session(&record).unwrap();
     crate::database::begin_container_upgrade(
         "session-1",
@@ -4380,6 +4451,7 @@ async fn recovered_container_replacement_keeps_commit_authority_after_failure() 
     );
 
     let missing = ManagedSessionView {
+        attention: Default::default(),
         snapshot: None,
         connected: false,
         error: Some(ViewError::TargetMissing(
@@ -4416,7 +4488,7 @@ async fn recovered_container_replacement_keeps_commit_authority_after_failure() 
         }
     }
     let recovery = crate::session_manager::WorkerRecoveryPlan {
-        source_target: saved.target.clone().unwrap(),
+        source_target: *saved.target.clone().unwrap(),
         target: None,
         workspace: None,
         liveness_probe: crate::targets::CommandSpec::new(
@@ -4478,9 +4550,9 @@ async fn container_replacement_serializes_with_child_wake_and_registration() {
         mj_core::workspace::DEFAULT_WORKSPACE_ID,
         SessionState::Parked,
     );
-    child.target = Some(mj_core::state::TargetLocator::LocalBare {
+    child.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: "/isolated/child-1".into(),
-    });
+    }));
     crate::database::save_subagent_session(&child, &runtime_test_subagent("child-1", "session-1"))
         .unwrap();
     let plan = crate::targets::container_upgrade_test_plan("session-1");
@@ -4493,7 +4565,7 @@ async fn container_replacement_serializes_with_child_wake_and_registration() {
     .unwrap();
     let wake = crate::database::WorkerRestartIntent {
         operation_id: "wake-1".into(),
-        target: child.target.clone().unwrap(),
+        target: *child.target.clone().unwrap(),
         desired_build: "fixture".into(),
     };
     let owner = crate::worker_lifecycle::WorkerPermit::try_acquire("child-1", "test child wake")
@@ -4579,11 +4651,11 @@ async fn restart_compares_persisted_applied_settings_and_serializes_mount_edits(
         mj_core::workspace::DEFAULT_WORKSPACE_ID,
         SessionState::Running,
     );
-    session.target = Some(mj_core::state::TargetLocator::LocalPodman {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
         borrowed_from: None,
         container_id: mj_core::targets::resource_name("session-1").unwrap(),
         workspace_storage: Default::default(),
-    });
+    }));
     session.additional_mounts = vec![mj_core::targets::AdditionalMount {
         source: "/srv/reference".into(),
         destination: "/reference".into(),
@@ -4598,7 +4670,7 @@ async fn restart_compares_persisted_applied_settings_and_serializes_mount_edits(
         mj_core::config::DEFAULT_CONTAINER_IMAGE,
     );
     runtime.container_settings = Some(applied.clone());
-    session.target_runtime = Some(runtime);
+    session.target_runtime = Some(runtime.into());
     crate::database::save_session(&session).unwrap();
     let intent = crate::database::begin_session_restart(
         "session-1",
@@ -4609,9 +4681,8 @@ async fn restart_compares_persisted_applied_settings_and_serializes_mount_edits(
     .unwrap();
     assert!(!intent.container_recreation_acknowledged);
     assert!(intent.container_upgrade.is_none());
-    let refused =
-        crate::database::set_session_container_settings("session-1", None, None, &[], "later")
-            .unwrap_err();
+    let refused = crate::database::set_session_container_settings("session-1", None, &[], "later")
+        .unwrap_err();
     assert!(mj_core::refusal::Refusal::of(&refused).is_some());
 
     assert!(
@@ -4627,7 +4698,7 @@ async fn restart_compares_persisted_applied_settings_and_serializes_mount_edits(
         crate::database::SessionRestartPhase::Stopping
     );
     crate::database::cancel_session_restart("session-1").unwrap();
-    crate::database::set_session_container_settings("session-1", None, None, &[], "later").unwrap();
+    crate::database::set_session_container_settings("session-1", None, &[], "later").unwrap();
 }
 
 #[tokio::test]
@@ -4705,12 +4776,12 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
             .remove("session-1")
             .unwrap();
         session.state = SessionState::Closing;
-        session.checkpoint = Some(mj_core::state::CheckpointMetadata {
+        session.checkpoint = Some(Box::new(mj_core::state::CheckpointMetadata {
             archive_path: "/isolated/checkpoint.hel.zip".into(),
             sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             created_at: "now".into(),
             event_frontier: 1,
-        });
+        }));
         crate::database::save_checkpointed_session(&session)?;
         crate::database::advance_session_restart(
             "session-1",
@@ -4741,14 +4812,9 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
         crate::database::load_session_restarts().unwrap()[0].phase,
         crate::database::SessionRestartPhase::CancelRequested
     );
-    let refused = crate::database::set_session_container_settings(
-        "session-1",
-        None,
-        None,
-        &[],
-        "while cancelling",
-    )
-    .unwrap_err();
+    let refused =
+        crate::database::set_session_container_settings("session-1", None, &[], "while cancelling")
+            .unwrap_err();
     assert!(mj_core::refusal::Refusal::of(&refused).is_some());
     release.notify_one();
     RuntimeState::wait_lifecycle_result(operation)
@@ -4817,11 +4883,11 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
         mj_core::workspace::DEFAULT_WORKSPACE_ID,
         SessionState::Closing,
     );
-    session.target = Some(mj_core::state::TargetLocator::LocalPodman {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalPodman {
         borrowed_from: None,
         container_id: mj_core::targets::resource_name(&session.id).unwrap(),
         workspace_storage: Default::default(),
-    });
+    }));
     crate::database::save_session(&session).unwrap();
     let intent = crate::database::begin_session_restart(
         &session.id,
@@ -5747,12 +5813,12 @@ async fn a_destroyed_session_is_still_found_by_its_id() {
     // must still remove its record and publish a safe warning independently.
     session.id = "abcdef0123456789abcdef0123456789".into();
     session.target_template_id = "removed-machine".into();
-    session.target = Some(mj_core::state::TargetLocator::SshPodman {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::SshPodman {
         host: "removed.invalid".into(),
         container_id: "gone-container".into(),
         workspace_storage: Default::default(),
         borrowed_from: None,
-    });
+    }));
     crate::database::save_session(&session).unwrap();
     state.push_notice(&session.id, "private diagnostic /secret/path");
     // Hard-won: 27c51a34c: unavailable target configuration blocked Destroy too.
@@ -5794,9 +5860,9 @@ async fn a_destroyed_session_is_still_found_by_its_id() {
     std::fs::create_dir_all(&worker_root).unwrap();
     std::fs::write(worker_root.join("keep"), "parent worker evidence").unwrap();
     parent.state = SessionState::Running;
-    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+    parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: worker_root.clone(),
-    });
+    }));
     crate::database::save_session(&parent).unwrap();
     session.id = child_id.into();
     crate::database::save_subagent_session(&session, &runtime_test_subagent(child_id, parent_id))
@@ -5880,9 +5946,9 @@ async fn a_destroyed_session_is_still_found_by_its_id() {
         mj_core::workspace::DEFAULT_WORKSPACE_ID,
         SessionState::Running,
     );
-    root.target = Some(mj_core::state::TargetLocator::LocalBare {
+    root.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: repository.path().join(requested),
-    });
+    }));
     crate::database::save_session(&root).unwrap();
     session.id = descendant.into();
     crate::database::save_subagent_session(&session, &runtime_test_subagent(descendant, requested))
@@ -6159,6 +6225,7 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
             guardian_review_model: None,
             codex_profile: None,
             muse_auto_review: None,
+            claude_permission_mode: None,
             aws: None,
             models: Default::default(),
             legacy_subagents: None,
@@ -6173,6 +6240,12 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
     let workspace = crate::database::create_workspace("Hung launches").unwrap();
     let project = project.canonicalize().unwrap();
     let state = test_runtime_state_loading_the_store();
+    // Hard-won: 5e70f76a1: admission fixtures omitted the serving profile catalog.
+    state.profile_catalog.get_or_init(|| {
+        crate::server_runtime::profile_catalog::ProfileCatalog::new(
+            tokio_util::sync::CancellationToken::new(),
+        )
+    });
     let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
     let shutdown = CancellationToken::new();
     let create = |title: &str| {
@@ -6710,13 +6783,14 @@ async fn a_cancelled_workspace_close_lets_committed_stops_finish_and_reports_the
     // committed and still removing its target, one still checkpointing.
     let committed = LifecycleControl::default();
     let finish_teardown = Arc::new(tokio::sync::Notify::new());
-    state
-        .start_or_join_lifecycle_controlled(
+    let key = serde_json::to_string(&(true, false)).unwrap();
+    let (committed_acceptance, committed_watch) = tokio::sync::watch::channel(Some(Ok(())));
+    let started = state
+        .admit_prepared_lifecycle(
             "past-commit".into(),
             LifecycleKind::Suspend,
-            None,
-            None,
-            Some(committed.clone()),
+            super::lifecycle::LifecycleStart::request(key.clone(), None, Some(committed.clone())),
+            Some(committed_watch),
             {
                 let finish_teardown = finish_teardown.clone();
                 move |_, _, _| async move {
@@ -6726,34 +6800,43 @@ async fn a_cancelled_workspace_close_lets_committed_stops_finish_and_reports_the
             },
         )
         .unwrap();
+    drop(started);
+    let committed_baseline = committed_acceptance.receiver_count();
     assert!(committed.grant_commit());
-    state
-        .start_or_join_lifecycle("before-commit".into(), LifecycleKind::Suspend, {
+    let (cancellable_acceptance, cancellable_watch) = tokio::sync::watch::channel(Some(Ok(())));
+    let started = state
+        .admit_prepared_lifecycle(
+            "before-commit".into(),
+            LifecycleKind::Suspend,
+            super::lifecycle::LifecycleStart::request(key, None, None),
+            Some(cancellable_watch),
             move |_, _, cancelled| async move {
                 while !cancelled.load(Ordering::Acquire) {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
                 bail!("operation cancelled before the session began to stop")
-            }
-        })
+            },
+        )
         .unwrap();
-    let closing = tokio::spawn({
+    drop(started);
+    let cancellable_baseline = cancellable_acceptance.receiver_count();
+    let mut closing = tokio::spawn({
         let state = state.clone();
         let id = workspace.id.clone();
         async move { state.close_workspace(id).await }
     });
-    // Cancel only once the close has joined both stops. A cancel before that
-    // ends the close without submitting them, which is not this case.
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !["past-commit", "before-commit"]
-            .into_iter()
-            .all(|id| state.close_is_requested(id))
-        {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("the workspace close never joined both stops");
+    // A fresh stop already sets its close marker. Only an additional acceptance
+    // receiver proves that the workspace close has joined that existing stop.
+    tokio::select! {
+        result = &mut closing => panic!("workspace close completed before joining both stops: {result:?}"),
+        joined = tokio::time::timeout(Duration::from_secs(5), async {
+            while committed_acceptance.receiver_count() <= committed_baseline
+                || cancellable_acceptance.receiver_count() <= cancellable_baseline
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }) => joined.expect("the workspace close never joined both stops"),
+    }
     state.cancel_workspace_close(&workspace.id).unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         while state
@@ -6998,9 +7081,9 @@ async fn suspension_intent_survives_restart_and_missing_worker_reports_failure()
     let workspace = crate::database::create_workspace("Suspend restart").unwrap();
     let root = tempfile::tempdir().unwrap();
     let mut session = runtime_test_session("restart-suspend", &workspace.id, SessionState::Running);
-    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: root.path().join(&session.id),
-    });
+    }));
     session.last_error = Some("old connection failure".into());
     crate::database::save_session(&session).unwrap();
     let state = test_runtime_state_loading_the_store();
@@ -7094,9 +7177,9 @@ async fn a_graceful_stop_waits_for_a_destroy_in_flight() {
         "destroy evidence",
     )
     .unwrap();
-    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+    parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: root.path().join(parent_id),
-    });
+    }));
     crate::database::save_session(&parent).unwrap();
     let child = runtime_test_session(child_id, &workspace.id, SessionState::Running);
     crate::database::save_subagent_session(&child, &runtime_test_subagent(child_id, parent_id))
@@ -7245,16 +7328,16 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
     // A parent with nothing to checkpoint yet, so its own suspend settles
     // without a worker to talk to.
     let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Provisioning);
-    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+    parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: root.path().join(parent_id),
-    });
+    }));
     crate::database::save_session(&parent).unwrap();
 
     // A child that finished its task and handed back its report.
     let mut finished = runtime_test_session(finished_id, &workspace.id, SessionState::Running);
-    finished.target = Some(mj_core::state::TargetLocator::LocalBare {
+    finished.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: root.path().join(finished_id),
-    });
+    }));
     finished.session_title_override = Some("Fix the parser".into());
     let mut relation = runtime_test_subagent(finished_id, parent_id);
     relation.initial_prompt = "Fix the off-by-one in the parser.".into();
@@ -7321,11 +7404,11 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
     let mut stuck = runtime_test_session(stuck_id, &workspace.id, SessionState::Running);
     stuck.title = "Review the docs".into();
     stuck.target_template_id = "removed-target".into();
-    stuck.target = Some(mj_core::state::TargetLocator::SshBare {
+    stuck.target = Some(Box::new(mj_core::state::TargetLocator::SshBare {
         host: "builder.invalid".into(),
         workspace: PathBuf::from(format!(".local/share/hel/workspaces/{stuck_id}")),
         worker_id: Some(stuck_id.into()),
-    });
+    }));
     crate::database::save_subagent_session(&stuck, &runtime_test_subagent(stuck_id, parent_id))
         .unwrap();
     // The primary's oracle, working like the child above. It is stopped with
@@ -7333,11 +7416,11 @@ async fn suspending_a_parent_stops_its_sub_agents_and_lists_them_on_the_parent()
     let mut oracle = runtime_test_session(oracle_id, &workspace.id, SessionState::Running);
     oracle.title = "oracle".into();
     oracle.target_template_id = "removed-target".into();
-    oracle.target = Some(mj_core::state::TargetLocator::SshBare {
+    oracle.target = Some(Box::new(mj_core::state::TargetLocator::SshBare {
         host: "builder.invalid".into(),
         workspace: PathBuf::from(format!(".local/share/hel/workspaces/{oracle_id}")),
         worker_id: Some(oracle_id.into()),
-    });
+    }));
     let mut oracle_relation = runtime_test_subagent(oracle_id, parent_id);
     oracle_relation.kind = mj_core::subagent::SubagentKind::Oracle;
     crate::database::save_subagent_session(&oracle, &oracle_relation).unwrap();
@@ -7509,18 +7592,18 @@ async fn live_parent_with_a_working_sub_agent(recovery_copy: ParentRecoveryCopy)
     parent.workspace_id = workspace.id.clone();
     parent.target_template_id = "removed-local".into();
     parent.target_runtime = Some((&mj_core::config::TargetTemplate::LocalBare).into());
-    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+    parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: worker_root.clone(),
-    });
+    }));
     parent.project_directory = Some(checkout);
     if recovery_copy == ParentRecoveryCopy::Installed {
-        parent.checkpoint = Some(
+        parent.checkpoint = Some(Box::new(
             crate::controller::test_support::write_checkpoint_gate_archive(
                 &archives,
                 LATCH_RELAY_SESSION,
                 2,
             ),
-        );
+        ));
     }
     crate::database::save_session(&parent).unwrap();
     crate::database::save_materialized_session(&mj_core::state::MaterializedSession::empty(
@@ -7530,9 +7613,9 @@ async fn live_parent_with_a_working_sub_agent(recovery_copy: ParentRecoveryCopy)
 
     let mut child = runtime_test_session(WORKING_CHILD, &workspace.id, SessionState::Running);
     child.title = "Review the docs".into();
-    child.target = Some(mj_core::state::TargetLocator::LocalBare {
+    child.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: directory.path().join(WORKING_CHILD),
-    });
+    }));
     crate::database::save_subagent_session(
         &child,
         &runtime_test_subagent(WORKING_CHILD, LATCH_RELAY_SESSION),
@@ -7767,9 +7850,9 @@ async fn live_clone_with_an_unpushed_commit() -> LiveClone {
     session.state = SessionState::Running;
     session.target_template_id = "removed-local".into();
     session.target_runtime = Some((&mj_core::config::TargetTemplate::LocalBare).into());
-    session.target = Some(mj_core::state::TargetLocator::LocalBare {
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: worker_root.clone(),
-    });
+    }));
     crate::database::save_session(&session).unwrap();
     crate::database::save_materialized_session(&mj_core::state::MaterializedSession::empty(
         LATCH_RELAY_SESSION,
@@ -8071,15 +8154,76 @@ async fn discarding_changes_since_a_checkpoint_stops_the_sub_agents() {
         .clone()
         .unwrap();
 
-    tokio::time::timeout(
-        Duration::from_secs(60),
+    let bytes = std::fs::read(&checkpoint.archive_path).unwrap();
+    std::fs::write(&checkpoint.archive_path, b"corrupt recovery archive").unwrap();
+    let rejected = parent
+        .state
+        .start_session_lifecycle(SessionLifecycleRequest::Discard {
+            session_id: LATCH_RELAY_SESSION.into(),
+            checkpoint: *checkpoint.clone(),
+        })
+        .await
+        .unwrap_err();
+    assert!(format!("{rejected:#}").contains("SHA changed"));
+    let unchanged = crate::database::load_state().unwrap();
+    assert_eq!(
+        unchanged.sessions[LATCH_RELAY_SESSION].state,
+        SessionState::Running
+    );
+    assert!(unchanged.sessions.contains_key(WORKING_CHILD));
+    std::fs::write(&checkpoint.archive_path, bytes).unwrap();
+
+    let release = Arc::new(tokio::sync::Notify::new());
+    let child = parent
+        .state
+        .start_or_join_lifecycle(WORKING_CHILD.into(), LifecycleKind::StopSubagent, {
+            let release = release.clone();
+            move |_, _, _| async move {
+                release.notified().await;
+                Ok(DaemonLifecycleResult::Done)
+            }
+        })
+        .unwrap();
+    let receipt = tokio::time::timeout(
+        Duration::from_secs(30),
         parent
             .state
-            .discard_since_checkpoint(LATCH_RELAY_SESSION.to_owned(), checkpoint),
+            .start_session_lifecycle(SessionLifecycleRequest::Discard {
+                session_id: LATCH_RELAY_SESSION.into(),
+                checkpoint: *checkpoint.clone(),
+            }),
     )
     .await
-    .unwrap()
+    .expect("Discard acceptance waited for child teardown")
     .unwrap();
+    let accepted = crate::database::load_state().unwrap();
+    assert_eq!(
+        accepted.sessions[LATCH_RELAY_SESSION].state,
+        SessionState::Destroying
+    );
+    assert_eq!(
+        accepted.sessions[LATCH_RELAY_SESSION].checkpoint.as_ref(),
+        Some(&checkpoint)
+    );
+    assert!(accepted.sessions.contains_key(WORKING_CHILD));
+    assert!(
+        parent
+            .state
+            .cancel_lifecycle_with_intent(LATCH_RELAY_SESSION)
+            .await
+            .is_err()
+    );
+    let mut completion = Box::pin(parent.state.wait_session_lifecycle(receipt));
+    assert!(futures::poll!(&mut completion).is_pending());
+    release.notify_one();
+    RuntimeState::wait_lifecycle_result(child).await.unwrap();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(60), completion)
+            .await
+            .unwrap()
+            .unwrap(),
+        DaemonReply::Done
+    ));
 
     let stored = crate::database::load_state().unwrap();
     assert_eq!(
@@ -8097,6 +8241,198 @@ async fn discarding_changes_since_a_checkpoint_stops_the_sub_agents() {
             .map(|child| child.child_session_id.as_str())
             .collect::<Vec<_>>(),
         [WORKING_CHILD]
+    );
+    parent.channels.shutdown.shutdown().await.unwrap();
+}
+
+// Hard-won: #1507: an accepted Discard failure disappeared when its observer left.
+#[cfg(unix)]
+#[tokio::test]
+async fn accepted_discard_failure_is_published_without_an_observer() {
+    use crate::controller::checkpoint::tests::LATCH_RELAY_SESSION;
+    const NAME: &str = "accepted_discard_failure_is_published_without_an_observer";
+    if !in_isolated_live_parent_test(NAME) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let parent = live_parent_with_a_working_sub_agent(ParentRecoveryCopy::Installed).await;
+    let checkpoint = crate::database::load_state().unwrap().sessions[LATCH_RELAY_SESSION]
+        .checkpoint
+        .clone()
+        .unwrap();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (acceptance, watch) = tokio::sync::watch::channel(Some(Ok(())));
+    let child = parent
+        .state
+        .admit_prepared_lifecycle(
+            WORKING_CHILD.into(),
+            LifecycleKind::StopSubagent,
+            super::lifecycle::LifecycleStart::request(
+                serde_json::to_string(&(LifecycleKind::StopSubagent.label(), false)).unwrap(),
+                None,
+                None,
+            ),
+            Some(watch),
+            {
+                let release = release.clone();
+                move |_, _, _| async move {
+                    release.notified().await;
+                    bail!("held child teardown diagnostic")
+                }
+            },
+        )
+        .unwrap();
+    let child_result = child.result.clone();
+    drop(child);
+    let baseline = acceptance.receiver_count();
+    let mut started = parent
+        .state
+        .admit_session_lifecycle(SessionLifecycleRequest::Discard {
+            session_id: LATCH_RELAY_SESSION.into(),
+            checkpoint: *checkpoint.clone(),
+        })
+        .await
+        .unwrap();
+    let receipt = tokio::time::timeout(Duration::from_secs(30), started.confirm_acceptance())
+        .await
+        .unwrap()
+        .unwrap();
+    let accepted = crate::database::load_state().unwrap().sessions[LATCH_RELAY_SESSION].clone();
+    assert_eq!(accepted.state, SessionState::Destroying);
+    assert_eq!(accepted.checkpoint.as_ref(), Some(&checkpoint));
+    drop(started);
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while acceptance.receiver_count() <= baseline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("Discard never joined the held child stop");
+    // No initiating result or acceptance observer remains when teardown fails.
+    release.notify_one();
+    assert!(
+        RuntimeState::wait_lifecycle_result(child_result)
+            .await
+            .is_err()
+    );
+    let retained = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let stored = crate::database::load_state().unwrap();
+            let record = &stored.sessions[LATCH_RELAY_SESSION];
+            if record.public_error().is_some() {
+                break record.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("Discard failure was not persisted without an observer");
+    let public = retained.public_error().unwrap();
+    assert!(public.starts_with(mj_core::state::CLOSE_FAILURE_PREFIX));
+    assert!(public.contains(&receipt.operation_id));
+    assert!(!public.contains("held child teardown diagnostic"));
+    assert_eq!(retained.state, SessionState::Destroying);
+    assert_eq!(retained.checkpoint.as_ref(), Some(&checkpoint));
+    assert_eq!(retained.target, accepted.target);
+    // Stored timestamps have second precision; publication may share the ACK second.
+    assert!(retained.updated_at >= accepted.updated_at);
+    assert_eq!(
+        Controller::load().unwrap().state.sessions[LATCH_RELAY_SESSION].last_error,
+        retained.last_error
+    );
+    let outcome = parent.state.wait_session_lifecycle(receipt).await.unwrap();
+    assert!(
+        matches!(outcome, DaemonReply::LifecycleFailed(detail) if detail.contains("held child teardown diagnostic"))
+    );
+    assert_eq!(
+        parent.state.owner().controller().state.sessions[LATCH_RELAY_SESSION].last_error,
+        retained.last_error
+    );
+    parent.channels.shutdown.shutdown().await.unwrap();
+}
+
+// Hard-won: #1507: an accepted Discard had no durable teardown intent before target removal.
+#[cfg(unix)]
+#[tokio::test]
+async fn discard_intent_recovers_without_checkpointing_and_reconciles_children() {
+    use crate::controller::checkpoint::tests::LATCH_RELAY_SESSION;
+    const NAME: &str = "discard_intent_recovers_without_checkpointing_and_reconciles_children";
+    if !in_isolated_live_parent_test(NAME) {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let parent = live_parent_with_a_working_sub_agent(ParentRecoveryCopy::Installed).await;
+    parent
+        .channels
+        .control
+        .session(LATCH_RELAY_SESSION)
+        .await
+        .unwrap()
+        .submit(
+            new_command_id("after-selected-checkpoint").unwrap(),
+            RelayCommand::RecordNotice {
+                text: "New work after the selected recovery copy".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let mut controller = Controller::load().unwrap();
+    let checkpoint = controller.state.sessions[LATCH_RELAY_SESSION]
+        .checkpoint
+        .clone()
+        .unwrap();
+    controller
+        .prepare_discard(
+            LATCH_RELAY_SESSION,
+            &checkpoint,
+            &ProcessExecutor,
+            || Ok(()),
+        )
+        .unwrap();
+    let durable = Controller::load().unwrap();
+    assert_eq!(
+        durable.state.sessions[LATCH_RELAY_SESSION].state,
+        SessionState::Destroying
+    );
+    assert!(interrupted_suspend_session_ids(&durable).contains(&LATCH_RELAY_SESSION.to_owned()));
+    assert!(durable.state.sessions.contains_key(WORKING_CHILD));
+    let recovery = crate::recovery::RecoveryCoordinator::spawn(parent.channels.control.clone());
+    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
+        parent.channels.control.clone(),
+        &recovery.observer(),
+    );
+    let restarted = Arc::new(RuntimeState::new_with_controller_loader(
+        parent.channels.control.clone(),
+        durable,
+        recovery.observer(),
+        upgrades.observer(),
+        Vec::new(),
+        Controller::load,
+    ));
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        restarted.suspend_session(LATCH_RELAY_SESSION.into()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let restored = crate::database::load_state().unwrap();
+    assert_eq!(
+        restored.sessions[LATCH_RELAY_SESSION].state,
+        SessionState::Stopped
+    );
+    assert_eq!(
+        restored.sessions[LATCH_RELAY_SESSION].checkpoint.as_ref(),
+        Some(&checkpoint)
+    );
+    assert!(restored.sessions[LATCH_RELAY_SESSION].target.is_none());
+    assert!(!restored.sessions.contains_key(WORKING_CHILD));
+    assert!(!restored.subagents.contains_key(WORKING_CHILD));
+    assert_eq!(
+        crate::database::load_stopped_subagents(LATCH_RELAY_SESSION)
+            .unwrap()
+            .len(),
+        1
     );
     parent.channels.shutdown.shutdown().await.unwrap();
 }
@@ -8184,14 +8520,14 @@ async fn a_sub_agent_its_parents_suspend_stops_is_shown_stopping_not_destroying(
     // A parent with nothing to checkpoint yet, so its suspend settles
     // without a worker to talk to.
     let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Provisioning);
-    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+    parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: root.path().join(parent_id),
-    });
+    }));
     crate::database::save_session(&parent).unwrap();
     let mut child = runtime_test_session(WORKING_CHILD, &workspace.id, SessionState::Running);
-    child.target = Some(mj_core::state::TargetLocator::LocalBare {
+    child.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: root.path().join(WORKING_CHILD),
-    });
+    }));
     crate::database::save_subagent_session(
         &child,
         &runtime_test_subagent(WORKING_CHILD, parent_id),
@@ -8296,7 +8632,9 @@ fn parked_child(root: &Path, child_id: &str, parent_id: &str, workspace_id: &str
     .unwrap();
     std::fs::set_permissions(&hel, std::fs::Permissions::from_mode(0o755)).unwrap();
     let mut child = runtime_test_session(child_id, workspace_id, SessionState::Parked);
-    child.target = Some(mj_core::state::TargetLocator::LocalBare { worker_root });
+    child.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+        worker_root,
+    }));
     child.session_title_override = Some("Map the parser".into());
     crate::database::save_subagent_session(&child, &runtime_test_subagent(child_id, parent_id))
         .unwrap();
@@ -8322,9 +8660,9 @@ async fn suspending_a_parent_removes_its_parked_sub_agents_without_starting_or_w
     // A parent with nothing to checkpoint yet, so its own suspend settles
     // without a worker to talk to.
     let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Provisioning);
-    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+    parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: root.path().join(parent_id),
-    });
+    }));
     crate::database::save_session(&parent).unwrap();
     // No handback tool and no finished turn on record: only being parked
     // says this child's parent already has what it will get from it.
@@ -8372,7 +8710,7 @@ async fn closing_a_parked_sub_agent_stops_it_without_starting_its_worker() {
     let parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
     crate::database::save_session(&parent).unwrap();
     let child = parked_child(root.path(), child_id, parent_id, &workspace.id);
-    let worker_root = match &child.target {
+    let worker_root = match child.target.as_deref() {
         Some(mj_core::state::TargetLocator::LocalBare { worker_root }) => worker_root.clone(),
         _ => unreachable!(),
     };
@@ -8503,9 +8841,9 @@ async fn child_close_yields_handoff_and_replays_its_durable_request_with_the_fin
         crate::database::save_session(&parent).unwrap();
         let mut child =
             runtime_test_session(LATCH_RELAY_SESSION, &workspace.id, SessionState::Running);
-        child.target = Some(mj_core::state::TargetLocator::LocalBare {
+        child.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
             worker_root: worker_root.clone(),
-        });
+        }));
         crate::database::save_subagent_session(
             &child,
             &runtime_test_subagent(LATCH_RELAY_SESSION, parent_id),
@@ -8586,9 +8924,9 @@ async fn child_close_yields_handoff_and_replays_its_durable_request_with_the_fin
         assert_eq!(child.state, SessionState::Closing);
         assert_eq!(
             child.target,
-            Some(mj_core::state::TargetLocator::LocalBare {
+            Some(Box::new(mj_core::state::TargetLocator::LocalBare {
                 worker_root: worker_root.clone(),
-            })
+            }))
         );
         assert!(
             child.public_error().is_none(),
@@ -8716,9 +9054,9 @@ async fn exercise_child_close_with_a_nested_workspace(
     let parent_root = root.path().join(parent_id);
     std::fs::create_dir_all(&parent_root).unwrap();
     std::fs::write(parent_root.join("private"), "parent worker").unwrap();
-    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+    parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: parent_root.clone(),
-    });
+    }));
     crate::database::save_session(&parent).unwrap();
     let worker_root = root.path().join(LATCH_RELAY_SESSION);
     std::fs::create_dir_all(&worker_root).unwrap();
@@ -8730,9 +9068,9 @@ async fn exercise_child_close_with_a_nested_workspace(
         relation.kind = mj_core::subagent::SubagentKind::Reviewer;
     }
     child.project_directory = parent.project_directory.clone();
-    child.target = Some(mj_core::state::TargetLocator::LocalBare {
+    child.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: worker_root.clone(),
-    });
+    }));
     crate::database::save_subagent_session(&child, &relation).unwrap();
     let reports = repository
         .path()
@@ -8960,9 +9298,9 @@ async fn unreachable_child_keeps_its_private_journal_until_worker_death_is_prove
     crate::database::save_session(&parent).unwrap();
     let mut child = runtime_test_session(LATCH_RELAY_SESSION, &workspace.id, SessionState::Closing);
     child.project_directory = Some(parent_dir.clone());
-    child.target = Some(mj_core::state::TargetLocator::LocalBare {
+    child.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: child_root.clone(),
-    });
+    }));
     let mut relation = runtime_test_subagent(LATCH_RELAY_SESSION, parent_id);
     relation.working_directory = "deleted-child-cwd".into();
     crate::database::save_subagent_session(&child, &relation).unwrap();
@@ -9048,15 +9386,15 @@ async fn dead_child_close_recovers_journal_without_recreating_its_cwd() {
     std::fs::write(parent_root.join("private"), "parent worker").unwrap();
     let mut parent = runtime_test_session(parent_id, &workspace.id, SessionState::Running);
     parent.project_directory = Some(parent_dir.clone());
-    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+    parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: parent_root.clone(),
-    });
+    }));
     crate::database::save_session(&parent).unwrap();
     let mut child = runtime_test_session(LATCH_RELAY_SESSION, &workspace.id, SessionState::Closing);
     child.project_directory = Some(parent_dir.clone());
-    child.target = Some(mj_core::state::TargetLocator::LocalBare {
+    child.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: child_root.clone(),
-    });
+    }));
     let mut relation = runtime_test_subagent(LATCH_RELAY_SESSION, parent_id);
     relation.working_directory = "deleted-child-cwd".into();
     crate::database::save_subagent_session(&child, &relation).unwrap();
@@ -9338,6 +9676,7 @@ async fn move_destination_ownership_is_typed_and_survives_cancellation() {
     state.owner().lifecycle.insert(
         "moving".into(),
         ActiveLifecycle {
+            acceptance: tokio::sync::watch::channel(Some(Ok(()))).1,
             move_operation_id: None,
             restart_intent: None,
             upgrade_work: Arc::new(Mutex::new(None)),
@@ -9527,6 +9866,8 @@ async fn retry_admission_reserves_only_the_matching_move_destination() {
         source_target_template_id: session.target_template_id.clone(),
         source_target: None,
         source_native_session_id: None,
+        inherited_resource_allocation: None,
+        inherited_additional_mounts: Vec::new(),
         source_additional_mounts: Vec::new(),
         source_resource_allocation: None,
         destination_target: None,
@@ -10127,9 +10468,9 @@ async fn changing_a_sessions_workspace_reaches_the_published_projection() {
         mj_core::workspace::DEFAULT_WORKSPACE_ID,
         SessionState::Running,
     );
-    live.target = Some(mj_core::state::TargetLocator::LocalBare {
+    live.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: "/worker/session-1".into(),
-    });
+    }));
     crate::database::save_session(&live).unwrap();
     assert!(state.session_record("session-1").is_some());
     let initial = state.runtime_changes(None, false).await.unwrap();
@@ -10185,6 +10526,56 @@ async fn changing_a_sessions_workspace_reaches_the_published_projection() {
     };
     assert_eq!(members(&destination.id), ["session-1"]);
     assert!(members(mj_core::workspace::DEFAULT_WORKSPACE_ID).is_empty());
+}
+
+/// Toggling a session's notification mute persists it and reaches the
+/// published projection an attached dashboard reads.
+#[tokio::test]
+async fn ignoring_notifications_persists_and_reaches_the_published_projection() {
+    let Some(_writer) = startup_prompt_test_store(
+        "ignoring_notifications_persists_and_reaches_the_published_projection",
+    ) else {
+        return;
+    };
+    let manager = TestRemoteManager::new().await;
+    let state = test_runtime_state_with_manager(&manager);
+    crate::database::save_session(&runtime_test_session(
+        "session-1",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    ))
+    .unwrap();
+    handle_action(
+        DaemonAction::SetSessionNotificationsIgnored {
+            session_id: "session-1".into(),
+            ignored: true,
+        },
+        &test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))),
+        &state,
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("ignore notifications");
+    let fresh = state.runtime_changes(None, false).await.unwrap();
+    let mj_client::runtime_feed::RuntimeFrame::Snapshot { projection, .. } = fresh else {
+        panic!("a new dashboard is given a snapshot")
+    };
+    assert!(projection.records["session-1"].notifications_ignored);
+    assert!(
+        crate::database::load_state().unwrap().sessions["session-1"].notifications_ignored,
+        "the flag is durable"
+    );
+    handle_action(
+        DaemonAction::SetSessionNotificationsIgnored {
+            session_id: "missing".into(),
+            ignored: true,
+        },
+        &test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))),
+        &state,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
 }
 
 #[tokio::test]
@@ -10427,11 +10818,11 @@ async fn archiving_old_children_needs_no_index_copy_and_preserves_the_parent() {
                 ],
             },
         });
-    parent.checkpoint = Some(
+    parent.checkpoint = Some(Box::new(
         crate::controller::test_support::write_checkpoint_archive_input(
             &archives, parent_id, &input,
         ),
-    );
+    ));
     crate::database::save_session(&parent).unwrap();
     let mut child = parent.clone();
     child.state = SessionState::Stopped;
@@ -10786,6 +11177,8 @@ fn retained_startup_test_move(
         source_target_template_id: session.target_template_id.clone(),
         source_target: None,
         source_native_session_id: None,
+        inherited_resource_allocation: None,
+        inherited_additional_mounts: Vec::new(),
         source_additional_mounts: Vec::new(),
         source_resource_allocation: None,
         destination_target: None,
@@ -11669,9 +12062,9 @@ async fn a_failure_after_a_sub_agent_registers_moves_it_to_error() {
         straightforward: None,
         subtle: None,
     });
-    parent.target = Some(mj_core::state::TargetLocator::LocalBare {
+    parent.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
         worker_root: mj_core::config::data_dir().join("workers").join(parent_id),
-    });
+    }));
     crate::database::save_session(&parent).unwrap();
 
     let remote = spawn_remote_session_manager().unwrap();
@@ -11754,4 +12147,1278 @@ async fn a_failure_after_a_sub_agent_registers_moves_it_to_error() {
             "second-question",
         ))
         .expect("a fresh oracle may register once the failed one is in Error");
+}
+
+// Selection keys join running work; durable caller keys also replay completion.
+#[tokio::test]
+async fn fresh_lifecycle_retries_replace_completed_results_but_replays_keep_them() {
+    let state = test_runtime_state();
+    let key = "confirmed-selection".to_owned();
+    let first = state
+        .admit_prepared_lifecycle(
+            "retry-session".into(),
+            LifecycleKind::ForceStop,
+            super::lifecycle::LifecycleStart::request(key.clone(), None, None),
+            None,
+            |_, _, _| async { bail!("injected operation failure") },
+        )
+        .unwrap();
+    let old = first.receipt.clone();
+    assert!(
+        RuntimeState::wait_lifecycle_result(first.result)
+            .await
+            .is_err()
+    );
+    let replay = state
+        .start_or_join_lifecycle_with_key(
+            old.session_id.clone(),
+            LifecycleKind::ForceStop,
+            None,
+            Some(key.clone()),
+            |_, _, _| async { panic!("replay started duplicate work") },
+        )
+        .unwrap();
+    assert!(RuntimeState::wait_lifecycle_result(replay).await.is_err());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let next = state
+        .admit_prepared_lifecycle(
+            old.session_id.clone(),
+            LifecycleKind::ForceStop,
+            super::lifecycle::LifecycleStart::request(key, None, None),
+            None,
+            {
+                let release = release.clone();
+                move |_, _, _| async move {
+                    release.notified().await;
+                    Ok(DaemonLifecycleResult::Done)
+                }
+            },
+        )
+        .unwrap();
+    assert_ne!(next.receipt.operation_id, old.operation_id);
+    assert!(
+        state
+            .admit_prepared_lifecycle(
+                old.session_id.clone(),
+                LifecycleKind::ForceStop,
+                super::lifecycle::LifecycleStart::request(
+                    "different-checkpoint".into(),
+                    None,
+                    None
+                ),
+                None,
+                |_, _, _| async { panic!("changed selections were admitted concurrently") },
+            )
+            .is_err()
+    );
+    assert!(matches!(
+        state.wait_session_lifecycle(old).await.unwrap(),
+        DaemonReply::LifecycleObservationUnavailable(_)
+    ));
+    release.notify_one();
+    RuntimeState::wait_lifecycle_result(next.result)
+        .await
+        .unwrap();
+}
+
+// Hard-won: #1507: the initiating terminal waited through checkpoint and target retirement.
+#[cfg(unix)]
+#[tokio::test]
+async fn suspend_acceptance_survives_client_disconnect_during_checkpoint() {
+    use crate::controller::checkpoint::tests::{LATCH_RELAY_HOLD_PATH, LATCH_RELAY_SESSION};
+    const NAME: &str = "suspend_acceptance_survives_client_disconnect_during_checkpoint";
+    if !in_held_close_child(NAME, "begin_checkpoint") {
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let (controller, channels, _handle) =
+        crate::controller::checkpoint::tests::close_cut_controller(SessionState::Running).await;
+    controller.config.save().unwrap();
+    let recovery = crate::recovery::RecoveryCoordinator::spawn(channels.control.clone());
+    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
+        channels.control.clone(),
+        &recovery.observer(),
+    );
+    let state = Arc::new(RuntimeState::new_with_controller_loader(
+        channels.control.clone(),
+        Controller::load().unwrap(),
+        recovery.observer(),
+        upgrades.observer(),
+        Vec::new(),
+        Controller::load,
+    ));
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let metadata = test_metadata(listener.local_addr().unwrap());
+    let server_metadata = metadata.clone();
+    let server = tokio::spawn({
+        let state = state.clone();
+        async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_client(stream, server_metadata, state, CancellationToken::new())
+                .await
+                .unwrap();
+        }
+    });
+    let mut client = DaemonClient::connect(metadata).await.unwrap();
+    let receipt = tokio::time::timeout(
+        Duration::from_secs(30),
+        client.start_session_lifecycle(SessionLifecycleRequest::Suspend {
+            session_id: LATCH_RELAY_SESSION.into(),
+            acknowledge_unpublished_work: true,
+            ignore_nested_repositories: false,
+        }),
+    )
+    .await
+    .expect("acceptance waited for the held checkpoint")
+    .unwrap();
+    assert_eq!(
+        crate::database::load_state().unwrap().sessions[LATCH_RELAY_SESSION].state,
+        SessionState::Closing
+    );
+    assert!(state.close_is_requested(LATCH_RELAY_SESSION));
+    drop(client);
+    server.await.unwrap();
+    let hold = PathBuf::from(std::env::var_os(LATCH_RELAY_HOLD_PATH).unwrap());
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while !hold.with_extension("reached").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the daemon did not continue after acceptance");
+    let mut completion = Box::pin(state.wait_session_lifecycle(receipt));
+    assert!(futures::poll!(&mut completion).is_pending());
+    std::fs::write(hold.with_extension("release"), b"continue").unwrap();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(60), completion)
+            .await
+            .unwrap()
+            .unwrap(),
+        DaemonReply::Done
+    ));
+    assert!(!state.close_is_requested(LATCH_RELAY_SESSION));
+    let stored = crate::database::load_state().unwrap();
+    assert_eq!(
+        stored.sessions[LATCH_RELAY_SESSION].state,
+        SessionState::Stopped
+    );
+    assert!(stored.sessions[LATCH_RELAY_SESSION].checkpoint.is_some());
+}
+
+/// Exercise the real authenticated control boundary: these directories exist
+/// only in the server fixture, never in client-side interpretation.
+// Hard-won: #1514: one archive metadata error discarded readable sizes in the batch.
+#[tokio::test]
+async fn daemon_api_exchange() {
+    const CHILD: &str = "MJ_TEST_DAEMON_API_EXCHANGE";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        // Keep probes isolated, but give macOS version detection a stable answer.
+        // Apple container discovery is intentionally specific to the host OS.
+        let bin = directory.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let probe = bin.join("sw_vers");
+            fs::write(&probe, "#!/bin/sh\nprintf '25.0\\n'\n").unwrap();
+            fs::set_permissions(probe, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut child = crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), "daemon_api_exchange"),
+        )
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "machine-exchange")
+        .env("PATH", &bin)
+        .env("HOME", directory.path().join("home"))
+        .env("USERPROFILE", directory.path().join("home"))
+        .isolated_store(directory.path());
+        for kind in mj_core::config::HarnessKind::ALL {
+            child = child.env(kind.home_env(), directory.path().join("absent-home"));
+            if let Some(key) = kind.api_key_variable() {
+                child = child.env(key, "");
+            }
+        }
+        child.run();
+        return;
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let server_root = root.path().canonicalize().unwrap();
+    let project = server_root.join("server-only-project");
+    fs::create_dir(&project).unwrap();
+    let archive = server_root.join("daemon-only.tar");
+    fs::write(&archive, b"daemon archive bytes").unwrap();
+    let mut config = Config::default();
+    config
+        .targets
+        .insert("local".into(), mj_core::config::TargetTemplate::LocalBare);
+    config.profiles.insert(
+        "agent".into(),
+        mj_core::config::HarnessProfile::new(
+            mj_core::config::HarnessKind::Codex,
+            server_root.as_path().join("profile"),
+        ),
+    );
+    config.profiles.get_mut("agent").unwrap().environment = serde_json::from_value(
+        serde_json::json!({"DAEMON_TEST_KEY": {"from_secret": "missing-test-key"}}),
+    )
+    .unwrap();
+    let ready_home = server_root.join("ready-profile");
+    fs::create_dir(&ready_home).unwrap();
+    let mut ready =
+        mj_core::config::HarnessProfile::new(mj_core::config::HarnessKind::Codex, ready_home);
+    ready.environment = serde_json::from_value(serde_json::json!({
+        "DAEMON_TEST_KEY": {"from_secret": "daemon-only-key"}
+    }))
+    .unwrap();
+    fs::create_dir_all(mj_core::config::config_dir()).unwrap();
+    fs::write(
+        mj_core::config::config_dir().join("secrets.toml"),
+        r#"daemon-only-key = "daemon-secret-value""#,
+    )
+    .unwrap();
+    config.profiles.insert("ready".into(), ready);
+    config.save().unwrap();
+    let state = test_runtime_state_with(Controller {
+        config,
+        state: Default::default(),
+    });
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let metadata = test_metadata(listener.local_addr().unwrap());
+    let unsupported_machine = mj_core::config::Machine::AwsEc2 {
+        aws_profile: None,
+        region: "test-region".into(),
+        launch_template: "test-template".into(),
+        launch_template_version: None,
+        ssh_user: "test".into(),
+        address_source: Default::default(),
+        identity_file: None,
+        ssh_args: vec![],
+    };
+    let client_root = tempfile::tempdir().unwrap();
+    let client_config_path = client_root.path().join("config/config.toml");
+    fs::create_dir_all(client_config_path.parent().unwrap()).unwrap();
+    fs::create_dir(client_root.path().join("data")).unwrap();
+    fs::write(&client_config_path, "").unwrap();
+    assert!(
+        Config::load_from(&client_config_path)
+            .unwrap()
+            .profiles
+            .is_empty()
+    );
+    let actions = vec![
+        DaemonAction::PreviewBuildCache {
+            machine: unsupported_machine.clone(),
+        },
+        DaemonAction::InstallMbx {
+            machine: unsupported_machine,
+        },
+        DaemonAction::CheckpointArchiveSizes {
+            paths: [
+                ("archived".into(), archive.clone()),
+                ("unreadable".into(), archive.join("invalid\0archive")),
+                ("missing".into(), server_root.join("missing.tar")),
+            ]
+            .into(),
+        },
+        DaemonAction::TestTarget {
+            target_id: "missing".into(),
+        },
+        DaemonAction::ProfileLoginStatuses,
+        DaemonAction::CheckAvailability,
+        DaemonAction::DiscoverSetup {
+            scope: mj_client::discovery::DetectScope::Profiles,
+            machines: Vec::new(),
+        },
+        DaemonAction::DiscoverSetup {
+            scope: mj_client::discovery::DetectScope::Runtimes,
+            machines: Vec::new(),
+        },
+        DaemonAction::CheckProjectDirectories {
+            paths: vec![project.clone(), server_root.as_path().join("absent")],
+        },
+        DaemonAction::CompletePath {
+            host: mj_core::path_completion::CompletionHost::Local,
+            // Typed with this host's separator: on Windows the root is a
+            // verbatim `\\?\` path, which reads `/` as part of a name.
+            prefix: server_root.join("server-").display().to_string(),
+            kind: mj_core::path_completion::CompletionKind::Directories,
+        },
+        DaemonAction::DiscoverProjects {
+            request: mj_core::project_picker::ProjectDiscoveryRequest::Directory {
+                path: server_root.as_path().to_string_lossy().into_owned(),
+                filter: String::new(),
+            },
+        },
+        DaemonAction::ResolveSetupPath {
+            machine: mj_core::config::Machine::Local { build_cache: None },
+            source: project.clone(),
+        },
+        DaemonAction::ValidateMountSource {
+            target_id: "missing".into(),
+            source: project.clone(),
+        },
+        DaemonAction::ValidateSessionMounts {
+            target_id: "missing".into(),
+            mounts: vec![mj_core::targets::AdditionalMount {
+                source: project.clone(),
+                destination: "/project".into(),
+                access: mj_core::targets::MountAccess::Ro,
+            }],
+        },
+        DaemonAction::ResolveContainerPath {
+            target_id: "local".into(),
+            source: project.clone(),
+        },
+        DaemonAction::ValidateProjectDirectory {
+            target_id: "local".into(),
+            directory: project.clone(),
+        },
+        DaemonAction::PreflightNewSession {
+            request: NewSessionPreflightRequest {
+                profile_id: "agent".into(),
+                workspace_id: String::new(),
+                bundle_id: String::new(),
+                target_id: "local".into(),
+                project_directory: Some(project.clone()),
+                additional_mounts: Vec::new(),
+                remote_repairs: Vec::new(),
+            },
+        },
+        DaemonAction::ResolveContainerPath {
+            target_id: "missing".into(),
+            source: project,
+        },
+        DaemonAction::SaveSpinnerStyle {
+            style: mj_core::config::SpinnerStyle::Wave,
+        },
+    ];
+    let mut exchange = Vec::new();
+    for (index, action) in actions.into_iter().enumerate() {
+        let server_state = state.clone();
+        let server_metadata = metadata.clone();
+        let server_listener = &listener;
+        let connect = TcpStream::connect(metadata.address);
+        let (stream, accepted) = tokio::join!(connect, server_listener.accept());
+        let (server_stream, _) = accepted.unwrap();
+        let server = tokio::spawn(async move {
+            serve_client(
+                server_stream,
+                server_metadata,
+                server_state,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        });
+        let mut stream = stream.unwrap();
+        let rendered_action = serde_json::to_value(&action).unwrap();
+        write_frame(
+            &mut stream,
+            &RequestEnvelope {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: index as u64,
+                token: metadata.token.clone(),
+                action,
+            },
+        )
+        .await
+        .unwrap();
+        let wire: serde_json::Value = read_frame(&mut stream).await.unwrap();
+        let mut response: ResponseEnvelope = mj_core::config::with_secret_resolver(
+            mj_core::config::SecretResolver::beside(&client_config_path),
+            || serde_json::from_value(wire).unwrap(),
+        );
+        if let Ok(DaemonReply::Availability(report)) = &response.result {
+            assert!(report.profiles["ready"].1.is_none());
+            assert!(report.profiles["agent"].1.is_some());
+            assert_eq!(
+                report.profiles["ready"]
+                    .0
+                    .environment
+                    .get("DAEMON_TEST_KEY"),
+                None
+            );
+            assert!(
+                !serde_json::to_string(report)
+                    .unwrap()
+                    .contains("daemon-secret-value")
+            );
+        }
+        // Embedded NUL is invalid on every host; only OS diagnostic wording varies.
+        if let Ok(DaemonReply::CheckpointArchiveSizes(sizes)) = &mut response.result {
+            let error = sizes.get_mut("unreadable").unwrap().as_mut().unwrap_err();
+            assert!(error.starts_with("read "), "{error}");
+            *error = "<archive metadata error>".into();
+        }
+        exchange.push(serde_json::json!({"request": rendered_action, "reply": response.result}));
+        drop(stream);
+        server.await.unwrap();
+    }
+    // Windows resolves a bare `docker` through its system directories before
+    // PATH, so this fixture cannot hide a Docker the host installed. Leave the
+    // host's Docker out there; Linux and macOS keep its isolated answer.
+    if cfg!(windows) {
+        for entry in &mut exchange {
+            remove_host_docker(entry);
+        }
+    }
+    // Normalize JSON's escaped Windows separators before replacing roots.
+    let rendered = serde_json::to_string_pretty(&exchange)
+        .unwrap()
+        .replace("\\\\", "/")
+        .replace(
+            &mj_core::config::config_dir()
+                .to_string_lossy()
+                .replace('\\', "/"),
+            "<daemon-config>",
+        )
+        .replace(
+            &server_root.to_string_lossy().replace('\\', "/"),
+            "<server>",
+        )
+        .replace(
+            &server_root
+                .parent()
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/"),
+            "<server-parent>",
+        );
+    // Windows has its own runtime answers: no local bare target, and Podman
+    // only through WSL2.
+    if cfg!(windows) {
+        mj_core::golden::assert_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "daemon-api-exchange-windows",
+            &rendered,
+        );
+    } else {
+        mj_core::golden::assert_platform_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "daemon-api-exchange",
+            &rendered,
+        );
+    }
+}
+
+/// Drop every answer that depends on the host's Docker: its availability
+/// entry, its rejected-runtime row, and a local Docker target it allowed.
+fn remove_host_docker(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(serde_json::Value::Object(local)) = object.get_mut("local") {
+                local.remove("docker");
+            }
+            if let Some(serde_json::Value::Array(rejected)) = object.get_mut("rejected_runtimes") {
+                rejected.retain(|runtime| runtime["kind"] != "docker");
+            }
+            if let Some(serde_json::Value::Object(targets)) = object.get_mut("targets") {
+                targets.retain(|_, target| target["kind"] != "local-docker");
+            }
+            object.values_mut().for_each(remove_host_docker);
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(remove_host_docker),
+        _ => {}
+    }
+}
+
+/// Real OpenSSH is held in a proxy command. Closing a superseded completion
+/// must reap that command even after it emits more than a pipe buffer.
+#[cfg(unix)]
+#[tokio::test]
+async fn superseded_machine_completion_closes_connection_and_reaps_ssh() {
+    let root = tempfile::tempdir().unwrap();
+    let started = root.path().join("started");
+    let script = root.path().join("proxy.sh");
+    fs::write(
+        &script,
+        format!(
+            "head -c 131072 /dev/zero >&2\nprintf '%s' $$ > {}\nexec sleep 600\n",
+            mj_core::targets::posix_quote(&started.to_string_lossy())
+        ),
+    )
+    .unwrap();
+    let state = test_runtime_state();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let metadata = test_metadata(listener.local_addr().unwrap());
+    let server_metadata = metadata.clone();
+    let shutdown = CancellationToken::new();
+    let server_shutdown = shutdown.clone();
+    let mut server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        serve_client(stream, server_metadata, state, server_shutdown)
+            .await
+            .unwrap();
+    });
+    let mut stream = TcpStream::connect(metadata.address).await.unwrap();
+    let machine = mj_core::config::Machine::Ssh {
+        ssh: mj_core::config::SshConnection {
+            host: "machine-cancellation.invalid".into(),
+            user: None,
+            identity_file: None,
+            extra_args: vec![
+                "-o".into(),
+                format!(
+                    "ProxyCommand=sh {}",
+                    mj_core::targets::posix_quote(&script.to_string_lossy())
+                ),
+                "-o".into(),
+                "ControlMaster=no".into(),
+                "-o".into(),
+                "ControlPath=none".into(),
+            ],
+        },
+        workspace_prefix: "work".into(),
+        build_cache: None,
+    };
+    write_frame(
+        &mut stream,
+        &RequestEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: 1,
+            token: metadata.token,
+            action: DaemonAction::CompletePath {
+                host: mj_core::path_completion::CompletionHost::Machine(Box::new(machine)),
+                prefix: "~/projects".into(),
+                kind: mj_core::path_completion::CompletionKind::Directories,
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let started_result = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Ok(pid) = fs::read_to_string(&started)
+                && let Ok(pid) = pid.parse::<u32>()
+            {
+                break pid;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    // Always cancel/reap before a failed assertion can abandon the fixture.
+    drop(stream);
+    match tokio::time::timeout(Duration::from_secs(30), &mut server).await {
+        Ok(result) => result.unwrap(),
+        Err(_) => {
+            shutdown.cancel();
+            server.await.unwrap();
+            panic!("connection closure did not cancel completion");
+        }
+    }
+    let pid = started_result.expect("OpenSSH proxy never started");
+    assert!(
+        !daemon_process_is_alive(pid),
+        "superseded completion left its SSH proxy alive"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn daemon_upload_exchange() {
+    const CHILD: &str = "MJ_TEST_UPLOAD_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), "daemon_upload_exchange"),
+        )
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "upload-exchange")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::start_database_writer().unwrap();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let metadata = DaemonMetadata {
+        protocol_version: PROTOCOL_VERSION,
+        pid: 1,
+        address: listener.local_addr().unwrap(),
+        token: "upload-secret".into(),
+        started_at: "now".into(),
+        build_version: "test".into(),
+        instance_id: "upload-exchange".into(),
+        placement: DaemonPlacement::Host,
+    };
+    let server_metadata = metadata.clone();
+    let server = tokio::spawn(async move {
+        for (index, authenticated) in [true, false, true, false, true].into_iter().enumerate() {
+            if index == 4 {
+                assert!(crate::upgrade::gate().try_close());
+            }
+            let (stream, _) = listener.accept().await.unwrap();
+            let result = serve_client(
+                stream,
+                server_metadata.clone(),
+                test_runtime_state_loading_the_store(),
+                CancellationToken::new(),
+            )
+            .await;
+            assert_eq!(result.is_ok(), authenticated);
+            assert_eq!(
+                std::fs::read_dir(mj_core::config::data_dir().join("uploads"))
+                    .unwrap()
+                    .count(),
+                0
+            );
+        }
+    });
+    let mut partial = TcpStream::connect(metadata.address).await.unwrap();
+    write_frame(
+        &mut partial,
+        &RequestEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: 1,
+            token: metadata.token.clone(),
+            action: DaemonAction::UploadChunk {
+                bytes: vec![0; 96 * 1024],
+                sha256: None,
+            },
+        },
+    )
+    .await
+    .unwrap();
+    drop(partial);
+    let mut unauthorized = TcpStream::connect(metadata.address).await.unwrap();
+    write_frame(
+        &mut unauthorized,
+        &RequestEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: 1,
+            token: "wrong-token".into(),
+            action: DaemonAction::UploadChunk {
+                bytes: vec![0; 96 * 1024],
+                sha256: None,
+            },
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        read_frame::<ResponseEnvelope>(&mut unauthorized)
+            .await
+            .is_err()
+    );
+    assert!(
+        !mj_core::attachment::AttachmentStore::controller("upload-session")
+            .unwrap()
+            .root()
+            .exists()
+    );
+    // Exercise several transport fragments and the pipe-buffer boundary.
+    let mut bytes = vec![37; 192 * 1024];
+    bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+    let reference =
+        mj_core::attachment::AttachmentRef::new(&bytes, "image/png".into(), 256, 256).unwrap();
+    let mut client = DaemonClient::connect(metadata.clone()).await.unwrap();
+    let mut output = String::from("interrupted upload: no blob remains\n");
+    for label in ["install 196608 bytes", "repeat content-addressed install"] {
+        let blob = client.upload(&mut bytes.as_slice()).await.unwrap();
+        let reply = client
+            .request(DaemonAction::InstallAttachment {
+                session_id: "upload-session".into(),
+                reference: reference.clone(),
+                blob,
+            })
+            .await
+            .unwrap();
+        output.push_str(&format!(
+            "{label}: {}\n",
+            serde_json::to_string(&reply).unwrap()
+        ));
+    }
+    assert_eq!(
+        mj_core::attachment::AttachmentStore::controller("upload-session")
+            .unwrap()
+            .read(&reference)
+            .unwrap(),
+        bytes
+    );
+    let mut corrupt = bytes;
+    corrupt[100] ^= 1;
+    let blob = client.upload(&mut corrupt.as_slice()).await.unwrap();
+    let error = client
+        .request(DaemonAction::InstallAttachment {
+            session_id: "upload-session".into(),
+            reference,
+            blob,
+        })
+        .await
+        .unwrap_err();
+    output.push_str(&format!("corrupt payload: {error}\n"));
+    let error = client
+        .request(DaemonAction::ImportSession {
+            blob: "another-connections-blob".into(),
+            session: Box::new(runtime_test_session(
+                "import-session",
+                "default",
+                SessionState::Stopped,
+            )),
+            bundle: None,
+        })
+        .await
+        .unwrap_err();
+    output.push_str(&format!("import unknown blob: {error}\n"));
+    let staging = tempfile::tempdir().unwrap();
+    let archive_path = staging.path().join("import.zip");
+    let mut session = runtime_test_session("import-session", "default", SessionState::Stopped);
+    let verified = mj_checkpoint::archive::write_archive_atomic(
+        &archive_path,
+        &mj_checkpoint::archive::ArchiveInput {
+            session: mj_core::archive::SessionManifest {
+                id: session.id.clone(),
+                title: session.title.clone(),
+                harness_kind: session.harness_kind,
+                profile_id: session.last_profile.clone(),
+                native_session_id: "native-import".into(),
+                created_at: session.created_at.clone(),
+                checkpointed_at: session.created_at.clone(),
+                hel_version: "test".into(),
+                relay_version: "test".into(),
+                adapter_version: "test".into(),
+            },
+            target: mj_core::archive::TargetManifest {
+                template_id: "local".into(),
+                target_kind: "import".into(),
+                details: Default::default(),
+            },
+            bundle: mj_core::archive::BundleManifest {
+                id: session.bundle_id.clone(),
+                primary_repository: "repo".into(),
+            },
+            canonical_session: empty_archive_snapshot(),
+            native_artifacts: Vec::new(),
+            repositories: Vec::new(),
+        },
+    )
+    .unwrap();
+    session.checkpoint = Some(Box::new(mj_core::state::CheckpointMetadata {
+        archive_path: archive_path.clone(),
+        sha256: verified.archive_sha256,
+        created_at: session.created_at.clone(),
+        event_frontier: 0,
+    }));
+    let blob = client
+        .upload(&mut tokio::fs::File::open(&archive_path).await.unwrap())
+        .await
+        .unwrap();
+    let reply = client
+        .request(DaemonAction::ImportSession {
+            session: Box::new(session),
+            bundle: None,
+            blob,
+        })
+        .await
+        .unwrap();
+    output.push_str(&format!(
+        "import verified archive: {}\n",
+        serde_json::to_string(&reply).unwrap()
+    ));
+    assert!(
+        mj_core::config::sessions_dir()
+            .join("import-session.hel.zip")
+            .is_file()
+    );
+    let registered = client
+        .session_record("import-session".into())
+        .await
+        .unwrap()
+        .unwrap();
+    let reply = client
+        .request(DaemonAction::TranscriptionAvailable {
+            preferred_profile: "missing".into(),
+        })
+        .await
+        .unwrap();
+    output.push_str(&format!(
+        "transcription availability: {}\n",
+        serde_json::to_string(&reply).unwrap()
+    ));
+    let audio_blob = client
+        .upload(&mut vec![0; 196608].as_slice())
+        .await
+        .unwrap();
+    let error = client
+        .request(DaemonAction::TranscribeAudio {
+            preferred_profile: "missing".into(),
+            blob: audio_blob.clone(),
+        })
+        .await
+        .unwrap_err();
+    output.push_str(&format!("transcription without credential: {error}\n"));
+    let error = client
+        .request(DaemonAction::TranscribeAudio {
+            preferred_profile: "missing".into(),
+            blob: audio_blob,
+        })
+        .await
+        .unwrap_err();
+    output.push_str(&format!("transcription blob after refusal: {error}\n"));
+    let reply = client.request(DaemonAction::Ping).await.unwrap();
+    output.push_str(&format!(
+        "connection after refusal: {}\n",
+        serde_json::to_string(&reply).unwrap()
+    ));
+    client
+        .upload(&mut b"unconsumed blob".as_slice())
+        .await
+        .unwrap();
+    drop(client);
+    let mut corrupt_digest = TcpStream::connect(metadata.address).await.unwrap();
+    write_frame(
+        &mut corrupt_digest,
+        &RequestEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: 1,
+            token: metadata.token.clone(),
+            action: DaemonAction::UploadChunk {
+                bytes: vec![1; 96 * 1024],
+                sha256: Some("wrong".into()),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        read_frame::<ResponseEnvelope>(&mut corrupt_digest)
+            .await
+            .is_err()
+    );
+    // Inspect raw replies: DaemonClient intentionally reconnects after UpgradePending.
+    async fn exchange(
+        stream: &mut TcpStream,
+        metadata: &DaemonMetadata,
+        action: DaemonAction,
+    ) -> DaemonReply {
+        write_frame(
+            stream,
+            &RequestEnvelope {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: 1,
+                token: metadata.token.clone(),
+                action,
+            },
+        )
+        .await
+        .unwrap();
+        read_frame::<ResponseEnvelope>(stream)
+            .await
+            .unwrap()
+            .result
+            .unwrap()
+    }
+    // Hard-won: blob storage admission prevented management connections during handoff.
+    let mut management = TcpStream::connect(metadata.address).await.unwrap();
+    assert!(matches!(
+        exchange(&mut management, &metadata, DaemonAction::Ping).await,
+        DaemonReply::Pong
+    ));
+    use sha2::Digest as _;
+    let bytes = std::fs::read(&archive_path).unwrap();
+    let digest = mj_core::hex::lower_hex(sha2::Sha256::digest(&bytes));
+    let DaemonReply::BlobUploaded(blob) = exchange(
+        &mut management,
+        &metadata,
+        DaemonAction::UploadChunk {
+            bytes,
+            sha256: Some(digest),
+        },
+    )
+    .await
+    else {
+        panic!("expected blob");
+    };
+    // Hard-won: #1514: archive preparation held daemon handoff admission.
+    let reply = exchange(
+        &mut management,
+        &metadata,
+        DaemonAction::ImportSession {
+            session: Box::new(registered),
+            bundle: None,
+            blob,
+        },
+    )
+    .await;
+    output.push_str(&format!(
+        "import during handoff: {}\n",
+        serde_json::to_string(&reply).unwrap()
+    ));
+    let remaining = std::fs::read_dir(mj_core::config::sessions_dir())
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .filter(|entry| entry.file_type().unwrap().is_file())
+        .map(|entry| entry.file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        remaining,
+        vec![std::ffi::OsString::from("import-session.hel.zip")]
+    );
+    assert_eq!(
+        output,
+        include_str!("../../tests/golden/daemon-upload-exchange.txt")
+    );
+    drop(management);
+    server.await.unwrap();
+}
+
+// Hard-won: #1514: admitted mbx downloads kept daemon handoff waiting for minutes.
+// The pinned mbx executable installs only on Linux container hosts.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn mbx_preparation_cancels_on_handoff_and_disconnect_before_removing_staging() {
+    const CHILD: &str = "MJ_MBX_CANCELLATION_ROOT";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let bin = root.path().join("bin");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        std::os::unix::fs::symlink("/bin/sh", bin.join("sh")).unwrap();
+        std::os::unix::fs::symlink("/usr/bin/uname", bin.join("uname")).unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "mbx_preparation_cancels_on_handoff_and_disconnect_before_removing_staging",
+            ),
+        )
+        .env(CHILD, root.path())
+        .env("MJ_INSTANCE", "mbx-cancellation")
+        .env("HOME", &home)
+        .env("PATH", &bin)
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let root = PathBuf::from(std::env::var_os(CHILD).unwrap());
+    let download_server = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    crate::controller::MBX_TEST_RELEASE_URL
+        .set(format!(
+            "http://{}/archive",
+            download_server.local_addr().unwrap()
+        ))
+        .unwrap();
+    for handoff in [true, false] {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let metadata = test_metadata(listener.local_addr().unwrap());
+        let server_metadata = metadata.clone();
+        let shutdown = CancellationToken::new();
+        let server_shutdown = shutdown.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_client(
+                stream,
+                server_metadata,
+                test_runtime_state(),
+                server_shutdown,
+            )
+            .await
+        });
+        let mut client = TcpStream::connect(metadata.address).await.unwrap();
+        write_frame(
+            &mut client,
+            &RequestEnvelope {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: 1,
+                token: metadata.token,
+                action: DaemonAction::InstallMbx {
+                    machine: mj_core::config::Machine::Local { build_cache: None },
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let download =
+            tokio::time::timeout(Duration::from_secs(30), download_server.accept()).await;
+        if download.is_err() {
+            shutdown.cancel();
+            server.await.unwrap().unwrap();
+            panic!("mbx download never reached HTTP fixture");
+        }
+        let (mut download, _) = download.unwrap().unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            request.push(download.read_u8().await.unwrap());
+        }
+        // The body remains incomplete. The real reqwest future must be dropped on cancellation.
+        download
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\n\r\n")
+            .await
+            .unwrap();
+        download.write_all(&vec![b'x'; 131072]).await.unwrap();
+        assert!(
+            !crate::upgrade::active_labels()
+                .iter()
+                .any(|label| label.contains("mbx installation"))
+        );
+        if handoff {
+            shutdown.cancel();
+            let response: ResponseEnvelope = read_frame(&mut client).await.unwrap();
+            assert!(response.result.unwrap_err().contains("cancel"));
+        } else {
+            drop(client);
+        }
+        server.await.unwrap().unwrap();
+        let mut remaining = Vec::new();
+        // A dropped response closes the incomplete HTTP body, instead of waiting for its deadline.
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            download.read_to_end(&mut remaining),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            fs::read_dir(mj_core::config::data_dir().join("mbx-download"))
+                .unwrap()
+                .count(),
+            0
+        );
+        assert!(!root.join("home/.local/bin/mbx").exists());
+    }
+}
+
+#[tokio::test]
+async fn dismiss_notification_refuses_a_stale_target_before_dispatch() {
+    let state = test_runtime_state();
+    let error = state
+        .dismiss_notification(
+            "session-no-longer-current".into(),
+            mj_core::attention::NotificationDismissal::Question(
+                mj_core::assessment::InferredQuestion {
+                    turn_id: "stale".into(),
+                    completed_ordinal: 10,
+                },
+            ),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("notification is no longer current")
+    );
+}
+
+/// The whole dismiss seam: a served question target, the daemon operation the
+/// web and TUI menus call, and the next view the worker publishes once the
+/// command lands. The attention must drop so the card glyph clears.
+#[tokio::test]
+async fn dismiss_notification_clears_the_served_question_attention() {
+    const CHILD: &str = "MJ_TEST_DISMISS_CLEARS_ATTENTION";
+    if std::env::var_os(CHILD).is_none() {
+        let root = tempfile::tempdir().unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(
+                module_path!(),
+                "dismiss_notification_clears_the_served_question_attention",
+            ),
+        )
+        .env(CHILD, "1")
+        .env("MJ_INSTANCE", "dismiss-clears-attention")
+        .isolated_store(root.path())
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let question = mj_core::assessment::InferredQuestion {
+        turn_id: "turn-1".into(),
+        completed_ordinal: 9,
+    };
+    let record = runtime_test_session(
+        "session-1",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Running,
+    );
+    crate::database::save_session(&record).unwrap();
+    let mut applied = mj_core::state::MaterializedSession::empty("session-1");
+    applied.applied_event_ordinal = question.completed_ordinal;
+    applied.applied_event_digest = "11".repeat(32);
+    crate::database::save_materialized_session(&applied).unwrap();
+
+    let mut manager = TestRemoteManager::new().await;
+    let recovery = crate::recovery::RecoveryCoordinator::spawn(manager.control.clone());
+    let upgrades = crate::worker_upgrade::WorkerUpgradeCoordinator::spawn(
+        manager.control.clone(),
+        &recovery.observer(),
+    );
+    let state = Arc::new(RuntimeState::new(
+        manager.control.clone(),
+        Controller {
+            config: runtime_test_config(),
+            state: Default::default(),
+        },
+        recovery.observer(),
+        upgrades.observer(),
+        Vec::new(),
+    ));
+    state.owner().edit_sessions(|sessions| {
+        sessions.insert(record.id.clone(), record);
+    });
+    state
+        .owner()
+        .install_relay_sessions(["session-1".to_owned()].into());
+
+    let question_view = |dismissed: bool| {
+        let mut view = ready_startup_view();
+        let snapshot = view.snapshot.as_mut().unwrap();
+        snapshot.materialized.applied_event_ordinal = question.completed_ordinal;
+        snapshot.materialized.applied_event_digest = "11".repeat(32);
+        snapshot.materialized.execution = mj_core::state::MaterializedExecutionState::Idle;
+        snapshot.window = mj_core::state::ProjectionWindow::of(&snapshot.materialized);
+        snapshot.operational.person_input_through = if dismissed { 10 } else { 0 };
+        snapshot.operational.open_request =
+            (!dismissed).then(|| mj_core::assessment::OpenRequest {
+                question: question.clone(),
+                question_message: None,
+            });
+        view
+    };
+    state
+        .publish_session("session-1".into(), question_view(false))
+        .await
+        .unwrap();
+    let served = state.runtime_publication().unwrap();
+    assert_eq!(
+        served.metadata.session_attention["session-1"],
+        mj_core::attention::SessionAttention::NeedsInput
+    );
+    let target = served
+        .metadata
+        .notification_dismissals
+        .get("session-1")
+        .cloned()
+        .expect("a needs-input session serves its dismissal target");
+    assert_eq!(
+        target,
+        mj_core::attention::NotificationDismissal::Question(question.clone())
+    );
+
+    let answerer = tokio::spawn(async move {
+        let request = tokio::time::timeout(Duration::from_secs(5), manager.requests.recv())
+            .await
+            .expect("the dismissal submit reached the worker bridge")
+            .expect("request bridge open");
+        let crate::session_manager::RemoteSessionRequest::Submit {
+            command_id,
+            command,
+            reply,
+            ..
+        } = request
+        else {
+            panic!("the dismissal is a submit");
+        };
+        assert_eq!(command_id, "dismiss-question-9");
+        assert!(
+            matches!(command, RelayCommand::DismissQuestion { .. }),
+            "{command:?}"
+        );
+        let _ = reply.send(Ok(10));
+    });
+    let ordinal = state
+        .dismiss_notification("session-1".into(), target)
+        .await
+        .unwrap();
+    assert_eq!(ordinal, 10);
+    answerer.await.unwrap();
+
+    // The worker's next view closes the request; the publication must lower
+    // the attention it serves, which is what clears the card glyph.
+    state
+        .publish_session("session-1".into(), question_view(true))
+        .await
+        .unwrap();
+    let cleared = state.runtime_publication().unwrap();
+    assert_eq!(
+        cleared.metadata.session_attention["session-1"],
+        mj_core::attention::SessionAttention::Idle
+    );
+    assert!(
+        !cleared
+            .metadata
+            .notification_dismissals
+            .contains_key("session-1")
+    );
+    // Recorded failures use the same action without a worker: the database
+    // writer publishes committed records before replying, and owner() observes
+    // that publication before attention is projected.
+    let mut failed = runtime_test_session(
+        "resume-failure",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Stopped,
+    );
+    failed.last_error = Some("resume failed: operation cancelled".into());
+    crate::database::save_session(&failed).unwrap();
+    let served = state.runtime_publication().unwrap();
+    assert_eq!(
+        served.metadata.session_attention[&failed.id],
+        mj_core::attention::SessionAttention::Failed
+    );
+    let target = served.metadata.notification_dismissals[&failed.id].clone();
+    // Hard-won: 0db309adc: a delayed dismissal accepted a repeated identical failure.
+    failed.state = SessionState::Provisioning;
+    crate::database::save_session(&failed).unwrap();
+    failed.state = SessionState::Stopped;
+    crate::database::save_session(&failed).unwrap();
+    let error = state
+        .dismiss_notification(failed.id.clone(), target)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("notification is no longer current")
+    );
+    let served = state.runtime_publication().unwrap();
+    assert_eq!(
+        served.metadata.session_attention[&failed.id],
+        mj_core::attention::SessionAttention::Failed
+    );
+    let target = served.metadata.notification_dismissals[&failed.id].clone();
+
+    assert!(matches!(
+        target,
+        mj_core::attention::NotificationDismissal::Failure(_)
+    ));
+    state
+        .dismiss_notification(failed.id.clone(), target)
+        .await
+        .unwrap();
+    let dismissed = state.runtime_publication().unwrap();
+    assert_eq!(
+        dismissed.metadata.session_attention[&failed.id],
+        mj_core::attention::SessionAttention::Inactive
+    );
+    assert!(
+        !dismissed
+            .metadata
+            .notification_dismissals
+            .contains_key(&failed.id)
+    );
+    failed.title = "renamed failure".into();
+    crate::database::save_session(&failed).unwrap();
+    assert_eq!(
+        state
+            .runtime_publication()
+            .unwrap()
+            .metadata
+            .session_attention[&failed.id],
+        mj_core::attention::SessionAttention::Inactive
+    );
+    failed.last_error = Some("resume failed: different failure".into());
+    crate::database::save_session(&failed).unwrap();
+    let renewed = state.runtime_publication().unwrap();
+    assert_eq!(
+        renewed.metadata.session_attention[&failed.id],
+        mj_core::attention::SessionAttention::Failed
+    );
+    assert!(
+        renewed
+            .metadata
+            .notification_dismissals
+            .contains_key(&failed.id)
+    );
 }

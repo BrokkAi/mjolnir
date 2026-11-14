@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeSet;
 
 #[cfg(test)]
 thread_local! {
@@ -193,6 +194,22 @@ impl ViewerSnapshot {
         records: impl Iterator<Item = &'a mj_core::state::SessionRecord>,
         children: &ViewerChildren,
     ) -> Self {
+        // Snapshot-local interning shares storage without caching compatibility decisions.
+        let targets: Vec<Arc<str>> = config
+            .targets
+            .keys()
+            .map(|id| Arc::from(id.as_str()))
+            .collect();
+        let mut reasons = BTreeSet::<Arc<str>>::new();
+        let mut target_lists = BTreeSet::<Arc<[Arc<str>]>>::new();
+        let mut intern_list = |ids: Vec<Arc<str>>| {
+            if let Some(existing) = target_lists.get(ids.as_slice()) {
+                return existing.clone();
+            }
+            let shared: Arc<[Arc<str>]> = ids.into();
+            target_lists.insert(shared.clone());
+            shared
+        };
         let sessions = records
             .map(|session| {
                 #[cfg(test)]
@@ -200,18 +217,33 @@ impl ViewerSnapshot {
                 let checkout = state
                     .checkout(&session.id)
                     .expect("viewer session has a valid checkout owner");
-                let resume_refusals = config
-                    .targets
-                    .keys()
+                let resume_refusals = targets
+                    .iter()
                     .filter_map(|target_id| {
                         crate::controller::resume_compatibility_with_checkout(
                             session, &checkout, config, target_id,
                         )
                         .err()
-                        .map(|reason| (target_id.clone(), reason))
+                        .map(|reason| {
+                            let shared = if let Some(existing) = reasons.get(reason.as_str()) {
+                                existing.clone()
+                            } else {
+                                let shared: Arc<str> = reason.into();
+                                reasons.insert(shared.clone());
+                                shared
+                            };
+                            (target_id.clone(), shared)
+                        })
                     })
                     .collect::<BTreeMap<_, _>>();
-                let incompatible = resume_refusals.keys().cloned().collect::<Vec<_>>();
+                let incompatible = intern_list(resume_refusals.keys().cloned().collect());
+                let compatible = intern_list(
+                    targets
+                        .iter()
+                        .filter(|id| !resume_refusals.contains_key(*id))
+                        .cloned()
+                        .collect(),
+                );
                 let lifecycle = ViewerLifecycleCategory::of(session.state);
                 // A sub-agent child works in its parent's checkout and owns no
                 // worktree, so its project identity has to come from the
@@ -238,8 +270,12 @@ impl ViewerSnapshot {
                     .review
                     .for_session(state.effective_review_or_off(&session.id));
                 ViewerSession {
+                    attention: Default::default(),
+                    unread_frontier: None,
+                    notification_dismissal: None,
+                    notifications_ignored: session.notifications_ignored,
                     oracle: session.oracle,
-                    oracle_choice: session.oracle_choice.clone(),
+                    oracle_choice: session.oracle_choice.clone().map(|v| *v),
                     subagents: session.subagents.clone().unwrap_or_default(),
                     at: start.at,
                     branch: start.branch,
@@ -250,6 +286,7 @@ impl ViewerSnapshot {
                     targeted_turn_control_supported: false,
                     turn_controls: None,
                     native_subagents: Vec::new(),
+                    native_subagent_attention: Default::default(),
                     steering: None,
                     active_prompt_id: None,
                     cancelling_prompt_id: None,
@@ -316,20 +353,14 @@ impl ViewerSnapshot {
                     pending_elicitations: Vec::new(),
                     conversation_available: false,
                     prompt_images_supported: false,
-                    incompatible_resume_targets: incompatible.clone(),
+                    incompatible_resume_targets: incompatible,
                     resume_refusals,
-                    compatible_resume_targets: config
-                        .targets
-                        .keys()
-                        .filter(|target_id| !incompatible.contains(*target_id))
-                        .cloned()
-                        .collect(),
+                    compatible_resume_targets: compatible,
                     project_label: source.short,
                     project_key: project_key(&source.key),
                     display_location: project.project_target(config, &session.target_template_id),
-                    container_cpus: session.container_cpus.clone(),
-                    container_memory: session.container_memory.clone(),
                     additional_mounts: session.additional_mounts.clone(),
+                    resource_allocation: session.resource_allocation.clone(),
                     lifecycle,
                     transitioning: session.state.transition_kind().is_some(),
                     latest_event_ordinal: 0,
@@ -350,11 +381,12 @@ impl ViewerSnapshot {
                     config_options: Vec::new(),
                     plan_mode_active: None,
                     turn_review: None,
-                    available_commands: Vec::new(),
+                    available_commands: Default::default(),
                     // What the durable record alone can justify. The phone server
                     // widens these once it knows whether the session manager holds
                     // the session and what the agent has advertised.
                     capabilities: ViewerSessionCapabilities {
+                        dismiss_notification: false,
                         clear_context: false,
                         open: false,
                         read_history: false,
@@ -385,6 +417,14 @@ impl ViewerSnapshot {
             .map(|(id, profile)| ViewerProfile {
                 id: id.to_owned(),
                 harness_kind: profile.kind.id().into(),
+                quota_pools: if profile.kind == mj_core::config::HarnessKind::Antigravity {
+                    mj_client::quota::AntigravityQuotaPool::ALL
+                        .into_iter()
+                        .map(|pool| pool.label().to_owned())
+                        .collect()
+                } else {
+                    Vec::new()
+                },
                 capabilities_key: profile.capabilities_key(id),
                 quota: None,
             })
@@ -509,6 +549,15 @@ impl ViewerSession {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewerSession {
+    #[serde(default)]
+    pub attention: mj_core::attention::SessionAttention,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread_frontier: Option<u64>,
+    #[serde(default)]
+    pub notification_dismissal: Option<mj_core::attention::NotificationDismissal>,
+    /// The session raises no notifications; its attention still renders.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub notifications_ignored: bool,
     #[serde(default = "oracle_default_enabled")]
     pub oracle: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -545,21 +594,23 @@ pub struct ViewerSession {
     #[serde(default)]
     pub targeted_turn_control_supported: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub turn_controls: Option<mj_core::relay::TurnControls>,
+    pub turn_controls: Option<Box<mj_core::relay::TurnControls>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub native_subagents: Vec<mj_core::native_agent::NativeAgent>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub native_subagent_attention: BTreeMap<String, mj_core::attention::SessionAttention>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub steering: Option<mj_core::relay::SteeringOperation>,
+    pub steering: Option<Box<mj_core::relay::SteeringOperation>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_prompt_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancelling_prompt_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capacity_retry: Option<mj_core::relay::CapacityRetry>,
+    pub capacity_retry: Option<Box<mj_core::relay::CapacityRetry>>,
     #[serde(default)]
     pub retry_assessment_pending: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quota_recovery: Option<mj_core::continuation::QuotaRecovery>,
+    pub quota_recovery: Option<Box<mj_core::continuation::QuotaRecovery>>,
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publication_state: Option<mj_core::state::PublicationState>,
@@ -646,18 +697,18 @@ pub struct ViewerSession {
     ///
     /// Retained beside `compatible_resume_targets` so a viewer cached from
     /// before that field existed keeps working through a deployment.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub incompatible_resume_targets: Vec<String>,
+    #[serde(default, skip_serializing_if = "<[_]>::is_empty")]
+    pub incompatible_resume_targets: Arc<[Arc<str>]>,
     /// The controller's reason for each id in `incompatible_resume_targets`.
     /// It names project paths and SSH hosts, so it is never serialized: only
     /// in-process validation reads it, to tell the caller why a resume or move
     /// was refused.
     #[serde(skip)]
-    pub resume_refusals: BTreeMap<String, String>,
+    pub resume_refusals: BTreeMap<Arc<str>, Arc<str>>,
     /// Target ids this session can resume on, so the browser never has to
     /// subtract one set from another to find out.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub compatible_resume_targets: Vec<String>,
+    #[serde(default, skip_serializing_if = "<[_]>::is_empty")]
+    pub compatible_resume_targets: Arc<[Arc<str>]>,
     /// The canonical short source label for this session: a bundle name, path
     /// leaf, or repository name, never a source path itself.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -671,18 +722,12 @@ pub struct ViewerSession {
     /// same target projection the terminal uses while a session is running.
     #[serde(default)]
     pub display_location: String,
-    /// Per-session container CPU limit overriding the target template's. It
-    /// is applied the next time the session's container is created.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub container_cpus: Option<String>,
-    /// Per-session container memory limit overriding the target template's.
-    /// It is applied the next time the session's container is created.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub container_memory: Option<String>,
     /// Extra directories attached to this session's container, in the same
     /// persisted shape the terminal's container dialog edits.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_mounts: Vec<AdditionalMount>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_allocation: Option<SessionResourceAllocation>,
     pub lifecycle: ViewerLifecycleCategory,
     /// A lifecycle transition temporarily owns this session's conversation.
     /// This remains separate from the coarse lifecycle category so Move can
@@ -710,12 +755,12 @@ pub struct ViewerSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity_details: Option<ViewerActivityDetails>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operation: Option<ViewerOperation>,
+    pub operation: Option<Box<ViewerOperation>>,
     /// Safe recovery choices for a failed or cancelled Move. Diagnostics and
     /// checkpoint paths remain on the controller; this contains only the
     /// settings a person may choose again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub move_recovery: Option<ViewerMoveRecovery>,
+    pub move_recovery: Option<Box<ViewerMoveRecovery>>,
     #[serde(default)]
     pub chat_phase: ViewerChatPhase,
     /// Known live activity is idle: no foreground turn, tool, or background work.
@@ -748,12 +793,12 @@ pub struct ViewerSession {
     /// The review the daemon is running for this session, if any. A phone
     /// renders the same review the terminal does and resolves it the same way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub turn_review: Option<ViewerTurnReview>,
+    pub turn_review: Option<Box<ViewerTurnReview>>,
     /// The Mjolnir commands this session accepts, published rather than hardcoded
     /// in the browser: a command list kept in two places is a command list that
     /// drifts, which is how `/review` went missing from the phone.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub available_commands: Vec<ViewerMjCommand>,
+    pub available_commands: Arc<Vec<ViewerMjCommand>>,
     pub capabilities: ViewerSessionCapabilities,
 }
 
@@ -859,8 +904,16 @@ impl ViewerMoveRecovery {
                 .selection
                 .additional_mounts
                 .clone()
-                .unwrap_or_default(),
-            destination_resource_allocation: operation.selection.resource_allocation.clone(),
+                .unwrap_or_else(|| operation.inherited_additional_mounts.clone()),
+            destination_resource_allocation: if operation.selection.clear_resource_allocation {
+                None
+            } else {
+                operation
+                    .selection
+                    .resource_allocation
+                    .clone()
+                    .or_else(|| operation.inherited_resource_allocation.clone())
+            },
             checkpoint_retained: operation.checkpoint_retained(),
             environment_retained: operation.holds_source_environment(),
             destination_ready: operation.destination_target.is_some()
@@ -1024,6 +1077,9 @@ pub struct ViewerProfile {
     #[serde(default)]
     pub capabilities_key: String,
     pub harness_kind: String,
+    /// Rows exist before the first reading and survive a failed quota probe.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quota_pools: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota: Option<ViewerQuota>,
 }
@@ -1037,6 +1093,9 @@ pub struct ViewerProfile {
 #[serde(deny_unknown_fields)]
 pub struct ViewerQuotaWindow {
     pub label: String,
+    /// Independent model pool, displayed as a separate row for the profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resets_at_epoch_seconds: Option<i64>,
     #[serde(default)]
@@ -1258,6 +1317,8 @@ pub struct ViewerSessionCapabilities {
     pub suspend: bool,
     pub destroy: bool,
     pub rename: bool,
+    #[serde(default)]
+    pub dismiss_notification: bool,
     pub resume: bool,
     /// Prepare and confirm a daemon-owned move to a compatible profile or
     /// target. The browser must never compose Stop and Resume itself.

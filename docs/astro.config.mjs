@@ -3,7 +3,7 @@ import starlight from '@astrojs/starlight';
 import { defineConfig } from 'astro/config';
 import rehypeBasePathLinks from './rehype-base-path-links.mjs';
 
-const site = process.env.PUBLIC_DOCS_SITE ?? 'https://mjolnir.brokk.ai/';
+const site = process.env.PUBLIC_DOCS_SITE ?? 'https://mjolnir.slopcop.com/';
 const productionBase = process.env.PUBLIC_DOCS_BASE ?? '/';
 const isDev = process.argv.includes('dev');
 const base = isDev ? '/' : productionBase;
@@ -95,7 +95,8 @@ export default defineConfig({
           items: [
             { label: 'Terminal surface', slug: 'terminal-surface' },
             { label: 'Daemon in a container', slug: 'daemon-container' },
-            { label: 'Web viewer and desktop app', slug: 'web-viewer' },
+            { label: 'Daemon over SSH', slug: 'daemon-ssh' },
+            { label: 'Web viewer', slug: 'web-viewer' },
             { label: 'Code review', slug: 'turn-review' },
             { label: 'Durability and recovery', slug: 'durability' },
           ],

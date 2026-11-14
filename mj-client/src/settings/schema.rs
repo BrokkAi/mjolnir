@@ -6,7 +6,7 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
     let key = path.last().map(String::as_str).unwrap_or("");
     match path.first().map(String::as_str).unwrap_or("") {
         "" => {
-            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{},"continuation":{}, "github":{}, "jev":{}, "quota":{}, "daemon":{}, "sessionwiki":{}, "subagents":{}, "keys":{"prefix":mj_core::config::DEFAULT_PREFIX}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
+            json!({"sessions_side":"left", "spinner":"scan", "theme":"midnight", "advanced":{}, "notify":{}, "phone":{}, "review":{}, "github":{}, "jev":{}, "quota":{}, "daemon":{}, "sessionwiki":{}, "subagents":{}, "keys":{"prefix":mj_core::config::DEFAULT_PREFIX}, "profiles":{}, "machines":{}, "targets":{}, "bundles":{}})
         }
         "phone" => {
             json!({"enabled":true,"bind":mj_core::config::PhoneConfig::default().bind,"tailscale_detect":true,"tls_cert":null,"tls_key":null})
@@ -23,11 +23,10 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
         // Only the section itself: its reviewer entries are SubagentChoice
         // tables, which reject unknown keys.
         "review" if path.len() == 1 => json!({}),
-        "continuation" => json!({"enabled":true}),
         "github" if path.len() == 1 => json!({"watch":{}}),
         "github" if key == "watch" => {
             let watch = mj_core::config::GithubWatchConfig::default();
-            json!({"enabled":watch.enabled,"interval_seconds":watch.interval_seconds,"api_base":watch.api_base})
+            json!({"enabled":watch.enabled,"use_gpu":watch.use_gpu,"interval_seconds":watch.interval_seconds,"api_base":watch.api_base})
         }
         "jev" => json!({"enabled":true}),
         "quota" => json!({"runtime":"auto"}),
@@ -44,7 +43,7 @@ pub fn defaults(path: &[String], value: &Value) -> Value {
             json!({"model":null,"effort":null})
         }
         "profiles" if path.len() == 2 => {
-            json!({"enabled":true,"kind":"codex","home":"","environment":{},"context_window_bytes":null,"guardian_review_model":null,"codex_profile":null,"models":[]})
+            json!({"enabled":true,"kind":"codex","home":"","environment":{},"context_window_bytes":null,"guardian_review_model":null,"codex_profile":null,"claude_permission_mode":null,"models":[]})
         }
         "machines" if path.len() == 2 => machine_defaults(value["kind"].as_str().unwrap_or("ssh")),
         // The build cache is its own page, and the saved file keeps only the
@@ -258,8 +257,8 @@ pub fn label(key: &str) -> String {
         "theme" => "Theme",
         "phone" => "Web Access",
         "review" => "Code Review",
-        "continuation" => "Continuation",
         "watch" => "Watcher",
+        "use_gpu" => "Use GPU for GitHub relevance",
         "jev" => "Jev (hosted service)",
         "quota" => "Quota checks",
         "daemon" => "Daemon",
@@ -290,6 +289,7 @@ pub fn label(key: &str) -> String {
         "context_window_bytes" => "Context budget (bytes)",
         "guardian_review_model" => "Guardian review model",
         "codex_profile" => "Codex profile",
+        "claude_permission_mode" => "Claude permission mode",
         "models" => "Offered models",
         "bind" => "Listen address and port",
         "tailscale_detect" => "Detect Tailscale",
@@ -427,6 +427,7 @@ pub fn null_label(path: &[String], draft: &Value) -> String {
             mj_core::config::GUARDIAN_REVIEW_NEWEST_FLASH.to_owned()
         }
         ["profiles", _, "codex_profile"] => "None — config.toml only".to_owned(),
+        ["profiles", _, "claude_permission_mode"] => "Auto".to_owned(),
         _ => "Not set".to_owned(),
     }
 }
@@ -512,17 +513,6 @@ pub fn section_summary(
                 "Before push · automatic reviewers".to_owned()
             } else {
                 "Off".to_owned()
-            }
-        }
-        "continuation" => {
-            if section["enabled"] == Value::Bool(false) {
-                "Off".to_owned()
-            } else if !jev_enabled(draft) {
-                // `Config::automatic_continuation_enabled`: the classifier
-                // that judges each reply is Jev, so without it nothing runs.
-                "Off · Jev is off (Privacy)".to_owned()
-            } else {
-                "On · 3 continuations plus quota recovery".to_owned()
             }
         }
         "github" => {
@@ -621,6 +611,18 @@ pub fn choice_label(path: &[String], value: &Value, draft: &Value) -> String {
     // A machine id is shown as the user named it.
     if path.last().is_some_and(|key| key == "machine") {
         return value.to_owned();
+    }
+    if path
+        .last()
+        .is_some_and(|key| key == "claude_permission_mode")
+    {
+        return match value {
+            "auto" => "Auto",
+            "accept-edits" => "Accept edits",
+            "manual" => "Manual",
+            _ => value,
+        }
+        .to_owned();
     }
     match value {
         "native" => "Native",
@@ -738,6 +740,7 @@ pub fn choices(path: &[String], draft: &Value) -> Vec<Value> {
         "mode" if path.first().is_some_and(|key| key == "notify") => &["off", "terminal", "system"],
         "spinner" => &[], // Use the canonical animation list below.
         "permissions" => &["guardian", "yolo"],
+        "claude_permission_mode" => &["auto", "accept-edits", "manual"],
         "pull_policy" => &["auto", "always", "newer", "missing", "never"],
         "address_source" => &["public-dns", "public-ip", "private-dns", "private-ip"],
         "kind" if path.iter().any(|key| key == "workspace_storage") => {
@@ -801,8 +804,8 @@ fn jev_enabled(draft: &Value) -> bool {
 }
 
 /// The description drawn above the page `path`: its [`help`], except where
-/// another setting in the draft changes what the page does. Continuation
-/// cannot run while Jev is off, whatever its own box says.
+/// another setting in the draft changes what the page does. The GitHub
+/// watcher cannot run while Jev is off, whatever its own box says.
 pub fn page_help(path: &[String], draft: &Value) -> &'static str {
     page_specific_help(path, draft).unwrap_or_else(|| help(path))
 }
@@ -818,9 +821,6 @@ pub fn page_specific_help(path: &[String], draft: &Value) -> Option<&'static str
                     .any(|task| draft["_subagent_options"][task].is_null())) =>
         {
             "Discovering available subagent models. Unset models remain None until you choose one."
-        }
-        [section] if section == "continuation" && !jev_enabled(draft) => {
-            "Off because Jev is off: continuation needs Jev to judge each reply. Turn Jev on under Privacy to use it."
         }
         [section] | [section, _]
             if section == "github"
@@ -870,6 +870,11 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
         .collect::<Vec<_>>()
         .as_slice()
     {
+        ["github", "watch", "use_gpu"] => {
+            return Some(
+                "Automatically use a GPU only when it runs faster than the CPU. Turn off for CPU-only GitHub relevance scoring. Device failures select CPU and report a notice.",
+            );
+        }
         ["github"] | ["github", "watch"] => {
             return Some(
                 "Receive GitHub activity selected by Jev. This switch controls only the GitHub event source. Mailbox hooks, peer messages and child reports remain available at tool boundaries and through idle wakes.",
@@ -905,7 +910,7 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
             "Add an SSH host or EC2 launch template; saving one adds its runtimes. Its runtimes share its build cache settings."
         }
         "targets" => {
-            "Add a runtime and choose its machine, or use Detect runtimes to find what every machine can run."
+            "Add a runtime and choose its machine, or use Detect runtimes to probe every machine. Add SSH hosts under Machines."
         }
         "machine" => "Which machine this runtime runs on.",
         "phone" => {
@@ -950,9 +955,6 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
             "Set either a local repository directory or a GitHub source for each repository."
         }
         "review" => "Reviewers for code review before push. With no reviewers, review is off.",
-        "continuation" => {
-            "Continue an unfinished request up to three times per message, and resume a session after its quota resets."
-        }
         "quota" => {
             "Codex, Grok and Claude quota checks start the agent. Auto runs it on this machine when the agent is installed here, else in your local Podman or Docker runtime's image when one is enabled."
         }
@@ -972,7 +974,7 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
             "Directories the daemon container sees, beside your home, Mjolnir's data and settings, and /tmp. Add local projects kept elsewhere."
         }
         "jev" => {
-            "Sends turn and help-search text to a hosted classifier. Off stops it; running sessions follow after a resume or restart."
+            "Sends turn text to a hosted classifier; quota recovery needs it. Off stops both; sessions follow on resume or restart."
         }
         "sessionwiki" => {
             "Sessions are always indexed into SessionWiki. This page sets archiving; the row below shows what it frees."
@@ -1015,6 +1017,9 @@ pub fn specific_help(path: &[String]) -> Option<&'static str> {
         }
         "codex_profile" => {
             "Codex only: the name of a profile file in the account directory, such as ds for ds.config.toml, layered over config.toml like codex -p ds."
+        }
+        "claude_permission_mode" => {
+            "How new sessions on runtimes that ask for approvals handle Claude's permissions. Auto: Claude's classifier approves or denies each action. Accept edits: file edits run, everything else asks you. Manual: every action that needs permission asks you. Runtimes that allow all actions always bypass permissions."
         }
         _ => return None,
     })

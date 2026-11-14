@@ -51,7 +51,8 @@ impl From<&TargetLocator> for SessionHost {
             | TargetLocator::SshBare { .. }
             | TargetLocator::SshPodman { .. }
             | TargetLocator::SshDocker { .. }
-            | TargetLocator::SshAppleContainer { .. } => Self::Isolated,
+            | TargetLocator::SshAppleContainer { .. }
+            | TargetLocator::SshNitro { .. } => Self::Isolated,
         }
     }
 }
@@ -68,7 +69,8 @@ impl From<&mj_core::config::TargetTemplate> for SessionHost {
             | T::SshBare { .. }
             | T::SshPodman { .. }
             | T::SshDocker { .. }
-            | T::SshAppleContainer { .. } => Self::Isolated,
+            | T::SshAppleContainer { .. }
+            | T::SshNitro { .. } => Self::Isolated,
         }
     }
 }
@@ -237,12 +239,10 @@ pub(crate) fn resolve(source: &AwsCredentialSource) -> Result<AwsCredentialSourc
     let mut source = source.clone();
     // Codex can select its AWS profile inside the provider table.
     if let Some(selection) = &source.selection
-        && let Some(config) = mj_core::codex_provider::ConfigFiles::read_with(
+        && let Some(config) = mj_core::codex_provider::effective_config(
             &selection.home,
             selection.overlay.as_deref(),
-            crate::host_fs::read_optional_sync,
         )?
-        .layer(&selection.home)?
     {
         let config: toml::Value =
             toml::from_str(&config).context("read Codex AWS profile selection")?;

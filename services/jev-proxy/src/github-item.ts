@@ -82,3 +82,13 @@ export function githubItemAnswersV2(value: unknown): Record<string, unknown> | u
     || !Number.isFinite(answer.noul) || answer.noul < 0 || answer.noul > 1) return;
   return { interested: { type: "noul", noul: answer.noul } };
 }
+
+export { default as githubItemGlideQuestions } from "../../../mj-core/src/github_item/questions_glide.json" with { type: "json" };
+
+export function githubItemGlideRequest(value: unknown): boolean {
+  if (!object(value) || !object(value.session) || !Array.isArray(value.session.history)) return false;
+  const { history, ...session } = value.session;
+  return githubItemRequestV2({ ...value, session }) && history.every(entry =>
+    object(entry) && fields(entry, ["time", "text"])
+    && typeof entry.time === "string" && typeof entry.text === "string");
+}

@@ -36,6 +36,7 @@ impl ClaudeProbe {
         let spec = LaunchSpec {
             operator_away: Default::default(),
             imported_logins: None,
+            login_identity: Default::default(),
             bridge_spec_path: None,
             subagent_policy: mj_core::subagent::SubagentPolicy::Native,
             managed_subagent: false,
@@ -56,14 +57,13 @@ impl ClaudeProbe {
             initial_model: None,
             harness: HarnessKind::Claude,
             execution_policy: ExecutionPolicy::ConfiguredApprovals,
+            claude_permission_mode: Default::default(),
+            observe_policy: None,
             acp_activity: AcpActivityClock::default(),
             step_clock: StepClock::default(),
             tools_in_flight: Default::default(),
             turn_context: Default::default(),
-            verdict: Some(crate::acp::VerdictSource::Direct {
-                key: String::new(),
-                endpoint: String::new(),
-            }),
+            verdict: Some(crate::acp::VerdictSource::Disabled),
             stall_policy: None,
         };
         let driver = tokio::spawn(async move {

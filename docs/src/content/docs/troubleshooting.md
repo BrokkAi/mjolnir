@@ -294,12 +294,7 @@ the reason for any loopback fallback. Then check these cases:
   lockouts grow to one hour. Wait for the reported lockout rather than retrying
   continuously.
 
-The native `mj app` command opens the same viewer. On Linux its separate
-desktop executable needs the system WebKitGTK 4.1 runtime—for Debian and Ubuntu
-the package is commonly `libwebkit2gtk-4.1-0`. The headless `mj` controller
-does not need that library.
-
-See [Web viewer and desktop app](/web-viewer/) for setup,
+See [Web viewer](/web-viewer/) for setup,
 [Security boundaries](/security/) for its authentication model, and
 [Configuration reference](/configuration/) for `[phone]`.
 

@@ -34,9 +34,10 @@ pub(super) enum ActorCommand {
         reply: oneshot::Sender<std::result::Result<(), String>>,
     },
     Reviewer {
+        queued_at: std::time::Instant,
         role: Option<String>,
         action: ReviewerAction,
-        reply: oneshot::Sender<std::result::Result<ReviewerOutcome, String>>,
+        reply: oneshot::Sender<anyhow::Result<ReviewerOutcome>>,
     },
     /// The connection is handed over whole, and so is the failure: a caller
     /// that must decide whether to restart the worker needs the typed cause,
@@ -140,7 +141,7 @@ impl ActorCommand {
                 }
             }
             Self::Reviewer { reply, .. } => {
-                if reply.send(Err(message.to_owned())).is_err() {
+                if reply.send(Err(anyhow::anyhow!("{message}"))).is_err() {
                     tracing::debug!(
                         %session_id,
                         operation = "reviewer",
@@ -167,7 +168,9 @@ impl ActorCommand {
 
 pub(super) struct ReturnedConnection {
     pub(super) lease_id: u64,
-    pub(super) connection: Option<StandaloneSession>,
+    /// Boxed: the unbounded channel allocates whole 32-slot blocks of this
+    /// message per actor, and a session connection is a large struct.
+    pub(super) connection: Option<Box<StandaloneSession>>,
 }
 
 /// A submission that arrived while a lifecycle operation held the connection.

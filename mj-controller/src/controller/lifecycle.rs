@@ -209,6 +209,11 @@ impl Controller {
                 } else {
                     CheckpointExportPolicy::ReuseUnchangedArchive
                 };
+                let exclusivity = if operation.quota_stop_reason.is_some() {
+                    LatchExclusivity::HoldThroughQuotaClose
+                } else {
+                    LatchExclusivity::HoldThroughClose
+                };
                 self.suspend_session_controlled_with_manager(
                     session_id,
                     executor,
@@ -219,7 +224,7 @@ impl Controller {
                     true,
                     None,
                     source_relay.take(),
-                    LatchExclusivity::HoldThroughClose,
+                    exclusivity,
                 )
                 .await
             },
@@ -280,7 +285,7 @@ impl Controller {
             Ok(latched) => latched,
             Err(error) => {
                 let record = self.state.sessions.get_mut(session_id).unwrap();
-                if exclusivity == LatchExclusivity::HoldThroughIdleClose
+                if exclusivity.close_purpose().is_some()
                     && super::checkpoint::checkpoint_was_deferred(&error)
                 {
                     // Nothing failed: the session is working, so the close
@@ -365,8 +370,8 @@ impl Controller {
         record.state = SessionState::Closing;
         record.native_session_id = Some(artifact.native_session_id.clone());
         if !session_handoff {
-            record.checkpoint = Some(artifact.metadata.clone());
-            record.publication = publication;
+            record.checkpoint = Some(Box::new(artifact.metadata.clone()));
+            record.publication = publication.map(Box::new);
         }
         record.updated_at = now();
         record.last_error = None;
@@ -374,7 +379,7 @@ impl Controller {
         if session_handoff {
             if let Some((operation, _)) = move_intent.as_mut() {
                 operation.handoff = Some(artifact.metadata.clone());
-                operation.checkpoint = previous.checkpoint.clone();
+                operation.checkpoint = previous.checkpoint.clone().map(|v| *v);
                 operation.updated_at = now();
                 crate::database::save_move_operation(operation)?;
             } else {
@@ -445,7 +450,7 @@ impl Controller {
             let record = self.state.sessions.get_mut(session_id).unwrap();
             record.state = state_after_unsealed_close(&previous);
             // An automatic close that stands down did not fail.
-            if exclusivity != LatchExclusivity::HoldThroughIdleClose
+            if exclusivity.close_purpose().is_none()
                 || !super::checkpoint::checkpoint_was_deferred(&error)
             {
                 record.last_error = Some(format!("{error:#}"));
@@ -459,7 +464,7 @@ impl Controller {
             return Err(error);
         }
         if !session_handoff {
-            prune_replaced_checkpoint(previous.checkpoint.as_ref(), &artifact.metadata);
+            prune_replaced_checkpoint(previous.checkpoint.as_deref(), &artifact.metadata);
             // A stopping session will not checkpoint again, so this is its last
             // chance to release what its checkpoint now covers.
             release_projection_behind_checkpoint(session_id, &artifact.metadata);
@@ -894,7 +899,7 @@ impl Controller {
     pub fn suspend_session_without_checkpoint(
         &mut self,
         session_id: &str,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
     ) -> Result<bool> {
         self.suspend_session_without_checkpoint_with(
             session_id,
@@ -906,7 +911,7 @@ impl Controller {
     fn suspend_session_without_checkpoint_with(
         &mut self,
         session_id: &str,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
         persist: impl Fn(&SessionRecord) -> Result<()>,
     ) -> Result<bool> {
         let session = self
@@ -934,7 +939,7 @@ impl Controller {
         &mut self,
         session_id: &str,
         verified: &CheckpointMetadata,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
     ) -> Result<bool> {
         self.destroy_after_verified_checkpoint_with(
             session_id,
@@ -948,7 +953,7 @@ impl Controller {
         &mut self,
         session_id: &str,
         verified: &CheckpointMetadata,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
         persist: impl Fn(&SessionRecord) -> Result<()>,
     ) -> Result<bool> {
         crate::worker_lifecycle::run_blocking(
@@ -970,7 +975,7 @@ impl Controller {
                     "refusing to destroy session {session_id}: it is not closing or destroying"
                 );
                 ensure!(
-                    session.checkpoint.as_ref() == Some(verified),
+                    session.checkpoint.as_deref() == Some(verified),
                     "refusing to destroy session {session_id}: verified checkpoint gate is stale"
                 );
                 if session.state == SessionState::Closing {
@@ -1041,7 +1046,7 @@ impl Controller {
     pub fn cleanup_stopped_target(
         &mut self,
         session_id: &str,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
         self.cleanup_stopped_target_with(
             session_id,
@@ -1053,7 +1058,7 @@ impl Controller {
     fn cleanup_stopped_target_with(
         &mut self,
         session_id: &str,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
         persist: impl Fn(&SessionRecord) -> Result<()>,
     ) -> Result<()> {
         crate::worker_lifecycle::run_blocking(
@@ -1112,12 +1117,55 @@ impl Controller {
         )
     }
 
+    /// Commit the verified recovery copy before discarding the current target.
+    pub(crate) fn prepare_discard(
+        &mut self,
+        session_id: &str,
+        confirmed: &CheckpointMetadata,
+        executor: &(impl CommandExecutor + Sync),
+        commit: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        crate::worker_lifecycle::run_blocking(session_id, "prepare discard", executor, || {
+            let previous = self
+                .state
+                .sessions
+                .get(session_id)
+                .with_context(|| format!("unknown session {session_id}"))?
+                .clone();
+            ensure!(
+                previous.state.is_active(),
+                "session {session_id} is already inactive"
+            );
+            ensure!(
+                previous.checkpoint.as_deref() == Some(confirmed),
+                "the recovery copy changed; review it before discarding changes"
+            );
+            {
+                let _verifying = ProvisionStageGuard::new(executor, ProvisionStage::Verifying);
+                verify_installed_checkpoint_gate(session_id, confirmed)
+                    .context("verify the recovery archive before accepting discard")?;
+            }
+            commit()?;
+            let record = self.state.sessions.get_mut(session_id).unwrap();
+            record.state = SessionState::Destroying;
+            record.updated_at = now();
+            record.last_error = None;
+            persist_session_record_transition_or_restore(
+                &mut self.state,
+                session_id,
+                &previous,
+                "persist verified discard before target teardown",
+                &crate::database::save_lifecycle_session,
+            )
+        })
+    }
+
     /// Tear down the current target without taking a fresh checkpoint, then
     /// leave the logical session resumable from its latest verified archive.
     pub fn force_stop(
         &mut self,
         session_id: &str,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
     ) -> Result<bool> {
         self.force_stop_with(
             session_id,
@@ -1129,7 +1177,7 @@ impl Controller {
     fn force_stop_with(
         &mut self,
         session_id: &str,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
         persist: impl Fn(&SessionRecord) -> Result<()>,
     ) -> Result<bool> {
         let session = self
@@ -1164,7 +1212,7 @@ impl Controller {
         &mut self,
         session_id: &str,
         session: &SessionRecord,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
         persist: &impl Fn(&SessionRecord) -> Result<()>,
     ) -> Result<bool> {
         crate::worker_lifecycle::run_blocking(
@@ -1218,7 +1266,7 @@ impl Controller {
     pub fn destroy_session_controlled(
         &mut self,
         session_id: &str,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
         self.destroy_session_controlled_with(session_id, executor, BranchDisposition::Keep)
     }
@@ -1233,7 +1281,7 @@ impl Controller {
     pub fn destroy_session_controlled_with(
         &mut self,
         session_id: &str,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
         branch: BranchDisposition,
     ) -> Result<()> {
         self.destroy_session_controlled_with_checkout(
@@ -1253,7 +1301,7 @@ impl Controller {
     pub(crate) fn destroy_session_controlled_with_checkout(
         &mut self,
         session_id: &str,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
         branch: BranchDisposition,
         checkout: CheckoutDisposition,
     ) -> Result<Option<PathBuf>> {
@@ -1268,7 +1316,7 @@ impl Controller {
     fn destroy_stopped_session_steps(
         &mut self,
         session_id: &str,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
         branch: BranchDisposition,
         checkout: CheckoutDisposition,
     ) -> Result<Option<PathBuf>> {
@@ -1299,7 +1347,7 @@ impl Controller {
         super::checkpoint::remove_session_checkpoint_archives(
             &mj_core::config::sessions_dir(),
             session_id,
-            session.checkpoint.as_ref(),
+            session.checkpoint.as_deref(),
         )?;
         mj_core::attachment::AttachmentStore::controller(session_id)?
             .remove_session_data()
@@ -1325,7 +1373,7 @@ impl Controller {
     pub fn force_destroy_session(
         &mut self,
         session_id: &str,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
         branch: BranchDisposition,
     ) -> Result<DestroyOutcome> {
         self.force_destroy_session_with(
@@ -1339,7 +1387,7 @@ impl Controller {
     fn force_destroy_session_with(
         &mut self,
         session_id: &str,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
         branch: BranchDisposition,
         delete: impl Fn(&str) -> Result<()>,
     ) -> Result<DestroyOutcome> {
@@ -1356,7 +1404,7 @@ impl Controller {
     pub(crate) fn stop_subagent(
         &mut self,
         session_id: &str,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
     ) -> Result<DestroyOutcome> {
         self.destroy_session_with_cleanup(
             session_id,
@@ -1370,7 +1418,7 @@ impl Controller {
     fn destroy_session_with_cleanup(
         &mut self,
         session_id: &str,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
         branch: BranchDisposition,
         delete: impl Fn(&str) -> Result<()>,
         cleanup: DestroyCleanup,
@@ -1417,7 +1465,7 @@ impl Controller {
     fn force_destroy_session_steps(
         &mut self,
         session_id: &str,
-        executor: &impl CommandExecutor,
+        executor: &(impl CommandExecutor + Sync),
         branch: BranchDisposition,
         delete: impl Fn(&str) -> Result<()>,
         cleanup: DestroyCleanup,
@@ -1464,7 +1512,7 @@ impl Controller {
                 super::checkpoint::remove_session_checkpoint_archives(
                     &mj_core::config::sessions_dir(),
                     session_id,
-                    session.checkpoint.as_ref(),
+                    session.checkpoint.as_deref(),
                 )?;
                 mj_core::attachment::AttachmentStore::controller(session_id)?
                     .remove_session_data()
@@ -1552,7 +1600,7 @@ pub fn has_nothing_to_checkpoint(session: &SessionRecord, subagent: bool) -> boo
 fn execute_target_cleanup(
     session: &SessionRecord,
     config: &mj_core::config::Config,
-    executor: &impl CommandExecutor,
+    executor: &(impl CommandExecutor + Sync),
 ) -> Result<()> {
     super::environment::retire_session_environment(
         session,

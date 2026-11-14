@@ -29,7 +29,6 @@ pub mod golden;
 #[cfg(unix)]
 pub mod harness_install;
 pub mod harness_runtime;
-pub mod help_search;
 pub mod hex;
 pub mod history;
 pub mod jev;
@@ -39,9 +38,10 @@ pub mod lock_wait;
 pub mod logging;
 pub mod login_environment;
 pub mod mailbox;
+pub mod model_catalog;
 pub mod move_workspace;
 pub mod native_agent;
-pub mod node;
+pub mod observe;
 pub mod path_completion;
 pub mod path_input;
 pub mod placement;
@@ -79,3 +79,7 @@ pub mod workspace;
 pub mod continuation;
 
 pub mod cpu_usage;
+
+pub mod attention;
+
+pub mod packed_text;

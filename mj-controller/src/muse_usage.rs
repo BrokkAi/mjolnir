@@ -1155,12 +1155,15 @@ mod tests {
         assert_eq!(meta["mechanism"], "oauth");
         assert_eq!(saved["schema_version"], 1);
         assert!(meta["expires_at"].as_i64().unwrap() > mj_core::clock::epoch_seconds() as i64);
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
 
         // Muse renews the login while the daemon waits for its lock: the
         // daemon uses that login and never spends the refresh token Muse
         // already spent.
-        refreshes.lock().unwrap().clear();
-        minted_with.lock().unwrap().clear();
+        let refreshes = Arc::new(Mutex::new(Vec::new()));
+        let minted_with = Arc::new(Mutex::new(Vec::new()));
+        let (base_url, server) = spawn_meta(refreshes.clone(), minted_with.clone()).await;
         let raced = tempfile::tempdir().unwrap();
         write_login(raced.path(), "stale-access", 1_700_000_000);
         let muse = std::fs::OpenOptions::new()
@@ -1172,16 +1175,16 @@ mod tests {
         muse.lock().unwrap();
         let query = tokio::spawn({
             let home = raced.path().to_owned();
-            let endpoints = endpoints(&base_url);
-            async move { query_with_timeout(&home, &endpoints, REQUEST_TIMEOUT).await }
+            let auth_base_url = base_url;
+            async move { fresh_access_token(&reqwest::Client::new(), &home, &auth_base_url, None).await }
         });
         sleep(Duration::from_millis(300)).await;
         assert!(!query.is_finished(), "the daemon must wait for Muse's lock");
         write_login(raced.path(), "muse-renewed-access", far_future);
         drop(muse);
-        query.await.unwrap().unwrap();
+        assert_eq!(query.await.unwrap().unwrap(), "muse-renewed-access");
         assert!(refreshes.lock().unwrap().is_empty());
-        assert_eq!(*minted_with.lock().unwrap(), ["Bearer muse-renewed-access"]);
+        assert!(minted_with.lock().unwrap().is_empty());
 
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());

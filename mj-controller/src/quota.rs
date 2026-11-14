@@ -26,9 +26,12 @@ pub use mj_client::quota::{
 };
 
 /// Clone a daemon report for a user-facing quota surface, retaining only
-/// unscoped windows and Claude's Fable weekly allowance. Internal selection
-/// and health keep the complete report.
+/// unscoped windows, Claude's Fable allowance and Antigravity's two pools.
+/// Internal selection and health keep the complete report.
 pub(crate) fn surface_quota_report(report: &ProfileQuota) -> ProfileQuota {
+    if report.harness == HarnessKind::Antigravity {
+        return report.clone();
+    }
     let mut visible = report.clone();
     let fable_weekly = report.fable_weekly_window().cloned();
     visible
@@ -50,6 +53,11 @@ pub struct QuotaRefreshRequest {
     pub cwd: std::path::PathBuf,
     /// Where a Codex profile's quota comes from. Other harnesses ignore it.
     pub codex_source: CodexQuotaSource,
+    /// Whether an OpenCode profile signs in through an environment-supplied
+    /// provider key rather than a login OpenCode itself stores, so it is
+    /// billed by usage the way Dsh and a Codex custom provider are. Other
+    /// harnesses ignore it.
+    pub opencode_usage_priced: bool,
     /// Where a check that starts the harness runs it (`[quota] runtime`).
     pub runtime: QuotaRuntimeConfig,
 }
@@ -61,12 +69,20 @@ pub struct QuotaRuntimeConfig {
     pub choice: QuotaRuntimeChoice,
     /// The image of the enabled local Podman runtime, preferring one the
     /// person configured over a standard candidate.
-    pub podman_image: Option<String>,
+    pub podman_image: Option<RuntimeImage>,
     /// The same for Docker.
-    pub docker_image: Option<String>,
+    pub docker_image: Option<RuntimeImage>,
     /// Whether the daemon runs in its own container, whose image already
     /// carries every harness: checks then run beside it, whatever `choice` says.
     pub in_daemon_container: bool,
+}
+
+/// A local runtime's image, with that runtime's pull policy: the policy, not
+/// the quota check, decides whether the daemon downloads the image.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeImage {
+    pub image: String,
+    pub pull_policy: mj_core::config::ImagePullPolicy,
 }
 
 impl QuotaRuntimeConfig {
@@ -83,9 +99,10 @@ impl QuotaRuntimeConfig {
                 .collect::<Vec<_>>();
             // Configured runtimes first: `false` sorts before `true`.
             enabled.sort_by_key(|(standard, _)| *standard);
-            enabled
-                .first()
-                .map(|(_, container)| container.image.clone())
+            enabled.first().map(|(_, container)| RuntimeImage {
+                image: container.image.clone(),
+                pull_policy: container.pull_policy,
+            })
         };
         Self {
             choice: config.quota.runtime,
@@ -190,6 +207,7 @@ impl QuotaRefreshRequest {
             }
             CodexQuotaSource::Unreadable(_) => hash.update(b"unreadable\0"),
         }
+        hash.update([u8::from(self.opencode_usage_priced)]);
         mj_core::hex::lower_hex(hash.finalize())
     }
 
@@ -208,6 +226,32 @@ impl QuotaRefreshRequest {
             mj_core::config::HarnessHost::current(),
             &mut environment,
         );
+        // A profile with no stored OpenCode login is usage-priced exactly
+        // when the environment supplies a provider key ([`mj doctor`] and the
+        // sign-in status recognize the same signal,
+        // [`HarnessProfile::opencode_environment_logins`]). A profile with a
+        // stored login is usage-priced too when every stored credential is
+        // itself a plain API key (`value.type == "key"`, whether exported
+        // from the environment or typed into `opencode auth login`); any
+        // stored OAuth login, for this provider or another, leaves billing
+        // unknown, because OpenCode's own login database does not say which
+        // credential the session actually uses.
+        let opencode_usage_priced = profile.kind == HarnessKind::OpenCode
+            && match crate::opencode_logins::profile_logins(profile) {
+                Ok(None) => !profile.opencode_environment_logins().is_empty(),
+                Ok(Some(logins)) => {
+                    serde_json::from_slice::<Vec<Value>>(&logins).is_ok_and(|logins| {
+                        logins.iter().all(|login| {
+                            login
+                                .get("value")
+                                .and_then(|value| value.get("type"))
+                                .and_then(Value::as_str)
+                                == Some("key")
+                        })
+                    })
+                }
+                Err(_) => false,
+            };
         Self {
             profile_id: profile_id.to_owned(),
             harness: profile.kind,
@@ -216,6 +260,7 @@ impl QuotaRefreshRequest {
             environment,
             cwd,
             codex_source: CodexQuotaSource::of_profile(profile),
+            opencode_usage_priced,
             runtime,
         }
     }
@@ -280,9 +325,64 @@ pub(crate) fn hold_report(previous: Option<&ProfileQuota>, limited: ProfileQuota
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuotaRefreshOutcome {
+    /// Identity captured from the request that produced this outcome.
+    pub cache_identity: String,
     pub report: ProfileQuota,
     pub credentials_changed: bool,
 }
+
+/// One profile's authoritative quota publication. `None` means that its
+/// current identity has not completed a check yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QuotaReportPublication {
+    /// Renewal failure, independent of the usage API result.
+    pub login_error: Option<String>,
+    pub cache_identity: String,
+    pub report: Option<ProfileQuota>,
+}
+
+impl QuotaReportPublication {
+    pub(crate) fn observe_claude_grant(
+        &mut self,
+        profile_id: &str,
+        check: ClaudeGrantCheck,
+        rejected: bool,
+    ) -> bool {
+        let error = (rejected
+            && matches!(
+                check,
+                ClaudeGrantCheck::Failed | ClaudeGrantCheck::Waiting { due_at_ms: None }
+            ))
+        .then(|| mj_client::quota::refused_login_message(profile_id));
+        if self.login_error == error {
+            return false;
+        }
+        self.login_error = error;
+        true
+    }
+
+    pub(crate) fn effective_report(&self, profile_id: &str) -> Option<ProfileQuota> {
+        let Some(error) = &self.login_error else {
+            return self.report.clone();
+        };
+        let mut report = self.report.clone().unwrap_or_else(|| ProfileQuota {
+            profile_id: profile_id.to_owned(),
+            harness: HarnessKind::Claude,
+            monthly_price_usd: None,
+            paid_credits: None,
+            banked_resets: None,
+            windows: Vec::new(),
+            extra: None,
+            error: None,
+            refreshed_at_epoch_seconds: mj_core::clock::epoch_seconds(),
+            rate_limited_until_epoch_seconds: None,
+        });
+        report.error = Some(error.clone());
+        Some(report)
+    }
+}
+
+pub(crate) type QuotaReportMap = BTreeMap<String, QuotaReportPublication>;
 
 #[derive(Default)]
 pub struct QuotaManager {
@@ -386,8 +486,9 @@ impl QuotaManager {
             let previous = self.reports.get(&outcome.report.profile_id);
             let outcome = if outcome.report.rate_limited_until_epoch_seconds.is_some() {
                 QuotaRefreshOutcome {
+                    cache_identity: outcome.cache_identity,
                     report: hold_report(previous, outcome.report),
-                    ..outcome
+                    credentials_changed: outcome.credentials_changed,
                 }
             } else {
                 outcome
@@ -465,6 +566,172 @@ fn log_quota_change(previous: Option<&ProfileQuota>, report: &ProfileQuota) {
     }
 }
 
+/// Where a check that starts a harness runs it: on this host, or in the
+/// configured container runtime when the host lacks the harness.
+fn quota_container(
+    runtime: &QuotaRuntimeConfig,
+    source_home: &Path,
+    host_has_harness: bool,
+) -> Result<Option<crate::quota_runtime::ContainerCheck>> {
+    Ok(
+        match crate::quota_runtime::QuotaRuntime::current(runtime, host_has_harness)? {
+            crate::quota_runtime::QuotaRuntime::Host => None,
+            crate::quota_runtime::QuotaRuntime::Container(runtime) => {
+                Some(crate::quota_runtime::ContainerCheck {
+                    runtime,
+                    home: source_home.to_owned(),
+                })
+            }
+        },
+    )
+}
+
+/// What the daemon's early Claude grant refresh decided for one profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaudeGrantCheck {
+    /// Not a profile whose grant the daemon renews (another harness, or one
+    /// that does not sign in with the harness's own login).
+    NotApplicable,
+    /// Nothing to do now. `due_at_ms` is when the grant needs renewing, from
+    /// the login as it is now (after a renewal, the new one). `None` when the
+    /// login is missing, holds no refresh token, or states no expiry.
+    Waiting { due_at_ms: Option<i64> },
+    /// A handoff is draining admission; the next daemon checks the login.
+    Deferred,
+    /// A replacement is ready for immediate credential delivery.
+    Renewed { due_at_ms: Option<i64> },
+    /// The refresh failed. The error is already logged with its safe category.
+    Failed,
+}
+
+/// Renew a Claude profile's grant ahead of its expiry (#1490). The daemon is
+/// the only refresher: session copies carry no refresh token. This is the
+/// decision's one owner and runs apart from the usage probe, so a 429 hold on
+/// the usage API never postpones it.
+pub(crate) async fn refresh_claude_grant(
+    request: &QuotaRefreshRequest,
+    now_ms: i64,
+    launcher: &claude_usage::ClaudeLauncher,
+    gate: &std::sync::Arc<crate::upgrade::Gate>,
+    rejected_logins: &BTreeSet<String>,
+) -> ClaudeGrantCheck {
+    if request.harness != HarnessKind::Claude || !request.auth_scheme.uses_native_login_file() {
+        return ClaudeGrantCheck::NotApplicable;
+    }
+    let environment = request
+        .environment
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<HashMap<_, _>>();
+    let (source, container) = match request.harness.login_store(
+        mj_core::config::HarnessHost::current(),
+        &request.source_home,
+    ) {
+        // A Keychain login is renewed by Claude Code on this host, never in
+        // a container: the image cannot write the Keychain. A host that
+        // cannot run Claude Code fails visibly in `refresh_grant_if_due`.
+        mj_core::config::HarnessLoginStore::MacKeychain => {
+            let lock_marker = match mj_core::config::HarnessLoginStore::MacKeychain.lock_marker() {
+                Ok(marker) => marker,
+                Err(error) => {
+                    tracing::warn!(
+                        profile_id = %request.profile_id,
+                        error = %format!("{error:#}"),
+                        "could not find where Claude Code locks the Keychain login"
+                    );
+                    return ClaudeGrantCheck::Failed;
+                }
+            };
+            (
+                claude_usage::LoginSource::Keychain {
+                    lock_marker,
+                    // `security` can wait on a Keychain prompt; the same bound
+                    // as the other host lookups. The login exchange itself
+                    // runs under no deadline.
+                    security: std::sync::Arc::new(crate::targets::BoundedProcessExecutor::new(
+                        crate::setup::KEYCHAIN_READ_TIMEOUT,
+                    )),
+                },
+                None,
+            )
+        }
+        mj_core::config::HarnessLoginStore::File { .. } => {
+            // The launcher says whether this host can run Claude Code, so
+            // `auto` picks a container exactly when it cannot.
+            let container = match quota_container(
+                &request.runtime,
+                &request.source_home,
+                launcher.host_can_run(&environment),
+            ) {
+                Ok(container) => container,
+                Err(error) => {
+                    tracing::warn!(
+                        profile_id = %request.profile_id,
+                        error = %format!("{error:#}"),
+                        "could not choose where to refresh the Claude login"
+                    );
+                    return ClaudeGrantCheck::Failed;
+                }
+            };
+            (
+                claude_usage::LoginSource::File {
+                    home: request.source_home.clone(),
+                },
+                container,
+            )
+        }
+    };
+    // No deadline and no cancellation: a started login exchange runs to its
+    // own end (see `claude_usage::run_claude_refresh`).
+    let executor = std::sync::Arc::new(crate::targets::ProcessExecutor);
+    match claude_usage::refresh_grant_if_due(
+        source,
+        environment,
+        executor,
+        container,
+        launcher,
+        gate,
+        claude_usage::GrantRefreshTrigger {
+            now_ms,
+            rejected_logins,
+        },
+    )
+    .await
+    {
+        Ok(claude_usage::GrantRefresh::NotRefreshable) => {
+            ClaudeGrantCheck::Waiting { due_at_ms: None }
+        }
+        // Due, but a handoff is waiting: the next daemon decides again.
+        Ok(claude_usage::GrantRefresh::Deferred) => ClaudeGrantCheck::Deferred,
+        Ok(claude_usage::GrantRefresh::Current { due_at_ms }) => ClaudeGrantCheck::Waiting {
+            due_at_ms: Some(due_at_ms),
+        },
+        Ok(claude_usage::GrantRefresh::Renewed {
+            by_this_call,
+            expires_at_ms,
+        }) => {
+            tracing::info!(
+                profile_id = %request.profile_id,
+                new_expires_at_ms = ?expires_at_ms,
+                refreshed_by_this_daemon = by_this_call,
+                "refreshed the Claude login"
+            );
+            // The credential sync pushes the renewed login to sessions.
+            ClaudeGrantCheck::Renewed {
+                due_at_ms: expires_at_ms.map(claude_usage::grant_due_at),
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                profile_id = %request.profile_id,
+                %error,
+                "could not refresh the Claude login"
+            );
+            ClaudeGrantCheck::Failed
+        }
+    }
+}
+
 async fn refresh_profile_with_cache_root(
     request: QuotaRefreshRequest,
     mut codex_client: Option<CodexUsageClient>,
@@ -502,24 +769,13 @@ async fn refresh_profile_with_cache_root(
         environment,
         cwd,
         codex_source,
+        opencode_usage_priced,
         runtime,
     } = request;
     // Only the checks that start a harness program consult the runtime, each
     // saying whether this host already has the harness it would start.
     let container =
-        |host_has_harness: bool| -> Result<Option<crate::quota_runtime::ContainerCheck>> {
-            Ok(
-                match crate::quota_runtime::QuotaRuntime::current(&runtime, host_has_harness)? {
-                    crate::quota_runtime::QuotaRuntime::Host => None,
-                    crate::quota_runtime::QuotaRuntime::Container(runtime) => {
-                        Some(crate::quota_runtime::ContainerCheck {
-                            runtime,
-                            home: source_home.clone(),
-                        })
-                    }
-                },
-            )
-        };
+        |host_has_harness: bool| quota_container(&runtime, &source_home, host_has_harness);
     let environment = environment.into_iter().collect::<HashMap<_, _>>();
     // The PATH a host check's program is found on: the profile's own when it
     // sets one, as the subprocess then receives it, else the daemon's.
@@ -538,6 +794,7 @@ async fn refresh_profile_with_cache_root(
     // behaves.
     let usage_priced = || ProfileQuota {
         paid_credits: None,
+        monthly_price_usd: None,
         banked_resets: None,
         profile_id: profile_id.clone(),
         harness,
@@ -566,6 +823,7 @@ async fn refresh_profile_with_cache_root(
                     .await
                     .map(|windows| ProfileQuota {
                         paid_credits: None,
+                        monthly_price_usd: None,
                         banked_resets: None,
                         profile_id: profile_id.clone(),
                         harness,
@@ -668,6 +926,7 @@ async fn refresh_profile_with_cache_root(
                 match status {
                     CodexUsageStatus::Available(report) => Ok(ProfileQuota {
                         paid_credits: report.paid_credits,
+                        monthly_price_usd: None,
                         banked_resets: report.banked_resets,
                         profile_id: profile_id.clone(),
                         harness,
@@ -699,13 +958,14 @@ async fn refresh_profile_with_cache_root(
         HarnessKind::Claude => match if cfg!(target_os = "macos") {
             Ok(None)
         } else {
-            container(claude_usage::host_has_claude(host_path.as_deref()))
+            container(claude_usage::ClaudeLauncher::Managed.host_can_run(&environment))
         } {
             Err(error) => Err(error),
             Ok(container) => claude_usage::query(source_home, environment, container)
                 .await
                 .map(|report| ProfileQuota {
                     paid_credits: report.paid_credits,
+                    monthly_price_usd: report.monthly_price_usd,
                     banked_resets: report.banked_resets,
                     profile_id: profile_id.clone(),
                     harness,
@@ -788,6 +1048,7 @@ async fn refresh_profile_with_cache_root(
                 .await
                 .map(|(windows, extra)| ProfileQuota {
                     paid_credits: None,
+                    monthly_price_usd: None,
                     banked_resets: None,
                     profile_id: profile_id.clone(),
                     harness,
@@ -810,6 +1071,7 @@ async fn refresh_profile_with_cache_root(
                 .await
                 .map(|report| ProfileQuota {
                     paid_credits: None,
+                    monthly_price_usd: None,
                     banked_resets: None,
                     profile_id: profile_id.clone(),
                     harness,
@@ -836,6 +1098,7 @@ async fn refresh_profile_with_cache_root(
             .await
             .map(|report| ProfileQuota {
                 paid_credits: None,
+                monthly_price_usd: None,
                 banked_resets: None,
                 profile_id: profile_id.clone(),
                 harness,
@@ -859,13 +1122,35 @@ async fn refresh_profile_with_cache_root(
                 rate_limited_until_epoch_seconds: None,
             }),
         // OpenCode reads no allowance from any provider: rate-limit headers
-        // reach it only on failed requests.
-        HarnessKind::OpenCode => Ok(not_reported()),
+        // reach it only on failed requests. A profile signed in through an
+        // environment-supplied provider key (OpenRouter and the like) is
+        // still billed by usage even though OpenCode never shares it, so it
+        // gets the same `API` label as Dsh rather than reading as unavailable.
+        HarnessKind::OpenCode => Ok(if opencode_usage_priced {
+            usage_priced()
+        } else {
+            not_reported()
+        }),
         // dsh-acp talks to DeepSeek's API, which bills by usage.
         HarnessKind::Dsh => Ok(usage_priced()),
+        HarnessKind::Antigravity => crate::antigravity_usage::query(&source_home, &environment)
+            .await
+            .map(|windows| ProfileQuota {
+                paid_credits: None,
+                monthly_price_usd: None,
+                banked_resets: None,
+                profile_id: profile_id.clone(),
+                harness,
+                windows,
+                extra: None,
+                error: None,
+                refreshed_at_epoch_seconds,
+                rate_limited_until_epoch_seconds: None,
+            }),
     };
     let report = result.unwrap_or_else(|error| ProfileQuota {
         paid_credits: None,
+        monthly_price_usd: None,
         banked_resets: None,
         profile_id,
         harness,
@@ -883,8 +1168,9 @@ async fn refresh_profile_with_cache_root(
     // Only the daemon owns the writer; other callers leave persistence to it.
     if crate::database::database_writer_installed() {
         let observed = report.clone();
+        let identity = cache_identity.clone();
         match tokio::task::spawn_blocking(move || {
-            crate::database::save_quota_report(&cache_identity, &observed)
+            crate::database::save_quota_report(&identity, &observed)
         })
         .await
         {
@@ -916,6 +1202,7 @@ async fn refresh_profile_with_cache_root(
     };
     (
         QuotaRefreshOutcome {
+            cache_identity,
             report,
             credentials_changed,
         },

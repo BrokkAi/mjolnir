@@ -125,12 +125,12 @@ impl Controller {
                     snapshot.operational.execution,
                     RelayExecutionState::Closing | RelayExecutionState::Closed
                 ) {
-                    let command_id = if let Some(existing) = snapshot.operational.checkpoint_barrier
-                    {
-                        existing
-                    } else {
-                        let id = new_command_id("child-close-barrier")?;
-                        relay
+                    let command_id =
+                        if let Some(existing) = snapshot.operational.checkpoint_barrier.clone() {
+                            existing
+                        } else {
+                            let id = new_command_id("child-close-barrier")?;
+                            relay
                             .connection_mut()
                             .submit(
                                 id.clone(),
@@ -142,8 +142,8 @@ impl Controller {
                                 },
                             )
                             .await?;
-                        id
-                    };
+                            id
+                        };
                     let ready = wait_for_checkpoint_barrier(
                         relay.connection_mut(),
                         session_id,
@@ -156,6 +156,7 @@ impl Controller {
                     let cursor = ready
                         .operational
                         .checkpoint_ready
+                        .clone()
                         .context("sub-agent close barrier has no ready cursor")?;
                     barrier = Some((command_id, cursor));
                 }
@@ -197,7 +198,7 @@ impl Controller {
                 // A retry can find an accepted Close whose barrier was not
                 // released before the previous controller disappeared.
                 let snapshot = relay.connection_mut().sync().await?;
-                if let Some(barrier_command_id) = snapshot.operational.checkpoint_barrier {
+                if let Some(barrier_command_id) = snapshot.operational.checkpoint_barrier.clone() {
                     relay
                         .connection_mut()
                         .submit(

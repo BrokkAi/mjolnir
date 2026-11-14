@@ -55,7 +55,7 @@ pub struct LinkedProfileHome {
 pub fn link_profile_homes_of_earlier_sessions(state: &State) -> Vec<LinkedProfileHome> {
     let mut linked = Vec::new();
     for session in state.sessions.values() {
-        let Some(TargetLocator::LocalBare { worker_root }) = &session.target else {
+        let Some(TargetLocator::LocalBare { worker_root }) = session.target.as_deref() else {
             continue;
         };
         // A harness with a nested home always ran from a per-session root
@@ -127,7 +127,7 @@ fn link_directory(_target: &Path, _link: &Path) -> std::io::Result<()> {
 /// home is a link to a profile home, or missing because an earlier release
 /// started its worker from a profile home that could not be linked.
 pub fn session_has_a_staged_home_of_its_own(session: &mj_core::state::SessionRecord) -> bool {
-    let Some(TargetLocator::LocalBare { worker_root }) = &session.target else {
+    let Some(TargetLocator::LocalBare { worker_root }) = session.target.as_deref() else {
         return true;
     };
     if session.harness_kind.nested_home() {
@@ -147,7 +147,7 @@ pub fn session_shares_profile_login(
     session: &mj_core::state::SessionRecord,
     harness: mj_core::config::HarnessKind,
 ) -> bool {
-    let Some(TargetLocator::LocalBare { worker_root }) = &session.target else {
+    let Some(TargetLocator::LocalBare { worker_root }) = session.target.as_deref() else {
         return false;
     };
     harness.shares_local_login()
@@ -160,7 +160,8 @@ pub fn session_shares_profile_login(
 
 /// The argument lists of every process running on this machine, or `None`
 /// when they cannot be listed. The same `ps` options work on Linux and macOS,
-/// and `-ww` keeps long arguments whole.
+/// and `-ww` keeps long arguments whole. A host without `ps` is read through
+/// `/proc` instead.
 #[cfg(unix)]
 pub fn running_process_arguments(executor: &impl CommandExecutor) -> Option<Vec<String>> {
     let command = crate::targets::CommandSpec::new("ps", ["-A", "-ww", "-o", "args="])
@@ -180,20 +181,31 @@ pub fn running_process_arguments(executor: &impl CommandExecutor) -> Option<Vec<
             );
             None
         }
-        Err(error) => {
-            tracing::warn!("could not list running processes: {error:#}");
-            None
-        }
+        // Minimal Linux images need not install procps. sysinfo reads the same
+        // command lines from /proc, so the sweep still runs there. A `ps` that
+        // runs but fails stays a failed listing: the sweep must not remove
+        // files it cannot prove are idle.
+        Err(error) => match running_process_arguments_without_ps() {
+            Some(arguments) => Some(arguments),
+            None => {
+                tracing::warn!("could not list running processes: {error:#}");
+                None
+            }
+        },
     }
 }
 
-/// [`running_process_arguments`] where there is no `ps`: each process's
-/// command line as Windows reports it, its arguments joined with spaces the
-/// way `ps` prints them. A process whose command line cannot be read lists
-/// as empty. An empty listing cannot be right, since it would not even hold
-/// this process, so it counts as one that failed.
 #[cfg(not(unix))]
 pub fn running_process_arguments(_executor: &impl CommandExecutor) -> Option<Vec<String>> {
+    running_process_arguments_without_ps()
+}
+
+/// [`running_process_arguments`] where there is no usable `ps`: each
+/// process's command line as the platform reports it, its arguments joined
+/// with spaces the way `ps` prints them. A process whose command line cannot
+/// be read lists as empty. An empty listing cannot be right, since it would
+/// not even hold this process, so it counts as one that failed.
+fn running_process_arguments_without_ps() -> Option<Vec<String>> {
     let mut system = sysinfo::System::new();
     system.refresh_processes_specifics(
         sysinfo::ProcessesToUpdate::All,
@@ -242,6 +254,31 @@ mod tests {
     use super::*;
     use mj_core::config::HarnessKind;
 
+    struct NoPs;
+
+    impl CommandExecutor for NoPs {
+        fn execute(
+            &self,
+            _command: &crate::targets::CommandSpec,
+        ) -> anyhow::Result<crate::targets::CommandOutput> {
+            anyhow::bail!("ps is not installed")
+        }
+    }
+
+    /// A local bare host need not install procps. The startup sweep must still
+    /// see this process instead of leaving checkpoint files in place forever.
+    // Hard-won: #1516: a host without ps disabled the checkpoint-leftover sweep.
+    #[test]
+    fn running_process_arguments_fall_back_when_ps_is_unavailable() {
+        let own = std::env::args().collect::<Vec<_>>().join(" ");
+        let running = running_process_arguments(&NoPs).expect("list running processes without ps");
+        assert!(
+            running.contains(&own),
+            "{own:?} not in {} processes",
+            running.len()
+        );
+    }
+
     fn session(
         id: &str,
         harness: HarnessKind,
@@ -249,9 +286,9 @@ mod tests {
     ) -> mj_core::state::SessionRecord {
         let mut session = crate::controller::test_support::checkpoint_test_session(id);
         session.harness_kind = harness;
-        session.target = Some(TargetLocator::LocalBare {
+        session.target = Some(Box::new(TargetLocator::LocalBare {
             worker_root: worker_root.to_path_buf(),
-        });
+        }));
         session
     }
 
@@ -328,7 +365,7 @@ mod tests {
         );
         for id in ["earlier", "older"] {
             let TargetLocator::LocalBare { worker_root } =
-                state.sessions[id].target.as_ref().unwrap()
+                &**state.sessions[id].target.as_ref().unwrap()
             else {
                 unreachable!()
             };

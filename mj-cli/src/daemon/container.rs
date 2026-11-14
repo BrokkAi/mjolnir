@@ -222,7 +222,7 @@ pub(super) async fn log_tail(program: &str, name: &str) -> String {
 /// container's name in [`mj_core::placement::DAEMON_CONTAINER_ENV`], like the
 /// daemon: it runs in the daemon container, so it uses the image's harnesses
 /// and cannot try to launch another container.
-pub(crate) async fn exec_in_container(args: &[String]) -> Result<bool> {
+pub(crate) async fn exec_in_container(args: &[String], interactive: bool) -> Result<bool> {
     if mj_core::placement::daemon_container().is_some() {
         return Ok(false);
     }
@@ -244,7 +244,7 @@ pub(crate) async fn exec_in_container(args: &[String]) -> Result<bool> {
         .context("the daemon container has no engine")?;
     let mut command = std::process::Command::new(program);
     command.args(["exec"]);
-    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+    if interactive && std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         command.args(["--interactive", "--tty"]);
     } else {
         command.arg("--interactive");
@@ -257,12 +257,13 @@ pub(crate) async fn exec_in_container(args: &[String]) -> Result<bool> {
         .arg(&name)
         .arg(IMAGE_EXECUTABLE)
         .args(args);
-    let status = mj_core::subprocess::run_inherited(&mut command)
-        .with_context(|| format!("run mj {args:?} inside the daemon container"))?;
-    ensure!(
-        status.success(),
-        "mj {args:?} inside the daemon container failed ({status})"
-    );
+    let status =
+        tokio::task::spawn_blocking(move || mj_core::subprocess::run_inherited(&mut command))
+            .await
+            .context("container command task panicked")??;
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
     Ok(true)
 }
 

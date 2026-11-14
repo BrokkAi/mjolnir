@@ -240,8 +240,17 @@ pub(super) async fn upload_attachment(
 /// still running.
 pub(super) async fn action(
     State(state): State<ServerState>,
-    Json(mut action): Json<ControllerAction>,
+    Json(body): Json<serde_json::Value>,
 ) -> Result<StatusCode, ApiError> {
+    if body.get("action").and_then(serde_json::Value::as_str) == Some("set-container-settings")
+        && (body.get("cpus").is_some() || body.get("memory").is_some())
+    {
+        return Err(ApiError::bad_request(
+            "Container settings now take resource_allocation (whole CPUs and memory bytes); reload the page or update the script.",
+        ));
+    }
+    let mut action: ControllerAction =
+        serde_json::from_value(body).map_err(|error| ApiError::bad_request(error.to_string()))?;
     if let ControllerAction::New {
         remember_launch_choices,
         ..
@@ -539,21 +548,7 @@ pub(super) async fn stop_background_task(
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct PreflightNewRequest {
-    #[serde(default)]
-    pub(super) additional_mounts: Vec<AdditionalMount>,
-    #[serde(default)]
-    pub(super) remote_repairs: Vec<mj_core::local_git::LocalRemoteRepair>,
-    #[serde(default)]
-    pub(super) workspace_id: String,
-    pub(super) profile_id: String,
-    pub(super) bundle_id: String,
-    pub(super) target_id: String,
-    #[serde(default)]
-    pub(super) project_directory: Option<PathBuf>,
-}
+type PreflightNewRequest = mj_client::daemon::NewSessionPreflightRequest;
 
 /// Answer whether a new session would launch cleanly, and what to warn about.
 ///
@@ -565,36 +560,14 @@ pub(super) async fn preflight_new(
     Json(request): Json<PreflightNewRequest>,
 ) -> Result<Json<PreflightNew>, ApiError> {
     let project_validation = request.project_directory.is_some();
-    let action = ControllerAction::New {
-        oracle: None,
-        oracle_choice: None,
-        remember_launch_choices: false,
-        remember_container_size: false,
-        subagents: None,
-        review: None,
-        no_project_memory: false,
-        no_github_events: false,
-        no_github_credentials: false,
-        create_managed_worktree: None,
-        at: None,
-        branch: None,
-        base: None,
-        no_later_history: false,
-        workspace_id: request.workspace_id,
-        profile_id: request.profile_id,
-        bundle_id: request.bundle_id.clone(),
-        target_id: request.target_id.clone(),
-        resource_allocation: None,
-        title: None,
-        project_directory: request.project_directory.clone(),
-        additional_mounts: request.additional_mounts.clone(),
-        dirty_ack: Vec::new(),
-    };
-    validate_action(&action, &state.snapshot_rx.borrow())?;
+    super::validate_new_preflight(&request, &state.snapshot_rx.borrow())
+        .map_err(ApiError::bad_request)?;
     let (reply, result) = tokio::sync::oneshot::channel();
     state
         .preflight_tx
         .send(PreflightRequest::New(NewPreflightRequest {
+            profile_id: request.profile_id,
+            workspace_id: request.workspace_id,
             additional_mounts: request.additional_mounts,
             bundle_id: request.bundle_id,
             target_id: request.target_id,
@@ -1191,4 +1164,36 @@ pub(super) async fn ask_container_upgrade_preview(
         .await
         .map_err(|_| ApiError::controller_unavailable())?
         .map_err(|error| ApiError::new(StatusCode::CONFLICT, error))
+}
+
+pub(crate) fn validate_new_preflight(
+    request: &mj_client::daemon::NewSessionPreflightRequest,
+    snapshot: &ViewerSnapshot,
+) -> Result<(), String> {
+    let action = ControllerAction::New {
+        oracle: None,
+        oracle_choice: None,
+        remember_launch_choices: false,
+        remember_container_size: false,
+        subagents: None,
+        review: None,
+        no_project_memory: false,
+        no_github_events: false,
+        no_github_credentials: false,
+        create_managed_worktree: None,
+        at: None,
+        branch: None,
+        base: None,
+        no_later_history: false,
+        workspace_id: request.workspace_id.clone(),
+        profile_id: request.profile_id.clone(),
+        bundle_id: request.bundle_id.clone(),
+        target_id: request.target_id.clone(),
+        resource_allocation: None,
+        title: None,
+        project_directory: request.project_directory.clone(),
+        additional_mounts: request.additional_mounts.clone(),
+        dirty_ack: Vec::new(),
+    };
+    validate_action(&action, snapshot).map_err(|error| error.message.into_owned())
 }

@@ -82,6 +82,8 @@ pub(super) async fn send_message(
             Json(SessionMessageResponse {
                 session_id,
                 via: "turn".into(),
+                mailbox_delivery: None,
+                note: None,
                 turn_id: Some(turn_id),
                 managed_child: false,
             }),

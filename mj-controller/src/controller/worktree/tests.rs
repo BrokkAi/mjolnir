@@ -809,7 +809,7 @@ fn a_plain_local_directory_cannot_convert_into_a_bundle_workspace() {
     assert!(!project.plain_directories.is_empty());
     let mut session = raw_session_on("localhost", plain.path().to_str().unwrap());
     session.target_template_id = "local-bare".into();
-    session.project = Some(project);
+    session.project = Some(project.into());
     let config = resume_compatibility_config();
 
     let detail = resume_compatibility(&session, &config, "podman").unwrap_err();
@@ -1798,7 +1798,7 @@ fn a_managed_conversion_carries_the_session_worktree_not_the_primary_checkout() 
 
     assert_eq!(conversion.checkout, worktree.worktree_root);
     assert_eq!(conversion.repository_id, "project");
-    assert_eq!(conversion.retire, Some(worktree));
+    assert_eq!(conversion.retire, Some(worktree).map(|v| *v));
     // The archive names the session directory as the repository, and the
     // test bundle's accepted destination is the session directory.
     assert_eq!(conversion.destination, PathBuf::from(session_id));
@@ -1820,7 +1820,7 @@ fn raw_to_workspace_keeps_the_accepted_bundle_and_adds_its_source() {
     let project = crate::project_catalog::snapshot(&bundle, &ProcessExecutor, false).unwrap();
     let mut session = raw_session_on("local-bare", &checkout.path().to_string_lossy());
     session.bundle_id = "bifrost".into();
-    session.project = Some(project.clone());
+    session.project = Some(project.clone().into());
     let checkout_state = session.checkout();
 
     // A snapshot-only imported session must not need its bundle in config.
@@ -1868,7 +1868,7 @@ fn raw_to_workspace_uses_the_configured_github_source() {
     let project = crate::project_catalog::snapshot(&bundle, &ProcessExecutor, false).unwrap();
     let mut session = raw_session_on("local-bare", &checkout.path().to_string_lossy());
     session.bundle_id = "bifrost".into();
-    session.project = Some(project);
+    session.project = Some(project.into());
 
     let conversion = plan_raw_to_workspace(&session, &ProcessExecutor).unwrap();
 
@@ -2187,7 +2187,7 @@ fn a_failed_conversion_returns_the_session_to_its_checkout() {
                 plain_directories: Default::default(),
             },
             source: fixture_network_source(),
-            retire: previous.managed_worktree.clone(),
+            retire: previous.managed_worktree.clone().map(|v| *v),
         },
     )
     .unwrap();
@@ -2253,7 +2253,7 @@ fn cancelled_new_session_cleanup_removes_managed_worktree_and_branch() {
 
     let mut session = checkpoint_test_session(session_id);
     session.project_directory = Some(worktree.worktree_root.clone());
-    session.managed_worktree = Some(worktree.clone());
+    session.managed_worktree = Some(Box::new(worktree.clone()));
     let controller = Controller {
         config: Config::default(),
         state: State {

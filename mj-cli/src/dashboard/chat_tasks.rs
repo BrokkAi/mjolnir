@@ -57,10 +57,9 @@ impl DashboardContext {
             let updates = self.import_updates_tx.clone();
             let cache = self.native_scan_cache.clone();
             tokio::task::spawn_blocking(move || {
-                let completed = crate::import::discover_import_profile(
+                let completed = crate::import::discover_client_import_profile(
                     profile_id,
-                    profile.kind,
-                    profile.home,
+                    profile,
                     &cache,
                     |profile| {
                         if let Ok(permit) = updates.try_reserve() {

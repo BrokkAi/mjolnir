@@ -22,11 +22,10 @@ use mj_core::state::{
 
 use mj_controller::controller::Controller;
 use mj_controller::controller::ResumeRepositorySourcePreflight;
-use mj_controller::targets::CancellableProcessExecutor;
 use mj_tui::{
     DashboardAction, DetectScope, PreparedMaterializedSessionDetail,
-    PreparedMaterializedSessionSummary, RejectedRuntime, RemoteRepositoryPreview,
-    SessionOperationKind, SetupDetection, WebViewerAccess,
+    PreparedMaterializedSessionSummary, RemoteRepositoryPreview, SessionOperationKind,
+    WebViewerAccess,
 };
 use mj_tui::{WorkspaceDraftEntry, WorkspaceManagementEntry};
 use tokio::sync::mpsc::UnboundedSender;
@@ -34,8 +33,8 @@ use tokio::task::{JoinError, JoinHandle};
 
 use crate::daemon;
 use crate::dashboard::{CriticalOperationTracker, DashboardContext};
-use crate::import::{DashboardImportSuccess, PendingDashboardImport, persist_imported_session};
-use crate::pollers::{DashboardLifecycleUpdate, LifecycleSuccess};
+use crate::import::{DashboardImportSuccess, PendingDashboardImport};
+use crate::pollers::{DashboardLifecycleFailure, DashboardLifecycleUpdate, LifecycleSuccess};
 
 /// Everything the dashboard learns from a background job.
 pub(crate) enum DashboardIoUpdate {
@@ -86,10 +85,18 @@ pub(crate) enum DashboardIoUpdate {
         session_id: String,
         result: std::result::Result<Box<PreparedMaterializedSessionDetail>, String>,
     },
-    QuestionDismissed {
+    NotificationDismissed {
         session_id: String,
-        question: mj_core::assessment::InferredQuestion,
+        target: mj_core::attention::NotificationDismissal,
         result: std::result::Result<u64, String>,
+    },
+    /// Every result of one workspace "Clear notifications".
+    NotificationsDismissed {
+        results: Vec<(
+            String,
+            mj_core::attention::NotificationDismissal,
+            std::result::Result<u64, String>,
+        )>,
     },
     /// A bounded tail of a resumed session's stored transcript, loaded off the
     /// event loop so the conversation is not blank while the poller catches up.
@@ -168,6 +175,13 @@ pub(crate) enum DashboardIoUpdate {
     RenameSession {
         title: String,
         result: std::result::Result<String, String>,
+    },
+    NotificationsIgnored {
+        ignored: bool,
+        result: std::result::Result<(), String>,
+    },
+    QuotaPreferencesSaved {
+        result: std::result::Result<(), String>,
     },
     ChangeWorkspace {
         session_id: String,
@@ -371,7 +385,7 @@ pub(crate) enum DashboardIoUpdate {
     CheckpointArchiveSizes {
         generation: u64,
         targets: BTreeMap<String, std::path::PathBuf>,
-        sizes: BTreeMap<String, Option<u64>>,
+        sizes: BTreeMap<String, Result<Option<u64>, String>>,
     },
     WorkerDiagnosis {
         session_id: String,
@@ -505,8 +519,8 @@ pub(crate) struct LifecycleReloaded {
     result: std::result::Result<DashboardMetadata, String>,
 }
 
-impl From<mj_controller::controller::NewSessionPreflight> for RemotePreflightOutcome {
-    fn from(result: mj_controller::controller::NewSessionPreflight) -> Self {
+impl From<mj_client::daemon::PreflightNew> for RemotePreflightOutcome {
+    fn from(result: mj_client::daemon::PreflightNew) -> Self {
         if !result.remote_repairs.is_empty() {
             return Self::Repair(result.remote_repairs);
         }
@@ -804,8 +818,11 @@ impl DashboardContext {
             DashboardIoUpdate::MaterializedSessionProjection { session_id, result } => {
                 self.finish_materialized_projection(session_id, result);
             }
-            DashboardIoUpdate::QuestionDismissed { session_id, question, result } => {
-                self.dashboard.question_dismissal_finished(&session_id, question, result);
+            DashboardIoUpdate::NotificationDismissed { session_id, target, result } => {
+                self.dashboard.notification_dismissal_finished(&session_id, target, result);
+            }
+            DashboardIoUpdate::NotificationsDismissed { results } => {
+                self.dashboard.notifications_dismissed(results);
             }
             DashboardIoUpdate::TranscriptTailSeed { materialized } => {
                 let viewed_through_event_ordinal = self
@@ -1095,6 +1112,20 @@ impl DashboardContext {
                     ));
                 }
             },
+            DashboardIoUpdate::NotificationsIgnored { ignored, result } => {
+                if let Err(error) = result {
+                    self.dashboard.set_notice(format!(
+                        "Could not {} notifications: {error}",
+                        if ignored { "ignore" } else { "unignore" }
+                    ));
+                }
+            }
+            DashboardIoUpdate::QuotaPreferencesSaved { result } => {
+                if let Err(error) = result {
+                    self.dashboard
+                        .set_notice(format!("Could not save load-balancing preferences: {error}"));
+                }
+            }
             DashboardIoUpdate::ChangeWorkspace {
                 session_id,
                 workspace_name,
@@ -1486,15 +1517,32 @@ impl DashboardContext {
                 targets,
                 sizes,
             } => {
-                self.dashboard.patch_checkpoint_archive_sizes(
-                    sizes
-                        .into_iter()
-                        .filter(|(id, _)| {
-                            targets.get(id) == self.checkpoint_archive_targets_seen.get(id)
-                                && self.checkpoint_archive_pending.get(id) == Some(&generation)
-                        })
-                        .collect(),
-                );
+                let mut answered = BTreeMap::new();
+                let mut errors = Vec::new();
+                for (id, result) in sizes {
+                    if self.checkpoint_archive_pending.get(&id) != Some(&generation)
+                        || targets.get(&id) != self.checkpoint_archive_records.get(&id)
+                    {
+                        continue;
+                    }
+                    self.checkpoint_archive_pending.remove(&id);
+                    match result {
+                        Ok(size) => {
+                            if let Some(path) = targets.get(&id) {
+                                self.checkpoint_archive_targets_seen.insert(id.clone(), path.clone());
+                            }
+                            answered.insert(id, size);
+                        }
+                        Err(error) => errors.push(format!("{id}: {error}")),
+                    }
+                }
+                self.dashboard.patch_checkpoint_archive_sizes(answered);
+                if !errors.is_empty() {
+                    self.dashboard.set_notice(format!(
+                        "Could not read checkpoint archive sizes: {}. Use Refresh to retry.",
+                        errors.join("; ")
+                    ));
+                }
             }
             DashboardIoUpdate::WorkerDiagnosis {
                 session_id,
@@ -1704,8 +1752,11 @@ impl DashboardContext {
                     );
                 }
                 let notice_name = self.session_notice_name(&session_id);
-                self.dashboard
-                    .set_notice(format!("Launching {notice_name}…"));
+                self.dashboard.set_notice(
+                    registered
+                        .retry_launch
+                        .annotate_launch_notice(format!("Launching {notice_name}…")),
+                );
                 if still_launching {
                     self.lifecycle_operations.insert(
                         session_id,
@@ -1752,6 +1803,28 @@ impl DashboardContext {
                 .as_ref()
                 .map(|operation| operation.notice_name.as_str()),
         );
+        if matches!(
+            update.result,
+            Err(DashboardLifecycleFailure::ObservationUnavailable
+                | DashboardLifecycleFailure::AdmissionUnconfirmed)
+        ) {
+            match reloaded.result {
+                Ok(loaded) => {
+                    self.apply_controller_metadata(loaded);
+                    self.dashboard.set_state(self.controller.state.clone());
+                    self.resolve_project_sources();
+                }
+                Err(error) => {
+                    tracing::warn!(%session_id, %error, "could not reload lifecycle observation");
+                }
+            }
+            self.dashboard.set_notice(if matches!(update.result, Err(DashboardLifecycleFailure::AdmissionUnconfirmed)) {
+                format!("Could not confirm daemon acceptance for {name}; check session status before retrying")
+            } else {
+                format!("The daemon accepted the operation for {name}; check session status for its result")
+            });
+            return;
+        }
         if operation
             .as_ref()
             .is_some_and(|operation| operation.kind == SessionOperationKind::Moving)
@@ -1845,6 +1918,7 @@ impl DashboardContext {
                 .dashboard
                 .set_notice(format!("Permanently destroyed session {}", name)),
             Err(error) => {
+                let error = error.to_string();
                 if operation
                     .as_ref()
                     .is_some_and(|operation| operation.kind == SessionOperationKind::Suspending)
@@ -1948,6 +2022,132 @@ mod tests {
     use super::*;
     use mj_controller::controller::create_quick_bundle_in_config as create_quick_bundle;
     use mj_core::config::{HarnessKind, ProjectRepository};
+
+    // Hard-won: #1507: quit waited for checkpoint completion and cancelled accepted lifecycle work.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lifecycle_quit_protects_submission_but_not_daemon_completion() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metadata = daemon::DaemonMetadata {
+            protocol_version: daemon::PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address: listener.local_addr().unwrap(),
+            token: "lifecycle-acceptance-test".into(),
+            started_at: "test".into(),
+            build_version: env!("CARGO_PKG_VERSION").into(),
+            instance_id: "lifecycle-acceptance-test".into(),
+            placement: daemon::DaemonPlacement::Host,
+        };
+        let session_id = "0123456789abcdef0123456789abcdef".to_owned();
+        let receipt = daemon::LifecycleReceipt {
+            session_id: session_id.clone(),
+            operation_id: "accepted-suspension".into(),
+        };
+        let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
+        let (accept_tx, accept_rx) = tokio::sync::oneshot::channel();
+        let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
+        let (complete_tx, complete_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request: daemon::RequestEnvelope = daemon::read_frame(&mut stream).await.unwrap();
+            assert!(matches!(
+                request.action,
+                daemon::DaemonAction::StartSessionLifecycle(
+                    daemon::SessionLifecycleRequest::Suspend { .. }
+                )
+            ));
+            submitted_tx.send(()).unwrap();
+            accept_rx.await.unwrap();
+            daemon::write_frame(
+                &mut stream,
+                &daemon::ResponseEnvelope {
+                    protocol_version: request.protocol_version,
+                    request_id: request.request_id,
+                    result: Ok(daemon::DaemonReply::LifecycleAccepted(receipt.clone())),
+                },
+            )
+            .await
+            .unwrap();
+            let request: daemon::RequestEnvelope = daemon::read_frame(&mut stream).await.unwrap();
+            assert!(
+                matches!(request.action, daemon::DaemonAction::WaitSessionLifecycle(ref actual) if actual == &receipt)
+            );
+            waiting_tx.send(()).unwrap();
+            complete_rx.await.unwrap();
+            daemon::write_frame(
+                &mut stream,
+                &daemon::ResponseEnvelope {
+                    protocol_version: request.protocol_version,
+                    request_id: request.request_id,
+                    result: Ok(daemon::DaemonReply::Done),
+                },
+            )
+            .await
+            .unwrap();
+        });
+        let (tracker, _) = CriticalOperationTracker::new();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (updates, mut results) = tokio::sync::mpsc::unbounded_channel();
+        spawn_lifecycle_operation(
+            LifecycleOperationRequest {
+                session_id: session_id.clone(),
+                session_name: "held suspend".into(),
+                kind: SessionOperationKind::Suspending,
+                cancelled: cancelled.clone(),
+                updates,
+            },
+            tracker.clone(),
+            move |_cancelled, admission| {
+                mj_core::runtime::block_on(async move {
+                    let mut client = daemon::DaemonClient::connect(metadata).await?;
+                    let receipt = admission
+                        .submit(
+                            &mut client,
+                            daemon::SessionLifecycleRequest::Suspend {
+                                session_id,
+                                acknowledge_unpublished_work: true,
+                                ignore_nested_repositories: false,
+                            },
+                        )
+                        .await?;
+                    client.wait_session_lifecycle(receipt).await?;
+                    Ok(LifecycleSuccess::Closed)
+                })?
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(30), submitted_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !tracker.blockers().is_empty(),
+            "quit must retain an unaccepted request"
+        );
+        tracker.cancel_all();
+        assert!(
+            !cancelled.load(Ordering::Acquire),
+            "quitting must not cancel the lifecycle"
+        );
+        accept_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(30), waiting_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            tracker.blockers().is_empty(),
+            "daemon completion must not hold quit"
+        );
+        assert!(
+            results.try_recv().is_err(),
+            "the operation is still executing"
+        );
+        complete_tx.send(()).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(30), results.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result.result, Ok(LifecycleSuccess::Closed)));
+        server.await.unwrap();
+    }
 
     #[test]
     fn saved_bundle_waits_for_runtime_identity_without_installing_old_config() {
@@ -2647,6 +2847,7 @@ mod tests {
         SessionRecord {
             oracle_choice: None,
             oracle: true,
+            notifications_ignored: false,
             project: None,
             target_runtime: None,
             launch_base: None,
@@ -2659,8 +2860,6 @@ mod tests {
             create_managed_worktree: None,
             workspace_id: workspace_id.to_owned(),
             archived: false,
-            container_cpus: None,
-            container_memory: None,
             id: id.into(),
             title: id.into(),
             harness_kind: HarnessKind::Codex,
@@ -2685,6 +2884,8 @@ mod tests {
             viewed_through_event_ordinal: 0,
             draft_input: String::new(),
             last_error: None,
+            dismissed_failure: None,
+            failure_generation: 0,
             last_checkpoint_error: None,
             checkpoint: None,
         }

@@ -12,6 +12,30 @@ pub fn quota_refresh_profiles(controller: &Controller) -> Vec<QuotaRefreshReques
         .collect()
 }
 
+/// The disabled Claude profiles whose sessions are live, from the credential
+/// sync's published targets (the one owner of which sessions hold which
+/// profile's copy). A session copy holds no refresh token, so the profile's
+/// grant must stay renewed while any such session runs, enabled or not.
+pub fn claude_grant_only_requests(
+    config: &mj_core::config::Config,
+    live_profile_ids: &std::collections::BTreeSet<String>,
+) -> Vec<QuotaRefreshRequest> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let runtime = crate::quota::QuotaRuntimeConfig::of(config);
+    config
+        .profiles
+        .iter()
+        .filter(|(id, profile)| {
+            !profile.enabled
+                && profile.kind == mj_core::config::HarnessKind::Claude
+                && live_profile_ids.contains(*id)
+        })
+        .map(|(id, profile)| {
+            QuotaRefreshRequest::for_profile(id, profile, cwd.clone(), runtime.clone())
+        })
+        .collect()
+}
+
 /// Reads a profile's stored report, the rebuildable copy the daemon keeps in
 /// the store. Called on a blocking thread.
 pub type QuotaCacheLoader =
@@ -46,8 +70,31 @@ pub fn spawn_quota_refresher(
     tokio::sync::watch::Sender<QuotaRefreshBatch>,
     tokio::sync::mpsc::Receiver<QuotaUpdate>,
 ) {
+    spawn_quota_refresher_with(cache, crate::claude_usage::ClaudeLauncher::Managed)
+}
+
+/// [`spawn_quota_refresher`] with the program Claude grant renewals run.
+pub(super) fn spawn_quota_refresher_with(
+    cache: QuotaCacheLoader,
+    launcher: crate::claude_usage::ClaudeLauncher,
+) -> (
+    tokio::sync::watch::Sender<QuotaRefreshBatch>,
+    tokio::sync::mpsc::Receiver<QuotaUpdate>,
+) {
     let (profiles_tx, mut profiles_rx) = tokio::sync::watch::channel(QuotaRefreshBatch::default());
     let (updates_tx, updates_rx) = tokio::sync::mpsc::channel(32);
+    // Grant renewal is its own task: a slow lock, container start or
+    // `claude auth login` must not hold up a probe, and a usage hold must
+    // not hold up a renewal.
+    spawn_claude_grant_refresher(
+        profiles_tx.subscribe(),
+        QUOTA_REFRESH_INTERVAL,
+        GrantRenewal {
+            launcher,
+            gate: crate::upgrade::gate().clone(),
+        },
+        Some(updates_tx.clone()),
+    );
     tokio::spawn(async move {
         // A daemon that stopped mid-check left its quota container running;
         // this instance owns it, and nothing else will remove it. Unit tests
@@ -119,6 +166,179 @@ pub fn spawn_quota_refresher(
     (profiles_tx, updates_rx)
 }
 
+/// The least a profile's renewal task waits after a check. A grant whose
+/// login is already due again after a renewal would otherwise renew in a
+/// loop. This is a back-off, not a limit: the due time otherwise decides.
+const CLAUDE_GRANT_MINIMUM_WAIT: Duration = Duration::from_secs(5);
+
+/// What a grant renewal runs, and the handoff gate it takes admission from.
+#[derive(Clone)]
+pub(super) struct GrantRenewal {
+    pub(super) launcher: crate::claude_usage::ClaudeLauncher,
+    pub(super) gate: Arc<crate::upgrade::Gate>,
+}
+
+/// Keep every Claude profile's grant renewed (#1490): the daemon is the only
+/// refresher, because session copies hold no refresh token. This task is the
+/// one owner of that decision. It follows the same batches as the quota
+/// poller (`profiles` and `grants`) and runs one task per profile request, so
+/// a slow renewal never delays another profile's. `recheck` is how long a task
+/// sleeps at most, so a login file replaced behind its back is seen within one
+/// interval. Task failures are logged.
+pub(super) fn spawn_claude_grant_refresher(
+    mut batches: tokio::sync::watch::Receiver<QuotaRefreshBatch>,
+    recheck: Duration,
+    renewal: GrantRenewal,
+    updates: Option<tokio::sync::mpsc::Sender<QuotaUpdate>>,
+) {
+    tokio::spawn(async move {
+        let mut tasks = tokio::task::JoinSet::new();
+        let mut running: std::collections::BTreeMap<tokio::task::Id, QuotaRefreshRequest> =
+            Default::default();
+        loop {
+            let batch = batches.borrow_and_update().clone();
+            for request in batch.profiles.iter().chain(&batch.grants) {
+                if running.values().any(|running| running == request) {
+                    continue;
+                }
+                let handle = tasks.spawn(renew_claude_grant_when_due(
+                    request.clone(),
+                    batches.clone(),
+                    recheck,
+                    renewal.clone(),
+                    updates.clone(),
+                ));
+                running.insert(handle.id(), request.clone());
+            }
+            tokio::select! {
+                changed = batches.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                }
+                Some(joined) = tasks.join_next_with_id(), if !tasks.is_empty() => {
+                    match joined {
+                        // The task saw its request leave or change.
+                        Ok((id, ())) => {
+                            running.remove(&id);
+                        }
+                        // A panicked task stays listed, so it is not restarted
+                        // in a loop; its request changing replaces it.
+                        Err(error) => tracing::error!(
+                            %error,
+                            "a Claude grant renewal task failed; it is not restarted until its profile changes"
+                        ),
+                    }
+                }
+            }
+        }
+        // The feed closed: let renewals in flight finish rather than cut a
+        // refresh-token exchange short.
+        while let Some(joined) = tasks.join_next().await {
+            if let Err(error) = joined {
+                tracing::error!(%error, "a Claude grant renewal task failed");
+            }
+        }
+    });
+}
+
+/// One profile's renewal loop. Nothing is cached between wakes: each one reads
+/// the login file again through [`crate::quota::refresh_claude_grant`]. It
+/// ends when the profile leaves the batch or is configured differently.
+async fn renew_claude_grant_when_due(
+    request: QuotaRefreshRequest,
+    mut batches: tokio::sync::watch::Receiver<QuotaRefreshBatch>,
+    recheck: Duration,
+    renewal: GrantRenewal,
+    updates: Option<tokio::sync::mpsc::Sender<QuotaUpdate>>,
+) {
+    loop {
+        let (current, rejected_logins) = {
+            let batch = batches.borrow_and_update();
+            let current = batch
+                .profiles
+                .iter()
+                .chain(&batch.grants)
+                .find(|candidate| candidate.profile_id == request.profile_id)
+                .cloned();
+            (
+                current,
+                batch
+                    .rejected_logins
+                    .get(&request.profile_id)
+                    .cloned()
+                    .unwrap_or_default(),
+            )
+        };
+        if current.as_ref() != Some(&request) {
+            return;
+        }
+        let now_ms = mj_core::clock::epoch_millis();
+        let check = crate::quota::refresh_claude_grant(
+            &request,
+            now_ms,
+            &renewal.launcher,
+            &renewal.gate,
+            &rejected_logins,
+        )
+        .await;
+        if let Some(updates) = &updates
+            && !matches!(
+                check,
+                crate::quota::ClaudeGrantCheck::NotApplicable
+                    | crate::quota::ClaudeGrantCheck::Deferred
+            )
+            && (!rejected_logins.is_empty()
+                || matches!(check, crate::quota::ClaudeGrantCheck::Renewed { .. }))
+            && updates
+                .send(QuotaUpdate::ClaudeGrant {
+                    request: request.clone(),
+                    check,
+                    rejected_logins: rejected_logins.clone(),
+                })
+                .await
+                .is_err()
+        {
+            return;
+        }
+        let wait = match check {
+            // Applicability follows from the request, so only a changed
+            // batch can alter it.
+            crate::quota::ClaudeGrantCheck::NotApplicable => None,
+            crate::quota::ClaudeGrantCheck::Waiting {
+                due_at_ms: Some(due_at_ms),
+            }
+            | crate::quota::ClaudeGrantCheck::Renewed {
+                due_at_ms: Some(due_at_ms),
+            } => Some(
+                Duration::from_millis(due_at_ms.saturating_sub(now_ms).max(0) as u64)
+                    .max(CLAUDE_GRANT_MINIMUM_WAIT)
+                    .min(recheck),
+            ),
+            // No login or refresh token yet, no readable expiry, or a failed
+            // renewal: look again after one interval.
+            crate::quota::ClaudeGrantCheck::Waiting { due_at_ms: None }
+            | crate::quota::ClaudeGrantCheck::Renewed { due_at_ms: None }
+            | crate::quota::ClaudeGrantCheck::Deferred
+            | crate::quota::ClaudeGrantCheck::Failed => Some(recheck),
+        };
+        let sleep = async {
+            match wait {
+                Some(wait) => tokio::time::sleep(wait).await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            _ = sleep => {}
+            changed = batches.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
 /// Bring the manager in line with a new batch: drop profiles that left or
 /// changed, and adopt the stored report of each new one when it is still
 /// current. Reports whether the consumer is still listening.
@@ -141,7 +361,7 @@ async fn adopt_profiles(
         if identities.get(&request.profile_id) == Some(&identity) {
             continue;
         }
-        identities.insert(request.profile_id.clone(), identity);
+        identities.insert(request.profile_id.clone(), identity.clone());
         quotas.forget(&request.profile_id).await;
         let load = cache.clone();
         let for_request = request.clone();
@@ -164,6 +384,7 @@ async fn adopt_profiles(
         );
         quotas.seed(stored.clone());
         let outcome = QuotaRefreshOutcome {
+            cache_identity: identity,
             report: stored,
             credentials_changed: false,
         };
@@ -338,7 +559,10 @@ pub(super) fn local_engine_installed(host: &ImageHost, path: Option<&std::ffi::O
         ImageHost::LocalPodman | ImageHost::LocalDocker | ImageHost::AppleContainer => {
             crate::targets::program_on_path(host.engine(), path)
         }
-        ImageHost::SshPodman(_) | ImageHost::SshDocker(_) | ImageHost::SshAppleContainer(_) => true,
+        ImageHost::SshPodman(_)
+        | ImageHost::SshDocker(_)
+        | ImageHost::SshAppleContainer(_)
+        | ImageHost::SshNitro(_) => true,
     }
 }
 
@@ -518,11 +742,20 @@ pub enum ImageRefreshOutcome {
 /// host with a new image, so the user hears about the wait they are in rather
 /// than about every hourly check. The same gate covers background refreshes,
 /// explicit preloads, and session launches, including other mj processes.
+///
+/// A Nitro host's engine is the worker binary, which is not there until mj
+/// puts it there, and a host created for sandboxes is registered and its image
+/// preloaded before any session exists. Every refresh path comes through here,
+/// so this installs the engine before the first engine command; the install
+/// is idempotent and only writes under the SSH user's home.
 pub fn refresh_host_image(
     refresh: &ImageRefresh,
     executor: &impl CommandExecutor,
     report: &dyn Fn(ImageRefreshReport),
 ) -> Result<ImageRefreshOutcome> {
+    if let ImageHost::SshNitro(ssh) = &refresh.host {
+        crate::controller::ensure_microvm_engine(ssh, executor)?;
+    }
     let lock = crate::image_pull_gate::image_pull_mutex(&refresh.host, &refresh.image);
     let _guard = crate::image_pull_gate::hold_image_pull(
         &lock,

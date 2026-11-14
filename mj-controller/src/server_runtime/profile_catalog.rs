@@ -22,7 +22,7 @@ use mj_core::profile_capabilities::{
 use mj_core::worker_launch::ProfileConfig;
 use sha2::{Digest, Sha256};
 
-use crate::quota::ProfileQuota;
+use crate::quota::{ProfileQuota, QuotaReportMap};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -33,7 +33,7 @@ type ModelProbe = dyn Fn(String, String) -> BoxFuture<'static, Result<ProfileCon
 type Attempt = Shared<BoxFuture<'static, Result<ProbeOutcome, AttemptError>>>;
 type CacheKey = (String, Option<String>);
 type NoticeCallback = Arc<dyn Fn(String) + Send + Sync>;
-pub(crate) type QuotaReports = Arc<Mutex<BTreeMap<String, ProfileQuota>>>;
+pub(crate) type QuotaReports = Arc<Mutex<QuotaReportMap>>;
 
 /// How long the legacy upgrade waits for every offering profile's first
 /// quota report before treating profiles without one as subscriptions.
@@ -323,7 +323,12 @@ impl ProfileCatalog {
         let mut priced = BTreeSet::new();
         let mut unknown = BTreeSet::new();
         for (id, harness) in profiles {
-            match ProfileQuota::billing_for(*harness, reports.get(id)) {
+            match ProfileQuota::billing_for(
+                *harness,
+                reports
+                    .get(id)
+                    .and_then(|publication| publication.report.as_ref()),
+            ) {
                 QuotaBilling::Usage => {
                     priced.insert(id.clone());
                 }
@@ -558,9 +563,8 @@ impl ProfileCatalog {
                 let catalog = Arc::clone(self);
                 async move { catalog.model_capabilities(profile, model).await }
             },
-            None,
         )
-        .await?;
+        .await;
         if !known {
             anyhow::bail!("reviewer efforts remain unknown");
         }
@@ -675,6 +679,10 @@ impl ProfileCatalog {
     /// `config` selects under one lock. A Settings draft uses this same path
     /// without becoming the live configuration.
     pub(crate) fn ensure(self: &Arc<Self>, config: &Config) {
+        self.ensure_profiles(config, true);
+    }
+
+    fn ensure_profiles(self: &Arc<Self>, config: &Config, refresh_live: bool) {
         let config = Arc::new(config.clone());
         let mut started = Vec::new();
         {
@@ -692,7 +700,7 @@ impl ProfileCatalog {
                 // keeping its entries; reads below never serve them either.
                 let live = profile.kind == HarnessKind::Muse;
                 if let Some(definition) = inner.definitions.get_mut(&identity) {
-                    if !live && !definition.cancellation.is_cancelled() {
+                    if (!live || !refresh_live) && !definition.cancellation.is_cancelled() {
                         // Keep successful entries and the in-flight attempt.
                         // A failed owner's next retry uses refreshed credentials.
                         let models_changed = definition
@@ -844,10 +852,12 @@ impl ProfileCatalog {
         for model in &choices.models {
             let model_key = (identity.to_owned(), Some(model.value.clone()));
             let current = choices.model.as_ref() == Some(&model.value);
-            let selected = inner
-                .wanted
-                .get(identity)
-                .is_some_and(|wanted| wanted.contains(&model.value));
+            let selected = inner.wanted.get(identity).is_some_and(|wanted| {
+                wanted.iter().any(|wanted| {
+                    mj_core::model_catalog::resolve(&choices.models, wanted)
+                        .is_some_and(|offer| offer.value == model.value)
+                })
+            });
             if inner.entries.contains_key(&model_key) || !(current || selected) {
                 continue;
             }
@@ -1507,26 +1517,53 @@ impl ProfileCatalog {
                 .fetch_live(&key, key.1.clone(), cancellation, &mut revisions)
                 .await;
         }
+        self.fetch_settled(config, id, key.1).await
+    }
+
+    // Admission checks configured choices against the warm owner, including Muse.
+    async fn fetch_settled(
+        self: &Arc<Self>,
+        config: &Config,
+        id: &str,
+        model: Option<String>,
+    ) -> Result<ProfileConfig> {
+        let profile = config.enabled_profile(id).context("profile unavailable")?;
+        let identity = profile.capabilities_key(id);
+        // Claim and reuse under the same lock, so concurrent first readers
+        // cannot replace each other's Muse owner. Only warm passes refresh it.
+        self.ensure_profiles(config, false);
+        let key = (identity, model);
+        let mut revisions = self.revisions.subscribe();
         loop {
             // Subscribe before inspecting ownership, so completion cannot be
             // missed. Readers never drive or publish the supervisor's future.
-            let (entry, started) = {
+            let (entry, started, cancellation) = {
                 let mut inner = self.lock();
+                if self.cancellation.is_cancelled() {
+                    bail!("profile discovery cancelled by daemon shutdown");
+                }
+                let cancellation = inner
+                    .definitions
+                    .get(&key.0)
+                    .filter(|definition| !definition.cancellation.is_cancelled())
+                    .context("profile definition retired")?
+                    .cancellation
+                    .clone();
                 let default = inner
                     .entries
                     .get(&(key.0.clone(), None))
                     .cloned()
                     .expect("default claimed by ensure");
                 if key.1.is_some() && !matches!(default, Entry::Ready(_)) {
-                    (default, None)
+                    (default, None, cancellation)
                 } else if let Some(entry) = inner.entries.get(&key) {
-                    (entry.clone(), None)
+                    (entry.clone(), None, cancellation)
                 } else {
                     let attempt = self.attempt(&inner.definitions[&key.0], key.1.clone());
                     let entry = Entry::Pending(attempt.clone());
                     inner.publication = None;
                     inner.entries.insert(key.clone(), entry.clone());
-                    (entry, Some(attempt))
+                    (entry, Some(attempt), cancellation)
                 }
             };
             if let Some(attempt) = started {
@@ -1543,7 +1580,9 @@ impl ProfileCatalog {
             tokio::select! {
                 biased;
                 _ = self.cancellation.cancelled() => bail!("profile discovery cancelled by daemon shutdown"),
-                _ = cancellation.cancelled() => bail!("profile definition retired"),
+                // A warm pass can replace this identity while we wait.
+                // Rejoin its current owner under the lock on the next iteration.
+                _ = cancellation.cancelled() => {},
                 result = revisions.changed() => { result.context("profile capability publisher stopped")?; }
             }
         }
@@ -1637,6 +1676,7 @@ impl ProfileCatalog {
     pub(crate) fn ready_candidates(&self, model: &str) -> Result<Vec<(String, HarnessKind)>> {
         let config = self.live()?;
         let snapshot = self.snapshot();
+        let identity = snapshot.model_id(&config, model);
         Ok(config
             .enabled_profiles()
             .filter(|(id, profile)| {
@@ -1645,7 +1685,7 @@ impl ProfileCatalog {
                     .get(&profile.capabilities_key(id))
                     .is_some_and(|entry| {
                         matches!(&entry.choices, CapabilityState::Ready(choices)
-                        if model.is_empty() || choices.models.iter().any(|choice| choice.value == model))
+                        if model.is_empty() || mj_core::model_catalog::offer(&choices.models, &identity, model).is_some())
                     })
             })
             .map(|(id, profile)| (id.to_owned(), profile.kind))
@@ -1725,6 +1765,46 @@ impl ProfileCatalog {
             .await
             .into_iter()
             .collect()
+    }
+
+    pub(crate) async fn admission_options(
+        self: &Arc<Self>,
+        config: &Config,
+        parent: &str,
+        models: std::collections::BTreeSet<String>,
+    ) -> Result<std::collections::BTreeMap<String, mj_core::subagent::SubagentOptions>> {
+        config
+            .enabled_profile(parent)
+            .context("parent profile unavailable")?;
+        let defaults = join_all(config.enabled_profiles().map(|(id, _)| async move {
+            (id.to_owned(), self.fetch_settled(config, id, None).await)
+        }))
+        .await
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+        let results = join_all(models.into_iter().map(|model| {
+            let defaults = &defaults;
+            async move {
+                let options = crate::controller::profile_config::subagent_options_with(
+                    config,
+                    parent,
+                    Some(model.clone()),
+                    |id, selected| async move {
+                        if selected.is_none() {
+                            return defaults[&id]
+                                .as_ref()
+                                .cloned()
+                                .map_err(|error| anyhow::anyhow!("{error:#}"));
+                        }
+                        self.fetch_settled(config, &id, selected).await
+                    },
+                )
+                .await?;
+                Ok::<_, anyhow::Error>((model, options))
+            }
+        }))
+        .await;
+        results.into_iter().collect()
     }
 
     pub(crate) async fn options_for(
@@ -3636,7 +3716,7 @@ mod tests {
         catalog.upgrade_legacy_review(2).await.unwrap();
         let review = Config::load_from(&path).unwrap().review;
         assert!(!review.is_legacy());
-        assert_eq!(review.reviewers.len(), 2);
+        assert_eq!(review.reviewers.len(), 3);
         assert_eq!(review.reviewers[0].model, "gpt-6-terra");
     }
 
@@ -3644,6 +3724,7 @@ mod tests {
     fn subscription_report(profile: &str, harness: HarnessKind) -> ProfileQuota {
         ProfileQuota {
             paid_credits: None,
+            monthly_price_usd: None,
             banked_resets: None,
             profile_id: profile.into(),
             harness,
@@ -3726,6 +3807,24 @@ mod tests {
         catalog
     }
 
+    fn published_reports(
+        reports: impl IntoIterator<Item = (String, ProfileQuota)>,
+    ) -> QuotaReportMap {
+        reports
+            .into_iter()
+            .map(|(id, report)| {
+                (
+                    id,
+                    crate::quota::QuotaReportPublication {
+                        login_error: None,
+                        cache_identity: "test-identity".into(),
+                        report: Some(report),
+                    },
+                )
+            })
+            .collect()
+    }
+
     fn upgraded_models(path: &Path) -> Vec<String> {
         Config::load_from(path)
             .unwrap()
@@ -3741,30 +3840,30 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("custom-config.toml");
         // The OpenCode profile's real report is `n/a`, not an API label.
-        let reports: QuotaReports = Arc::new(Mutex::new(BTreeMap::from([
+        let reports: QuotaReports = Arc::new(Mutex::new(published_reports(BTreeMap::from([
             (
                 "codex".to_owned(),
                 subscription_report("codex", HarnessKind::Codex),
             ),
             ("openrouter".to_owned(), not_reported("openrouter")),
-        ])));
+        ]))));
         let catalog = billing_catalog(&path, reports.clone());
         let upgrade = {
             let catalog = Arc::clone(&catalog);
             tokio::spawn(async move { catalog.upgrade_legacy_review(1).await })
         };
-        // OpenAI fills both slots, so an unused Claude profile's unknown
+        // OpenAI fills every slot, so an unused Claude profile's unknown
         // billing must not delay the upgrade.
         upgrade.await.unwrap().unwrap();
         assert!(!Config::load_from(&path).unwrap().review.is_legacy());
-        assert_eq!(upgraded_models(&path), ["gpt-6.1-terra", "gpt-6.1-sol"]);
+        assert_eq!(upgraded_models(&path), ["gpt-6.1-terra"; 3]);
     }
 
     #[tokio::test(start_paused = true)]
     async fn legacy_upgrade_treats_an_opencode_profile_without_a_report_as_usage_priced() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("custom-config.toml");
-        let reports: QuotaReports = Arc::new(Mutex::new(BTreeMap::from([
+        let reports: QuotaReports = Arc::new(Mutex::new(published_reports(BTreeMap::from([
             (
                 "codex".to_owned(),
                 subscription_report("codex", HarnessKind::Codex),
@@ -3773,10 +3872,10 @@ mod tests {
                 "sonnet".to_owned(),
                 subscription_report("sonnet", HarnessKind::Claude),
             ),
-        ])));
+        ]))));
         let catalog = billing_catalog(&path, reports);
         catalog.upgrade_legacy_review(1).await.unwrap();
-        assert_eq!(upgraded_models(&path), ["gpt-6.1-terra", "gpt-6.1-sol"]);
+        assert_eq!(upgraded_models(&path), ["gpt-6.1-terra"; 3]);
     }
 
     #[tokio::test(start_paused = true)]
@@ -3784,10 +3883,10 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("custom-config.toml");
         // The selected OpenAI profile's quota probe never reports.
-        let reports: QuotaReports = Arc::new(Mutex::new(BTreeMap::from([(
+        let reports: QuotaReports = Arc::new(Mutex::new(published_reports(BTreeMap::from([(
             "sonnet".to_owned(),
             subscription_report("sonnet", HarnessKind::Claude),
-        )])));
+        )]))));
         let catalog = billing_catalog(&path, reports.clone());
         let error = catalog.upgrade_legacy_review(1).await.unwrap_err();
         assert!(
@@ -3798,10 +3897,14 @@ mod tests {
         // A report that arrives before the next attempt lets it finish.
         reports.lock().unwrap().insert(
             "codex".into(),
-            subscription_report("codex", HarnessKind::Codex),
+            crate::quota::QuotaReportPublication {
+                login_error: None,
+                cache_identity: "test-identity".into(),
+                report: Some(subscription_report("codex", HarnessKind::Codex)),
+            },
         );
         catalog.upgrade_legacy_review(2).await.unwrap();
-        assert_eq!(upgraded_models(&path), ["gpt-6.1-terra", "gpt-6.1-sol"]);
+        assert_eq!(upgraded_models(&path), ["gpt-6.1-terra"; 3]);
     }
 
     #[tokio::test(start_paused = true)]
@@ -4118,6 +4221,70 @@ mod tests {
         catalog.sync_now(&config).await;
         assert_eq!(snapshot_models(&catalog), ["p-model", "m1", "m2", "m3"]);
     }
+    // Hard-won: 9d1f70d2b: refreshing Muse retired an admission waiter.
+    #[tokio::test]
+    async fn admission_follows_a_replaced_pending_muse_owner() {
+        let probes = calls();
+        let (started, mut starts) = tokio::sync::mpsc::unbounded_channel();
+        let (release, gate) = tokio::sync::watch::channel(false);
+        let catalog = ProfileCatalog::with_probe(gated_probe(probes.clone(), started, gate));
+        let mut config = test_config(&[("parent", HarnessKind::Codex), ("p", HarnessKind::Muse)]);
+        config.subagents.straightforward = Some(mj_core::config::SubagentChoice {
+            model: "p-model".into(),
+            effort: None,
+        });
+        let policy = mj_core::subagent::SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None,
+        };
+        catalog.sync(&config);
+        let validation = crate::controller::profile_config::validate_session_subagent_policy(
+            &catalog, &config, "parent", &policy,
+        );
+        tokio::pin!(validation);
+        assert!(futures::poll!(&mut validation).is_pending());
+        for _ in 0..2 {
+            starts.recv().await.unwrap();
+        }
+        catalog.sync(&config);
+        assert_eq!(starts.recv().await.unwrap(), "p");
+        // The waiter must join the replacement before either probe completes.
+        assert!(futures::poll!(&mut validation).is_pending());
+        release.send_replace(true);
+        validation.await.unwrap();
+        assert_eq!(probes.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn admission_shares_pending_muse_warmup_and_retains_its_result() {
+        let probes = calls();
+        let catalog = ProfileCatalog::with_probe(counting_probe(probes.clone()));
+        let mut config = test_config(&[("parent", HarnessKind::Codex), ("p", HarnessKind::Muse)]);
+        let choice = mj_core::config::SubagentChoice {
+            model: "p-model".into(),
+            effort: None,
+        };
+        config.subagents.straightforward = Some(choice.clone());
+        config.subagents.subtle = Some(choice);
+        catalog.sync(&config);
+        let policy = mj_core::subagent::SubagentPolicy::Mjolnir {
+            straightforward: None,
+            subtle: None,
+        };
+        for _ in 0..2 {
+            crate::controller::profile_config::validate_session_subagent_policy(
+                &catalog, &config, "parent", &policy,
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            probes.load(Ordering::SeqCst),
+            2,
+            "one startup probe per profile across both validations"
+        );
+    }
+
     // Hard-won: dfbb210a5: restricted Muse reads restarted default discovery.
     #[tokio::test]
     async fn restricted_live_model_read_reuses_cached_default() {

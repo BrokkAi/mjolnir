@@ -1,12 +1,12 @@
 use super::*;
 
 pub fn close_plan(locator: &TargetLocator, session_id: &str) -> Result<CommandPlan> {
-    close_plan_scoped(locator, session_id, true)
+    close_plan_scoped(locator, session_id, true, None)
 }
 
 /// A Move can have two generations on one host. Shared session caches remain owned by the destination.
 pub fn retire_move_target_plan(locator: &TargetLocator, session_id: &str) -> Result<CommandPlan> {
-    close_plan_scoped(locator, session_id, false)
+    close_plan_scoped(locator, session_id, false, None)
 }
 
 /// Termination needs the durable AWS identity even before SSH has an address.
@@ -40,6 +40,7 @@ fn close_plan_scoped(
     locator: &TargetLocator,
     session_id: &str,
     remove_shared_cache: bool,
+    stopped: Option<&crate::controller::StoppedWorker<'_>>,
 ) -> Result<CommandPlan> {
     verify_locator(locator, session_id)?;
     ensure!(
@@ -67,7 +68,7 @@ fn close_plan_scoped(
                 container_id: container_id.clone(),
             },
         };
-        let local = close_plan_scoped(&local_locator, session_id, remove_shared_cache)?;
+        let local = close_plan_scoped(&local_locator, session_id, remove_shared_cache, None)?;
         return Ok(CommandPlan {
             description: local.description,
             commands: local
@@ -78,6 +79,18 @@ fn close_plan_scoped(
         });
     }
 
+    // The engine stops a sandbox's process before it deletes a disk, so
+    // removal needs no more than the sandbox and its two named volumes. A
+    // sandbox has no host Git cache snapshot to remove.
+    if let TargetLocator::SshNitro {
+        ssh, container_id, ..
+    } = locator
+    {
+        return Ok(CommandPlan {
+            description: format!("clean up stopped Mjolnir session {session_id}"),
+            commands: nitro_destroy_commands(ssh, container_id),
+        });
+    }
     let session_worker_root = worker_root(locator, session_id)?;
     let session_profile_home = format!(".local/share/hel/profiles/{session_id}");
     if matches!(
@@ -101,16 +114,22 @@ fn close_plan_scoped(
             // directory instead.
             let script = format!(
                 "{}\nrm -rf -- {} {}\n",
-                stop_worker_daemon_script(&session_worker_root),
+                stopped
+                    .map(|_| String::new())
+                    .unwrap_or_else(|| kill_worker_daemon_script(&session_worker_root)),
                 posix_quote(&session_worker_root),
                 posix_quote(&local_nested_profile_root(session_id).to_string_lossy()),
             );
-            CommandSpec::new("sh", ["-c", script.as_str()]).purpose(
-                "stop the local Mjolnir worker and remove exact local Mjolnir worker state",
-            )
+            CommandSpec::new("sh", ["-c", script.as_str()]).purpose(if stopped.is_some() {
+                "remove exact stopped local Mjolnir worker state"
+            } else {
+                "stop the local Mjolnir worker and remove exact local Mjolnir worker state"
+            })
         }
         TargetLocator::LocalPodman { .. } => unreachable!("handled above"),
-        TargetLocator::SshDocker { .. } | TargetLocator::SshAppleContainer { .. } => {
+        TargetLocator::SshDocker { .. }
+        | TargetLocator::SshAppleContainer { .. }
+        | TargetLocator::SshNitro { .. } => {
             unreachable!("handled above")
         }
         TargetLocator::LocalDocker { container_id, .. } => {
@@ -214,13 +233,15 @@ exit "$status""#;
             // daemon before deleting the root it keeps writing to.
             let script = format!(
                 "{}\nrm -rf -- {} {} {}\n",
-                stop_worker_daemon_script(&session_worker_root),
+                stopped
+                    .map(|_| String::new())
+                    .unwrap_or_else(|| kill_worker_daemon_script(&session_worker_root)),
                 posix_quote(workspace),
                 posix_quote(&session_worker_root),
                 posix_quote(&session_profile_home),
             );
             ssh_command(ssh, ["sh", "-c", script.as_str()]).purpose(
-                "stop the remote Mjolnir worker and remove exact SSH session workspace and runtime state",
+                if stopped.is_some() { "remove exact stopped SSH session workspace and runtime state" } else { "stop the remote Mjolnir worker and remove exact SSH session workspace and runtime state" },
             )
         }
         TargetLocator::SshPodman { .. } => unreachable!("handled above"),
@@ -247,9 +268,19 @@ pub fn borrowed_worker_cleanup_plan(
     locator: &TargetLocator,
     child_session_id: &str,
 ) -> Result<CommandPlan> {
+    borrowed_worker_cleanup_plan_scoped(locator, child_session_id, None)
+}
+
+fn borrowed_worker_cleanup_plan_scoped(
+    locator: &TargetLocator,
+    child_session_id: &str,
+    stopped: Option<&crate::controller::StoppedWorker<'_>>,
+) -> Result<CommandPlan> {
     verify_locator(locator, child_session_id)?;
     let worker_root = worker_root(locator, child_session_id)?;
-    let mut script = stop_worker_daemon_script(&worker_root);
+    let mut script = stopped
+        .map(|_| String::new())
+        .unwrap_or_else(|| kill_worker_daemon_script(&worker_root));
     script.push_str(&format!("rm -rf -- {}\n", posix_quote(&worker_root)));
     if matches!(locator, TargetLocator::LocalBare { .. }) {
         script.push_str(&format!(
@@ -267,7 +298,11 @@ pub fn borrowed_worker_cleanup_plan(
         locator,
         child_session_id,
         vec!["sh".into(), "-c".into(), script],
-        "stop a borrowed-target sub-agent and remove its private worker state",
+        if stopped.is_some() {
+            "remove a stopped borrowed-target sub-agent's private worker state"
+        } else {
+            "stop a borrowed-target sub-agent and remove its private worker state"
+        },
     )?;
     Ok(CommandPlan {
         description: format!("clean up sub-agent worker {child_session_id}"),
@@ -299,6 +334,15 @@ pub fn quiesce_plan(locator: &TargetLocator, session_id: &str) -> Result<Option<
         !is_borrowed(locator),
         "refusing to operate on a target borrowed from another session; act on the owning session instead"
     );
+    if let TargetLocator::SshNitro {
+        ssh, container_id, ..
+    } = locator
+    {
+        return Ok(Some(CommandPlan {
+            description: format!("quiesce Mjolnir session {session_id}"),
+            commands: vec![nitro_quiesce_command(ssh, container_id)],
+        }));
+    }
     let (ssh, container_id) = match locator {
         TargetLocator::LocalPodman { container_id, .. } => (None, container_id),
         TargetLocator::SshPodman {
@@ -598,6 +642,9 @@ pub fn cleanup_target_is_confirmed_absent(
             podman_absence_command(Some(ssh), container_id, workspace_storage, session_id),
             true,
         ),
+        TargetLocator::SshNitro {
+            ssh, container_id, ..
+        } => (nitro_absence_command(ssh, container_id), true),
         _ => return Ok(false),
     };
     let command = match locator {
@@ -698,4 +745,57 @@ esac
         None => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
     }
     .purpose("confirm exact Podman session resources are absent")
+}
+
+/// Removal follows completed managed Stop and retains the launch permits.
+/// This authority does not assert containment of arbitrary detached writers.
+pub(crate) struct StoppedCleanupPlan<'a> {
+    _proof: crate::controller::StoppedWorker<'a>,
+    plan: CommandPlan,
+}
+impl StoppedCleanupPlan<'_> {
+    pub(crate) fn execute(&self, executor: &impl CommandExecutor) -> Result<Vec<CommandOutput>> {
+        self.plan.execute(executor)
+    }
+}
+
+pub(crate) fn close_stopped_target_plan(
+    proof: crate::controller::StoppedWorker<'_>,
+) -> Result<StoppedCleanupPlan<'_>> {
+    ensure!(
+        worker_root(proof.target(), proof.session_id())? == proof.root(),
+        "stopped worker root changed"
+    );
+    let plan = close_plan_scoped(proof.target(), proof.session_id(), true, Some(&proof))?;
+    Ok(StoppedCleanupPlan {
+        _proof: proof,
+        plan,
+    })
+}
+pub(crate) fn retire_stopped_move_target_plan(
+    proof: crate::controller::StoppedWorker<'_>,
+) -> Result<StoppedCleanupPlan<'_>> {
+    ensure!(
+        worker_root(proof.target(), proof.session_id())? == proof.root(),
+        "stopped worker root changed"
+    );
+    let plan = close_plan_scoped(proof.target(), proof.session_id(), false, Some(&proof))?;
+    Ok(StoppedCleanupPlan {
+        _proof: proof,
+        plan,
+    })
+}
+pub(crate) fn stopped_borrowed_worker_cleanup_plan(
+    proof: crate::controller::StoppedWorker<'_>,
+) -> Result<StoppedCleanupPlan<'_>> {
+    ensure!(
+        worker_root(proof.target(), proof.session_id())? == proof.root(),
+        "stopped worker root changed"
+    );
+    let plan =
+        borrowed_worker_cleanup_plan_scoped(proof.target(), proof.session_id(), Some(&proof))?;
+    Ok(StoppedCleanupPlan {
+        _proof: proof,
+        plan,
+    })
 }

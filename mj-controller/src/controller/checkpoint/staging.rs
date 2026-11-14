@@ -371,6 +371,9 @@ pub(in crate::controller) fn upload_checkpoint_spec(
         }
         | targets::TargetLocator::SshAppleContainer {
             ssh, container_id, ..
+        }
+        | targets::TargetLocator::SshNitro {
+            ssh, container_id, ..
         } => {
             let engine = locator
                 .container_engine()
@@ -391,9 +394,10 @@ pub(in crate::controller) fn upload_checkpoint_spec(
             )?;
             execute_checked(
                 executor,
-                crate::targets::ssh_command(
+                crate::targets::ssh_engine_command(
                     ssh,
-                    [engine, "cp", &staging, &format!("{container_id}:{remote}")],
+                    engine,
+                    ["cp", &staging, &format!("{container_id}:{remote}")],
                 )
                 .purpose("install remote container checkpoint specification"),
             )?;

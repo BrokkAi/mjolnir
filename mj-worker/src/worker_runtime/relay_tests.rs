@@ -50,6 +50,167 @@ async fn delegation_exchange(
     }
 }
 
+async fn project_memory_transfer_exchange(
+    lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    request_id: &str,
+    action: mj_core::relay::ProjectMemoryTransferAction,
+) -> RelayResponseEnvelope {
+    project_memory_transfer_exchange_at(lines, writer, request_id, RELAY_PROTOCOL_VERSION, action)
+        .await
+}
+
+async fn project_memory_transfer_exchange_at(
+    lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    request_id: &str,
+    protocol_version: u32,
+    action: mj_core::relay::ProjectMemoryTransferAction,
+) -> RelayResponseEnvelope {
+    let request = RelayRequestEnvelope {
+        request_id: request_id.into(),
+        protocol_version,
+        request: RelayRequest::ProjectMemoryTransfer { action },
+    };
+    let mut bytes = serde_json::to_vec(&request).unwrap();
+    bytes.push(b'\n');
+    assert!(bytes.len() <= mj_core::relay::MAX_FRAME_BYTES);
+    writer.write_all(&bytes).await.unwrap();
+    let line = tokio::time::timeout(crate::test_support::IO_TIMEOUT, lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(line.len() < mj_core::relay::MAX_FRAME_BYTES);
+    serde_json::from_str(&line).unwrap()
+}
+
+async fn next_project_memory_transfer_exchange(
+    lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    sequence: &mut u64,
+    action: mj_core::relay::ProjectMemoryTransferAction,
+) -> RelayResponseEnvelope {
+    let request_id = format!("project-memory-transfer-{}", *sequence);
+    *sequence += 1;
+    project_memory_transfer_exchange(lines, writer, &request_id, action).await
+}
+
+async fn upload_project_memory_bytes(
+    lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    sequence: &mut u64,
+    bytes: &[u8],
+    kind: mj_core::relay::ProjectMemoryUploadKind,
+) -> RelayResponsePayload {
+    use base64::Engine as _;
+    use mj_core::relay::{
+        ProjectMemoryTransferAction as Action, ProjectMemoryTransferResult as ResultKind,
+    };
+
+    let response = next_project_memory_transfer_exchange(
+        lines,
+        writer,
+        sequence,
+        Action::BeginUpload {
+            kind,
+            total_bytes: u64::try_from(bytes.len()).unwrap(),
+        },
+    )
+    .await;
+    let transfer_id = match response.body {
+        RelayResponseBody::Ok {
+            payload:
+                RelayResponsePayload::ProjectMemoryTransfer {
+                    result: ResultKind::UploadStarted { transfer_id },
+                },
+        } => transfer_id,
+        body => panic!("project-memory upload did not start: {body:?}"),
+    };
+    let capacity = mj_core::relay::project_memory_transfer_request_chunk_bytes(
+        RELAY_PROTOCOL_VERSION,
+        "relay-ffffffffffffffff-18446744073709551615",
+    )
+    .unwrap();
+    let mut offset = 0_u64;
+    for chunk in bytes.chunks(capacity) {
+        let response = next_project_memory_transfer_exchange(
+            lines,
+            writer,
+            sequence,
+            Action::AppendUpload {
+                transfer_id,
+                offset,
+                chunk: base64::engine::general_purpose::STANDARD.encode(chunk),
+            },
+        )
+        .await;
+        let next_offset = match response.body {
+            RelayResponseBody::Ok {
+                payload:
+                    RelayResponsePayload::ProjectMemoryTransfer {
+                        result:
+                            ResultKind::UploadProgress {
+                                transfer_id: response_id,
+                                next_offset,
+                            },
+                    },
+            } => {
+                assert_eq!(response_id, transfer_id);
+                next_offset
+            }
+            body => panic!("project-memory upload page failed: {body:?}"),
+        };
+        offset = next_offset;
+    }
+    let response = next_project_memory_transfer_exchange(
+        lines,
+        writer,
+        sequence,
+        Action::CommitUpload { transfer_id },
+    )
+    .await;
+    match response.body {
+        RelayResponseBody::Ok { payload } => payload,
+        body => panic!("project-memory upload commit failed: {body:?}"),
+    }
+}
+
+fn incompressible_memory_text(length: usize) -> String {
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    (0..length)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            char::from(b'!' + (state % 90) as u8)
+        })
+        .collect()
+}
+
+fn project_memory_socket(
+    relay: Arc<RelayCell>,
+    endpoint: unix::ProjectMemoryEndpoint,
+) -> (
+    tokio::net::UnixStream,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+) {
+    let (server, client) = tokio::net::UnixStream::pair().unwrap();
+    let (wake, _) = mpsc::channel(1);
+    let task = tokio::spawn(unix::serve_client_with_memory(
+        server,
+        relay,
+        wake,
+        test_credentials(),
+        unix::ConnectionRuntime {
+            project_memory: endpoint,
+            ..Default::default()
+        },
+        fatal_reports().0,
+    ));
+    (client, task)
+}
+
 // Hard-won: 82e4c8a44: retained child reports made a healthy worker unreachable.
 #[tokio::test]
 async fn oversized_legacy_delegation_history_replays_only_completion_receipts() {
@@ -220,6 +381,7 @@ fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         reviewer_launch: None,
         subagents: mj_core::subagent::SubagentPolicy::Native,
         handback_tool: false,
+        subagent_kind: None,
         agent_mailboxes_enabled: true,
         subtle_subagents: true,
         initial_model: None,
@@ -243,6 +405,8 @@ fn launch_config(profile_home: &str) -> WorkerLaunchConfig {
         native_session_id: None,
         project_memory: None,
         execution_policy: ExecutionPolicy::Unconstrained,
+        claude_permission_mode: Default::default(),
+        observe_policy: None,
     }
 }
 
@@ -337,6 +501,7 @@ async fn credential_request(
         },
         &Ok(endpoint.clone()),
         &endpoint.home,
+        &Default::default(),
     )
     .await;
     match response.body {
@@ -1642,6 +1807,254 @@ async fn next_command(commands: &mut mpsc::Receiver<CommandRequest>) -> CommandR
         .expect("the ACP command channel closed")
 }
 
+// Hard-won: #1515: credential installs did not resume an auth-failed Claude turn.
+#[tokio::test]
+async fn authentication_recovery_handles_both_orders_of_install_and_failure() {
+    use base64::Engine as _;
+    for install_first in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("relay");
+        let home = temp.path().join("claude");
+        std::fs::create_dir_all(&home).unwrap();
+        let path = home.join(".credentials.json");
+        let old = br#"{"claudeAiOauth":{"accessToken":"old-access","refreshToken":"remove-me","expiresAt":1000}}"#;
+        let stripped = br#"{"claudeAiOauth":{"accessToken":"old-access","expiresAt":1000}}"#;
+        let fresh = br#"{"claudeAiOauth":{"accessToken":"new-access","expiresAt":2000}}"#;
+        std::fs::write(&path, old).unwrap();
+        let mut durable = DurableRelay::open(&root, SESSION_ID, "test").unwrap();
+        durable.set_turn_verdict_harness(HarnessKind::Claude);
+        durable.authentication_login_path = Some(path.clone());
+        let initial_revision = durable.login_identity.snapshot().0;
+        let relay = Arc::new(RelayCell::new(durable));
+        let (events, event_rx) = mpsc::channel(16);
+        let (wakes, wake_rx) = mpsc::channel(1);
+        let (commands, mut command_rx) = mpsc::channel(8);
+        let coordinator = tokio::spawn(run_relay_coordinator(
+            relay.clone(),
+            event_rx,
+            wake_rx,
+            commands.clone(),
+        ));
+        events
+            .send(RuntimeEvent::SessionConfigured {
+                config_options: vec![],
+            })
+            .await
+            .unwrap();
+
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let (fatal, _failures) = fatal_reports();
+        let serving = tokio::spawn(unix::serve_client(
+            server,
+            relay.clone(),
+            wakes,
+            Ok(CredentialEndpoint {
+                harness: HarnessKind::Claude,
+                home,
+                marker: path,
+                no_github_credentials: false,
+            }),
+            Some(commands),
+            fatal,
+        ));
+        let (read, mut writer) = client.into_split();
+        let mut reader = BufReader::new(read).lines();
+        delegation_exchange(
+            &mut reader,
+            &mut writer,
+            RelayRequest::Submit {
+                command_id: "user-request".into(),
+                command: prompt("finish this task"),
+            },
+        )
+        .await;
+        assert_prompt(
+            next_command(&mut command_rx).await,
+            "user-request",
+            "finish this task",
+        );
+        let mut diagnostic = mj_core::diagnostic::TurnDiagnostic::from_acp(
+            &agent_client_protocol::Error::auth_required(),
+        );
+        diagnostic.login_fingerprint =
+            Some(mj_core::credentials::credential_fingerprint(b"old-access"));
+        let failed = RuntimeEvent::PromptFinished {
+            request_id: "user-request".into(),
+            stop_reason: "error".into(),
+            diagnostic: Some(diagnostic),
+            usage: None,
+        };
+        if !install_first {
+            events.send(failed.clone()).await.unwrap();
+            wait_until(
+                || {
+                    relay
+                        .lock()
+                        .unwrap()
+                        .operational_state()
+                        .continuation
+                        .completed_command_id
+                        .as_deref()
+                        == Some("user-request")
+                },
+                "failure was not recorded",
+            )
+            .await;
+        }
+        // A document change without an access-token change is not recovery.
+        delegation_exchange(
+            &mut reader,
+            &mut writer,
+            RelayRequest::InstallCredentials {
+                data: base64::engine::general_purpose::STANDARD.encode(stripped),
+            },
+        )
+        .await;
+        events
+            .send(RuntimeEvent::Warning {
+                message: "unchanged-login-checked".into(),
+            })
+            .await
+            .unwrap();
+        wait_until(
+            || recorded_warning(&relay, "unchanged-login-checked"),
+            "credential check was not drained",
+        )
+        .await;
+        assert!(command_rx.try_recv().is_err());
+        delegation_exchange(
+            &mut reader,
+            &mut writer,
+            RelayRequest::InstallCredentials {
+                data: base64::engine::general_purpose::STANDARD.encode(fresh),
+            },
+        )
+        .await;
+        if install_first {
+            // A startup sample that predates the push cannot overwrite the
+            // identity published with the successful install.
+            relay.lock().unwrap().login_identity.observe(
+                initial_revision,
+                Some(mj_core::credentials::credential_fingerprint(b"old-access")),
+            );
+            events.send(failed).await.unwrap();
+        }
+        let CommandRequest::Prompt {
+            request_id,
+            prompt: retry,
+        } = next_command(&mut command_rx).await
+        else {
+            panic!("recovery must dispatch a prompt");
+        };
+        assert!(request_id.starts_with("auth-retry-"));
+        assert_eq!(retry, mj_core::continuation::prompt_blocks());
+        assert_eq!(
+            relay
+                .lock()
+                .unwrap()
+                .operational_state()
+                .continuation
+                .user_command_id
+                .as_deref(),
+            Some("user-request")
+        );
+        // Repeated delivery cannot queue another recovery while the first runs.
+        delegation_exchange(
+            &mut reader,
+            &mut writer,
+            RelayRequest::InstallCredentials {
+                data: base64::engine::general_purpose::STANDARD.encode(fresh),
+            },
+        )
+        .await;
+        events
+            .send(RuntimeEvent::Warning {
+                message: "duplicate-login-checked".into(),
+            })
+            .await
+            .unwrap();
+        wait_until(
+            || recorded_warning(&relay, "duplicate-login-checked"),
+            "duplicate credential check was not drained",
+        )
+        .await;
+        assert!(command_rx.try_recv().is_err());
+        events
+            .send(RuntimeEvent::PromptFinished {
+                request_id,
+                stop_reason: "EndTurn".into(),
+                diagnostic: None,
+                usage: None,
+            })
+            .await
+            .unwrap();
+        events.send(RuntimeEvent::Stopped).await.unwrap();
+        coordinator.await.unwrap().unwrap();
+        writer.shutdown().await.unwrap();
+        serving.await.unwrap().unwrap();
+    }
+}
+
+// Hard-won: #1515: awaiting credential I/O parked the coordinator's event loop.
+#[tokio::test]
+async fn a_stalled_login_read_does_not_block_relay_events_or_shutdown() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("login.json");
+    let gate = crate::test_support::stalled_read_file(&path);
+    let mut durable = DurableRelay::open(root.path(), SESSION_ID, "test").unwrap();
+    durable.set_turn_verdict_harness(HarnessKind::Claude);
+    durable.authentication_login_path = Some(path);
+    durable
+        .record_observation(RelayObservation::SessionConfigured {
+            config_options: vec![],
+        })
+        .unwrap();
+    submit(&mut durable, "user-request", prompt("finish this task"));
+    durable.claim_pending_commands(true).unwrap();
+    let mut diagnostic = mj_core::diagnostic::TurnDiagnostic::from_acp(
+        &agent_client_protocol::Error::auth_required(),
+    );
+    diagnostic.login_fingerprint = Some("old-login".into());
+    durable
+        .record_command_completed(
+            "user-request",
+            mj_core::relay::RelayCommandOutcome::Prompt {
+                work_facts: None,
+                stop_reason: "error".into(),
+                diagnostic: Some(diagnostic),
+                usage: None,
+            },
+        )
+        .unwrap();
+    let relay = Arc::new(RelayCell::new(durable));
+    let (events, event_rx) = mpsc::channel(4);
+    let (_wakes, wake_rx) = mpsc::channel(1);
+    let (commands, _command_rx) = mpsc::channel(4);
+    let coordinator = tokio::spawn(run_relay_coordinator(
+        relay.clone(),
+        event_rx,
+        wake_rx,
+        commands,
+    ));
+    events
+        .send(RuntimeEvent::Warning {
+            message: "read-is-stalled".into(),
+        })
+        .await
+        .unwrap();
+    wait_until(
+        || recorded_warning(&relay, "read-is-stalled"),
+        "login read blocked runtime events",
+    )
+    .await;
+    events.send(RuntimeEvent::Stopped).await.unwrap();
+    crate::test_support::wait_for("coordinator shutdown during a login read", coordinator)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(gate);
+}
+
 /// Wait for a coordinator-side condition. Everything this guards against
 /// wedges permanently, so a generous deadline still fails fast enough.
 async fn wait_until(mut condition: impl FnMut() -> bool, blocked: &str) {
@@ -1823,6 +2236,7 @@ async fn an_empty_kimi_turn_with_a_journalled_login_failure_reports_the_failure(
                 code: Some(mj_core::acp::PROMPT_UNANSWERED_STOP_REASON.into()),
                 http_status: None,
                 reset_at: None,
+                login_fingerprint: None,
             }),
         },
     ];
@@ -5609,6 +6023,7 @@ async fn daemon_restart_records_one_marker_after_recovering_in_flight_work() {
     );
 }
 
+// Hard-won: #1515: two relay locks in LaunchSpec field initializers deadlocked startup.
 #[tokio::test]
 async fn first_daemon_start_does_not_record_a_restart_marker() {
     let temp = tempfile::tempdir().unwrap();
@@ -7003,6 +7418,584 @@ fn project_memory_replace_refuses_a_changed_replica_without_writing_either_tree(
     ));
     assert_eq!(replica.snapshot().unwrap(), replica_after_concurrent_edit);
     assert_eq!(baseline.snapshot().unwrap(), baseline_before);
+}
+
+// Hard-won: #1500: a complete project-memory tree exceeded the single relay frame limit.
+#[tokio::test]
+async fn project_memory_transfer_pages_large_trees_and_commits_complete_uploads() {
+    use base64::Engine as _;
+    use mj_core::relay::{
+        ProjectMemoryTransferAction as Action, ProjectMemoryTransferResult as ResultKind,
+        ProjectMemoryUploadKind as UploadKind,
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let large_baseline = incompressible_memory_text(10 * 1024 * 1024);
+    let large_replica = incompressible_memory_text(10 * 1024 * 1024);
+    let large_upload = incompressible_memory_text(10 * 1024 * 1024);
+    let memory = ProjectMemoryLaunchConfig {
+        history_socket: None,
+        project_key: "project".into(),
+        root: directory.path().join("replica"),
+        baseline_root: directory.path().join("baseline"),
+        repository_roots: BTreeMap::new(),
+        mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+    };
+    let baseline_store = mj_core::project_memory::ProjectMemoryStore::new(&memory.baseline_root);
+    let baseline_tree = mj_core::project_memory::ProjectMemorySnapshot {
+        files: BTreeMap::from([
+            ("/baseline-only.md".into(), "baseline".into()),
+            ("/large.md".into(), large_baseline),
+        ]),
+    };
+    baseline_store.install_snapshot(&baseline_tree).unwrap();
+    let replica_store = mj_core::project_memory::ProjectMemoryStore::new(&memory.root);
+    let replica_tree = mj_core::project_memory::ProjectMemorySnapshot {
+        files: BTreeMap::from([
+            ("/large.md".into(), large_replica),
+            ("/replica-only.md".into(), "replica".into()),
+        ]),
+    };
+    replica_store.install_snapshot(&replica_tree).unwrap();
+    let encoded_snapshot = mj_core::relay::ProjectMemoryWireSnapshot::encode(
+        baseline_tree.clone(),
+        replica_tree.clone(),
+        RELAY_PROTOCOL_VERSION,
+    )
+    .unwrap();
+    assert!(encoded_snapshot.len() > mj_core::relay::MAX_FRAME_BYTES);
+
+    let upload_tree = mj_core::project_memory::ProjectMemorySnapshot {
+        files: BTreeMap::from([("/large-upload.md".into(), large_upload)]),
+    };
+    let encoded_upload = serde_json::to_vec(
+        &mj_core::relay::ProjectMemoryWireTree::encode(upload_tree.clone(), RELAY_PROTOCOL_VERSION)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(encoded_upload.len() > mj_core::relay::MAX_FRAME_BYTES);
+
+    let relay = Arc::new(RelayCell::new(
+        DurableRelay::open(directory.path().join("relay"), SESSION_ID, "test").unwrap(),
+    ));
+    let endpoint = unix::ProjectMemoryEndpoint::new(Some(memory.clone()));
+    let (client, server_task) = project_memory_socket(relay.clone(), endpoint.clone());
+    let (reader, mut writer) = client.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    let mut sequence = 0_u64;
+
+    let response = next_project_memory_transfer_exchange(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        Action::BeginSnapshot,
+    )
+    .await;
+    let (transfer_id, total_bytes) = match response.body {
+        RelayResponseBody::Ok {
+            payload:
+                RelayResponsePayload::ProjectMemoryTransfer {
+                    result:
+                        ResultKind::SnapshotStarted {
+                            transfer_id,
+                            total_bytes,
+                        },
+                },
+        } => (transfer_id, total_bytes),
+        body => panic!("project-memory snapshot did not start: {body:?}"),
+    };
+    assert_eq!(
+        usize::try_from(total_bytes).unwrap(),
+        encoded_snapshot.len()
+    );
+
+    // A second socket cannot consume another connection's immutable transfer.
+    let (other_client, other_task) = project_memory_socket(relay.clone(), endpoint.clone());
+    let (other_reader, mut other_writer) = other_client.into_split();
+    let mut other_lines = BufReader::new(other_reader).lines();
+    let other_response = project_memory_transfer_exchange(
+        &mut other_lines,
+        &mut other_writer,
+        "other-connection",
+        Action::ReadSnapshotPage {
+            transfer_id,
+            offset: 0,
+        },
+    )
+    .await;
+    assert!(matches!(
+        other_response.body,
+        RelayResponseBody::Error { .. }
+    ));
+    drop(other_writer);
+    drop(other_lines);
+    other_task.await.unwrap().unwrap();
+
+    // Mutation after BeginSnapshot cannot change any later page in the frozen pair.
+    baseline_store
+        .install_snapshot(&mj_core::project_memory::ProjectMemorySnapshot {
+            files: BTreeMap::from([("/changed-after-capture.md".into(), "baseline".into())]),
+        })
+        .unwrap();
+    replica_store
+        .install_snapshot(&mj_core::project_memory::ProjectMemorySnapshot {
+            files: BTreeMap::from([("/changed-after-capture.md".into(), "replica".into())]),
+        })
+        .unwrap();
+    let mut received_snapshot = Vec::new();
+    let mut offset = 0_u64;
+    let mut first_page = true;
+    loop {
+        let action = Action::ReadSnapshotPage {
+            transfer_id,
+            offset,
+        };
+        let response = if first_page {
+            first_page = false;
+            let escaped_long_id = format!("long-{}", "\"".repeat(220));
+            project_memory_transfer_exchange(&mut lines, &mut writer, &escaped_long_id, action)
+                .await
+        } else {
+            next_project_memory_transfer_exchange(&mut lines, &mut writer, &mut sequence, action)
+                .await
+        };
+        let (next_offset, complete, chunk) = match response.body {
+            RelayResponseBody::Ok {
+                payload:
+                    RelayResponsePayload::ProjectMemoryTransfer {
+                        result:
+                            ResultKind::SnapshotPage {
+                                transfer_id: response_id,
+                                offset: response_offset,
+                                next_offset,
+                                complete,
+                                chunk,
+                            },
+                    },
+            } => {
+                assert_eq!(response_id, transfer_id);
+                assert_eq!(response_offset, offset);
+                (next_offset, complete, chunk)
+            }
+            body => panic!("project-memory snapshot page failed: {body:?}"),
+        };
+        received_snapshot.extend_from_slice(
+            &base64::engine::general_purpose::STANDARD
+                .decode(chunk)
+                .unwrap(),
+        );
+        assert!(next_offset > offset);
+        offset = next_offset;
+        if complete {
+            break;
+        }
+    }
+    assert_eq!(offset, total_bytes);
+    assert_eq!(received_snapshot, encoded_snapshot);
+    assert_eq!(
+        mj_core::relay::ProjectMemoryWireSnapshot::decode(&received_snapshot).unwrap(),
+        (baseline_tree, replica_tree)
+    );
+
+    let installed = upload_project_memory_bytes(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        &encoded_upload,
+        UploadKind::InstallSnapshot,
+    )
+    .await;
+    assert!(matches!(
+        installed,
+        RelayResponsePayload::ProjectMemoryTransfer {
+            result: ResultKind::Installed,
+        }
+    ));
+    assert_eq!(
+        baseline_store.snapshot().unwrap().files["/large-upload.md"],
+        upload_tree.files["/large-upload.md"]
+    );
+    assert_eq!(
+        replica_store.snapshot().unwrap().files["/large-upload.md"],
+        upload_tree.files["/large-upload.md"]
+    );
+    assert!(
+        baseline_store
+            .snapshot()
+            .unwrap()
+            .files
+            .contains_key("/baseline-only.md")
+    );
+    assert!(
+        replica_store
+            .snapshot()
+            .unwrap()
+            .files
+            .contains_key("/replica-only.md")
+    );
+
+    let expected_replica = replica_store.snapshot().unwrap().version();
+    let replaced = upload_project_memory_bytes(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        &encoded_upload,
+        UploadKind::ReplaceTree {
+            expected_replica: expected_replica.clone(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        replaced,
+        RelayResponsePayload::ProjectMemoryTransfer {
+            result: ResultKind::Replaced {
+                outcome: mj_core::project_memory::ReplicaReplaceOutcome::Replaced,
+            },
+        }
+    ));
+    assert_eq!(baseline_store.snapshot().unwrap(), upload_tree);
+    assert_eq!(replica_store.snapshot().unwrap(), upload_tree);
+
+    let stale_expected = replica_store.snapshot().unwrap().version();
+    let stale_tree = mj_core::project_memory::ProjectMemorySnapshot {
+        files: BTreeMap::from([("/must-not-appear.md".into(), "stale upload".into())]),
+    };
+    let stale_bytes = serde_json::to_vec(
+        &mj_core::relay::ProjectMemoryWireTree::encode(stale_tree, RELAY_PROTOCOL_VERSION).unwrap(),
+    )
+    .unwrap();
+    let response = next_project_memory_transfer_exchange(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        Action::BeginUpload {
+            kind: UploadKind::ReplaceTree {
+                expected_replica: stale_expected,
+            },
+            total_bytes: u64::try_from(stale_bytes.len()).unwrap(),
+        },
+    )
+    .await;
+    let stale_id = match response.body {
+        RelayResponseBody::Ok {
+            payload:
+                RelayResponsePayload::ProjectMemoryTransfer {
+                    result: ResultKind::UploadStarted { transfer_id },
+                },
+        } => transfer_id,
+        body => panic!("stale project-memory upload did not start: {body:?}"),
+    };
+    let response = next_project_memory_transfer_exchange(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        Action::AppendUpload {
+            transfer_id: stale_id,
+            offset: 0,
+            chunk: base64::engine::general_purpose::STANDARD.encode(&stale_bytes),
+        },
+    )
+    .await;
+    assert!(matches!(response.body, RelayResponseBody::Ok { .. }));
+    replica_store
+        .install_snapshot(&mj_core::project_memory::ProjectMemorySnapshot {
+            files: BTreeMap::from([("/external.md".into(), "concurrent edit".into())]),
+        })
+        .unwrap();
+    let baseline_before_stale_commit = baseline_store.snapshot().unwrap();
+    let replica_before_stale_commit = replica_store.snapshot().unwrap();
+    let stale_result = next_project_memory_transfer_exchange(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        Action::CommitUpload {
+            transfer_id: stale_id,
+        },
+    )
+    .await;
+    assert!(matches!(
+        stale_result.body,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::ProjectMemoryTransfer {
+                result: ResultKind::Replaced {
+                    outcome: mj_core::project_memory::ReplicaReplaceOutcome::ReplicaChanged,
+                },
+            },
+        }
+    ));
+    assert_eq!(
+        baseline_store.snapshot().unwrap(),
+        baseline_before_stale_commit
+    );
+    assert_eq!(
+        replica_store.snapshot().unwrap(),
+        replica_before_stale_commit
+    );
+
+    let before_abort = replica_store.snapshot().unwrap();
+    let response = next_project_memory_transfer_exchange(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        Action::BeginUpload {
+            kind: UploadKind::InstallSnapshot,
+            total_bytes: 100,
+        },
+    )
+    .await;
+    let abort_id = match response.body {
+        RelayResponseBody::Ok {
+            payload:
+                RelayResponsePayload::ProjectMemoryTransfer {
+                    result: ResultKind::UploadStarted { transfer_id },
+                },
+        } => transfer_id,
+        body => panic!("abort-test upload did not start: {body:?}"),
+    };
+    let response = next_project_memory_transfer_exchange(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        Action::AppendUpload {
+            transfer_id: abort_id,
+            offset: 0,
+            chunk: base64::engine::general_purpose::STANDARD.encode(b"partial"),
+        },
+    )
+    .await;
+    assert!(matches!(response.body, RelayResponseBody::Ok { .. }));
+    let response = next_project_memory_transfer_exchange(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        Action::Abort {
+            transfer_id: abort_id,
+        },
+    )
+    .await;
+    assert!(matches!(
+        response.body,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::ProjectMemoryTransfer {
+                result: ResultKind::Aborted { transfer_id },
+            },
+        } if transfer_id == abort_id
+    ));
+    assert_eq!(replica_store.snapshot().unwrap(), before_abort);
+    drop(writer);
+    drop(lines);
+    server_task.await.unwrap().unwrap();
+}
+
+// Legacy project-memory method shapes remain available at the current protocol.
+#[tokio::test]
+async fn protocol_59_worker_serves_legacy_project_memory_methods_and_gates_transfer() {
+    let directory = tempfile::tempdir().unwrap();
+    let memory = ProjectMemoryLaunchConfig {
+        history_socket: None,
+        project_key: "project".into(),
+        root: directory.path().join("replica"),
+        baseline_root: directory.path().join("baseline"),
+        repository_roots: BTreeMap::new(),
+        mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+    };
+    let baseline = mj_core::project_memory::ProjectMemoryStore::new(&memory.baseline_root);
+    baseline
+        .install_snapshot(&mj_core::project_memory::ProjectMemorySnapshot {
+            files: BTreeMap::from([("/MEMORY.md".into(), "legacy baseline".into())]),
+        })
+        .unwrap();
+    let replica = mj_core::project_memory::ProjectMemoryStore::new(&memory.root);
+    replica
+        .install_snapshot(&mj_core::project_memory::ProjectMemorySnapshot {
+            files: BTreeMap::from([("/MEMORY.md".into(), "legacy replica".into())]),
+        })
+        .unwrap();
+    let relay = Arc::new(RelayCell::new(
+        DurableRelay::open(directory.path().join("relay"), SESSION_ID, "test").unwrap(),
+    ));
+    let endpoint = unix::ProjectMemoryEndpoint::new(Some(memory));
+    let (client, server_task) = project_memory_socket(relay, endpoint);
+    let (reader, mut writer) = client.into_split();
+    let mut lines = BufReader::new(reader).lines();
+
+    let legacy_request = RelayRequestEnvelope {
+        request_id: "legacy-memory-snapshot".into(),
+        protocol_version: RELAY_PROTOCOL_VERSION,
+        request: RelayRequest::ProjectMemorySnapshot,
+    };
+    let mut bytes = serde_json::to_vec(&legacy_request).unwrap();
+    bytes.push(b'\n');
+    writer.write_all(&bytes).await.unwrap();
+    let response: RelayResponseEnvelope =
+        serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+    assert_eq!(response.protocol_version, RELAY_PROTOCOL_VERSION);
+    assert!(matches!(
+        response.body,
+        RelayResponseBody::Ok {
+            payload: RelayResponsePayload::ProjectMemorySnapshot { .. }
+        }
+    ));
+
+    let unsupported = project_memory_transfer_exchange_at(
+        &mut lines,
+        &mut writer,
+        "transfer-at-protocol-58",
+        mj_core::relay::RELAY_CHANGE_WAIT_PROTOCOL,
+        mj_core::relay::ProjectMemoryTransferAction::BeginSnapshot,
+    )
+    .await;
+    assert!(matches!(
+        unsupported.body,
+        RelayResponseBody::Error {
+            error: RelayProtocolError {
+                code: RelayErrorCode::IncompatibleProtocol,
+                ..
+            }
+        }
+    ));
+    drop(writer);
+    drop(lines);
+    server_task.await.unwrap().unwrap();
+}
+
+// A disconnected upload must not publish a partial tree or leak transfer state.
+#[tokio::test]
+async fn project_memory_partial_upload_is_discarded_with_its_connection() {
+    use base64::Engine as _;
+    use mj_core::relay::{
+        ProjectMemoryTransferAction as Action, ProjectMemoryTransferResult as ResultKind,
+        ProjectMemoryUploadKind as UploadKind,
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let memory = ProjectMemoryLaunchConfig {
+        history_socket: None,
+        project_key: "project".into(),
+        root: directory.path().join("replica"),
+        baseline_root: directory.path().join("baseline"),
+        repository_roots: BTreeMap::new(),
+        mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+    };
+    let baseline = mj_core::project_memory::ProjectMemoryStore::new(&memory.baseline_root);
+    let replica = mj_core::project_memory::ProjectMemoryStore::new(&memory.root);
+    let initial = mj_core::project_memory::ProjectMemorySnapshot {
+        files: BTreeMap::from([("/MEMORY.md".into(), "initial".into())]),
+    };
+    baseline.install_snapshot(&initial).unwrap();
+    replica.install_snapshot(&initial).unwrap();
+    let relay = Arc::new(RelayCell::new(
+        DurableRelay::open(directory.path().join("relay"), SESSION_ID, "test").unwrap(),
+    ));
+    let endpoint = unix::ProjectMemoryEndpoint::new(Some(memory));
+
+    let (client, disconnected_server) = project_memory_socket(relay.clone(), endpoint.clone());
+    let (reader, mut writer) = client.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    let mut sequence = 0_u64;
+    let started = next_project_memory_transfer_exchange(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        Action::BeginUpload {
+            kind: UploadKind::ReplaceTree {
+                expected_replica: initial.version(),
+            },
+            total_bytes: 100,
+        },
+    )
+    .await;
+    let transfer_id = match started.body {
+        RelayResponseBody::Ok {
+            payload:
+                RelayResponsePayload::ProjectMemoryTransfer {
+                    result: ResultKind::UploadStarted { transfer_id },
+                },
+        } => transfer_id,
+        body => panic!("partial project-memory upload did not start: {body:?}"),
+    };
+    let incomplete_commit = next_project_memory_transfer_exchange(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        Action::CommitUpload { transfer_id },
+    )
+    .await;
+    assert!(matches!(
+        incomplete_commit.body,
+        RelayResponseBody::Error { .. }
+    ));
+    let wrong_offset = next_project_memory_transfer_exchange(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        Action::AppendUpload {
+            transfer_id,
+            offset: 1,
+            chunk: base64::engine::general_purpose::STANDARD.encode(b"partial tree"),
+        },
+    )
+    .await;
+    assert!(matches!(wrong_offset.body, RelayResponseBody::Error { .. }));
+    let appended = next_project_memory_transfer_exchange(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        Action::AppendUpload {
+            transfer_id,
+            offset: 0,
+            chunk: base64::engine::general_purpose::STANDARD.encode(b"partial tree"),
+        },
+    )
+    .await;
+    assert!(matches!(appended.body, RelayResponseBody::Ok { .. }));
+    drop(writer);
+    drop(lines);
+    disconnected_server.await.unwrap().unwrap();
+    assert_eq!(baseline.snapshot().unwrap(), initial);
+    assert_eq!(replica.snapshot().unwrap(), initial);
+
+    // A new connection cannot finish or abort the former connection's upload.
+    let (client, next_server) = project_memory_socket(relay, endpoint);
+    let (reader, mut writer) = client.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    let result = next_project_memory_transfer_exchange(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        Action::CommitUpload { transfer_id },
+    )
+    .await;
+    assert!(matches!(result.body, RelayResponseBody::Error { .. }));
+    let started = next_project_memory_transfer_exchange(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        Action::BeginSnapshot,
+    )
+    .await;
+    let snapshot_id = match started.body {
+        RelayResponseBody::Ok {
+            payload:
+                RelayResponsePayload::ProjectMemoryTransfer {
+                    result: ResultKind::SnapshotStarted { transfer_id, .. },
+                },
+        } => transfer_id,
+        body => panic!("new connection could not start a fresh transfer: {body:?}"),
+    };
+    let aborted = next_project_memory_transfer_exchange(
+        &mut lines,
+        &mut writer,
+        &mut sequence,
+        Action::Abort {
+            transfer_id: snapshot_id,
+        },
+    )
+    .await;
+    assert!(matches!(aborted.body, RelayResponseBody::Ok { .. }));
+    drop(writer);
+    drop(lines);
+    next_server.await.unwrap().unwrap();
 }
 
 #[tokio::test]

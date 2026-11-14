@@ -407,6 +407,51 @@ pub struct MaterializedSessionSummary {
 }
 
 impl MaterializedSession {
+    /// Latest user item, including empty responses, in this projection.
+    pub fn latest_user_position(&self) -> Option<u64> {
+        self.transcript
+            .iter()
+            .filter_map(|item| {
+                matches!(item.body, TranscriptBody::User { .. }).then_some(item.position)
+            })
+            .max()
+    }
+
+    /// Latest prompt written by the person, excluding generated wake messages.
+    pub fn latest_person_position(&self) -> Option<u64> {
+        self.transcript
+            .iter()
+            .filter(|item| match &item.body {
+                TranscriptBody::User { content } => crate::continuation::is_user_authored_message(
+                    Some(&item.stable_id),
+                    &crate::transcript::materialized_content_text(content),
+                ),
+                _ => false,
+            })
+            .map(|item| item.position)
+            .max()
+    }
+
+    /// The latest input-requiring outcome, unless work or a later user item
+    /// has already answered it. A transcript-free header supplies the user
+    /// position retained from its original publication; full sessions use None.
+    pub fn unanswered_input_outcome(
+        &self,
+        assessment: Option<&crate::assessment::TurnAssessment>,
+        published_latest_user_position: Option<u64>,
+    ) -> Option<&MaterializedTurnOutcome> {
+        if self.active_turn.is_some() || !self.queued_prompts.is_empty() {
+            return None;
+        }
+        let outcome = self.last_turn_outcome.as_ref()?;
+        let latest_user = self
+            .latest_user_position()
+            .max(published_latest_user_position);
+        (outcome.requires_input(assessment)
+            && latest_user.is_none_or(|position| position <= outcome.completed_ordinal))
+        .then_some(outcome)
+    }
+
     pub fn empty(session_id: impl Into<String>) -> Self {
         Self {
             session_id: session_id.into(),
@@ -556,7 +601,7 @@ pub struct ManagedSessionSnapshot {
     /// What `materialized.transcript` leaves out, and the facts that live
     /// there. See [`ProjectionWindow`].
     pub window: ProjectionWindow,
-    pub operational: RelayOperationalState,
+    pub operational: crate::snapshot_map::SharedSnapshot<RelayOperationalState>,
     /// Newest relay event observed by this live actor that asks for immediate
     /// credential reconciliation. This is intentionally ephemeral: it avoids
     /// retaining raw replay pages or rescanning projected history.
@@ -566,9 +611,11 @@ pub struct ManagedSessionSnapshot {
     /// field; either way the worker is not known to match this controller.
     pub worker_build: Option<String>,
     /// Pending parent-tool work fetched from the target worker.
-    pub subagent_requests: Vec<crate::subagent::SubagentToolRequest>,
+    pub subagent_requests:
+        crate::snapshot_map::SharedSnapshot<Vec<crate::subagent::SubagentToolRequest>>,
     /// Compact completion receipts; full tool replies remain worker-private.
-    pub subagent_completions: Vec<crate::subagent::SubagentCompletion>,
+    pub subagent_completions:
+        crate::snapshot_map::SharedSnapshot<Vec<crate::subagent::SubagentCompletion>>,
     /// Delegation transport failures do not make the worker's controls unreachable.
     pub subagent_queue_error: Option<String>,
 }
@@ -582,10 +629,15 @@ pub struct ManagedSessionSnapshot {
 /// it whenever a single turn is longer than the window. Both are read
 /// separately, with one indexed query each, rather than found by scanning.
 ///
-/// A complete projection answers both by scanning what it already holds, which
-/// is what [`ProjectionWindow::of`] does.
+/// The unread event watermark is also retained here and restored from the
+/// stored summary ordinals when an actor reloads. A complete projection finds
+/// these facts in the items it already holds, via [`ProjectionWindow::of`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectionWindow {
+    /// Retained across actor trimming and restored from stored projection rows.
+    /// Clients consume served attention rather than this daemon-local fact.
+    #[serde(skip)]
+    pub latest_unread_event_ordinal: Option<u64>,
     /// Transcript items before the window. Zero when the projection is whole.
     pub omitted_items: usize,
     /// The title derived from the first user message.
@@ -597,10 +649,12 @@ pub struct ProjectionWindow {
 }
 
 impl ProjectionWindow {
-    /// Keep complete turns around the tail target. Unsettled content can still
-    /// change after a newer turn starts, so retain its turn as well.
+    /// Keep the tail and complete turns containing unsettled content.
     pub fn trim(&mut self, session: &mut MaterializedSession, target: usize) {
         let observed = Self::of(session);
+        self.latest_unread_event_ordinal = self
+            .latest_unread_event_ordinal
+            .max(observed.latest_unread_event_ordinal);
         if self.provisional_title.is_none() {
             self.provisional_title = observed.provisional_title;
         }
@@ -608,19 +662,12 @@ impl ProjectionWindow {
             .latest_turn_start_position
             .or(self.latest_turn_start_position);
         let mut boundary = session.transcript.len().saturating_sub(target.max(1));
-        for (index, item) in session.transcript.iter().enumerate() {
-            let mutable = match &item.body {
-                TranscriptBody::Agent { streaming, .. }
-                | TranscriptBody::Thought { streaming, .. } => *streaming,
-                TranscriptBody::Tool { call, .. } => matches!(
-                    call.get("status").and_then(serde_json::Value::as_str),
-                    Some("pending" | "in_progress")
-                ),
-                _ => false,
-            };
-            if mutable || Some(item.position) == self.latest_turn_start_position {
-                boundary = boundary.min(index);
-            }
+        if let Some(index) = session
+            .transcript
+            .iter()
+            .position(|item| Some(item.position) == self.latest_turn_start_position)
+        {
+            boundary = boundary.min(index);
         }
         let cut = session
             .transcript
@@ -628,16 +675,51 @@ impl ProjectionWindow {
             .take(boundary + 1)
             .rposition(|item| item.is_turn_start())
             .unwrap_or(0);
-        if cut > 0 {
-            session.transcript.drain(..cut);
-            self.omitted_items += cut;
+        let mut keep = vec![false; cut];
+        let mut start = 0;
+        while start < cut {
+            let end = (start + 1..cut)
+                .find(|&i| session.transcript[i].is_turn_start())
+                .unwrap_or(cut);
+            let unsettled = session.transcript[start..end]
+                .iter()
+                .any(|item| match &item.body {
+                    TranscriptBody::Agent {
+                        streaming: true, ..
+                    }
+                    | TranscriptBody::Thought {
+                        streaming: true, ..
+                    } => true,
+                    TranscriptBody::Tool { call, .. } => {
+                        matches!(call.raw_status(), Some("pending" | "in_progress"))
+                    }
+                    _ => false,
+                });
+            keep[start..end].fill(unsettled);
+            start = end;
         }
+        let mut index = 0;
+        session.transcript.retain(|_| {
+            let retain = index >= cut || keep[index];
+            index += 1;
+            if !retain {
+                self.omitted_items += 1;
+            }
+            retain
+        });
     }
 
     /// The window of a projection that omits nothing.
     #[must_use]
     pub fn of(session: &MaterializedSession) -> Self {
         Self {
+            latest_unread_event_ordinal: session
+                .transcript
+                .iter()
+                .filter(|item| item.is_nonempty_agent_message())
+                .filter_map(|item| item.latest_content_event_ordinal)
+                .chain(session.interruption_event_ordinals())
+                .max(),
             omitted_items: 0,
             provisional_title: session.transcript.iter().find_map(|item| {
                 if !item.is_user_prompt() {
@@ -936,6 +1018,18 @@ pub enum TargetLocator {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         borrowed_from: Option<String>,
     },
+    /// A Nitro Sandbox (a Firecracker microVM) on an EC2 host reached over
+    /// SSH. The workspace is always a named volume the host engine owns, so
+    /// unlike Podman there is no workspace storage to record.
+    SshNitro {
+        host: String,
+        container_id: String,
+        /// The session that owns the sandbox when this locator is a
+        /// sub-agent child borrowing its parent's sandbox; `None` when the
+        /// session owns the sandbox itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        borrowed_from: Option<String>,
+    },
 }
 
 impl ManagedWorktreeTarget {
@@ -1206,6 +1300,9 @@ impl TargetLocator {
             Self::SshAppleContainer {
                 host, container_id, ..
             } => Some(("apple", Some(host), container_id)),
+            Self::SshNitro {
+                host, container_id, ..
+            } => Some(("nitro", Some(host), container_id)),
             _ => None,
         }
     }
@@ -1232,7 +1329,8 @@ impl TargetLocator {
             | Self::AppleContainer { borrowed_from, .. }
             | Self::SshPodman { borrowed_from, .. }
             | Self::SshDocker { borrowed_from, .. }
-            | Self::SshAppleContainer { borrowed_from, .. } => borrowed_from.is_none(),
+            | Self::SshAppleContainer { borrowed_from, .. }
+            | Self::SshNitro { borrowed_from, .. } => borrowed_from.is_none(),
             Self::LocalBare { .. } | Self::SshBare { .. } | Self::AwsEc2 { .. } => false,
         }
     }
@@ -1265,6 +1363,7 @@ impl TargetLocator {
             | Self::SshPodman { container_id, .. }
             | Self::SshDocker { container_id, .. }
             | Self::SshAppleContainer { container_id, .. }
+            | Self::SshNitro { container_id, .. }
                 if container_id.trim().is_empty() =>
             {
                 bail!("target locator has an empty container id")
@@ -1314,6 +1413,9 @@ impl TargetLocator {
             }
             Self::SshAppleContainer { host, .. } if host.trim().is_empty() => {
                 bail!("SSH Apple container target locator has an empty host")
+            }
+            Self::SshNitro { host, .. } if host.trim().is_empty() => {
+                bail!("SSH Nitro target locator has an empty host")
             }
             _ => {}
         }
@@ -1412,7 +1514,7 @@ pub struct ArchiveSpacePreview {
 /// What a container target's host resolves for its blank build cache
 /// settings right now. Settings shows this beside each "automatic" field so
 /// the values a session would actually run with are visible before one starts.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildCachePreview {
     /// The host's own mbx version, or `None` when it has none on `PATH`.
     pub native_mbx: Option<String>,
@@ -1445,7 +1547,7 @@ pub struct BuildCachePreview {
 /// native builds the user ran themselves are counted together, since they
 /// share one cache. They answer whether the cache is being used at all, not
 /// what one session got out of it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildCacheStats {
     /// Builds that went through mbx. Zero means nothing has used the shim.
     pub builds: u64,
@@ -1458,7 +1560,7 @@ pub struct BuildCacheStats {
 }
 
 /// Why a target's sessions run without the build cache.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BuildCacheOff {
     /// This machine's own `enabled = false`.
     TurnedOff,
@@ -1484,7 +1586,7 @@ impl std::fmt::Display for BuildCacheOff {
 }
 
 /// Where a machine build cache budget comes from.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BuildCacheLimit {
     /// An explicit mj machine setting written to shared mbx configuration.
     Size(String),
@@ -1497,7 +1599,7 @@ pub enum BuildCacheLimit {
     MbxDefault(Option<String>),
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BuildCacheApplication {
     #[default]
     Pending,
@@ -1521,13 +1623,13 @@ pub struct SessionRecord {
     pub bundle_id: String,
     /// Accepted bundle for every target, including a raw directory's bundle of one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project: Option<crate::repository::ProjectBundleSnapshot>,
+    pub project: Option<Arc<crate::repository::ProjectBundleSnapshot>>,
     /// Existing project directory used directly by a local or SSH bare target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_directory: Option<PathBuf>,
     /// Git worktree created and owned by Hel for this raw-project session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub managed_worktree: Option<ManagedWorktree>,
+    pub managed_worktree: Option<Box<ManagedWorktree>>,
     /// None preserves automatic selection; false uses the selected directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub create_managed_worktree: Option<bool>,
@@ -1548,10 +1650,10 @@ pub struct SessionRecord {
     /// from the API's `at` and `branch`. Resume preserves checkpointed work
     /// rather than applying this selection again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checkout: Option<crate::remote_git::ExactCheckout>,
+    pub checkout: Option<Box<crate::remote_git::ExactCheckout>>,
     /// Last verified publication verdict, tied to its checkpoint digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub publication: Option<PublicationAssessment>,
+    pub publication: Option<Box<PublicationAssessment>>,
     /// Stored delegation policy. Historical records without a choice use native delegation.
     #[serde(
         default,
@@ -1566,11 +1668,11 @@ pub struct SessionRecord {
     /// This session's own oracle model (`--subagent-oracle`), overriding
     /// `[subagents.oracle]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub oracle_choice: Option<crate::config::SubagentChoice>,
+    pub oracle_choice: Option<Box<crate::config::SubagentChoice>>,
     /// Turn review chosen for this session when it was created. `None`
     /// follows the global `[review]` section.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub review: Option<crate::config::SessionReview>,
+    pub review: Option<Box<crate::config::SessionReview>>,
     /// Chosen when the session is created (`mj new --no-project-memory`): the
     /// session starts with no project memory. The worker gets no memory
     /// directory, no memory index in its context and no history tools, the
@@ -1591,14 +1693,6 @@ pub struct SessionRecord {
     pub resource_allocation: Option<SessionResourceAllocation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_mounts: Vec<AdditionalMount>,
-    /// Per-session container CPU limit that overrides the target template's
-    /// value. It is applied the next time the container is created.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub container_cpus: Option<String>,
-    /// Per-session container memory limit that overrides the target
-    /// template's value. It is applied the next time the container is created.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub container_memory: Option<String>,
     /// In-container workspace root this session's repositories live under.
     /// `None` is a session whose container predates per-session workspaces and
     /// therefore keeps the shared legacy `/workspace`; every session created
@@ -1616,11 +1710,15 @@ pub struct SessionRecord {
     /// Current surfaces do not hide sessions based on this flag.
     #[serde(default, skip_serializing_if = "is_false")]
     pub archived: bool,
+    /// The session raises no notifications: no bell, desktop, or push episode.
+    /// Its attention and unread state still render normally.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub notifications_ignored: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target: Option<TargetLocator>,
+    pub target: Option<Box<TargetLocator>>,
     /// Connection and worker settings captured when this target was selected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_runtime: Option<TargetRuntimeSettings>,
+    pub target_runtime: Option<Arc<TargetRuntimeSettings>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1644,10 +1742,16 @@ pub struct SessionRecord {
     /// [`CLOSE_FAILURE_PREFIX`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// Database-owned failure occurrence; omitted from portable session formats.
+    #[serde(skip)]
+    pub failure_generation: u64,
+    /// Database-owned dismissal receipt.
+    #[serde(skip)]
+    pub dismissed_failure: Option<crate::attention::FailureIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_checkpoint_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checkpoint: Option<CheckpointMetadata>,
+    pub checkpoint: Option<Box<CheckpointMetadata>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1720,6 +1824,41 @@ pub fn session_owns_container(session: &SessionRecord) -> bool {
     }
 }
 
+/// The creation settings from the applied snapshot, or the legacy request
+/// when no snapshot was recorded.
+/// A present snapshot is authoritative even when its size is unknown.
+pub struct AppliedContainerSettings<'a> {
+    pub resource_allocation: Option<&'a SessionResourceAllocation>,
+    pub additional_mounts: &'a [AdditionalMount],
+}
+
+pub fn applied_container_settings(session: &SessionRecord) -> AppliedContainerSettings<'_> {
+    match session
+        .target_runtime
+        .as_ref()
+        .and_then(|runtime| runtime.container_settings.as_ref())
+    {
+        Some(applied) => AppliedContainerSettings {
+            resource_allocation: applied.resource_allocation.as_ref(),
+            additional_mounts: &applied.additional_mounts,
+        },
+        None => AppliedContainerSettings {
+            resource_allocation: session.resource_allocation.as_ref(),
+            additional_mounts: &session.additional_mounts,
+        },
+    }
+}
+
+/// The size a session's container is charged at, including unknown sizes.
+pub fn counted_container_allocation(session: &SessionRecord) -> Option<&SessionResourceAllocation> {
+    if session.target.is_none() {
+        // Provisioning reserves the next creation, even if a prior snapshot remains.
+        session.resource_allocation.as_ref()
+    } else {
+        applied_container_settings(session).resource_allocation
+    }
+}
+
 /// Sum the owning container allocations for one physical host.
 ///
 /// A new or resuming owner has no target locator while provisioning, so those
@@ -1728,10 +1867,19 @@ pub fn session_owns_container(session: &SessionRecord) -> bool {
 /// the parent's allocation.
 pub fn host_container_capacity<'a>(
     total: HostContainerSize,
+    memory_is_pool: bool,
     target_ids: &[String],
     sessions: impl IntoIterator<Item = &'a SessionRecord>,
 ) -> HostContainerCapacity {
-    let reserved = reserved_container_capacity(total);
+    // A pool set aside at boot is already net of the host's own needs.
+    let reserved = if memory_is_pool {
+        HostContainerSize {
+            cpus: 0,
+            memory_bytes: 0,
+        }
+    } else {
+        reserved_container_capacity(total)
+    };
     let usable = HostContainerSize {
         cpus: total.cpus.saturating_sub(reserved.cpus),
         memory_bytes: total.memory_bytes.saturating_sub(reserved.memory_bytes),
@@ -1746,7 +1894,7 @@ pub fn host_container_capacity<'a>(
             continue;
         }
         let Some(SessionResourceAllocation::Container { cpus, memory_bytes }) =
-            session.resource_allocation.as_ref()
+            counted_container_allocation(session)
         else {
             complete = false;
             continue;
@@ -1834,14 +1982,14 @@ impl HostContainerCapacity {
     /// Why [`Self::refuses`] refused, for the person.
     pub fn refusal_message(&self, allocation: &SessionResourceAllocation) -> String {
         if !self.complete {
-            return "a live container on this Mac has no recorded RAM size, so Mjolnir cannot work out the RAM left safely".into();
+            return "a live container on this host has no recorded RAM size, so Mjolnir cannot work out the RAM left safely".into();
         }
         let requested = match allocation {
             SessionResourceAllocation::Container { memory_bytes, .. } => *memory_bytes,
             _ => 0,
         };
         format!(
-            "this session asks for {} GiB of RAM, but this Mac has {} GiB left after the macOS reserve and live containers. Apple containers do not give freed memory back to macOS, so Mjolnir does not overcommit RAM on a Mac. Suspend or stop a session on this Mac, or choose less RAM. Mjolnir does not stop sessions automatically",
+            "this session asks for {} GiB of RAM, but this host has {} GiB left after its reserve and live containers. RAM is a hard limit on this host, so Mjolnir does not overcommit it: Apple containers do not give freed memory back to macOS, and Nitro sandboxes take theirs from the memory pool the host reserved at boot. Suspend or stop a session on this host, or choose less RAM. Mjolnir does not stop sessions automatically",
             floor_gib_tenths(requested),
             floor_gib_tenths(self.remaining.memory_bytes),
         )
@@ -1982,7 +2130,7 @@ impl SessionRecord {
             return None;
         }
         self.oracle_choice
-            .as_ref()
+            .as_deref()
             .or(subagents.oracle.as_ref())
             .filter(|choice| !choice.model.trim().is_empty())
     }
@@ -1998,7 +2146,7 @@ impl SessionRecord {
     pub fn review_unavailable(&self) -> Option<&'static str> {
         self.project
             .as_ref()
-            .is_some_and(crate::repository::ProjectBundleSnapshot::primary_is_plain_directory)
+            .is_some_and(|project| project.primary_is_plain_directory())
             .then_some(crate::review::settings::PLAIN_DIRECTORY_REVIEW_OFF)
     }
 
@@ -2068,21 +2216,21 @@ impl SessionRecord {
 
     /// How this session's harness realizes its target's execution policy:
     /// the policy recorded when its target was selected, so a later change
-    /// to the target template does not move it, and the profile's Muse
-    /// auto-review choice. `None` when the policy cannot be resolved or the
-    /// harness keeps its own configuration.
+    /// to the target template does not move it, and the profile's approval
+    /// choices (Muse auto-review, Claude permission mode). `None` when the
+    /// policy cannot be resolved or the harness keeps its own configuration.
     pub fn execution_enforcement(
         &self,
         config: &Config,
     ) -> Option<crate::config::ExecutionEnforcement> {
         let policy = self.target_runtime_settings(config).ok()?.execution_policy;
-        let muse_auto_review = config
+        let choices = config
             .profiles
             .get(&self.last_profile)
-            .and_then(|profile| profile.muse_auto_review)
-            .unwrap_or(false);
+            .map(crate::config::HarnessProfile::approval_choices)
+            .unwrap_or_default();
         self.harness_kind
-            .resolve_execution_enforcement(policy, muse_auto_review)
+            .resolve_execution_enforcement(policy, choices)
     }
 
     /// The target access settings this session's commands use: the ones
@@ -2096,8 +2244,8 @@ impl SessionRecord {
         target_runtime_settings_for(
             &self.id,
             &self.target_template_id,
-            self.target.as_ref(),
-            self.target_runtime.as_ref(),
+            self.target.as_deref(),
+            self.target_runtime.as_deref(),
             config,
         )
     }
@@ -2250,7 +2398,7 @@ impl SessionRecord {
                 ProjectSourceIdentity::path(&worktree.source_repository, None)
             }
             Checkout::Attached { path } => {
-                let remote = match &self.target {
+                let remote = match self.target.as_deref() {
                     Some(TargetLocator::SshBare { host, .. }) => Some(host.as_str()),
                     _ => None,
                 };
@@ -2567,7 +2715,13 @@ impl State {
                     }
                     current = &child.parent_session_id;
                 }
-                _ => return Ok(self.sessions.get(current).and_then(|s| s.review.as_ref())),
+                _ => {
+                    return Ok(self
+                        .sessions
+                        .get(current)
+                        .and_then(|s| s.review.as_ref())
+                        .map(|v| &**v));
+                }
             }
         }
         Err(session_id.to_owned())
@@ -3267,8 +3421,12 @@ pub fn provisional_session_title(prompt: &str) -> Option<String> {
     Some(truncate_session_title(normalized, MAX_TITLE_CHARS))
 }
 
+/// How many leading characters of a session id Mjolnir shows, and so the
+/// shortest prefix a person can be expected to paste back.
+pub const SHORT_ID_LEN: usize = 8;
+
 pub fn short_id(id: &str) -> &str {
-    id.get(..8).unwrap_or(id)
+    id.get(..SHORT_ID_LEN).unwrap_or(id)
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -3457,6 +3615,18 @@ impl TargetLocator {
                     ..
                 },
                 TargetLocator::SshDocker {
+                    host: right_host,
+                    container_id: right_container,
+                    ..
+                },
+            )
+            | (
+                TargetLocator::SshNitro {
+                    host: left_host,
+                    container_id: left_container,
+                    ..
+                },
+                TargetLocator::SshNitro {
                     host: right_host,
                     container_id: right_container,
                     ..

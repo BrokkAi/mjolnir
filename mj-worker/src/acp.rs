@@ -20,8 +20,12 @@ use air_tasks::*;
 use drive::*;
 #[cfg(unix)]
 pub(crate) use launch::TOOL_CACHE_DIRECTORY_VARIABLES;
+#[cfg(unix)]
+pub(crate) use launch::read_claude_login_fingerprint;
 use launch::*;
-pub use launch::{ContextReset, LaunchSpec, ReviewerMcpServer, SubagentMcpSocket};
+pub use launch::{
+    ClaudeLoginIdentity, ContextReset, LaunchSpec, ReviewerMcpServer, SubagentMcpSocket,
+};
 pub use opencode_logins::ImportedLogins;
 use permissions::*;
 use session::*;
@@ -532,6 +536,14 @@ async fn run_bridge(
             .await
             .context("prepare the OpenCode session's logins")??,
         );
+    }
+    // Before the process starts, like the pinned selectors: agy reads its
+    // grants at startup.
+    {
+        let staged = spec.clone();
+        tokio::task::spawn_blocking(move || stage_antigravity_mcp_grants(&staged))
+            .await
+            .context("stage Antigravity MCP grants task failed")??;
     }
     let spec = &spec;
     let mut child = Command::new(&spec.command)

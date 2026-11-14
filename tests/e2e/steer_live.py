@@ -245,7 +245,7 @@ class SteerLab:
             [str(wrapper), "--version"], capture_output=True, text=True,
             timeout=15, env=self.env,
         )
-        if result.returncode or "0.165.0" not in result.stdout:
+        if result.returncode or versions["CODEX_CLI_VERSION"] not in result.stdout:
             raise ScenarioFailure(
                 "isolated Codex wrapper did not launch the pinned CLI: "
                 f"status={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}"
@@ -429,7 +429,7 @@ class SteerLab:
         self.cli("workspaces", "create", self.workspace, "--json", case="setup")
         info = json.loads(self.cli("api-info", "--json", case="setup"))
         self.api_url = info["base_url"]
-        self.api_token = Path(info["token_path"]).read_text().strip()
+        self.api_token = self.cli("api-token", case="setup").strip()
         access = self.daemon_request({"action": "web_viewer_access"}, request_id=2)
         if not isinstance(access, dict) or "Ready" not in access:
             raise ScenarioFailure(f"isolated viewer did not become ready: {access!r}")

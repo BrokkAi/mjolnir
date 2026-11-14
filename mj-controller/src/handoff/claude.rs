@@ -224,6 +224,7 @@ fn map_compaction(
         .iter()
         .map(|(position, _)| *position)
         .collect::<HashSet<_>>();
+    let outputs = mj_core::transcript::TerminalOutputs::of_canonical(snapshot.transcript.iter());
     let mut retained_positions = Vec::new();
     for item in snapshot
         .transcript
@@ -235,13 +236,12 @@ fn map_compaction(
             CanonicalTranscriptBody::Tool {
                 call,
                 terminal_refs,
-                terminal_outputs,
                 ..
             } => {
                 let id = call.get("toolCallId").and_then(Value::as_str);
                 !id.is_some_and(|id| completed.contains(id) && !post_ids.contains(id))
                     || !terminal_refs.is_empty()
-                    || !terminal_outputs.is_empty()
+                    || !outputs.for_tool(&item.stable_id).is_empty()
             }
             CanonicalTranscriptBody::Message { .. } | CanonicalTranscriptBody::Plan { .. } => true,
             CanonicalTranscriptBody::Agent { .. } => item

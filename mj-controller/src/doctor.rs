@@ -17,11 +17,12 @@ use crate::setup::{
 use crate::targets::{
     APPLE_CONTAINER_MINIMUM_MACOS, BoundedProcessExecutor, CommandExecutor, CommandSpec,
     CommandTimedOut, ContainerTemplate as RuntimeContainerTemplate, DockerUnavailable,
-    PODMAN_DOCUMENTATION_URL, PodmanPostcondition, ProcessExecutor, SshTarget as RuntimeSshTarget,
-    TargetTemplate as RuntimeTargetTemplate, failed_podman_postcondition, local_docker_vm_share,
-    podman_probe_observation, run_setup_smoke_test, ssh_command, ssh_connectivity_probe,
+    MICROVM_ENGINE, PODMAN_DOCUMENTATION_URL, PodmanPostcondition, ProcessExecutor,
+    SshTarget as RuntimeSshTarget, TargetTemplate as RuntimeTargetTemplate,
+    failed_podman_postcondition, local_docker_vm_share, podman_probe_observation,
+    run_setup_smoke_test, ssh_command, ssh_connectivity_probe, ssh_engine_command,
     ssh_validation_command, verify_local_docker, verify_local_podman, verify_ssh_apple_container,
-    verify_ssh_docker, verify_ssh_podman,
+    verify_ssh_docker, verify_ssh_nitro, verify_ssh_podman,
 };
 use mj_core::config::{
     Config, ContainerTemplate, HarnessKind, HarnessProfile, TargetTemplate, config_path,
@@ -31,6 +32,7 @@ use mj_core::local_git::{MINIMUM_GIT_VERSION, parse_git_version};
 
 mod catalog;
 mod github;
+mod sshd;
 pub use catalog::{Catalogs, LARGE_CATALOG, catalog_checks, catalog_profile_ids};
 
 // Only the image for the Apple container smoke test when the config has no
@@ -225,10 +227,12 @@ pub fn run_with_config_path(
     checks.extend(podman);
     checks.extend(docker);
     checks.extend(local_bare_github_checks(config, executor));
+    checks.extend(sshd::checks(config, executor));
     checks.extend(ssh_bare_checks(config, executor));
     checks.extend(ssh_podman_checks(config, executor, options.smoke));
     checks.extend(ssh_docker_checks(config, executor, options.smoke));
     checks.extend(ssh_apple_container_checks(config, executor, options.smoke));
+    checks.extend(ssh_nitro_checks(config, executor, options.smoke));
     checks.extend(machine_runtime_checks(config, executor));
     checks.extend(storage_checks(config, executor));
     checks.extend(build_cache_checks(offered, executor));
@@ -1085,6 +1089,15 @@ fn aws_scope_check(
         ),
     });
     checks
+}
+
+/// Login failures observed by the running daemon, even when a local file
+/// still exists and claims hours of lifetime.
+pub fn login_checks(failures: &BTreeMap<String, String>) -> Vec<DoctorCheck> {
+    failures.iter().map(|(id, error)| DoctorCheck::fixable(
+        format!("harness.{id}.login"), format!("Harness profile {id} login"),
+        error.clone(), format!("Run `mj login --profile {id}`. Interrupted authentication-failed work continues when the new login reaches its worker."),
+    )).collect()
 }
 
 /// The readiness of one profile: its home, and whether it can authenticate.
@@ -2930,6 +2943,133 @@ fn ssh_apple_container_check(
     }
 }
 
+/// One check per `ssh-nitro` target: the host engine's own report (Firecracker,
+/// the memory pool reserved for sandboxes, the kernel), then the target's image
+/// and, with `--smoke`, a disposable sandbox.
+///
+/// Doctor only reads. An engine that is not installed yet is not a fault: the
+/// first launch (or the Targets pane's Test action) installs it.
+fn ssh_nitro_checks(
+    config: ConfigStatus<'_>,
+    executor: &impl CommandExecutor,
+    smoke: bool,
+) -> Vec<DoctorCheck> {
+    let Ok(config) = config else {
+        return Vec::new();
+    };
+    config
+        .targets
+        .iter()
+        .filter_map(|(id, target)| match target {
+            TargetTemplate::SshNitro { ssh, container } => Some(ssh_nitro_check(
+                id,
+                &RuntimeSshTarget::from(ssh),
+                &container.image,
+                executor,
+                smoke,
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+fn ssh_nitro_check(
+    id: &str,
+    ssh: &RuntimeSshTarget,
+    image: &str,
+    executor: &impl CommandExecutor,
+    smoke: bool,
+) -> DoctorCheck {
+    let check_id = format!("runtime.ssh-nitro.{id}");
+    let title = format!("Nitro sandboxes for target {id}");
+    let destination = &ssh.destination;
+    if let SshConnectivity::Failed {
+        detail,
+        remediation,
+    } = ssh_connectivity(ssh, executor)
+    {
+        return DoctorCheck::fixable(check_id, title, detail, remediation);
+    }
+    let preflight = match verify_ssh_nitro(ssh, executor) {
+        Ok(preflight) => preflight,
+        Err(error) => {
+            let remediation = if error.is::<crate::targets::NitroEngineUnavailable>() {
+                format!(
+                    "Start a session on target {id}, or use Test in the Targets pane: the first use installs the sandbox engine on {destination}."
+                )
+            } else {
+                "Fix the host as the message says, or recreate it with `mj ec2 create --runtime nitro`."
+                    .to_owned()
+            };
+            return DoctorCheck::fixable(check_id, title, format!("{error:#}"), remediation);
+        }
+    };
+    if smoke {
+        let target = RuntimeTargetTemplate::SshNitro {
+            ssh: ssh.clone(),
+            container: RuntimeContainerTemplate {
+                build_cache: None,
+                image: image.to_owned(),
+                pull_policy: Default::default(),
+                extra_run_args: vec![],
+                workspace_storage: Default::default(),
+            },
+        };
+        return match run_setup_smoke_test(&target, &doctor_smoke_id(), executor) {
+            Ok(()) => DoctorCheck::ready(
+                check_id,
+                title,
+                format!(
+                    "{}; disposable run/exec/remove smoke test passed for image {image}.",
+                    preflight.summary()
+                ),
+            ),
+            Err(error) => DoctorCheck::fixable(
+                check_id,
+                title,
+                format!(
+                    "Disposable run/exec/remove smoke test failed for image {image} on {destination}: {error:#}"
+                ),
+                format!(
+                    "Fix the configured image or the sandbox engine on {destination}, then run `mj doctor --json --smoke` again."
+                ),
+            ),
+        };
+    }
+    let image_command = ssh_engine_command(
+        ssh,
+        MICROVM_ENGINE,
+        ["image", "inspect", "--format", "{{.Id}}", image],
+    )
+    .purpose("check remote Nitro sandbox image presence");
+    match executor.execute(&image_command) {
+        Ok(output) if output.status == 0 => DoctorCheck::ready(
+            check_id,
+            title,
+            format!(
+                "{}; image {image} is present. Run `mj doctor --json --smoke` to verify a disposable sandbox.",
+                preflight.summary()
+            ),
+        ),
+        Ok(output) => DoctorCheck::fixable(
+            check_id,
+            title,
+            format!(
+                "Image {image} is not present on {destination}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            "The first session pulls it, or run `mj doctor --json --smoke` to pull it now."
+                .to_owned(),
+        ),
+        Err(error) => DoctorCheck::fixable(
+            check_id,
+            title,
+            format!("Could not inspect Nitro sandbox image {image} on {destination}: {error}"),
+            format!("Verify `ssh {destination}` succeeds, then run `mj doctor` again."),
+        ),
+    }
+}
+
 /// Shared disposable-container identity for every doctor smoke test.
 fn doctor_smoke_id() -> String {
     format!(
@@ -3116,7 +3256,8 @@ fn container_worker_architectures(config: ConfigStatus<'_>) -> Vec<String> {
             | TargetTemplate::LocalDocker { container }
             | TargetTemplate::AppleContainer { container }
             | TargetTemplate::SshPodman { container, .. }
-            | TargetTemplate::SshDocker { container, .. } => container,
+            | TargetTemplate::SshDocker { container, .. }
+            | TargetTemplate::SshNitro { container, .. } => container,
             _ => continue,
         };
         let arch = container
@@ -3168,11 +3309,8 @@ fn worker_changed_since_daemon_start(path: &Path, started_at: &str) -> Result<bo
     let started: SystemTime = chrono::DateTime::parse_from_rfc3339(started_at)
         .map_err(|error| anyhow::anyhow!("parse daemon start time {started_at:?}: {error}"))?
         .into();
-    let modified = crate::host_fs::metadata_sync(path)?
-        .modified_ms
-        .and_then(chrono::DateTime::from_timestamp_millis)
-        .ok_or_else(|| anyhow::anyhow!("read modification time of {}", path.display()))?;
-    Ok(SystemTime::from(modified) > started)
+    let modified = std::fs::metadata(path)?.modified()?;
+    Ok(modified > started)
 }
 
 /// The targets the build-cache and worker-binary checks cover: every target
@@ -3240,6 +3378,9 @@ fn worker_binary_checks(config: ConfigStatus<'_>) -> Vec<DoctorCheck> {
             }
             TargetTemplate::SshDocker { container, .. } => {
                 Some((id, container, Some("ssh-docker"), None))
+            }
+            TargetTemplate::SshNitro { container, .. } => {
+                Some((id, container, Some("ssh-nitro"), None))
             }
             // Apple container runs only native images, so this remote target
             // is Apple silicon whatever the controller's own machine is.
@@ -3615,13 +3756,13 @@ impl ReviewResidue {
 pub(crate) fn review_residue(repository: &Path) -> ReviewResidue {
     let mut residue = ReviewResidue::default();
     let git_dir = repository.join(".git");
-    if crate::host_fs::metadata_sync(&git_dir).is_err() {
+    if !git_dir.exists() {
         return residue;
     }
     loose_refs(&git_dir.join("refs/hel"), "refs/hel", &mut residue.refs);
     loose_refs(&git_dir.join("refs/mj"), "refs/mj", &mut residue.refs);
     // A packed ref survives `git pack-refs`, which a `git gc` runs.
-    if let Ok(packed) = crate::host_fs::read_to_string_sync(&git_dir.join("packed-refs")) {
+    if let Ok(packed) = std::fs::read_to_string(git_dir.join("packed-refs")) {
         for line in packed.lines() {
             if let Some((_, reference)) = line.split_once(' ')
                 && (reference.starts_with("refs/hel/") || reference.starts_with("refs/mj/"))
@@ -3631,10 +3772,14 @@ pub(crate) fn review_residue(repository: &Path) -> ReviewResidue {
             }
         }
     }
-    if let Ok(entries) = crate::host_fs::list_sync(&git_dir) {
-        for entry in entries {
-            if entry.name.starts_with("hel-review-index-") {
-                residue.scratch_indexes.push(git_dir.join(entry.name));
+    if let Ok(entries) = std::fs::read_dir(&git_dir) {
+        for entry in entries.filter_map(Result::ok) {
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("hel-review-index-"))
+            {
+                residue.scratch_indexes.push(entry.path());
             }
         }
     }
@@ -3645,16 +3790,19 @@ pub(crate) fn review_residue(repository: &Path) -> ReviewResidue {
 
 /// Appends every loose ref stored under `directory`, named from `prefix`.
 fn loose_refs(directory: &Path, prefix: &str, refs: &mut Vec<String>) {
-    let Ok(entries) = crate::host_fs::list_sync(directory) else {
+    let Ok(entries) = std::fs::read_dir(directory) else {
         return;
     };
-    for entry in entries {
-        let reference = format!("{prefix}/{}", entry.name);
-        let path = directory.join(entry.name);
-        match crate::host_fs::metadata_sync(&path) {
-            Ok(metadata) if metadata.is_dir => loose_refs(&path, &reference, refs),
-            Ok(metadata) if metadata.is_file => refs.push(reference),
-            _ => {}
+    for entry in entries.filter_map(Result::ok) {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let reference = format!("{prefix}/{name}");
+        let path = entry.path();
+        if path.is_dir() {
+            loose_refs(&path, &reference, refs);
+        } else if path.is_file() {
+            refs.push(reference);
         }
     }
 }

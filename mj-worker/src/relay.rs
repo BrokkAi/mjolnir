@@ -38,6 +38,8 @@ use commands::validate_identifier;
 pub use replay::{DeferredRelayAttach, RelayReplayPlan};
 pub use serving::serve_relay_json_lines;
 #[cfg(test)]
+mod authentication_tests;
+#[cfg(test)]
 mod capacity_tests;
 #[cfg(test)]
 mod snapshot_tests;
@@ -235,6 +237,11 @@ pub struct DurableRelay {
     /// How this harness receives an accepted steer. Claude never uses ACP
     /// steering because its bridge can cancel an in-flight tool hook.
     steering_delivery_mode: SteeringDeliveryMode,
+    /// When this worker delivers mailbox messages to a working Codex session,
+    /// resolved from its staged provider. `None` until preparation resolves it,
+    /// and for harnesses whose delivery is not classified here; `None` never
+    /// permits a `PostToolUse` delivery.
+    mailbox_delivery_mode: Option<mj_core::mailbox::MailboxDeliveryMode>,
     snapshot: RelaySnapshot,
     /// Canonical, non-overlapping slices of the durable journal. Event bodies
     /// stay on disk; only enough metadata to locate a requested ordinal is
@@ -274,6 +281,10 @@ pub struct DurableRelay {
     foreground_tools: mj_core::activity::ToolsInFlight,
     turn_context: mj_transcript::turn_context::TurnContext,
     verdict_harness: Option<mj_core::config::HarnessKind>,
+    #[cfg_attr(not(unix), allow(dead_code))] // The worker control runtime is Unix-only.
+    pub(crate) authentication_login_path: Option<PathBuf>,
+    #[cfg_attr(not(unix), allow(dead_code))] // Read only by the Unix worker control runtime.
+    pub(crate) login_identity: crate::acp::ClaudeLoginIdentity,
     replied_verdict: verdict::RepliedVerdictState,
     /// Adapter-owned tasks, keyed by their owning session and task identity.
     air_tasks: BTreeMap<String, AirTaskEntry>,
@@ -292,9 +303,10 @@ pub struct DurableRelay {
     /// Whether Kimi's provider-owned background work is synchronized. Other
     /// policies leave this absent.
     background_work_known: Option<bool>,
-    /// Whether the daemon will act on a `Continue` verdict. Off when the
-    /// launch environment says automatic continuation is disabled.
-    continuation_enabled: bool,
+    /// The classifier the sub-agent handback check asks. Only the Unix worker
+    /// sets and reads it; the field stays on Windows so the relay type matches.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) handback_verdict_client: Option<crate::acp::verdict_client::VerdictClient>,
     /// When a Claude background task last completed or failed, until the
     /// harness turn that answers it opens. Claude Code always follows such a
     /// settle with a task-notification turn; publishing the settle time lets
@@ -406,8 +418,17 @@ impl DurableRelay {
             }
             // Upgrade an older snapshot in place. The stored frontier digests
             // stay valid — each is recomputed with the formula matching the
-            // record's format — so only the schema marker advances; the next
-            // persist writes it back at the current version.
+            // record's format. Seed newly owned state before advancing the
+            // schema marker; the next persist writes the current version.
+            if snapshot.format_version < 23 {
+                seed_legacy_open_request(&mut snapshot);
+            }
+            if snapshot.format_version < 24
+                && let Some(turn) = snapshot.harness_turn.as_mut()
+            {
+                turn.autonomous =
+                    snapshot.continuation.autonomous_turn_started == Some(turn.first_ordinal);
+            }
             snapshot.format_version = RELAY_STATE_VERSION;
             // Older snapshots can still identify a live turn, even though
             // they did not retain its start through subsequent background work.
@@ -435,11 +456,17 @@ impl DurableRelay {
                 snapshot.assessment_context = None;
                 if let Some(value) = &restored.assessment_state {
                     let state = mj_core::assessment::Checkpoint::decode(value)?;
-                    snapshot.assessment_context = state.context;
-                    snapshot.assessment = state.assessment;
+                    snapshot.assessment_context = state.context.map(Arc::new);
+                    snapshot.assessment = state.assessment.map(std::sync::Arc::new);
                     snapshot.continuation = state.continuation;
                     snapshot.capacity_retry = state.capacity_retry;
                     snapshot.turn_completion = state.turn_completion;
+                    if let Some(open) = state.open_request {
+                        snapshot.request = open.request;
+                        snapshot.person_input_through = open.person_input_through;
+                    } else {
+                        seed_legacy_open_request(&mut snapshot);
+                    }
                 }
                 snapshot.latest_ordinal = restored.event_frontier;
                 snapshot.latest_digest = restored.event_frontier_digest.clone();
@@ -559,7 +586,7 @@ impl DurableRelay {
                 completion,
             );
             a.evidence = Some(old.evidence);
-            snapshot.assessment = Some(a);
+            snapshot.assessment = Some(std::sync::Arc::new(a));
         }
         ensure_serialized_budget(
             &snapshot.operational_state(),
@@ -583,6 +610,7 @@ impl DurableRelay {
             steering_delivery_mode: harness
                 .map(|harness| SteeringDeliveryMode::for_harness(harness, false))
                 .unwrap_or_default(),
+            mailbox_delivery_mode: None,
             snapshot,
             journal_spans,
             hot_events,
@@ -596,6 +624,8 @@ impl DurableRelay {
             foreground_tools: mj_core::activity::ToolsInFlight::default(),
             turn_context: Default::default(),
             verdict_harness: None,
+            authentication_login_path: None,
+            login_identity: Default::default(),
             replied_verdict: Default::default(),
             air_tasks: BTreeMap::new(),
             claude_pending_stops: BTreeMap::new(),
@@ -604,7 +634,7 @@ impl DurableRelay {
             kimi_observed_task_ids: BTreeSet::new(),
             kimi_observed_tool_ids: BTreeSet::new(),
             background_work_known: None,
-            continuation_enabled: true,
+            handback_verdict_client: None,
             task_settled_at_ms: None,
             active_agent_terminals: BTreeMap::new(),
             closed_agent_terminals: BTreeSet::new(),
@@ -849,6 +879,7 @@ impl DurableRelay {
         state.acp_ready = Some(self.is_acp_ready());
         state.checkpoint_only = self.checkpoint_only;
         state.steering_supported = self.steering_supported;
+        state.mailbox_delivery = self.mailbox_delivery_mode;
         // Harness-initiated turns have no owned prompt ID. Keep their existing
         // explicit interrupt surface; queue steering always needs an owned turn.
         state.turn_controls = (self.snapshot.active_prompt.is_some()
@@ -928,6 +959,13 @@ impl DurableRelay {
     ) {
         self.steering_delivery_mode =
             SteeringDeliveryMode::for_harness(harness, claude_post_tool_batch_hook);
+    }
+
+    /// Set when a Codex session's mailbox messages may reach it, from the
+    /// provider in its staged configuration. The `PostToolUse` drain and the
+    /// published operational state both read this one field.
+    pub fn set_mailbox_delivery_mode(&mut self, mode: mj_core::mailbox::MailboxDeliveryMode) {
+        self.mailbox_delivery_mode = Some(mode);
     }
 
     /// The relay-owned turn boundary shared by command promotion, checkpoint
@@ -1076,9 +1114,13 @@ impl DurableRelay {
         self.harness_turns == HarnessTurnPolicy::ClaudeAdapter
     }
 
-    /// Whether a `Continue` verdict may be parked for the daemon to act on.
-    pub fn set_continuation_enabled(&mut self, enabled: bool) {
-        self.continuation_enabled = enabled;
+    /// Launch metadata owns this fact, including older environment-only launches.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn set_managed_subagent(&mut self, managed: bool) -> Result<()> {
+        if self.snapshot.managed_subagent != managed {
+            self.record_observation(RelayObservation::ManagedSubagentConfigured { managed })?;
+        }
+        self.suppress_child_assessment()
     }
 
     pub fn set_turn_verdict_harness(&mut self, harness: mj_core::config::HarnessKind) {
@@ -1371,7 +1413,7 @@ impl DurableRelay {
         )
     }
 
-    /// The announced task owns this turn's completion, including after a stop.
+    /// The announced task owns completion unless an unanswered user stop overrides it.
     fn announced_harness_turn(&self) -> bool {
         self.snapshot.harness_turn.is_some_and(|turn| {
             self.air_tasks
@@ -1387,7 +1429,7 @@ impl DurableRelay {
     /// [`HARNESS_TURN_STOP_GRACE`]. The snapshot owns the stop: a journal
     /// event records it, so it is the same on every path and after a restart.
     pub fn unanswered_harness_turn_stop(&self) -> Option<u64> {
-        if self.harness_turns != HarnessTurnPolicy::ClaudeAdapter || self.announced_harness_turn() {
+        if self.harness_turns != HarnessTurnPolicy::ClaudeAdapter {
             return None;
         }
         let turn = self.snapshot.autonomous_harness_turn()?;
@@ -1398,9 +1440,8 @@ impl DurableRelay {
     }
 
     /// End the harness turn a stop was applied to, if it is still open. A
-    /// cycle Claude Code was running would have sent its result by now; a
-    /// turn that is still open was opened for output no cycle produced, and
-    /// nothing else would ever end it. Returns whether a turn was ended.
+    /// user stop overrides even an announced task that never reports its end.
+    /// Returns whether a turn was ended.
     pub fn end_unanswered_harness_turn_stop(&mut self, first_ordinal: u64) -> Result<bool> {
         if self.unanswered_harness_turn_stop() != Some(first_ordinal) {
             return Ok(false);
@@ -1432,6 +1473,7 @@ impl DurableRelay {
     }
 
     fn settle_harness_turn(&mut self, origin: Option<String>, stop_reason: &str) -> Result<()> {
+        let settled_ordinal = self.snapshot.harness_turn.map(|turn| turn.first_ordinal);
         self.append_relay_event(
             None,
             RelayObservation::HarnessTurnSettled {
@@ -1462,6 +1504,17 @@ impl DurableRelay {
                 prompt_in_flight: self.snapshot.active_prompt.is_some(),
             },
         )?;
+        // Settlement and detachment share the relay owner lock. Keep task IDs
+        // as tombstones so late terminal updates cannot claim a successor.
+        // Late output may open an unannounced turn after its raw result; a
+        // fresh Stop still ends that turn through the same grace fallback.
+        for entry in self.air_tasks.values_mut() {
+            if let background::AirTaskState::Turn(ordinal) = &mut entry.state
+                && *ordinal == settled_ordinal
+            {
+                *ordinal = None;
+            }
+        }
         self.finish_turn_activity()?;
         Ok(())
     }
@@ -1557,6 +1610,29 @@ pub(crate) mod test_support {
     use super::*;
 
     pub(crate) const SESSION: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
+
+    /// A recorded GLiDE answer whose frozen rule gives `expected` (`await_input`,
+    /// `finished`, `wait`, `retry_provider`, `recover_quota` or `uncertain`).
+    /// `background` replaces the leftover-process distribution `[needed, unneeded,
+    /// unclear]` when a test needs a particular quiet judgment.
+    pub(crate) fn glide_answer(
+        expected: &str,
+        background: Option<[f64; 3]>,
+    ) -> mj_core::activity::eot_glide::types::Probabilities {
+        let samples = crate::acp::verdict_client::glide_turn::test_samples();
+        let mut answer = samples
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|sample| sample["expected"] == expected)
+            .unwrap_or_else(|| panic!("no recorded GLiDE answer for {expected}"))
+            .clone();
+        if let Some([needed, unneeded, unclear]) = background {
+            answer["answers"]["background"]["probabilities"] =
+                serde_json::json!({"needed":needed,"unneeded":unneeded,"unclear":unclear});
+        }
+        crate::acp::verdict_client::glide_turn::Probabilities::parse(&answer).unwrap()
+    }
 
     pub(crate) fn relay_request(request_id: &str, request: RelayRequest) -> RelayRequestEnvelope {
         RelayRequestEnvelope {
@@ -1720,3 +1796,37 @@ mod attachment_tests;
 
 #[cfg(test)]
 mod continuation_tests;
+
+#[cfg(test)]
+mod handback_tests;
+
+/// Seed once at the legacy persisted-format boundary, never during publication.
+fn seed_legacy_open_request(snapshot: &mut RelaySnapshot) {
+    let Some(assessment) = snapshot.assessment.as_deref() else {
+        return;
+    };
+    if assessment.question_dismissed() {
+        return;
+    }
+    let question = assessment.inferred_question().or_else(|| {
+        (mj_core::state::classify_prompt_completion(&assessment.completion.stop_reason)
+            == mj_core::state::PromptCompletion::InputRequired)
+            .then(|| mj_core::assessment::InferredQuestion {
+                turn_id: assessment.turn_id.clone(),
+                completed_ordinal: assessment.completed_ordinal,
+            })
+    });
+    if let Some(question) = question {
+        snapshot.person_input_through = snapshot
+            .latest_prompt_accepted_ordinal
+            .filter(|ordinal| *ordinal > question.completed_ordinal)
+            .unwrap_or(0);
+        snapshot.request = Some(mj_core::assessment::OpenRequest {
+            question,
+            question_message: assessment
+                .question_message
+                .clone()
+                .or_else(|| snapshot.completed_reply_message.clone()),
+        });
+    }
+}

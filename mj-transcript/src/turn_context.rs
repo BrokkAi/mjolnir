@@ -144,7 +144,7 @@ impl TurnContext {
             } => {
                 self.observe_terminal(&mj_core::transcript::TerminalOutputRecord {
                     terminal_id: terminal_id.clone(),
-                    output: output.clone(),
+                    output: output.clone().into(),
                     truncated: *truncated,
                     exit_code: *exit_code,
                     signal: signal.clone(),
@@ -341,7 +341,7 @@ impl TurnContext {
                     .to_owned(),
             })
             .collect();
-        let mut evidence = TurnEvidence {
+        TurnEvidence {
             authorization: None,
             final_tool_calls,
             background: Vec::new(),
@@ -376,13 +376,7 @@ impl TurnContext {
                 state.assistant_text_tail.clone()
             },
             completion: None,
-        };
-        let mut limit = 48 * 1024;
-        while limit > 0 && !mj_core::activity::verdict::request_fits(&evidence) {
-            limit /= 2;
-            evidence.transcript_summary = summary.render(limit);
         }
-        evidence
     }
 }
 
@@ -393,7 +387,9 @@ fn complete_message(state: &mut TurnContextState) {
     state.message_id = None;
 }
 
-fn tail(text: &str, maximum_bytes: usize) -> String {
+/// The last `maximum_bytes` of `text`, cut at a character boundary: the tail
+/// every turn classifier receives.
+pub fn tail(text: &str, maximum_bytes: usize) -> String {
     let start = text.floor_char_boundary(text.len().saturating_sub(maximum_bytes));
     let mut value = text[start..].to_owned();
     mj_core::transcript::truncate_string_start(&mut value, maximum_bytes);

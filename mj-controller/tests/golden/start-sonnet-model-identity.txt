@@ -1,0 +1,28 @@
+quota Claude=0% Gemini-Claude=100%, effort=default
+HTTP 201
+{
+  "session_id": "session-2"
+}
+profile=gemini, model=claude-sonnet-5-5, effort=default
+
+quota Claude=0% Gemini-Claude=100%, effort=high
+HTTP 201
+{
+  "session_id": "session-2"
+}
+profile=gemini, model=claude-sonnet-5-5, effort=high
+
+quota Claude=100% Gemini-Claude=0%, effort=default
+HTTP 201
+{
+  "session_id": "session-2"
+}
+profile=claude, model=sonnet, effort=default
+
+quota Claude=100% Gemini-Claude=0%, effort=high
+HTTP 201
+{
+  "session_id": "session-2"
+}
+profile=claude, model=sonnet, effort=high
+

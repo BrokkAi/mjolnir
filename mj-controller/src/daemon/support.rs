@@ -1,8 +1,36 @@
 use super::*;
 
+/// Publication is deliberately synchronous: I/O settles in the coordinators.
+pub(super) fn publish_background_results(
+    state: &Arc<RuntimeState>,
+    recovery: impl Iterator<Item = crate::recovery::RecoveryResult>,
+    upgrades: impl Iterator<Item = crate::worker_upgrade::WorkerUpgradeResult>,
+) {
+    for result in recovery {
+        report_recovery(&result);
+    }
+    for result in upgrades {
+        report_worker_upgrade(state, &result);
+    }
+}
+
+/// Records already reach the owner through the committed publication feed.
+/// Reporting a finished copy must never join the configuration I/O owner.
+pub(super) fn report_recovery(result: &crate::recovery::RecoveryResult) {
+    if let Err(error) = &result.outcome {
+        if result.deferred {
+            tracing::info!(session_id = %result.session_id, %error, "recovery copy deferred: agent is working");
+        } else if result.cancelled {
+            tracing::info!(session_id = %result.session_id, %error, reason = "superseded by suspend", "daemon recovery checkpoint cancelled");
+        } else {
+            tracing::warn!(session_id = %result.session_id, %error, "daemon recovery checkpoint failed");
+        }
+    }
+}
+
 /// Log one finished worker upgrade, and tell the surfaces about the one that
 /// changed something.
-pub(super) async fn report_worker_upgrade(
+pub(super) fn report_worker_upgrade(
     state: &Arc<RuntimeState>,
     result: &crate::worker_upgrade::WorkerUpgradeResult,
 ) {
@@ -36,14 +64,8 @@ pub(super) async fn report_worker_upgrade(
         }
         Err(error) => {
             tracing::warn!(%session_id, %error, "could not upgrade the session worker");
-            if let Some(failure) = &result.preparation_failure {
-                state
-                    .fail_harness_preparation(
-                        session_id.clone(),
-                        failure.clone(),
-                        result.observed_updated_at.clone(),
-                    )
-                    .await;
+            if let Some(cause) = &result.applied_preparation_failure {
+                state.push_notice(session_id, cause.clone());
             }
         }
     }
@@ -262,4 +284,115 @@ pub(super) fn write_metadata(path: &Path, metadata: &DaemonMetadata) -> Result<(
     fs::rename(&temporary, path)
         .with_context(|| format!("publish daemon metadata {}", path.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+    use crate::daemon::tests::{test_metadata, test_runtime_state};
+
+    // Hard-won: #1499: result publication awaited configuration ownership on the serving loop.
+    #[tokio::test]
+    async fn result_publication_does_not_wait_for_configuration() {
+        const CHILD: &str = "MJ_RESULT_PUBLICATION_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            crate::controller::test_support::IsolatedTest::new(
+                "daemon::support::publication_tests::result_publication_does_not_wait_for_configuration",
+            )
+            .env(CHILD, "1")
+            .env("MJ_INSTANCE", "result-publication-test")
+            .isolated_store(root.path())
+            .run();
+            return;
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let mut state = test_runtime_state();
+        Arc::get_mut(&mut state).unwrap().committed =
+            Some(crate::database::subscribe_committed_state().unwrap());
+        let config_owner = state.config_mutation.lock().await;
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let metadata = test_metadata(address);
+        let cancellation = CancellationToken::new();
+        let server_cancel = cancellation.clone();
+        let serving = state.clone();
+        let server = tokio::spawn(async move {
+            // The same synchronous drain used by the real serving tick must
+            // finish before this task can accept and answer a connection.
+            publish_background_results(
+                &serving,
+                [(false, true), (true, false), (false, false), (false, false)]
+                    .into_iter()
+                    .enumerate()
+                    .map(
+                        |(index, (cancelled, deferred))| crate::recovery::RecoveryResult {
+                            session_id: "finished-copy".into(),
+                            expected_target: mj_core::state::TargetLocator::LocalBare {
+                                worker_root: "unused".into(),
+                            },
+                            outcome: if index == 3 {
+                                Ok(crate::controller::CheckpointArtifact {
+                                    metadata: mj_core::state::CheckpointMetadata {
+                                        archive_path: "unused.zip".into(),
+                                        sha256: "verified".into(),
+                                        created_at: "2026-11-11T15:00:00Z".into(),
+                                        event_frontier: 1,
+                                    },
+                                    native_session_id: "native".into(),
+                                    event_frontier_digest: "verified".into(),
+                                })
+                            } else {
+                                Err("copy completed without an artifact".into())
+                            },
+                            cancelled,
+                            deferred,
+                        },
+                    ),
+                [crate::worker_upgrade::WorkerUpgradeResult {
+                    session_id: "finished-upgrade".into(),
+                    outcome: Err("harness preparation failed".into()),
+                    applied_preparation_failure: Some("durably failed".into()),
+                    cancelled: false,
+                }]
+                .into_iter(),
+            );
+            let (stream, _) = listener.accept().await.unwrap();
+            serve_client(stream, metadata, serving, server_cancel)
+                .await
+                .unwrap();
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut stream = TcpStream::connect(address).await.unwrap();
+            for (request_id, action) in [(1, DaemonAction::Ping), (2, DaemonAction::Stop)] {
+                write_frame(
+                    &mut stream,
+                    &RequestEnvelope {
+                        protocol_version: PROTOCOL_VERSION,
+                        request_id,
+                        token: "right-token".into(),
+                        action,
+                    },
+                )
+                .await
+                .unwrap();
+                let reply = read_frame::<ResponseEnvelope>(&mut stream)
+                    .await
+                    .unwrap()
+                    .result
+                    .unwrap();
+                if request_id == 1 {
+                    assert!(matches!(reply, DaemonReply::Pong));
+                } else {
+                    assert!(matches!(reply, DaemonReply::Done));
+                }
+            }
+            assert!(cancellation.is_cancelled());
+            drop(stream);
+            server.await.unwrap();
+        })
+        .await
+        .expect("publication blocked request/stop behind configuration mutation");
+        drop(config_owner);
+    }
 }

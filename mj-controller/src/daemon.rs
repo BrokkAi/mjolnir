@@ -4,9 +4,11 @@ mod auto_afk;
 pub(crate) mod capacity;
 mod container_upgrade;
 mod feed;
+mod observe;
 mod owner;
 mod record_index;
 mod restart;
+mod session_lifecycle;
 mod session_move;
 use crate::controller::move_session::{
     MoveMutationGuard, MoveOutcome, MovePreparation, MoveSelection, MoveSessionRequest,
@@ -201,7 +203,13 @@ const ATTACHMENT_LEASE: Duration = Duration::from_secs(15);
 #[derive(Default)]
 struct QuotaBoard {
     snapshot: mj_core::snapshot_map::SharedSnapshot<mj_client::quota::QuotaSnapshot>,
-    refresh: Option<tokio::sync::mpsc::Sender<()>>,
+    refresh: Option<tokio::sync::mpsc::UnboundedSender<QuotaRefreshIntent>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QuotaRefreshIntent {
+    Force,
+    ReconcileSources,
 }
 
 struct SurfaceNotice {
@@ -213,6 +221,7 @@ pub struct RuntimeState {
     attachments: Mutex<BTreeMap<String, Attachment>>,
     phone_status: Mutex<WebViewerStatus>,
     pub web_viewer: crate::web_viewer::ViewerControl,
+    pub(crate) api_credential: std::sync::OnceLock<String>,
     ever_attached: AtomicBool,
     revisions: RuntimeRevisions,
     workspaces_tx: tokio::sync::watch::Sender<Vec<WorkspaceRecord>>,
@@ -575,6 +584,7 @@ struct ActiveLifecycle {
     request_key: Option<String>,
     _move_guard: Option<MoveMutationGuard>,
     result: LifecycleWatch,
+    acceptance: LifecycleAcceptance,
 }
 
 enum LifecyclePhase {
@@ -591,6 +601,29 @@ enum LifecyclePhase {
 impl ActiveLifecycle {
     fn is_running(&self) -> bool {
         !matches!(self.phase, LifecyclePhase::Completed(_))
+    }
+
+    fn check_request(
+        &self,
+        session_id: &str,
+        kind: LifecycleKind,
+        key: Option<&str>,
+        workspace: Option<&str>,
+        child_close: bool,
+    ) -> Result<()> {
+        ensure!(
+            child_close || self.request_key.as_deref() == key,
+            "another lifecycle request with different selections is already running for session {session_id}"
+        );
+        ensure!(
+            self.kind == kind,
+            "another lifecycle operation is already running for session {session_id}"
+        );
+        ensure!(
+            workspace.is_none() || self.resume_workspace_id.as_deref() == workspace,
+            "session {session_id} is already resuming into another workspace"
+        );
+        Ok(())
     }
 
     /// The stages this operation is in, oldest stage first.
@@ -720,6 +753,18 @@ pub(crate) struct LifecycleFailure {
 type LifecycleResult = std::result::Result<DaemonLifecycleResult, LifecycleFailure>;
 type LifecycleWatch = tokio::sync::watch::Receiver<Option<LifecycleResult>>;
 
+type LifecycleAcceptance =
+    tokio::sync::watch::Receiver<Option<std::result::Result<(), LifecycleFailure>>>;
+
+type LifecycleAcceptanceSender =
+    tokio::sync::watch::Sender<Option<std::result::Result<(), LifecycleFailure>>>;
+
+pub(crate) struct StartedLifecycle {
+    receipt: LifecycleReceipt,
+    result: LifecycleWatch,
+    acceptance: LifecycleAcceptance,
+}
+
 impl LifecycleFailure {
     fn of(error: &anyhow::Error) -> Self {
         Self {
@@ -796,12 +841,15 @@ pub use process::*;
 mod serve;
 use serve::*;
 mod actions;
+mod machine;
 use actions::*;
 mod guards;
 pub(crate) use guards::*;
 mod dashboard_reads;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub(crate) mod continuation;
+
+mod attention;

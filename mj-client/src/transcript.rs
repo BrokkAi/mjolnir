@@ -44,7 +44,6 @@ pub enum EntryCollapse {
     },
 }
 
-pub const BROWSER_TRANSCRIPT_LINES: usize = 1_000;
 pub const BROWSER_LINE_BYTES: usize = 4 * 1024;
 
 /// Interpret the durable mailbox list shared by historical and live clients.
@@ -72,6 +71,10 @@ pub fn mailbox_event_lines<'a>(
 /// surfaces, without the live feed's presentation collapse or tail clipping.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct HistoryEntry {
+    pub stable_id: String,
+    /// Stored transcript position: the browser orders history by it and
+    /// matches it against live rows, whose ids are these positions.
+    pub position: u64,
     pub role: &'static str,
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -84,6 +87,8 @@ pub fn history_entries(page: &mj_core::storage::TranscriptHistoryPage) -> Vec<Hi
     page.items
         .iter()
         .map(|item| HistoryEntry {
+            stable_id: item.stable_id.clone(),
+            position: item.position,
             role: mj_core::transcript::transcript_item_role(&item.body),
             text: match &item.body {
                 TranscriptBody::Message { event } => mj_core::transcript::sanitize_terminal_text(
@@ -120,30 +125,29 @@ pub fn browser_transcript(
         &collapsed_restarts,
         TranscriptRenderMode::Rich,
     );
-    let mut entries = browser_projection_entries(source_entries, &collapse, last_compaction_seq)
+    browser_transcript_collapsed(
+        source_entries,
+        &collapse,
+        latest_seq,
+        last_compaction_seq,
+        after_seq,
+        restart_collapse_window_start,
+    )
+}
+
+fn browser_transcript_collapsed(
+    source_entries: &[ChatEntry],
+    collapse: &[EntryCollapse],
+    latest_seq: u64,
+    last_compaction_seq: u64,
+    after_seq: Option<u64>,
+    restart_collapse_window_start: Option<u64>,
+) -> BrowserTranscript {
+    let mut entries = browser_projection_entries(source_entries, collapse, last_compaction_seq)
         .into_iter()
         .map(|entry| browser_entry(&entry))
         .collect::<Vec<_>>();
-    let mut remaining = BROWSER_TRANSCRIPT_LINES;
-    for entry in entries.iter_mut().rev() {
-        if entry.role != "message" && entry.lines.len() > remaining {
-            let omitted = entry
-                .lines
-                .len()
-                .saturating_sub(remaining.saturating_sub(1));
-            if remaining == 0 {
-                entry.lines.clear();
-            } else {
-                entry.lines.drain(..omitted);
-                entry
-                    .lines
-                    .insert(0, format!("[… {omitted} earlier lines omitted …]"));
-                entry.lines.truncate(remaining);
-            }
-        }
-        remaining = remaining.saturating_sub(entry.lines.len());
-        // Derive disclosures after clipping so hidden detail cannot bypass
-        // the browser transcript's line budget.
+    for entry in &mut entries {
         entry.mailbox_events = mailbox_event_lines(
             if entry.role == "system" {
                 ChatRole::System
@@ -154,11 +158,6 @@ pub fn browser_transcript(
         );
     }
     entries.retain(|entry| !entry.lines.is_empty());
-    if remaining == 0 {
-        while entries.first().is_some_and(|entry| entry.lines.is_empty()) {
-            entries.remove(0);
-        }
-    }
     // A collapse can remove an entry a viewer already received even when
     // older, unrelated entries remain in the window. Move the reset
     // boundary to the newest replacement marker so the append-only web
@@ -176,10 +175,10 @@ pub fn browser_transcript(
     }
     BrowserTranscript {
         latest_seq,
-        presentation_key: rich_presentation_key(source_entries, &collapse, last_compaction_seq),
+        presentation_key: rich_presentation_key(source_entries, collapse, last_compaction_seq),
         window_start_seq,
         reset,
-        entries,
+        entries: entries.into_iter().map(Arc::new).collect(),
     }
 }
 
@@ -218,7 +217,7 @@ pub const TAIL_SEED_ITEMS: usize = 256;
 pub fn materialized_prefix_entries(items: &[Arc<TranscriptItem>], frontier: u64) -> Vec<ChatEntry> {
     let mut entries = items
         .iter()
-        .map(|item| materialized_chat_entry(item, frontier))
+        .map(|item| materialized_chat_entry_with_diffstats(item, frontier, None))
         .collect::<Vec<_>>();
     apply_entry_list_rules(&mut entries);
     entries
@@ -257,10 +256,18 @@ pub fn materialized_chat_entries_reusing(
                 .peek()
                 .is_none_or(|entry| entry.start_seq != item.position)
             {
-                return materialized_chat_entry(item, session.applied_event_ordinal);
+                return materialized_chat_entry_with_diffstats(
+                    item,
+                    session.applied_event_ordinal,
+                    None,
+                );
             }
             let Some(mut entry) = previous.next() else {
-                return materialized_chat_entry(item, session.applied_event_ordinal);
+                return materialized_chat_entry_with_diffstats(
+                    item,
+                    session.applied_event_ordinal,
+                    None,
+                );
             };
             if entry.source.is(item) {
                 entry.seq = item_update_ordinal(item, session.applied_event_ordinal);
@@ -271,7 +278,7 @@ pub fn materialized_chat_entries_reusing(
                 entry.source = TranscriptSource(Some(item.clone()));
                 return entry;
             }
-            materialized_chat_entry(item, session.applied_event_ordinal)
+            materialized_chat_entry_with_diffstats(item, session.applied_event_ordinal, None)
         })
         .collect::<Vec<_>>();
     apply_entry_list_rules(&mut entries);
@@ -346,12 +353,13 @@ pub fn suppress_duplicate_standalone_terminal_output(entries: &mut [ChatEntry]) 
         let TranscriptBody::TerminalOutput { record } = &item.body else {
             continue;
         };
+        let digest = record.raw_result_digest();
         entry.raw_only = record.exited_cleanly()
             || tools.iter().any(|tool| {
                 let TranscriptBody::Tool { call, .. } = &tool.body else {
                     unreachable!("filtered to tool transcript items above");
                 };
-                record.matches_tool_raw_result(call)
+                call.matches_raw_result(record, &digest)
             });
     }
 }
@@ -442,6 +450,38 @@ pub fn materialized_chat_entry_with_diffstats(
     frontier: u64,
     exact_diffstats: Option<&Vec<String>>,
 ) -> ChatEntry {
+    materialized_chat_entry_with_outputs(
+        item,
+        &TerminalOutputs::of([item.as_ref()]),
+        frontier,
+        exact_diffstats,
+    )
+}
+
+fn decode_tool_call(
+    item: &TranscriptItem,
+    call: &mj_core::transcript::OpaqueToolCall,
+) -> Option<ToolCall> {
+    call.decode()
+        .map_err(|error| {
+            tracing::warn!(stable_id = %item.stable_id, %error,
+            "could not decode a stored tool call; rendering it as invalid");
+        })
+        .ok()
+}
+
+fn tool_raw_only(call: &ToolCall, outputs: &[TerminalOutputRecord]) -> bool {
+    mj_core::acp::is_fallback_terminal_tool_call(call)
+        && !outputs.is_empty()
+        && outputs.iter().all(TerminalOutputRecord::exited_cleanly)
+}
+
+pub fn materialized_chat_entry_with_outputs(
+    item: &Arc<TranscriptItem>,
+    outputs: &TerminalOutputs<'_>,
+    frontier: u64,
+    exact_diffstats: Option<&Vec<String>>,
+) -> ChatEntry {
     let mut entry = match &item.body {
         TranscriptBody::User { content } => ChatEntry::plain(
             item.position,
@@ -460,22 +500,10 @@ pub fn materialized_chat_entry_with_diffstats(
             materialized_chunks_text(chunks),
         ),
         TranscriptBody::Tool {
-            call,
-            terminal_outputs,
-            presentation,
-            ..
+            call, presentation, ..
         } => {
-            let call = match ToolCall::deserialize(call) {
-                Ok(call) => Some(call),
-                Err(error) => {
-                    tracing::warn!(
-                        stable_id = %item.stable_id,
-                        %error,
-                        "could not decode a stored tool call; rendering it as invalid"
-                    );
-                    None
-                }
-            };
+            let terminal_outputs = outputs.for_tool(&item.stable_id);
+            let call = decode_tool_call(item, call);
             let mut entry = ChatEntry::tool(
                 item.position,
                 call.as_ref()
@@ -494,7 +522,7 @@ pub fn materialized_chat_entry_with_diffstats(
                 let fallback_terminal = mj_core::acp::is_fallback_terminal_tool_call(&call);
                 entry.tool_content = tool_content_details(
                     &call.content,
-                    terminal_outputs,
+                    &terminal_outputs,
                     call.raw_output.as_ref(),
                     tool_status(&call.status),
                 );
@@ -505,11 +533,7 @@ pub fn materialized_chat_entry_with_diffstats(
                 // Successful fallback calls replace the successful standalone
                 // terminal blocks Rich already omitted. Raw mode still keeps
                 // every command, while failures remain visible everywhere.
-                entry.raw_only = fallback_terminal
-                    && !terminal_outputs.is_empty()
-                    && terminal_outputs
-                        .iter()
-                        .all(TerminalOutputRecord::exited_cleanly);
+                entry.raw_only = tool_raw_only(&call, &terminal_outputs);
                 if fallback_terminal && call.status == ToolCallStatus::Failed {
                     let details = std::mem::take(&mut entry.tool_content);
                     if !details.is_empty() {
@@ -1174,7 +1198,22 @@ pub fn materialized_browser_transcript(session: &MaterializedSession) -> Browser
 pub struct BrowserTranscriptProjector {
     entries: Vec<ChatEntry>,
     /// The entries this projector last published, by id.
-    published: BTreeMap<String, BrowserTranscriptEntry>,
+    published: BTreeMap<String, Arc<BrowserTranscriptEntry>>,
+}
+
+/// A browser tool row renders its summary and diffstats only. The Raw-view
+/// detail below is read by the terminal renderer, which converts its own
+/// entries, so the browser projector does not keep it.
+fn release_raw_view_detail(entries: &mut [ChatEntry]) {
+    for entry in entries
+        .iter_mut()
+        .filter(|entry| entry.role == ChatRole::Tool)
+    {
+        entry.tool_content = Vec::new();
+        entry.tool_input = None;
+        entry.tool_error = None;
+        entry.tool_locations = Vec::new();
+    }
 }
 
 impl BrowserTranscriptProjector {
@@ -1185,15 +1224,18 @@ impl BrowserTranscriptProjector {
     /// the cursor it was published with, so a browser polling with `after_seq`
     /// is not sent it again. A changed entry gets the new frontier. This holds
     /// for every item kind and for changes the item itself does not record:
-    /// a tool call marked ended by a later interrupt, or lines trimmed from
-    /// the oldest entry as the window slides.
+    /// a tool call marked ended by a later interrupt, or changes to collapse
+    /// groups as the window slides.
     pub fn project(&mut self, session: &MaterializedSession) -> BrowserTranscript {
         self.entries =
             materialized_chat_entries_reusing(session, 0, std::mem::take(&mut self.entries));
+        release_raw_view_detail(&mut self.entries);
         let mut transcript =
             browser_transcript(&self.entries, session.applied_event_ordinal, 0, None);
         let first = self.published.is_empty();
         for entry in &mut transcript.entries {
+            // Freshly rendered rows have one owner until publication below.
+            let entry = Arc::get_mut(entry).expect("unpublished browser row");
             match self.published.get(&entry.identity()) {
                 Some(previous) if same_rendering(previous, entry) => {
                     entry.updated_seq = previous.updated_seq;
@@ -1258,10 +1300,10 @@ mod tests {
         let delivery =
             include_str!("../../mj-transcript/tests/golden/mailbox-delivery-transcript.txt");
         let batch = delivery
-            .split_once("19: Mailbox events:\n")
+            .split_once("20: Mailbox events:\n")
             .unwrap()
             .1
-            .split_once("\n20: ")
+            .split_once("\n21: ")
             .unwrap()
             .0;
         let entry = ChatEntry::plain(
@@ -1276,24 +1318,6 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "mailbox-browser-transcript",
             &serde_json::to_string_pretty(&browser).unwrap(),
-        );
-    }
-
-    #[test]
-    fn mailbox_disclosures_respect_the_browser_line_budget() {
-        let entry = ChatEntry::plain(
-            2,
-            ChatRole::System,
-            format!(
-                "Mailbox events:\n  - Child report\n{}",
-                "    large report line\n".repeat(BROWSER_TRANSCRIPT_LINES + 1),
-            ),
-        );
-        let browser = browser_transcript(&[entry], 2, 0, None);
-        assert_eq!(browser.entries[0].lines.len(), BROWSER_TRANSCRIPT_LINES);
-        assert!(
-            browser.entries[0].mailbox_events.is_empty(),
-            "clipped events must not retain hidden report text"
         );
     }
 
@@ -1382,7 +1406,7 @@ mod tests {
             let mut item = item(
                 2,
                 TranscriptBody::Tool {
-                    call: json!({"toolCallId":"tool-2", "title":"cargo test", "status":status, "kind":"execute"}),
+                    call: json!({"toolCallId":"tool-2", "title":"cargo test", "status":status, "kind":"execute"}).into(),
                     terminal_outputs: Vec::new(),
                     terminal_refs: Vec::new(),
                     presentation: None,
@@ -1443,6 +1467,63 @@ mod tests {
         cached
     }
 
+    #[test]
+    fn browser_publication_shares_large_rows_without_changing_cursors() {
+        let mut session = MaterializedSession::empty("shared-publication");
+        for position in 1..=8_000 {
+            session.transcript.push(item(
+                position,
+                TranscriptBody::User {
+                    content: vec![json!({"type": "text", "text": format!(
+                        "Message {position}: {}", "realistic transcript text and Unicode 支持. ".repeat(40)
+                    )})],
+                },
+            ));
+        }
+        session.applied_event_ordinal = 8_000;
+        let mut projector = BrowserTranscriptProjector::default();
+        let first = projector.project(&session);
+        assert_eq!(
+            serde_json::to_vec(&first).unwrap(),
+            serde_json::to_vec(&materialized_browser_transcript(&session)).unwrap(),
+        );
+        // The conversations map clones the returned transcript. Its rows and
+        // the projector's cursor baseline must still have the same allocation.
+        let conversation = first.clone();
+        for entry in &conversation.entries {
+            assert!(Arc::ptr_eq(entry, &projector.published[&entry.identity()]));
+        }
+        let line_bytes: usize = first
+            .entries
+            .iter()
+            .flat_map(|entry| &entry.lines)
+            .map(String::len)
+            .sum();
+        eprintln!(
+            "shared publication measurement: {} source items, {} published rows, {line_bytes} line bytes; old two copies = {} line bytes, shared = {line_bytes}",
+            session.transcript.len(),
+            first.entries.len(),
+            line_bytes * 2
+        );
+
+        session.applied_event_ordinal += 1;
+        Arc::make_mut(session.transcript.last_mut().unwrap()).body = TranscriptBody::User {
+            content: vec![json!({"type": "text", "text": "changed newest item"})],
+        };
+        let second = projector.project(&session);
+        for entry in &second.entries {
+            assert!(Arc::ptr_eq(entry, &projector.published[&entry.identity()]));
+            if entry.id == 8_000 {
+                assert_eq!(entry.updated_seq, 8_001);
+            } else {
+                let previous = first.entries.iter().find(|old| old.id == entry.id).unwrap();
+                assert_eq!(entry.updated_seq, previous.updated_seq);
+            }
+        }
+        // Later publication cannot mutate the previous conversation snapshot.
+        assert_eq!(conversation, first);
+    }
+
     /// A browser polling with `after_seq` is sent an entry again only when
     /// that entry changed, for every item kind: here a tool call and a thought
     /// that did not change stay behind while a new message is sent.
@@ -1458,7 +1539,7 @@ mod tests {
             },
         ));
         session.transcript.push(item(2, TranscriptBody::Tool {
-            call: json!({"toolCallId":"tool-2", "title":"Read file", "status":"completed", "kind":"read"}),
+            call: json!({"toolCallId":"tool-2", "title":"Read file", "status":"completed", "kind":"read"}).into(),
             terminal_outputs: Vec::new(), terminal_refs: Vec::new(), presentation: None,
         }));
         session.transcript.push(item(
@@ -1492,7 +1573,7 @@ mod tests {
         else {
             unreachable!()
         };
-        call["status"] = json!("failed");
+        call.edit(|value| value["status"] = json!("failed"));
         session.applied_event_ordinal = 5;
         let third = assert_projection(&mut projector, &session);
         let sent = third
@@ -1504,12 +1585,65 @@ mod tests {
         assert_eq!(sent, [2], "the changed tool call is sent again");
     }
 
+    // Hard-won: e13ed5c7c: parked records rebuilt unchanged entries and disappeared across prefix and tail
+    #[test]
+    fn parked_output_preserves_entry_reuse_across_prefix_and_tail() {
+        let mut session = MaterializedSession::empty("parked-tail");
+        session.transcript.push(item(1, TranscriptBody::Tool {
+            call: json!({"toolCallId":"owner", "title":"Execute", "status":"completed", "kind":"execute"}).into(),
+            terminal_outputs: Vec::new(), terminal_refs: vec!["parked".into()], presentation: None,
+        }));
+        for position in 2..=300 {
+            session.transcript.push(item(
+                position,
+                TranscriptBody::User {
+                    content: vec![json!({"type":"text", "text":format!("message {position}")})],
+                },
+            ));
+        }
+        session.transcript.push(item(
+            301,
+            TranscriptBody::TerminalOutput {
+                record: TerminalOutputRecord {
+                    terminal_id: "parked".into(),
+                    output: "unique parked output".into(),
+                    truncated: false,
+                    exit_code: Some(0),
+                    signal: None,
+                },
+            },
+        ));
+        session.applied_event_ordinal = 301;
+        let previous = materialized_chat_entries(&session);
+        let pointer = previous[1].text.as_ptr();
+        let reused = materialized_chat_entries_reusing(&session, 0, previous);
+        assert_eq!(reused[1].text.as_ptr(), pointer);
+        let split = session.transcript.len() - TAIL_SEED_ITEMS;
+        let mut entries = materialized_prefix_entries(&session.transcript[..split], 301);
+        entries.extend(materialized_chat_entries_reusing(
+            &session,
+            split,
+            Vec::new(),
+        ));
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| e.text.matches("unique parked output").count()
+                    + e.tool_content
+                        .iter()
+                        .map(|t| t.matches("unique parked output").count())
+                        .sum::<usize>())
+                .sum::<usize>(),
+            1
+        );
+    }
+
     #[test]
     fn advancing_transcript_window_preserves_computed_tool_diffstats() {
         let mut session = MaterializedSession::empty("sliding-tail");
         for position in 1..=3 {
             session.transcript.push(item(position, TranscriptBody::Tool {
-                call: json!({"toolCallId": format!("tool-{position}"), "title": "Edit file", "status": "completed", "kind": "edit"}),
+                call: json!({"toolCallId": format!("tool-{position}"), "title": "Edit file", "status": "completed", "kind": "edit"}).into(),
                 terminal_outputs: Vec::new(), terminal_refs: Vec::new(), presentation: None,
             }));
         }
@@ -1542,7 +1676,7 @@ mod tests {
         ));
         for position in 2..=3 {
             session.transcript.push(item(position, TranscriptBody::Tool {
-                call: json!({"toolCallId":format!("tool-{position}"), "title":"Read file", "status":"in_progress", "kind":"read", "content":[{"type":"content", "content":{"type":"text", "text":"x".repeat(80_000)}}]}),
+                call: json!({"toolCallId":format!("tool-{position}"), "title":"Read file", "status":"in_progress", "kind":"read", "content":[{"type":"content", "content":{"type":"text", "text":"x".repeat(80_000)}}]}).into(),
                 terminal_outputs: Vec::new(), terminal_refs: Vec::new(), presentation: None,
             }));
         }
@@ -1553,7 +1687,7 @@ mod tests {
             let TranscriptBody::Tool { call, .. } = &mut Arc::make_mut(entry).body else {
                 unreachable!()
             };
-            call["status"] = json!("completed");
+            call.edit(|value| value["status"] = json!("completed"));
         }
         session.applied_event_ordinal = 4;
         assert_projection(&mut projector, &session);

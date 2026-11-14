@@ -30,8 +30,6 @@ pub struct TargetRuntimeSettings {
 pub struct ContainerSettings {
     pub additional_mounts: Vec<AdditionalMount>,
     pub resource_allocation: Option<SessionResourceAllocation>,
-    pub cpus: Option<String>,
-    pub memory: Option<String>,
     /// Which image the container was created from, as far as upgrades care:
     /// `Some(Some(image))` for the default image of the Mjolnir that created
     /// it, `Some(None)` for a configured image, and `None` for a container
@@ -61,7 +59,7 @@ impl ContainerSettings {
     pub fn upgrade_supported(session: &SessionRecord) -> bool {
         Self::owns_container(session)
             && !matches!(
-                session.target,
+                session.target.as_deref(),
                 Some(
                     TargetLocator::AppleContainer { .. } | TargetLocator::SshAppleContainer { .. }
                 )
@@ -72,8 +70,6 @@ impl ContainerSettings {
         Self {
             additional_mounts: session.additional_mounts.clone(),
             resource_allocation: session.resource_allocation.clone(),
-            cpus: session.container_cpus.clone(),
-            memory: session.container_memory.clone(),
             // A container on the default image follows the default to the one
             // this Mjolnir names; a configured image stays as it was.
             default_image: Self::applied_to(session)
@@ -105,7 +101,7 @@ impl ContainerSettings {
 
     fn owns_container(session: &SessionRecord) -> bool {
         matches!(
-            session.target,
+            session.target.as_deref(),
             Some(
                 TargetLocator::LocalPodman {
                     borrowed_from: None,
@@ -123,6 +119,9 @@ impl ContainerSettings {
                     borrowed_from: None,
                     ..
                 } | TargetLocator::SshAppleContainer {
+                    borrowed_from: None,
+                    ..
+                } | TargetLocator::SshNitro {
                     borrowed_from: None,
                     ..
                 }
@@ -201,9 +200,8 @@ impl From<&TargetTemplate> for TargetRuntimeSettings {
             TargetTemplate::SshBare { ssh, .. }
             | TargetTemplate::SshPodman { ssh, .. }
             | TargetTemplate::SshDocker { ssh, .. }
-            | TargetTemplate::SshAppleContainer { ssh, .. } => {
-                TargetConnection::Ssh { ssh: ssh.clone() }
-            }
+            | TargetTemplate::SshAppleContainer { ssh, .. }
+            | TargetTemplate::SshNitro { ssh, .. } => TargetConnection::Ssh { ssh: ssh.clone() },
             TargetTemplate::AwsEc2 {
                 aws_profile,
                 region,
@@ -226,7 +224,8 @@ impl From<&TargetTemplate> for TargetRuntimeSettings {
             | TargetTemplate::AppleContainer { container }
             | TargetTemplate::SshPodman { container, .. }
             | TargetTemplate::SshDocker { container, .. }
-            | TargetTemplate::SshAppleContainer { container, .. } => {
+            | TargetTemplate::SshAppleContainer { container, .. }
+            | TargetTemplate::SshNitro { container, .. } => {
                 container.environment.resolved().clone()
             }
             _ => BTreeMap::new(),
@@ -239,5 +238,11 @@ impl From<&TargetTemplate> for TargetRuntimeSettings {
             tool_cache: None,
             container_settings: None,
         }
+    }
+}
+
+impl From<&TargetTemplate> for std::sync::Arc<TargetRuntimeSettings> {
+    fn from(template: &TargetTemplate) -> Self {
+        Self::new(TargetRuntimeSettings::from(template))
     }
 }

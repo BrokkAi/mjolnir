@@ -1,7 +1,5 @@
 use super::*;
 
-const SET_BASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
-
 impl HostState {
     pub(super) fn set_push_base(
         &mut self,
@@ -18,8 +16,8 @@ impl HostState {
             session_id,
             reply,
             "baseline update",
-            |control, persistence, events, owner| {
-                run_set_base(control, persistence, events, owner, commit, path)
+            |control, persistence, _events, owner| {
+                run_set_base(control, persistence, owner, commit, path)
             },
         );
     }
@@ -28,12 +26,11 @@ impl HostState {
 async fn run_set_base(
     control: SessionManagerControl,
     persistence: mpsc::UnboundedSender<PersistenceRequest>,
-    events: mpsc::UnboundedSender<HostEvent>,
     session_id: String,
     commit: String,
     path: Option<String>,
 ) -> Result<serde_json::Value, StartRefusal> {
-    let mut state = tokio::time::timeout(SET_BASE_TIMEOUT, async {
+    let mut state = async {
         let protocol = control
             .session(session_id.clone())
             .await
@@ -59,20 +56,7 @@ async fn run_set_base(
             .await
             .map_err(|_| StartRefusal("review persistence stopped".into()))?
             .map_err(StartRefusal)
-    })
-    .await
-    .map_err(|_| StartRefusal("set_review_baseline preparation exceeded 90 seconds".into()))??;
-
-    let (permit, admitted) = oneshot::channel();
-    events
-        .send(HostEvent::OverrideValidated {
-            session_id: session_id.clone(),
-            permit,
-        })
-        .map_err(|_| StartRefusal("the review host stopped".into()))?;
-    let _admission = admitted
-        .await
-        .map_err(|_| StartRefusal("the review host stopped".into()))??;
+    }.await?;
 
     let outcome = resolve::push_action(
         &control,
@@ -83,7 +67,7 @@ async fn run_set_base(
         },
     )
     .await
-    .map_err(StartRefusal)?;
+    .map_err(|error| StartRefusal(format!("{error:#}")))?;
     let ReviewerOutcome::ReviewBaseSet {
         root,
         commit,
@@ -105,6 +89,7 @@ async fn run_set_base(
     let (reply, saved) = oneshot::channel();
     persistence
         .send(PersistenceRequest::SaveAcknowledged {
+            operation: "push review baseline state",
             session_id,
             state: Box::new(state),
             reply,

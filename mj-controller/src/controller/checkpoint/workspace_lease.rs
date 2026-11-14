@@ -7,6 +7,7 @@ pub struct IdleWorkspaceLease {
     pub(super) lease: ManagedSessionLease,
     pub(super) command_id: String,
     pub(super) harness: HarnessKind,
+    ready_cursor: RelayCursor,
     _worker_owner: crate::worker_lifecycle::WorkerPermit,
 }
 
@@ -28,11 +29,13 @@ impl IdleWorkspaceLease {
                 return Ok(None);
             };
             let command_id = new_command_id("worker-upgrade")?;
-            let preparation_failed = lease
-                .connection_mut()
-                .operational()
-                .harness_preparation_failed();
-            if !preparation_failed && lease.connection_mut().protocol_version() >= 21 {
+            let protocol = lease.connection_mut().protocol_version();
+            let operational = lease.connection_mut().operational();
+            let preparation_failed = operational.harness_preparation_failed();
+            let legacy_goal = (21..mj_core::relay::RELAY_IDLE_GOAL_INTENT_PROTOCOL)
+                .contains(&protocol)
+                && operational.facts().goal_active;
+            if !preparation_failed && protocol >= 21 && !legacy_goal {
                 if !lease
                     .connection_mut()
                     .reserve_idle(command_id.clone())
@@ -42,11 +45,10 @@ impl IdleWorkspaceLease {
                     return Ok(None);
                 }
             } else {
-                // Failed preparation is terminal: no harness can start work,
-                // and old workers cannot include that fact in ReserveIdle.
-                // Their lifecycle dispatcher can still establish this barrier,
-                // which prevents independent shells from starting. Recheck live
-                // processes after it is ready. Historical workers use it too.
+                // Old ReserveIdle predicates refuse a saved goal even when no
+                // work is running. Bootstrap with observed idle and a dispatch
+                // barrier, not an atomic idle reservation. Failed preparation
+                // also uses this path. Recheck work and the cut before swapping.
                 lease
                     .connection_mut()
                     .submit(
@@ -60,17 +62,50 @@ impl IdleWorkspaceLease {
             loop {
                 let mut snapshot = lease.connection_mut().sync().await?;
                 let ready = checkpoint_barrier_is_ready(&snapshot, &command_id);
+                let ready_cursor = if ready {
+                    let cursor = snapshot
+                        .operational
+                        .checkpoint_ready
+                        .clone()
+                        .context("idle worker barrier lacks its ready cursor")?;
+                    if let Err(error) =
+                        validate_checkpoint_barrier_snapshot(&snapshot, &command_id, &cursor)
+                    {
+                        if error.is::<CheckpointDeferred>() {
+                            return Ok(None);
+                        }
+                        return Err(error);
+                    }
+                    Some(cursor)
+                } else {
+                    None
+                };
                 snapshot.operational.checkpoint_barrier = None;
                 if !snapshot.operational.safe_to_replace(harness) {
                     // Dropping the connection releases the barrier even if its
                     // acknowledgement was lost. No worker is stopped.
                     return Ok(None);
                 }
-                if ready {
+                if let Some(ready_cursor) = ready_cursor {
+                    // An accepted BeginCheckpoint has the same identity as
+                    // ReserveIdle's barrier. Confirm it without the old goal
+                    // predicate, while still checking private reviewer work.
+                    // The pending/active barrier prevents new reviewer admission.
+                    if legacy_goal
+                        && !preparation_failed
+                        && !lease
+                            .connection_mut()
+                            .reserve_idle(command_id.clone())
+                            .await?
+                    {
+                        // Disconnect so the worker cancels the accepted barrier.
+                        return Ok(None);
+                    }
                     return Ok(Some(Self {
                         lease,
                         command_id,
                         harness,
+                        ready_cursor,
                         _worker_owner: worker_owner,
                     }));
                 }
@@ -87,8 +122,18 @@ impl IdleWorkspaceLease {
 
     pub(in crate::controller) async fn verify_for_upgrade(&mut self) -> Result<bool> {
         let mut snapshot = self.lease.connection_mut().sync().await?;
-        if !checkpoint_barrier_is_ready(&snapshot, &self.command_id) {
+        if !checkpoint_barrier_is_ready(&snapshot, &self.command_id)
+            || snapshot.operational.checkpoint_ready.as_ref() != Some(&self.ready_cursor)
+        {
             return Ok(false);
+        }
+        if let Err(error) =
+            validate_checkpoint_barrier_snapshot(&snapshot, &self.command_id, &self.ready_cursor)
+        {
+            if error.is::<CheckpointDeferred>() {
+                return Ok(false);
+            }
+            return Err(error);
         }
         snapshot.operational.checkpoint_barrier = None;
         Ok(snapshot.operational.safe_to_replace(self.harness))
@@ -126,10 +171,16 @@ impl IdleWorkspaceLease {
             loop {
                 let snapshot = lease.connection_mut().sync().await?;
                 if checkpoint_barrier_is_ready(&snapshot, &command_id) {
+                    let ready_cursor = snapshot
+                        .operational
+                        .checkpoint_ready
+                        .clone()
+                        .context("file write barrier lacks its ready cursor")?;
                     let mut operation = Self {
                         lease,
                         command_id,
                         harness,
+                        ready_cursor,
                         _worker_owner: worker_owner,
                     };
                     operation.verify().await?;
@@ -151,10 +202,7 @@ impl IdleWorkspaceLease {
 
     pub async fn verify(&mut self) -> Result<()> {
         let mut snapshot = self.lease.connection_mut().sync().await?;
-        ensure!(
-            checkpoint_barrier_is_ready(&snapshot, &self.command_id),
-            "file write lost its workspace barrier"
-        );
+        validate_checkpoint_barrier_snapshot(&snapshot, &self.command_id, &self.ready_cursor)?;
         snapshot.operational.checkpoint_barrier = None;
         // Commands may queue behind this barrier, but cannot begin until it
         // releases. Their arrival does not invalidate an in-progress write.

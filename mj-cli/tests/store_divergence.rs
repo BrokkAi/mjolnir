@@ -65,7 +65,6 @@ image = "ubuntu:24.04"
     (storage, config_directory, data_directory)
 }
 
-// Hard-won: a97c0e7bc: shutdown cleanup waited for an absent host node after a store divergence.
 #[test]
 fn daemon_survives_compatible_migration_then_exits_on_an_incompatible_one() {
     let (_storage, config_directory, data_directory) = configured_storage();

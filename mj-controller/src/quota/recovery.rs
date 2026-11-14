@@ -3,11 +3,7 @@ use super::*;
 
 /// Whether a scoped quota window applies to the selected model.
 pub(crate) fn window_applies(window: &QuotaWindow, model: &str) -> bool {
-    window.model_scope.as_deref().is_none_or(|scope| {
-        model
-            .to_ascii_lowercase()
-            .contains(&scope.to_ascii_lowercase())
-    })
+    window.applies_to_model(model)
 }
 
 /// Score quota headroom against its reset deadline. Higher scores mean more
@@ -57,7 +53,7 @@ pub(crate) fn merge_reset_windows(windows: &mut Vec<QuotaWindow>, cached: &[Quot
     for old in cached {
         if let Some(window) = windows
             .iter_mut()
-            .find(|w| w.label.eq_ignore_ascii_case(&old.label))
+            .find(|w| w.label.eq_ignore_ascii_case(&old.label) && w.model_scope == old.model_scope)
         {
             if window.resets_at_epoch_seconds.is_none() && old.resets_at_epoch_seconds.is_some() {
                 window.resets_at_epoch_seconds = old.resets_at_epoch_seconds;

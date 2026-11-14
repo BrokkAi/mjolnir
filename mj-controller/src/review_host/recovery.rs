@@ -67,6 +67,7 @@ impl HostState {
                 state,
                 _background: None,
                 finishing: false,
+                delivery: Arc::new(super::resolve::Delivery::default()),
                 retry_delay: std::time::Duration::from_secs(1),
                 start_reply: None,
                 pending_outcome: None,

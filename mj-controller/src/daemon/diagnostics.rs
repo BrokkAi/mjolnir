@@ -349,6 +349,7 @@ mod tests {
     }
 
     // Hard-won: #1263: a starved process made the first stall sample show the runtime stalled too.
+    // Hard-won: #1478: startup recovery can precede the serving-only stall.
     #[tokio::test]
     async fn diagnostics_distinguish_a_stuck_serving_loop_from_a_running_runtime() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -378,7 +379,10 @@ mod tests {
                         break;
                     }
                     Report::Stalled { .. } => {}
-                    Report::Recovered { .. } => panic!("recovered without a serving tick"),
+                    // The observer starts before the first serving tick. A
+                    // startup runtime stall can recover after that tick, so
+                    // consume startup reports until the serving-only stall.
+                    Report::Recovered { .. } => {}
                 }
             }
         })

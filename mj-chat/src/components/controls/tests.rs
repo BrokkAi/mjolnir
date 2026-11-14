@@ -390,6 +390,7 @@ fn combobox_golden_buffer(
                 true,
                 " choices ",
                 PopupSide::Below,
+                ComboBox::DEFAULT_MAX_VISIBLE_ROWS,
                 form,
                 1,
             );

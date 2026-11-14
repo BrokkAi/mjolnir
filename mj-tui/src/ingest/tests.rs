@@ -47,9 +47,21 @@ fn delayed_projection_and_summary_cannot_revive_acknowledged_content() {
         .unwrap()
         .viewed_through_event_ordinal = 3;
     assert!(dashboard.apply_prepared_materialized_session_summary(summary));
-    assert!(!dashboard.session_details["session-1"].has_unread());
+    assert_eq!(
+        (
+            dashboard.session_details["session-1"].unread_agent_messages,
+            dashboard.session_details["session-1"].unread_interruptions
+        ),
+        (0, 0)
+    );
     assert!(dashboard.apply_prepared_materialized_session(prepared));
-    assert!(!dashboard.session_details["session-1"].has_unread());
+    assert_eq!(
+        (
+            dashboard.session_details["session-1"].unread_agent_messages,
+            dashboard.session_details["session-1"].unread_interruptions
+        ),
+        (0, 0)
+    );
     let newer = materialized_session_for(
         "session-1",
         vec![
@@ -636,7 +648,7 @@ fn projection_cache_keeps_terminal_diffstats_across_unrelated_updates() {
         created_at_ms: 1,
         last_changed_at_ms: 2,
         body: TranscriptBody::Tool {
-            call: serde_json::json!({
+            call: (serde_json::json!({
                 "toolCallId": "edit",
                 "title": "Edit src/lib.rs",
                 "status": "completed",
@@ -646,7 +658,8 @@ fn projection_cache_keeps_terminal_diffstats_across_unrelated_updates() {
                     "oldText": "alpha\n",
                     "newText": "alpha\nbeta\n"
                 }]
-            }),
+            }))
+            .into(),
             terminal_outputs: Vec::new(),
             terminal_refs: Vec::new(),
             presentation: None,
@@ -724,35 +737,4 @@ fn failed_closing_record_is_recovery_status_not_an_active_transition() {
         dashboard.transition_failure_kind("session-1"),
         Some(mj_core::state::SessionTransitionKind::Suspending)
     );
-}
-
-#[test]
-fn inferred_input_request_clears_when_a_later_prompt_starts() {
-    let mut materialized = MaterializedSession::empty("session-1");
-    materialized.last_turn_outcome = Some(mj_core::state::MaterializedTurnOutcome {
-        work_facts: None,
-        answered_through: None,
-        diagnostic: None,
-        usage: None,
-        command_id: "prompt".into(),
-        accepted_ordinal: Some(1),
-        turn_start_position: Some(2),
-        completed_ordinal: 3,
-        completed_at_ms: 1000,
-        outcome: mj_core::state::TurnOutcomeKind::Completed {
-            stop_reason: mj_core::acp::AWAITING_INPUT_STOP_REASON.into(),
-        },
-    });
-    let prepare = |session| {
-        PreparedMaterializedSessionDetail::from_materialized(session, 0, Default::default())
-    };
-    assert!(prepare(materialized.clone()).awaiting_input);
-    materialized.active_turn = Some(mj_core::state::MaterializedTurn {
-        command_id: "next".into(),
-        accepted_ordinal: Some(4),
-        turn_start_position: 5,
-        started_at_ms: 2000,
-        steered_into: None,
-    });
-    assert!(!prepare(materialized).awaiting_input);
 }

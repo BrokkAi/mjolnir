@@ -1,0 +1,465 @@
+[
+  {
+    "request": {
+      "action": "preview_build_cache",
+      "arguments": {
+        "machine": {
+          "kind": "aws-ec2",
+          "region": "test-region",
+          "launch_template": "test-template",
+          "ssh_user": "test",
+          "address_source": "public-dns"
+        }
+      }
+    },
+    "reply": {
+      "Ok": {
+        "reply": "build_cache_preview",
+        "value": [
+          null,
+          false
+        ]
+      }
+    }
+  },
+  {
+    "request": {
+      "action": "install_mbx",
+      "arguments": {
+        "machine": {
+          "kind": "aws-ec2",
+          "region": "test-region",
+          "launch_template": "test-template",
+          "ssh_user": "test",
+          "address_source": "public-dns"
+        }
+      }
+    },
+    "reply": {
+      "Err": "this machine has no persistent container host where mbx can be installed"
+    }
+  },
+  {
+    "request": {
+      "action": "checkpoint_archive_sizes",
+      "arguments": {
+        "paths": {
+          "archived": "<server>/daemon-only.tar",
+          "missing": "<server>/missing.tar",
+          "unreadable": "<server>/daemon-only.tar/invalid\u0000archive"
+        }
+      }
+    },
+    "reply": {
+      "Ok": {
+        "reply": "checkpoint_archive_sizes",
+        "value": {
+          "archived": {
+            "Ok": 20
+          },
+          "missing": {
+            "Ok": null
+          },
+          "unreadable": {
+            "Err": "<archive metadata error>"
+          }
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "action": "test_target",
+      "arguments": {
+        "target_id": "missing"
+      }
+    },
+    "reply": {
+      "Err": "unknown target template \"missing\""
+    }
+  },
+  {
+    "request": {
+      "action": "profile_login_statuses"
+    },
+    "reply": {
+      "Ok": {
+        "reply": "profile_login_statuses",
+        "value": {
+          "agent": "SignedOut",
+          "ready": "SignedOut"
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "action": "check_availability"
+    },
+    "reply": {
+      "Ok": {
+        "reply": "availability",
+        "value": {
+          "profiles": {
+            "agent": [
+              {
+                "kind": "codex",
+                "home": "<server>/profile",
+                "environment": {
+                  "DAEMON_TEST_KEY": {
+                    "from_secret": "missing-test-key"
+                  }
+                }
+              },
+              "profile \"agent\": DAEMON_TEST_KEY = { from_secret = \"missing-test-key\" } needs `missing-test-key = \"...\"` in <daemon-config>/secrets.toml"
+            ],
+            "ready": [
+              {
+                "kind": "codex",
+                "home": "<server>/ready-profile",
+                "environment": {
+                  "DAEMON_TEST_KEY": {
+                    "from_secret": "daemon-only-key"
+                  }
+                }
+              },
+              null
+            ]
+          },
+          "local": {
+            "apple-container": {
+              "missing": "Apple container requires macOS 26 or newer (found 25).",
+              "installed": false
+            },
+            "docker": {
+              "missing": "Docker is not installed on this host. Install Docker (https://mjolnir.brokk.ai/docker/), or use another target.",
+              "installed": false
+            },
+            "podman": {
+              "missing": "Podman preflight failed: could not run `podman --version` to check that Podman 4.0.0 or newer is installed: `podman` is not installed or not on PATH. Install or upgrade Podman: on macOS `brew install podman` then `podman machine init --now`; Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`. See https://mjolnir.brokk.ai/podman/.",
+              "installed": false
+            }
+          },
+          "machines": [],
+          "added_profiles": [],
+          "added_runtimes": {}
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "action": "discover_setup",
+      "arguments": {
+        "scope": "Profiles",
+        "machines": []
+      }
+    },
+    "reply": {
+      "Ok": {
+        "reply": "setup_discovery",
+        "value": {
+          "scope": "Profiles",
+          "config": {
+            "version": 22,
+            "review": {
+              "reviewers": []
+            },
+            "targets": {
+              "localhost": {
+                "kind": "bare"
+              }
+            }
+          },
+          "profile_readiness": {},
+          "rejected_runtimes": [],
+          "machines": []
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "action": "discover_setup",
+      "arguments": {
+        "scope": "Runtimes",
+        "machines": []
+      }
+    },
+    "reply": {
+      "Ok": {
+        "reply": "setup_discovery",
+        "value": {
+          "scope": "Runtimes",
+          "config": {
+            "version": 22,
+            "review": {
+              "reviewers": []
+            },
+            "targets": {
+              "localhost": {
+                "kind": "bare"
+              }
+            }
+          },
+          "profile_readiness": {},
+          "rejected_runtimes": [
+            {
+              "kind": "podman",
+              "label": "Podman",
+              "detail": "Podman preflight failed: could not run `podman --version` to check that Podman 4.0.0 or newer is installed: `podman` is not installed or not on PATH.",
+              "remediation": "Install or upgrade Podman: on macOS `brew install podman` then `podman machine init --now`; Debian/Ubuntu `sudo apt update && sudo apt install -y podman uidmap`; Fedora `sudo dnf install -y podman shadow-utils`. See https://mjolnir.brokk.ai/podman/."
+            },
+            {
+              "kind": "docker",
+              "label": "Docker",
+              "detail": "Docker is not installed on this host.",
+              "remediation": "Install Docker (https://mjolnir.brokk.ai/docker/), or use another target."
+            },
+            {
+              "kind": "apple-container",
+              "label": "Apple container",
+              "detail": "Apple container requires macOS 26 or newer (found 25).",
+              "remediation": null
+            }
+          ],
+          "machines": []
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "action": "check_project_directories",
+      "arguments": {
+        "paths": [
+          "<server>/server-only-project",
+          "<server>/absent"
+        ]
+      }
+    },
+    "reply": {
+      "Ok": {
+        "reply": "project_directories",
+        "value": [
+          [
+            "<server>/server-only-project",
+            true
+          ],
+          [
+            "<server>/absent",
+            false
+          ]
+        ]
+      }
+    }
+  },
+  {
+    "request": {
+      "action": "complete_path",
+      "arguments": {
+        "host": "Local",
+        "prefix": "<server>/server-",
+        "kind": "directories"
+      }
+    },
+    "reply": {
+      "Ok": {
+        "reply": "path_completion",
+        "value": {
+          "candidates": [
+            "<server>/server-only-project/"
+          ],
+          "insert": "<server>/server-only-project/",
+          "truncated": false
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "action": "discover_projects",
+      "arguments": {
+        "request": {
+          "kind": "directory",
+          "path": "<server>",
+          "filter": ""
+        }
+      }
+    },
+    "reply": {
+      "Ok": {
+        "reply": "project_discovery",
+        "value": {
+          "entries": [
+            {
+              "name": "ready-profile",
+              "source": "<server>/ready-profile",
+              "description": "Directory",
+              "kind": "directory"
+            },
+            {
+              "name": "server-only-project",
+              "source": "<server>/server-only-project",
+              "description": "Directory",
+              "kind": "directory"
+            }
+          ],
+          "directory": "<server>",
+          "parent": "<server-parent>",
+          "truncated": false
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "action": "resolve_setup_path",
+      "arguments": {
+        "machine": {
+          "kind": "local"
+        },
+        "source": "<server>/server-only-project"
+      }
+    },
+    "reply": {
+      "Ok": {
+        "reply": "resolved_path",
+        "value": "<server>/server-only-project"
+      }
+    }
+  },
+  {
+    "request": {
+      "action": "validate_mount_source",
+      "arguments": {
+        "target_id": "missing",
+        "source": "<server>/server-only-project"
+      }
+    },
+    "reply": {
+      "Err": "Unknown path target"
+    }
+  },
+  {
+    "request": {
+      "action": "validate_session_mounts",
+      "arguments": {
+        "target_id": "missing",
+        "mounts": [
+          {
+            "source": "<server>/server-only-project",
+            "destination": "/project",
+            "read_only": true
+          }
+        ]
+      }
+    },
+    "reply": {
+      "Ok": {
+        "reply": "session_mount_validation",
+        "value": [
+          "<server>/server-only-project",
+          "unknown target template \"missing\""
+        ]
+      }
+    }
+  },
+  {
+    "request": {
+      "action": "resolve_container_path",
+      "arguments": {
+        "target_id": "local",
+        "source": "<server>/server-only-project"
+      }
+    },
+    "reply": {
+      "Ok": {
+        "reply": "resolved_path",
+        "value": "<server>/server-only-project"
+      }
+    }
+  },
+  {
+    "request": {
+      "action": "validate_project_directory",
+      "arguments": {
+        "target_id": "local",
+        "directory": "<server>/server-only-project"
+      }
+    },
+    "reply": {
+      "Ok": {
+        "reply": "new_session_preflight",
+        "value": {
+          "project_directory": "<server>/server-only-project",
+          "managed_worktree": {
+            "available": false,
+            "default_create": false
+          },
+          "remote_repairs": [],
+          "dirty_repositories": [],
+          "remote_repositories": [],
+          "local_changes_excluded": false
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "action": "preflight_new_session",
+      "arguments": {
+        "request": {
+          "additional_mounts": [],
+          "remote_repairs": [],
+          "workspace_id": "",
+          "profile_id": "agent",
+          "bundle_id": "",
+          "target_id": "local",
+          "project_directory": "<server>/server-only-project"
+        }
+      }
+    },
+    "reply": {
+      "Ok": {
+        "reply": "new_session_preflight",
+        "value": {
+          "project_directory": "<server>/server-only-project",
+          "managed_worktree": {
+            "available": false,
+            "default_create": false
+          },
+          "remote_repairs": [],
+          "dirty_repositories": [],
+          "remote_repositories": [],
+          "local_changes_excluded": false
+        }
+      }
+    }
+  },
+  {
+    "request": {
+      "action": "resolve_container_path",
+      "arguments": {
+        "target_id": "missing",
+        "source": "<server>/server-only-project"
+      }
+    },
+    "reply": {
+      "Err": "Unknown path target"
+    }
+  },
+  {
+    "request": {
+      "action": "save_spinner_style",
+      "arguments": {
+        "style": "wave"
+      }
+    },
+    "reply": {
+      "Ok": {
+        "reply": "done"
+      }
+    }
+  }
+]

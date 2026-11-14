@@ -526,6 +526,7 @@ fn validate_canonical_session(snapshot: &CanonicalSessionSnapshot) -> Result<()>
     );
     let mut item_ids = BTreeSet::new();
     let mut previous_position = 0_u64;
+    let outputs = crate::transcript::TerminalOutputs::of_canonical(snapshot.transcript.iter());
     for item in &snapshot.transcript {
         ensure!(
             !item.stable_id.trim().is_empty(),
@@ -625,7 +626,6 @@ fn validate_canonical_session(snapshot: &CanonicalSessionSnapshot) -> Result<()>
             }
             CanonicalTranscriptBody::Tool {
                 call,
-                terminal_outputs,
                 terminal_refs,
                 ..
             } => {
@@ -636,7 +636,7 @@ fn validate_canonical_session(snapshot: &CanonicalSessionSnapshot) -> Result<()>
                             item.stable_id
                         )
                     })?;
-                for output in terminal_outputs {
+                for output in outputs.embedded_for_tool(&item.stable_id) {
                     validate_canonical_terminal_output(output, &item.stable_id)?;
                 }
                 for terminal_id in terminal_refs {

@@ -776,7 +776,7 @@ impl DurableRelay {
             // frontier, which `relay_event_digest` already validated.
             None => apply_relay_event(&mut self.snapshot, &event)?,
         }
-        if self.snapshot.assessment != previous_assessment {
+        if self.classifies_turns() && self.snapshot.assessment != previous_assessment {
             self.publish_assessment_diagnostic();
         }
         self.turn_context
@@ -838,6 +838,7 @@ impl DurableRelay {
         {
             self.persist_snapshot()?;
         }
+        self.suppress_child_assessment()?;
         Ok(ordinal)
     }
 

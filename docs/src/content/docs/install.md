@@ -16,7 +16,6 @@ curl -fsSL https://raw.githubusercontent.com/BrokkAi/mjolnir/master/install.sh |
 The installer selects the release for the current Linux or macOS architecture, verifies the downloaded artifacts against their published checksum sidecars (a release without them is refused), and installs them in `~/.local/bin` by default. A release bundle contains:
 
 - `mj`, the terminal controller and CLI
-- `mj-desktop`, used by `mj app`
 - `mj-voice-worker`, used for local dictation
 - static x86_64 and ARM64 Linux session workers for remote and container targets
 - on macOS, a native `mj-worker` for local bare sessions
@@ -49,7 +48,7 @@ Re-run the installer to update or repair an installation. Its checksum cache avo
 ## Native Windows (preview)
 
 Every release also publishes `brokk-mjolnir-<tag>-x86_64-pc-windows-msvc.zip`,
-with `mj.exe`, `mj-desktop.exe`, and the same static x86_64 and ARM64 Linux
+with `mj.exe` and the same static x86_64 and ARM64 Linux
 session workers. The x64 build also runs on Windows on ARM through emulation.
 Install it from PowerShell:
 
@@ -132,12 +131,6 @@ Add the local dictation sidecar when voice input is wanted:
 cargo install --locked brokk-mjolnir brokk-mj-voice-worker
 ```
 
-To use the desktop viewer through `mj app`, install the desktop crate as well:
-
-```sh
-cargo install --locked brokk-mjolnir brokk-mj-desktop
-```
-
 Cargo places the executables in its configured binary directory, normally `~/.cargo/bin`. Ensure that directory is on `PATH`.
 
 ## Build from source
@@ -190,15 +183,7 @@ To work only on controller commands without launching sessions, use:
 cargo run -p brokk-mjolnir -- --instance docs-dev --help
 ```
 
-To build the desktop controller on x86_64 GNU/Linux:
-
-```sh
-cargo build --release -p brokk-mjolnir -p brokk-mj-desktop \
-  --target x86_64-unknown-linux-gnu
-./target/x86_64-unknown-linux-gnu/release/mj app
-```
-
-Use the corresponding host target on ARM64 Linux or macOS. Linux desktop builds require the WebKitGTK 4.1 development package, and running `mj app` requires the distribution's WebKitGTK 4.1 runtime. These GUI libraries are not required for the headless `mj` controller. Building the optional voice worker on Linux also requires ALSA development headers.
+Building the optional voice worker on Linux requires ALSA development headers.
 
 ## Verify the installation
 

@@ -404,10 +404,8 @@ async fn autoconfigure_settings(
                 }
             }
         },
-        None,
     )
-    .await
-    .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    .await;
     let mut reviewers = configured.reviewers;
     if reviewers.is_empty() {
         return Err(ApiError::bad_request(
@@ -533,4 +531,27 @@ async fn save_draft_settings(
     })
     .await
     .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+}
+
+/// VAPID public material only; the private key never leaves the data directory.
+pub(super) async fn push_key() -> Result<Json<Value>, ApiError> {
+    crate::web_push::blocking(|| {
+        Ok(serde_json::json!({"public_key": crate::web_push::Vapid::load()?.public()}))
+    })
+    .await
+    .map(Json)
+    .map_err(unreadable)
+}
+
+#[derive(Deserialize)]
+pub(super) struct PushDeviceQuery {
+    endpoint: String,
+}
+pub(super) async fn push_device_status(
+    Query(query): Query<PushDeviceQuery>,
+) -> Result<Json<Value>, ApiError> {
+    crate::web_push::blocking(move || crate::database::push_device_status(query.endpoint))
+        .await
+        .map(Json)
+        .map_err(unreadable)
 }
