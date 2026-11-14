@@ -1788,8 +1788,8 @@ pub fn dismiss_recorded_failure(
     let json = serde_json::to_string(&failure)?;
     submit_database_write("dismiss recorded failure", move |connection| {
         let changed = connection.execute(
-            "UPDATE sessions SET dismissed_failure_json=?2 WHERE session_id=?1 AND state=?3 AND last_error IS ?4",
-            params![session_id, json, failure.state.as_str(), failure.last_error],
+            "UPDATE sessions SET dismissed_failure_json=?2 WHERE session_id=?1 AND state=?3 AND last_error IS ?4 AND failure_generation=?5",
+            params![session_id, json, failure.state.as_str(), failure.last_error, failure.generation],
         )?;
         ensure!(changed == 1, "notification is no longer current");
         Ok(())

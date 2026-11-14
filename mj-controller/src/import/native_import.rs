@@ -201,6 +201,7 @@ pub fn import_native_session(
             draft_input: String::new(),
             last_error: None,
             dismissed_failure: None,
+            failure_generation: 0,
             last_checkpoint_error: None,
             checkpoint: Some(Box::new(checkpoint)),
         },

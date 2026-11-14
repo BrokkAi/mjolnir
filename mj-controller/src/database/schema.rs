@@ -2472,26 +2472,28 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
         migrate_github_watch_followers(connection)?;
     }
     // Compatible: older writers preserve this nullable receipt through explicit
-    // column lists. Different failures mismatch the receipt. The trigger also
-    // invalidates a receipt when state/error changes, including older writers.
+    // column lists. The trigger maintains the generation and invalidates receipts
+    // when state/error changes, including writes by older daemons.
     if version < 131 {
-        let add_column = if super::legacy_schema::table_has_column(
-            connection,
-            "sessions",
-            "dismissed_failure_json",
-        )? {
-            ""
-        } else {
-            "ALTER TABLE sessions ADD COLUMN dismissed_failure_json TEXT;"
-        };
+        let mut add_columns = String::new();
+        for (column, definition) in [
+            ("dismissed_failure_json", "TEXT"),
+            ("failure_generation", "INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            if !super::legacy_schema::table_has_column(connection, "sessions", column)? {
+                add_columns.push_str(&format!(
+                    "ALTER TABLE sessions ADD COLUMN {column} {definition};"
+                ));
+            }
+        }
         connection.execute_batch(&format!(
             "BEGIN IMMEDIATE;
-             {add_column}
+             {add_columns}
              CREATE TRIGGER IF NOT EXISTS clear_dismissed_failure
              AFTER UPDATE OF state, last_error ON sessions
              WHEN NEW.state IS NOT OLD.state OR NEW.last_error IS NOT OLD.last_error
              BEGIN
-                 UPDATE sessions SET dismissed_failure_json = NULL WHERE session_id = NEW.session_id;
+                 UPDATE sessions SET dismissed_failure_json = NULL, failure_generation = failure_generation + 1 WHERE session_id = NEW.session_id;
              END;
              INSERT INTO schema_migrations(version, applied_at)
                  VALUES (131, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
@@ -4693,7 +4695,7 @@ mod reader_tests {
             && legacy_schema::table_has_column(&connection, "sessions", "dismissed_failure_json")
                 .unwrap()
         {
-            connection.execute_batch("DROP TRIGGER IF EXISTS clear_dismissed_failure; ALTER TABLE sessions DROP COLUMN dismissed_failure_json;").unwrap();
+            connection.execute_batch("DROP TRIGGER IF EXISTS clear_dismissed_failure; ALTER TABLE sessions DROP COLUMN dismissed_failure_json; ALTER TABLE sessions DROP COLUMN failure_generation;").unwrap();
         }
         if version < 129
             && legacy_schema::table_has_column(&connection, "sessions", "notifications_ignored")

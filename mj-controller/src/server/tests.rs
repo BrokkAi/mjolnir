@@ -181,6 +181,7 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
                 draft_input: String::new(),
                 last_error: Some("secret-token at /highly/secret/codex".into()),
                 dismissed_failure: None,
+                failure_generation: 0,
                 last_checkpoint_error: None,
                 checkpoint: None,
             },

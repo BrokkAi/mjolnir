@@ -429,14 +429,19 @@ fn project_states(
             let review = reviews.get(id.as_str()).copied();
             let transitioning =
                 record.state.transition_kind().is_some() || lifecycles.contains(id.as_str());
-            let state = if current_condition_failure(runtime, id) {
+            let failure = mj_core::attention::FailureIdentity::of(record);
+            let dismissed = failure
+                .as_ref()
+                .is_some_and(|failure| record.dismissed_failure.as_ref() == Some(failure));
+            let state = if current_condition_failure(runtime, id)
+                || (failure.is_some() && !dismissed)
+            {
                 Failed
-            } else if let Some(failure) = mj_core::attention::FailureIdentity::of(record) {
-                if record.dismissed_failure.as_ref() == Some(&failure) && !failed_review(review) {
-                    Inactive
-                } else {
-                    Failed
-                }
+            } else if dismissed
+                && (!record.state.is_active()
+                    || record.state == mj_core::state::SessionState::Error)
+            {
+                Inactive
             } else if transitioning || record.state == mj_core::state::SessionState::Checkpointing {
                 Working
             } else if !record.state.is_active() {
@@ -1356,7 +1361,49 @@ mod tests {
             panic!("expected recorded failure")
         };
         runtime.records.get_mut("parent").unwrap().dismissed_failure = Some(failure);
+        for state in [
+            SessionState::Error,
+            SessionState::Lost,
+            SessionState::DestroyedWithDataLoss,
+            SessionState::Stopped,
+        ] {
+            let record = runtime.records.get_mut("parent").unwrap();
+            record.state = state;
+            record.dismissed_failure = mj_core::attention::FailureIdentity::of(record);
+            assert_eq!(project(&runtime)["parent"], SessionAttention::Inactive);
+        }
+
         assert_eq!(project(&runtime)["parent"], SessionAttention::Inactive);
+        // Hard-won: 0db309adc: dismissing a lifecycle failure hid later questions.
+        runtime.records.get_mut("parent").unwrap().state = SessionState::Running;
+        let record = runtime.records.get_mut("parent").unwrap();
+        record.dismissed_failure = mj_core::attention::FailureIdentity::of(record);
+        use mj_core::native_agent::*;
+        let agent = NativeAgent {
+            owner_session_id: "parent".into(),
+            session_id: "native".into(),
+            parent_session_id: None,
+            name: "Inspect".into(),
+            task: "Inspect files".into(),
+            capabilities: Default::default(),
+            state: NativeAgentState::Running,
+            availability: Default::default(),
+            availability_reason: None,
+            stable_id: None,
+        };
+        let id = agent.view_id();
+        runtime.native_agents.insert(
+            id.clone(),
+            NativeAgentSummary {
+                generation_ordinal: 1,
+                agent,
+                projection_ordinal: 0,
+                projection_digest: String::new(),
+                pending_input: true,
+            },
+        );
+        assert_eq!(project(&runtime)["parent"], SessionAttention::NeedsInput);
+        runtime.native_agents.clear();
         runtime.records.get_mut("parent").unwrap().last_error =
             Some("another resume failure".into());
         assert_eq!(project(&runtime)["parent"], SessionAttention::Failed);

@@ -1750,7 +1750,10 @@ pub struct SessionRecord {
     /// [`CLOSE_FAILURE_PREFIX`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
-    /// Database-owned receipt; omitted from portable session formats.
+    /// Database-owned failure occurrence; omitted from portable session formats.
+    #[serde(skip)]
+    pub failure_generation: u64,
+    /// Database-owned dismissal receipt.
     #[serde(skip)]
     pub dismissed_failure: Option<crate::attention::FailureIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

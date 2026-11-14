@@ -63,6 +63,7 @@ fn session_record(id: &str) -> SessionRecord {
         draft_input: String::new(),
         last_error: None,
         dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: None,
         additional_mounts: Vec::new(),

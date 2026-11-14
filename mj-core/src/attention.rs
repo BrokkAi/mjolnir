@@ -36,6 +36,7 @@ pub enum NotificationDismissal {
 /// A recorded lifecycle failure, independent of transcript progress.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FailureIdentity {
+    pub generation: u64,
     pub state: crate::state::SessionState,
     pub last_error: Option<String>,
 }
@@ -50,6 +51,7 @@ impl FailureIdentity {
                     | crate::state::SessionState::DestroyedWithDataLoss
             ))
         .then(|| Self {
+            generation: record.failure_generation,
             state: record.state,
             last_error: record.last_error.clone(),
         })

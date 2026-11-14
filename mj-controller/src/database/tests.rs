@@ -585,6 +585,7 @@ pub(super) fn session(id: &str, bundle: &str) -> SessionRecord {
         draft_input: String::new(),
         last_error: None,
         dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: Some("temporary recovery failure".into()),
         checkpoint: Some(Box::new(CheckpointMetadata {
             archive_path: PathBuf::from("sessions/test.hel.zip"),

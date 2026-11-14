@@ -1552,6 +1552,7 @@ pub(crate) fn runtime_test_session(
         draft_input: String::new(),
         last_error: None,
         dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: None,
     }
@@ -13320,6 +13321,27 @@ async fn dismiss_notification_clears_the_served_question_attention() {
         mj_core::attention::SessionAttention::Failed
     );
     let target = served.metadata.notification_dismissals[&failed.id].clone();
+    // Hard-won: 0db309adc: a delayed dismissal accepted a repeated identical failure.
+    failed.state = SessionState::Provisioning;
+    crate::database::save_session(&failed).unwrap();
+    failed.state = SessionState::Stopped;
+    crate::database::save_session(&failed).unwrap();
+    let error = state
+        .dismiss_notification(failed.id.clone(), target)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("notification is no longer current")
+    );
+    let served = state.runtime_publication().unwrap();
+    assert_eq!(
+        served.metadata.session_attention[&failed.id],
+        mj_core::attention::SessionAttention::Failed
+    );
+    let target = served.metadata.notification_dismissals[&failed.id].clone();
+
     assert!(matches!(
         target,
         mj_core::attention::NotificationDismissal::Failure(_)
