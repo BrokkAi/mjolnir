@@ -22,8 +22,13 @@ on:
         required: true
         default: brokk-mj-core
       filter:
-        description: Test name filter, as passed to the test binary
-        required: true
+        description: Test name filter, as passed to the test binary (empty runs every test)
+        required: false
+        default: ''
+      skip:
+        description: Test name filter to skip (empty skips nothing)
+        required: false
+        default: ''
       hang_seconds:
         description: Seconds before a still-running test is inspected and stopped
         required: true
@@ -61,10 +66,13 @@ jobs:
       env:
         PACKAGE: ${{ inputs.package }}
         FILTER: ${{ inputs.filter }}
+        SKIP: ${{ inputs.skip }}
         HANG_SECONDS: ${{ inputs.hang_seconds }}
         RUST_BACKTRACE: '1'
       run: |
-        cargo test --locked -p "$PACKAGE" -- "$FILTER" --nocapture &
+        arguments=("$FILTER" --nocapture)
+        if [ -n "$SKIP" ]; then arguments+=(--skip "$SKIP"); fi
+        cargo test --locked --no-fail-fast -p "$PACKAGE" -- "${arguments[@]}" &
         tests=$!
         for _ in $(seq "$HANG_SECONDS"); do
           if ! kill -0 "$tests" 2>/dev/null; then
