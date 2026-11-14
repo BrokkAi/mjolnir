@@ -83,6 +83,36 @@ total. That cannot separate the two setups. Stage 2 was paused for
 Jonathan's decision after one run (`handback-reminder-stops-work`, setup B),
 which has not been judged.
 
+## Pooled-findings result (stage 1, verified by Opus/high)
+
+Jonathan chose to score the findings the stage 1 reviews already produced.
+`verify/SPEC.md`: the 96 findings from the 50 outputs were split per finding,
+shuffled with random IDs (no reviewer, model or setup labels), and given to
+five Opus/high Claude Code sessions with a checkout holding history through
+2026-11-13. Each verifier grouped duplicates per commit and marked each group
+confirmed, plausible or rejected, with a trace at the introducing commit.
+
+- 33 distinct problems: 27 confirmed, 2 plausible, 4 rejected. Twelve
+  confirmed groups cite a later commit that fixed them. All 14 cited SHAs
+  exist, come after the introducing commit, and match the claim. The known
+  Hard-won bug was confirmed with its actual fix commit (`af22566c5`).
+- `score.py` scores per reviewer session (`verify/sessions.csv`,
+  `groups.csv`, `session_groups.csv`), so setups can be composed afterward.
+  Each bug has 4 Terra sessions and 1 Sol session.
+- Averaged over every combination, Terra + Sol found 23.25 confirmed
+  distinct problems across the 10 diffs, against 20.5 for 3× Terra (+13%).
+  Per bug, Terra + Sol was ahead on 4, behind on 2, and tied on 4. The
+  bootstrap 95% interval of the total difference is −1.5 to +7.75, so this
+  is not significant.
+- Terra runs repeat each other: 16 of the 21 confirmed problems Terra found
+  were found by at least 3 of its 4 sessions. Sol found 6 confirmed problems
+  no Terra session found, including 1 of the 3 high-severity ones (the known
+  bug). Sol missed 5 problems that at least 3 Terra sessions found. A single
+  session found 17.0 (Terra, mean) and 16 (Sol) confirmed problems.
+- Per-bug differences have a standard deviation of about 0.8 problems; at
+  the observed mean difference (0.28 per diff), about 65 diffs would be needed
+  for 80% power.
+
 ## Running
 
 The scripts read the corpus from this directory and keep everything else
