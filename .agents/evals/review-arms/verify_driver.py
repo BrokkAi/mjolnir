@@ -116,7 +116,9 @@ Read only SPEC.md, your batch file, and the repository in your working directory
             mj("set-config", "--session", sid, "--key", k, "--value", v)
         cfg = {c["key"]: c.get("current") for c in session(sid).get("config_options", [])}
         assert cfg.get("model") == "opus" and cfg.get("effort") == "high", cfg
-        mj("message", "--session", sid, "--prompt-file", prompt)
+        # A stable command ID makes a resend after an interrupted run the same request,
+        # which mj accepts once, instead of a second verifier turn.
+        mj("message", "--session", sid, "--command-id", f"review-arms-{V.name}-batch-{n}", "--prompt-file", prompt)
         rec = {**rec, "config": cfg, "prompted": time.time_ns()}
         save(rec_path, rec)
         time.sleep(30)

@@ -14,6 +14,14 @@ while :; do
   if [ "$reviewing" = no ]; then
     # The last pass decides the result: unverified batches would drop diffs from scoring.
     [ "$failed" = yes ] && { echo "pipeline incomplete: verification failed on the final pass; see the log above"; exit 1; }
+    # A review job that failed or was interrupted never became ready, so its diff
+    # was never batched; name it rather than report a complete evaluation.
+    unfinished=$(python3 -c '
+import json, os, pathlib, sys
+root = pathlib.Path(os.environ.get("REVIEW_ARMS_DIR", "/mnt/optane/review-arms-20261113"))
+print(" ".join("%s/%s" % (j["bug"], j["arm"]) for j in json.load(open(sys.argv[1]))
+               if not (root / "runs" / j["bug"] / j["arm"] / "done.json").exists()))' "$jobs")
+    [ -n "$unfinished" ] && { echo "pipeline incomplete: review jobs without done.json: $unfinished"; exit 1; }
     break
   fi
   [ "$failed" = yes ] && echo "verify_driver reported failures; retrying on the next pass"
