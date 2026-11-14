@@ -2,11 +2,10 @@ use super::*;
 
 pub(crate) use mj_core::repository::RepositoryIdentity;
 
+/// Local Git reads with no network or prompt, so no deadline: a fixed one
+/// failed imports on a loaded host while Git was still answering.
 pub(super) fn root_identity(root: &Path) -> Result<RepositoryIdentity> {
-    mj_core::repository::local_identity(
-        root,
-        &mj_core::targets::CancellableProcessExecutor::with_timeout(Duration::from_secs(8)),
-    )
+    mj_core::repository::local_identity(root, &mj_core::targets::ProcessExecutor)
 }
 
 pub(crate) fn configured_repository_identity(

@@ -468,12 +468,11 @@ fn interpret_repository_source(source: &str) -> Result<InterpretedRepositorySour
     let expanded = mj_core::path_input::expand_local(Path::new(source))?;
     let candidate = expanded.as_path();
     if candidate.exists() {
+        // Local Git reads only; like `root_identity`, they get no deadline.
         let resolved = mj_core::repository::resolve_directory(
             candidate,
             None,
-            &mj_core::targets::CancellableProcessExecutor::with_timeout(
-                std::time::Duration::from_secs(8),
-            ),
+            &mj_core::targets::ProcessExecutor,
         )?;
         let identity = resolved.identity;
         let name = identity.name();
