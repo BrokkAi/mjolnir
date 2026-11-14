@@ -40,7 +40,7 @@ pub(crate) async fn discover_for(
     refresh: bool,
 ) -> Result<Discovery> {
     serialized_until(id.clone(), cancellation, move |cancelled| {
-        discover_with_provenance(&config, &id, model, refresh, cancelled)
+        discover_with_provenance(&config, &id, model, refresh, cancelled, false)
     })
     .await
 }
@@ -238,8 +238,19 @@ pub async fn discover(
     model: Option<String>,
     refresh: bool,
 ) -> Result<ProfileConfig> {
+    discover_any(profile_id, model, refresh, false).await
+}
+
+/// [`discover`] that also answers for a disabled profile: discovery is a read
+/// of what the harness advertises, and a disabled profile's home still exists.
+pub async fn discover_any(
+    profile_id: String,
+    model: Option<String>,
+    refresh: bool,
+    allow_disabled: bool,
+) -> Result<ProfileConfig> {
     serialized(profile_id.clone(), move |cancelled| {
-        discover_blocking(&profile_id, model, refresh, cancelled)
+        discover_blocking(&profile_id, model, refresh, cancelled, allow_disabled)
     })
     .await
 }
@@ -430,13 +441,22 @@ fn discover_blocking(
     model: Option<String>,
     refresh: bool,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
+    allow_disabled: bool,
 ) -> Result<ProfileConfig> {
     ensure!(
         !cancelled.load(std::sync::atomic::Ordering::Acquire),
         "profile discovery cancelled"
     );
     let config = Config::load()?;
-    Ok(discover_with_provenance(&config, profile_id, model, refresh, cancelled)?.choices)
+    Ok(discover_with_provenance(
+        &config,
+        profile_id,
+        model,
+        refresh,
+        cancelled,
+        allow_disabled,
+    )?
+    .choices)
 }
 
 /// What discovery returned, and whether the harness actually ran: a
@@ -455,14 +475,22 @@ fn discover_with_provenance(
     model: Option<String>,
     refresh: bool,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
+    allow_disabled: bool,
 ) -> Result<Discovery> {
     ensure!(
         !cancelled.load(std::sync::atomic::Ordering::Acquire),
         "profile discovery cancelled"
     );
-    let profile = config
-        .enabled_profile(profile_id)
-        .with_context(|| format!("unknown or disabled profile {profile_id:?}"))?;
+    let profile = if allow_disabled {
+        config
+            .profiles
+            .get(profile_id)
+            .with_context(|| format!("unknown profile {profile_id:?}"))?
+    } else {
+        config
+            .enabled_profile(profile_id)
+            .with_context(|| format!("unknown or disabled profile {profile_id:?}"))?
+    };
     let mut environment = profile.environment.resolved().clone();
     let _ = super::worker_binary::apply_claude_setup_token(
         &mut environment,

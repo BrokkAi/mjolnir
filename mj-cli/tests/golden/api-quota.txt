@@ -15,6 +15,7 @@ claude (Claude Code, subscription): 5H 62% left, resets 2h 41m · Week 340/500 u
       "profile": "claude",
       "harness": "claude",
       "billing": "subscription",
+      "enabled": true,
       "probing": false,
       "report": {
         "monthly_price_usd": 100,
@@ -48,6 +49,7 @@ claude (Claude Code, subscription): 5H 62% left, resets 2h 41m · Week 340/500 u
       "profile": "codex",
       "harness": "codex",
       "billing": "usage",
+      "enabled": true,
       "probing": false,
       "report": {
         "paid_credits": {
@@ -67,6 +69,7 @@ claude (Claude Code, subscription): 5H 62% left, resets 2h 41m · Week 340/500 u
       "profile": "grok",
       "harness": "grok",
       "billing": "unknown",
+      "enabled": true,
       "probing": false,
       "report": {
         "profile_id": "grok",
@@ -82,6 +85,7 @@ claude (Claude Code, subscription): 5H 62% left, resets 2h 41m · Week 340/500 u
       "profile": "kimi",
       "harness": "kimi",
       "billing": "unknown",
+      "enabled": true,
       "probing": false,
       "report": {
         "profile_id": "kimi",
@@ -97,6 +101,7 @@ claude (Claude Code, subscription): 5H 62% left, resets 2h 41m · Week 340/500 u
       "profile": "muse",
       "harness": "muse",
       "billing": "unknown",
+      "enabled": true,
       "probing": false,
       "report": null,
       "detail": "no quota report yet"
@@ -105,11 +110,20 @@ claude (Claude Code, subscription): 5H 62% left, resets 2h 41m · Week 340/500 u
       "profile": "opencode",
       "harness": "opencode",
       "billing": "usage",
+      "enabled": true,
       "probing": true,
       "report": null,
       "detail": "probing now"
     }
   ]
 }
+=== mj quota --with-disabled ===
+claude (Claude Code, subscription): 5H 62% left, resets 2h 41m · Week 340/500 used, resets 3d 4h · checked 4m ago
+codex (Codex, usage): API · credits $43.2 left · checked 1m ago
+dsh (DSH, usage, disabled): no quota report yet
+grok (Grok Build, unknown): error: login expired · checked 10m ago
+kimi (Kimi Code, unknown): n/a · checked 30s ago
+muse (Muse Code, unknown): no quota report yet
+opencode (OpenCode, usage): probing now
 === mj quota --profile missing ===
 no enabled profile "missing"

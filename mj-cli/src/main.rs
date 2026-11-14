@@ -2608,7 +2608,7 @@ async fn doctor_catalogs(config: &mj_core::config::Config) -> mj_controller::doc
         }
     };
     let read = futures::future::join_all(ids.iter().map(|id| async {
-        match tokio::time::timeout(CATALOG_WAIT, client.models(id, None, true)).await {
+        match tokio::time::timeout(CATALOG_WAIT, client.models(id, None, true, false)).await {
             Ok(Ok(choices)) => Ok(choices),
             Ok(Err(error)) => Err(format!("{error:#}")),
             Err(_) => Err(format!(

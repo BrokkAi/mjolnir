@@ -12,6 +12,10 @@ pub struct QuotaRefreshBatch {
     /// session copies. Those hold no refresh token, so the poller keeps their
     /// grant renewed too (#1490). Never overlaps `profiles`.
     pub grants: Vec<QuotaRefreshRequest>,
+    /// Profiles outside the batch asked about directly (`mj quota
+    /// --with-disabled`): each is probed once when it arrives, never on the
+    /// batch's schedule.
+    pub extra: Vec<QuotaRefreshRequest>,
     /// Access tokens refused by failed turns; a change wakes renewal.
     pub rejected_logins: BTreeMap<String, std::collections::BTreeSet<String>>,
 }

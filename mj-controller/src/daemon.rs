@@ -206,10 +206,14 @@ struct QuotaBoard {
     refresh: Option<tokio::sync::mpsc::UnboundedSender<QuotaRefreshIntent>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum QuotaRefreshIntent {
     Force,
     ReconcileSources,
+    /// Probe these profiles once even though they sit outside the enabled
+    /// batch (for `mj quota --with-disabled`); their reports stay served until
+    /// their identities change.
+    ProbeProfiles(Vec<crate::quota::QuotaRefreshRequest>),
 }
 
 struct SurfaceNotice {

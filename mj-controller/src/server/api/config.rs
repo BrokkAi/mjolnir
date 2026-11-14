@@ -11,9 +11,16 @@ pub(super) async fn profile_config(
     Path(profile_id): Path<String>,
     Query(query): Query<ProfileConfigQuery>,
 ) -> Result<Json<mj_core::worker_launch::ProfileConfig>, ApiFailure> {
-    crate::server::require_profile(&state.snapshot_rx.borrow(), &profile_id)?;
+    // The served profile list holds enabled profiles only; a disabled one is
+    // still discoverable when the caller asks for it, and discovery itself
+    // refuses an id the configuration does not have.
+    if !query.with_disabled {
+        crate::server::require_profile(&state.snapshot_rx.borrow(), &profile_id)?;
+    }
     let backend = backend(&state)?;
-    let choices = if query.unrestricted {
+    let choices = if query.with_disabled {
+        backend.discover_profile_config_any_state(profile_id).await
+    } else if query.unrestricted {
         backend.unrestricted_profile_config(profile_id).await
     } else {
         backend.profile_config(profile_id, query.model, false).await

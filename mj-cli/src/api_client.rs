@@ -389,6 +389,7 @@ impl ApiClient {
         profile: &str,
         model: Option<String>,
         unrestricted: bool,
+        with_disabled: bool,
     ) -> Result<mj_core::worker_launch::ProfileConfig> {
         let mut request = self
             .http
@@ -399,6 +400,9 @@ impl ApiClient {
         }
         if unrestricted {
             request = request.query(&[("unrestricted", "true")]);
+        }
+        if with_disabled {
+            request = request.query(&[("with_disabled", "true")]);
         }
         decode(self.send(request).await?).await
     }
