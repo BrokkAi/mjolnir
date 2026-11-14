@@ -2264,21 +2264,7 @@ mod tests {
             .draw(|frame| crate::render::render(frame, dashboard))
             .unwrap();
         let mut lines = buffer_lines(terminal.backend().buffer());
-        // Transition spinners use a process-wide clock, so pin their glyph.
-        for line in &mut lines {
-            if line.contains("Transition ·") {
-                *line = line
-                    .chars()
-                    .map(|character| {
-                        if matches!(character, '⠁' | '⠂' | '⠄' | '⡀') {
-                            '?'
-                        } else {
-                            character
-                        }
-                    })
-                    .collect();
-            }
-        }
+        crate::test_support::pin_spinner_glyphs(&mut lines);
         lines
     }
 

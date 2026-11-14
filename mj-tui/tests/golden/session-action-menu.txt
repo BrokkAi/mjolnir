@@ -593,7 +593,7 @@ unread dismissed: Some("Notification dismissed.")
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────                                                                                                        │
 │› ? ACP pretty                                                                                                        │
-│  ⠁ Sub-agent   ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  ? Sub-agent   ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
 │  │ No message  │                                                                   Copy session ID  │                │
 │  │             │  codex-1                                                                           │                │
 │                │  Sub-agents Native · 0 of 1 working                                                │                │
