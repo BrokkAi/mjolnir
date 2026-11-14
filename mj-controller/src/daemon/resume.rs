@@ -110,12 +110,9 @@ impl RuntimeState {
                     }
                 })
                 .await?;
-                let restore_request = request.clone();
-                let mut controller = tokio::task::spawn_blocking(move || {
-                    session_move::load_controller_for_resume(&restore_request)
-                })
-                .await
-                .context("load controller for daemon resume task")??;
+                let mut controller = tokio::task::spawn_blocking(Controller::load)
+                    .await
+                    .context("load controller for daemon resume task")??;
                 let executor = DaemonStageReportingExecutor::new(
                     CancellableProcessExecutor::new(cancelled),
                     state.clone(),

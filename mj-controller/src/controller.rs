@@ -468,12 +468,11 @@ fn interpret_repository_source(source: &str) -> Result<InterpretedRepositorySour
     let expanded = mj_core::path_input::expand_local(Path::new(source))?;
     let candidate = expanded.as_path();
     if candidate.exists() {
+        // Local Git reads only; like `root_identity`, they get no deadline.
         let resolved = mj_core::repository::resolve_directory(
             candidate,
             None,
-            &mj_core::targets::CancellableProcessExecutor::with_timeout(
-                std::time::Duration::from_secs(8),
-            ),
+            &mj_core::targets::ProcessExecutor,
         )?;
         let identity = resolved.identity;
         let name = identity.name();
@@ -615,6 +614,7 @@ pub struct SessionLaunchOptions {
     pub session_title_override: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct SessionResumeOptions {
     pub additional_mounts: Option<Vec<AdditionalMount>>,
     pub resource_allocation: Option<SessionResourceAllocation>,
@@ -1109,8 +1109,6 @@ impl Controller {
             publication: None,
             subagents: Some(subagents),
             archived: false,
-            container_cpus: None,
-            container_memory: None,
             // Recorded for every new session, container-backed or not, so a
             // later move into a container already knows the path its checkout
             // will occupy. Only sessions that predate per-session container
@@ -1141,6 +1139,8 @@ impl Controller {
             viewed_through_event_ordinal: 0,
             draft_input: initial_prompt.unwrap_or_default(),
             last_error: None,
+            dismissed_failure: None,
+            failure_generation: 0,
             last_checkpoint_error: None,
             checkpoint: None,
         };
@@ -1491,8 +1491,7 @@ impl Controller {
     pub fn update_session_container_settings(
         &mut self,
         session_id: &str,
-        cpus: Option<String>,
-        memory: Option<String>,
+        resource_allocation: Option<SessionResourceAllocation>,
         additional_mounts: Vec<targets::AdditionalMount>,
         mount_history: Vec<std::path::PathBuf>,
         executor: &impl CommandExecutor,
@@ -1518,13 +1517,21 @@ impl Controller {
             }
             self.validate_mount_source(&session.target_template_id, &mount.source, executor)?;
         }
-        let cpus = cpus.filter(|value| !value.trim().is_empty());
-        let memory = memory.filter(|value| !value.trim().is_empty());
+        let template = self
+            .config
+            .targets
+            .get(&session.target_template_id)
+            .context("session target template is missing")?;
+        backend::validate_resource_allocation(template, resource_allocation.as_ref())?;
+        if resource_allocation != session.resource_allocation
+            && let Some(allocation) = &resource_allocation
+        {
+            allocation.validate_minimum_useful_container()?;
+        }
         let updated_at = now();
         crate::database::set_session_container_settings(
             session_id,
-            cpus.as_deref(),
-            memory.as_deref(),
+            resource_allocation.as_ref(),
             &additional_mounts,
             &updated_at,
         )?;
@@ -1551,8 +1558,7 @@ impl Controller {
             .sessions
             .get_mut(session_id)
             .expect("session was checked before updating its container settings");
-        record.container_cpus = cpus;
-        record.container_memory = memory;
+        record.resource_allocation = resource_allocation;
         record.additional_mounts = additional_mounts;
         record.updated_at = updated_at;
         Ok(())

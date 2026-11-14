@@ -1660,11 +1660,6 @@ impl Controller {
         // Decide the representation before the record changes, so an
         // incompatible target fails here instead of during provisioning.
         self.validate_muse_resume_destination(&previous, profile.kind, target_id)?;
-        ensure!(
-            profile.kind != HarnessKind::Muse || previous.additional_mounts.is_empty(),
-            "{} ACP supports one workspace root; attached directories are unsupported",
-            profile.kind.display_name()
-        );
         let checkout = self.state.checkout(session_id)?;
         let plan = resume_compatibility_with_checkout(
             &previous,
@@ -1711,10 +1706,18 @@ impl Controller {
                     .context("prepare a checkout for this session")?,
             )),
         };
+        let requests = if move_operation.is_none() {
+            SessionResumeOptions { additional_mounts: additional_mounts.clone(), resource_allocation: resource_allocation.clone(), discard_queue }
+        } else { SessionResumeOptions { additional_mounts: None, resource_allocation: None, discard_queue } };
         let resource_allocation =
             resource_allocation.or_else(|| previous.resource_allocation.clone());
         let additional_mounts =
             additional_mounts.unwrap_or_else(|| previous.additional_mounts.clone());
+        ensure!(
+            profile.kind != HarnessKind::Muse || additional_mounts.is_empty(),
+            "{} ACP supports one workspace root; attached directories are unsupported",
+            profile.kind.display_name()
+        );
         validate_resource_allocation(&target_template, resource_allocation.as_ref())?;
         let selected_container_size =
             selected_host_container_size(&target_template, resource_allocation.as_ref());
@@ -1913,11 +1916,10 @@ impl Controller {
         }
         // Resume changes target resources, while titles and drafts remain
         // owned by their independent writers throughout provisioning.
-        crate::database::save_resumed_session(
+        crate::database::accept_resumed_session(
             &self.state.sessions[session_id],
-            selected_container_size
-                .as_ref()
-                .map(|(host, size)| (host.as_str(), *size)),
+            selected_container_size.as_ref().map(|(host, size)| (host.as_str(), *size)),
+            &requests,
         )?;
         on_accepted();
         if let Some((host, size)) = selected_container_size.as_ref() {
@@ -2115,6 +2117,10 @@ impl Controller {
                         written,
                     );
                 }
+                let latest = crate::database::load_session_record(session_id)?.context("resumed session disappeared")?;
+                let record = self.state.sessions.get_mut(session_id).unwrap();
+                record.resource_allocation = latest.resource_allocation;
+                record.additional_mounts = latest.additional_mounts;
                 Ok(materialized)
             }
             Err(error) => {
@@ -2261,6 +2267,11 @@ impl Controller {
         } else {
             crate::database::save_resumed_session(&self.state.sessions[session_id], None)?;
         }
+        let latest = crate::database::load_session_record(session_id)?
+            .context("resumed session disappeared")?;
+        let record = self.state.sessions.get_mut(session_id).unwrap();
+        record.resource_allocation = latest.resource_allocation;
+        record.additional_mounts = latest.additional_mounts;
         Ok(failure)
     }
 }

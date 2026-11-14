@@ -3508,6 +3508,8 @@ async fn an_in_place_move_close_seals_the_source_and_keeps_its_target() {
         source_target_template_id: "local".into(),
         source_target: session.target.clone().map(|v| *v),
         source_native_session_id: session.native_session_id.clone(),
+        inherited_resource_allocation: None,
+        inherited_additional_mounts: Vec::new(),
         source_additional_mounts: Vec::new(),
         source_resource_allocation: None,
         destination_target: None,

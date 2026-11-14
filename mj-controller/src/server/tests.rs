@@ -154,8 +154,6 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
                 create_managed_worktree: None,
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
                 archived: false,
-                container_cpus: None,
-                container_memory: None,
                 id: "session-1".into(),
                 title: "Build Hel".into(),
                 harness_kind: HarnessKind::Codex,
@@ -180,6 +178,8 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
                 viewed_through_event_ordinal: 0,
                 draft_input: String::new(),
                 last_error: Some("secret-token at /highly/secret/codex".into()),
+                dismissed_failure: None,
+                failure_generation: 0,
                 last_checkpoint_error: None,
                 checkpoint: None,
             },
@@ -2783,8 +2783,7 @@ fn terminal_session_actions_validate_against_their_published_capabilities() {
     };
     let container_settings = || ControllerAction::SetContainerSettings {
         session_id: "session-1".into(),
-        cpus: None,
-        memory: None,
+        resource_allocation: None,
         mounts: Vec::new(),
     };
     let restart = || ControllerAction::Restart {

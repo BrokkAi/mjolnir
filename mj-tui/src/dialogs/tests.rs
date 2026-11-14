@@ -40,6 +40,7 @@ fn remote_repair_requires_confirmation_and_restores_the_previous_screen() {
         create_managed_worktree: Some(false),
         additional_mounts: Vec::new(),
         resource_allocation: None,
+        carried: Default::default(),
     };
     dashboard.show_remote_repair_confirmation("repo".into(), vec![repair.clone()], retry.clone());
     let mut terminal = Terminal::new(TestBackend::new(100, 25)).unwrap();
@@ -474,8 +475,7 @@ fn container_editor_edits_a_listed_mount_in_place() {
         dashboard.handle_key(key(KeyCode::Enter)),
         DashboardAction::SaveContainerSettings {
             session_id: "session-1".into(),
-            cpus: None,
-            memory: None,
+            resource_allocation: None,
             additional_mounts: vec![
                 AdditionalMount {
                     source: PathBuf::from("/srv/data"),
@@ -1598,6 +1598,11 @@ fn golden_tui_container_editor_details() {
     let mut output = String::new();
 
     let mut cached_session = running_session();
+    cached_session.resource_allocation =
+        Some(mj_core::state::SessionResourceAllocation::Container {
+            cpus: 4,
+            memory_bytes: 8 << 30,
+        });
     cached_session.build_cache = Some(mj_core::state::SessionBuildCache {
         host: "ssh:morannon".into(),
         directory: PathBuf::from("/mnt/nvme/mbx"),
@@ -1609,6 +1614,21 @@ fn golden_tui_container_editor_details() {
     append_dialog_render(
         &mut output,
         "session build cache",
+        120,
+        40,
+        &drawn(&mut cached, 120, 40),
+    );
+
+    if let Mode::EditContainer(editor) = &mut cached.mode {
+        editor.cpus = "1.5".into();
+    }
+    while container_editor(&cached).focused() != ContainerEditFocus::Save {
+        cached.handle_key(key(KeyCode::Tab));
+    }
+    cached.handle_key(key(KeyCode::Enter));
+    append_dialog_render(
+        &mut output,
+        "invalid fractional CPUs",
         120,
         40,
         &drawn(&mut cached, 120, 40),
@@ -1994,6 +2014,7 @@ fn launch_failure_survives_notices_and_retries_original_settings_once() {
         target_template_id: "docker".into(),
         additional_mounts: Vec::new(),
         resource_allocation: None,
+        carried: Default::default(),
     };
     dashboard.show_launch_failure("upload failed", Some(retry.clone()));
     dashboard.set_notice("Quota refreshed");

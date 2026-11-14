@@ -1,0 +1,20 @@
+  export-relative-read-root/g1 split {'export-relative-read-root/g5': 3, 'export-relative-read-root/g4': 1}; using export-relative-read-root/g5
+Hard-won diffs: 30; with a match group: 12
+  Sol/high               expected known bugs caught  8.00 of 30
+  Sol/medium             expected known bugs caught  6.50 of 30
+  Terra/high             expected known bugs caught  6.67 of 30
+  Sol/high + Sol/high    expected known bugs caught  9.33 of 30
+  Sol/high + Sol/medium  expected known bugs caught  8.83 of 30
+  Sol/high + Terra/high  expected known bugs caught 10.44 of 30
+  Sol/medium + Sol/medium expected known bugs caught  9.00 of 30
+  Sol/medium + Terra/high expected known bugs caught  9.67 of 30
+  Terra/high + Terra/high expected known bugs caught  8.33 of 30
+  Sol/high + Sol/high + Sol/high expected known bugs caught 10.00 of 30
+  Sol/high + Sol/high + Sol/medium expected known bugs caught  9.83 of 30
+  Sol/high + Sol/high + Terra/high expected known bugs caught 10.89 of 30
+  Sol/high + Sol/medium + Sol/medium expected known bugs caught  9.67 of 30
+  Sol/high + Sol/medium + Terra/high expected known bugs caught 10.78 of 30
+  Sol/high + Terra/high + Terra/high expected known bugs caught 11.33 of 30
+  Sol/medium + Sol/medium + Terra/high expected known bugs caught 11.00 of 30
+  Sol/medium + Terra/high + Terra/high expected known bugs caught 10.67 of 30
+  Terra/high + Terra/high + Terra/high expected known bugs caught  9.00 of 30

@@ -180,7 +180,7 @@ Targets Machines… action: None
 │hel ───────────────  │ Add an SSH host or EC2 launch template; saving one adds its runtimes. Its runtimes share its │                     │
 │› · ACP pretty name  │ build cache settings.                                                                        │                     │
 │  Idle  podman  cod  │                                                                                              │                     │
-│  │ No messages yet  │   local                           2 settings  ›                                        Add   │                     │
+│  │ No messages yet  │   local                           1 setting  ›                                         Add   │                     │
 │  │                  │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -264,7 +264,7 @@ Profiles Settings… action: None
 │hel ───────────────  │ Add a profile, then choose Sign in. Detect profiles finds installed agents.                  │                     │
 │› · ACP pretty name  │                                                                                              │                     │
 │  Idle  podman  cod  │                                                                                              │                     │
-│  │ No messages yet  │   claude-1                        8 settings  ›                            Add               │                     │
+│  │ No messages yet  │   claude-1                        7 settings  ›                            Add               │                     │
 │  │                  │   codex-1                         8 settings  ›                            Detect profiles   │                     │
 │                     │   codex-2                         8 settings  ›                            Set up managed    │                     │
 │                     │                                                                                              │                     │
@@ -390,7 +390,7 @@ Targets number 3 action: None
 │hel ───────────────  │ Add an SSH host or EC2 launch template; saving one adds its runtimes. Its runtimes share its │                     │
 │› · ACP pretty name  │ build cache settings.                                                                        │                     │
 │  Idle  podman  cod  │                                                                                              │                     │
-│  │ No messages yet  │   local                           2 settings  ›                                        Add   │                     │
+│  │ No messages yet  │   local                           1 setting  ›                                         Add   │                     │
 │  │                  │                                                                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │
@@ -643,7 +643,7 @@ Profiles number 2 action: None
 │hel ───────────────  │ Add a profile, then choose Sign in. Detect profiles finds installed agents.                  │                     │
 │› · ACP pretty name  │                                                                                              │                     │
 │  Idle  podman  cod  │                                                                                              │                     │
-│  │ No messages yet  │   claude-1                        8 settings  ›                            Add               │                     │
+│  │ No messages yet  │   claude-1                        7 settings  ›                            Add               │                     │
 │  │                  │   codex-1                         8 settings  ›                            Detect profiles   │                     │
 │                     │   codex-2                         8 settings  ›                            Set up managed    │                     │
 │                     │                                                                                              │                     │
@@ -812,7 +812,7 @@ Profiles Enter setup action: None
 │hel ───────────────  │ Add a profile, then choose Sign in. Detect profiles finds installed agents.                  │                     │
 │› · ACP pretty name  │                                                                                              │                     │
 │  Idle  podman  cod  │                                                                                              │                     │
-│  │ No messages yet  │   claude-1                        8 settings  ›                            Add               │                     │
+│  │ No messages yet  │   claude-1                        7 settings  ›                            Add               │                     │
 │  │                  │   codex-1                         8 settings  ›                            Detect profiles   │                     │
 │                     │   codex-2                         8 settings  ›                            Set up managed    │                     │
 │                     │                                                                                              │                     │

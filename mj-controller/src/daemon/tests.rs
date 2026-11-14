@@ -1538,8 +1538,6 @@ pub(crate) fn runtime_test_session(
         target_template_id: "local".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),
-        container_cpus: None,
-        container_memory: None,
         state,
         archived: false,
         target: None,
@@ -1551,6 +1549,8 @@ pub(crate) fn runtime_test_session(
         viewed_through_event_ordinal: 0,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+        failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: None,
     }
@@ -4297,6 +4297,8 @@ async fn failed_container_preparation_can_be_cancelled_after_result_publication(
     );
     saved.last_error = None;
     saved.updated_at = session.updated_at.clone();
+    // Recording the failure advanced the database-owned generation.
+    saved.failure_generation = session.failure_generation;
     assert_eq!(saved, session);
 
     // A late upgrade Cancel must not cancel the next ordinary operation.
@@ -4679,9 +4681,8 @@ async fn restart_compares_persisted_applied_settings_and_serializes_mount_edits(
     .unwrap();
     assert!(!intent.container_recreation_acknowledged);
     assert!(intent.container_upgrade.is_none());
-    let refused =
-        crate::database::set_session_container_settings("session-1", None, None, &[], "later")
-            .unwrap_err();
+    let refused = crate::database::set_session_container_settings("session-1", None, &[], "later")
+        .unwrap_err();
     assert!(mj_core::refusal::Refusal::of(&refused).is_some());
 
     assert!(
@@ -4697,7 +4698,7 @@ async fn restart_compares_persisted_applied_settings_and_serializes_mount_edits(
         crate::database::SessionRestartPhase::Stopping
     );
     crate::database::cancel_session_restart("session-1").unwrap();
-    crate::database::set_session_container_settings("session-1", None, None, &[], "later").unwrap();
+    crate::database::set_session_container_settings("session-1", None, &[], "later").unwrap();
 }
 
 #[tokio::test]
@@ -4811,14 +4812,9 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
         crate::database::load_session_restarts().unwrap()[0].phase,
         crate::database::SessionRestartPhase::CancelRequested
     );
-    let refused = crate::database::set_session_container_settings(
-        "session-1",
-        None,
-        None,
-        &[],
-        "while cancelling",
-    )
-    .unwrap_err();
+    let refused =
+        crate::database::set_session_container_settings("session-1", None, &[], "while cancelling")
+            .unwrap_err();
     assert!(mj_core::refusal::Refusal::of(&refused).is_some());
     release.notify_one();
     RuntimeState::wait_lifecycle_result(operation)
@@ -9870,6 +9866,8 @@ async fn retry_admission_reserves_only_the_matching_move_destination() {
         source_target_template_id: session.target_template_id.clone(),
         source_target: None,
         source_native_session_id: None,
+        inherited_resource_allocation: None,
+        inherited_additional_mounts: Vec::new(),
         source_additional_mounts: Vec::new(),
         source_resource_allocation: None,
         destination_target: None,
@@ -11179,6 +11177,8 @@ fn retained_startup_test_move(
         source_target_template_id: session.target_template_id.clone(),
         source_target: None,
         source_native_session_id: None,
+        inherited_resource_allocation: None,
+        inherited_additional_mounts: Vec::new(),
         source_additional_mounts: Vec::new(),
         source_resource_allocation: None,
         destination_target: None,
@@ -12440,7 +12440,9 @@ async fn daemon_api_exchange() {
         },
         DaemonAction::CompletePath {
             host: mj_core::path_completion::CompletionHost::Local,
-            prefix: format!("{}/server-", server_root.as_path().display()),
+            // Typed with this host's separator: on Windows the root is a
+            // verbatim `\\?\` path, which reads `/` as part of a name.
+            prefix: server_root.join("server-").display().to_string(),
             kind: mj_core::path_completion::CompletionKind::Directories,
         },
         DaemonAction::DiscoverProjects {
@@ -12554,6 +12556,14 @@ async fn daemon_api_exchange() {
         drop(stream);
         server.await.unwrap();
     }
+    // Windows resolves a bare `docker` through its system directories before
+    // PATH, so this fixture cannot hide a Docker the host installed. Leave the
+    // host's Docker out there; Linux and macOS keep its isolated answer.
+    if cfg!(windows) {
+        for entry in &mut exchange {
+            remove_host_docker(entry);
+        }
+    }
     // Normalize JSON's escaped Windows separators before replacing roots.
     let rendered = serde_json::to_string_pretty(&exchange)
         .unwrap()
@@ -12576,11 +12586,42 @@ async fn daemon_api_exchange() {
                 .replace('\\', "/"),
             "<server-parent>",
         );
-    mj_core::golden::assert_platform_golden(
-        env!("CARGO_MANIFEST_DIR"),
-        "daemon-api-exchange",
-        &rendered,
-    );
+    // Windows has its own runtime answers: no local bare target, and Podman
+    // only through WSL2.
+    if cfg!(windows) {
+        mj_core::golden::assert_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "daemon-api-exchange-windows",
+            &rendered,
+        );
+    } else {
+        mj_core::golden::assert_platform_golden(
+            env!("CARGO_MANIFEST_DIR"),
+            "daemon-api-exchange",
+            &rendered,
+        );
+    }
+}
+
+/// Drop every answer that depends on the host's Docker: its availability
+/// entry, its rejected-runtime row, and a local Docker target it allowed.
+fn remove_host_docker(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(serde_json::Value::Object(local)) = object.get_mut("local") {
+                local.remove("docker");
+            }
+            if let Some(serde_json::Value::Array(rejected)) = object.get_mut("rejected_runtimes") {
+                rejected.retain(|runtime| runtime["kind"] != "docker");
+            }
+            if let Some(serde_json::Value::Object(targets)) = object.get_mut("targets") {
+                targets.retain(|_, target| target["kind"] != "local-docker");
+            }
+            object.values_mut().for_each(remove_host_docker);
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(remove_host_docker),
+        _ => {}
+    }
 }
 
 /// Real OpenSSH is held in a proxy command. Closing a superseded completion
@@ -13204,7 +13245,7 @@ async fn dismiss_notification_clears_the_served_question_attention() {
         manager.control.clone(),
         &recovery.observer(),
     );
-    let state = Arc::new(RuntimeState::new_with_controller_loader(
+    let state = Arc::new(RuntimeState::new(
         manager.control.clone(),
         Controller {
             config: runtime_test_config(),
@@ -13213,12 +13254,6 @@ async fn dismiss_notification_clears_the_served_question_attention() {
         recovery.observer(),
         upgrades.observer(),
         Vec::new(),
-        || {
-            Ok(Controller {
-                config: runtime_test_config(),
-                state: Default::default(),
-            })
-        },
     ));
     state.owner().edit_sessions(|sessions| {
         sessions.insert(record.id.clone(), record);
@@ -13235,12 +13270,11 @@ async fn dismiss_notification_clears_the_served_question_attention() {
         snapshot.materialized.execution = mj_core::state::MaterializedExecutionState::Idle;
         snapshot.window = mj_core::state::ProjectionWindow::of(&snapshot.materialized);
         snapshot.operational.person_input_through = if dismissed { 10 } else { 0 };
-        snapshot.operational.open_request = (!dismissed).then(|| {
-            mj_core::assessment::OpenRequest {
+        snapshot.operational.open_request =
+            (!dismissed).then(|| mj_core::assessment::OpenRequest {
                 question: question.clone(),
                 question_message: None,
-            }
-        });
+            });
         view
     };
     state
@@ -13307,5 +13341,84 @@ async fn dismiss_notification_clears_the_served_question_attention() {
             .metadata
             .notification_dismissals
             .contains_key("session-1")
+    );
+    // Recorded failures use the same action without a worker: the database
+    // writer publishes committed records before replying, and owner() observes
+    // that publication before attention is projected.
+    let mut failed = runtime_test_session(
+        "resume-failure",
+        mj_core::workspace::DEFAULT_WORKSPACE_ID,
+        SessionState::Stopped,
+    );
+    failed.last_error = Some("resume failed: operation cancelled".into());
+    crate::database::save_session(&failed).unwrap();
+    let served = state.runtime_publication().unwrap();
+    assert_eq!(
+        served.metadata.session_attention[&failed.id],
+        mj_core::attention::SessionAttention::Failed
+    );
+    let target = served.metadata.notification_dismissals[&failed.id].clone();
+    // Hard-won: 0db309adc: a delayed dismissal accepted a repeated identical failure.
+    failed.state = SessionState::Provisioning;
+    crate::database::save_session(&failed).unwrap();
+    failed.state = SessionState::Stopped;
+    crate::database::save_session(&failed).unwrap();
+    let error = state
+        .dismiss_notification(failed.id.clone(), target)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("notification is no longer current")
+    );
+    let served = state.runtime_publication().unwrap();
+    assert_eq!(
+        served.metadata.session_attention[&failed.id],
+        mj_core::attention::SessionAttention::Failed
+    );
+    let target = served.metadata.notification_dismissals[&failed.id].clone();
+
+    assert!(matches!(
+        target,
+        mj_core::attention::NotificationDismissal::Failure(_)
+    ));
+    state
+        .dismiss_notification(failed.id.clone(), target)
+        .await
+        .unwrap();
+    let dismissed = state.runtime_publication().unwrap();
+    assert_eq!(
+        dismissed.metadata.session_attention[&failed.id],
+        mj_core::attention::SessionAttention::Inactive
+    );
+    assert!(
+        !dismissed
+            .metadata
+            .notification_dismissals
+            .contains_key(&failed.id)
+    );
+    failed.title = "renamed failure".into();
+    crate::database::save_session(&failed).unwrap();
+    assert_eq!(
+        state
+            .runtime_publication()
+            .unwrap()
+            .metadata
+            .session_attention[&failed.id],
+        mj_core::attention::SessionAttention::Inactive
+    );
+    failed.last_error = Some("resume failed: different failure".into());
+    crate::database::save_session(&failed).unwrap();
+    let renewed = state.runtime_publication().unwrap();
+    assert_eq!(
+        renewed.metadata.session_attention[&failed.id],
+        mj_core::attention::SessionAttention::Failed
+    );
+    assert!(
+        renewed
+            .metadata
+            .notification_dismissals
+            .contains_key(&failed.id)
     );
 }

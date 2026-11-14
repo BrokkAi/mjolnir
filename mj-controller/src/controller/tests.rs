@@ -1694,7 +1694,6 @@ fn container_settings_refuse_a_new_mount_whose_source_does_not_exist() {
         .update_session_container_settings(
             &id,
             None,
-            None,
             vec![mount(&missing)],
             Vec::new(),
             &ProcessExecutor,
@@ -1718,7 +1717,6 @@ fn container_settings_refuse_a_new_mount_whose_source_does_not_exist() {
         .update_session_container_settings(
             &id,
             None,
-            None,
             vec![mount(&present)],
             Vec::new(),
             &ProcessExecutor,
@@ -1730,8 +1728,10 @@ fn container_settings_refuse_a_new_mount_whose_source_does_not_exist() {
     controller
         .update_session_container_settings(
             &id,
-            Some("2".into()),
-            None,
+            Some(SessionResourceAllocation::Container {
+                cpus: 2,
+                memory_bytes: 4 << 30,
+            }),
             vec![mount(&present)],
             Vec::new(),
             &ProcessExecutor,
@@ -1762,9 +1762,25 @@ fn registration_remembers_launch_size_but_session_overrides_do_not_replace_it() 
         cpus: 12,
         memory_bytes: 48 * 1024 * 1024 * 1024,
     });
+    // Provisioning uses the same allocation registration remembers for the host.
     let id = controller
         .register_session_with_resources("codex", "project", "podman", "sized", options)
         .unwrap();
+    let record = &controller.state.sessions[&id];
+    let targets::TargetTemplate::LocalPodman(container) = backend::backend_target(
+        &controller.config.targets["podman"],
+        record.resource_allocation.as_ref(),
+        backend::ContainerOverrides::for_session(record),
+    )
+    .unwrap() else {
+        panic!("a podman target");
+    };
+    assert!(container.extra_run_args.contains(&"--cpus=12".to_owned()));
+    assert!(
+        container
+            .extra_run_args
+            .contains(&format!("--memory={}", 48_u64 << 30))
+    );
     let expected = HostContainerSize {
         cpus: 12,
         memory_bytes: 48 * 1024 * 1024 * 1024,
@@ -1778,8 +1794,10 @@ fn registration_remembers_launch_size_but_session_overrides_do_not_replace_it() 
     controller
         .update_session_container_settings(
             &id,
-            Some("2".into()),
-            Some("4g".into()),
+            Some(SessionResourceAllocation::Container {
+                cpus: 2,
+                memory_bytes: 4 << 30,
+            }),
             Vec::new(),
             Vec::new(),
             &ProcessExecutor,
@@ -2107,6 +2125,10 @@ fn a_subagent_of_an_isolated_session_shares_its_parents_project_memory() {
 /// never ran and is still delivered; one that started is not.
 // Hard-won: #1535: a Restart re-sent a finished sub-agent's assignment and froze its view.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1291: local bare fixture; a Windows controller runs no local bare sessions"
+)]
 fn a_launch_delivers_a_childs_assignment_only_until_its_history_shows_it_started() {
     use super::worker_binary::LaunchHistory;
     use mj_core::archive::{

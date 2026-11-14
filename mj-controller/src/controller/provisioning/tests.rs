@@ -931,8 +931,6 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
         create_managed_worktree: None,
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
-        container_cpus: None,
-        container_memory: None,
         id: session_id.into(),
         title: "new session".into(),
         harness_kind: mj_core::config::HarnessKind::Kimi,
@@ -961,6 +959,8 @@ fn failed_new_worker_start_retains_session_only_after_target_cleanup() {
         viewed_through_event_ordinal: 0,
         draft_input: String::new(),
         last_error: None,
+        dismissed_failure: None,
+            failure_generation: 0,
         last_checkpoint_error: None,
         checkpoint: None,
     };

@@ -221,6 +221,11 @@ impl DashboardContext {
         // around it. Do not advance read receipts for a covered conversation.
         self.drawn_chat_sessions = if login_open { Vec::new() } else { drawn };
         self.dashboard.acknowledge_render();
+        if !login_open {
+            for action in self.dashboard.take_drawn_failure_dismissals() {
+                super::actions::spawn_notification_dismissal(self, action);
+            }
+        }
         if let Some(chat) = self.visible_chat() {
             chat.acknowledge_render();
         }

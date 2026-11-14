@@ -116,10 +116,7 @@ fn autoconfigure_skips_models_only_usage_priced_profiles_offer() {
             .map(|choice| choice.model.clone())
             .collect::<Vec<_>>()
     };
-    assert_eq!(
-        suggested(&["codex-1", "codex-2"]),
-        ["gpt-6.1-terra", "gpt-6.1-sol"]
-    );
+    assert_eq!(suggested(&["codex-1", "codex-2"]), ["gpt-6.1-terra"; 3]);
     // Unknown billing counts as a subscription, so the newer aliases win.
     assert!(suggested(&[])[0].starts_with("openrouter/"));
 }
@@ -220,7 +217,7 @@ fn autoconfigure_button_uses_the_quota_reports_present_when_pressed() {
         );
     }
     press_autoconfigure(&mut dashboard);
-    assert_eq!(setup_review_models(&dashboard), SUBSCRIPTION_MODELS[..2]);
+    assert_eq!(setup_review_models(&dashboard), ["gpt-6.1-terra"; 3]);
 }
 
 #[test]
@@ -263,7 +260,7 @@ fn an_opencode_profile_without_a_report_is_usage_priced() {
     let snapshot = billing_snapshot(&dashboard.config, &["openrouter"]);
     dashboard.set_profile_capabilities(snapshot);
     press_autoconfigure(&mut dashboard);
-    assert_eq!(setup_review_models(&dashboard), SUBSCRIPTION_MODELS[..2]);
+    assert_eq!(setup_review_models(&dashboard), ["gpt-6.1-terra"; 3]);
 }
 
 #[test]
@@ -314,6 +311,8 @@ fn effort_choices_follow_the_selected_model() {
     let mut dialog = ReviewSettingsDialog::new(&config);
     dialog.update_choices(&config, &catalog, &Default::default());
     dialog.review.reviewers = dialog.suggested().unwrap();
+    dialog.review.reviewers[1].model = "gpt-6-sol".into();
+    dialog.review.reviewers[1].effort = Some("medium".into());
     dialog.update_choices(&config, &catalog, &Default::default());
     assert_eq!(
         dialog.choices(ReviewSettingsFocus::Effort(0)).0,
@@ -338,6 +337,7 @@ fn reviewer_rows_can_be_added_removed_and_reconfigured() {
     };
     let editor = setup.review_editor.as_mut().unwrap();
     editor.review.reviewers = editor.suggested().unwrap();
+    editor.review.reviewers.truncate(2);
     editor.update_choices(&config, &snapshot, &Default::default());
     assert_eq!(editor.review.reviewers.len(), 2);
     editor.form.get_mut().focus(ReviewSettingsFocus::Add);
@@ -605,10 +605,6 @@ fn autoconfigure_waits_for_efforts_then_uses_harness_default_for_unsupported_eff
         entry
             .efforts
             .insert("gpt-6-terra".into(), CapabilityState::Ready(vec![]));
-        entry.efforts.insert(
-            "gpt-6-sol".into(),
-            CapabilityState::Ready(vec![choice("medium")]),
-        );
     }
     dashboard.set_profile_capabilities(snapshot.clone());
     let Mode::Setup(setup) = &mut dashboard.mode else {
@@ -617,8 +613,8 @@ fn autoconfigure_waits_for_efforts_then_uses_harness_default_for_unsupported_eff
     let editor = setup.review_editor.as_mut().unwrap();
     editor.update_choices(&dashboard.config, &snapshot, &Default::default());
     assert!(editor.pending_autoconfigure.is_none());
-    assert_eq!(editor.review.reviewers[0].effort, None);
-    assert_eq!(editor.review.reviewers[1].effort.as_deref(), Some("medium"));
+    assert_eq!(editor.review.reviewers.len(), 3);
+    assert!(editor.review.reviewers.iter().all(|r| r.effort.is_none()));
 }
 
 #[test]
@@ -659,7 +655,7 @@ fn autoconfigure_timeout_finishes_on_clock_tick_without_a_catalog_update() {
     };
     let editor = setup.review_editor.as_ref().unwrap();
     assert!(!editor.checking_efforts());
-    assert_eq!(editor.review.reviewers.len(), 2);
+    assert_eq!(editor.review.reviewers.len(), 3);
     assert!(
         editor
             .review

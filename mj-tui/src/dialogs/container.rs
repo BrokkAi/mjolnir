@@ -1,5 +1,6 @@
 //! Container settings composed from reusable terminal controls.
 use mj_chat::path_input::PathInput;
+use mj_core::state::SessionResourceAllocation;
 
 use std::cell::RefCell;
 
@@ -19,6 +20,8 @@ pub(crate) struct ContainerEditor {
     /// other session dialogs do, not its id.
     pub(crate) session_name: String,
     pub(crate) cpus: TextInput,
+    pub(crate) limits: Option<(u64, u64)>,
+    pub(crate) original_allocation: Option<SessionResourceAllocation>,
     pub(crate) memory: TextInput,
     pub(crate) mounts: Vec<AdditionalMount>,
     pub(crate) suggestions: Vec<PathBuf>,
@@ -147,7 +150,7 @@ impl ContainerEditor {
             )),
             Row::Text(Line::raw("")),
             Row::Field(Cpus, "CPUs", &self.cpus),
-            Row::Field(Memory, "Memory", &self.memory),
+            Row::Field(Memory, "Memory (GiB)", &self.memory),
             Row::Text(Line::styled(
                 "Empty keeps the target's value.",
                 Style::default().fg(theme::palette().muted),
@@ -340,14 +343,26 @@ impl ContainerEditor {
 
     fn save(&self) -> Result<DashboardAction, String> {
         validate_additional_mounts(&self.mounts).map_err(|error| error.to_string())?;
-        let value = |text: &str| {
-            let trimmed = text.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_owned())
+        let draft = crate::wizards::resources::ResourceEditor {
+            target_id: None,
+            cpu: self.cpus.clone(),
+            memory: self.memory.clone(),
         };
+        let allocation = if self.cpus.trim().is_empty() && self.memory.trim().is_empty() {
+            None
+        } else {
+            Some(draft.allocation(self.limits, false)?)
+        };
+        if allocation != self.original_allocation
+            && let Some(allocation) = &allocation
+        {
+            allocation
+                .validate_minimum_useful_container()
+                .map_err(|e| e.to_string())?;
+        }
         Ok(DashboardAction::SaveContainerSettings {
             session_id: self.session_id.clone(),
-            cpus: value(&self.cpus),
-            memory: value(&self.memory),
+            resource_allocation: allocation,
             additional_mounts: self.mounts.clone(),
             mount_history: self.suggestions.clone(),
         })
@@ -559,8 +574,20 @@ impl DashboardState {
         let editor = ContainerEditor {
             session_id: session.id.clone(),
             session_name: session.listed_title().to_owned(),
-            cpus: session.container_cpus.clone().unwrap_or_default().into(),
-            memory: session.container_memory.clone().unwrap_or_default().into(),
+            limits: self.host_limits(&session.target_template_id),
+            original_allocation: session.resource_allocation.clone(),
+            cpus: match &session.resource_allocation {
+                Some(SessionResourceAllocation::Container { cpus, .. }) => cpus.to_string(),
+                _ => String::new(),
+            }
+            .into(),
+            memory: match &session.resource_allocation {
+                Some(SessionResourceAllocation::Container { memory_bytes, .. }) => {
+                    crate::wizards::resources::memory_gib_text(*memory_bytes)
+                }
+                _ => String::new(),
+            }
+            .into(),
             mounts: session.additional_mounts.clone(),
             suggestions,
             source: PathInput::new(),
@@ -816,6 +843,9 @@ mod tests {
     fn save_click_requires_release_inside_and_focuses_on_first_press() {
         let mut dashboard = open();
         dashboard.handle_key(key(KeyCode::Char('4')));
+        if let Mode::EditContainer(editor) = &mut dashboard.mode {
+            editor.memory = "8".into();
+        }
         let lines = draw(&mut dashboard, 100, 40);
         let save = point(&lines, "  Save  ");
         assert_eq!(
@@ -836,9 +866,13 @@ mod tests {
         );
         assert!(matches!(dashboard.mode, Mode::EditContainer(_)));
         dashboard.handle_mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), save));
-        assert!(
-            matches!(dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), save)), DashboardAction::SaveContainerSettings { cpus: Some(value), .. } if value == "4")
-        );
+        assert!(matches!(
+            dashboard.handle_mouse(mouse_at(MouseEventKind::Up(MouseButton::Left), save)),
+            DashboardAction::SaveContainerSettings {
+                resource_allocation: Some(SessionResourceAllocation::Container { cpus: 4, .. }),
+                ..
+            }
+        ));
     }
 
     #[test]

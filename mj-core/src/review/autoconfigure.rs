@@ -203,9 +203,9 @@ pub fn autoconfigure(
                 effort: used,
             }
         };
-    use ReviewModelFamily::{DeepSeek, Grok, Kimi, Sol, Sonnet, Terra};
-    let preset = if selected.contains_key(&Terra) && selected.contains_key(&Sol) {
-        [(Terra, "high"), (Sol, "medium")]
+    use ReviewModelFamily::{DeepSeek, Grok, Kimi, Sonnet, Terra};
+    let preset = if selected.contains_key(&Terra) {
+        vec![(Terra, "high"); 3]
     } else {
         let family = [Sonnet, DeepSeek, Grok, Kimi]
             .into_iter()
@@ -229,7 +229,7 @@ pub fn autoconfigure(
                     )
                     .map(|(family, _)| family.clone())
             })?;
-        [(family.clone(), "high"), (family, "high")]
+        vec![(family, "high"); 2]
     };
     let mut adjusted = Vec::new();
     let reviewers = preset
@@ -318,22 +318,33 @@ mod tests {
 
     #[test]
     fn known_efforts_choose_nearest_lower_then_lowest_and_report_adjustments() {
-        let models = choices(&["gpt-6-terra", "gpt-6-sol"]);
-        let configured = autoconfigure(&merged_model_offers(&models), |model| {
-            Some(if model.ends_with("terra") {
-                choices(&["low", "max"])
-            } else {
-                choices(&["high", "xhigh"])
-            })
-        })
+        let nearest_lower = autoconfigure(
+            &merged_model_offers(&choices(&["gpt-6-terra", "gpt-6-sol"])),
+            |_| Some(choices(&["low", "max"])),
+        )
         .unwrap();
-        assert_eq!(configured.reviewers[0].effort.as_deref(), Some("low"));
-        assert_eq!(configured.reviewers[1].effort.as_deref(), Some("high"));
-        assert_eq!(configured.adjusted.len(), 2);
-        assert_eq!(configured.adjusted[0].requested, "high");
-        assert_eq!(configured.adjusted[0].used.as_deref(), Some("low"));
-        assert_eq!(configured.adjusted[1].requested, "medium");
-        assert_eq!(configured.adjusted[1].used.as_deref(), Some("high"));
+        assert!(
+            nearest_lower
+                .reviewers
+                .iter()
+                .all(|choice| choice.effort.as_deref() == Some("low"))
+        );
+        assert_eq!(nearest_lower.adjusted.len(), 3);
+        assert_eq!(nearest_lower.adjusted[0].requested, "high");
+        assert_eq!(nearest_lower.adjusted[0].used.as_deref(), Some("low"));
+        let lowest = autoconfigure(
+            &merged_model_offers(&choices(&["claude-sonnet-4.5"])),
+            |_| Some(choices(&["xhigh", "max"])),
+        )
+        .unwrap();
+        assert!(
+            lowest
+                .reviewers
+                .iter()
+                .all(|choice| choice.effort.as_deref() == Some("xhigh"))
+        );
+        assert_eq!(lowest.adjusted.len(), 2);
+        assert_eq!(lowest.adjusted[1].used.as_deref(), Some("xhigh"));
     }
 
     // Hard-won: ed508ae8c: stripping Kimi Code's provider selected an older Kimi model.
@@ -353,11 +364,19 @@ mod tests {
                     "claude-sonnet-4.5",
                     "grok-4.6",
                 ],
-                &[("gpt-6.10-terra", "high"), ("gpt-6.1-sol", "medium")],
+                &[
+                    ("gpt-6.10-terra", "high"),
+                    ("gpt-6.10-terra", "high"),
+                    ("gpt-6.10-terra", "high"),
+                ],
             ),
             (
                 &["gpt-6-terra", "gpt-6-sol", "grok-4.6"],
-                &[("gpt-6-terra", "high"), ("gpt-6-sol", "medium")],
+                &[
+                    ("gpt-6-terra", "high"),
+                    ("gpt-6-terra", "high"),
+                    ("gpt-6-terra", "high"),
+                ],
             ),
             (
                 &["claude-sonnet-4.5", "deepseek-v4-pro"],
@@ -487,7 +506,7 @@ mod tests {
 
     #[test]
     fn subscription_models_beat_newer_latest_aliases_from_a_usage_priced_profile() {
-        let expected = expect(&[("gpt-6.1-terra", "high"), ("gpt-6.1-sol", "medium")]);
+        let expected = expect(&[("gpt-6.1-terra", "high"); 3]);
         // The live catalog: four codex and six claude profiles, one OpenRouter profile.
         let mut profiles = vec![(true, OPENROUTER)];
         profiles.extend(std::iter::repeat_n((false, CODEX), 4));
@@ -525,7 +544,7 @@ mod tests {
                 (false, &["grok-4.6"]),
                 (true, &["claude-sonnet-4.5", "gpt-6.1-terra"]),
             ]),
-            expect(&[("claude-sonnet-4.5", "high"), ("claude-sonnet-4.5", "high")])
+            expect(&[("gpt-6.1-terra", "high"); 3])
         );
     }
 
@@ -537,7 +556,7 @@ mod tests {
                 (false, &["gpt-6-terra", "gpt-6.1-sol", "claude-sonnet-4.5"]),
                 (false, &["gpt-6.1-terra", "gpt-6-sol", "claude-sonnet-5"]),
             ]),
-            expect(&[("gpt-6-terra", "high"), ("gpt-6-sol", "medium")])
+            expect(&[("gpt-6-terra", "high"); 3])
         );
     }
 
@@ -548,7 +567,7 @@ mod tests {
                 (false, &["gpt-6-terra", "gpt-6.1-terra", "gpt-6-sol"]),
                 (false, &["gpt-6-terra", "gpt-6.1-terra", "gpt-6-sol"]),
             ]),
-            expect(&[("gpt-6.1-terra", "high"), ("gpt-6-sol", "medium")])
+            expect(&[("gpt-6.1-terra", "high"); 3])
         );
     }
 

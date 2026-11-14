@@ -6,8 +6,8 @@
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────                                                                                                        │
 │› · ACP pretty                                                                                                        │
-│  Idle  podman  ╭ × ACP pretty name ──────────────────────────────────────────────── Copy session ID ╮                │
-│  │ No message  │                                                                                    │                │
+│  Idle  podman  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  │ No message  │                                                                   Copy session ID  │                │
 │  │             │  codex-1                                                                           │                │
 │                │  Sub-agents Native                                                                 │                │
 │                │  CPU        no CPU data yet                                                        │                │
@@ -48,8 +48,8 @@ menu popup action: None
 │ Create   Open   Filter: ___________________││                                                                                            │
 │hel ─────────────                                                                                                                         │
 │› · ACP pretty na                                                                                                                         │
-│  Idle  podman  c  ╭ × ACP pretty name ────────────────────────────────────────────────────────────── Copy session ID ╮                   │
-│  │ No messages y  │                                                                                                  │                   │
+│  Idle  podman  c  ╭ × ACP pretty name ───────────────────────────────────────────────────────────────────────────────╮                   │
+│  │ No messages y  │                                                                                 Copy session ID  │                   │
 │  │                │  codex-1                                                                                         │                   │
 │                   │  Sub-agents Native                                                                               │                   │
 │                   │  CPU        no CPU data yet                                                                      │                   │
@@ -90,8 +90,8 @@ menu popup action: None
 │ Create   Open   Filter: _____________││                                      │
 │hel ────                                                                      │
 │› · ACP                                                                       │
-│  Idle    ╭ × ACP pretty name ─────────────────── Copy session ID ╮           │
-│  │ No m  │                                                       │           │
+│  Idle    ╭ × ACP pretty name ────────────────────────────────────╮           │
+│  │ No m  │                                      Copy session ID  │           │
 │  │       │  codex-1                                              │           │
 │          │  Sub-agents Native                                    │           │
 │          │  CPU        no CPU data yet                           │           │
@@ -216,8 +216,8 @@ Enter open · / search (filter a/b/w/i/d) · Tab pane · . actions │ ctrl+b th
 │ Workspace w7  Workspace w8           ││                                                                              │
 │ Workspace w9                                                                                                         │
 ╰──────────────                                                                                                        │
-╭ Sessions ────  ╭ × ACP pretty name ──────────────────────────────────────────────── Copy session ID ╮                │
-│ Create   Open  │                                                                                    │                │
+╭ Sessions ────  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│ Create   Open  │                                                                   Copy session ID  │                │
 │hel ──────────  │  codex-1                                                                           │                │
 │› · ACP pretty  │  Sub-agents Native                                                                 │                │
 │  Idle  podman  │  CPU        no CPU data yet                                                        │                │
@@ -258,8 +258,8 @@ first Escape action: None
 │ Create   Open   Filter: _____________││                                                                              │
 │hel ──────────                                                                                                        │
 │› · ACP pretty                                                                                                        │
-│  Idle  podman  ╭ × ACP pretty name ──────────────────────────────────────────────── Copy session ID ╮                │
-│  │ No message  │                                                                                    │                │
+│  Idle  podman  ╭ × ACP pretty name ─────────────────────────────────────────────────────────────────╮                │
+│  │ No message  │                                                                   Copy session ID  │                │
 │  │             │  codex-1                                                                           │                │
 │                │  Sub-agents Native                                                                 │                │
 │                │  CPU        no CPU data yet                                                        │                │

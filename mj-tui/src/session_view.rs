@@ -161,6 +161,11 @@ impl SessionFacts {
             })
             .collect();
         let mut listed = index.live.clone();
+        listed.extend(
+            own.iter()
+                .filter(|(_, level)| level.needs_person())
+                .map(|(id, _)| id.clone()),
+        );
         listed.extend(dashboard.session_operations.keys().cloned());
         let listed = listed
             .into_iter()

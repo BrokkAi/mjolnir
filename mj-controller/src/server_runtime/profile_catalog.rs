@@ -3716,7 +3716,7 @@ mod tests {
         catalog.upgrade_legacy_review(2).await.unwrap();
         let review = Config::load_from(&path).unwrap().review;
         assert!(!review.is_legacy());
-        assert_eq!(review.reviewers.len(), 2);
+        assert_eq!(review.reviewers.len(), 3);
         assert_eq!(review.reviewers[0].model, "gpt-6-terra");
     }
 
@@ -3852,11 +3852,11 @@ mod tests {
             let catalog = Arc::clone(&catalog);
             tokio::spawn(async move { catalog.upgrade_legacy_review(1).await })
         };
-        // OpenAI fills both slots, so an unused Claude profile's unknown
+        // OpenAI fills every slot, so an unused Claude profile's unknown
         // billing must not delay the upgrade.
         upgrade.await.unwrap().unwrap();
         assert!(!Config::load_from(&path).unwrap().review.is_legacy());
-        assert_eq!(upgraded_models(&path), ["gpt-6.1-terra", "gpt-6.1-sol"]);
+        assert_eq!(upgraded_models(&path), ["gpt-6.1-terra"; 3]);
     }
 
     #[tokio::test(start_paused = true)]
@@ -3875,7 +3875,7 @@ mod tests {
         ]))));
         let catalog = billing_catalog(&path, reports);
         catalog.upgrade_legacy_review(1).await.unwrap();
-        assert_eq!(upgraded_models(&path), ["gpt-6.1-terra", "gpt-6.1-sol"]);
+        assert_eq!(upgraded_models(&path), ["gpt-6.1-terra"; 3]);
     }
 
     #[tokio::test(start_paused = true)]
@@ -3904,7 +3904,7 @@ mod tests {
             },
         );
         catalog.upgrade_legacy_review(2).await.unwrap();
-        assert_eq!(upgraded_models(&path), ["gpt-6.1-terra", "gpt-6.1-sol"]);
+        assert_eq!(upgraded_models(&path), ["gpt-6.1-terra"; 3]);
     }
 
     #[tokio::test(start_paused = true)]

@@ -63,35 +63,6 @@ pub(super) async fn record_quota_move_failure(
     Ok(())
 }
 
-pub(super) fn load_controller_for_resume(request: &ResumeSessionRequest) -> Result<Controller> {
-    let mut controller = Controller::load()?;
-    if let Some(operation) = crate::database::load_move_operation(&request.session_id)?
-        && matches!(
-            operation.phase,
-            mj_core::state::MovePhase::Failed | mj_core::state::MovePhase::Cancelled
-        )
-        && !operation.queue_admission_started
-        && operation.source_profile_id == request.profile_id
-        && operation.source_target_template_id == request.target_template_id
-    {
-        // None in ordinary Resume means inheritance. Restore that inheritance
-        // baseline first so a partial conversion cannot change source sizing.
-        let record = controller
-            .state
-            .sessions
-            .get_mut(&request.session_id)
-            .context("Move recovery session is missing")?;
-        record.resource_allocation = operation.source_resource_allocation;
-        record.additional_mounts = operation.source_additional_mounts;
-        if let Some(previous) = operation.recovery_session {
-            record.container_cpus = previous.container_cpus;
-            record.container_memory = previous.container_memory;
-        }
-        crate::database::save_resumed_session(record, None)?;
-    }
-    Ok(controller)
-}
-
 fn validate_prepared_move_environment(prepared: bool, durable: bool) -> Result<()> {
     ensure!(
         prepared == durable,
@@ -143,7 +114,7 @@ impl RuntimeState {
                     .filter(|target| target.kind == crate::targets::DeploymentCapacityKind::Host)
                     .map(|target| capacity::ContainerCapacityCommitment {
                         target_ids: target.target_ids,
-                        allocation: source.resource_allocation.clone(),
+                        allocation: mj_core::state::counted_container_allocation(source).cloned(),
                     })
             } else {
                 None

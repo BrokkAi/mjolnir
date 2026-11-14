@@ -225,6 +225,40 @@ const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 /// every release and nobody reads them as a claim about the running version.
 const TEST_VERSION_LABEL: &str = "vX.Y.Z";
 
+/// Settings a launch copies from an existing session because the wizard has
+/// no step for them: "New session with these settings" sets them, and every
+/// wizard launch leaves them at their defaults.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CarriedLaunchSettings {
+    pub no_project_memory: bool,
+    pub no_github_events: bool,
+    pub no_github_credentials: bool,
+    /// What the copy changed because a setting could not apply now, in a
+    /// sentence the launch notices show.
+    pub note: Option<String>,
+}
+
+impl CarriedLaunchSettings {
+    /// `notice` followed by the note, when the copy changed something.
+    pub fn annotate(&self, notice: String) -> String {
+        match &self.note {
+            Some(note) => format!("{notice} {note}"),
+            None => notice,
+        }
+    }
+}
+
+impl DashboardAction {
+    /// `notice` for a launch, followed by what a copied launch changed. Any
+    /// other action leaves it as it is.
+    pub fn annotate_launch_notice(&self, notice: String) -> String {
+        match self {
+            Self::CreateSession { carried, .. } => carried.annotate(notice),
+            _ => notice,
+        }
+    }
+}
+
 /// A side effect requested by the dashboard.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DashboardAction {
@@ -334,6 +368,8 @@ pub enum DashboardAction {
         target_template_id: String,
         additional_mounts: Vec<AdditionalMount>,
         resource_allocation: Option<SessionResourceAllocation>,
+        /// Choices the wizard does not offer, copied from another session.
+        carried: CarriedLaunchSettings,
     },
     /// Resolve all network sources for an isolated session and leave the
     /// creation wizard open until the person reviews that plan.
@@ -561,6 +597,9 @@ pub enum DashboardAction {
         session_id: String,
         target: mj_core::attention::NotificationDismissal,
     },
+    DismissNotifications {
+        dismissals: Vec<(String, mj_core::attention::NotificationDismissal)>,
+    },
     /// Toggle whether the session raises bell, desktop, and push
     /// notifications.
     SetSessionNotificationsIgnored {
@@ -649,8 +688,7 @@ pub enum DashboardAction {
     /// the container is created.
     SaveContainerSettings {
         session_id: String,
-        cpus: Option<String>,
-        memory: Option<String>,
+        resource_allocation: Option<SessionResourceAllocation>,
         additional_mounts: Vec<AdditionalMount>,
         mount_history: Vec<std::path::PathBuf>,
     },
@@ -1040,9 +1078,9 @@ pub struct DashboardState {
     navigation: conversation_navigation::ConversationNavigation,
     pub(crate) browse_pane: Option<tile_layout::PaneId>,
     pub(crate) pin_ids: BTreeMap<String, u32>,
-    pub(crate) navigation_session: Option<String>,
+    pub(crate) pending_navigation: Option<dashboard_sessions::PendingNavigation>,
     /// When a workspace switch was requested for a child, open its parent's
-    /// Sub-agents view before restoring `navigation_session`.
+    /// Sub-agents view before restoring `pending_navigation`.
     pub(crate) navigation_subagent_parent: Option<String>,
     pub(crate) pane_menu: Option<pane_controls::PaneMenu>,
     /// Whether the focused pane fills the conversation band on its own. The
@@ -1116,8 +1154,7 @@ pub struct DashboardState {
     /// reported, for [`DashboardState::notification_events`].
     pub(crate) attention_episodes: BTreeMap<String, crate::notify::AttentionEpisode>,
     pub(crate) attention_navigation: Option<dashboard_sessions::AttentionNavigation>,
-    pub(crate) viewed_failures: BTreeMap<String, crate::notify::ViewedFailure>,
-    pub(crate) drawn_failures: BTreeMap<String, crate::notify::ViewedFailure>,
+    pub(crate) rendered_failure_dismissals: BTreeSet<String>,
     /// The pane, row index, and time of the most recent left click on a
     /// session row, so the next click can be recognized as a double click.
     last_row_click: Option<(Focus, usize, Instant)>,
@@ -1354,7 +1391,7 @@ impl DashboardState {
             browse_pane: None,
             pin_ids: BTreeMap::new(),
 
-            navigation_session: None,
+            pending_navigation: None,
             navigation_subagent_parent: None,
             pane_menu: None,
             conversation_zoomed: false,
@@ -1381,8 +1418,7 @@ impl DashboardState {
             collapsed_project_keys: Default::default(),
             attention_episodes: BTreeMap::new(),
             attention_navigation: None,
-            viewed_failures: BTreeMap::new(),
-            drawn_failures: BTreeMap::new(),
+            rendered_failure_dismissals: BTreeSet::new(),
             last_row_click: None,
             mode: Mode::Dashboard,
             pending_welcome: None,

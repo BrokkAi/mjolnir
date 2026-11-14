@@ -223,8 +223,11 @@ impl DashboardState {
         if self.pane_menu.is_some() {
             return self.handle_pane_menu_event(Event::Mouse(mouse));
         }
+        // An open away dialog owns the pointer, so no background menu opens
+        // under it.
         if mouse.kind == MouseEventKind::Down(MouseButton::Right)
             && matches!(self.mode, Mode::Dashboard)
+            && self.away_dialog().is_none()
         {
             // A right-clicked profile row offers its load-balancing menu.
             let quota_hit = self
@@ -238,8 +241,18 @@ impl DashboardState {
                 self.record_event_handled();
                 return DashboardAction::None;
             }
-            // A right-clicked session row opens that session's menu, the way
-            // right-clicking a web session card does.
+            if let Some(workspace_id) = self
+                .workspace_tab_areas
+                .iter()
+                .find(|(_, area)| area.contains((mouse.column, mouse.row).into()))
+                .map(|(workspace_id, _)| workspace_id.clone())
+            {
+                self.begin_workspace_row_menu(&workspace_id, (mouse.column, mouse.row));
+                self.record_event_handled();
+                return DashboardAction::None;
+            }
+            // A right-clicked session row opens a small menu for that
+            // session, anchored at the click.
             if let Some((index, _)) = self
                 .session_row_areas
                 .iter()
@@ -247,7 +260,7 @@ impl DashboardState {
                 && let Some(id) = self.session_menu_ids.get(*index).cloned()
                 && self.state.sessions.contains_key(&id)
             {
-                self.begin_session_palette_for(&id);
+                self.begin_session_row_menu(&id, (mouse.column, mouse.row));
                 self.record_event_handled();
                 return DashboardAction::None;
             }
@@ -724,6 +737,16 @@ impl DashboardState {
                 operation: Box::new(operation),
             }));
             return DashboardAction::None;
+        }
+        // A stopped row is listed only while its failure needs a person; Enter
+        // resumes it, unless the dialog would refuse the same record.
+        if !session.state.is_active() {
+            if let Some(reason) = crate::resume::unresumable_reason(session.state) {
+                self.notices.set(crate::resume::unresumable_notice(reason));
+                return DashboardAction::None;
+            }
+            let session_id = session.id.clone();
+            return self.begin_resume_for(&session_id);
         }
         // A failed session has two reasonable answers - read what it did, or
         // put it back on a fresh target - and recovery replaces the target, so

@@ -210,20 +210,20 @@ action: RecoverWorkspaceDraft { generation: 1, draft_id: "draft-web" }
 ╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 
-=== five workspace rows in Standard sidebar (110x32) ===
+=== seven workspace rows in Standard sidebar (110x32) ===
 ╭ Workspaces ──────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ──────────────────────────────────── ◇   ⋯───╮
 │ Project 00 界   Project 01 界      ▐ ≡ ││                                                                    │
 │ Project 02 界   Project 03 界      ▐   ││                                                                    │
-│ Project 04 界   Project 05 界      │   ││                                                                    │
-│ Project 06 界   Project 07 界      │   ││                                                                    │
+│ Project 04 界   Project 05 界      ▐   ││                                                                    │
+│ Project 06 界   Project 07 界      ▐   ││                                                                    │
 │ Project 08 界   Project 09 界      │   ││                                                                    │
-╰──────────────────────────────────────╯│                          ✦  M J O L N I R                          │
+│ Project 10 界   Project 11 界      │   ││                          ✦  M J O L N I R                          │
+│ Project 12 界   Project 13 界      │   ││                                                                    │
+╰──────────────────────────────────────╯│                 Create a session to start building.                │
 ╭ Sessions ───────────────── ▁   ▄   □ ╮│                                                                    │
-│ Create   Open   Filter: _____________││                 Create a session to start building.                │
+│ Create   Open   Filter: _____________││                                                                    │
 │No sessions yet                       ││                                                                    │
 │Create new work or open a session.    ││                                                                    │
-│                                      ││                                                                    │
-│                                      ││                                                                    │
 │                                      ││                                                                    │
 │                                      ││                                                                    │
 │                                      ││                                                                    │
@@ -244,20 +244,20 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 ╰──────────────────────────────────────╯╰────────────────────────────────────────────────────────────────────╯
 Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r refresh · s settings · : / ? palette
 
-=== five workspace rows in Maximized sidebar (110x32) ===
+=== seven workspace rows in Maximized sidebar (110x32) ===
 ╭ Workspaces ─────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────── ◇   ⋯───╮
 │ Project 00 界   Project 01 界   Project 02 界      ▐ ≡ ││                                                     │
 │ Project 03 界   Project 04 界   Project 05 界      ▐   ││                                                     │
 │ Project 06 界   Project 07 界   Project 08 界      ▐   ││                                                     │
-│ Project 09 界   Project 10 界   Project 11 界      │   ││                                                     │
-│ Project 12 界   Project 13 界   Project 14 界      │   ││                                                     │
-╰─────────────────────────────────────────────────────╯│                  ✦  M J O L N I R                   │
+│ Project 09 界   Project 10 界   Project 11 界      ▐   ││                                                     │
+│ Project 12 界   Project 13 界   Project 14 界      ▐   ││                                                     │
+│ Project 15 界   Project 16 界   Project 17 界      ▐   ││                  ✦  M J O L N I R                   │
+│ Project 18 界   Project 19 界   Project 20 界      │   ││                                                     │
+╰─────────────────────────────────────────────────────╯│         Create a session to start building.         │
 ╭ Sessions ──────────────────────────────── ▁   ▄   □ ╮│                                                     │
-│ Create   Open   Filter: ________________________    ││         Create a session to start building.         │
+│ Create   Open   Filter: ________________________    ││                                                     │
 │No sessions yet                                      ││                                                     │
 │Create new work or open a session.                   ││                                                     │
-│                                                     ││                                                     │
-│                                                     ││                                                     │
 │                                                     ││                                                     │
 │                                                     ││                                                     │
 │                                                     ││                                                     │
@@ -280,18 +280,18 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 
 === wheel scrolls without switching workspaces (110x32) ===
 ╭ Workspaces ─────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────── ◇   ⋯───╮
-│ Project 03 界   Project 04 界   Project 05 界      ▐ ≡ ││                                                     │
+│ Project 03 界   Project 04 界   Project 05 界      │ ≡ ││                                                     │
 │ Project 06 界   Project 07 界   Project 08 界      ▐   ││                                                     │
 │ Project 09 界   Project 10 界   Project 11 界      ▐   ││                                                     │
-│ Project 12 界   Project 13 界   Project 14 界      │   ││                                                     │
-│ Project 15 界   Project 16 界   Project 17 界      │   ││                                                     │
-╰─────────────────────────────────────────────────────╯│                  ✦  M J O L N I R                   │
+│ Project 12 界   Project 13 界   Project 14 界      ▐   ││                                                     │
+│ Project 15 界   Project 16 界   Project 17 界      ▐   ││                                                     │
+│ Project 18 界   Project 19 界   Project 20 界      ▐   ││                  ✦  M J O L N I R                   │
+│ Project 21 界   Project 22 界   Project 23 界      ▐   ││                                                     │
+╰─────────────────────────────────────────────────────╯│         Create a session to start building.         │
 ╭ Sessions ──────────────────────────────── ▁   ▄   □ ╮│                                                     │
-│ Create   Open   Filter: ________________________    ││         Create a session to start building.         │
+│ Create   Open   Filter: ________________________    ││                                                     │
 │No sessions yet                                      ││                                                     │
 │Create new work or open a session.                   ││                                                     │
-│                                                     ││                                                     │
-│                                                     ││                                                     │
 │                                                     ││                                                     │
 │                                                     ││                                                     │
 │                                                     ││                                                     │
@@ -314,18 +314,18 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 
 === scrollbar seeks to the final workspace rows (110x32) ===
 ╭ Workspaces ─────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────── ◇   ⋯───╮
-│ Project 09 界   Project 10 界   Project 11 界      │ ≡ ││                                                     │
-│ Project 12 界   Project 13 界   Project 14 界      │   ││                                                     │
+│ Project 03 界   Project 04 界   Project 05 界      │ ≡ ││                                                     │
+│ Project 06 界   Project 07 界   Project 08 界      ▐   ││                                                     │
+│ Project 09 界   Project 10 界   Project 11 界      ▐   ││                                                     │
+│ Project 12 界   Project 13 界   Project 14 界      ▐   ││                                                     │
 │ Project 15 界   Project 16 界   Project 17 界      ▐   ││                                                     │
-│ Project 18 界   Project 19 界   Project 20 界      ▐   ││                                                     │
+│ Project 18 界   Project 19 界   Project 20 界      ▐   ││                  ✦  M J O L N I R                   │
 │ Project 21 界   Project 22 界   Project 23 界      ▐   ││                                                     │
-╰─────────────────────────────────────────────────────╯│                  ✦  M J O L N I R                   │
+╰─────────────────────────────────────────────────────╯│         Create a session to start building.         │
 ╭ Sessions ──────────────────────────────── ▁   ▄   □ ╮│                                                     │
-│ Create   Open   Filter: ________________________    ││         Create a session to start building.         │
+│ Create   Open   Filter: ________________________    ││                                                     │
 │No sessions yet                                      ││                                                     │
 │Create new work or open a session.                   ││                                                     │
-│                                                     ││                                                     │
-│                                                     ││                                                     │
 │                                                     ││                                                     │
 │                                                     ││                                                     │
 │                                                     ││                                                     │
@@ -348,18 +348,18 @@ Tab pane │ ctrl+b then g sessions · b panes · q detach · u web · shift+r r
 
 === selecting the final workspace reveals it (110x32) ===
 ╭ Workspaces ─────────────────────── ✦ MJOLNIR vX.Y.Z ╮╭ Browse | Conversation ───────────────────── ◇   ⋯───╮
-│ Project 09 界   Project 10 界   Project 11 界      │ ≡ ││                                                     │
-│ Project 12 界   Project 13 界   Project 14 界      │   ││                                                     │
+│ Project 03 界   Project 04 界   Project 05 界      │ ≡ ││                                                     │
+│ Project 06 界   Project 07 界   Project 08 界      ▐   ││                                                     │
+│ Project 09 界   Project 10 界   Project 11 界      ▐   ││                                                     │
+│ Project 12 界   Project 13 界   Project 14 界      ▐   ││                                                     │
 │ Project 15 界   Project 16 界   Project 17 界      ▐   ││                                                     │
-│ Project 18 界   Project 19 界   Project 20 界      ▐   ││                                                     │
+│ Project 18 界   Project 19 界   Project 20 界      ▐   ││                  ✦  M J O L N I R                   │
 │ Project 21 界   Project 22 界   Project 23 界      ▐   ││                                                     │
-╰─────────────────────────────────────────────────────╯│                  ✦  M J O L N I R                   │
+╰─────────────────────────────────────────────────────╯│         Create a session to start building.         │
 ╭ Sessions ──────────────────────────────── ▁   ▄   □ ╮│                                                     │
-│ Create   Open   Filter: ________________________    ││         Create a session to start building.         │
+│ Create   Open   Filter: ________________________    ││                                                     │
 │No sessions yet                                      ││                                                     │
 │Create new work or open a session.                   ││                                                     │
-│                                                     ││                                                     │
-│                                                     ││                                                     │
 │                                                     ││                                                     │
 │                                                     ││                                                     │
 │                                                     ││                                                     │

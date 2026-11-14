@@ -547,6 +547,18 @@ impl DashboardState {
             mj_core::attention::NotificationDismissal,
         >,
     ) {
+        for (id, detail) in self.session_details.iter_mut() {
+            if let Some(NotificationDismissalState::Accepted { target, .. }) =
+                &detail.notification_dismissal
+                && matches!(
+                    target,
+                    mj_core::attention::NotificationDismissal::Failure(_)
+                )
+                && targets.get(id) != Some(target)
+            {
+                detail.notification_dismissal = None;
+            }
+        }
         self.notification_dismissals = targets;
     }
     pub fn set_session_attention(
@@ -682,18 +694,10 @@ impl DashboardState {
                         rows.remove(child);
                         self.session_details.remove(child);
                         self.project_sources.remove(child);
-                        self.viewed_failures.remove(child);
                     }
                 }
                 self.session_details.remove(id);
                 self.project_sources.remove(id);
-            }
-            if self
-                .viewed_failures
-                .get(id)
-                .is_some_and(|seen| record.as_ref().is_none_or(|record| !seen.matches(record)))
-            {
-                self.viewed_failures.remove(id);
             }
         }
         state.sessions = rows;
@@ -1242,7 +1246,7 @@ impl DashboardState {
         detail.current_turn_started_at = prepared.current_turn_started_at;
         detail.legacy_awaiting_input = prepared.legacy_awaiting_input;
         if matches!(&detail.notification_dismissal,
-            Some(NotificationDismissalState::Accepted { ordinal, .. }) if prepared.applied_event_ordinal >= *ordinal)
+            Some(NotificationDismissalState::Accepted { target: mj_core::attention::NotificationDismissal::Question(_), ordinal }) if prepared.applied_event_ordinal >= *ordinal)
         {
             detail.notification_dismissal = None;
         }
@@ -1323,16 +1327,52 @@ impl DashboardState {
     }
 
     pub(crate) fn begin_dismiss_notification(&mut self) -> crate::DashboardAction {
-        let Some(session_id) = self.command_session_id().map(str::to_owned) else {
+        // While the resume dialog is open, `d` acts on its selected row only;
+        // a native or archive row must not fall through to the dashboard
+        // selection behind the dialog.
+        let target = if matches!(self.mode, crate::Mode::ResumeDialog(_)) {
+            self.resume_command_session_id()
+        } else {
+            self.command_session_id()
+        };
+        let Some(session_id) = target.map(str::to_owned) else {
             return crate::DashboardAction::None;
         };
-        let Some(target) = self.notification_dismissal_target(&session_id) else {
-            return crate::DashboardAction::None;
-        };
-        let detail = self.session_details.entry(session_id.clone()).or_default();
+        self.begin_dismiss_notification_for(&session_id)
+            .unwrap_or(crate::DashboardAction::None)
+    }
+
+    /// Starts the dismissal of one session's current notification, unless one
+    /// is already being submitted for it.
+    pub(crate) fn begin_dismiss_notification_for(
+        &mut self,
+        session_id: &str,
+    ) -> Option<crate::DashboardAction> {
+        if self.notification_dismissal_pending(session_id) {
+            return None;
+        }
+        let target = self.submit_notification_dismissal(session_id)?;
+        Some(crate::DashboardAction::DismissNotification {
+            session_id: session_id.to_owned(),
+            target,
+        })
+    }
+
+    /// Marks the session's current notification as being dismissed and
+    /// returns its target, or `None` when it has nothing to dismiss. Every
+    /// dismissal starts here, so its result is matched against this mark.
+    pub(crate) fn submit_notification_dismissal(
+        &mut self,
+        session_id: &str,
+    ) -> Option<mj_core::attention::NotificationDismissal> {
+        let target = self.notification_dismissal_target(session_id)?;
+        let detail = self
+            .session_details
+            .entry(session_id.to_owned())
+            .or_default();
         detail.notification_dismissal =
             Some(NotificationDismissalState::Submitting(target.clone()));
-        crate::DashboardAction::DismissNotification { session_id, target }
+        Some(target)
     }
 
     pub fn notification_dismissal_finished(
@@ -1341,9 +1381,61 @@ impl DashboardState {
         target: mj_core::attention::NotificationDismissal,
         result: Result<u64, String>,
     ) {
-        let Some(detail) = self.session_details.get_mut(session_id) else {
-            return;
-        };
+        match self.apply_notification_dismissal(session_id, target, result) {
+            Some(Ok(())) => self.set_notice("Notification dismissed."),
+            Some(Err(error)) => {
+                self.set_notice(format!("Could not dismiss notification: {error}"));
+            }
+            None => {}
+        }
+    }
+
+    /// The results of one "Clear notifications": each applied as a single
+    /// dismissal is, then one notice, so a later success cannot hide an
+    /// earlier failure.
+    pub fn notifications_dismissed(
+        &mut self,
+        results: Vec<(
+            String,
+            mj_core::attention::NotificationDismissal,
+            Result<u64, String>,
+        )>,
+    ) {
+        let mut cleared = 0usize;
+        let mut failures = Vec::new();
+        for (session_id, target, result) in results {
+            match self.apply_notification_dismissal(&session_id, target, result) {
+                Some(Ok(())) => cleared += 1,
+                Some(Err(error)) => failures.push(error),
+                None => {}
+            }
+        }
+        let count = |n| crate::widgets::counted(n, "notification", "notifications");
+        match failures.as_slice() {
+            [] if cleared == 0 => {}
+            [] => self.set_notice(format!("Cleared {}.", count(cleared))),
+            [first, ..] if cleared == 0 => self.set_notice(format!(
+                "Could not dismiss {}: {first}",
+                count(failures.len())
+            )),
+            [first, ..] => self.set_notice(format!(
+                "Cleared {}; could not dismiss {}: {first}",
+                count(cleared),
+                failures.len()
+            )),
+        }
+    }
+
+    /// Applies one dismissal result to the session it was submitted for.
+    /// `None` when the notification has since changed and the result no
+    /// longer applies.
+    fn apply_notification_dismissal(
+        &mut self,
+        session_id: &str,
+        target: mj_core::attention::NotificationDismissal,
+        result: Result<u64, String>,
+    ) -> Option<Result<(), String>> {
+        let detail = self.session_details.get_mut(session_id)?;
         let current = match &detail.notification_dismissal {
             Some(NotificationDismissalState::Submitting(current))
             | Some(NotificationDismissalState::Accepted {
@@ -1352,11 +1444,18 @@ impl DashboardState {
             None => false,
         };
         if !current {
-            return;
+            return None;
         }
         match result {
             Ok(ordinal) => {
                 if matches!(
+                    target,
+                    mj_core::attention::NotificationDismissal::Failure(_)
+                ) {
+                    detail.notification_dismissal = (self.notification_dismissals.get(session_id)
+                        == Some(&target))
+                    .then_some(NotificationDismissalState::Accepted { target, ordinal });
+                } else if matches!(
                     target,
                     mj_core::attention::NotificationDismissal::ReadThrough(_)
                 ) {
@@ -1377,11 +1476,11 @@ impl DashboardState {
                         .is_none_or(|applied| applied < ordinal)
                         .then_some(NotificationDismissalState::Accepted { target, ordinal });
                 }
-                self.set_notice("Notification dismissed.");
+                Some(Ok(()))
             }
             Err(error) => {
                 detail.notification_dismissal = None;
-                self.set_notice(format!("Could not dismiss notification: {error}"));
+                Some(Err(error))
             }
         }
     }

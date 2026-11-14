@@ -171,7 +171,7 @@ impl Controller {
             .context("legacy target configuration missing")?;
         let mut target = backend::backend_target(
             configured,
-            record.resource_allocation.as_ref(),
+            mj_core::state::applied_container_settings(&record).resource_allocation,
             backend::ContainerOverrides::for_session(&record),
         )?;
         for notice in super::provisioning::enforce_cgroup_capable_limits(&mut target, executor) {
@@ -198,13 +198,8 @@ impl Controller {
         let (_, template) = target
             .image_host()
             .context("legacy target is not a supported container")?;
-        let mut mounts = record
-            .target_runtime
-            .as_ref()
-            .and_then(|r| r.container_settings.as_ref())
-            .map_or(record.additional_mounts.as_slice(), |s| {
-                s.additional_mounts.as_slice()
-            })
+        let mut mounts = mj_core::state::applied_container_settings(&record)
+            .additional_mounts
             .to_vec();
         // Reattach recorded cache storage without discovery, allocation or
         // release. Historical applied settings contain only user attachments.

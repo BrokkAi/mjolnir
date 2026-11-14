@@ -935,8 +935,7 @@ pub enum DaemonAction {
     },
     SetSessionContainerSettings {
         session_id: String,
-        cpus: Option<String>,
-        memory: Option<String>,
+        resource_allocation: Option<SessionResourceAllocation>,
         mounts: Vec<AdditionalMount>,
         mount_history: Vec<PathBuf>,
     },
@@ -2567,16 +2566,14 @@ impl DaemonClient {
     pub async fn set_session_container_settings(
         &mut self,
         session_id: String,
-        cpus: Option<String>,
-        memory: Option<String>,
+        resource_allocation: Option<SessionResourceAllocation>,
         mounts: Vec<AdditionalMount>,
         mount_history: Vec<PathBuf>,
     ) -> Result<()> {
         match self
             .request(DaemonAction::SetSessionContainerSettings {
                 session_id,
-                cpus,
-                memory,
+                resource_allocation,
                 mounts,
                 mount_history,
             })
@@ -3527,7 +3524,9 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // unread frontiers.
 // Version 95: authenticated daemon-owned login terminal streams.
 // Version 95: milestone-4 setup discovery, availability, login status and machine actions.
-pub const PROTOCOL_VERSION: u32 = 96;
+// Version 97: the daemon decides which sessions are notifications.
+// Version 98: container settings use the single resource allocation.
+pub const PROTOCOL_VERSION: u32 = 98;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
