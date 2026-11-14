@@ -1,0 +1,223 @@
+"""Writes a blind relation brief for each diff with one isolated writer session.
+
+Usage: python3 brief_driver.py <diff id> ... [--concurrency N]
+       python3 brief_driver.py --lint <diff id> ...   # lint existing briefs only
+
+Each writer is a session in the private instance with the reviewers'
+isolation: carrier-style checkout at the introducing commit with
+--no-later-history on the Podman target, no project memory, GitHub or helper
+agents. It gets brief/WRITER.md with the base commit and the commit message
+(trailers removed), writes brief.md in its checkout, and the driver fetches
+it, checks the rules a script can check (lint), and asks the same writer to
+fix a brief that breaks them, at most FIX_ROUNDS times. Output goes to
+$REVIEW_ARMS_DIR/briefs/blind/<diff>/; the transcript is stored under
+reviewers/ so that audit.py can scan it. Every step writes a file; a writer
+with a session is resumed, never started twice.
+"""
+import argparse
+import concurrent.futures
+import hashlib
+import json
+import re
+import subprocess
+import sys
+import threading
+import time
+import traceback
+
+import driver
+from driver import ROOT, SCRIPTS, MJX, mj, save, session
+
+WRITER_MODEL, WRITER_EFFORT = "gpt-6.1-sol", "high"
+FIX_ROUNDS = 2
+MAX_ITEMS = 25
+# "About 1,500 tokens" (brief/PLAN.md); at about 4 characters a token, with slack.
+MAX_CHARS = 7000
+SECTIONS = ["## Affected callers", "## Paths", "## Value flow"]
+JUDGMENT = re.compile(r"\b(bugs?|wrong|missing|should|risks?|risky|unsafe|issues?|problems?|incorrect(ly)?|"
+                      r"broken|fails? to|forgets?|forgot|forgotten|flaw|mistake|careful|beware|ensure)\b", re.I)
+ANCHOR = re.compile(r"([A-Za-z0-9_./-]+\.[A-Za-z0-9]+):(\d+)(?:-(\d+))?")
+
+
+def changed_lines(bug):
+    """New-side line numbers each file's hunks touch at the introducing commit."""
+    out = subprocess.check_output(["git", "-C", driver.REPO, "diff", "-U0", "--no-color",
+                                   bug["base_commit"], bug["intro_commit"]]).decode(errors="replace")
+    lines, path = {}, None
+    for line in out.splitlines():
+        if line.startswith("+++ "):
+            path = None if line[4:] == "/dev/null" else line[6:]
+        elif line.startswith("@@") and path:
+            m = re.match(r"@@ -\S+ \+(\d+)(?:,(\d+))? @@", line)
+            start, count = int(m.group(1)), int(m.group(2) or 1)
+            lines.setdefault(path, set()).update(range(start, start + count))
+    return lines
+
+
+def lint(text, bug):
+    changed = changed_lines(bug)
+    problems = []
+    for s in SECTIONS:
+        if s not in text:
+            problems.append(f"section `{s}` is absent")
+    items = [l.strip()[2:] for l in text.splitlines() if l.strip().startswith("- ")]
+    items = [i for i in items if i.strip().lower() != "none"]
+    if len(items) > MAX_ITEMS:
+        problems.append(f"{len(items)} items; the limit is {MAX_ITEMS}")
+    if len(text) > MAX_CHARS:
+        problems.append(f"{len(text)} characters; the limit is about 1,500 tokens ({MAX_CHARS} characters)")
+    for n, item in enumerate(items, 1):
+        prose = re.sub(r"`[^`]*`", "", item)  # identifiers such as `missing_ok` are not judgments
+        words = sorted({m.group(0).lower() for m in JUDGMENT.finditer(prose)})
+        if words:
+            problems.append(f"item {n} uses judgment words {words}: {item[:120]}")
+        anchors = [(m.group(1), int(m.group(2)), int(m.group(3) or m.group(2))) for m in ANCHOR.finditer(item)]
+        if not anchors:
+            problems.append(f"item {n} has no file:line anchor: {item[:120]}")
+        elif all(p in changed and set(range(a, b + 1)) <= changed[p] for p, a, b in anchors):
+            problems.append(f"item {n} has no anchor outside the changed lines: {item[:120]}")
+    return problems
+
+
+def wait_command(sid, command, limit=1800):
+    end = time.monotonic() + limit
+    while time.monotonic() < end:
+        s = session(sid)
+        outcome = s.get("last_turn_outcome") or {}
+        if outcome.get("command_id") == command and s.get("is_idle"):
+            if outcome["outcome"]["kind"] != "completed":
+                raise RuntimeError(f"writer turn did not complete: {json.dumps(outcome)[:600]}")
+            return outcome
+        if s.get("lifecycle") == "failed" or s.get("has_error"):
+            raise RuntimeError(f"writer session {sid} failed: {json.dumps(s)[:600]}")
+        time.sleep(5)
+    raise TimeoutError(f"writer turn {command} did not finish")
+
+
+def fetch_brief(sid):
+    r = subprocess.run([str(MJX), "fetch", "--session", sid, "--path", "brief.md", "--stdout"],
+                       capture_output=True, timeout=300)
+    if r.returncode:
+        raise RuntimeError(f"writer {sid} left no brief.md: {r.stderr.decode()[-400:]}")
+    return r.stdout.decode()
+
+
+def send(d, sid, name, command, text):
+    (d / f"{name}.txt").write_text(text)
+    if not (d / f"{name}-request.json").exists():
+        save(d / f"{name}-request.json", mj("message", "--session", sid, "--command-id", command,
+                                            "--prompt-file", d / f"{name}.txt"))
+    if not (d / f"{name}-completion.json").exists():
+        save(d / f"{name}-completion.json", wait_command(sid, command))
+
+
+def run(bug_id, gate):
+    bug = driver.CORPUS[bug_id]
+    d = ROOT / "briefs" / "blind" / bug_id
+    if (d / "done.json").exists():
+        return "done"
+    tag = hashlib.sha256(("brief" + bug_id).encode()).hexdigest()
+    if (d / "launch.json").exists():
+        sid = json.loads((d / "launch.json").read_text())["session_id"]
+    elif (d / "launch-intent.json").exists():
+        return "needs-recovery"  # a session may exist without a record; find it before rerunning
+    else:
+        save(d / "launch-intent.json", {"bug": bug_id, "model": WRITER_MODEL, "effort": WRITER_EFFORT,
+                                        "time_ns": time.time_ns()})
+        with gate:
+            launch = mj("new", "--workspace-id", driver.WORKSPACE, "--target", "podman", "--bundle", "mjolnir",
+                        "--at", bug["intro_commit"], "--base", bug["base_commit"], "--no-later-history",
+                        "--model", WRITER_MODEL, "--effort", WRITER_EFFORT, "--review", "off",
+                        "--no-project-memory", "--no-github-events", "--no-github-credentials",
+                        "--subagents", "none", "--title", "brief " + tag[:8], timeout=900)
+            save(d / "launch.json", launch)
+            sid = launch["session_id"]
+            driver.wait_idle(sid)
+    if not (d / "settings.json").exists():
+        s = session(sid)
+        assert s["no_later_history"] and s["at"] == bug["intro_commit"] and s["base"] == bug["base_commit"], s
+        for key in ("web_fetch", "web_search"):
+            if any(c["key"] == key for c in s.get("config_options", [])):
+                mj("set-config", "--session", sid, "--key", key, "--value", "disabled")
+        settings = {c["key"]: c.get("current") for c in session(sid).get("config_options", [])}
+        assert settings.get("model") == WRITER_MODEL, settings
+        save(d / "settings.json", settings)
+        place = driver.container(sid)
+        save(d / "placement.json", place)
+        before = driver.inventory(place, "audit", bug["base_commit"])
+        assert not before["remotes"] and not before["alternates"] and not before["status"], before
+        save(d / "pre-inventory.json", before)
+
+    prompt = ((SCRIPTS / "brief/WRITER.md").read_text()
+              .replace("{base}", bug["base_commit"]).replace("{message}", driver.commit_message(bug)))
+    send(d, sid, "prompt", "brief-" + tag[:32], prompt)
+    text = fetch_brief(sid)
+    rounds = 0
+    while True:
+        problems = lint(text, bug)
+        save(d / f"lint-{rounds}.json", problems)
+        if not problems or rounds == FIX_ROUNDS:
+            break
+        rounds += 1
+        fix = ("Your brief.md breaks these rules from the instructions:\n\n"
+               + "\n".join(f"- {p}" for p in problems)
+               + "\n\nFix brief.md so that it follows every rule, then reply `brief written`.\n")
+        send(d, sid, f"fix-{rounds}", f"brief-fix{rounds}-" + tag[:28], fix)
+        text = fetch_brief(sid)
+    (d / "brief.md").write_text(text)
+    if not (d / "inventory-check.json").exists():
+        # The writer may add brief.md and nothing else; audit.py reads this file.
+        place = json.loads((d / "placement.json").read_text())
+        after = driver.inventory(place, "audit", bug["base_commit"])
+        save(d / "post-inventory.json", after)
+        only_brief = {k: "?? brief.md" for k in ("status", "ignored")}
+        problems_inv, new_refs = driver.compare_inventories(
+            json.loads((d / "pre-inventory.json").read_text()),
+            {**after, **{k: "" for k, v in only_brief.items() if after.get(k, "").strip() == v}})
+        save(d / "inventory-check.json", {"problems": problems_inv, "new_refs": new_refs})
+    cd = d / "reviewers" / sid[:12]
+    save(cd / "transcript.json", driver.transcript(sid))
+    save(cd / "usage.json", mj("usage", "--session", sid))
+    save(d / "suspend.json", mj("suspend", "--session", sid, "--acknowledge-unpublished-work", timeout=900))
+    inv = json.loads((d / "inventory-check.json").read_text())["problems"]
+    save(d / "done.json", {"bug": bug_id, "session_id": sid, "fix_rounds": rounds, "lint_problems": problems,
+                           "inventory_problems": inv, "finished_ns": time.time_ns()})
+    if inv:
+        raise RuntimeError(f"writer changed the checkout beyond brief.md: {inv}")
+    if problems:
+        raise RuntimeError(f"brief still breaks {len(problems)} rules after {rounds} fix rounds; see lint-{rounds}.json")
+    return "done"
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("bugs", nargs="+")
+    p.add_argument("--concurrency", type=int, default=1)
+    p.add_argument("--lint", action="store_true")
+    a = p.parse_args()
+    if a.lint:
+        for b in a.bugs:
+            text = (ROOT / "briefs" / "blind" / b / "brief.md").read_text()
+            print(json.dumps({"bug": b, "problems": lint(text, driver.CORPUS[b])}))
+        return 0
+    gate = threading.Semaphore(2)  # serialize session startup as driver.py does
+
+    def one(b):
+        try:
+            return b, run(b, gate), None
+        except Exception as e:  # report every failure with its diff
+            save(ROOT / "briefs" / "blind" / b / "error.json",
+                 {"error": str(e), "traceback": traceback.format_exc(), "time_ns": time.time_ns()})
+            return b, "failed", str(e)
+
+    unfinished = 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=a.concurrency) as pool:
+        for f in concurrent.futures.as_completed([pool.submit(one, b) for b in a.bugs]):
+            b, state, error = f.result()
+            print(json.dumps({"bug": b, "state": state, "error": error}), flush=True)
+            unfinished += state != "done"
+    return 1 if unfinished else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
