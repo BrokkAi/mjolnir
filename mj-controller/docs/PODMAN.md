@@ -227,12 +227,17 @@ still as those checks found it, so rerun `mj doctor` after changing Podman on
 that host.
 
 Such a runtime also gets a second check, `Host limits for target
-<id>`, for the two host limits that cause failures when many sessions start
+<id>`, for the host limits that cause failures when many sessions start
 at once. It reports how many kernel keys the SSH login user holds against its
 quota in `/proc/key-users`, because every container takes a session keyring
 and `podman run` fails with `crun: create keyring` once the quota is gone; fix
 that on the host by raising `kernel.keys.maxkeys` and `kernel.keys.maxbytes`
-with sysctl. It also reports the `MaxStartups` value set in
+with sysctl. It also reports `fs.inotify.max_user_instances`, which caps the
+inotify instances the one login user may hold for every rootless container at
+once; below mj's fleet value of 8192 (Ubuntu's default is 128) it warns,
+because file watchers then fail with `Too many open files`. Raise both with
+sysctl; hosts mj makes get `/etc/sysctl.d/90-mj-limits.conf` from
+`mj ec2 create` or `mj ec2 tune`. It also reports the `MaxStartups` value set in
 `/etc/ssh/sshd_config` or a readable drop-in, which caps how many
 unauthenticated connections sshd accepts at once; raise it there and reload
 sshd if provisioning sees dropped connections. Doctor reads the files rather

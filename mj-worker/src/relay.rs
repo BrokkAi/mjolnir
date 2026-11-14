@@ -328,6 +328,12 @@ pub struct DurableRelay {
     held_writes: VecDeque<checkpoint_hold::HeldWrite>,
     /// The barrier whose hold something that could not wait already ended.
     hold_ended_for: Option<String>,
+    /// The barrier whose cut background work started after. See
+    /// `checkpoint_hold`.
+    cut_spoiled_for: Option<String>,
+    /// The background work the relay last saw, to tell work that starts from
+    /// work already running. See `checkpoint_hold`.
+    known_background_work: BTreeSet<String>,
     /// Benchmark aid: stage and persist a snapshot on every append, the way
     /// the relay did before transcript appends were amortized, so both
     /// policies can be timed in one process.
@@ -641,6 +647,8 @@ impl DurableRelay {
             agent_terminal_tool_calls: BTreeMap::new(),
             held_writes: VecDeque::new(),
             hold_ended_for: None,
+            cut_spoiled_for: None,
+            known_background_work: BTreeSet::new(),
             #[cfg(test)]
             stage_snapshot_every_append: false,
         };
@@ -1092,6 +1100,9 @@ impl DurableRelay {
     }
 
     fn persist_activity_transition(&mut self) -> Result<()> {
+        // The one place background work gains members: every change to it
+        // ends here, journaled or not.
+        self.note_background_work()?;
         if self.refresh_idle_clock(epoch_millis()) {
             self.persist_snapshot()
                 .context("persist session idle transition")?;

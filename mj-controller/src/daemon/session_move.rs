@@ -99,7 +99,8 @@ impl RuntimeState {
                 &controller.config.targets,
                 controller.state.subagents.contains_key(&source.id),
                 previous,
-            );
+            )
+            .map_err(|error| anyhow::Error::new(Refusal::precondition(error.to_string())))?;
             let allocation = if selection.clear_resource_allocation {
                 None
             } else {

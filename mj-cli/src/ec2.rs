@@ -37,6 +37,9 @@ enum Ec2Command {
     /// Terminate a managed VM and delete its disk, sessions, keys, and target.
     /// Also cleans up an interrupted create; accepts its operation ID.
     Destroy(DestroyArgs),
+    /// Re-apply mj's host tuning (kernel limits) to an existing managed host,
+    /// so hosts made before a tuning change do not need to be recreated.
+    Tune(TuneArgs),
 }
 
 #[derive(Clone, Debug, Default, Args)]
@@ -137,6 +140,12 @@ struct DestroyArgs {
     host: String,
     #[command(flatten)]
     aws: AwsArgs,
+}
+
+#[derive(Debug, Args)]
+struct TuneArgs {
+    /// Machine name from the create that made the host.
+    host: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -412,6 +421,7 @@ pub(crate) async fn run(args: Ec2Args) -> Result<()> {
             Ec2Command::Create(args) => create(args, &root),
             Ec2Command::List(args) => list(args, &root),
             Ec2Command::Destroy(args) => destroy(args, &root),
+            Ec2Command::Tune(args) => tune(args),
         }
     })
     .await
@@ -1568,6 +1578,37 @@ fn remove_configuration(record: &Record, root: &Path, path: &Path) -> Result<()>
     Ok(())
 }
 
+/// Re-apply the tuning `bootstrap` installs to a host that already exists:
+/// the kernel limits land from the same script, over SSH, with sudo.
+fn tune(args: TuneArgs) -> Result<()> {
+    let config = Config::load()?;
+    let Some(Machine::Ssh { ssh, .. }) = config.machines.get(&args.host) else {
+        bail!("no ssh machine named {:?}; check the name with `mj ec2 list`", args.host);
+    };
+    eprintln!("Applying mj's kernel limits to {} ({}).", args.host, ssh.host);
+    checked(
+        &mut ssh_command(ssh, "sudo bash -s"),
+        include_str!("ec2_sysctl.sh").as_bytes(),
+    )?;
+    let readback = checked(
+        &mut ssh_command(
+            ssh,
+            "printf 'fs.inotify.max_user_instances='; cat /proc/sys/fs/inotify/max_user_instances;\
+             printf 'kernel.keys.maxkeys='; cat /proc/sys/kernel/keys/maxkeys",
+        ),
+        &[],
+    )?;
+    let stdout = String::from_utf8_lossy(&readback.stdout);
+    let value = |key: &str| stdout.lines().find_map(|line| line.strip_prefix(key));
+    eprintln!(
+        "{} now allows {} inotify instances and {} kernel keys per user.",
+        args.host,
+        value("fs.inotify.max_user_instances=").unwrap_or("?"),
+        value("kernel.keys.maxkeys=").unwrap_or("?"),
+    );
+    Ok(())
+}
+
 fn bootstrap(zfs_cache: bool) -> String {
     let zfs = if zfs_cache {
         include_str!("ec2_zfs.sh")
@@ -1578,6 +1619,7 @@ fn bootstrap(zfs_cache: bool) -> String {
         r#"#!/bin/bash
 set -euxo pipefail
 {ssh_setup}
+{sysctl_setup}
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y podman uidmap slirp4netns fuse-overlayfs dbus-user-session git curl ca-certificates mold {packages}
@@ -1587,6 +1629,7 @@ systemctl start user@1000.service
 sudo -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 podman info --format '{{{{.Host.Security.Rootless}}}}'
 "#,
         ssh_setup = include_str!("ec2_sshd.sh"),
+        sysctl_setup = include_str!("ec2_sysctl.sh"),
         packages = if zfs_cache { "zfsutils-linux" } else { "" }
     )
 }
@@ -1746,6 +1789,11 @@ elif op == 'run-instances':
         assert 'Requires=mj-ec2-cache.service' in bootstrap
     else:
         assert '/mnt/nvme/podman' not in bootstrap
+    if not (root/'nitro').exists():
+        assert '/etc/sysctl.d/90-mj-limits.conf' in bootstrap
+        for sysctl in ['fs.inotify.max_user_instances = 8192','fs.inotify.max_user_watches = 1048576','user.max_inotify_instances = 8192','kernel.keys.maxkeys = 4096','kernel.keys.maxbytes = 409600']:
+            assert sysctl in bootstrap, sysctl
+        assert bootstrap.index('cat > /etc/sysctl.d/90-mj-limits.conf') < bootstrap.index('sysctl --system')
     if (root/'fail-launch').exists(): sys.exit('An error occurred (InsufficientInstanceCapacity) when calling the RunInstances operation: capacity unavailable')
     tags = next(t['Tags'] for t in request['TagSpecifications'] if t['ResourceType']=='instance')
     assert next(t['Value'] for t in tags if t['Key']=='mj:operation') == request['ClientToken']
@@ -1841,6 +1889,10 @@ else:
                     "case \"$remote_command\" in\n",
                     "*'systemctl --no-block reboot'*) echo boot-2 > \"$MJ_EC2_FIXTURE_CHILD/boot_id\" ;;\n",
                     "*dmesg*) printf '6.18.56-126.188.amzn2023\\nnitro_enclaves: CMA pool: 49152 MiB reserved\\n' ;;\n",
+                    // `tune` pipes the sysctl script to `sudo bash -s`; capture it
+                    // instead of running it on the test host.
+                    "*'sudo bash -s'*) cat > \"$MJ_EC2_FIXTURE_CHILD/tune-script\" ;;\n",
+                    "*'cat /proc/sys/fs/inotify/max_user_instances'*) printf 'fs.inotify.max_user_instances=8192\nkernel.keys.maxkeys=4096\n' ;;\n",
                     "*) exec sh -c \"$remote_command\" ;;\nesac\n",
                 ),
             ),
@@ -1890,6 +1942,62 @@ else:
             zfs_cache: false,
             json: true,
         }
+    }
+
+    #[test]
+    fn tune_applies_the_kernel_limits_to_an_existing_host() {
+        if let Some(output) = fixture_output(
+            "ec2::tests::tune_applies_the_kernel_limits_to_an_existing_host",
+            None,
+        ) {
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let fixture = PathBuf::from(std::env::var_os("MJ_EC2_FIXTURE_CHILD").unwrap());
+        Config::update(|config| {
+            config.machines.insert(
+                "builder".into(),
+                Machine::Ssh {
+                    ssh: SshConnection {
+                        host: "192.0.2.7".into(),
+                        user: Some("ubuntu".into()),
+                        identity_file: None,
+                        extra_args: Vec::new(),
+                    },
+                    workspace_prefix: mj_core::config::DEFAULT_WORKSPACE_PREFIX.into(),
+                    build_cache: None,
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
+        tune(TuneArgs {
+            host: "builder".into(),
+        })
+        .unwrap();
+        let script = fs::read_to_string(fixture.join("tune-script")).unwrap();
+        for sysctl in [
+            "fs.inotify.max_user_instances = 8192",
+            "fs.inotify.max_user_watches = 1048576",
+            "user.max_inotify_instances = 8192",
+            "kernel.keys.maxkeys = 4096",
+            "kernel.keys.maxbytes = 409600",
+        ] {
+            assert!(script.contains(sysctl), "{sysctl}");
+        }
+        assert!(script.contains("sysctl --system"));
+        let calls = fs::read_to_string(fixture.join("ssh-calls")).unwrap();
+        assert!(calls.contains("sudo bash -s"), "{calls}");
+        assert!(calls.contains("cat /proc/sys/fs/inotify/max_user_instances"));
+        let error = tune(TuneArgs {
+            host: "missing".into(),
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("no ssh machine named"));
     }
 
     #[test]

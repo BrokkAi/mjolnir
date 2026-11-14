@@ -680,6 +680,10 @@ impl DurableRelay {
         command_id: Option<&str>,
         observation: RelayObservation,
     ) -> Result<u64> {
+        // Every journal write passes here, so this is the one place that
+        // decides whether a ready checkpoint barrier's hold survives it. What
+        // waited is journaled first, which also keeps arrival order.
+        self.end_checkpoint_hold_for(command_id, &observation)?;
         let ordinal = self
             .snapshot
             .latest_ordinal
