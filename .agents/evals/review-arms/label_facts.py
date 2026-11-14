@@ -6,12 +6,18 @@ Usage:
    "batches": item IDs of each batch-N.json in order}; save its result as
    $REVIEW_ARMS_DIR/label-facts/workflow-out.json)
   python3 label_facts.py collect   # writes results/missing-facts.jsonl and a summary
+  python3 label_facts.py build-pass2   # items labeled "none: in_diff" -> label-facts/pass2/
+  (run label/workflow-pass2.js, args = {"dir": "$REVIEW_ARMS_DIR/label-facts/pass2",
+   "ids": the IDs it prints}; save its result as label-facts/pass2/workflow-out.json)
+  python3 label_facts.py collect-pass2  # writes results/missing-facts-pass2.jsonl
 
 Items: every Hard-won diff with its known defect, and every sampled diff that
 has a confirmed problem in <verify>, with its most severe one (then highest
 confidence, then first group). Sampled diffs with no confirmed problem are
 left out. Each batch goes to one Opus/high labeler that follows label/SPEC.md
-and returns its labels as structured output.
+and returns its labels as structured output. The second pass gives each item
+the first pass labeled "visible in the diff" to one Opus/high labeler that
+follows label/SPEC-pass2.md, with the first pass's fact and evidence.
 """
 import argparse
 import collections
@@ -27,7 +33,7 @@ L = ROOT / "label-facts"
 SEV = {"high": 3, "medium": 2, "low": 1}
 
 p = argparse.ArgumentParser()
-p.add_argument("step", choices=["build", "collect"])
+p.add_argument("step", choices=["build", "collect", "build-pass2", "collect-pass2"])
 p.add_argument("--verify", default="verify3")
 p.add_argument("--batch-size", type=int, default=5)
 a = p.parse_args()
@@ -97,4 +103,31 @@ def collect():
                      indent=1))
 
 
-{"build": build, "collect": collect}[a.step]()
+def build_pass2():
+    items = {it["id"]: it for it in json.loads((L / "items.json").read_text())}
+    P = L / "pass2"
+    P.mkdir(exist_ok=True)
+    ids = []
+    for line in open(HERE / "results/missing-facts.jsonl"):
+        r = json.loads(line)
+        if r["kind"] == "none" and r["none_reason"] == "in_diff":
+            item = {k: v for k, v in items[r["id"]].items() if k not in ("source", "group", "severity")}
+            item["first_pass"] = {k: r[k] for k in ("fact", "evidence", "other_facts")}
+            save(P / f"item-{r['id']}.json", item)
+            ids.append(r["id"])
+    (P / "SPEC.md").write_text((HERE / "label/SPEC-pass2.md").read_text())
+    print(json.dumps(ids))
+
+
+def collect_pass2():
+    first = {json.loads(l)["id"]: json.loads(l) for l in open(HERE / "results/missing-facts.jsonl")}
+    out = json.loads((L / "pass2/workflow-out.json").read_text())
+    assert not out["missing"], f"unlabeled items: {out['missing']}"
+    rows = [{**{k: first[x["id"]][k] for k in ("id", "source", "intro", "defect")},
+             **{k: v for k, v in x.items() if k != "id"}} for x in sorted(out["labels"], key=lambda x: x["id"])]
+    (HERE / "results/missing-facts-pass2.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    print(json.dumps({"kind": collections.Counter(r["kind"] for r in rows),
+                      "specificity": collections.Counter(r["specificity"] for r in rows)}, indent=1))
+
+
+{"build": build, "collect": collect, "build-pass2": build_pass2, "collect-pass2": collect_pass2}[a.step]()
