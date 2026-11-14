@@ -238,6 +238,16 @@ impl DashboardState {
                 self.record_event_handled();
                 return DashboardAction::None;
             }
+            if let Some(workspace_id) = self
+                .workspace_tab_areas
+                .iter()
+                .find(|(_, area)| area.contains((mouse.column, mouse.row).into()))
+                .map(|(workspace_id, _)| workspace_id.clone())
+            {
+                self.begin_workspace_row_menu(&workspace_id, (mouse.column, mouse.row));
+                self.record_event_handled();
+                return DashboardAction::None;
+            }
             // A right-clicked session row opens a small menu for that
             // session, anchored at the click.
             if let Some((index, _)) = self

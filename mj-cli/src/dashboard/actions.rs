@@ -298,23 +298,43 @@ pub(crate) async fn apply_dashboard_action(
                 "notification dismissal",
                 context.dashboard_io_tx.clone(),
                 std::time::Duration::from_secs(30),
-                async move {
-                    let mut client = daemon::connect_existing().await?;
-                    match client
-                        .request(mj_client::daemon::DaemonAction::DismissNotification {
-                            session_id,
-                            target,
-                        })
-                        .await?
-                    {
-                        mj_client::daemon::DaemonReply::Ordinal(ordinal) => Ok(ordinal),
-                        reply => anyhow::bail!("unexpected dismissal reply: {reply:?}"),
-                    }
-                },
+                request_notification_dismissal(session_id, target),
                 move |result| DashboardIoUpdate::NotificationDismissed {
                     session_id: result_session,
                     target: result_target,
                     result,
+                },
+            );
+        }
+        DashboardAction::DismissNotifications { dismissals } => {
+            // One supervised job sends every dismissal at once and reports
+            // all results together; a timeout fails the ones still pending.
+            let submitted = dismissals.clone();
+            spawn_async_job(
+                Some(context.critical_operations.clone()),
+                "notification dismissals",
+                context.dashboard_io_tx.clone(),
+                std::time::Duration::from_secs(30),
+                async move {
+                    Ok(futures::future::join_all(dismissals.into_iter().map(
+                        |(session_id, target)| async move {
+                            let result =
+                                request_notification_dismissal(session_id.clone(), target.clone())
+                                    .await
+                                    .map_err(|error| format!("{error:#}"));
+                            (session_id, target, result)
+                        },
+                    ))
+                    .await)
+                },
+                move |result| DashboardIoUpdate::NotificationsDismissed {
+                    results: match result {
+                        Ok(results) => results,
+                        Err(error) => submitted
+                            .into_iter()
+                            .map(|(session_id, target)| (session_id, target, Err(error.clone())))
+                            .collect(),
+                    },
                 },
             );
         }
@@ -2287,6 +2307,22 @@ async fn dispatch_restart(
     daemon
         .restart_session_with_ack(session_id, acknowledge_container_recreation)
         .await
+}
+
+/// Asks the daemon to dismiss one session's notification; the single and the
+/// workspace-wide dismissal both send it.
+async fn request_notification_dismissal(
+    session_id: String,
+    target: mj_core::attention::NotificationDismissal,
+) -> Result<u64> {
+    let mut client = daemon::connect_existing().await?;
+    match client
+        .request(mj_client::daemon::DaemonAction::DismissNotification { session_id, target })
+        .await?
+    {
+        mj_client::daemon::DaemonReply::Ordinal(ordinal) => Ok(ordinal),
+        reply => anyhow::bail!("unexpected dismissal reply: {reply:?}"),
+    }
 }
 
 #[cfg(test)]
