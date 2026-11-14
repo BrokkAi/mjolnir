@@ -1,7 +1,7 @@
 //! Move intent uses the same guarded writer as session lifecycle transitions.
 
 use super::*;
-use mj_core::state::MoveOperation;
+use mj_core::state::{MoveOperation, MoveSelection};
 
 pub fn retain_move_source(operation: &MoveOperation) -> Result<()> {
     let operation = operation.clone();
@@ -64,6 +64,42 @@ pub fn save_move_operation(operation: &MoveOperation) -> Result<()> {
     })
 }
 
+/// Record the person's requests atomically with acceptance of the Move intent.
+pub(crate) fn accept_move_operation(operation: &MoveOperation) -> Result<()> {
+    let operation = operation.clone();
+    submit_database_write("accept Move", move |connection| {
+        let tx = connection.transaction()?;
+        update_move_requests(&tx, &operation.selection)?;
+        save_move_operation_with(&tx, &operation)?;
+        tx.commit()?;
+        Ok(())
+    })
+}
+
+/// An unchanged Move still accepts the person's explicit next-creation choices.
+pub(crate) fn accept_unchanged_move(selection: &MoveSelection) -> Result<()> {
+    let selection = selection.clone();
+    submit_database_write("accept unchanged Move", move |connection| {
+        let tx = connection.transaction()?;
+        update_move_requests(&tx, &selection)?;
+        tx.commit()?;
+        Ok(())
+    })
+}
+
+fn update_move_requests(tx: &Transaction<'_>, selection: &MoveSelection) -> Result<()> {
+    super::state_io::update_container_requests(
+        tx,
+        &selection.session_id,
+        if selection.clear_resource_allocation {
+            Some(None)
+        } else {
+            selection.resource_allocation.as_ref().map(Some)
+        },
+        selection.additional_mounts.as_deref(),
+    )
+}
+
 /// Publish destination adoption and ownership together, without changing client fields.
 pub fn adopt_move_destination(operation: &MoveOperation, session: &SessionRecord) -> Result<()> {
     let operation = operation.clone();
@@ -71,7 +107,6 @@ pub fn adopt_move_destination(operation: &MoveOperation, session: &SessionRecord
     submit_database_write("adopt_move_destination", move |connection| {
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         update_lifecycle_fields(&tx, &session)?;
-        super::state_io::update_resource_allocation(&tx, &session)?;
         save_move_operation_with(&tx, &operation)?;
         tx.commit()?;
         Ok(())
@@ -879,5 +914,38 @@ mod tests {
         assert_eq!(current.draft_input, "keep this draft");
         assert_eq!(current.session_title_override.as_deref(), Some("new title"));
         assert_eq!(current.last_profile, "destination");
+
+        // A no-op Move's omitted choices cannot overwrite a settings edit.
+        let allocation = SessionResourceAllocation::Container {
+            cpus: 8,
+            memory_bytes: 16 << 30,
+        };
+        set_session_container_settings_to(
+            &path,
+            &stale.id,
+            Some(&allocation),
+            &current.additional_mounts,
+            &current.updated_at,
+        )
+        .unwrap();
+        let mut selection = operation(&stale).selection;
+        selection.additional_mounts = None;
+        let mut connection = open(&path).unwrap();
+        let tx = connection.transaction().unwrap();
+        update_move_requests(&tx, &selection).unwrap();
+        tx.commit().unwrap();
+        let retained = load_session_with(&connection, &stale.id).unwrap().unwrap();
+        assert_eq!(retained.resource_allocation, Some(allocation));
+        assert_eq!(retained.additional_mounts, current.additional_mounts);
+
+        // An explicit choice still applies when no environment change is needed.
+        selection.clear_resource_allocation = true;
+        selection.additional_mounts = Some(Vec::new());
+        let tx = connection.transaction().unwrap();
+        update_move_requests(&tx, &selection).unwrap();
+        tx.commit().unwrap();
+        let changed = load_session_with(&connection, &stale.id).unwrap().unwrap();
+        assert_eq!(changed.resource_allocation, None);
+        assert!(changed.additional_mounts.is_empty());
     }
 }

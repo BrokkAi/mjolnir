@@ -1623,23 +1623,25 @@ pub fn record_operator_away_worker_protocol(session: String, protocol: u32) -> R
     })
 }
 
-/// Explicit size changes belong to Resume/Move and the settings writer;
-/// generic lifecycle or checkpoint saves must preserve a newer editor save.
-pub(super) fn update_resource_allocation(
+/// Only explicit dialog choices change next-creation requests.
+pub(super) fn update_container_requests(
     tx: &Transaction<'_>,
-    session: &SessionRecord,
+    session_id: &str,
+    allocation: Option<Option<&SessionResourceAllocation>>,
+    mounts: Option<&[AdditionalMount]>,
 ) -> Result<()> {
-    tx.execute(
-        "UPDATE sessions SET resource_allocation=?2 WHERE session_id=?1",
-        params![
-            session.id,
-            session
-                .resource_allocation
-                .as_ref()
-                .map(serde_json::to_string)
-                .transpose()?
-        ],
-    )?;
+    if let Some(allocation) = allocation {
+        tx.execute(
+            "UPDATE sessions SET resource_allocation=?2 WHERE session_id=?1",
+            params![
+                session_id,
+                allocation.map(serde_json::to_string).transpose()?
+            ],
+        )?;
+    }
+    if let Some(mounts) = mounts {
+        replace_mounts(tx, session_id, mounts)?;
+    }
     Ok(())
 }
 

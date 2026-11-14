@@ -657,8 +657,8 @@ pub fn save_session_with_container_size(
     })
 }
 
-/// Resume owns the target, checkout and attached resources, never a client's
-/// title, draft, archive visibility or the worker's current display title.
+/// Resume publication owns the target and checkout. Requested size and mounts,
+/// client titles, drafts, archive visibility and worker titles keep their owners.
 pub fn save_resumed_session(
     session: &SessionRecord,
     container_size: Option<(&str, HostContainerSize)>,
@@ -676,12 +676,34 @@ pub fn save_resumed_session(
     })
 }
 
+/// Commit explicit dialog choices together with the first provisioning publication.
+pub(crate) fn accept_resumed_session(
+    session: &SessionRecord,
+    container_size: Option<(&str, HostContainerSize)>,
+    requests: &crate::controller::SessionResumeOptions,
+) -> Result<()> {
+    let session = session.clone();
+    let requests = requests.clone();
+    let container_size = container_size.map(|(host, size)| (host.to_owned(), size));
+    submit_database_write("accept resumed session", move |_| {
+        save_resumed_session_in_environment_to(
+            &database_path(),
+            &session,
+            container_size
+                .as_ref()
+                .map(|(host, size)| (host.as_str(), *size)),
+            None,
+            Some(&requests),
+        )
+    })
+}
+
 pub(super) fn save_resumed_session_to(
     path: &Path,
     session: &SessionRecord,
     container_size: Option<(&str, HostContainerSize)>,
 ) -> Result<()> {
-    save_resumed_session_in_environment_to(path, session, container_size, None)
+    save_resumed_session_in_environment_to(path, session, container_size, None, None)
 }
 
 pub(crate) fn restore_resumed_session(session: &SessionRecord, environment_id: &str) -> Result<()> {
@@ -693,6 +715,7 @@ pub(crate) fn restore_resumed_session(session: &SessionRecord, environment_id: &
             &session,
             None,
             Some(&environment_id),
+            None,
         )
     })
 }
@@ -702,6 +725,7 @@ fn save_resumed_session_in_environment_to(
     session: &SessionRecord,
     container_size: Option<(&str, HostContainerSize)>,
     environment_id: Option<&str>,
+    requests: Option<&crate::controller::SessionResumeOptions>,
 ) -> Result<()> {
     validate_session_record(session)?;
     let mut connection = open(path)?;
@@ -732,7 +756,14 @@ fn save_resumed_session_in_environment_to(
         )?;
     }
     update_lifecycle_fields(&tx, session)?;
-    super::state_io::update_resource_allocation(&tx, session)?;
+    if let Some(requests) = requests {
+        super::state_io::update_container_requests(
+            &tx,
+            &session.id,
+            requests.resource_allocation.as_ref().map(Some),
+            requests.additional_mounts.as_deref(),
+        )?;
+    }
     tx.execute(
         "UPDATE sessions SET native_session_id = ?2, container_workspace = ?3,
              create_managed_worktree = ?4, launch_base = ?5, launch_branch = ?6,
@@ -755,7 +786,6 @@ fn save_resumed_session_in_environment_to(
                 .transpose()?,
         ],
     )?;
-    replace_mounts(&tx, &session.id, &session.additional_mounts)?;
     replace_checkpoint(&tx, session)?;
     if let Some((host, size)) = container_size {
         write_host_container_size(&tx, host, size)?;
@@ -1780,6 +1810,7 @@ pub(super) fn rebind_session_bundle_to(
 mod ownership_tests {
     use super::*;
 
+    // Hard-won: #1538: a resume save overwrote a Container settings edit made while it provisioned
     #[test]
     fn resume_and_rollback_preserve_edits_committed_after_their_snapshot() {
         let directory = tempfile::tempdir().unwrap();
@@ -1806,7 +1837,7 @@ mod ownership_tests {
             .unwrap();
         assert_eq!(current.state, SessionState::Provisioning);
         assert_eq!(current.native_session_id, provisioning.native_session_id);
-        assert!(current.additional_mounts.is_empty());
+        assert_eq!(current.additional_mounts, original.additional_mounts);
         assert_eq!(
             current.session_title_override.as_deref(),
             Some("renamed during resume")
@@ -1819,13 +1850,45 @@ mod ownership_tests {
         assert!(current.archived);
         assert_eq!(current.viewed_through_event_ordinal, 99);
 
+        let allocation = SessionResourceAllocation::Container {
+            cpus: 8,
+            memory_bytes: 16 << 30,
+        };
+        let mounts = vec![AdditionalMount {
+            source: "/new/source".into(),
+            destination: "/new/destination".into(),
+            access: crate::targets::MountAccess::Ro,
+        }];
+        set_session_container_settings_to(
+            &path,
+            &original.id,
+            Some(&allocation),
+            &mounts,
+            "2026-11-13T00:00:00Z",
+        )
+        .unwrap();
+        // The converted-checkpoint publication still holds the provisioning snapshot.
+        provisioning.checkpoint = Some(Box::new(mj_core::state::CheckpointMetadata {
+            archive_path: "converted.hel.zip".into(),
+            sha256: "c".repeat(64),
+            created_at: "2026-11-13T00:01:00Z".into(),
+            event_frontier: 1,
+        }));
+        save_resumed_session_to(&path, &provisioning, None).unwrap();
+        let converted = load_session_with(&connection, &original.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(converted.resource_allocation, Some(allocation.clone()));
+        assert_eq!(converted.additional_mounts, mounts);
+
         // Failure restores a snapshot captured before those independent edits.
         save_resumed_session_to(&path, &original, None).unwrap();
         let rolled_back = load_session_with(&connection, &original.id)
             .unwrap()
             .unwrap();
         assert_eq!(rolled_back.state, original.state);
-        assert_eq!(rolled_back.additional_mounts, original.additional_mounts);
+        assert_eq!(rolled_back.additional_mounts, mounts);
+        assert_eq!(rolled_back.resource_allocation, Some(allocation));
         assert_eq!(
             rolled_back.session_title_override,
             current.session_title_override

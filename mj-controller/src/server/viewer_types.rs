@@ -904,8 +904,16 @@ impl ViewerMoveRecovery {
                 .selection
                 .additional_mounts
                 .clone()
-                .unwrap_or_default(),
-            destination_resource_allocation: operation.selection.resource_allocation.clone(),
+                .unwrap_or_else(|| operation.source_additional_mounts.clone()),
+            destination_resource_allocation: if operation.selection.clear_resource_allocation {
+                None
+            } else {
+                operation
+                    .selection
+                    .resource_allocation
+                    .clone()
+                    .or_else(|| operation.source_resource_allocation.clone())
+            },
             checkpoint_retained: operation.checkpoint_retained(),
             environment_retained: operation.holds_source_environment(),
             destination_ready: operation.destination_target.is_some()

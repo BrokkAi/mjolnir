@@ -615,6 +615,7 @@ pub struct SessionLaunchOptions {
     pub session_title_override: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct SessionResumeOptions {
     pub additional_mounts: Option<Vec<AdditionalMount>>,
     pub resource_allocation: Option<SessionResourceAllocation>,

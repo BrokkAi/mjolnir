@@ -16,6 +16,8 @@ After this change each session has one size, `resource_allocation`. Container se
 
 ## Progress
 
+- [x] (2026-11-14) Follow-up request ownership: Resume/Move acceptance alone writes explicit size/mount choices; lifecycle publications and rollback preserve newer requests. Central applied-settings lookup and all-reader audit complete, including inherited TUI Move choices and removed-locator upgrade recovery. Final controller suite: 2635 passed/27 ignored; core: 651 passed/4 ignored; final Move module: 61 passed; workspace Clippy and formatting passed. TUI: 588 passed/2 ignored, with only the two documented baseline goldens failing. Evidence: `.mj/agents/f5843c6b3c11ad265083711bafa5ee82/validation.md`.
+
 - [x] Follow-up #1538: revision 131 now converts embedded Move recovery/transfer records, effective source recovery sizing, retained sources and environment snapshots. Existing regression extended with the requested Hard-won assertion; final targeted migration tests (2) and controller-only Clippy passed.
 
 - [x] (2026-11-13 23:00Z) Map the current code (read-only child report, summarized in Context and Orientation).
@@ -37,7 +39,7 @@ After this change each session has one size, `resource_allocation`. Container se
 - Observation: older-store regressions also rewind schema through drop_environment_schema and a separate daemon_startup old_store fixture. They must restore removed size columns; the revision-129 watch fixture must remove all later ledger entries and assert the current compatibility floor. Full-suite failures exposed these fixture-only assumptions.
 - Observation: the live regression must compare engine IDs, since the container locator keeps the same name across recreation; the viewer calls stopped sessions "suspended". The generic lab wait was shorter than measured container worker setup, so the scenario uses the existing container regression’s 120-second wait. All intermediate attempts cleaned up their owned resources.
 
-- Observation: the existing stale lifecycle/checkpoint regressions expose that generic lifecycle saves own resource_allocation today. With settings now writing that field, they overwrite a newer settings edit. Removed allocation writes from generic lifecycle updates; Resume and Move destination adoption explicitly own allocation changes. Existing regression names: lifecycle_save_preserves_container_settings_and_mounts and checkpointed_save_preserves_container_settings_and_mounts.
+- Observation: the existing stale lifecycle/checkpoint regressions expose that generic lifecycle saves own resource_allocation today. With settings now writing that field, they overwrite a newer settings edit. Removed allocation writes from generic lifecycle updates; the later ownership follow-up moves explicit Resume/Move request changes into acceptance transactions and removes them from all lifecycle publications, including destination adoption. Existing regression names: lifecycle_save_preserves_container_settings_and_mounts and checkpointed_save_preserves_container_settings_and_mounts.
 
 - Observation: Move source reservations compare their allocation with the live source allocation; both now use counted_container_allocation so resized live sources are not charged twice or at their pending request.
 - Observation: fixtures rewinding the current schema must restore removed columns before replaying revision 131; updated stamp_schema_version. Fresh baseline construction supplies historical columns inside its transaction, then revision 131 removes them.
@@ -49,6 +51,14 @@ After this change each session has one size, `resource_allocation`. Container se
 
 
 ## Decision Log
+
+- Decision: size and mounts on SessionRecord are requests for the next creation. Only creation, explicit Resume/Move choices, and Container settings write them; lifecycle publications and rollback preserve them. Keep selections remain omitted through Move preparation. Commit explicit choices with operation acceptance.
+  Rationale: a provisioning controller's stale snapshot must never overwrite settings saved while provisioning runs. Failed operations retain the person's requested settings.
+  Date/Author: 2026-11-14, parent.
+
+- Decision: one mj-core applied_container_settings lookup owns applied allocation and mounts. Use an existing applied snapshot even when its size is absent (unknown). Fall back to the request only when no snapshot exists (legacy). Capacity reservations for a provisioning session without a target count its next-creation request, independently of any retained prior snapshot.
+  Rationale: the legacy request is the only creation record available; no inspection or reconstruction is needed. Every applied-mount reader shares this answer with capacity accounting.
+  Date/Author: 2026-11-14, parent.
 
 - Decision: the public SetContainerSettings action keeps no mount_history field; its handler derives history from controller state. The internal TUI action and controller method retain their parameter.
   Rationale: correct the plan’s description to preserve existing behavior; replace only CPU/memory fields.
@@ -88,6 +98,8 @@ After this change each session has one size, `resource_allocation`. Container se
 
 
 ## Outcomes & Retrospective
+
+Follow-up ownership fix: explicit Resume and Move settings are committed atomically at acceptance; even an unchanged Move accepts explicit requests. Later Container settings edits survive converted-checkpoint publication, destination adoption and failed-operation rollback. The applied lookup owns legacy fallback for size and mounts; a snapshot remains authoritative if recovery has removed the locator. Provisioning capacity independently reserves the next-creation request. Move creates from its admitted request snapshot while subsequent edits remain requested. Final checks passed except the two existing TUI goldens listed above. The parent’s Hard-won unknown-size regression remains intact.
 
 Implementation is complete across store, runtime, and clients. Migration, stale lifecycle/checkpoint writes, terminal goldens, and browser dialog goldens have passed their targeted checks. One requested allocation now controls editors, launch, admission and provisioning; running owners are counted at their applied snapshot. Revision 131 converts and removes the legacy strings and fences revision-130 writers. Protocol 97 carries the replacement allocation. The real cs1538 resize/recreation and cleanup passed. Full touched-crate suites ran; all change-related failures were corrected and their targeted reruns passed. Formatting and workspace Clippy pass. The two documented base-tree TUI goldens remain outside this work. Live Apple/Nitro engines and macOS/Windows were not exercised.
 

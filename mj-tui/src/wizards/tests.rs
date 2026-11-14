@@ -3032,7 +3032,20 @@ fn taking_move_preparation_closes_only_a_valid_confirmation_handoff() {
     assert!(matches!(dashboard.mode, Mode::Resume(_)));
 
     let preparation = move_preparation();
+    let inherited_size = mj_core::state::SessionResourceAllocation::Container {
+        cpus: 4,
+        memory_bytes: 8 << 30,
+    };
+    let Mode::Resume(wizard) = &mut dashboard.mode else {
+        panic!("Move wizard missing")
+    };
+    wizard.resource_allocation = Some(inherited_size.clone());
+    assert!(preparation.selection.resource_allocation.is_none());
     assert!(dashboard.apply_move_preparation(request_id, preparation.clone()));
+    let Mode::Resume(wizard) = &dashboard.mode else {
+        panic!("Move wizard missing")
+    };
+    assert_eq!(wizard.resource_allocation, Some(inherited_size));
 
     // A stale action for another session must not consume the confirmation.
     assert!(dashboard.take_move_preparation("other-session").is_none());

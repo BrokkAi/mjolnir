@@ -383,6 +383,19 @@ fn container_capacity_counts_owners_and_provisioning_but_not_borrowed_children()
         cpus: 2,
         memory_bytes: 4 << 30,
     });
+    // A removed locator during upgrade recovery does not erase its applied snapshot.
+    assert_eq!(
+        applied_container_settings(&provisioning).resource_allocation,
+        parent
+            .target_runtime
+            .as_ref()
+            .unwrap()
+            .container_settings
+            .as_ref()
+            .unwrap()
+            .resource_allocation
+            .as_ref()
+    );
 
     let capacity = host_container_capacity(
         HostContainerSize {
@@ -452,6 +465,27 @@ fn container_capacity_counts_owners_and_provisioning_but_not_borrowed_children()
     assert!(warning.contains("more CPUs"));
     assert!(warning.contains("more RAM"));
     assert!(warning.contains("still start"));
+
+    // Hard-won: #1538: a container created at the target's defaults was
+    // counted at a later, smaller Container settings request.
+    let mut defaults = parent.clone();
+    let mut runtime = defaults.target_runtime.as_deref().cloned().unwrap();
+    runtime
+        .container_settings
+        .as_mut()
+        .expect("the parent records its applied settings")
+        .resource_allocation = None;
+    defaults.target_runtime = Some(std::sync::Arc::new(runtime));
+    let unknown = host_container_capacity(
+        HostContainerSize {
+            cpus: 10,
+            memory_bytes: 20 << 30,
+        },
+        false,
+        &["podman".into()],
+        [&defaults],
+    );
+    assert!(!unknown.complete);
 }
 
 #[test]

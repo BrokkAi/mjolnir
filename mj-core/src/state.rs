@@ -1818,15 +1818,39 @@ pub fn session_owns_container(session: &SessionRecord) -> bool {
     }
 }
 
-/// Applied limits describe a running container; requests describe provisioning.
-pub fn counted_container_allocation(session: &SessionRecord) -> Option<&SessionResourceAllocation> {
-    session
-        .target
+/// The creation settings from the applied snapshot, or the legacy request
+/// when no snapshot was recorded.
+/// A present snapshot is authoritative even when its size is unknown.
+pub struct AppliedContainerSettings<'a> {
+    pub resource_allocation: Option<&'a SessionResourceAllocation>,
+    pub additional_mounts: &'a [AdditionalMount],
+}
+
+pub fn applied_container_settings(session: &SessionRecord) -> AppliedContainerSettings<'_> {
+    match session
+        .target_runtime
         .as_ref()
-        .and(session.target_runtime.as_ref())
         .and_then(|runtime| runtime.container_settings.as_ref())
-        .and_then(|settings| settings.resource_allocation.as_ref())
-        .or(session.resource_allocation.as_ref())
+    {
+        Some(applied) => AppliedContainerSettings {
+            resource_allocation: applied.resource_allocation.as_ref(),
+            additional_mounts: &applied.additional_mounts,
+        },
+        None => AppliedContainerSettings {
+            resource_allocation: session.resource_allocation.as_ref(),
+            additional_mounts: &session.additional_mounts,
+        },
+    }
+}
+
+/// The size a session's container is charged at, including unknown sizes.
+pub fn counted_container_allocation(session: &SessionRecord) -> Option<&SessionResourceAllocation> {
+    if session.target.is_none() {
+        // Provisioning reserves the next creation, even if a prior snapshot remains.
+        session.resource_allocation.as_ref()
+    } else {
+        applied_container_settings(session).resource_allocation
+    }
 }
 
 /// Sum the owning container allocations for one physical host.

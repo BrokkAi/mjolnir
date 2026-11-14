@@ -3334,8 +3334,8 @@ fn start_source_relay_manager(
 #[cfg(unix)]
 // Hard-won: 6b51b56d6: unchanged native Moves ran provisioning checks and downloads.
 #[test]
-fn bare_move_preparation_normalizes_an_empty_resource_reset() {
-    let name = test_name("bare_move_preparation_normalizes_an_empty_resource_reset");
+fn bare_move_preparation_preserves_an_explicit_resource_reset() {
+    let name = test_name("bare_move_preparation_preserves_an_explicit_resource_reset");
     if !isolated_test_child(&name, "MJ_EMPTY_RESOURCE_RESET_CHILD") {
         return;
     }
@@ -3358,7 +3358,7 @@ fn bare_move_preparation_normalizes_an_empty_resource_reset() {
         ))
         .unwrap();
     assert!(prepared.in_place);
-    assert!(!prepared.selection.clear_resource_allocation);
+    assert!(prepared.selection.clear_resource_allocation);
     let mut source = fixture.controller.state.sessions[LATCH_RELAY_SESSION].clone();
     source.resource_allocation = Some(SessionResourceAllocation::Container {
         cpus: 4,

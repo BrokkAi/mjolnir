@@ -1516,7 +1516,7 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
     assert!(!detail.contains("unknown session"), "{detail}");
     assert_eq!(
         executor.mounts_during_provisioning.into_inner().unwrap(),
-        Some(resumed_mounts)
+        Some(resumed_mounts.clone())
     );
 
     let retained = controller.state.sessions.get(session_id).unwrap();
@@ -1529,10 +1529,7 @@ fn failed_resume_provisioning_preserves_checkpoint_and_projection_lineage() {
     let durable_session = durable.sessions.get(session_id).unwrap();
     assert_eq!(durable_session.state, SessionState::Stopped);
     assert_eq!(durable_session.checkpoint, previous.checkpoint);
-    assert_eq!(
-        durable_session.additional_mounts,
-        previous.additional_mounts
-    );
+    assert_eq!(durable_session.additional_mounts, resumed_mounts);
     assert_eq!(
         crate::database::load_materialized_session(session_id).unwrap(),
         Some(expected_projection)
