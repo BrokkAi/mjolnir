@@ -25,6 +25,9 @@ host registered and prints a warning; the daemon can retry the download.
 Raw SSH sessions are disabled for this host; SSH is still used to manage Podman.
 The VM stays running across session suspension and destruction. Its on-demand
 compute, storage, and network charges continue until you stop or destroy it.
+Create also raises the host's kernel limits for many containers at once
+(`/etc/sysctl.d/90-mj-limits.conf`: inotify instances and watches, keyring
+quota); `mj ec2 tune <name>` re-applies that file to an existing host.
 
 The instance type is required. `--zone` is required and supplies the region;
 `--region` can override region inference. `--aws-profile` selects AWS credentials,
