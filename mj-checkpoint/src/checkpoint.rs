@@ -29,13 +29,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
+use crate::archive::read_archive_verified;
 use crate::archive::{
     ArchiveInput, BundleManifest, CanonicalSessionSnapshot, CanonicalTranscriptBody,
     GitCollectionSpec, GitCommand, GitCommandRunner, GitHistoryMode, NativeArtifact, PayloadRole,
     RepositorySnapshot, SessionManifest, SystemGit, TargetManifest, collect_git_metadata_snapshot,
     collect_plain_directory_snapshot, ensure_no_symlink_ancestors, has_origin_refs,
-    read_archive_verified, remote_workspace_base, validate_component, verify_archive_streaming,
-    write_archive_hashed, write_archive_hashed_borrowed,
+    remote_workspace_base, validate_component, verify_archive_streaming, write_archive_hashed,
+    write_archive_hashed_borrowed,
 };
 use mj_core::config::HarnessKind;
 /// Native state whose storage format is owned by the target runtime.

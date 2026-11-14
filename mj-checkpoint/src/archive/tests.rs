@@ -1112,6 +1112,7 @@ fn streaming_verification_parses_untracked_tar_for_safety() {
     assert!(format!("{error:#}").contains("inside a Git directory"));
 }
 
+// Hard-won: 0d7aa0f1e: streaming restore skipped the whole native digest before mutating targets.
 #[test]
 fn corruption_is_detected_by_payload_digest() {
     let directory = tempfile::tempdir().unwrap();
@@ -1133,6 +1134,64 @@ fn corruption_is_detected_by_payload_digest() {
     drop(file);
 
     assert!(read_archive_verified(&path).is_err());
+
+    // Keep every part intact but corrupt the whole native digest. Every
+    // selective reader must reject it before the caller can mutate a target.
+    let (archive_input, _, _) = sharded_input();
+    let (mut manifest, payloads) =
+        prepare_archive_with_part_size(&archive_input, TEST_PART_BYTES).unwrap();
+    let native = manifest
+        .payloads
+        .iter_mut()
+        .find(|payload| matches!(payload.role, PayloadRole::NativeArtifact { .. }))
+        .unwrap();
+    assert!(!native.parts.is_empty());
+    native.sha256 = "0".repeat(64);
+    let relative = match &native.role {
+        PayloadRole::NativeArtifact { relative_path } => relative_path.clone(),
+        _ => unreachable!(),
+    };
+    let mut file = File::create(&path).unwrap();
+    write_zip(&mut file, &manifest, &payloads).unwrap();
+    drop(file);
+    for result in [
+        verify_archive_streaming(&path).map(|_| ()),
+        read_archive_repositories(&path).map(|_| ()),
+    ] {
+        assert!(format!("{:#}", result.unwrap_err()).contains("SHA-256 mismatch"));
+    }
+    let workspace = directory.path().join("workspace");
+    let home = directory.path().join("harness");
+    let relay = directory.path().join("relay");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(home.join(&relative).parent().unwrap()).unwrap();
+    fs::write(home.join(&relative), b"existing native state").unwrap();
+    fs::write(workspace.join("keep"), b"existing work").unwrap();
+    for restore_native in [false, true] {
+        let error = crate::checkpoint::restore_checkpoint(
+            &crate::checkpoint::CheckpointRestoreSpec {
+                report_root: None,
+                archive_path: path.clone(),
+                workspace_root: workspace.clone(),
+                relay_root: relay.clone(),
+                harness_home: home.clone(),
+                restore_repositories: true,
+                restore_native,
+                queue_policy: crate::checkpoint::QueueRestorePolicy::Discard,
+                primary_repository_root: None,
+            },
+            &SystemGit,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("SHA-256 mismatch"));
+        assert_eq!(
+            fs::read(home.join(&relative)).unwrap(),
+            b"existing native state"
+        );
+        assert_eq!(fs::read(workspace.join("keep")).unwrap(), b"existing work");
+        assert!(!relay.exists());
+        assert!(!workspace.join("hel").exists());
+    }
 }
 
 #[test]

@@ -4324,6 +4324,12 @@ fn quota_move_streams_a_native_transcript_larger_than_one_gib() {
         output_path: spec.output_path.clone(),
     })
     .unwrap();
+    let repository_archive = crate::archive::read_archive_repositories(&spec.output_path).unwrap();
+    for payload in &repository_archive.manifest.payloads {
+        if matches!(payload.role, PayloadRole::NativeArtifact { .. }) {
+            assert!(!repository_archive.payloads.contains_key(&payload.path));
+        }
+    }
     let home = temp.path().join("restored-home");
     restore_checkpoint(
         &CheckpointRestoreSpec {

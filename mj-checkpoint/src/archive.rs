@@ -389,8 +389,39 @@ pub(crate) fn read_archive_for_restore(path: &Path) -> Result<VerifiedArchive> {
     })
 }
 
-pub(crate) fn copy_native_payload(
-    path: &Path,
+pub(crate) fn read_archive_repositories(path: &Path) -> Result<VerifiedArchive> {
+    let contents = read_verified_zip(path, PayloadRetention::Repositories)?;
+    Ok(VerifiedArchive {
+        manifest: contents.manifest,
+        payloads: contents.payloads,
+        archive_sha256: digest_reader(&mut File::open(path)?)?,
+    })
+}
+
+/// An open checkpoint directory shared by all streamed payload copies.
+/// Each copy checks the descriptor's whole size and digest as it writes.
+pub struct CheckpointPayloadReader {
+    archive: Archive,
+}
+
+impl CheckpointPayloadReader {
+    pub fn open(path: &Path) -> Result<Self> {
+        Ok(Self {
+            archive: open_archive(path)?,
+        })
+    }
+
+    pub fn copy_payload(
+        &mut self,
+        descriptor: &PayloadDescriptor,
+        writer: &mut dyn Write,
+    ) -> Result<()> {
+        copy_payload_from_archive(&mut self.archive, descriptor, writer)
+    }
+}
+
+fn copy_payload_from_archive(
+    archive: &mut Archive,
     descriptor: &PayloadDescriptor,
     writer: &mut dyn Write,
 ) -> Result<()> {
@@ -415,7 +446,6 @@ pub(crate) fn copy_native_payload(
         digest: Sha256::new(),
         size: 0,
     };
-    let mut archive = open_archive(path)?;
     if descriptor.parts.is_empty() {
         std::io::copy(&mut archive.by_name(&descriptor.path)?, &mut output)?;
     } else {
@@ -429,7 +459,8 @@ pub(crate) fn copy_native_payload(
     );
     ensure!(
         lower_hex(output.digest.finalize()) == descriptor.sha256,
-        "native payload digest changed during restore"
+        "SHA-256 mismatch for payload '{}'",
+        descriptor.path
     );
     Ok(())
 }
@@ -1186,6 +1217,7 @@ fn write_stream_entry(
 enum PayloadRetention {
     All,
     Restore,
+    Repositories,
     CanonicalOnly,
     CanonicalAndGitBundles,
 }
@@ -1293,6 +1325,8 @@ impl std::io::Seek for ArchiveFile {
 /// Payload bodies the caller keeps.
 fn retains_payload(retention: PayloadRetention, role: &PayloadRole) -> bool {
     retention == PayloadRetention::All
+        || (retention == PayloadRetention::Repositories
+            && !matches!(role, PayloadRole::NativeArtifact { .. }))
         || (retention == PayloadRetention::Restore
             && match role {
                 PayloadRole::NativeArtifact { relative_path } => {
@@ -1442,6 +1476,11 @@ fn read_verified_zip_cancellable(
     let mut payloads = BTreeMap::new();
     let mut canonical_session = None;
     for descriptor in &manifest.payloads {
+        // Per-part hashes do not prove the whole-payload digest. Verify omitted
+        // sharded bodies in order before returning any trusted archive state.
+        if !descriptor.parts.is_empty() && !retains_parts(retention, &descriptor.role) {
+            copy_payload_from_archive(&mut archive, descriptor, &mut std::io::sink())?;
+        }
         let bytes = reassemble_payload(descriptor, &mut bodies, retention)?;
         if let Some(validate) = tar_payload_validator(&descriptor.role)
             && let Some(bytes) = bytes.as_deref()

@@ -107,6 +107,7 @@ pub fn restore_checkpoint_with_native_state(
         spec.relay_root.display()
     );
     let archive = crate::archive::read_archive_for_restore(&spec.archive_path)?;
+    let mut payload_reader = crate::archive::CheckpointPayloadReader::open(&spec.archive_path)?;
     // Deserialize and validate the schema-2 canonical projection before any
     // repository, relay, or native-session state can be mutated.
     let canonical_session = archive.canonical_session()?;
@@ -209,13 +210,7 @@ pub fn restore_checkpoint_with_native_state(
                         &spec.harness_home,
                         &destination,
                         descriptor.mode,
-                        |file| {
-                            crate::archive::copy_native_payload(
-                                &spec.archive_path,
-                                descriptor,
-                                file,
-                            )
-                        },
+                        |file| payload_reader.copy_payload(descriptor, file),
                     )?;
                     continue;
                 }
@@ -224,7 +219,7 @@ pub fn restore_checkpoint_with_native_state(
             let native_data = if let Some(bytes) = archive.payloads.get(&descriptor.path) {
                 bytes.as_slice()
             } else {
-                crate::archive::copy_native_payload(&spec.archive_path, descriptor, &mut loaded)?;
+                payload_reader.copy_payload(descriptor, &mut loaded)?;
                 &loaded
             };
 
@@ -275,7 +270,7 @@ pub fn restore_repositories(
     git: &dyn GitCommandRunner,
 ) -> Result<()> {
     ensure!(workspace_root.is_dir(), "restore workspace is missing");
-    let archive = read_archive_verified(archive_path)?;
+    let archive = crate::archive::read_archive_repositories(archive_path)?;
     restore_repositories_from_archive(&archive, workspace_root, git, true)
 }
 
@@ -404,7 +399,7 @@ pub fn restore_single_repository_onto_branch(
     git: &dyn GitCommandRunner,
 ) -> Result<Option<String>> {
     ensure!(repository_path.is_dir(), "restore checkout is missing");
-    let archive = read_archive_verified(archive_path)?;
+    let archive = crate::archive::read_archive_repositories(archive_path)?;
     let [repository] = archive.manifest.repositories.as_slice() else {
         bail!(
             "this checkpoint holds {} repositories; exactly one can be restored into a checkout",
@@ -439,7 +434,7 @@ pub fn restore_single_repository_into_checkout(
     git: &dyn GitCommandRunner,
 ) -> Result<()> {
     ensure!(repository_path.is_dir(), "restore checkout is missing");
-    let archive = read_archive_verified(archive_path)?;
+    let archive = crate::archive::read_archive_repositories(archive_path)?;
     let [repository] = archive.manifest.repositories.as_slice() else {
         bail!("an isolated checkout requires exactly one archived repository");
     };
