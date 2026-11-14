@@ -49,6 +49,8 @@ Each workspace tab carries the most urgent symbol among its own sessions and how
 
 `prefix+o` opens the next session that needs you, in that order, and switches workspace when the next one is on another tab. `prefix+a` marks every session read, which clears only the `✓` reason; questions, failures, and unreachable sessions stay flagged. See [Sessions that need you](/terminal-surface/#sessions-that-need-you).
 
+A stopped session whose failure needs you stays in Sessions until you resume it, dismiss the notification, or destroy it. `prefix+o` selects its row. Enter resumes it, and `.` opens its actions, which include **Dismiss notification** and **Destroy session**.
+
 ## Create a session
 
 Press **Create**, `n`, `N`, or `prefix+c` anywhere in the terminal

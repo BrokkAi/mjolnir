@@ -373,6 +373,10 @@ impl DashboardState {
                 Some(record.workspace_id.as_str()) == self.active_workspace_id()
             })
         {
+            if let Some(record) = self.state.sessions.get(&session) {
+                let key = self.project_source(record).key;
+                self.collapsed_project_keys.remove(&key);
+            }
             self.select_active_session(&session);
             self.clear_filter_hiding_selection();
         }

@@ -679,6 +679,16 @@ fn hel_row_status(state: SessionState) -> ResumeRowStatus {
     }
 }
 
+/// Why a stopped record cannot be resumed at all, for the Sessions row that
+/// lists a stopped failure as well as for the dialog.
+pub(crate) fn unresumable_reason(state: SessionState) -> Option<&'static str> {
+    hel_row_status(state).explanation()
+}
+
+pub(crate) fn unresumable_notice(reason: &str) -> String {
+    format!("This session was {reason}. Use Destroy to remove its record.")
+}
+
 /// The zone resume times display in: local time, except UTC under test so
 /// goldens do not follow the machine's time zone.
 #[cfg(not(test))]
@@ -1273,12 +1283,6 @@ impl DashboardState {
             history: HistoryLoad::Loading,
             opening: None,
         });
-        if let Some(id) = self.resume_notification_target.take()
-            && let Mode::ResumeDialog(dialog) = &mut self.mode
-        {
-            dialog.tab = ResumeTab::Hel;
-            dialog.selected = Some(ResumeRowKey::Hel(id));
-        }
         self.rebuild_resume_rows();
         // Record which row the initial selection lands on, so the first
         // incremental scan result cannot slide the selection out from under it.
@@ -2106,9 +2110,7 @@ impl DashboardState {
             return DashboardAction::None;
         };
         if let Some(reason) = row.status.explanation() {
-            self.notices.set(format!(
-                "This session was {reason}. Use Destroy to remove its record."
-            ));
+            self.notices.set(unresumable_notice(reason));
             return DashboardAction::None;
         }
         if let Some(reason) = &row.unavailable_reason {

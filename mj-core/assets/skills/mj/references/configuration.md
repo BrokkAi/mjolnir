@@ -76,7 +76,7 @@ also accepted when reading and is saved under `[github.watch] enabled`.
 | --- | --- | --- | --- | --- |
 | `version` | integer | yes | none | Configuration schema version; use `22`. |
 | `sessions_side` | string enum | no | `"left"` | Place the Sessions sidebar on the `left` or `right`. |
-| `show_stopped_sessions` | boolean | no | ignored | Retired. It is accepted when reading configuration files but has no effect and is omitted on the next save. Suspended sessions are listed only in the resume dialog. |
+| `show_stopped_sessions` | boolean | no | ignored | Retired. It is accepted when reading configuration files but has no effect and is omitted on the next save. Suspended sessions are listed in the resume dialog. A stopped session whose failure needs you also stays in Sessions until dismissed, resumed, or destroyed. |
 | `spinner` | string enum | no | `"scan"` | Activity animation: `scan`, `pulse`, `wave`, `bars`, `shimmer`, or `globe`. |
 | `theme` | string enum | no | `"midnight"` | Terminal color palette: `auto`, `midnight`, `light`, `darcula`, `high-contrast`, `high-contrast-light`, `colorblind-dark`, `colorblind-light`, `catppuccin-mocha`, `catppuccin-latte`, `campbell`, `one-half-dark`, `one-half-light`, `solarized-dark`, `solarized-light`, `terminal-dark`, `terminal-light`, or `mono` (no colors). `auto` asks the terminal for its background color at startup and uses `midnight` on a dark background and `light` on a light one, or `midnight` when the terminal does not answer. The colorblind palettes keep failures distinct from success and warnings with red-green or blue-yellow color blindness. The Campbell, One Half, and Solarized palettes match the Windows Terminal schemes of the same name; `terminal-dark` and `terminal-light` use the terminal's own background and 16 ANSI colors, with a neutral gray for secondary text. A non-empty `NO_COLOR` environment variable selects `mono` regardless of this setting. |
 | `phone` | table | no | default `[phone]` values | Browser viewer settings. |
@@ -194,8 +194,8 @@ The default bindings:
 | `palette` | `prefix+:` | Open the command palette |
 | `cancel_operation` | `prefix+shift+c` | Cancel an in-flight launch, resume, or stop |
 | `mark_all_read` | `prefix+a` | Mark unread session activity as read |
-| `next_attention` | `prefix+o` | Open the next session that needs you |
-| `previous_attention` | `prefix+shift+o` | Open the previous session that needs you |
+| `next_attention` | `prefix+o` | Visit the next session that needs you |
+| `previous_attention` | `prefix+shift+o` | Visit the previous session that needs you |
 | `web_viewer` | `prefix+u` | Show the web viewer address and access code |
 | `rename_session` | `prefix+shift+t` | Rename the selected session |
 | `toggle_transcript_rendering` | `prefix+t` | Toggle rendered/raw transcript |

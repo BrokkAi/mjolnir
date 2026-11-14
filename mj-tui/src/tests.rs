@@ -2395,8 +2395,9 @@ fn viewing_one_failure_reveals_the_five_unread_sessions_without_relabeling_them(
 }
 
 // Hard-won: bed9102: terminal failures inflated badges and queued an unopenable session.
+// Hard-won: 0db309adc: prefix+o reopened the resume dialog on the same stopped failure, so traversal never advanced.
 #[test]
-fn a_stopped_notification_is_counted_and_reachable_in_the_resume_dialog() {
+fn a_stopped_notification_is_a_row_and_attention_advances() {
     let mut dashboard = dashboard_with_attention_mix();
     dashboard.set_active_workspace(Some("default".into()));
     assert_eq!(
@@ -2404,48 +2405,20 @@ fn a_stopped_notification_is_counted_and_reachable_in_the_resume_dialog() {
         Some((AttentionLevel::Waiting, 1))
     );
 
-    // The live Sessions pane excludes these records; notifications still reach them.
     for state in [
         SessionState::Stopped,
         SessionState::DestroyedWithDataLoss,
         SessionState::Lost,
     ] {
-        dashboard.state.sessions.get_mut("quiet").unwrap().state = state;
+        let record = dashboard.state.sessions.get_mut("quiet").unwrap();
+        record.state = state;
+        record.last_error = Some("resume failed".into());
+        let failure = mj_core::attention::FailureIdentity::of(record).unwrap();
         crate::test_support::serve_attention(
             &mut dashboard,
             &["quiet"],
             mj_core::attention::SessionAttention::Failed,
         );
-        assert_eq!(dashboard.attention_level("quiet"), AttentionLevel::Failed);
-        assert!(
-            !dashboard
-                .ordered_sessions()
-                .iter()
-                .any(|session| session.id == "quiet"),
-            "{state:?} has no row in the pane"
-        );
-        assert_eq!(
-            dashboard.workspace_attention_summary("default"),
-            Some((AttentionLevel::Failed, 1)),
-            "{state:?} needs a person"
-        );
-        assert!(
-            dashboard
-                .attention_queue()
-                .iter()
-                .any(|entry| entry.session_id == "quiet"),
-            "{state:?} belongs in the attention queue"
-        );
-        dashboard.select_active_session("asks");
-        assert!(matches!(
-            dashboard.step_attention(-1),
-            DashboardAction::OpenResumeDialog
-        ));
-        dashboard.show_resume_dialog(1, vec![]);
-        assert_eq!(dashboard.resume_command_session_id(), Some("quiet"));
-        let record = dashboard.state.sessions.get_mut("quiet").unwrap();
-        record.last_error = Some("resume failed".into());
-        let failure = mj_core::attention::FailureIdentity::of(record).unwrap();
         dashboard.set_notification_dismissals(
             [(
                 "quiet".into(),
@@ -2454,10 +2427,51 @@ fn a_stopped_notification_is_counted_and_reachable_in_the_resume_dialog() {
             .into_iter()
             .collect(),
         );
-        dashboard.rebuild_resume_rows();
-        let screen = drawn(&mut dashboard, 140, 40).join("\n");
-        assert!(screen.contains("d: dismiss notification"), "{screen}");
-        let action = dashboard.handle_resume_dialog_event(Event::Key(key(KeyCode::Char('d'))));
+        assert!(
+            dashboard
+                .ordered_sessions()
+                .iter()
+                .any(|session| session.id == "quiet"),
+            "{state:?} is listed while its failure needs a person"
+        );
+        assert_eq!(
+            dashboard.workspace_attention_summary("default"),
+            Some((AttentionLevel::Failed, 1)),
+            "{state:?} needs a person"
+        );
+
+        // The first press selects the stopped row without opening anything;
+        // the second moves on to the question instead of returning to it.
+        dashboard.select_active_session("done");
+        let action = dashboard.step_attention(1);
+        assert!(
+            matches!(action, DashboardAction::None),
+            "{state:?}: {action:?}"
+        );
+        assert_eq!(dashboard.selected_session_id(), Some("quiet"));
+        assert_eq!(dashboard.focus, Focus::Sessions);
+        assert!(matches!(dashboard.mode, Mode::Dashboard));
+        let action = dashboard.step_attention(1);
+        assert!(
+            matches!(&action, DashboardAction::Open { session_id } if session_id == "asks"),
+            "{state:?}: {action:?}"
+        );
+
+        // Enter resumes a stopped record and refuses one with nothing left.
+        dashboard.select_active_session("quiet");
+        dashboard.focus_sessions();
+        dashboard.handle_key(key(KeyCode::Enter));
+        if state == SessionState::Stopped {
+            assert!(matches!(dashboard.mode, Mode::Resume(_)), "{state:?}");
+            dashboard.mode = Mode::Dashboard;
+        } else {
+            assert!(matches!(dashboard.mode, Mode::Dashboard), "{state:?}");
+            let notice = dashboard.notices.current().unwrap_or_default();
+            assert!(notice.contains("Use Destroy"), "{state:?}: {notice}");
+        }
+
+        dashboard.focus_sessions();
+        let action = dashboard.dispatch_command(CommandId::DismissNotification);
         assert!(
             matches!(&action, DashboardAction::DismissNotification { session_id, .. } if session_id == "quiet"),
             "{state:?}: {action:?}"
@@ -2468,7 +2482,6 @@ fn a_stopped_notification_is_counted_and_reachable_in_the_resume_dialog() {
             Ok(0),
         );
         dashboard.set_notification_dismissals(Default::default());
-        dashboard.mode = Mode::Dashboard;
     }
 
     // An error state still has a row, so it still counts.
@@ -2547,6 +2560,25 @@ fn golden_attention_navigation() {
         40,
     );
     writeln!(output, "{}", attention_values(&ranked)).expect("write attention levels");
+
+    let mut stopped = dashboard_with_attention_mix();
+    stopped.set_active_workspace(Some("default".into()));
+    let record = stopped.state.sessions.get_mut("quiet").unwrap();
+    record.state = SessionState::Stopped;
+    record.last_error = Some("resume failed: target unavailable".into());
+    crate::test_support::serve_attention(
+        &mut stopped,
+        &["quiet"],
+        mj_core::attention::SessionAttention::Failed,
+    );
+    stopped.select_active_session("quiet");
+    append_attention_state(
+        &mut output,
+        "stopped failure remains a row",
+        &mut stopped,
+        140,
+        40,
+    );
 
     let mut urgent = dashboard_with_attention_mix();
     urgent.set_active_workspace(Some("default".into()));

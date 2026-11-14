@@ -550,10 +550,8 @@ impl DashboardState {
         }
     }
 
-    /// Whether the Sessions pane lists `session` as a top-level row of
-    /// `workspace_id`: live or mid-transition. Stopped sessions are listed
-    /// only by the resume dialog. Notification navigation reaches stopped
-    /// sessions there; badges and the attention queue include them.
+    /// Lists live and transitioning top-level sessions, plus stopped sessions
+    /// while the daemon says they need a person.
     pub(crate) fn is_listed_top_level_session(
         &self,
         session: &SessionRecord,
@@ -561,7 +559,9 @@ impl DashboardState {
     ) -> bool {
         session.workspace_id == workspace_id
             && !self.state.is_subagent_session(&session.id)
-            && (session.state.is_active() || self.transition_kind(&session.id).is_some())
+            && (session.state.is_active()
+                || self.transition_kind(&session.id).is_some()
+                || self.attention_level(&session.id).needs_person())
     }
 
     fn ordered_sessions_unfiltered(&self) -> Vec<&SessionRecord> {
@@ -1039,8 +1039,19 @@ impl DashboardState {
             .get(&target.session_id)
             .is_some_and(|session| !session.state.is_active())
         {
-            self.resume_notification_target = Some(target.session_id.clone());
-            (target.session_id, DashboardAction::OpenResumeDialog)
+            // The row's conversation area says what to do with it; the
+            // notice names the session and what failed.
+            let notice = self.notice_naming_workspace(
+                &target.session_id,
+                format!(
+                    "{} stopped: {}",
+                    self.session_notice_name(&target.session_id),
+                    self.session_failure_text(&target.session_id),
+                ),
+            );
+            self.set_notice(notice);
+            let action = self.move_to_session(&target.workspace_id, &target.session_id, false);
+            (target.session_id, action)
         } else {
             let action = self.focus_session_anywhere(&target.workspace_id, &target.session_id);
             (target.session_id, action)
@@ -1063,6 +1074,15 @@ impl DashboardState {
         workspace_id: &str,
         session_id: &str,
     ) -> DashboardAction {
+        self.move_to_session(workspace_id, session_id, true)
+    }
+
+    fn move_to_session(
+        &mut self,
+        workspace_id: &str,
+        session_id: &str,
+        open: bool,
+    ) -> DashboardAction {
         if self.child_workspace.is_some() {
             self.close_subagent_workspace();
         }
@@ -1082,7 +1102,7 @@ impl DashboardState {
                     collapsed_project_keys: BTreeSet::new(),
                     focus: Focus::Prompt,
                 });
-            view.focus = Focus::Prompt;
+            view.focus = if open { Focus::Prompt } else { Focus::Sessions };
             self.navigation_session = Some(session_id.to_owned());
             return DashboardAction::SelectWorkspace {
                 workspace_id: workspace_id.to_owned(),
@@ -1094,7 +1114,12 @@ impl DashboardState {
         }
         self.select_active_session(session_id);
         self.clear_filter_hiding_selection();
-        self.open_selected_session()
+        if open {
+            self.open_selected_session()
+        } else {
+            self.focus = Focus::Sessions;
+            DashboardAction::None
+        }
     }
 
     /// Opens a session selected from the CPU report. Managed sub-agents live
