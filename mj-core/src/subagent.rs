@@ -1112,11 +1112,13 @@ pub static HANDBACK_REPORT_RULES: LazyLock<String> = LazyLock::new(|| {
 /// What a child's first prompt opens with when it has the tool. It leads the
 /// prompt rather than trailing a parent's long instructions, where live runs
 /// showed children skipping it. `report_dir` is the directory Mjolnir created
-/// for this child's files.
+/// for this child's files. The sentence about long waits is here and not in
+/// [`HANDBACK_REPORT_RULES`] because those rules already fill the length the
+/// harnesses keep of a tool description and of server instructions.
 #[must_use]
 pub fn handback_prompt_note(report_dir: &str) -> String {
     format!(
-        "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your report: the session that started you reads only that report, not the rest of this conversation. Your report directory is {report_dir}. {}",
+        "You are a Mjolnir sub-agent. Finish every task by calling the mj-agents handback tool with your report: the session that started you reads only that report, not the rest of this conversation. When your assignment needs the result of a build, test run or other long command, wait for it to finish: a long wait is not a reason to hand back. Your report directory is {report_dir}. {}",
         HANDBACK_REPORT_RULES.as_str()
     )
 }
