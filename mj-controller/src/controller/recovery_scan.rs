@@ -539,8 +539,6 @@ fn adopted_session_record(
         create_managed_worktree: None,
         workspace_id,
         archived: false,
-        container_cpus: None,
-        container_memory: None,
         id: session_id.to_owned(),
         title: format!("Recovered {}", &session_id[..session_id.len().min(8)]),
         harness_kind,

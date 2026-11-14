@@ -233,11 +233,6 @@ pub struct CarriedLaunchSettings {
     pub no_project_memory: bool,
     pub no_github_events: bool,
     pub no_github_credentials: bool,
-    /// The source's per-session container size overrides, as stored. They
-    /// take precedence over the allocation when the container is created, so
-    /// a copy that dropped them would start at a different size.
-    pub container_cpus: Option<String>,
-    pub container_memory: Option<String>,
     /// What the copy changed because a setting could not apply now, in a
     /// sentence the launch notices show.
     pub note: Option<String>,
@@ -690,8 +685,7 @@ pub enum DashboardAction {
     /// the container is created.
     SaveContainerSettings {
         session_id: String,
-        cpus: Option<String>,
-        memory: Option<String>,
+        resource_allocation: Option<SessionResourceAllocation>,
         additional_mounts: Vec<AdditionalMount>,
         mount_history: Vec<std::path::PathBuf>,
     },

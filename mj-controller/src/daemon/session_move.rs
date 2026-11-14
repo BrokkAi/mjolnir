@@ -83,10 +83,6 @@ pub(super) fn load_controller_for_resume(request: &ResumeSessionRequest) -> Resu
             .context("Move recovery session is missing")?;
         record.resource_allocation = operation.source_resource_allocation;
         record.additional_mounts = operation.source_additional_mounts;
-        if let Some(previous) = operation.recovery_session {
-            record.container_cpus = previous.container_cpus;
-            record.container_memory = previous.container_memory;
-        }
         crate::database::save_resumed_session(record, None)?;
     }
     Ok(controller)
@@ -143,7 +139,7 @@ impl RuntimeState {
                     .filter(|target| target.kind == crate::targets::DeploymentCapacityKind::Host)
                     .map(|target| capacity::ContainerCapacityCommitment {
                         target_ids: target.target_ids,
-                        allocation: source.resource_allocation.clone(),
+                        allocation: mj_core::state::counted_container_allocation(source).cloned(),
                     })
             } else {
                 None

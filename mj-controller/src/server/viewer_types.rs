@@ -359,9 +359,8 @@ impl ViewerSnapshot {
                     project_label: source.short,
                     project_key: project_key(&source.key),
                     display_location: project.project_target(config, &session.target_template_id),
-                    container_cpus: session.container_cpus.clone(),
-                    container_memory: session.container_memory.clone(),
                     additional_mounts: session.additional_mounts.clone(),
+                    resource_allocation: session.resource_allocation.clone(),
                     lifecycle,
                     transitioning: session.state.transition_kind().is_some(),
                     latest_event_ordinal: 0,
@@ -723,18 +722,12 @@ pub struct ViewerSession {
     /// same target projection the terminal uses while a session is running.
     #[serde(default)]
     pub display_location: String,
-    /// Per-session container CPU limit overriding the target template's. It
-    /// is applied the next time the session's container is created.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub container_cpus: Option<String>,
-    /// Per-session container memory limit overriding the target template's.
-    /// It is applied the next time the session's container is created.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub container_memory: Option<String>,
     /// Extra directories attached to this session's container, in the same
     /// persisted shape the terminal's container dialog edits.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_mounts: Vec<AdditionalMount>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_allocation: Option<SessionResourceAllocation>,
     pub lifecycle: ViewerLifecycleCategory,
     /// A lifecycle transition temporarily owns this session's conversation.
     /// This remains separate from the coarse lifecycle category so Move can

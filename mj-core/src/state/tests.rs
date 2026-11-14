@@ -294,8 +294,6 @@ fn sample_state() -> State {
         create_managed_worktree: None,
         workspace_id: crate::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
-        container_cpus: None,
-        container_memory: None,
         container_workspace: None,
         id: "0123456789abcdef".into(),
         title: "Build Hel".into(),
@@ -358,6 +356,17 @@ fn container_capacity_counts_owners_and_provisioning_but_not_borrowed_children()
         memory_bytes: 8 << 30,
     });
 
+    let mut runtime = parent
+        .target_runtime
+        .as_deref()
+        .cloned()
+        .unwrap_or_else(|| (&sample_config().targets["podman"]).into());
+    runtime.container_settings = Some(ContainerSettings::requested(&parent));
+    parent.target_runtime = Some(std::sync::Arc::new(runtime));
+    parent.resource_allocation = Some(SessionResourceAllocation::Container {
+        cpus: 8,
+        memory_bytes: 16 << 30,
+    });
     let mut child = parent.clone();
     child.id = "fedcba9876543210".into();
     child.target = Some(Box::new(TargetLocator::LocalPodman {
@@ -560,13 +569,9 @@ fn session_records_written_before_container_overrides_still_load() {
     assert!(object.remove("container_memory").is_none());
 
     let loaded: SessionRecord = serde_json::from_value(json).expect("load older session");
-    assert_eq!(loaded.container_cpus, None);
-    assert_eq!(loaded.container_memory, None);
     assert_eq!(loaded, session);
 
-    let mut edited = session.clone();
-    edited.container_cpus = Some("4".into());
-    edited.container_memory = Some("8g".into());
+    let edited = session.clone();
     let round_tripped: SessionRecord =
         serde_json::from_str(&serde_json::to_string(&edited).expect("serialize"))
             .expect("reload edited session");

@@ -1034,8 +1034,7 @@ pub(crate) async fn apply_dashboard_action(
         }
         DashboardAction::SaveContainerSettings {
             session_id,
-            cpus,
-            memory,
+            resource_allocation,
             additional_mounts,
             mount_history,
         } => {
@@ -1046,8 +1045,7 @@ pub(crate) async fn apply_dashboard_action(
             spawn_dashboard_container_settings(
                 ContainerSettingsRequest {
                     session_id,
-                    cpus,
-                    memory,
+                    resource_allocation,
                     additional_mounts,
                     mount_history,
                 },

@@ -1219,8 +1219,6 @@ fn failed_resume_rolls_back_only_after_target_cleanup() {
         create_managed_worktree: None,
         workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
         archived: false,
-        container_cpus: None,
-        container_memory: None,
         id: "0123456789abcdef0123456789abcdef".into(),
         title: "imported session".into(),
         harness_kind: mj_core::config::HarnessKind::Codex,

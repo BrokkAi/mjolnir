@@ -3360,7 +3360,10 @@ fn bare_move_preparation_normalizes_an_empty_resource_reset() {
     assert!(prepared.in_place);
     assert!(!prepared.selection.clear_resource_allocation);
     let mut source = fixture.controller.state.sessions[LATCH_RELAY_SESSION].clone();
-    source.container_cpus = Some("4".into());
+    source.resource_allocation = Some(SessionResourceAllocation::Container {
+        cpus: 4,
+        memory_bytes: 8 << 30,
+    });
     let mut selection = prepared.selection;
     selection.clear_resource_allocation = true;
     assert!(

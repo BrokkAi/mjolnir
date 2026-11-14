@@ -73,6 +73,7 @@ const SUMMARY_FIELDS: &[&str] = &[
     "target_id",
     "state",
     "container_upgrade_supported",
+    "resource_allocation",
     "created_at",
     "updated_at",
     "has_error",

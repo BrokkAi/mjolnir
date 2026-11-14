@@ -279,7 +279,7 @@ Container settings
 Mounted session
 
 CPUs
-Memory
+Memory (GiB)
 Attached directories
 
 Source directories must exist on the selected target’s host.
@@ -337,7 +337,7 @@ alpha
 Live
 controls: [{"tag":"select","id":"new-profile","label":"alphabetagamma","value":"alpha","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":"new-back","label":"Back","value":"","checked":null,"disabled":true,"pressed":null},{"tag":"button","id":"new-next","label":"Next","value":"","checked":null,"disabled":false,"pressed":null},{"tag":"button","id":null,"label":"Cancel","value":"","checked":null,"disabled":false,"pressed":null}]
 subagent selector count: 0
-action: POST /api/actions [{"action":"set-container-settings","session_id":"mounted","cpus":"6","memory":"12g","mounts":[{"source":"/srv/reference","destination":"/reference","read_only":true},{"source":"/srv/cache","destination":"/cache","read_only":false},{"source":"/srv/work","destination":"/work","read_only":false,"access":"rw"}]},{"action":"restart","session_id":"mounted"},{"action":"upgrade-container","request":{"selection":{"session_id":"mounted","source_container_id":"old-container","current_image":"agent-dev:2.51.0","current_image_id":"sha256:previous","target_image":"agent-dev:2.52.0","target_image_id":"sha256:selected","available":true,"retained_mounts":["/workspace","/cache","/tmp"],"warning":"Writable-layer state, including manually installed packages, may be lost. A checkpoint does not preserve the whole environment."},"acknowledge_writable_layer_loss":true}}]
+action: POST /api/actions [{"action":"set-container-settings","session_id":"mounted","resource_allocation":{"kind":"container","cpus":6,"memory_bytes":12884901888},"mounts":[{"source":"/srv/reference","destination":"/reference","read_only":true},{"source":"/srv/cache","destination":"/cache","read_only":false},{"source":"/srv/work","destination":"/work","read_only":false,"access":"rw"}]},{"action":"restart","session_id":"mounted"},{"action":"upgrade-container","request":{"selection":{"session_id":"mounted","source_container_id":"old-container","current_image":"agent-dev:2.51.0","current_image_id":"sha256:previous","target_image":"agent-dev:2.52.0","target_image_id":"sha256:selected","available":true,"retained_mounts":["/workspace","/cache","/tmp"],"warning":"Writable-layer state, including manually installed packages, may be lost. A checkpoint does not preserve the whole environment."},"acknowledge_writable_layer_loss":true}}]
 project creation requests: 0
 === local path suggestions stay with the local host (390x844) ===
 New session

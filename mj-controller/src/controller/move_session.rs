@@ -944,8 +944,6 @@ impl Controller {
             &source.native_session_id,
             &source.resource_allocation,
             &source.additional_mounts,
-            &source.container_cpus,
-            &source.container_memory,
             selection,
             self.move_configuration_fingerprint(selection)?,
             &queued,
@@ -1148,11 +1146,7 @@ impl Controller {
                 .resource_allocation
                 .or_else(|| source.resource_allocation.clone());
         }
-        if selection.clear_resource_allocation
-            && source.resource_allocation.is_none()
-            && source.container_cpus.is_none()
-            && source.container_memory.is_none()
-        {
+        if selection.clear_resource_allocation && source.resource_allocation.is_none() {
             selection.clear_resource_allocation = false;
         }
         if let Some(retained) = previous.as_ref().filter(|op| op.holds_source_environment()) {
@@ -2362,8 +2356,6 @@ impl Controller {
                 if operation.selection.clear_resource_allocation {
                     let session = self.state.sessions.get_mut(&id).unwrap();
                     session.resource_allocation = None;
-                    session.container_cpus = None;
-                    session.container_memory = None;
                     crate::database::save_resumed_session(session, None)?;
                 }
                 if operation.workspace_transfer.is_some() {
@@ -2858,10 +2850,7 @@ fn move_environment_change(
         Some("target changed")
     } else if Some(&source.additional_mounts) != selection.additional_mounts.as_ref() {
         Some("attached mounts changed")
-    } else if source.resource_allocation != selection.resource_allocation
-        || (selection.clear_resource_allocation
-            && (source.container_cpus.is_some() || source.container_memory.is_some()))
-    {
+    } else if source.resource_allocation != selection.resource_allocation {
         Some("resource allocation changed")
     } else {
         None

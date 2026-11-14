@@ -11,6 +11,7 @@
 //! It replaces the old session edit dialog, which existed only because the
 //! footer had no room for three more hints.
 
+use mj_core::state::SessionResourceAllocation;
 use std::cell::RefCell;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -301,11 +302,14 @@ fn session_facts(dashboard: &DashboardState, session: &SessionRecord) -> Vec<Lin
     }
 
     let mut container = Vec::new();
-    if let Some(cpus) = &session.container_cpus {
+    if let Some(SessionResourceAllocation::Container { cpus, memory_bytes }) =
+        &session.resource_allocation
+    {
         container.push(format!("{cpus} CPUs"));
-    }
-    if let Some(memory) = &session.container_memory {
-        container.push(format!("{memory} memory"));
+        container.push(format!(
+            "{} GiB memory",
+            crate::wizards::resources::memory_gib_text(*memory_bytes)
+        ));
     }
     if !session.additional_mounts.is_empty() {
         container.push(crate::widgets::counted(
@@ -1744,12 +1748,14 @@ mod tests {
         append_golden_state(&mut output, "session action menu", 120, 40, &lines);
 
         let mut session = running_session();
+        session.resource_allocation = Some(SessionResourceAllocation::Container {
+            cpus: 4,
+            memory_bytes: 8 << 30,
+        });
         session.subagents = Some(SubagentPolicy::Mjolnir {
             straightforward: None,
             subtle: None,
         });
-        session.container_cpus = Some("4".into());
-        session.container_memory = Some("8g".into());
         let mut dashboard = dashboard_with_session(session);
         dashboard.focus_sessions();
         dashboard.begin_session_palette();

@@ -1538,8 +1538,6 @@ pub(crate) fn runtime_test_session(
         target_template_id: "local".into(),
         resource_allocation: None,
         additional_mounts: Vec::new(),
-        container_cpus: None,
-        container_memory: None,
         state,
         archived: false,
         target: None,
@@ -4679,9 +4677,8 @@ async fn restart_compares_persisted_applied_settings_and_serializes_mount_edits(
     .unwrap();
     assert!(!intent.container_recreation_acknowledged);
     assert!(intent.container_upgrade.is_none());
-    let refused =
-        crate::database::set_session_container_settings("session-1", None, None, &[], "later")
-            .unwrap_err();
+    let refused = crate::database::set_session_container_settings("session-1", None, &[], "later")
+        .unwrap_err();
     assert!(mj_core::refusal::Refusal::of(&refused).is_some());
 
     assert!(
@@ -4697,7 +4694,7 @@ async fn restart_compares_persisted_applied_settings_and_serializes_mount_edits(
         crate::database::SessionRestartPhase::Stopping
     );
     crate::database::cancel_session_restart("session-1").unwrap();
-    crate::database::set_session_container_settings("session-1", None, None, &[], "later").unwrap();
+    crate::database::set_session_container_settings("session-1", None, &[], "later").unwrap();
 }
 
 #[tokio::test]
@@ -4811,14 +4808,9 @@ async fn restart_intent_checks_cancellation_and_records_its_sealed_checkpoint() 
         crate::database::load_session_restarts().unwrap()[0].phase,
         crate::database::SessionRestartPhase::CancelRequested
     );
-    let refused = crate::database::set_session_container_settings(
-        "session-1",
-        None,
-        None,
-        &[],
-        "while cancelling",
-    )
-    .unwrap_err();
+    let refused =
+        crate::database::set_session_container_settings("session-1", None, &[], "while cancelling")
+            .unwrap_err();
     assert!(mj_core::refusal::Refusal::of(&refused).is_some());
     release.notify_one();
     RuntimeState::wait_lifecycle_result(operation)
@@ -6276,8 +6268,6 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
             target_template_id: "localhost".into(),
             additional_mounts: Vec::new(),
             resource_allocation: None,
-            container_cpus: None,
-            container_memory: None,
             title: title.into(),
             session_title_override: None,
         })
@@ -13237,12 +13227,11 @@ async fn dismiss_notification_clears_the_served_question_attention() {
         snapshot.materialized.execution = mj_core::state::MaterializedExecutionState::Idle;
         snapshot.window = mj_core::state::ProjectionWindow::of(&snapshot.materialized);
         snapshot.operational.person_input_through = if dismissed { 10 } else { 0 };
-        snapshot.operational.open_request = (!dismissed).then(|| {
-            mj_core::assessment::OpenRequest {
+        snapshot.operational.open_request =
+            (!dismissed).then(|| mj_core::assessment::OpenRequest {
                 question: question.clone(),
                 question_message: None,
-            }
-        });
+            });
         view
     };
     state

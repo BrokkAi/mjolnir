@@ -374,8 +374,6 @@ impl Controller {
             subagents: Some(mj_core::subagent::SubagentPolicy::None),
             create_managed_worktree: Some(false),
             archived: false,
-            container_cpus: None,
-            container_memory: None,
             // A child runs inside its parent's container, so it works in the
             // parent's workspace, including the legacy shared one.
             container_workspace: parent.container_workspace.clone(),

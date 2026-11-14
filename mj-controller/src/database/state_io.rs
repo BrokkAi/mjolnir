@@ -646,12 +646,12 @@ pub(super) fn insert_session_with_parent(
              native_session_id, acp_session_title, session_title_override, updated_at,
              viewed_through_event_ordinal, last_error, resource_allocation,
              last_checkpoint_error, project_directory, managed_worktree,
-             container_cpus, container_memory, archived, draft_input, create_managed_worktree,
+             archived, draft_input, create_managed_worktree,
              subagents, container_workspace, build_cache_json, launch_base,
              target_runtime_json, launch_branch, publication_json, checkout_json, project_json,
              review_json, no_project_memory, no_mailbox, oracle, oracle_choice, no_github_credentials,
              notifications_ignored
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37)
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35)
          ON CONFLICT(session_id) DO UPDATE SET
              title = excluded.title,
              harness_kind = excluded.harness_kind,
@@ -671,8 +671,6 @@ pub(super) fn insert_session_with_parent(
              last_checkpoint_error = excluded.last_checkpoint_error,
              project_directory = excluded.project_directory,
              managed_worktree = excluded.managed_worktree,
-             container_cpus = excluded.container_cpus,
-             container_memory = excluded.container_memory,
              archived = excluded.archived,
              create_managed_worktree = excluded.create_managed_worktree,
              subagents = excluded.subagents,
@@ -719,8 +717,6 @@ pub(super) fn insert_session_with_parent(
                 .as_ref()
                 .map(serde_json::to_string)
                 .transpose()?,
-            session.container_cpus,
-            session.container_memory,
             session.archived,
             session.draft_input,
             session.create_managed_worktree,
@@ -771,7 +767,7 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
     // that is set in memory, read back as its default, and never missed until
     // somebody inspects the database. A new field breaks this binding, and
     // whoever adds it decides then whether a lifecycle transition owns it.
-    // Everything bound to `_` is owned by `upsert_session` instead.
+    // Fields bound to `_` have explicit writers, such as container settings.
     let SessionRecord {
         oracle_choice,
         target_runtime,
@@ -784,7 +780,7 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
         updated_at,
         viewed_through_event_ordinal,
         last_error,
-        resource_allocation,
+        resource_allocation: _,
         last_checkpoint_error,
         project_directory,
         managed_worktree,
@@ -807,8 +803,6 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
         subagents,
         oracle,
         additional_mounts: _,
-        container_cpus: _,
-        container_memory: _,
         container_workspace: _,
         archived: _,
         // Written by `replace_targets` below rather than by this statement.
@@ -833,16 +827,15 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
              updated_at = ?7,
              viewed_through_event_ordinal = max(viewed_through_event_ordinal, ?8),
              last_error = ?9,
-             resource_allocation = ?10,
-             last_checkpoint_error = ?11,
-             project_directory = ?12,
-             managed_worktree = ?13,
-             build_cache_json = ?14,
-             target_runtime_json = ?15,
-             subagents = ?16,
-             project_json = coalesce(?17,project_json),
-             oracle = ?18,
-             oracle_choice = ?19
+             last_checkpoint_error = ?10,
+             project_directory = ?11,
+             managed_worktree = ?12,
+             build_cache_json = ?13,
+             target_runtime_json = ?14,
+             subagents = ?15,
+             project_json = coalesce(?16,project_json),
+             oracle = ?17,
+             oracle_choice = ?18
          WHERE session_id = ?1",
         params![
             id,
@@ -854,10 +847,6 @@ pub(super) fn update_lifecycle_fields(tx: &Transaction<'_>, session: &SessionRec
             updated_at,
             viewed_through_event_ordinal,
             last_error,
-            resource_allocation
-                .as_ref()
-                .map(serde_json::to_string)
-                .transpose()?,
             last_checkpoint_error,
             project_directory.as_ref().map(|path| path_to_blob(path)),
             managed_worktree
@@ -1404,7 +1393,7 @@ const SESSION_QUERY: &str =
                 s.session_title_override, c.created_at, s.updated_at,
                 s.viewed_through_event_ordinal, s.last_error, s.resource_allocation,
                 s.last_checkpoint_error, s.project_directory, s.managed_worktree,
-                s.draft_input, s.container_cpus, s.container_memory, s.archived
+                s.draft_input, s.archived
                 , c.workspace_id, s.create_managed_worktree, s.subagents,
                 s.container_workspace, s.build_cache_json, s.launch_base, s.target_runtime_json,
                 s.launch_branch, s.publication_json, s.checkout_json, s.project_json,
@@ -1431,47 +1420,47 @@ fn decode_session(
     };
     Ok(Some(SessionRecord {
         oracle_choice: row
-            .get::<_, Option<String>>(37)?
+            .get::<_, Option<String>>(35)?
             .map(|json| {
                 serde_json::from_str(&json).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(37, Type::Text, Box::new(error))
+                    rusqlite::Error::FromSqlConversionFailure(35, Type::Text, Box::new(error))
                 })
             })
             .transpose()?,
-        oracle: row.get(36)?,
-        project: decode_shared(row, 32, &mut interns.projects)?,
-        target_runtime: decode_shared(row, 28, &mut interns.runtimes)?,
+        oracle: row.get(34)?,
+        project: decode_shared(row, 30, &mut interns.projects)?,
+        target_runtime: decode_shared(row, 26, &mut interns.runtimes)?,
         harness_kind,
-        create_managed_worktree: row.get(23)?,
-        launch_base: row.get(27)?,
-        launch_branch: row.get(29)?,
+        create_managed_worktree: row.get(21)?,
+        launch_base: row.get(25)?,
+        launch_branch: row.get(27)?,
         checkout: row
-            .get::<_, Option<String>>(31)?
+            .get::<_, Option<String>>(29)?
             .map(|json| {
                 serde_json::from_str(&json).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(31, Type::Text, Box::new(error))
+                    rusqlite::Error::FromSqlConversionFailure(29, Type::Text, Box::new(error))
                 })
             })
             .transpose()?,
         publication: row
-            .get::<_, Option<String>>(30)?
+            .get::<_, Option<String>>(28)?
             .map(|json| {
                 serde_json::from_str(&json).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(30, Type::Text, Box::new(error))
+                    rusqlite::Error::FromSqlConversionFailure(28, Type::Text, Box::new(error))
                 })
             })
             .transpose()?,
         subagents: row
-            .get::<_, Option<String>>(24)?
+            .get::<_, Option<String>>(22)?
             .map(|json| {
                 mj_core::subagent::parse_stored_policy(&json).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(24, Type::Text, Box::new(error))
+                    rusqlite::Error::FromSqlConversionFailure(22, Type::Text, Box::new(error))
                 })
             })
             .transpose()?,
-        container_workspace: row.get::<_, Option<String>>(25)?.map(PathBuf::from),
+        container_workspace: row.get::<_, Option<String>>(23)?.map(PathBuf::from),
         build_cache: row
-            .get::<_, Option<String>>(26)?
+            .get::<_, Option<String>>(24)?
             .as_deref()
             .and_then(|text| match serde_json::from_str(text) {
                 Ok(build_cache) => Some(build_cache),
@@ -1480,10 +1469,8 @@ fn decode_session(
                     None
                 }
             }),
-        workspace_id: row.get(22)?,
-        archived: row.get(21)?,
-        container_cpus: row.get(19)?,
-        container_memory: row.get(20)?,
+        workspace_id: row.get(20)?,
+        archived: row.get(19)?,
         id: row.get(0)?,
         title: row.get(1)?,
         last_profile: row.get(3)?,
@@ -1504,7 +1491,7 @@ fn decode_session(
         // An unreadable choice, such as a mode a newer release wrote, falls
         // back to `[review]` rather than hiding the session.
         review: row
-            .get::<_, Option<String>>(33)?
+            .get::<_, Option<String>>(31)?
             .as_deref()
             .and_then(|text| match serde_json::from_str(text) {
                 Ok(review) => Some(review),
@@ -1513,11 +1500,11 @@ fn decode_session(
                     None
                 }
             }),
-        no_project_memory: row.get(34)?,
+        no_project_memory: row.get(32)?,
         // Keep the shipped no_mailbox column for the GitHub target opt-out.
-        no_github_events: row.get(35)?,
-        no_github_credentials: row.get(38)?,
-        notifications_ignored: row.get(39)?,
+        no_github_events: row.get(33)?,
+        no_github_credentials: row.get(36)?,
+        notifications_ignored: row.get(37)?,
         target_template_id: row.get(5)?,
         resource_allocation: row
             .get::<_, Option<String>>(14)?
@@ -1634,6 +1621,26 @@ pub fn record_operator_away_worker_protocol(session: String, protocol: u32) -> R
         connection.execute("INSERT INTO operator_away_workers(session_id,protocol) VALUES(?1,?2) ON CONFLICT(session_id) DO UPDATE SET protocol=excluded.protocol WHERE protocol != excluded.protocol", params![session,protocol])?;
         Ok(())
     })
+}
+
+/// Explicit size changes belong to Resume/Move and the settings writer;
+/// generic lifecycle or checkpoint saves must preserve a newer editor save.
+pub(super) fn update_resource_allocation(
+    tx: &Transaction<'_>,
+    session: &SessionRecord,
+) -> Result<()> {
+    tx.execute(
+        "UPDATE sessions SET resource_allocation=?2 WHERE session_id=?1",
+        params![
+            session.id,
+            session
+                .resource_allocation
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?
+        ],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

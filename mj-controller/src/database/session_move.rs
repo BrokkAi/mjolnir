@@ -71,6 +71,7 @@ pub fn adopt_move_destination(operation: &MoveOperation, session: &SessionRecord
     submit_database_write("adopt_move_destination", move |connection| {
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         update_lifecycle_fields(&tx, &session)?;
+        super::state_io::update_resource_allocation(&tx, &session)?;
         save_move_operation_with(&tx, &operation)?;
         tx.commit()?;
         Ok(())

@@ -154,8 +154,6 @@ pub(super) fn sample_config_state() -> (Config, AppState) {
                 create_managed_worktree: None,
                 workspace_id: mj_core::workspace::DEFAULT_WORKSPACE_ID.to_owned(),
                 archived: false,
-                container_cpus: None,
-                container_memory: None,
                 id: "session-1".into(),
                 title: "Build Hel".into(),
                 harness_kind: HarnessKind::Codex,
@@ -2783,8 +2781,7 @@ fn terminal_session_actions_validate_against_their_published_capabilities() {
     };
     let container_settings = || ControllerAction::SetContainerSettings {
         session_id: "session-1".into(),
-        cpus: None,
-        memory: None,
+        resource_allocation: None,
         mounts: Vec::new(),
     };
     let restart = || ControllerAction::Restart {

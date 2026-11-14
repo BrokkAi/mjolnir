@@ -732,17 +732,15 @@ fn save_resumed_session_in_environment_to(
         )?;
     }
     update_lifecycle_fields(&tx, session)?;
+    super::state_io::update_resource_allocation(&tx, session)?;
     tx.execute(
-        "UPDATE sessions SET native_session_id = ?2, container_cpus = ?3,
-             container_memory = ?4, container_workspace = ?5,
-             create_managed_worktree = ?6, launch_base = ?7, launch_branch = ?8,
-             checkout_json = ?9
+        "UPDATE sessions SET native_session_id = ?2, container_workspace = ?3,
+             create_managed_worktree = ?4, launch_base = ?5, launch_branch = ?6,
+             checkout_json = ?7
          WHERE session_id = ?1",
         params![
             session.id,
             session.native_session_id,
-            session.container_cpus,
-            session.container_memory,
             session
                 .container_workspace
                 .as_ref()
@@ -1152,22 +1150,19 @@ pub(super) fn set_native_session_hidden_to(
 /// owns is left to its own writer.
 pub fn set_session_container_settings(
     session_id: &str,
-    cpus: Option<&str>,
-    memory: Option<&str>,
+    allocation: Option<&SessionResourceAllocation>,
     mounts: &[AdditionalMount],
     updated_at: &str,
 ) -> Result<()> {
     let session_id = session_id.to_owned();
-    let cpus = cpus.map(str::to_owned);
-    let memory = memory.map(str::to_owned);
+    let allocation = allocation.cloned();
     let mounts = mounts.to_vec();
     let updated_at = updated_at.to_owned();
     submit_database_write("set_session_container_settings", move |_| {
         set_session_container_settings_to(
             &database_path(),
             &session_id,
-            cpus.as_deref(),
-            memory.as_deref(),
+            allocation.as_ref(),
             &mounts,
             &updated_at,
         )
@@ -1177,8 +1172,7 @@ pub fn set_session_container_settings(
 pub(super) fn set_session_container_settings_to(
     path: &Path,
     session_id: &str,
-    cpus: Option<&str>,
-    memory: Option<&str>,
+    allocation: Option<&SessionResourceAllocation>,
     mounts: &[AdditionalMount],
     updated_at: &str,
 ) -> Result<()> {
@@ -1200,9 +1194,13 @@ pub(super) fn set_session_container_settings_to(
     }
     let changed = tx.execute(
         "UPDATE sessions
-         SET container_cpus = ?2, container_memory = ?3, updated_at = ?4
+         SET resource_allocation = ?2, updated_at = ?3
          WHERE session_id = ?1",
-        params![session_id, cpus, memory, updated_at],
+        params![
+            session_id,
+            allocation.map(serde_json::to_string).transpose()?,
+            updated_at
+        ],
     )?;
     if changed != 1 {
         bail!("unknown session {session_id}");

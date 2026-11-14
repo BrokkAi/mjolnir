@@ -2370,7 +2370,9 @@ function parseMemoryGiB(text) {
   return Number(bytes);
 }
 
-function containerAllocationFromDraft(draft, target) {
+function containerAllocationFromDraft(draft, target, savedAllocation = undefined) {
+  const editing = savedAllocation !== undefined;
+  const unchanged = editing && draft.resourceCpuText.trim() === String(savedAllocation?.cpus) && parseMemoryGiB(draft.resourceMemoryText) === savedAllocation?.memory_bytes;
   const invalid = error => ({ allocation: null, error, warning: '' });
   const cpuText = draft.resourceCpuText.trim();
   if (!/^\d+$/.test(cpuText)) return invalid('CPU must be a positive whole number.');
@@ -2378,12 +2380,12 @@ function containerAllocationFromDraft(draft, target) {
   if (cpusBig < 1n || cpusBig > BigInt(Number.MAX_SAFE_INTEGER)) {
     return invalid('CPU must be a positive whole number.');
   }
-  if (cpusBig < BigInt(MIN_CONTAINER_CPUS)) {
+  if (!unchanged && cpusBig < BigInt(MIN_CONTAINER_CPUS)) {
     return invalid(`CPU must be at least ${MIN_CONTAINER_CPUS}.`);
   }
   const memoryBytes = parseMemoryGiB(draft.resourceMemoryText);
   if (memoryBytes === null) return invalid('MEM must be a positive number of GiB (up to 30 decimal places).');
-  if (BigInt(memoryBytes) < MIN_CONTAINER_MEMORY_BYTES) {
+  if (!unchanged && BigInt(memoryBytes) < MIN_CONTAINER_MEMORY_BYTES) {
     return invalid('RAM must be at least 4 GiB.');
   }
   const capacity = target?.container_capacity;
@@ -2396,7 +2398,7 @@ function containerAllocationFromDraft(draft, target) {
   }
   const allocation = { kind: 'container', cpus: Number(cpusBig), memory_bytes: memoryBytes };
   let error = '';
-  if (target?.container_memory_hard_limit && (!capacity || !capacity.complete || BigInt(memoryBytes) > BigInt(capacity.remaining.memory_bytes))) {
+  if (!editing && target?.container_memory_hard_limit && (!capacity || !capacity.complete || BigInt(memoryBytes) > BigInt(capacity.remaining.memory_bytes))) {
     error = !capacity || !capacity.complete
       ? 'a live container on this host has no recorded RAM size, so Mjolnir cannot work out the RAM left safely'
       : `this session asks for ${capacityGiBText(memoryBytes)} GiB of RAM, but this host has ${capacityGiBText(capacity.remaining.memory_bytes)} GiB left after its reserve and live containers. RAM is a hard limit on this host, so Mjolnir does not overcommit it: Apple containers do not give freed memory back to macOS, and Nitro sandboxes take theirs from the memory pool the host reserved at boot. Suspend or stop a session on this host, or choose less RAM. Mjolnir does not stop sessions automatically`;
@@ -6173,14 +6175,14 @@ function openContainerSettings(session) {
   const cpusField = el('label', 'field');
   cpusField.append(el('span', '', 'CPUs'));
   const cpusInput = el('input');
-  cpusInput.value = session.container_cpus || '';
+  cpusInput.value = session.resource_allocation?.cpus?.toString() || '';
   cpusInput.placeholder = '2';
   cpusField.append(cpusInput);
   const memoryField = el('label', 'field');
-  memoryField.append(el('span', '', 'Memory'));
+  memoryField.append(el('span', '', 'Memory (GiB)'));
   const memoryInput = el('input');
-  memoryInput.value = session.container_memory || '';
-  memoryInput.placeholder = '8g';
+  memoryInput.value = session.resource_allocation ? memoryGiBText(session.resource_allocation.memory_bytes) : '';
+  memoryInput.placeholder = '8';
   memoryField.append(memoryInput);
 
   const editor = freshMountEditor(session.additional_mounts);
@@ -6198,6 +6200,10 @@ function openContainerSettings(session) {
     controls,
   );
   confirm.onclick = async () => {
+    const parsed = !cpusInput.value.trim() && !memoryInput.value.trim()
+      ? { allocation: null, error: null }
+      : containerAllocationFromDraft({resourceCpuText: cpusInput.value, resourceMemoryText: memoryInput.value}, snapshot?.targets.find(target => target.id === session.target_id), session.resource_allocation ?? null);
+    if (parsed.error) { error.textContent = parsed.error; return; }
     confirm.disabled = true;
     error.textContent = '';
     try {
@@ -6206,8 +6212,7 @@ function openContainerSettings(session) {
         body: JSON.stringify({
           action: 'set-container-settings',
           session_id: session.id,
-          cpus: cpusInput.value.trim(),
-          memory: memoryInput.value.trim(),
+          resource_allocation: parsed.allocation,
           mounts: mountEditorWire(editor),
         }),
       });

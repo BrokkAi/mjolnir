@@ -242,8 +242,6 @@ pub(super) async fn apply_phone_action(
                         target_template_id: target_id,
                         additional_mounts,
                         resource_allocation: resource_allocation.map(|allocation| *allocation),
-                        container_cpus: None,
-                        container_memory: None,
                         title,
                         session_title_override,
                     },
@@ -539,10 +537,13 @@ pub(super) async fn apply_phone_action(
         }
         ControllerAction::SetContainerSettings {
             session_id,
-            cpus,
-            memory,
+            resource_allocation,
             mounts,
         } => {
+            services
+                .daemon_runtime
+                .validate_container_settings_size(&session_id, resource_allocation.as_ref())
+                .await?;
             // The dialog that edits these owns the suggestion list, so the
             // remembered sources pass through unchanged: the update persists
             // them again beside the new mounts.
@@ -563,8 +564,7 @@ pub(super) async fn apply_phone_action(
             };
             controller.update_session_container_settings(
                 &session_id,
-                cpus,
-                memory,
+                resource_allocation,
                 mounts,
                 mount_history,
                 executor,

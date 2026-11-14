@@ -473,8 +473,7 @@ pub(super) async fn handle_action(
         }
         DaemonAction::SetSessionContainerSettings {
             session_id,
-            cpus,
-            memory,
+            resource_allocation,
             mounts,
             mount_history,
         } => {
@@ -482,11 +481,13 @@ pub(super) async fn handle_action(
                 !crate::controller::move_session::move_owns_session(&session_id),
                 "session is moving; change container settings after Move finishes"
             );
+            state
+                .validate_container_settings_size(&session_id, resource_allocation.as_ref())
+                .await?;
             blocking(move || {
                 Controller::load()?.update_session_container_settings(
                     &session_id,
-                    cpus,
-                    memory,
+                    resource_allocation,
                     mounts,
                     mount_history,
                     &crate::targets::ProcessExecutor,

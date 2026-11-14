@@ -7,7 +7,7 @@ const COMPATIBILITY_METADATA_VERSION: i64 = 30;
 /// Expected compatibility floor shared by migration regressions. Compatible
 /// migrations advance the revision without changing this contract.
 #[cfg(test)]
-pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 130;
+pub(super) const MINIMUM_COMPATIBLE_VERSION: i64 = 131;
 
 pub(super) struct SchemaState {
     pub(super) revision: i64,
@@ -2471,6 +2471,10 @@ pub(super) fn migrate_schema(connection: &Connection) -> Result<()> {
     if version < 130 {
         migrate_github_watch_followers(connection)?;
     }
+    // Breaking: removes legacy size columns; older writers cannot preserve edits.
+    if version < 131 {
+        super::container_size::report(super::container_size::migrate(connection)?);
+    }
     let recorded: Option<i64> =
         connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| {
             row.get(0)
@@ -3129,6 +3133,11 @@ fn create_baseline_schema(connection: &Connection) -> Result<()> {
             return Ok(());
         }
         connection.execute_batch(include_str!("baseline.sql"))?;
+        // Reconstruct the historical revision before traversing its migrations.
+        connection.execute_batch(
+            "ALTER TABLE sessions ADD COLUMN container_cpus TEXT;
+            ALTER TABLE sessions ADD COLUMN container_memory TEXT;",
+        )?;
         connection.execute(
             "INSERT INTO schema_compatibility(singleton, minimum_compatible_version) VALUES (1, ?1)",
             [BASELINE_MINIMUM_COMPATIBLE_VERSION],
@@ -3181,6 +3190,8 @@ pub(super) fn advance_test_schema(path: &Path, revision: i64, minimum_compatible
 /// reshape, so a fixture older than 121 removes them first.
 #[cfg(test)]
 pub(super) fn drop_environment_schema(connection: &Connection) {
+    // These historical fixtures also predate removal of the size columns.
+    legacy_schema::ensure_session_container_override_columns(connection).unwrap();
     for (table, column) in [
         ("session_moves", "source_environment_id"),
         ("retained_move_sources", "environment_id"),
@@ -4256,6 +4267,7 @@ mod reader_tests {
         // there are no lifecycle columns. Rewinding the ledger makes the next
         // open apply revision 130.
         let connection = Connection::open(&path).unwrap();
+        legacy_schema::ensure_session_container_override_columns(&connection).unwrap();
         connection
             .execute_batch(
                 "DROP TRIGGER session_rows_deleted;
@@ -4302,7 +4314,7 @@ mod reader_tests {
                             ('acme','repo',11,'follower','pull_request','not interested','https://example.com/11','c',0,0);
                  INSERT INTO mailbox_outbox(event_key,target_session_id,event_json,wake,created_at)
                      VALUES ('queued','creator','{}',1,'c');
-                 DELETE FROM schema_migrations WHERE version = 130;
+                 DELETE FROM schema_migrations WHERE version >= 130;
                  UPDATE schema_compatibility SET minimum_compatible_version = 126;
                  PRAGMA user_version = 129;",
             )
@@ -4312,8 +4324,8 @@ mod reader_tests {
 
         let writer = open_writer(&path).unwrap();
         let state = read_schema_state(&writer).unwrap();
-        assert_eq!(state.revision, 130);
-        assert_eq!(state.minimum_compatible, Some(130));
+        assert_eq!(state.revision, SCHEMA_VERSION);
+        assert_eq!(state.minimum_compatible, Some(MINIMUM_COMPATIBLE_VERSION));
         // A revision-129 build must refuse to read or write the store.
         assert!(state.ensure_supported_by(129).is_err());
         let kept: (String, String, i64, String, i64, String, Option<String>) = writer
@@ -4661,6 +4673,15 @@ mod reader_tests {
             return;
         }
         let connection = Connection::open(path).unwrap();
+        if version < 131 {
+            for column in ["container_cpus", "container_memory"] {
+                if !legacy_schema::table_has_column(&connection, "sessions", column).unwrap() {
+                    connection
+                        .execute_batch(&format!("ALTER TABLE sessions ADD COLUMN {column} TEXT;"))
+                        .unwrap();
+                }
+            }
+        }
         if version < 129
             && legacy_schema::table_has_column(&connection, "sessions", "notifications_ignored")
                 .unwrap()
@@ -5240,6 +5261,313 @@ mod reader_tests {
 
     #[test]
     fn outcome_facts_migration_raises_the_floor() {
+        // Exercise the removed-column migration against the previous writer's data,
+        // including its applied snapshot, before checking older-store refusal.
+        let cases = [
+            ("whole", Some("4"), Some("8g"), None, Some((4, 8_u64 << 30))),
+            (
+                "fraction",
+                Some("1.5"),
+                Some("700m"),
+                None,
+                Some((2, 700_u64 << 20)),
+            ),
+            (
+                "partial",
+                Some("6"),
+                None,
+                Some(SessionResourceAllocation::Container {
+                    cpus: 2,
+                    memory_bytes: 4 << 30,
+                }),
+                Some((6, 4 << 30)),
+            ),
+            ("missing", Some("6"), None, None, None),
+            ("invalid", None, Some("lots"), None, None),
+            (
+                "ec2",
+                Some("4"),
+                Some("8g"),
+                Some(SessionResourceAllocation::AwsEc2 {
+                    instance_type: "m5.large".into(),
+                    vcpus: 2,
+                    memory_bytes: 8 << 30,
+                }),
+                None,
+            ),
+        ];
+        let fixture = tempfile::tempdir().unwrap();
+        let old_path = fixture.path().join("sizes.sqlite3");
+        for (id, _, _, allocation, _) in &cases {
+            let mut record = super::super::tests::session(id, "project");
+            record.resource_allocation = allocation.clone();
+            save_session_to(&old_path, &record).unwrap();
+        }
+        stamp_schema_version(&old_path, 130);
+        let raw = Connection::open(&old_path).unwrap();
+        for (id, cpus, memory, _, _) in &cases {
+            raw.execute(
+                "UPDATE sessions SET container_cpus=?2,container_memory=?3 WHERE session_id=?1",
+                params![id, cpus, memory],
+            )
+            .unwrap();
+        }
+        raw.execute("UPDATE sessions SET target_runtime_json=?1 WHERE session_id='whole'", [r#"{"kind":"local-podman","container_settings":{"additional_mounts":[],"resource_allocation":null,"cpus":"3","memory":"6g"}}"#]).unwrap();
+        let runtime = {
+            let runtime = mj_core::state::TargetRuntimeSettings::from(
+                &mj_core::config::TargetTemplate::LocalBare,
+            );
+            let mut runtime = serde_json::to_value(runtime).unwrap();
+            runtime["environment"]["container_cpus"] = "keep-this-variable".into();
+            runtime["container_settings"] = serde_json::json!({"additional_mounts":[],"resource_allocation":null,"cpus":"3","memory":"6g"});
+            runtime
+        };
+        let mut recovery =
+            serde_json::to_value(super::super::tests::session("whole", "project")).unwrap();
+        recovery["resource_allocation"] =
+            serde_json::json!({"kind":"container","cpus":2,"memory_bytes":4_u64 << 30});
+        recovery["container_cpus"] = "1.5".into();
+        recovery["container_memory"] = "700m".into();
+        recovery["target_runtime"] = runtime.clone();
+        let mut transfer_source = recovery.clone();
+        transfer_source["container_cpus"] = "6".into();
+        transfer_source
+            .as_object_mut()
+            .unwrap()
+            .remove("container_memory");
+        let prepared = serde_json::json!({"launch_args":[],"runtime":runtime,"state":{"phase":"launch_pending"}});
+        let operation = serde_json::json!({
+            "operation_id":"legacy-size-move", "selection":{"session_id":"whole"},
+            "source_profile_id":"codex", "source_target_template_id":"local",
+            "source_target":null, "source_native_session_id":null, "source_additional_mounts":[],
+            "source_resource_allocation":null, "destination_target":null,
+            "destination_native_session_id":null, "destination_store_id":null,
+            "configuration_fingerprint":"kept", "checkpoint":null, "recovery_session":recovery,
+            "workspace_transfer":{"assessment":mj_core::move_workspace::WorkspaceAssessment::default(),
+                "source":transfer_source,"source_stage":"/source","controller_stage":"/controller","phase":"planned"},
+            "prepared_destination":prepared, "queue":"start", "phase":"preparing",
+            "queue_admission_started":false, "queue_admission_finished":false,
+            "cancellation_requested":false, "created_at":"created", "updated_at":"updated", "error":null
+        });
+        raw.execute("INSERT INTO session_moves(session_id,operation_id,operation_json) VALUES('whole','legacy-size-move',?1)", [operation.to_string()]).unwrap();
+        raw.execute("INSERT INTO retained_move_sources(operation_id,session_id,source_json,exclusions_json,created_at) VALUES('legacy-size-move','whole',?1,'[]','created')", [transfer_source.to_string()]).unwrap();
+        let (environment_id, placement): (String, String) = raw.query_row("SELECT e.environment_id,e.placement_json FROM environments e JOIN environment_bindings b USING(environment_id) WHERE b.session_id='whole'", [], |row|Ok((row.get(0)?,row.get(1)?))).unwrap();
+        let mut placement: serde_json::Value = serde_json::from_str(&placement).unwrap();
+        placement["runtime"] = runtime.clone();
+        placement["prepared_destination"] =
+            serde_json::json!({"operation_id":"legacy-size-move","destination":prepared});
+        raw.execute(
+            "UPDATE environments SET placement_json=?2 WHERE environment_id=?1",
+            params![environment_id, placement.to_string()],
+        )
+        .unwrap();
+        raw.execute(
+            "UPDATE environment_workers SET runtime_json=?1 WHERE worker_session_id='whole'",
+            [runtime.to_string()],
+        )
+        .unwrap();
+        let mut preparing = operation.clone();
+        preparing["operation_id"] = "preparing-size-move".into();
+        preparing["selection"]["session_id"] = "partial".into();
+        preparing["recovery_session"] = serde_json::Value::Null;
+        preparing["workspace_transfer"] = serde_json::Value::Null;
+        preparing["prepared_destination"] = serde_json::Value::Null;
+        preparing["source_resource_allocation"] =
+            serde_json::json!({"kind":"container","cpus":2,"memory_bytes":4_u64 << 30});
+        raw.execute("INSERT INTO session_moves(session_id,operation_id,operation_json) VALUES('partial','preparing-size-move',?1)", [preparing.to_string()]).unwrap();
+        let changes = super::super::container_size::migrate(&raw).unwrap();
+        assert_eq!(changes.len(), cases.len() + 5);
+        assert!(!legacy_schema::table_has_column(&raw, "sessions", "container_cpus").unwrap());
+        assert!(!legacy_schema::table_has_column(&raw, "sessions", "container_memory").unwrap());
+        for (id, _, _, old, expected) in &cases {
+            let text: Option<String> = raw
+                .query_row(
+                    "SELECT resource_allocation FROM sessions WHERE session_id=?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let allocation: Option<SessionResourceAllocation> = text
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .unwrap();
+            let expected = expected
+                .map(
+                    |(cpus, memory_bytes)| SessionResourceAllocation::Container {
+                        cpus,
+                        memory_bytes,
+                    },
+                )
+                .or_else(|| old.clone());
+            assert_eq!(allocation, expected, "{id}");
+        }
+        let runtime: String = raw
+            .query_row(
+                "SELECT target_runtime_json FROM sessions WHERE session_id='whole'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let runtime: serde_json::Value = serde_json::from_str(&runtime).unwrap();
+        let settings = &runtime["container_settings"];
+        assert!(settings.get("cpus").is_none());
+        assert!(settings.get("memory").is_none());
+        assert_eq!(
+            settings["resource_allocation"],
+            serde_json::json!({"kind":"container","cpus":3,"memory_bytes":6_u64 << 30})
+        );
+        let preparing = super::super::session_move::load_move_operation_with(&raw, "partial")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            preparing.source_resource_allocation,
+            Some(SessionResourceAllocation::Container {
+                cpus: 6,
+                memory_bytes: 4 << 30
+            })
+        );
+        let moved = super::super::session_move::load_move_operation_with(&raw, "whole").unwrap();
+        // Hard-won: #1538: a pre-upgrade Move intent with override keys stopped decoding
+        assert!(
+            moved.is_some(),
+            "the migrated durable Move must remain recoverable"
+        );
+        let moved = moved.unwrap();
+        assert_eq!(
+            moved.source_resource_allocation,
+            Some(SessionResourceAllocation::Container {
+                cpus: 2,
+                memory_bytes: 700 << 20
+            })
+        );
+        assert_eq!(
+            moved.recovery_session.as_ref().unwrap().resource_allocation,
+            Some(SessionResourceAllocation::Container {
+                cpus: 2,
+                memory_bytes: 700 << 20
+            })
+        );
+        assert_eq!(
+            moved
+                .workspace_transfer
+                .as_ref()
+                .unwrap()
+                .source
+                .resource_allocation,
+            Some(SessionResourceAllocation::Container {
+                cpus: 6,
+                memory_bytes: 4 << 30
+            })
+        );
+        let expected_snapshot = Some(SessionResourceAllocation::Container {
+            cpus: 3,
+            memory_bytes: 6 << 30,
+        });
+        for runtime in [
+            moved
+                .recovery_session
+                .as_ref()
+                .unwrap()
+                .target_runtime
+                .as_deref()
+                .unwrap(),
+            moved
+                .workspace_transfer
+                .as_ref()
+                .unwrap()
+                .source
+                .target_runtime
+                .as_deref()
+                .unwrap(),
+            &moved.prepared_destination.as_ref().unwrap().runtime,
+        ] {
+            assert_eq!(runtime.environment["container_cpus"], "keep-this-variable");
+            assert_eq!(
+                runtime
+                    .container_settings
+                    .as_ref()
+                    .unwrap()
+                    .resource_allocation,
+                expected_snapshot
+            );
+        }
+        let retained: String = raw.query_row("SELECT source_json FROM retained_move_sources WHERE operation_id='legacy-size-move'", [], |row|row.get(0)).unwrap();
+        let retained: SessionRecord = serde_json::from_str(&retained).unwrap();
+        assert_eq!(
+            retained.resource_allocation,
+            moved
+                .workspace_transfer
+                .as_ref()
+                .unwrap()
+                .source
+                .resource_allocation
+        );
+        assert_eq!(
+            retained
+                .target_runtime
+                .as_ref()
+                .unwrap()
+                .container_settings
+                .as_ref()
+                .unwrap()
+                .resource_allocation,
+            expected_snapshot
+        );
+        let environment = super::super::environments::read_environment(&raw, &environment_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            environment
+                .placement
+                .runtime
+                .unwrap()
+                .container_settings
+                .unwrap()
+                .resource_allocation,
+            expected_snapshot
+        );
+        assert_eq!(
+            environment
+                .placement
+                .prepared_destination
+                .unwrap()
+                .destination
+                .runtime
+                .container_settings
+                .unwrap()
+                .resource_allocation,
+            expected_snapshot
+        );
+        let worker_runtime: String = raw
+            .query_row(
+                "SELECT runtime_json FROM environment_workers WHERE worker_session_id='whole'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let worker_runtime: mj_core::state::TargetRuntimeSettings =
+            serde_json::from_str(&worker_runtime).unwrap();
+        assert_eq!(
+            worker_runtime
+                .container_settings
+                .unwrap()
+                .resource_allocation,
+            expected_snapshot
+        );
+        let schema = read_schema_state(&raw).unwrap();
+        assert_eq!(schema.minimum_compatible, Some(131));
+        assert!(matches!(
+            schema
+                .ensure_supported_by(130)
+                .unwrap_err()
+                .downcast_ref::<StoreSchemaMismatch>()
+                .unwrap()
+                .reason,
+            StoreSchemaMismatchReason::Incompatible {
+                minimum_compatible: 131
+            }
+        ));
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mj.sqlite3");
         let record = super::super::tests::session("facts-upgrade", "project");

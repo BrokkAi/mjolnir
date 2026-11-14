@@ -153,16 +153,14 @@ pub enum ControllerAction {
         session_id: String,
         workspace_id: String,
     },
-    /// Record the session's container size overrides and attached
-    /// directories. An empty or absent size clears that override, and the
+    /// Record the session's container allocation and attached
+    /// directories. An absent allocation uses the target defaults, and the
     /// mounts list replaces the whole list. Nothing changes inside a running
     /// container: the values are read the next time it is created.
     SetContainerSettings {
         session_id: String,
         #[serde(default)]
-        cpus: Option<String>,
-        #[serde(default)]
-        memory: Option<String>,
+        resource_allocation: Option<SessionResourceAllocation>,
         #[serde(default)]
         mounts: Vec<AdditionalMount>,
     },

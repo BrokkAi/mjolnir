@@ -1693,14 +1693,6 @@ pub struct SessionRecord {
     pub resource_allocation: Option<SessionResourceAllocation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_mounts: Vec<AdditionalMount>,
-    /// Per-session container CPU limit that overrides the target template's
-    /// value. It is applied the next time the container is created.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub container_cpus: Option<String>,
-    /// Per-session container memory limit that overrides the target
-    /// template's value. It is applied the next time the container is created.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub container_memory: Option<String>,
     /// In-container workspace root this session's repositories live under.
     /// `None` is a session whose container predates per-session workspaces and
     /// therefore keeps the shared legacy `/workspace`; every session created
@@ -1826,6 +1818,17 @@ pub fn session_owns_container(session: &SessionRecord) -> bool {
     }
 }
 
+/// Applied limits describe a running container; requests describe provisioning.
+pub fn counted_container_allocation(session: &SessionRecord) -> Option<&SessionResourceAllocation> {
+    session
+        .target
+        .as_ref()
+        .and(session.target_runtime.as_ref())
+        .and_then(|runtime| runtime.container_settings.as_ref())
+        .and_then(|settings| settings.resource_allocation.as_ref())
+        .or(session.resource_allocation.as_ref())
+}
+
 /// Sum the owning container allocations for one physical host.
 ///
 /// A new or resuming owner has no target locator while provisioning, so those
@@ -1861,7 +1864,7 @@ pub fn host_container_capacity<'a>(
             continue;
         }
         let Some(SessionResourceAllocation::Container { cpus, memory_bytes }) =
-            session.resource_allocation.as_ref()
+            counted_container_allocation(session)
         else {
             complete = false;
             continue;

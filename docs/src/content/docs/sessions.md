@@ -73,7 +73,7 @@ offer this choice. Opening an empty workspace does not create a session.
 
 Provisioning runs in the background. The new row appears immediately in Sessions, its status changes as each launch stage completes, and a failure remains visible with useful diagnostics. `prefix+shift+c` cancels an in-flight launch without blocking the rest of the dashboard.
 
-Per-session CPU, memory, and attachment choices live in Mjolnir's state database, not `config.toml`. Container edits made later through the command palette (`prefix+:`) → **Container settings** take effect when that container is next created.
+Per-session CPU, memory, and attachment choices live in Mjolnir's state database, not `config.toml`. Container settings use the same allocation as New, Resume, and Move: whole CPUs and memory in GiB. Saving validates the size; host admission runs when the next container is created. A running container continues to count at its applied size until then. Container edits made later through the command palette (`prefix+:`) → **Container settings** take effect when that container is next created.
 
 ## Work, queue, and cancel
 
@@ -701,3 +701,7 @@ Continue with [durability and recovery](/durability/) for the archive guarantees
 When a turn ends at a subscription limit, Mjolnir resumes the session one minute after the limit resets, by sending a fixed prompt that asks the agent to continue the work you already requested. This also applies to turns the agent started on its own, and to sessions with background work still running. If the usage limit stopped a Codex goal, Mjolnir resumes the goal instead. A goal that has used up its own token budget is never resumed automatically; resume it yourself. New input from you or interrupting the session cancels a pending recovery.
 
 The session shows **Checking quota** while Mjolnir works out the reset time. Quota recovery relies on the Jev turn classifier to recognize a quota stop, so it follows the **Settings → Privacy → Jev (hosted service)** switch: with `[jev] enabled = false` it does not run. It skips child sessions. Workers older than relay protocol 25 are not recovered automatically until they are replaced.
+
+The `set-container-settings` API action accepts `resource_allocation`, for example
+`{"kind":"container","cpus":4,"memory_bytes":8589934592}`, alongside `session_id`
+and `mounts`. The old `cpus` and `memory` string fields are refused.
