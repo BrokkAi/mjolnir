@@ -1113,7 +1113,14 @@ mod tests {
             candidate("high", Some(90), &["luna"]),
             candidate("empty", Some(0), &["luna"]),
         ];
-        rank_candidates(&mut candidates, Some("parent"), &[], "luna", 0, Placement::Child);
+        rank_candidates(
+            &mut candidates,
+            Some("parent"),
+            &[],
+            "luna",
+            0,
+            Placement::Child,
+        );
         assert_eq!(
             ids(&candidates),
             vec![
@@ -1122,7 +1129,11 @@ mod tests {
         );
     }
 
-    fn five_hour_candidate(profile_id: &str, remaining: Option<u8>, models: &[&str]) -> SubagentCandidate {
+    fn five_hour_candidate(
+        profile_id: &str,
+        remaining: Option<u8>,
+        models: &[&str],
+    ) -> SubagentCandidate {
         let mut candidate = candidate(profile_id, remaining, models);
         if let CandidateQuota::Subscription { windows, .. } = &mut candidate.quota {
             windows[0].label = "5h".into();
@@ -1151,13 +1162,25 @@ mod tests {
         rank_candidates(&mut children, None, &[], "luna", 0, Placement::Child);
         assert_eq!(
             ids(&children),
-            vec!["windowed-high", "weekly-low", "unknown", "api", "windowed-empty"]
+            vec![
+                "windowed-high",
+                "weekly-low",
+                "unknown",
+                "api",
+                "windowed-empty"
+            ]
         );
         let mut top_level = build();
         rank_candidates(&mut top_level, None, &[], "luna", 0, Placement::TopLevel);
         assert_eq!(
             ids(&top_level),
-            vec!["weekly-low", "unknown", "api", "windowed-high", "windowed-empty"]
+            vec![
+                "weekly-low",
+                "unknown",
+                "api",
+                "windowed-high",
+                "windowed-empty"
+            ]
         );
     }
 
@@ -1185,7 +1208,14 @@ mod tests {
             candidate("plain", Some(50), &["luna"]),
             candidate("preferred-out", Some(0), &["luna"]),
         ];
-        rank_candidates(&mut candidates, None, &["preferred-out".into()], "luna", 0, Placement::Child);
+        rank_candidates(
+            &mut candidates,
+            None,
+            &["preferred-out".into()],
+            "luna",
+            0,
+            Placement::Child,
+        );
         assert_eq!(ids(&candidates), ["plain", "preferred-out"]);
     }
 
@@ -1218,11 +1248,25 @@ mod tests {
         let other = candidate("other", Some(40), &["claude-fable-5-1", "claude-opus-5"]);
 
         let mut for_fable = vec![fable.clone(), other.clone()];
-        rank_candidates(&mut for_fable, None, &[], "claude-fable-5-1", 1_000, Placement::Child);
+        rank_candidates(
+            &mut for_fable,
+            None,
+            &[],
+            "claude-fable-5-1",
+            1_000,
+            Placement::Child,
+        );
         assert_eq!(ids(&for_fable), ["other", "fable-profile"]);
 
         let mut for_opus = vec![fable, other];
-        rank_candidates(&mut for_opus, None, &[], "claude-opus-5", 1_000, Placement::Child);
+        rank_candidates(
+            &mut for_opus,
+            None,
+            &[],
+            "claude-opus-5",
+            1_000,
+            Placement::Child,
+        );
         assert_eq!(ids(&for_opus), ["fable-profile", "other"]);
     }
 
@@ -1275,10 +1319,24 @@ mod tests {
         // The pace was measured at the reading: an unchanged reading still
         // projects later, until the window resets.
         let mut stale = profiles.clone();
-        rank_candidates(&mut stale, None, &[], "luna", now + 30 * 60, Placement::Child);
+        rank_candidates(
+            &mut stale,
+            None,
+            &[],
+            "luna",
+            now + 30 * 60,
+            Placement::Child,
+        );
         assert_eq!(ids(&stale), ["pacing", "steady", "burning", "unknown"]);
         let mut reset = profiles.clone();
-        rank_candidates(&mut reset, None, &[], "luna", now + 4 * 60 * 60, Placement::Child);
+        rank_candidates(
+            &mut reset,
+            None,
+            &[],
+            "luna",
+            now + 4 * 60 * 60,
+            Placement::Child,
+        );
         assert_eq!(ids(&reset), ["burning", "pacing", "steady", "unknown"]);
     }
 
@@ -1338,7 +1396,15 @@ mod tests {
             for _ in 0..draws {
                 let mut candidates = profiles.clone();
                 let units = (0..candidates.len()).map(|_| unit()).collect::<Vec<_>>();
-                order_by_draw(&mut candidates, Some("thirty-b"), &[], &units, "luna", 0, Placement::Child);
+                order_by_draw(
+                    &mut candidates,
+                    Some("thirty-b"),
+                    &[],
+                    &units,
+                    "luna",
+                    0,
+                    Placement::Child,
+                );
                 let chosen = if included {
                     assert_eq!(ids(&candidates)[3..], ["unknown", "api", "empty"]);
                     &candidates[0]

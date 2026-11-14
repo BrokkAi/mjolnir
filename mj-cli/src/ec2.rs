@@ -1583,9 +1583,15 @@ fn remove_configuration(record: &Record, root: &Path, path: &Path) -> Result<()>
 fn tune(args: TuneArgs) -> Result<()> {
     let config = Config::load()?;
     let Some(Machine::Ssh { ssh, .. }) = config.machines.get(&args.host) else {
-        bail!("no ssh machine named {:?}; check the name with `mj ec2 list`", args.host);
+        bail!(
+            "no ssh machine named {:?}; check the name with `mj ec2 list`",
+            args.host
+        );
     };
-    eprintln!("Applying mj's kernel limits to {} ({}).", args.host, ssh.host);
+    eprintln!(
+        "Applying mj's kernel limits to {} ({}).",
+        args.host, ssh.host
+    );
     checked(
         &mut ssh_command(ssh, "sudo bash -s"),
         include_str!("ec2_sysctl.sh").as_bytes(),
