@@ -28,11 +28,30 @@ PROFILES = ["claude", "claude2", "claude3", "claude4", "claude5", "claude7"]
 p = argparse.ArgumentParser()
 p.add_argument("verify")
 p.add_argument("--concurrency", type=int, default=7)
+# Verifiers need later history (fixes) but must not reach this eval's results,
+# which map sessions to models. 3c3fa4b13 is master just before the first eval commit.
+p.add_argument("--repo-commit", default="3c3fa4b13")
 a = p.parse_args()
 V = ROOT / a.verify
-REPO = ROOT / "verify/repo"  # history through 2026-11-13, no refs to the eval results
+REPO = ROOT / "verify/repo"
+SOURCE = subprocess.check_output(["git", "-C", str(pathlib.Path(__file__).resolve().parent),
+                                  "rev-parse", "--show-toplevel"], text=True).strip()
+if not REPO.exists():
+    REPO.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "clone", "-q", "--no-local", SOURCE, str(REPO)], check=True)
+    for cmd in (["checkout", "-q", "--detach", a.repo_commit], ["branch", "-f", "master", a.repo_commit],
+                ["checkout", "-q", "master"], ["remote", "remove", "origin"],
+                ["reflog", "expire", "--expire=now", "--all"], ["gc", "-q", "--prune=now"]):
+        subprocess.run(["git", "-C", str(REPO), *cmd], check=True)
+    assert subprocess.run(["git", "-C", str(REPO), "cat-file", "-e", "HEAD:.agents/evals"],
+                          capture_output=True).returncode != 0, "verifier checkout contains the eval results"
 for sub in ("out", "sessions", "prompts"):
-    (V / sub).mkdir(exist_ok=True)
+    (V / sub).mkdir(parents=True, exist_ok=True)
+if not (V / "SPEC.md").exists():  # verifiers are told to read the spec from the verify dir
+    (V / "SPEC.md").write_text((pathlib.Path(__file__).resolve().parent / "verify/SPEC.md").read_text())
+if not (ROOT / "verify/workspace.json").exists():  # creates the workspace, or selects one with this name
+    r = subprocess.run(["mj", "workspaces", "create", "Review arms verify", "--json"], capture_output=True, check=True)
+    (ROOT / "verify/workspace.json").write_bytes(r.stdout)
 WORKSPACE = json.loads((ROOT / "verify/workspace.json").read_text())["workspace"]["id"]
 
 
@@ -71,10 +90,19 @@ def run(batch_path):
     if out_path.exists():
         return n, "done"
     if rec_path.exists():
-        sid = json.loads(rec_path.read_text())["session_id"]
+        rec = json.loads(rec_path.read_text())
+        sid = rec["session_id"]
     else:
         with lock:
             profile = next(profiles)
+        sid = mj("new", "--workspace-id", WORKSPACE, "--profile", profile, "--target", "localhost",
+                 "--project-directory", REPO, "--effort", "high", "--review", "off", "--no-project-memory",
+                 "--no-github-events", "--subagents", "none", "--title", f"review-arms {V.name} {n}",
+                 timeout=900)["session_id"]
+        rec = {"session_id": sid, "profile": profile, "time_ns": time.time_ns()}
+        save(rec_path, rec)
+    if not rec.get("prompted"):
+        # A session created by an interrupted run has no prompt yet; set it up here.
         prompt = V / "prompts" / f"prompt-{n}.txt"
         prompt.write_text(f"""Read {V}/SPEC.md and follow it exactly.
 
@@ -82,19 +110,15 @@ Your batch: {batch_path}
 
 Read only SPEC.md, your batch file, and the repository in your working directory. Do not open anything else under {ROOT} or /home/jonathan; other files there reveal which model wrote which finding.
 """)
-        sid = mj("new", "--workspace-id", WORKSPACE, "--profile", profile, "--target", "localhost",
-                 "--project-directory", REPO, "--effort", "high", "--review", "off", "--no-project-memory",
-                 "--no-github-events", "--subagents", "none", "--title", f"review-arms {V.name} {n}",
-                 timeout=900)["session_id"]
-        save(rec_path, {"session_id": sid, "profile": profile, "time_ns": time.time_ns()})
         while not (session(sid).get("is_idle") and session(sid).get("lifecycle") == "live"):
             time.sleep(5)
         for k, v in [("model", "opus"), ("effort", "high")]:
             mj("set-config", "--session", sid, "--key", k, "--value", v)
         cfg = {c["key"]: c.get("current") for c in session(sid).get("config_options", [])}
         assert cfg.get("model") == "opus" and cfg.get("effort") == "high", cfg
-        save(rec_path, {**json.loads(rec_path.read_text()), "config": cfg})
         mj("message", "--session", sid, "--prompt-file", prompt)
+        rec = {**rec, "config": cfg, "prompted": time.time_ns()}
+        save(rec_path, rec)
         time.sleep(30)
     while True:
         s = session(sid)

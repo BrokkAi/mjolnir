@@ -1,10 +1,10 @@
 option,reviewers,findings,findings_per_diff,median_latency_s,tokens_per_diff,cost_per_diff_usd,frontier,cost_frontier,bootstrap_frontier_share
-Terra/high,1,94.08,1.344,43.1,244964,0.044,True,True,1.0
-2× Terra/high,2,119.83,1.712,47.3,489928,0.087,True,True,1.0
-3× Terra/high,3,133.5,1.907,51.7,734891,0.131,True,True,1.0
-Sol/high,1,83.33,1.19,90.2,434066,0.168,False,False,0.0
-Sol/high + Terra/high,2,131.92,1.885,91.9,679029,0.211,False,False,0.328
-Sol/high + 2× Terra/high,3,150.11,2.144,93.7,923993,0.255,True,True,1.0
-2× Sol/high,2,106.0,1.514,100.0,868131,0.335,False,False,0.0
-2× Sol/high + Terra/high,3,145.83,2.083,101.1,1113095,0.379,False,False,0.08
-3× Sol/high,3,118.0,1.686,103.6,1302197,0.503,False,False,0.0
+Terra/high,1,84.92,1.213,43.1,244964,0.044,True,True,1.0
+2× Terra/high,2,106.33,1.519,47.3,489928,0.087,True,True,1.0
+3× Terra/high,3,117.25,1.675,51.7,734891,0.131,True,True,1.0
+Sol/high,1,79.0,1.129,90.2,434066,0.168,False,False,0.0
+Sol/high + Terra/high,2,120.25,1.718,91.9,679029,0.211,True,True,0.635
+Sol/high + 2× Terra/high,3,134.5,1.921,93.7,923993,0.255,True,True,1.0
+2× Sol/high,2,98.67,1.41,100.0,868131,0.335,False,False,0.0
+2× Sol/high + Terra/high,3,132.25,1.889,101.1,1113095,0.379,False,False,0.177
+3× Sol/high,3,109.0,1.557,103.6,1302197,0.503,False,False,0.0

@@ -225,7 +225,8 @@ Stage 2 (pooled findings, per-session scoring). Run long drivers with
 ```sh
 python3 select_diffs.py <repo> 40 > corpus/diffs.jsonl
 python3 driver.py --jobs jobs.json --concurrency 10        # arms A, D, D2 (C = Ember, dropped)
-./pipeline.sh jobs.json verify2                           # batches + Opus verifiers as diffs finish
+./pipeline.sh jobs.json verify2                           # batches + Opus verifiers as diffs finish;
+                                                          # creates the verifier checkout, workspace and SPEC.md
 python3 score.py verify2                                  # sessions.csv, groups.csv, session_groups.csv
 python3 pareto.py verify2 [--severities high,medium] [--verdicts confirmed,plausible]
 python3 compare.py verify2 Terra+Terra+Terra Terra+Sol Terra+Terra+Sol

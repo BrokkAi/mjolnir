@@ -143,7 +143,10 @@ rows = sorted(({"option": label(o), "reviewers": len(o), "findings": round(s["fi
                 "cost_per_diff_usd": round(s["cost_per_diff"], 3), "frontier": o in main_frontier,
                 "cost_frontier": o in cost_frontier, "bootstrap_frontier_share": round(hits[o] / a.bootstrap, 3)}
                for o, s in stats.items()), key=lambda r: r["median_latency_s"])
-with open(V / "pareto.csv", "w", newline="") as f:
+suffix = ("" if counted == {"confirmed"} else "-" + "-".join(sorted(counted))) + \
+         ("" if severities == {"high", "medium", "low"} else "-sev-" + "-".join(sorted(severities)))
+# Each verdict or severity variant gets its own files.
+with open(V / f"pareto{suffix}.csv", "w", newline="") as f:
     w = csv.DictWriter(f, fieldnames=list(rows[0]))
     w.writeheader()
     w.writerows(rows)
@@ -155,7 +158,5 @@ for r in rows:
     lines.append(f"| {r['option']} | {r['median_latency_s']} | {r['findings']} | {r['findings_per_diff']} | "
                  f"{r['cost_per_diff_usd']} | {'yes' if r['frontier'] else ''} | {'yes' if r['cost_frontier'] else ''} | "
                  f"{r['bootstrap_frontier_share']} |")
-suffix = ("" if counted == {"confirmed"} else "-" + "-".join(sorted(counted))) + \
-         ("" if severities == {"high", "medium", "low"} else "-sev-" + "-".join(sorted(severities)))
 (V / f"pareto{suffix}.md").write_text("\n".join(lines) + "\n")
 print("\n".join(lines))

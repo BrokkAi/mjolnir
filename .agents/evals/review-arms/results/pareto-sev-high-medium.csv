@@ -1,0 +1,10 @@
+option,reviewers,findings,findings_per_diff,median_latency_s,tokens_per_diff,cost_per_diff_usd,frontier,cost_frontier,bootstrap_frontier_share
+Terra/high,1,54.08,0.773,43.1,244964,0.044,True,True,1.0
+2× Terra/high,2,65.5,0.936,47.3,489928,0.087,True,True,1.0
+3× Terra/high,3,71.5,1.021,51.7,734891,0.131,True,True,1.0
+Sol/high,1,63.33,0.905,90.2,434066,0.168,False,False,0.056
+Sol/high + Terra/high,2,81.86,1.169,91.9,679029,0.211,True,True,0.881
+Sol/high + 2× Terra/high,3,88.33,1.262,93.7,923993,0.255,True,True,1.0
+2× Sol/high,2,76.33,1.09,100.0,868131,0.335,False,False,0.003
+2× Sol/high + Terra/high,3,89.75,1.282,101.1,1113095,0.379,True,True,0.747
+3× Sol/high,3,82.0,1.171,103.6,1302197,0.503,False,False,0.008

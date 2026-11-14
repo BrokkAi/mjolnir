@@ -42,6 +42,7 @@ def split(text):
 
 
 private = ROOT / "private" / f"key-{out.name}.json"
+private.parent.mkdir(parents=True, exist_ok=True)
 previous = json.loads(private.read_text()) if a.append and private.exists() else {"findings": {}, "sessions": []}
 assert a.append or not private.exists(), f"{private} exists; use --append"
 batched = {k["bug"] for k in previous["findings"].values()}
@@ -84,11 +85,16 @@ for n, members in enumerate(batches, start=first):
         items = by_diff[bug][:]
         rng.shuffle(items)
         batch.append({"intro": corpus[bug]["intro_commit"], "base": corpus[bug]["base_commit"], "findings": items})
-    (out / f"batch-{n}.json").write_text(json.dumps(batch, indent=1) + "\n")
+    # Written under a temporary name; published only after the key that maps its IDs.
+    (out / f"batch-{n}.json.tmp").write_text(json.dumps(batch, indent=1) + "\n")
 # Sessions with no findings count as having found nothing; sessions that finish
 # after this point are not covered and are left out of scoring.
-private.write_text(json.dumps({"findings": {**previous["findings"], **key},
+tmp_key = private.with_name(private.name + ".tmp")
+tmp_key.write_text(json.dumps({"findings": {**previous["findings"], **key},
                                "sessions": previous["sessions"] + covered}, indent=1) + "\n")
-private.chmod(0o600)
+tmp_key.chmod(0o600)
+tmp_key.replace(private)
+for n in range(first, first + len(batches)):
+    (out / f"batch-{n}.json.tmp").replace(out / f"batch-{n}.json")
 print(json.dumps({"new_diffs": len(diffs), "new_findings": len(key), "new_batches": list(range(first, first + len(batches))),
                   "unparsed_outputs": unparsed}))
