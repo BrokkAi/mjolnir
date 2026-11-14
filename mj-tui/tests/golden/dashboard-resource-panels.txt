@@ -32,8 +32,8 @@
 │                                                   ││Press ctrl+b c to create a session or ctrl+b g to find one.                                              │
 │                                                   │╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                   │╭ Targets ▾ ─────────────────────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
-│                                                   ││  Host / fleet  Targets                                   CPU          RAM                               │
-│                                                   ││  local         localhost, podman, sandbox (unavailable)  unavailable                                    │
+│                                                   ││  Host / fleet  Targets                                       CPU          RAM                           │
+│                                                   ││  local         localhost [G], podman, sandbox (unavailable)  unavailable                                │
 │                                                   │╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 │                                                   │╭ Profiles ▾ (not refreshed)─────────────────────────────────────────────────────────────────────── ▁   ▄ ╮
 │                                                   ││           Harness  Weekly Resets  5H Resets                                                             │

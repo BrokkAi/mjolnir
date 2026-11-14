@@ -22,9 +22,9 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::time::Duration;
 
-use crate::quota::QuotaRuntimeConfig;
+use crate::quota::{QuotaRuntimeConfig, RuntimeImage};
 use anyhow::{Result, bail};
-use mj_core::config::QuotaRuntimeChoice;
+use mj_core::config::{ImagePullPolicy, QuotaRuntimeChoice};
 use mj_core::targets::{
     BoundedProcessExecutor, CommandExecutor, CommandSpec, INSTANCE_LABEL, MANAGED_LABEL,
 };
@@ -54,6 +54,13 @@ impl Engine {
             Self::Docker => "docker",
         }
     }
+
+    fn image_host(self) -> mj_core::targets::ImageHost {
+        match self {
+            Self::Podman => mj_core::targets::ImageHost::LocalPodman,
+            Self::Docker => mj_core::targets::ImageHost::LocalDocker,
+        }
+    }
 }
 
 /// The decision for one check.
@@ -69,6 +76,9 @@ pub(crate) struct ContainerRuntime {
     /// The engine executable found on `PATH` when the check was decided.
     pub(crate) program: std::path::PathBuf,
     pub(crate) image: String,
+    /// The pull policy of the runtime whose image this is. The release image
+    /// a named engine falls back to belongs to no runtime, so it is `Auto`.
+    pub(crate) pull_policy: ImagePullPolicy,
 }
 
 impl QuotaRuntime {
@@ -131,15 +141,18 @@ impl QuotaRuntime {
                         engine.program()
                     );
                 };
-                let image = image(engine)
-                    .unwrap_or_else(|| mj_core::config::DEFAULT_CONTAINER_IMAGE.to_owned());
+                let image = image(engine).unwrap_or_else(|| RuntimeImage {
+                    image: mj_core::config::DEFAULT_CONTAINER_IMAGE.to_owned(),
+                    pull_policy: ImagePullPolicy::Auto,
+                });
                 (engine, program, image)
             }
         };
         Ok(Self::Container(ContainerRuntime {
             engine,
             program,
-            image,
+            image: image.image,
+            pull_policy: image.pull_policy,
         }))
     }
 
@@ -166,6 +179,19 @@ pub(crate) struct ContainerLaunch {
 }
 
 impl ContainerRuntime {
+    /// The background download that keeps this image on its engine, or
+    /// `None` when the runtime's pull policy forbids one. This is the decision
+    /// the runtime's own image refresh makes, so a quota check never fetches
+    /// an image its runtime says not to.
+    pub(crate) fn image_refresh(&self) -> Option<mj_core::targets::ImageRefresh> {
+        mj_core::targets::image_refresh(
+            self.engine.image_host(),
+            &self.image,
+            None,
+            self.pull_policy,
+        )
+    }
+
     /// Fail unless the engine already holds the image. A check never pulls:
     /// the daemon's image refresher does, and a multi-gigabyte download would
     /// outlast any quota request.
@@ -183,11 +209,20 @@ impl ContainerRuntime {
         .purpose("look up the agent-dev image for a quota check");
         let output = executor.execute(&command)?;
         if output.status != 0 {
+            let engine = self.engine.program();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if self.image_refresh().is_some() {
+                bail!(
+                    "the agent-dev image {} is not available to {engine} yet ({}); Mjolnir downloads it in the background",
+                    self.image,
+                    stderr.trim()
+                );
+            }
             bail!(
-                "the agent-dev image {} is not available to {} yet ({}); Mjolnir downloads it in the background",
+                "the agent-dev image {} is not available to {engine} ({}), and its runtime's pull policy is never, so Mjolnir does not download it; run `{engine} pull {}` or change the runtime's pull policy",
                 self.image,
-                self.engine.program(),
-                String::from_utf8_lossy(&output.stderr).trim()
+                stderr.trim(),
+                self.image
             );
         }
         Ok(())
@@ -542,9 +577,10 @@ impl ContainerCheck {
 }
 
 /// Add the image quota checks run in to the daemon's background downloads,
-/// unless a configured runtime already downloads it from the same engine, as
-/// it does whenever `auto` chose that runtime. The image is wanted whenever a
-/// check could fall back to it, so this assumes the host lacks the harness.
+/// unless its runtime's pull policy forbids a download or a configured
+/// runtime already downloads it from the same engine, as it does whenever
+/// `auto` chose that runtime. The image is wanted whenever a check could fall
+/// back to it, so this assumes the host lacks the harness.
 pub(crate) fn add_quota_image(
     plan: &mut Vec<mj_core::targets::ImageRefresh>,
     config: &QuotaRuntimeConfig,
@@ -553,22 +589,14 @@ pub(crate) fn add_quota_image(
     let Ok(QuotaRuntime::Container(runtime)) = QuotaRuntime::resolve(config, path, false) else {
         return;
     };
-    let host = match runtime.engine {
-        Engine::Podman => mj_core::targets::ImageHost::LocalPodman,
-        Engine::Docker => mj_core::targets::ImageHost::LocalDocker,
-    };
-    if plan
-        .iter()
-        .any(|entry| entry.host == host && entry.image == runtime.image && entry.platform.is_none())
-    {
+    let Some(refresh) = runtime.image_refresh() else {
         return;
-    }
-    if let Some(refresh) = mj_core::targets::image_refresh(
-        host,
-        &runtime.image,
-        None,
-        mj_core::config::ImagePullPolicy::Auto,
-    ) {
+    };
+    if !plan.iter().any(|entry| {
+        entry.host == refresh.host
+            && entry.image == refresh.image
+            && entry.platform == refresh.platform
+    }) {
         plan.push(refresh);
     }
 }
@@ -803,6 +831,48 @@ mod tests {
             decision("[quota]\nruntime = \"podman\"\n", &["podman"], true, false),
             None
         );
+    }
+
+    // Hard-won: cd5d83dd3: a quota check downloaded its runtime's image even when that runtime's pull policy was never.
+    #[test]
+    fn quota_checks_download_their_image_only_as_its_runtime_allows() {
+        let downloads = |targets: &str| {
+            let directory = tempfile::tempdir().unwrap();
+            let file = directory.path().join("config.toml");
+            std::fs::write(
+                &file,
+                format!("version = {}\n{targets}", mj_core::config::CONFIG_VERSION),
+            )
+            .unwrap();
+            let config = mj_core::config::Config::load_from(&file)
+                .unwrap()
+                .with_local_targets();
+            let (_bin, path) = path_with(&["podman", "docker"]);
+            let mut runtime = QuotaRuntimeConfig::of(&config);
+            runtime.in_daemon_container = false;
+            let mut plan = crate::controller::image_refresh_plan(&config);
+            add_quota_image(&mut plan, &runtime, Some(&path));
+            let mut downloads = plan
+                .into_iter()
+                .filter_map(|entry| match entry.host {
+                    mj_core::targets::ImageHost::LocalPodman => Some(("podman", entry.image)),
+                    mj_core::targets::ImageHost::LocalDocker => Some(("docker", entry.image)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            downloads.sort();
+            downloads
+        };
+        let standard = mj_core::config::DEFAULT_CONTAINER_IMAGE.to_owned();
+        // Both runtimes pull by default, and the check shares Podman's download.
+        assert_eq!(
+            downloads(""),
+            [("docker", standard.clone()), ("podman", standard.clone())]
+        );
+        // `never` on the runtime the check would use holds for the check too.
+        let never = "[targets.podman]\nkind = \"podman\"\npull_policy = \"never\"\n\
+             [targets.docker]\nkind = \"docker\"\npull_policy = \"never\"\n";
+        assert_eq!(downloads(never), Vec::<(&str, String)>::new());
     }
 
     #[test]

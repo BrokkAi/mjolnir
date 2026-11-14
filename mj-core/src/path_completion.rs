@@ -61,15 +61,15 @@ pub fn looks_like_path(text: &str) -> bool {
 
 /// Complete an on-disk path without spawning a shell.
 pub fn local_completions(prefix: &str, kind: CompletionKind) -> Vec<String> {
-    let (directory, fragment) = match prefix.rsplit_once('/') {
-        Some((directory, fragment)) => (format!("{directory}/"), fragment),
-        None => (String::new(), prefix),
+    // This host's separators: `/`, and also `\` on Windows, where a typed
+    // `C:\Users\me\pr` or a verbatim `\\?\C:\...` path has no `/` to split on.
+    // The directory keeps the separator as typed.
+    let (directory, fragment) = match prefix.rfind(std::path::is_separator) {
+        // Every separator is one ASCII byte.
+        Some(end) => prefix.split_at(end + 1),
+        None => ("", prefix),
     };
-    let lookup = if directory.is_empty() {
-        "."
-    } else {
-        &directory
-    };
+    let lookup = if directory.is_empty() { "." } else { directory };
     let entries = match fs::read_dir(lookup) {
         Ok(entries) => entries,
         Err(error) => {

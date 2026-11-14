@@ -549,18 +549,29 @@ pub fn persist_imported_session_locally(session: &SessionRecord) -> Result<()> {
 }
 
 /// The recorded project root used by both the path prompt and archive relocation.
+///
+/// Git reports the roots as physical paths, while the transcript keeps the
+/// working directory as the harness saw it, which can run through a symlink
+/// (macOS keeps /var and /tmp behind /private). Both are compared, and the
+/// root is returned, as physical paths.
 pub fn import_project_root(transcript: &ClaudeTranscript, targets: &SessionEditTargets) -> PathBuf {
+    let cwd = super::edit_targets::canonicalize_existing_ancestor(&transcript.cwd);
     targets
         .git_roots
         .iter()
-        .find(|root| transcript.cwd.starts_with(root))
+        .find(|root| cwd.starts_with(root))
         .cloned()
-        .unwrap_or_else(|| transcript.cwd.clone())
+        .unwrap_or(cwd)
 }
 
 /// Relocate operational project metadata together; native history retains its provenance.
 struct ImportProjectRemap<'a> {
     recorded: &'a Path,
+    /// `recorded` as a physical path. Every containment test is made there:
+    /// the paths being moved come spelled as configured, as Git reported them
+    /// or as the harness recorded them, and one spelling may run through a
+    /// symlink another resolved (macOS keeps /var and /tmp behind /private).
+    recorded_physical: PathBuf,
     destination: &'a Path,
 }
 
@@ -570,9 +581,14 @@ impl<'a> ImportProjectRemap<'a> {
             mj_core::target_path::is_absolute_on_host_or_target(destination),
             "Enter an absolute project root on the daemon host, or keep the recorded root."
         );
+        let remap = Self {
+            recorded,
+            recorded_physical: super::edit_targets::canonicalize_existing_ancestor(recorded),
+            destination,
+        };
         let outside = roots
             .iter()
-            .filter(|root| !root.starts_with(recorded))
+            .filter(|root| remap.within(root).is_none())
             .collect::<Vec<_>>();
         ensure!(
             outside.is_empty(),
@@ -584,11 +600,21 @@ impl<'a> ImportProjectRemap<'a> {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
-        Ok(Self {
-            recorded,
-            destination,
-        })
+        Ok(remap)
     }
+
+    /// `path` relative to the recorded root, or `None` when it lies outside it
+    /// or is not a filesystem path (a remote URL).
+    fn within(&self, path: &Path) -> Option<PathBuf> {
+        if !path.is_absolute() {
+            return None;
+        }
+        super::edit_targets::canonicalize_existing_ancestor(path)
+            .strip_prefix(&self.recorded_physical)
+            .ok()
+            .map(Path::to_path_buf)
+    }
+
     fn apply(
         &self,
         project: &mut mj_core::repository::ProjectBundleSnapshot,
@@ -597,14 +623,15 @@ impl<'a> ImportProjectRemap<'a> {
         let Self {
             recorded,
             destination,
+            ..
         } = *self;
         let remap = |path: &Path| {
-            path.strip_prefix(recorded).ok().map(|relative| {
+            self.within(path).map(|relative| {
                 if relative.as_os_str().is_empty() {
                     destination.to_path_buf()
                 } else {
                     // Daemon project paths obey the POSIX session-target contract.
-                    mj_core::target_path::join(destination, relative)
+                    mj_core::target_path::join(destination, &relative)
                 }
             })
         };

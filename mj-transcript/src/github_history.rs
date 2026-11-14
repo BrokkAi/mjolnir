@@ -304,8 +304,13 @@ pub fn retrieve(item: &Value, text: &str, session: &Value) -> Vec<Span> {
                 hits.push(pos);
             }
         }
+        // `f64::ln_1p` calls the platform's C library, whose log1p is not
+        // correctly rounded: glibc, Apple's libm and MSVC each differ by an
+        // ulp on some inputs, which broke byte parity on Windows. The pure
+        // Rust fdlibm port gives the same bits on every platform and
+        // reproduces every reference fixture.
         let weight =
-            base * (1.0 + ((t.len() as f64 / 500.0).max(1.0) / (1 + hits.len()) as f64).ln_1p());
+            base * (1.0 + libm::log1p((t.len() as f64 / 500.0).max(1.0) / (1 + hits.len()) as f64));
         for pos in hits {
             let start = (pos / 250 * 250).saturating_sub(125);
             let c = candidates.entry(start).or_insert((

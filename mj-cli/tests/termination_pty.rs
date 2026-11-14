@@ -221,6 +221,24 @@ impl ExpectedOutput<'_> {
     }
 }
 
+/// Do what the fixture terminal does whenever it is polled: take the
+/// program's output and answer the queries it has asked.
+fn answer_terminal(master: &mut File, output: &mut PtyOutput) {
+    drain(master, output);
+    if output.background_query_needs_answer(BACKGROUND_QUERY) {
+        master
+            .write_all(BACKGROUND_RESPONSE)
+            .expect("answer terminal background query");
+        output.mark_background_query_answered();
+    }
+    if output.device_query_needs_answer(DEVICE_ATTRIBUTES_QUERY) {
+        master
+            .write_all(DEVICE_ATTRIBUTES_RESPONSE)
+            .expect("answer terminal device attributes query");
+        output.mark_device_query_answered();
+    }
+}
+
 fn wait_for_output_until(
     master: &mut File,
     output: &mut PtyOutput,
@@ -229,19 +247,7 @@ fn wait_for_output_until(
     mut child: Option<&mut Child>,
 ) {
     loop {
-        drain(master, output);
-        if output.background_query_needs_answer(BACKGROUND_QUERY) {
-            master
-                .write_all(BACKGROUND_RESPONSE)
-                .expect("answer terminal background query");
-            output.mark_background_query_answered();
-        }
-        if output.device_query_needs_answer(DEVICE_ATTRIBUTES_QUERY) {
-            master
-                .write_all(DEVICE_ATTRIBUTES_RESPONSE)
-                .expect("answer terminal device attributes query");
-            output.mark_device_query_answered();
-        }
+        answer_terminal(master, output);
         if expected.matches(output) {
             return;
         }
@@ -314,7 +320,16 @@ struct DashboardPty {
     slave: File,
     original_termios: libc::termios,
     child: ReapChild,
+    /// Everything the dashboard wrote, from its first byte: the fixture reads
+    /// and answers the terminal while it waits for the daemon.
+    output: PtyOutput,
     _storage: common::DaemonStorage,
+}
+
+impl DashboardPty {
+    fn take_output(&mut self) -> PtyOutput {
+        std::mem::replace(&mut self.output, PtyOutput::new())
+    }
 }
 
 fn spawn_dashboard_pty() -> DashboardPty {
@@ -324,7 +339,7 @@ fn spawn_dashboard_pty() -> DashboardPty {
 #[test]
 fn an_open_terminal_automatically_reexecs_after_an_upgrade() {
     let mut fixture = spawn_dashboard_pty_with_idle_exit(false);
-    let mut output = PtyOutput::new();
+    let mut output = fixture.take_output();
     wait_for_ready(
         fixture.child.child_mut(),
         &mut fixture.master,
@@ -605,7 +620,7 @@ image = "ubuntu:24.04"
         0,
         "create PTY"
     );
-    let master = unsafe { File::from_raw_fd(master_fd) };
+    let mut master = unsafe { File::from_raw_fd(master_fd) };
     let slave = unsafe { File::from_raw_fd(slave_fd) };
     for fd in [master.as_raw_fd(), slave.as_raw_fd()] {
         assert_eq!(
@@ -708,8 +723,13 @@ image = "ubuntu:24.04"
     // The dashboard starts its daemon in the background. Handing this fixture
     // over before that daemon owns the store would let teardown finish first,
     // and the daemon would then recreate the storage that teardown removed.
+    // Meanwhile the fixture keeps acting as the terminal: the dashboard asks
+    // for the background before its daemon is ready, and waits two seconds.
+    let mut output = PtyOutput::new();
     assert!(
-        storage.wait_until_owned(Instant::now() + Duration::from_secs(30)),
+        storage.wait_until_owned_while(Instant::now() + Duration::from_secs(30), || {
+            answer_terminal(&mut master, &mut output)
+        }),
         "daemon never took the fixture store"
     );
     DashboardPty {
@@ -718,13 +738,14 @@ image = "ubuntu:24.04"
         slave,
         original_termios,
         child,
+        output,
     }
 }
 
 #[test]
 fn panicking_dashboard_fixture_reaps_the_dashboard_before_removing_storage() {
     let mut fixture = spawn_dashboard_pty();
-    let mut output = PtyOutput::new();
+    let mut output = fixture.take_output();
     wait_for_ready(
         fixture.child.child_mut(),
         &mut fixture.master,
@@ -758,7 +779,7 @@ fn auto_theme_paints_light_on_a_terminal_that_reports_a_white_background() {
         false,
         &[],
     );
-    let mut output = PtyOutput::new();
+    let mut output = fixture.take_output();
     wait_for_ready(
         fixture.child.child_mut(),
         &mut fixture.master,
@@ -814,13 +835,13 @@ fn empty_workspace_waits_for_explicit_new_before_creating_a_session() {
         _storage: storage,
         mut master,
         mut child,
+        mut output,
         ..
     } = spawn_dashboard_pty_with_local_target(false, false, true);
     // Declared after the fixture so that it drops first: the daemon's held
     // launches must finish before teardown stops it, even when this fails.
     let held_launch = ReleaseOnDrop(storage.path().join(LAUNCH_RELEASE));
     let database = storage.path().join("data/hel/mj.sqlite3");
-    let mut output = PtyOutput::new();
     wait_for_ready(child.child_mut(), &mut master, &mut output, READY_MARKER);
     // Ordinary background ticks must leave
     // the workspace empty until the user explicitly starts work.
@@ -992,9 +1013,9 @@ fn sigterm_restores_real_pty_terminal() {
         slave: _slave,
         original_termios: before,
         mut child,
+        mut output,
     } = spawn_dashboard_pty();
 
-    let mut output = PtyOutput::new();
     wait_for_ready(child.child_mut(), &mut master, &mut output, READY_MARKER);
     assert_eq!(
         unsafe { libc::kill(child.child_mut().id() as i32, libc::SIGTERM) },
@@ -1049,7 +1070,7 @@ fn sigterm_restores_real_pty_terminal() {
 #[test]
 fn control_backslash_prefix_detaches_from_a_real_terminal() {
     let mut fixture = spawn_dashboard_pty_with_prefix(true, false, false, Some(r"ctrl+\"));
-    let mut output = PtyOutput::new();
+    let mut output = fixture.take_output();
     wait_for_ready(
         fixture.child.child_mut(),
         &mut fixture.master,
@@ -1081,7 +1102,7 @@ fn simple_mode_detaches_on_direct_ctrl_q_and_never_claims_ctrl_b() {
         false,
         &["simple", env!("CARGO_MANIFEST_DIR")],
     );
-    let mut output = PtyOutput::new();
+    let mut output = fixture.take_output();
     // The launch notices replace each other within milliseconds; the session
     // row stays, and shows the launch went ahead without a wizard.
     wait_for_ready(
@@ -1135,8 +1156,8 @@ fn dashboard_detach_restores_terminal_then_exits_promptly_with_final_message() {
         slave: _slave,
         original_termios: before,
         mut child,
+        mut output,
     } = spawn_dashboard_pty_with_idle_exit(false);
-    let mut output = PtyOutput::new();
     wait_for_ready(child.child_mut(), &mut master, &mut output, READY_MARKER);
 
     // The detach chord. Escape belongs to the composer and to modals now; it
@@ -1192,8 +1213,8 @@ fn workspace_manager_terminates_without_leaving_and_reopening_the_dashboard() {
         slave: _slave,
         original_termios: before,
         mut child,
+        mut output,
     } = spawn_dashboard_pty_with_idle_exit(false);
-    let mut output = PtyOutput::new();
     wait_for_ready(child.child_mut(), &mut master, &mut output, READY_MARKER);
     output.clear();
     // Shift-Tab from the Sessions pane lands on the workspace pane's pinned
@@ -1258,8 +1279,8 @@ fn pending_session_open_can_be_cancelled_retried_and_quit_from_a_real_terminal()
         slave: _slave,
         original_termios: before,
         mut child,
+        mut output,
     } = spawn_dashboard_pty_fixture(false, true);
-    let mut output = PtyOutput::new();
     // The quit hint can be split by cursor movements during a differential redraw.
     wait_for_ready(child.child_mut(), &mut master, &mut output, b"quits.");
     master.write_all(b"\x1b").expect("cancel opening");
@@ -1339,7 +1360,7 @@ fn first_startup_discovers_both_agents_and_remains_usable_during_background_chec
     // Declared after the fixture so that it drops first: the held check
     // must finish before teardown, even when this fails.
     let held_check = ReleaseOnDrop(fixture._storage.path().join(FIRST_RUN_CHECK_RELEASE));
-    let mut output = PtyOutput::new();
+    let mut output = fixture.take_output();
     wait_for_ready(
         fixture.child.child_mut(),
         &mut fixture.master,

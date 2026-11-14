@@ -24,6 +24,7 @@ anyhow.workspace = true
 chrono.workspace = true
 regex = "1"
 indexmap = { version = "2", features = ["serde"] }
+libm = "0.2"
 tokenizers = { version = "0.22", optional = true, default-features = false, features = ["fancy-regex"] }
 serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true, features = ["float_roundtrip"] }

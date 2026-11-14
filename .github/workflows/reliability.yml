@@ -100,7 +100,9 @@ jobs:
   test-modes:
     name: Tests (${{ matrix.name }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # No fixed cap: the suite takes as long as it takes on one thread, and a
+    # guessed 30 minutes cancelled the serialized run once the suite outgrew
+    # it. GitHub's own 360-minute job limit still applies.
     strategy:
       fail-fast: false
       matrix:
