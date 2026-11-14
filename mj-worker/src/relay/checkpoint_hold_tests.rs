@@ -290,3 +290,49 @@ fn a_runtime_event_that_journals_nothing_leaves_the_cut_held() {
             .any(|event| matches!(event.observation, RelayObservation::SessionUpdate { .. }))
     );
 }
+
+/// A background task the adapter announces after the barrier became ready
+/// journals nothing, so the frontier still equals the cut. Close must still be
+/// refused: sealing there would stop work the cut never saw.
+// Hard-won: 15e0e5b35: background work that started after the cut and journaled nothing let Close stop it
+#[test]
+fn background_work_started_after_the_cut_refuses_the_close() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut durable = configured(&temp);
+    durable.set_background_work_policy(BackgroundWorkPolicy::AirTasks);
+    let cut = ready_checkpoint(&mut durable, "spoiled-barrier");
+    let relay = Arc::new(RelayCell::new(durable));
+    let mut in_flight = BTreeMap::new();
+
+    crate::worker_runtime::record_runtime_event(
+        &relay,
+        &mut in_flight,
+        RuntimeEvent::AirTaskChanged {
+            session_id: "native-session".into(),
+            update: crate::acp::AirTaskUpdate::Spawned {
+                task_id: "build".into(),
+                description: "cargo build".into(),
+                can_stop: true,
+            },
+        },
+    )
+    .unwrap();
+
+    let mut durable = relay.lock().unwrap();
+    assert_eq!(durable.operational_state().latest_ordinal, cut.ordinal);
+    let response = durable.handle(relay_request(
+        "request-close",
+        RelayRequest::Submit {
+            command_id: "close-command".into(),
+            command: RelayCommand::Close {
+                barrier_command_id: "spoiled-barrier".into(),
+                expected: cut,
+            },
+        },
+    ));
+    let refusal = format!("{:?}", response.body);
+    assert!(
+        refusal.contains("background work started after the checkpoint cut"),
+        "{refusal}"
+    );
+}
