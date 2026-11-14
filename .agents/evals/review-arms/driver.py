@@ -38,6 +38,7 @@ ARMS = {
     "C": ["muse-ember-1.0:high"] * 3,
     "D": ["gpt-6.1-sol:high"] * 3,
     "D2": ["gpt-6.1-sol:high"] * 2,  # stage 1 diffs already have one Sol session
+    "E": ["gpt-6.1-sol:medium"] * 2,
 }
 WORKSPACE = json.loads((ROOT / "instance/workspace.json").read_text())["workspace"]["id"]
 # Hard-won candidates and the sampled ordinary diffs share one id space.
@@ -320,13 +321,13 @@ def collect(d, bug, identity, sid, place, before):
         # A review can clear before every reviewer was observed, or with a reviewer
         # that failed. Only a complete capture is saved as reviewers.json, so a
         # resumed job captures again instead of reloading an incomplete one.
-        expected = sorted(r.split(":")[0] for r in ARMS[identity["arm"]])
-        got = sorted(r["model"] or "" for r in reviewers)
-        incomplete = [r["child"] for r in reviewers if not r["has_output"] or r["effort"] != "high"]
+        expected = sorted(ARMS[identity["arm"]])
+        got = sorted(f"{r['model']}:{r['effort']}" for r in reviewers)
+        incomplete = [r["child"] for r in reviewers if not r["has_output"]]
         if got != expected or incomplete:
             save(d / "reviewers-incomplete.json", reviewers)
-            raise RuntimeError(f"incomplete review: models {got}, expected {expected}; "
-                               f"without output or wrong effort: {incomplete}")
+            raise RuntimeError(f"incomplete review: reviewers {got}, expected {expected}; "
+                               f"without output: {incomplete}")
         save(d / "reviewers.json", reviewers)
 
     if (d / "inventory-check.json").exists():

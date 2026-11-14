@@ -85,7 +85,7 @@ def audit_run(run):
 
 
 def main():
-    runs = [pathlib.Path(a).resolve() for a in sys.argv[1:]] or sorted(p.parent for p in ROOT.glob("runs/*/*/done.json"))
+    runs = [(ROOT / a).resolve() for a in sys.argv[1:]] or sorted(p.parent for p in ROOT.glob("runs/*/*/done.json"))
     for run in runs:
         r = audit_run(run)
         counts = {k: {} for k in r["reviewers"]}
