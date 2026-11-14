@@ -200,6 +200,18 @@ struct Inner {
 }
 
 impl Inner {
+    /// Whether background work (periodic refresh, home watching) may probe
+    /// `definition`'s profile. A retained definition keeps the configuration
+    /// it was built from, so ask the live one: disabling a profile ends its
+    /// automatic probes even while its definition serves explicit requests.
+    fn probes_automatically(&self, definition: &Definition) -> bool {
+        self.live
+            .as_ref()
+            .unwrap_or(&definition.config)
+            .enabled_profile(&definition.id)
+            .is_some()
+    }
+
     /// Whether every non-Failed entry of `identity` carries a settled
     /// digest, all identical: the identity's served answers all describe
     /// one home state, so nothing is left retrying. A still-failing entry
@@ -962,9 +974,10 @@ impl ProfileCatalog {
                 if definition.cancellation.is_cancelled() {
                     continue;
                 }
-                let Some(profile) = definition.config.enabled_profile(&definition.id) else {
+                if !inner.probes_automatically(definition) {
                     continue;
-                };
+                }
+                let profile = &definition.config.profiles[&definition.id];
                 let home = mj_core::path_input::expand_local(&profile.home)
                     .unwrap_or_else(|_| profile.home.clone());
                 identities_by_home
@@ -1146,8 +1159,7 @@ impl ProfileCatalog {
                 else {
                     continue;
                 };
-                if !include_disabled && definition.config.enabled_profile(&definition.id).is_none()
-                {
+                if !include_disabled && !inner.probes_automatically(&definition) {
                     continue;
                 }
                 let attempt = self.attempt_refresh(&definition, key.1.clone());
@@ -3644,6 +3656,20 @@ mod tests {
         assert_eq!(probes.load(Ordering::SeqCst), 1);
         assert!(catalog.refresh(|_, _| true).is_empty());
         assert!(catalog.candidates().unwrap().is_empty());
+    }
+
+    // Hard-won: 1152c612e: a definition kept from before disabling still read its old enabled copy and kept refreshing.
+    #[tokio::test]
+    async fn disabling_a_discovered_profile_ends_its_background_refresh() {
+        let probes = calls();
+        let catalog = ProfileCatalog::with_probe(counting_probe(probes.clone()));
+        let mut config = test_config(&[("parent", HarnessKind::Codex)]);
+        catalog.sync_now(&config).await;
+        assert_eq!(probes.load(Ordering::SeqCst), 1);
+        config.profiles.get_mut("parent").unwrap().enabled = false;
+        catalog.sync_now(&config).await;
+        assert!(catalog.refresh(|_, _| true).is_empty());
+        assert_eq!(probes.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
