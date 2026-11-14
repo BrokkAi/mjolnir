@@ -191,6 +191,72 @@ Limits: the verifier is a model, and some low-severity "confirmed" groups
 are only lost test coverage. Latency was measured while about 10 reviews
 shared four Codex profiles, so it includes provider load at that time.
 
+## Stage 3 result: Sol/medium in place of Sol/high (verified by Opus/high)
+
+Jonathan asked how much faster Sol/medium is than Sol/high, and how much it
+loses when paired with one or two Terra/high reviewers.
+
+Method:
+
+- Setup E: 2 Sol/medium sessions on each of the 70 stage 2 diffs, 140 in all.
+  Everything else matches stage 2. The private daemon replaced itself with the
+  installed build (2.71.0+bec7a9a9) at the first command; nothing between the
+  two builds touches review code, and reviewers run with `subagents: none`, so
+  the changed delegation text does not reach them.
+- All 70 diffs were verified again from scratch in `verify3`, with every
+  session's findings pooled: 571 sessions, 697 findings, 32 batches. Grading
+  only the new findings against stage 2's groups would have judged Sol/medium
+  by a different procedure, with a verifier that knew which findings were new.
+  8 diffs had no findings from any session and needed no batch.
+- Four verifier turns on `claude5` stopped with `stop_reason: QuotaLimit`.
+  `verify_driver.py` now sets such a session aside and runs the batch again in
+  a fresh session on a profile that has not hit its limit.
+- The audit found nothing. All 70 checkouts were unchanged, and every hit was
+  a false positive: words like "origin" in search patterns, URLs in findings,
+  the handback call, and one `git diff` of the checkout's own base and head
+  trees.
+
+Results (`results/stage3/`):
+
+- 200 distinct problems: 160 confirmed, 11 plausible, 29 rejected. The
+  Terra-only and Sol/high options reproduce stage 2 within 2 confirmed (for
+  example Sol/high + 2× Terra 136.2 against 134.5). On the 597 findings
+  verified in both passes, 89.1% got the same verdict and 91.6% agreed on
+  confirmed versus not.
+- Per session: Sol/medium has a median latency of 46.0 s (90th percentile
+  66 s), against 90.9 s (141 s) for Sol/high and 42.7 s for Terra/high. It
+  uses 233k tokens against 398k, and costs an estimated $0.100 against $0.168.
+  Alone, it finds 48.5 confirmed problems against Sol/high's 80.7 (−32.2, 95%
+  −43.0 to −22.2), and 8.5 high-severity problems against 11.0.
+- Paired with Terra/high (`compare.py`, 95% bootstrap intervals over diffs):
+
+  | Option | Median latency (s) | Confirmed | Medium or high | Est. cost per diff ($) |
+  |---|---:|---:|---:|---:|
+  | Sol/high + Terra | 91.8 | 122.3 | 84.1 | 0.211 |
+  | Sol/medium + Terra | 52.1 | 99.2 | 68.1 | 0.143 |
+  | 2× Terra | 47.3 | 106.8 | 71.0 | 0.087 |
+  | Sol/high + 2× Terra | 93.9 | 136.2 | 91.5 | 0.255 |
+  | Sol/medium + 2× Terra | 54.3 | 116.0 | 77.8 | 0.187 |
+  | 3× Terra | 51.7 | 117.5 | 76.8 | 0.131 |
+
+  - With one Terra, Sol/medium in place of Sol/high saves 40 s and loses 23.0
+    confirmed (−31.9 to −14.9) and 15.9 medium or high (−23.7 to −9.2). It also
+    loses to 2× Terra by 7.6 confirmed (−13.5 to −1.9) while being slower and
+    costlier, so it is off the frontier.
+  - With two Terra, Sol/medium saves 40 s and loses 20.2 confirmed (−28.3 to
+    −12.9) and 13.7 medium or high (−20.7 to −7.6). Against 3× Terra it is a
+    tie: −1.5 confirmed (−6.1 to +3.1) and +1.1 medium or high, for 2.6 s more
+    and $0.056 more per diff. Counting only medium and high, it joins the
+    frontier (share 0.74).
+  - High severity: Sol/medium loses about 2.2 high-severity problems to
+    Sol/high in both pairings, but finds more than the Terra it replaces
+    (Sol/medium + 2× Terra has about 2.2 more than 3× Terra).
+- Known bugs (`knownbug.py --groups-from verify2`, because `known-bug.jsonl`
+  names stage 2 groups): expected catches out of 30 are 9.7 for Sol/medium +
+  Terra (8.3 for 2× Terra, 10.4 for Sol/high + Terra), and 10.7 for Sol/medium
+  + 2× Terra (9.0 for 3× Terra, 11.3 for Sol/high + 2× Terra). Only 12
+  Hard-won diffs have a matching group, so these differences are small.
+
 ## Running
 
 The scripts read the corpus from this directory and keep everything else
@@ -232,4 +298,18 @@ python3 pareto.py verify2 [--severities high,medium] [--verdicts confirmed,plaus
 python3 compare.py verify2 Terra+Terra+Terra Terra+Sol Terra+Terra+Sol
 python3 consistency.py verify verify2
 python3 knownbug.py verify2 <known-bug.jsonl>
+```
+
+Stage 3 (Sol/medium, all diffs verified again). Name each configuration with
+its effort once a model has run at two efforts:
+
+```sh
+python3 driver.py --jobs stage3-jobs.json --concurrency 10   # arm E, 2× Sol/medium per diff
+./pipeline.sh stage3-jobs.json verify3
+python3 audit.py runs/<diff>/E ...                           # paths relative to REVIEW_ARMS_DIR
+python3 score.py verify3
+python3 pareto.py verify3 --sessions Sol/medium=2 [--severities high,medium]
+python3 compare.py verify3 Sol/high+Terra/high Sol/medium+Terra/high Terra/high+Terra/high
+python3 consistency.py verify2 verify3
+python3 knownbug.py verify3 results/known-bug.jsonl --groups-from verify2
 ```
