@@ -563,15 +563,18 @@ fn project_states(runtime: &RuntimeProjection, ids: BTreeSet<String>) -> Attenti
         .filter(|(id, _)| !questions.contains(id.as_str()))
         .filter_map(|(id, state)| dismissal(runtime, id, *state).map(|target| (id.clone(), target)))
         .collect();
-    // A session's own form comes before a descendant's: the person answers it
-    // in that session, so no holder sends them elsewhere.
+    // A form the person answers in this session comes before a descendant's,
+    // so no holder sends them elsewhere. A sub-agent's ordinary question
+    // belongs to its parent agent and does not hide the descendant's form.
     holders.retain(|id, _| {
         ids.contains(id)
             && attention.get(id) == Some(&NeedsInput)
-            && runtime
-                .transcripts
-                .get(id)
-                .is_none_or(|tail| tail.header.pending_elicitations.is_empty())
+            && !runtime.transcripts.get(id).is_some_and(|tail| {
+                tail.header
+                    .pending_elicitations
+                    .iter()
+                    .any(|request| !request.goes_to_parent() || !runtime.subagents.contains_key(id))
+            })
     });
     AttentionProjection {
         states: attention,
@@ -1649,6 +1652,22 @@ mod tests {
             holders.get("grandparent").map(String::as_str),
             Some("child")
         );
+        // A sub-agent's ordinary question is its parent agent's to answer, so
+        // the descendant's approval stays reachable from this row.
+        own.pending_elicitations[0] = mj_core::elicitation::ElicitationRequest {
+            id: "question".into(),
+            message: "Which?".into(),
+            title: None,
+            description: None,
+            fields: vec![],
+            tool_permission: None,
+        };
+        runtime.transcripts.insert(
+            "parent".into(),
+            mj_client::runtime_feed::SessionTail::of(&own, &ProjectionWindow::of(&own), 11),
+        );
+        let holders = project_states(&runtime, runtime.records.keys().cloned().collect()).holders;
+        assert_eq!(holders.get("parent").map(String::as_str), Some("child"));
         runtime.transcripts.remove("parent");
         let previous = runtime.clone();
         materialized.pending_elicitations[0].id = "tool-approval".into();
