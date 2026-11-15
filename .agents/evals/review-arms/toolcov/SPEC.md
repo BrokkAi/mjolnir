@@ -36,7 +36,10 @@ asked only about things the diff shows, and if not, why not.
    `analyze_diff` (base `HEAD^`, target `HEAD`), the usage scans
    (`scan_usages_by_location` and the reference-based scan that
    `bifrost --help` lists), `usage_graph`, `get_definitions_by_location`, and
-   `query_code` if the others cannot express the question. Use what a tool
+   `query_code` if the others cannot express the question. Run one Bifrost
+   process at a time, never several in parallel: all worktrees share one
+   cache in the clone's `.bifrost/cache`, and concurrent processes wait on
+   its build lock, which the first run showed as timeouts. Use what a tool
    user who sees only the diff would reasonably try; a few calls, not a
    search for the answer.
 4. Record for each call: the tool and arguments, whether its output contains
