@@ -10,6 +10,10 @@ Usage:
   (run label/workflow-pass2.js, args = {"dir": "$REVIEW_ARMS_DIR/label-facts/pass2",
    "ids": the IDs it prints}; save its result as label-facts/pass2/workflow-out.json)
   python3 label_facts.py collect-pass2  # writes results/missing-facts-pass2.jsonl
+  python3 label_facts.py build-second   # Hard-won items, reshuffled, -> label-facts/second/
+  (run label/workflow.js with args {"dir": "$REVIEW_ARMS_DIR/label-facts/second", "batches": ...};
+   save its result as label-facts/second/workflow-out.json)
+  python3 label_facts.py collect-second # writes results/missing-facts-second.jsonl, prints agreement
 
 Items: every Hard-won diff with its known defect, and every sampled diff that
 has a confirmed problem in <verify>, with its most severe one (then highest
@@ -17,7 +21,9 @@ confidence, then first group). Sampled diffs with no confirmed problem are
 left out. Each batch goes to one Opus/high labeler that follows label/SPEC.md
 and returns its labels as structured output. The second pass gives each item
 the first pass labeled "visible in the diff" to one Opus/high labeler that
-follows label/SPEC-pass2.md, with the first pass's fact and evidence.
+follows label/SPEC-pass2.md, with the first pass's fact and evidence. The
+second labeler relabels the 30 Hard-won items independently under
+label/SPEC.md, in a different batch order, to check the first.
 """
 import argparse
 import collections
@@ -33,7 +39,7 @@ L = ROOT / "label-facts"
 SEV = {"high": 3, "medium": 2, "low": 1}
 
 p = argparse.ArgumentParser()
-p.add_argument("step", choices=["build", "collect", "build-pass2", "collect-pass2"])
+p.add_argument("step", choices=["build", "collect", "build-pass2", "collect-pass2", "build-second", "collect-second"])
 p.add_argument("--verify", default="verify3")
 p.add_argument("--batch-size", type=int, default=5)
 a = p.parse_args()
@@ -130,4 +136,36 @@ def collect_pass2():
                       "specificity": collections.Counter(r["specificity"] for r in rows)}, indent=1))
 
 
-{"build": build, "collect": collect, "build-pass2": build_pass2, "collect-pass2": collect_pass2}[a.step]()
+def build_second():
+    items = [i for i in json.loads((L / "items.json").read_text()) if i["source"] == "hard-won"]
+    random.Random(20261115).shuffle(items)
+    S = L / "second"
+    S.mkdir(exist_ok=True)
+    batches = []
+    for n in range(0, len(items), a.batch_size):
+        batch = [{k: v for k, v in it.items() if k not in ("source", "group", "severity")}
+                 for it in items[n:n + a.batch_size]]
+        save(S / f"batch-{n // a.batch_size}.json", batch)
+        batches.append([it["id"] for it in batch])
+    (S / "SPEC.md").write_text((HERE / "label/SPEC.md").read_text())
+    print(json.dumps({"dir": str(S), "batches": batches}))
+
+
+def collect_second():
+    first = {json.loads(l)["id"]: json.loads(l) for l in open(HERE / "results/missing-facts.jsonl")}
+    out = json.loads((L / "second/workflow-out.json").read_text())
+    assert not out["missing"], f"unlabeled items: {out['missing']}"
+    rows = [{**{k: first[x["id"]][k] for k in ("id", "source", "intro", "defect")},
+             **{k: v for k, v in x.items() if k != "id"}} for x in sorted(out["labels"], key=lambda x: x["id"])]
+    (HERE / "results/missing-facts-second.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    relation = lambda kind: kind != "none"
+    print(json.dumps({
+        "relation_agree": sum(relation(r["kind"]) == relation(first[r["id"]]["kind"]) for r in rows),
+        "kind_agree": sum(r["kind"] == first[r["id"]]["kind"] for r in rows),
+        "items": len(rows),
+        "disagreements": [{"id": r["id"], "first": first[r["id"]]["kind"], "second": r["kind"]}
+                          for r in rows if r["kind"] != first[r["id"]]["kind"]]}, indent=1))
+
+
+{"build": build, "collect": collect, "build-pass2": build_pass2, "collect-pass2": collect_pass2,
+ "build-second": build_second, "collect-second": collect_second}[a.step]()
