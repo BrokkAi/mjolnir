@@ -2149,9 +2149,12 @@ mod tests {
         crate::test_support::set_working(&mut dashboard, "child-session");
         // The child has only summary state; the daemon supplies the holder.
         dashboard.set_form_holders(
-            [(parent.clone(), "child-session".into())]
-                .into_iter()
-                .collect(),
+            [
+                (parent.clone(), "child-session".into()),
+                ("child-session".into(), "child-session".into()),
+            ]
+            .into_iter()
+            .collect(),
         );
         crate::test_support::serve_attention(
             &mut dashboard,

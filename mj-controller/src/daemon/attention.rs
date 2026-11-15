@@ -432,6 +432,10 @@ fn project_states(runtime: &RuntimeProjection, ids: BTreeSet<String>) -> Attenti
             continue;
         }
         questions.insert(id.clone());
+        if person_owned || !runtime.subagents.contains_key(id) {
+            // A form answered here takes precedence over any descendant.
+            holders.insert(id.clone(), id.clone());
+        }
         if !person_owned {
             continue;
         }
@@ -563,19 +567,7 @@ fn project_states(runtime: &RuntimeProjection, ids: BTreeSet<String>) -> Attenti
         .filter(|(id, _)| !questions.contains(id.as_str()))
         .filter_map(|(id, state)| dismissal(runtime, id, *state).map(|target| (id.clone(), target)))
         .collect();
-    // A form the person answers in this session comes before a descendant's,
-    // so no holder sends them elsewhere. A sub-agent's ordinary question
-    // belongs to its parent agent and does not hide the descendant's form.
-    holders.retain(|id, _| {
-        ids.contains(id)
-            && attention.get(id) == Some(&NeedsInput)
-            && !runtime.transcripts.get(id).is_some_and(|tail| {
-                tail.header
-                    .pending_elicitations
-                    .iter()
-                    .any(|request| !request.goes_to_parent() || !runtime.subagents.contains_key(id))
-            })
-    });
+    holders.retain(|id, _| ids.contains(id) && attention.get(id) == Some(&NeedsInput));
     AttentionProjection {
         states: attention,
         targets,
@@ -1637,8 +1629,8 @@ mod tests {
                 .map(String::as_str),
             Some("child")
         );
-        // The parent's own form comes first: no holder sends the person away
-        // from it, while the grandparent still names the child.
+        // The parent's self entry takes precedence, while the grandparent
+        // still names the child that actually holds the descendant form.
         let mut own = MaterializedSession::empty("parent");
         own.pending_elicitations
             .push(materialized.pending_elicitations[0].clone());
@@ -1647,7 +1639,7 @@ mod tests {
             mj_client::runtime_feed::SessionTail::of(&own, &ProjectionWindow::of(&own), 11),
         );
         let holders = project_states(&runtime, runtime.records.keys().cloned().collect()).holders;
-        assert!(!holders.contains_key("parent"));
+        assert_eq!(holders.get("parent").map(String::as_str), Some("parent"));
         assert_eq!(
             holders.get("grandparent").map(String::as_str),
             Some("child")
@@ -1668,6 +1660,11 @@ mod tests {
         );
         let holders = project_states(&runtime, runtime.records.keys().cloned().collect()).holders;
         assert_eq!(holders.get("parent").map(String::as_str), Some("child"));
+        // The same ordinary form is answered here when this is a top-level session.
+        let relation = runtime.subagents.remove("parent").unwrap();
+        let holders = project_states(&runtime, runtime.records.keys().cloned().collect()).holders;
+        assert_eq!(holders.get("parent").map(String::as_str), Some("parent"));
+        runtime.subagents.insert("parent".into(), relation);
         runtime.transcripts.remove("parent");
         let previous = runtime.clone();
         materialized.pending_elicitations[0].id = "tool-approval".into();
@@ -1680,7 +1677,7 @@ mod tests {
         update(&previous, &mut runtime);
         assert_eq!(runtime.metadata.form_holders["parent"], "child");
         assert_eq!(runtime.metadata.form_holders["grandparent"], "child");
-        assert!(!runtime.metadata.form_holders.contains_key("child"));
+        assert_eq!(runtime.metadata.form_holders["child"], "child");
         assert!(
             !runtime
                 .metadata
@@ -1707,6 +1704,10 @@ mod tests {
             });
         assert_eq!(
             project_states(&runtime, runtime.records.keys().cloned().collect()).holders["parent"],
+            "child"
+        );
+        assert_eq!(
+            project_states(&runtime, runtime.records.keys().cloned().collect()).holders["child"],
             "child"
         );
         runtime.metadata.reviews.clear();

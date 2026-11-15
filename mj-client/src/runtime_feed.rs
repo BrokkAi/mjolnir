@@ -328,7 +328,8 @@ pub struct RuntimeMetadata {
     pub unread_frontiers: SnapshotMap<String, u64>,
     #[serde(default)]
     pub notification_dismissals: SnapshotMap<String, mj_core::attention::NotificationDismissal>,
-    /// The descendant holding the person-owned form that raises this session.
+    /// Whose form the person answers for each row: the session itself takes
+    /// precedence over a descendant holding a person-owned form.
     #[serde(default)]
     pub form_holders: SnapshotMap<String, String>,
     pub session_attention: SnapshotMap<String, mj_core::attention::SessionAttention>,

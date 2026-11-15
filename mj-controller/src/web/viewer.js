@@ -8987,7 +8987,7 @@ function renderConversationHeader(session) {
     + new Set(native.filter(a => a.state === 'running').map(a => a.stable_id || a.session_id)).size;
   const total = children.length + native.length;
   // A child's approval is not shown in this conversation, so say it is waiting.
-  const waiting = Boolean(session?.form_holder);
+  const waiting = Boolean(childFormHolder(session));
   for (const button of [subagentsButton, subagentsDesktopButton]) {
     if (!button) continue;
     button.textContent = waiting
@@ -9048,10 +9048,16 @@ function renderConversationHeader(session) {
   }
 }
 
+function childFormHolder(session) {
+  const holder = session?.form_holder;
+  return holder && holder !== session.id ? holder : null;
+}
+
 function openChildWorkspace(childKind) {
   const session = activeSession();
-  if (childKind === 'worker' && session?.form_holder) {
-    navigate({ name: 'conversation', sessionId: session.form_holder });
+  const holder = childFormHolder(session);
+  if (childKind === 'worker' && holder) {
+    navigate({ name: 'conversation', sessionId: holder });
     return;
   }
   const any = childKind === 'reviewer'

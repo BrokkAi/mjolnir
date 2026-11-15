@@ -847,7 +847,10 @@ impl DashboardState {
     /// The child whose open form makes `parent_id` read as waiting when the
     /// parent itself is not, so a person is taken to that form.
     pub(crate) fn waiting_child_of(&self, parent_id: &str) -> Option<String> {
-        self.form_holders.get(parent_id).cloned()
+        self.form_holders
+            .get(parent_id)
+            .filter(|holder| holder.as_str() != parent_id)
+            .cloned()
     }
 
     /// What kind of child [`Self::waiting_child_of`] names, for its label.
