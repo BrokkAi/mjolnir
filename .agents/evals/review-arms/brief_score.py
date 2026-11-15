@@ -135,6 +135,11 @@ def collect():
     key = json.loads(KEY.read_text())["outputs"]
     assert set(verdicts) == set(key), "every output needs verdicts"
     assert all(len(v) == 2 for v in verdicts.values()), "every output needs two judges"
+    # A judge can attach an output to the wrong defect of its batch; such a verdict is void.
+    wrong = sorted(f"{v['output_id']}/{v['judge']}: {v['bug']} != {key[v['output_id']]['bug']}"
+                   for vs in verdicts.values() for v in vs if v["bug"] != key[v["output_id"]]["bug"])
+    if wrong:
+        raise SystemExit("verdicts name the wrong defect; rejudge these outputs:\n" + "\n".join(wrong))
     rows, check = [], []
     for oid, (a, b) in sorted(verdicts.items()):
         agree = a["label"] == b["label"]
@@ -147,6 +152,48 @@ def collect():
     print(json.dumps({"outputs": len(rows), "agree": sum(r["agree"] for r in rows),
                       "to_hand_check": len(check),
                       "label_pairs": collections.Counter("/".join(sorted(r["labels"])) for r in rows)}, indent=1))
+
+
+def boot_difference(p_values, c_values, n=10000):
+    """95% bootstrap interval of mean(p) - mean(c), resampling the two diff sets separately."""
+    rng = random.Random(2)
+    d = sorted(statistics.fmean(rng.choices(p_values, k=len(p_values)))
+               - statistics.fmean(rng.choices(c_values, k=len(c_values))) for _ in range(n))
+    return round(d[int(0.025 * n)], 3), round(d[int(0.975 * n)], 3)
+
+
+def decide(rate):
+    """Stage A decision of brief/PLAN.md, from the oracle effect on P and the control gain on C."""
+    per_model = {}
+    for model in MODELS:
+        p_b, p_n = rate[("P", "oracle", model)], rate[("P", "no-brief", model)]
+        c_b, c_n = rate[("C", "oracle", model)], rate[("C", "no-brief", model)]
+        p = [p_b[x][0] - p_n[x][0] for x in sorted(p_b)]
+        c = [c_b[x][0] - c_n[x][0] for x in sorted(c_b)]
+        per_model[model] = {"effect": statistics.fmean(p), "ci": boot(p),
+                            "control_gain": statistics.fmean(c), "p": p, "c": c}
+    control_passes = all(m["control_gain"] < 0.10 for m in per_model.values())
+    for m in per_model.values():
+        if control_passes:
+            m["decision_effect"], m["decision_ci"] = m["effect"], m["ci"]
+        else:  # the brief helps as a second reviewer would; decide on the effect net of that gain
+            m["decision_effect"] = m["effect"] - m["control_gain"]
+            m["decision_ci"] = boot_difference(m["p"], m["c"])
+    eff = {k: m["decision_effect"] for k, m in per_model.items()}
+    upper = {k: m["decision_ci"][1] for k, m in per_model.items()}
+    if all(e < 0.15 for e in eff.values()):
+        decision = "null" if all(u < 0.30 for u in upper.values()) else "inconclusive"
+    elif any(e >= 0.30 for e in eff.values()) and control_passes:
+        decision = "supports building"
+    else:  # includes a net effect of 30 points or more when control 1 failed
+        decision = "between"
+    pts = lambda x: round(100 * x, 1)
+    return {"decision": decision, "control_1_passes": control_passes,
+            "per_model": {k: {"effect_points": pts(m["effect"]), "ci95_points": [pts(x) for x in m["ci"]],
+                              "control_gain_points": pts(m["control_gain"]),
+                              "decision_effect_points": pts(m["decision_effect"]),
+                              "decision_ci95_points": [pts(x) for x in m["decision_ci"]]}
+                          for k, m in per_model.items()}}
 
 
 def boot(diff_values, n=10000):
@@ -211,6 +258,8 @@ def score():
                                       "median_tokens": statistics.median(k["total_tokens"] for k in ks),
                                       "median_latency_s": statistics.median(lat) if lat else None,
                                       "median_tool_calls": statistics.median(k["tool_calls"] for k in ks)})
+    if "oracle" in conds:
+        report["stage_a"] = decide(rate)
     save(J / "score.json", report)
     print(json.dumps(report, indent=1))
 
