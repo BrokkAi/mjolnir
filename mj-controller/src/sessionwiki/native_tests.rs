@@ -40,8 +40,11 @@ fn write_session(kind: HarnessKind, home: &Path, cwd: &Path) -> PathBuf {
             ),
         ),
         HarnessKind::Muse => {
-            let path = home
-                .join(".data/muse/sessions/2026/09/08")
+            let path = mj_checkpoint::native::muse_sessions_root(home)
+                .unwrap()
+                .join("2026")
+                .join("09")
+                .join("08")
                 .join(MUSE_ID)
                 .join("session.jsonl");
             fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -49,7 +52,9 @@ fn write_session(kind: HarnessKind, home: &Path, cwd: &Path) -> PathBuf {
             path
         }
         HarnessKind::Dsh => {
-            let path = home.join("sessions/90c30a64-54f7-4261-90f1-e75b1c14311c.json");
+            let path = home
+                .join("sessions")
+                .join("90c30a64-54f7-4261-90f1-e75b1c14311c.json");
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(
                 &path,
@@ -123,7 +128,43 @@ fn muse_native_search_and_import_agree_on_the_xdg_root() {
     );
 }
 
+// Hard-won: 3747d578c: the previous Muse adapter used mixed separators in its Windows root.
+#[test]
+fn muse_shared_import_root_preserves_previously_indexed_keys() {
+    let _held = tags::testing::lock();
+    let (_index, mut connection) = tags::testing::isolated_index();
+    let directory = tempfile::tempdir().unwrap();
+    let home = sessionwiki::util::canonicalize_as_recorded(directory.path()).unwrap();
+    let cwd = home.join("workspace");
+    fs::create_dir_all(&cwd).unwrap();
+    write_session(HarnessKind::Muse, &home, &cwd);
+    let previous: Box<dyn Adapter> =
+        Box::new(sessionwiki::adapters::Muse::in_home(&home).keep_configured_paths());
+    sessionwiki::index::sync_with(&mut connection, &[previous], None).unwrap();
+    let before =
+        sessionwiki::index::search(&connection, "remember", 10, Some("muse"), None).unwrap();
+    assert_eq!(before.len(), 1);
+
+    let mut config = Config::default();
+    config.profiles.clear();
+    config
+        .profiles
+        .insert("muse".into(), HarnessProfile::new(HarnessKind::Muse, home));
+    let adapters: Vec<_> = native_adapters(&config)
+        .into_iter()
+        .filter(|adapter| adapter.name() == "muse")
+        .collect();
+    sessionwiki::index::sync_with(&mut connection, &adapters, None).unwrap();
+    let after =
+        sessionwiki::index::search(&connection, "remember", 10, Some("muse"), None).unwrap();
+    assert_eq!(after.len(), 1, "the existing row must not be duplicated");
+    assert_eq!(after[0].row.path, before[0].row.path);
+    assert_eq!(after[0].row.session_id, before[0].row.session_id);
+    assert!(!after[0].row.archived);
+}
+
 // Hard-won: cff4a06e6: canonical Grok/Muse roots changed existing keys beneath symlinked homes.
+// Hard-won: 3747d578c: fixture keys and Muse roots must match Windows directory discovery.
 #[test]
 fn native_profiles_search_and_reconcile_only_their_own_home() {
     let _held = tags::testing::lock();
