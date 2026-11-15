@@ -18,7 +18,7 @@ After this change, the controller sends each distinct profile file to a host onc
 
 - [x] (2026-11-15 06:10Z) Diagnosed the incident from the daemon log and mapped both areas with read-only child investigations. Findings: `.mj/agents/98f62e22782823df6b3d6d3e298d2000/findings.md` (profile archive) and `.mj/agents/5eb1525f3de8aadc518093a8507a917f/findings.md` (round trips). These are local, uncommitted report directories; this plan repeats every fact it relies on.
 - [x] (2026-11-15) Milestone 1: host profile content store implemented and validated; real-shell regressions, full controller suite (2,651 passed, 27 ignored), workspace clippy and formatting pass.
-- [ ] Milestone 2: shared step-script helper, then batch the identified command groups.
+- [x] (2026-11-15 07:19Z) Milestone 2: shared step-script helper and all six groups implemented and committed in the batching worktree. Focused checks pass; final full suites pass (controller 2,650; core 651), and workspace clippy passes with warnings denied. Parent owns review of the integrated milestones.
 - [ ] Milestone 3: live check on a small EC2 host from an isolated instance; record timings here.
 
 
@@ -26,6 +26,13 @@ After this change, the controller sends each distinct profile file to a host onc
 
 - Observation: a byte-only store key loses executable modes when two paths have identical bytes but different modes. A filesystem probe with equal-content 0700 and 0600 files produced one shared inode; changing either link's mode changed both paths and the store. The parent approved separate `<sha256>` and `<sha256>.x` keys.
   Evidence: `profile_archive_tests::streamed_profile_roundtrips_through_system_tar_without_per_file_commands` includes equal-content executable and non-executable paths and checks their installed modes and store keys.
+- Observation (Milestone 2 validation): the network Git transport fixture originally allowed only a `git` executable. It now supplies its URL rewrites through Git's per-command environment configuration so both direct Git invocations and Git inside a batch use the same transport mapping. The initial focused run passed 14 cases and rejected the batched case before executing it.
+- Observation (Milestone 2 validation): mbx tracks the Git revision read by build scripts. Committing while Cargo was compiling caused `build-script inputs changed during compilation`; the interrupted check was restarted after all implementation commits, with the revision held fixed.
+
+- Observation (Milestone 2): Cargo package names are `brokk-mj-core` and `brokk-mj-controller`; the short directory names in the original commands are not package selectors. Validation commands below use the package names.
+- Observation (Milestone 2): overriding `settings.directory` before asking the resolution owner changes its cache key, so merely replacing `inspect_host` with `inspect` still repeats the launch inspection. The caller must first look up the original settings.
+- Observation (Milestone 2): worker-store private-upload discard is best-effort today. A batch must report its failure without turning successful publication into an error; profile staging discard, in contrast, stays success-only.
+
 - Observation: the four sessions each copying the worker binary into their containers was not repeated host uploads. Each container has its own worker store at `/var/lib/hel/workers/worker-binaries`, and all four reused the host's transport cache. The two `stage replacement Mjolnir worker` records per session are an SSH `true` followed by `podman cp`, and the `true` does nothing.
   Evidence: `mj-controller/src/controller/worker_binary/store.rs:7-24` (store and gate identity include the container), `upgrade.rs:683-693` (the `true` is chosen when `remote_source` is set).
 - Observation: Claude writes into its own `plugins/` directory (marketplace metadata, directory cache). A single shared, writable plugin directory would therefore share mutable state between sessions, and a read-only mount would break Claude's writes.
@@ -39,6 +46,16 @@ After this change, the controller sends each distinct profile file to a host onc
 - Decision: encode the user executable bit in the content key: `<sha256>` is stored at 0600 and `<sha256>.x` at 0700. Both the digest query and archive link targets use that key. Restrict extracted private files before creating hardlinks, and discard any previous staging directory before extraction, so neither an initial upload nor a repeat runs chmod through a stored inode.
   Rationale: byte identity alone cannot preserve differing executable modes. This keeps the approved symlink-then-hardlink mechanism and private final copies. The existing upload's umask and permission restriction remove group and other permissions.
   Date/Author: 2026-11-15, parent ruling implemented by Milestone 1 worker.
+- Decision: encode each step failure as an index, status and JSON-escaped purpose in stderr; reuse the existing command error checkers to decode it. Do not extend serialized `CommandSpec`.
+  Rationale: a batch retains the original purpose in failures across SSH, container execution and command plans, without a persisted contract change. Every argv element uses `targets::posix_quote`.
+  Date/Author: 2026-11-15, batching implementer.
+- Decision: support best-effort cleanup as a step property. The helper returns warning records even when an earlier step fails, and worker publication logs them with `tracing::warn`. Keep the separate executor cleanup when transfer fails before the batch can complete.
+  Rationale: preserve the existing warning-only discard policy and cancellation cleanup instead of hiding errors or failing a successful publication. Parent explicitly confirmed this policy.
+  Date/Author: 2026-11-15, parent and batching implementer.
+- Decision: configuration preparation first asks `inspect` with the original machine settings, then projects onto the recorded directory through that same owner only for a different or disabled retained cache. Keep `publish_at`'s compare-and-replace reread.
+  Rationale: the ordinary launch reuses its existing resolution key, while retained containers preserve their recorded mount and policy handling. Do not normalize the owner's keys or introduce another cache. Parent explicitly confirmed this caller projection.
+  Date/Author: 2026-11-15, parent and batching implementer.
+
 - Decision: change only how profile bytes reach the host; each session still receives a private, writable copy of its whole profile.
   Rationale: Claude writes into `plugins/`, and Resume, Move and profile refresh all delete and reinstall the profile directory (`controller/resume.rs:811-818`, `worker_binary/install.rs:1043-1093`). Sharing the final tree would touch all of those flows. Sending bytes once per host removes the measured bottleneck and keeps the session's files exactly as they are today. The worker binary store's host transport cache (`store.rs:582-656`) already works this way.
   Date/Author: 2026-11-15, parent session.
@@ -68,6 +85,11 @@ After this change, the controller sends each distinct profile file to a host onc
 ## Outcomes & Retrospective
 
 Milestone 1 is complete. Only harness-declared shared trees enter the host content store; each launch still installs a private profile. The real-shell integration tests cover more than 8 MiB of content, spaces, newline and leading-dash filenames, empty directories, distinct executable modes for identical bytes, collection of stale and abandoned content, an upload without shared content on the second launch, independent installed inodes, and a missing-content repeat. Full validation passed with `cargo test -p brokk-mj-controller` (2,651 passed, 27 ignored), `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all -- --check`, and `git diff --check`. The first round-trip run exposed a fixture omission: the helper now applies the real SSH installer's final chmod after copying, and the targeted rerun and full suite pass. Milestones 2 and 3 remain separate work; no live EC2 or macOS check was run in this lane.
+Milestone 2 validation completed on implementation revision `0200e9d33`. `cargo test -p brokk-mj-core -p brokk-mj-controller` passed: controller 2,650 passed and 27 ignored; core 651 passed and 4 ignored; doctests passed with one pre-existing ignored core doctest. `cargo clippy --all-targets -- -D warnings` passed in the dev profile. `cargo fmt --all -- --check` and `git diff --check` passed. Focused checks covered the real-shell helper partial failure, worker install/store paths, inherited Git settings (5), network Git initialization (15, including the corrected transport fixture), and mbx (75). The initial shim and network fixture expectations were updated to the new batch shape; no checked-in golden files changed. One additional test-fixture commit follows the six group commits. The parent requested one integrated review after both milestones, so this worktree did not request its own review.
+
+The batching worktree did not run live EC2, Docker's ignored live cases, or native macOS checks; Milestone 3 remains with the parent. Text evidence is under `/home/jonathan/Projects/mjolnir/.mj/clones/a83a99501dd0ab62165f069bce1a74a8/.mj/agents/ea3f2d728024eb4d7ae9fb5abd44d51d`, with `full-tests.log`, `clippy.log`, the focused logs and initial failure logs. The final plan-only commit contains these results and no source changes.
+
+Milestone 2 implementation estimate for the incident sequence is 69 commands to about 36 when the existing mbx resolution is available: profile install saves 6, worker replacement saves 6 including deletion of the useless SSH `true`, worker publication saves 2, inherited Git settings save 2, workspace Git configuration saves 6, and mbx inspection reuse plus shim/config batching save 11. This is a code-path estimate, not a timing measurement; the profile-store digest query from Milestone 1 can add a command back. SCP remains separate when a replacement has no remote source. No output-dependent local decision moved into shell. Milestone 3 still measures the combined implementation on a real isolated host.
 
 
 ## Context and Orientation
@@ -124,7 +146,7 @@ Add one shared helper next to `CommandPlan` in `mj-core/src/targets.rs`. It buil
 
 Use the helper for the following groups, in this order, each as its own commit:
 
-1. The seven remote-container profile install commands in `worker_binary/install.rs:970-1033`, with host staging removal as a cleanup step only where today's code removes it on success. Do not change cleanup on failure in this milestone.
+1. The seven remote-container profile install commands in `worker_binary/install.rs:970-1033`. Host staging removal is the final ordinary step, so it runs only after earlier steps succeed, and its failure still fails installation. It deliberately does not use the always-run cleanup trap; failure cleanup remains unchanged.
 2. The worker replacement plan in `worker_binary/upgrade.rs:680-713`. Delete the SSH `true` chosen when `remote_source` is set.
 3. Container worker store verify, publish and private-upload discard (`store.rs:475-571`). Keep the store gates and the final session link exactly where they are.
 4. The three inherited global Git settings in `controller/provisioning.rs:1914-1927`.
@@ -144,10 +166,10 @@ Work from the repository root. Implementers build and test only in their own det
 
 Focused tests during the work:
 
-    cargo test -p mj-controller worker_binary
-    cargo test -p mj-core targets
+    cargo test -p brokk-mj-controller worker_binary
+    cargo test -p brokk-mj-core targets
 
-Full validation once, after the last round: `cargo clippy --all-targets -- -D warnings` for the workspace, plus the full suites of the touched crates (`mj-core`, `mj-controller`). Run `cargo test` outside the restricted sandbox.
+Full validation once, after the last round: `cargo clippy --all-targets -- -D warnings` for the workspace, plus `cargo test -p brokk-mj-core -p brokk-mj-controller` for the full suites of the touched crates. Run `cargo test` outside the restricted sandbox and keep the source and Git revision fixed until the commands finish.
 
 Live check (Milestone 3), from an isolated instance only:
 
@@ -191,3 +213,6 @@ Claude profile source measurement (fast gzip): whole snapshot 780 files, 22,085,
 No new crates. Use the existing `tar` and `flate2` dependencies for the stream and `sha2` (already used by the worker store) for digests. Run commands through the existing executor (`execute_with_stdin` for the streamed upload); do not hand-roll pipes. The step-script helper lives in `mj-core/src/targets.rs` beside `CommandPlan` and returns errors through the same `anyhow` context style as `execute_checked`. No database migration and no relay protocol change are expected; if one becomes necessary, stop and record why in the Decision Log.
 
 Plan update (2026-11-15, Milestone 1 worker): implemented the host content store and recorded the parent-approved executable-mode key refinement; focused integration tests, the full controller suite, workspace clippy and formatting all pass.
+No new crates. Use the existing `tar` and `flate2` dependencies for the stream and `sha2` (already used by the worker store) for digests. Run commands through the existing executor (`execute_with_stdin` for the streamed upload); do not hand-roll pipes. The step-script helper lives in `mj-core/src/targets.rs` beside `CommandPlan` and returns errors through the same `anyhow` context style as `execute_checked`. `CommandStep::new(purpose, argv)` declares an operation; `accepted_statuses` declares accepted exit codes, `cleanup` runs it in the exit trap, and `best_effort_cleanup` reports failure without replacing the primary result. `step_script` returns the argv for the existing transport factories. `step_script_error` and `step_script_warnings` decode indexed status/purpose markers; purposes use JSON escaping and argv words use `posix_quote`. The core and controller error checkers decode failures, and worker publication logs all cleanup warnings before checking the result. No database migration and no relay protocol change are expected; if one becomes necessary, stop and record why in the Decision Log.
+
+Plan update (2026-11-15, Milestone 2): recorded batching implementation, preserved failure policies, the original-settings resolution lookup and corrected Cargo package selectors. Validation completed: the focused checks, both full crate suites and workspace clippy pass. The source revision stayed fixed during final validation; the final commit touches only this plan.
