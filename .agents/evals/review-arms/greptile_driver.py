@@ -123,41 +123,48 @@ def finish(d, bug, tier, run_id, stderr=""):
                            "base": bug["base_commit"], "reviewers": [reviewer], "finished_ns": time.time_ns()})
 
 
-def run_job(job):
-    bug, tier = CORPUS[job["bug"]], job["tier"]
-    d = ROOT / "runs" / bug["id"] / f"G-{tier}"
-    if (d / "done.json").exists():
-        return "done"
-    tag = hashlib.sha256((bug["id"] + tier).encode()).hexdigest()
-    branch, wt = f"review-{tag[:10]}", ROOT / "greptile" / "worktrees" / tag[:10]
-    if (d / "launch-intent.json").exists():
-        # A dispatched run may have finished, and been charged, after its CLI stopped:
-        # fetch it instead of paying again. Only a cancelled or failed run is dispatched again.
-        # Only a run this launch created: one made after its intent was recorded.
-        since = json.loads((d / "launch-intent.json").read_text())["time_ns"] / 1e9
-        live = [r for r in runs_for(bug["intro_commit"], bug["base_commit"])
-                if iso_s(r["createdAt"]) >= since and r["status"] != "CANCELLED" and tier_of(r) == tier]
-        if live:
-            finish(d, bug, tier, live[0]["runId"])
-            return "recovered"
-        (ROOT / "failed-attempts").mkdir(exist_ok=True)
-        d.rename(ROOT / "failed-attempts" / f"{bug['id']}-G-{tier}-no-result-{time.time_ns()}")
+def release(wt, branch):
+    """Removes a job's worktree and branch if they exist; safe to repeat."""
     if wt.exists():
         git("worktree", "remove", "--force", str(wt))
     subprocess.run(["git", "branch", "-D", branch], cwd=REPO, capture_output=True)
-    git("worktree", "add", "-q", "-b", branch, str(wt), bug["intro_commit"])
-    assert git("rev-parse", "HEAD", cwd=wt).strip() == bug["intro_commit"]
-    save(d / "launch-intent.json", {"bug": bug["id"], "tier": tier, "branch": branch, "time_ns": time.time_ns()})
-    cmd = ["greptile", "review", "--branch", bug["base_commit"], "--json"] + (["--plus"] if tier == "plus" else [])
-    r = subprocess.run(cmd, cwd=wt, env=ENV, capture_output=True, text=True)
-    (d / "review.log").write_text(r.stderr)
-    if r.returncode:
-        raise RuntimeError(f"greptile exit {r.returncode}: {r.stderr[-800:]}")
-    # The newest run for this commit is ours: a diff's tiers never run at the same time.
-    finish(d, bug, tier, runs_for(bug["intro_commit"], bug["base_commit"])[0]["runId"], r.stderr)
-    git("worktree", "remove", "--force", str(wt))
-    git("branch", "-D", branch)
-    return "done"
+
+
+def run_job(job):
+    bug, tier = CORPUS[job["bug"]], job["tier"]
+    d = ROOT / "runs" / bug["id"] / f"G-{tier}"
+    tag = hashlib.sha256((bug["id"] + tier).encode()).hexdigest()
+    branch, wt = f"review-{tag[:10]}", ROOT / "greptile" / "worktrees" / tag[:10]
+    try:
+        if (d / "done.json").exists():
+            return "done"
+        if (d / "launch-intent.json").exists():
+            # A dispatched run may have finished, and been charged, after its CLI stopped:
+            # fetch it instead of paying again. Only a cancelled or failed run is dispatched again.
+            # Only a run this launch created: one made after its intent was recorded.
+            since = json.loads((d / "launch-intent.json").read_text())["time_ns"] / 1e9
+            live = [r for r in runs_for(bug["intro_commit"], bug["base_commit"])
+                    if iso_s(r["createdAt"]) >= since and r["status"] != "CANCELLED" and tier_of(r) == tier]
+            if live:
+                finish(d, bug, tier, live[0]["runId"])
+                return "recovered"
+            (ROOT / "failed-attempts").mkdir(exist_ok=True)
+            d.rename(ROOT / "failed-attempts" / f"{bug['id']}-G-{tier}-no-result-{time.time_ns()}")
+        release(wt, branch)
+        git("worktree", "add", "-q", "-b", branch, str(wt), bug["intro_commit"])
+        assert git("rev-parse", "HEAD", cwd=wt).strip() == bug["intro_commit"]
+        save(d / "launch-intent.json", {"bug": bug["id"], "tier": tier, "branch": branch, "time_ns": time.time_ns()})
+        cmd = ["greptile", "review", "--branch", bug["base_commit"], "--json"] + (["--plus"] if tier == "plus" else [])
+        r = subprocess.run(cmd, cwd=wt, env=ENV, capture_output=True, text=True)
+        (d / "review.log").write_text(r.stderr)
+        if r.returncode:
+            raise RuntimeError(f"greptile exit {r.returncode}: {r.stderr[-800:]}")
+        # The newest run for this commit is ours: jobs on one commit never run at the same time.
+        finish(d, bug, tier, runs_for(bug["intro_commit"], bug["base_commit"])[0]["runId"], r.stderr)
+        return "done"
+    finally:
+        # Every exit path releases the checkout, including leftovers of an interrupted run.
+        release(wt, branch)
 
 
 def main():
