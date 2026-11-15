@@ -1201,24 +1201,41 @@ for content in "$destination"/.mj-content/*; do
     fi
     touch -- "$store/$key"
 done
-missing="$destination/.mj-content-missing"
+# Copy through a temporary name, so any failure leaves the placeholder link.
 find "$destination" -type l -exec sh -c '
-    set -eu
     store=$1; shift
     for path do
         target=$(readlink "$path")
         case $target in mj-profile-content/*) ;; *) continue;; esac
         key=${target#mj-profile-content/}
-        if [ ! -f "$store/$key" ]; then
-            printf "%s\n" "$key"
-            continue
-        fi
-        rm -f -- "$path"
-        if ! cp -- "$store/$key" "$path"; then
-            if [ ! -f "$store/$key" ]; then printf "%s\n" "$key"; else exit 1; fi
-        fi
+        [ -f "$store/$key" ] || continue
+        copy=$(mktemp "${path%/*}/.mj-copy-XXXXXXXXXX") || continue
+        # mktemp creates 0600, and cp keeps the mode of an existing file.
+        case $key in *.x) mode=700;; *) mode=600;; esac
+        if cp -- "$store/$key" "$copy" && chmod -- "$mode" "$copy" && mv -f -- "$copy" "$path"; then :; else rm -f -- "$copy"; fi
     done
-' sh "$store" {} + > "$missing"
+' sh "$store" {} + || :
+# Decide completeness from the links that remain, not from find's exit status:
+# a remaining link whose content left the store is missing; any other failed.
+remaining="$destination/.mj-content-remaining"
+find "$destination" -type l -exec sh -c '
+    for path do
+        target=$(readlink "$path")
+        case $target in mj-profile-content/*) printf "%s\n" "${target#mj-profile-content/}";; esac
+    done
+' sh {} + > "$remaining"
+missing="$destination/.mj-content-missing"
+: > "$missing"
+failed=0
+while IFS= read -r key; do
+    if [ -f "$store/$key" ]; then failed=1; else printf '%s\n' "$key" >> "$missing"; fi
+done < "$remaining"
+rm -f -- "$remaining"
+if [ "$failed" -ne 0 ]; then
+    rm -f -- "$missing"
+    echo "could not copy stored profile content into $destination" >&2
+    exit 1
+fi
 if [ -s "$missing" ]; then
     cat -- "$missing"
     rm -f -- "$missing"
@@ -1881,6 +1898,28 @@ mod profile_archive_tests {
         assert_eq!(
             String::from_utf8(output.stdout).unwrap().trim(),
             key.to_str().unwrap()
+        );
+    }
+
+    // Hard-won: review of 09769fc85: a stored file that exists but cannot be
+    // copied must fail the upload instead of leaving a profile with gaps.
+    #[test]
+    fn stored_profile_content_that_cannot_be_copied_fails_the_upload() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir_all(source.join("plugins")).unwrap();
+        fs::write(source.join("plugins/content"), vec![b'x'; 100_000]).unwrap();
+        let executor = SystemTar::new(temp.path());
+        upload(&executor, &source, &temp.path().join("initial")).unwrap();
+        let stored = executor.stored_files().pop().unwrap();
+        fs::set_permissions(&stored, fs::Permissions::from_mode(0o000)).unwrap();
+        let error = upload(&executor, &source, &temp.path().join("unreadable"))
+            .unwrap_err()
+            .to_string();
+        fs::set_permissions(&stored, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            error.contains("could not copy stored profile content"),
+            "{error}"
         );
     }
 }

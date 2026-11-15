@@ -80,6 +80,9 @@ After this change, the controller sends each distinct profile file to a host onc
 - Decision: the install script copies stored content into the staging directory instead of hard-linking it. This supersedes the earlier hard-link wording.
   Rationale: `podman cp` sends a tar stream, and tar preserves hard links. Two profile files with identical bytes, both linked to one store file, would therefore arrive in the container as one shared inode. An in-place write by the harness (Node's `writeFileSync` writes into the existing file) would then change both. Copying costs about 22 MB of local disk traffic on the host per launch. It also means no staging or session file ever shares an inode with the store, so the ordering rule "restrict permissions before linking" is no longer needed.
   Date/Author: 2026-11-15, parent session (review of 50d715dcb).
+- Decision: the install script decides completeness from the placeholder links that remain after copying, not from `find`'s exit status. Each copy goes through a temporary file that is renamed over the link, so any failure leaves the link in place. A remaining link whose store file is gone is reported as missing (status 75, one repeat). Any other remaining link fails the upload.
+  Rationale: code review of 09769fc85 found that a copy failure such as a full disk could otherwise depend on whether `find -exec … +` reports the failed invocation. Checking the result directly does not depend on how a given `find` implementation behaves.
+  Date/Author: 2026-11-15, parent session.
 
 
 ## Outcomes & Retrospective
