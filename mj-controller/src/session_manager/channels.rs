@@ -8,6 +8,17 @@ pub struct SessionManagerUpdate {
     pub view: ManagedSessionView,
 }
 
+impl SessionManagerUpdate {
+    /// A view update from a client surface.
+    pub fn from_view(session_id: String, view: ManagedSessionView) -> Self {
+        Self {
+            session_id,
+            view,
+            raw_observation: None,
+        }
+    }
+}
+
 pub(crate) type SessionCpuTable =
     mj_core::snapshot_map::SnapshotMap<String, mj_client::runtime_feed::SessionCpuView>;
 
@@ -324,6 +335,7 @@ impl Drop for SessionManagerShutdown {
 
 #[derive(Clone)]
 pub(crate) struct CoalescedUpdateSender {
+    pub(super) harness_failure: Arc<std::sync::OnceLock<HarnessFailureHandler>>,
     // Continuation checks can hold a view; keep its newest raw cache input until publication.
     pub(crate) pending_observations:
         Arc<Mutex<BTreeMap<String, mj_core::snapshot_map::SharedSnapshot<RelayOperationalState>>>>,
@@ -552,6 +564,7 @@ pub(crate) fn coalesced_update_channel() -> (CoalescedUpdateSender, SessionManag
     let (wake_tx, wake_rx) = mpsc::channel(1);
     (
         CoalescedUpdateSender {
+            harness_failure: Default::default(),
             pending_observations: Default::default(),
             last_raw_options: Default::default(),
             model_policies: watch::channel(BTreeMap::new()).0,

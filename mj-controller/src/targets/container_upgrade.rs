@@ -1093,7 +1093,7 @@ pub(crate) fn container_upgrade_test_plan(session_id: &str) -> RetainedContainer
 
 /// Prove absence before creating, and ownership before reattaching. Engine
 /// failure never turns surviving workspace data into a checkpoint restore.
-fn retain_legacy_volume(
+fn retained_volume_exists(
     host: &ImageHost,
     name: &str,
     session: &str,
@@ -1110,26 +1110,14 @@ fn retain_legacy_volume(
             "inspect retained legacy volume".into(),
         ))
     };
-    let mut output = query()?;
-    let existed = output.status == 0;
-    if !existed {
+    let output = query()?;
+    if output.status != 0 {
         let message = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
         ensure!(
             message.contains("no such volume") || message.contains("no volume with name"),
-            "cannot establish legacy volume absence: {message}; checkpoint and storage retained"
+            "cannot establish retained volume absence: {message}; checkpoint and storage retained"
         );
-        checked(
-            host,
-            vec![
-                "volume".into(),
-                "create".into(),
-                "--label=dev.mj.managed=true".into(),
-                format!("--label=dev.mj.session={session}"),
-                name.into(),
-            ],
-            executor,
-        )?;
-        output = query()?;
+        return Ok(false);
     }
     ensure!(
         output.status == 0,
@@ -1143,7 +1131,56 @@ fn retain_legacy_volume(
             && record["Labels"]["dev.mj.session"].as_str() == Some(session),
         "legacy volume ownership changed; refusing checkpoint restore over retained storage"
     );
+    Ok(true)
+}
+
+fn retain_legacy_volume(
+    host: &ImageHost,
+    name: &str,
+    session: &str,
+    executor: &impl CommandExecutor,
+) -> Result<bool> {
+    let existed = retained_volume_exists(host, name, session, executor)?;
+    if !existed {
+        checked(
+            host,
+            vec![
+                "volume".into(),
+                "create".into(),
+                "--label=dev.mj.managed=true".into(),
+                format!("--label=dev.mj.session={session}"),
+                name.into(),
+            ],
+            executor,
+        )?;
+        ensure!(
+            retained_volume_exists(host, name, session, executor)?,
+            "cannot verify created volume ownership"
+        );
+    }
     Ok(existed)
+}
+
+/// Read-only evidence for Resume; the replacement uses this same volume owner.
+pub(crate) fn retained_workspace_volume_exists(
+    locator: &TargetLocator,
+    session: &str,
+    executor: &impl CommandExecutor,
+) -> Result<bool> {
+    match locator {
+        TargetLocator::LocalPodman {
+            workspace_storage: PodmanWorkspaceLocator::Volume { name },
+            ..
+        }
+        | TargetLocator::SshPodman {
+            workspace_storage: PodmanWorkspaceLocator::Volume { name },
+            ..
+        } => {
+            let (host, _) = host_and_name(locator)?;
+            retained_volume_exists(&host, name, session, executor)
+        }
+        _ => Ok(false),
+    }
 }
 
 /// Recovery only for a shipped recreation that already removed its source.
@@ -1155,6 +1192,7 @@ pub(crate) fn recover_removed_container(
     session_id: &str,
     mounts: &[AdditionalMount],
     workspace: &str,
+    require_existing_workspace: bool,
     executor: &impl CommandExecutor,
 ) -> Result<bool> {
     let (host, name) = host_and_name(locator)?;
@@ -1173,7 +1211,15 @@ pub(crate) fn recover_removed_container(
     };
     let restore_repositories = match storage {
         Some(PodmanWorkspaceLocator::Volume { name }) => {
-            !retain_legacy_volume(&host, name, session_id, executor)?
+            if require_existing_workspace {
+                ensure!(
+                    retained_volume_exists(&host, name, session_id, executor)?,
+                    "retained workspace disappeared before replacement; no storage was created or removed; retry Resume"
+                );
+                false
+            } else {
+                !retain_legacy_volume(&host, name, session_id, executor)?
+            }
         }
         Some(PodmanWorkspaceLocator::HostPath { path, .. }) => {
             let result = executor.execute(&host.command(
@@ -1196,17 +1242,26 @@ pub(crate) fn recover_removed_container(
             let workspace = Path::new(workspace);
             if let Some(mount) = mounts
                 .iter()
-                .filter(|mount| workspace.starts_with(&mount.destination))
+                .filter(|mount| {
+                    workspace.starts_with(&mount.destination)
+                        || mount.destination.starts_with(workspace)
+                })
                 .max_by_key(|mount| mount.destination.components().count())
             {
                 ensure!(
                     mount.access == MountAccess::Rw,
                     "legacy workspace uses an unsupported read-only or transient attachment; checkpoint retained"
                 );
-                let source = mj_core::target_path::join(
-                    &mount.source,
-                    workspace.strip_prefix(&mount.destination)?,
-                );
+                // A surviving repository mounted inside the workspace also
+                // forbids a whole-workspace archive restore.
+                let source = if workspace.starts_with(&mount.destination) {
+                    mj_core::target_path::join(
+                        &mount.source,
+                        workspace.strip_prefix(&mount.destination)?,
+                    )
+                } else {
+                    mount.source.clone()
+                };
                 let result = executor.execute(&host.command(
                     vec![
                         "test".into(),
@@ -1735,6 +1790,7 @@ mod tests {
                 &session,
                 &mounts,
                 &workspace,
+                false,
                 &ProcessExecutor
             )
             .unwrap()

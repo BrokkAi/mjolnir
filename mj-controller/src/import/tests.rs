@@ -774,6 +774,7 @@ fn codex_jsonl_leaves_out_hidden_context_sent_as_a_resource() {
 }
 
 // Hard-won: #1514: choosing a daemon root changed managed imports into attached checkouts.
+// Hard-won: 970ce8a70: live native paths let late Codex output change an import after capture.
 #[test]
 fn nonempty_codex_import_materializes_and_validates_canonical_archive() {
     let directory = tempfile::tempdir().unwrap();
@@ -814,7 +815,7 @@ fn nonempty_codex_import_materializes_and_validates_canonical_archive() {
                 "type": "item_completed",
                 "item": {
                     "type": "AgentMessage",
-                    "content": [{"type": "Text", "text": "imported"}]
+                    "content": [{"type": "Text", "text": "imported ".repeat(16 * 1024)}]
                 }
             }
         }),
@@ -886,6 +887,34 @@ fn nonempty_codex_import_materializes_and_validates_canonical_archive() {
     fs::create_dir_all(&archive_directory).unwrap();
     let mut state = State::default();
 
+    let original = fs::read(&source.jsonl_path).unwrap();
+    assert!(original.len() > 64 * 1024);
+    let cancelled = AtomicBool::new(false);
+    let report = |progress| {
+        if matches!(progress, ImportArchiveProgress::WritingArchive) {
+            use std::io::Write as _;
+            let mut file = fs::OpenOptions::new()
+                .append(true)
+                .open(&source.jsonl_path)
+                .unwrap();
+            file.write_all(b"\n").unwrap();
+            serde_json::to_writer(
+                &mut file,
+                &json!({
+                    "timestamp": "2026-08-14T12:00:04.000Z", "type": "event_msg",
+                    "payload": {"type": "item_completed", "item": {
+                        "type": "AgentMessage", "content": [{"type": "Text", "text": "later harness output"}]
+                    }}
+                }),
+            )
+            .unwrap();
+        }
+    };
+    let control = ImportControl {
+        cancelled: &cancelled,
+        progress: &report,
+        include_untracked: true,
+    };
     let imported = import_native_session(
         &config,
         &mut state,
@@ -901,7 +930,7 @@ fn nonempty_codex_import_materializes_and_validates_canonical_archive() {
             title: None,
             archive_directory: &archive_directory,
         },
-        None,
+        Some(&control),
     )
     .unwrap();
     let verified =
@@ -928,6 +957,27 @@ fn nonempty_codex_import_materializes_and_validates_canonical_archive() {
         expected_agent_time
     );
     assert!(state.sessions.contains_key(&imported.session_id));
+    let native = verified
+        .manifest
+        .payloads
+        .iter()
+        .find(|payload| {
+            matches!(
+                payload.role,
+                mj_checkpoint::archive::PayloadRole::NativeArtifact { .. }
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        mj_checkpoint::archive::read_verified_checkpoint_payload(
+            &imported.archive_path,
+            native,
+            native.size,
+        )
+        .unwrap(),
+        original
+    );
+    assert!(fs::metadata(&source.jsonl_path).unwrap().len() > original.len() as u64);
 }
 
 const IMPORT_FIXTURE_SESSION: &str = "019feb6c-5ffc-7c12-ad99-bdeaeb6be79d";

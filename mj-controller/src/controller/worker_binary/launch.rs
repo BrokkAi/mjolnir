@@ -401,6 +401,7 @@ impl Controller {
                     ownership: &ownership_path,
                     profile: &profile_stage,
                     shared_login: shared_login.as_ref(),
+                    shared_paths: &shared_profile_paths(profile.kind),
                 },
             )?;
             if upgrade_retained_worker {
@@ -422,6 +423,7 @@ impl Controller {
             &ownership_path,
             &profile_stage,
             shared_login.as_ref(),
+            &shared_profile_paths(profile.kind),
         )?;
         if session.build_cache.is_some() {
             self.install_build_cache_shim(session, backend, &launch, executor)

@@ -2,6 +2,7 @@ use super::*;
 
 #[derive(Clone)]
 pub struct SessionManagerControl {
+    pub(super) harness_failure: Arc<std::sync::OnceLock<HarnessFailureHandler>>,
     pub(super) model_policies: watch::Sender<BTreeMap<String, SessionModelPolicy>>,
     pub(crate) session_cpu: watch::Receiver<SessionCpuTable>,
     pub(super) commands: mpsc::Sender<ManagerCommand>,
@@ -13,6 +14,15 @@ pub struct ManagedSessionHandle {
     pub(super) commands: mpsc::Sender<ActorCommand>,
     pub(super) releases: mpsc::UnboundedSender<ReturnedConnection>,
     pub(super) view: watch::Receiver<ManagedSessionView>,
+}
+
+impl SessionManagerControl {
+    pub(crate) fn install_harness_failure_handler(&self, handler: HarnessFailureHandler) {
+        assert!(
+            self.harness_failure.set(handler).is_ok(),
+            "readiness failure handler installed once"
+        );
+    }
 }
 
 /// Exclusive ownership of a session actor's existing relay connection.

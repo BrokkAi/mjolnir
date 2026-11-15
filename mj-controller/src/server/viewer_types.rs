@@ -56,6 +56,11 @@ pub struct ViewerSnapshot {
     pub workspaces: Vec<ViewerWorkspace>,
     pub sessions: ViewerSessions,
     pub profiles: Vec<ViewerProfile>,
+    /// Configured profiles left out of `profiles` because they are disabled.
+    /// Pickers never offer them, but a request that names one explicitly may
+    /// use it. Controller-private: never sent to clients.
+    #[serde(skip)]
+    pub disabled_profile_ids: std::collections::BTreeSet<String>,
     pub targets: Vec<ViewerTarget>,
     pub bundles: Vec<ViewerBundle>,
     /// The bounded part of `[review]` needed to report whether review is
@@ -273,6 +278,7 @@ impl ViewerSnapshot {
                     attention: Default::default(),
                     unread_frontier: None,
                     notification_dismissal: None,
+                    form_holder: None,
                     notifications_ignored: session.notifications_ignored,
                     oracle: session.oracle,
                     oracle_choice: session.oracle_choice.clone().map(|v| *v),
@@ -320,6 +326,7 @@ impl ViewerSnapshot {
                     has_error: session.last_error.is_some()
                         || session.configuration_issue(config).is_some(),
                     has_checkpoint: session.checkpoint.is_some(),
+                    retained_target: session.target.is_some(),
                     configuration_issue: session.configuration_issue(config),
                     // A session that failed to launch (or a close that left it
                     // dead) carries its reason here so a client need not open
@@ -397,7 +404,12 @@ impl ViewerSnapshot {
                         suspend: lifecycle.is_dashboard_visible(),
                         destroy: true,
                         rename: true,
-                        resume: !lifecycle.is_dashboard_visible(),
+                        resume: !lifecycle.is_dashboard_visible()
+                            && resume_source_available(
+                                session.state.as_str(),
+                                session.checkpoint.is_some(),
+                                session.target.is_some(),
+                            ),
                         move_session: false,
                         set_config: false,
                         set_plan_mode: false,
@@ -428,6 +440,12 @@ impl ViewerSnapshot {
                 capabilities_key: profile.capabilities_key(id),
                 quota: None,
             })
+            .collect();
+        let disabled_profile_ids = config
+            .profiles
+            .iter()
+            .filter(|(_, profile)| !profile.enabled)
+            .map(|(id, _)| id.clone())
             .collect();
         let targets = config
             .enabled_targets()
@@ -508,6 +526,7 @@ impl ViewerSnapshot {
             workspaces: Vec::new(),
             sessions,
             profiles,
+            disabled_profile_ids,
             targets,
             bundles,
             review_config: ViewerReviewConfig {
@@ -533,7 +552,16 @@ pub(super) fn project_key(identity: &str) -> String {
     mj_core::hex::lower_hex(&digest[..8])
 }
 
+fn resume_source_available(state: &str, has_checkpoint: bool, retained_target: bool) -> bool {
+    has_checkpoint || (state == "error" && retained_target)
+}
+
 impl ViewerSession {
+    /// Recorded repair/restore candidates; the environment owner proves existence.
+    pub(crate) fn has_resume_source(&self) -> bool {
+        resume_source_available(&self.state, self.has_checkpoint, self.retained_target)
+    }
+
     /// One interpretation for both current-state persistence and live API delivery.
     pub(crate) fn api_activity(&self) -> mj_core::storage::ApiActivityState {
         mj_core::storage::ApiActivityState {
@@ -555,6 +583,8 @@ pub struct ViewerSession {
     pub unread_frontier: Option<u64>,
     #[serde(default)]
     pub notification_dismissal: Option<mj_core::attention::NotificationDismissal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub form_holder: Option<String>,
     /// The session raises no notifications; its attention still renders.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub notifications_ignored: bool,
@@ -650,13 +680,12 @@ pub struct ViewerSession {
     pub created_at: String,
     pub updated_at: String,
     pub has_error: bool,
-    /// Whether the session has a checkpoint to resume from. A resume restores
-    /// a checkpoint and nothing else, so a session without one, such as a
-    /// launch that failed before its first, cannot be resumed (launch finding
-    /// R6-1). Only the fact travels; the archive's path stays on the
-    /// controller.
+    /// Whether an archive is available when the environment is absent.
     #[serde(default)]
     pub has_checkpoint: bool,
+    /// Internal placement evidence for API admission; existence is probed by Resume.
+    #[serde(skip)]
+    pub retained_target: bool,
     /// Public identifiers and repair guidance only; never raw runtime errors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub configuration_issue: Option<String>,
@@ -1037,6 +1066,9 @@ impl ViewerTurnReview {
 pub struct ViewerWorkspace {
     pub id: String,
     pub name: String,
+    /// Workspaces arrive in name order; the viewer opens the most recently
+    /// opened one when the route names none.
+    pub last_opened_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

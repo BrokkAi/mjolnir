@@ -719,7 +719,7 @@ impl DashboardState {
             let confirmation = Confirmation::RecoverFailed {
                 session_id: session.id.clone(),
                 error: session.last_error.clone(),
-                recoverable: session.checkpoint.is_some(),
+                recoverable: session.checkpoint.is_some() || session.target.is_some(),
             };
             self.mode = Mode::Confirm(
                 ConfirmDialog::new(confirmation)
@@ -748,14 +748,12 @@ impl DashboardState {
             let session_id = session.id.clone();
             return self.begin_resume_for(&session_id);
         }
-        // A failed session has two reasonable answers - read what it did, or
-        // put it back on a fresh target - and recovery replaces the target, so
-        // the surface asks rather than guessing.
+        // Failed sessions can be inspected or resumed in their retained environment.
         if session.state == SessionState::Error {
             let confirmation = Confirmation::RecoverFailed {
                 session_id: session.id.clone(),
                 error: session.last_error.clone(),
-                recoverable: session.checkpoint.is_some(),
+                recoverable: session.checkpoint.is_some() || session.target.is_some(),
             };
             self.mode = Mode::Confirm(
                 ConfirmDialog::new(confirmation)

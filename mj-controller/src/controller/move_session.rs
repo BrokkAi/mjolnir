@@ -1202,15 +1202,7 @@ impl Controller {
         }
         let profile_id = selection.profile_id.as_deref().unwrap();
         let target_id = selection.target_template_id.as_deref().unwrap();
-        let profile = self
-            .config
-            .profiles
-            .get(profile_id)
-            .context("unknown destination profile")?;
-        ensure!(
-            profile.enabled,
-            "destination profile {profile_id:?} is disabled"
-        );
+        let profile = self.config.named_profile(profile_id)?;
         let requested_oracle = selection.oracle.unwrap_or(source.oracle);
         let explicit_oracle = selection.oracle == Some(true) || selection.oracle_choice.is_some();
         if requested_oracle

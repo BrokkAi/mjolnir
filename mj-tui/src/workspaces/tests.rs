@@ -67,10 +67,9 @@ fn golden_workspace_manager_drafts() {
     let mut dashboard = dashboard_with_session(running_session());
     dashboard.set_workspace_names(std::collections::BTreeMap::from([
         ("default".into(), "Default".into()),
-        ("alpha".into(), "Alpha".into()),
-        ("beta".into(), "Beta".into()),
+        ("alpha".into(), "Echo".into()),
+        ("beta".into(), "Foxtrot".into()),
     ]));
-    dashboard.order_workspaces(&["default".into(), "alpha".into(), "beta".into()]);
     dashboard.set_active_workspace(Some("default".into()));
 
     let action = chord(&mut dashboard, crate::CommandId::FocusWorkspaces);
@@ -169,11 +168,6 @@ fn golden_workspace_manager_drafts() {
         })
         .collect();
     dashboard.set_workspace_names(names);
-    dashboard.order_workspaces(
-        &(0..24)
-            .map(|index| format!("workspace-{index}"))
-            .collect::<Vec<_>>(),
-    );
     dashboard.set_active_workspace(Some("workspace-0".into()));
     for size in [crate::PaneSize::Standard, crate::PaneSize::Maximized] {
         dashboard.set_pane_size(crate::SupportPane::Sessions, size);
@@ -444,7 +438,8 @@ fn tabs_scroll_to_the_selected_workspace_and_mouse_hits_unicode_labels() {
     dashboard.set_workspace_names(std::collections::BTreeMap::from([
         ("a".into(), "First workspace".into()),
         ("b".into(), "界界".into()),
-        ("c".into(), "Last workspace".into()),
+        // Tabs sort by name, so this one must sort after "界界".
+        ("c".into(), "界界 last workspace".into()),
     ]));
     dashboard.set_active_workspace(Some("b".into()));
     let mut terminal = Terminal::new(TestBackend::new(24, 5)).unwrap();
@@ -478,7 +473,7 @@ fn tabs_scroll_to_the_selected_workspace_and_mouse_hits_unicode_labels() {
     let text = (0..24)
         .map(|x| terminal.backend().buffer()[(x, 3)].symbol())
         .collect::<String>();
-    assert!(text.contains("Last workspace"), "{text}");
+    assert!(text.contains("last worksp"), "{text}");
 }
 
 #[test]
@@ -737,18 +732,17 @@ fn esc_in_a_workspace_dialog_opened_by_shortcut_returns_to_the_dashboard() {
 
 /// Launch campaign finding D-13: after a restart the tabs read
 /// `second  mjolnir` although they read `mjolnir  second` before, because a
-/// fresh dashboard ordered tabs by random workspace id. The host orders them
-/// by creation, and a later runtime update keeps that order.
+/// fresh dashboard ordered tabs by random workspace id. Tabs are ordered by
+/// name, so neither a restart nor a later runtime update changes the order.
 // Hard-won: e923d3bf: tab order changed because workspace ids were random
 #[test]
-fn workspace_tabs_keep_the_hosts_order_across_updates() {
+fn workspace_tabs_keep_name_order_across_updates() {
     let mut dashboard = dashboard_with_session(running_session());
     let names = std::collections::BTreeMap::from([
         ("f069".to_owned(), "mjolnir".to_owned()),
         ("2901".to_owned(), "second".to_owned()),
     ]);
     dashboard.set_workspace_names(names.clone());
-    dashboard.order_workspaces(&["f069".to_owned(), "2901".to_owned()]);
     assert_eq!(dashboard.workspace_ids(), ["f069", "2901"]);
     dashboard.set_workspace_names(names);
     assert_eq!(dashboard.workspace_ids(), ["f069", "2901"]);

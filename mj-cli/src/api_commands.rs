@@ -1859,21 +1859,33 @@ pub(crate) async fn fetch(args: FetchArgs) -> Result<()> {
     let fetched = client.fetch(&args.session, &args.path, args.ls).await?;
     if args.ls {
         let listing: mj_checkpoint::archive::SessionListing =
-            serde_json::from_slice(&fetched.bytes).context("decode the listing")?;
+            tokio::task::spawn_blocking(move || {
+                serde_json::from_reader(fetched.reader()).context("decode the listing")
+            })
+            .await??;
         if args.json {
             return print_json(&listing);
         }
         print_lines(listing_lines(&listing));
         return Ok(());
     }
-    if args.stdout {
-        let mut stdout = std::io::stdout().lock();
-        stdout
-            .write_all(&fetched.bytes)
-            .context("write the fetched path")?;
-        return stdout.flush().context("write the fetched path");
-    }
-    let saved = fetched.save(&std::env::temp_dir(), &args.session)?;
+    let session = args.session.clone();
+    let saved = tokio::task::spawn_blocking(
+        move || -> Result<Option<mj_checkpoint::archive::SavedFetch>> {
+            if args.stdout {
+                let mut stdout = std::io::stdout().lock();
+                std::io::copy(&mut fetched.reader(), &mut stdout)
+                    .context("write the fetched path")?;
+                stdout.flush().context("write the fetched path")?;
+                return Ok(None);
+            }
+            Ok(Some(fetched.save(&std::env::temp_dir(), &session)?))
+        },
+    )
+    .await??;
+    let Some(saved) = saved else {
+        return Ok(());
+    };
     if args.json {
         return print_json(&saved);
     }
@@ -3098,9 +3110,10 @@ mod tests {
                 &[root.path().to_path_buf()],
                 false,
                 FetchMode::Listing,
+                tempfile::tempfile().unwrap(),
             )
             .unwrap();
-            serde_json::from_slice(&fetched.bytes).unwrap()
+            serde_json::from_reader(fetched.reader()).unwrap()
         };
         let mut directory = list(&probes);
         // The standard library cannot set a symlink's own time, so the link's

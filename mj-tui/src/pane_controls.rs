@@ -252,13 +252,15 @@ impl DashboardState {
         if self.is_native_agent(session_id) || !self.state.sessions.contains_key(session_id) {
             return;
         }
+        let (label, command) = if self.waiting_child_of(session_id).is_some() {
+            ("Open sub-agent question", CommandId::OpenWaitingQuestion)
+        } else {
+            ("Dismiss notification", CommandId::DismissNotification)
+        };
         let entries = vec![
             (
-                "Dismiss notification".to_owned(),
-                PaneOperation::SessionCommand(
-                    session_id.to_owned(),
-                    CommandId::DismissNotification,
-                ),
+                label.to_owned(),
+                PaneOperation::SessionCommand(session_id.to_owned(), command),
             ),
             (
                 "Copy session ID".to_owned(),
@@ -318,6 +320,9 @@ impl DashboardState {
             PaneOperation::SessionCommand(session_id, CommandId::DismissNotification) => {
                 crate::actions::dismiss_notification_available_for(self, session_id)
                     == Availability::Ready
+            }
+            PaneOperation::SessionCommand(session_id, CommandId::OpenWaitingQuestion) => {
+                self.waiting_child_of(session_id).is_some()
             }
             PaneOperation::SessionCommand(session_id, _)
             | PaneOperation::NewSessionLike(session_id) => {

@@ -21,9 +21,10 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 
 const INSTALL_LOCK_FILE: &str = ".install.lock";
 const INSTALL_LOCK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+// Bounds a harness command that hangs, including version probes; a slow
+// container start must not fail preparation, and the user can cancel it.
 const HARNESS_COMMAND_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const MANAGED_INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
-const NODE_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_NODE_DIST_URL: &str = "https://nodejs.org/dist";
 const ARTIFACT_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const MAX_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
@@ -369,7 +370,7 @@ async fn locate_in_image(
         HarnessKind::Dsh => {
             let mut probe = tokio::process::Command::new(&bridge);
             probe.arg("--version").env_clear().envs(environment);
-            let output = crate::subprocess::run_bounded(&mut probe, 4096, Duration::from_secs(10))
+            let output = crate::subprocess::run_bounded(&mut probe, 4096, HARNESS_COMMAND_TIMEOUT)
                 .await
                 .context("check the image's dsh-acp version")?;
             let reported = String::from_utf8_lossy(&output.stdout);
@@ -445,7 +446,7 @@ async fn compatible_bridge(
     if let Some(home) = environment.get("HOME") {
         probe.current_dir(home);
     }
-    let output = crate::subprocess::run_bounded(&mut probe, 64 * 1024, Duration::from_secs(10))
+    let output = crate::subprocess::run_bounded(&mut probe, 64 * 1024, HARNESS_COMMAND_TIMEOUT)
         .await
         .with_context(|| format!("check installed {} bridge version", harness.display_name()))?;
     let expected = if harness == HarnessKind::Claude {
@@ -1659,7 +1660,7 @@ async fn bounded_env_output(
     environment: &BTreeMap<String, String>,
 ) -> Result<std::process::Output> {
     command.env_clear().envs(environment);
-    crate::subprocess::run_bounded(command, 64 * 1024, NODE_PROBE_TIMEOUT)
+    crate::subprocess::run_bounded(command, 64 * 1024, HARNESS_COMMAND_TIMEOUT)
         .await
         .context("probe Node.js runtime")
 }

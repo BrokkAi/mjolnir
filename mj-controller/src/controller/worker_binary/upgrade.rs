@@ -677,41 +677,88 @@ pub(super) fn worker_binary_upload_plan(
                     crate::session_manager::new_command_id("worker-upload")?
                 ),
             };
-            vec![
-                crate::targets::ssh_command(ssh, ["mkdir", "-p", targets::REMOTE_UPLOAD_STAGING])
-                    .purpose("create remote replacement worker staging"),
-                match remote_source {
-                    Some(_) => crate::targets::ssh_command(ssh, ["true"]),
-                    None => crate::targets::scp_upload(ssh, worker_binary, &upload, false),
-                }
-                .purpose("stage replacement Mjolnir worker"),
-                crate::targets::ssh_engine_command(
-                    ssh,
-                    engine,
-                    ["cp", &upload, &format!("{container_id}:{staged}")],
-                )
-                .purpose("stage replacement Mjolnir worker"),
-                crate::targets::ssh_engine_command(
-                    ssh,
-                    engine,
-                    container_upload_ownership_args(engine, container_id, &worker_root, &[&staged]),
-                )
-                .purpose("match replacement worker to the worker directory owner"),
-                crate::targets::ssh_engine_command(
-                    ssh,
-                    engine,
-                    ["exec", container_id, "mv", "-f", "--", &staged, &installed],
-                )
-                .purpose("replace installed Mjolnir worker"),
-                crate::targets::ssh_engine_command(
-                    ssh,
-                    engine,
-                    ["exec", container_id, "chmod", "700", &installed],
-                )
-                .purpose("make replaced Mjolnir worker executable"),
-                crate::targets::ssh_command(ssh, ["rm", "-f", "--", &upload])
-                    .purpose("remove remote replacement worker staging"),
-            ]
+            let mut commands = Vec::new();
+            let mut steps = Vec::new();
+            let staging = vec![
+                "mkdir".into(),
+                "-p".into(),
+                targets::REMOTE_UPLOAD_STAGING.into(),
+            ];
+            if remote_source.is_none() {
+                commands.push(
+                    crate::targets::ssh_command_owned(ssh, staging)
+                        .purpose("create remote replacement worker staging"),
+                );
+                commands.push(
+                    crate::targets::scp_upload(ssh, worker_binary, &upload, false)
+                        .purpose("stage replacement Mjolnir worker"),
+                );
+            } else {
+                steps.push(targets::CommandStep::new(
+                    "create remote replacement worker staging",
+                    staging,
+                ));
+            }
+            for (purpose, args) in [
+                (
+                    "stage replacement Mjolnir worker",
+                    vec![
+                        engine.into(),
+                        "cp".into(),
+                        upload.clone(),
+                        format!("{container_id}:{staged}"),
+                    ],
+                ),
+                (
+                    "match replacement worker to the worker directory owner",
+                    std::iter::once(engine.to_owned())
+                        .chain(container_upload_ownership_args(
+                            engine,
+                            container_id,
+                            &worker_root,
+                            &[&staged],
+                        ))
+                        .collect(),
+                ),
+                (
+                    "replace installed Mjolnir worker",
+                    vec![
+                        engine.into(),
+                        "exec".into(),
+                        container_id.clone(),
+                        "mv".into(),
+                        "-f".into(),
+                        "--".into(),
+                        staged,
+                        installed.clone(),
+                    ],
+                ),
+                (
+                    "make replaced Mjolnir worker executable",
+                    vec![
+                        engine.into(),
+                        "exec".into(),
+                        container_id.clone(),
+                        "chmod".into(),
+                        "700".into(),
+                        installed,
+                    ],
+                ),
+            ] {
+                steps.push(targets::CommandStep::new(
+                    purpose,
+                    targets::with_engine_argv(args),
+                ));
+            }
+            steps.push(targets::CommandStep::new(
+                "remove remote replacement worker staging",
+                ["rm", "-f", "--", &upload],
+            ));
+            commands.push(
+                crate::targets::ssh_command_owned(ssh, targets::step_script(steps))
+                    .purpose("stage replacement Mjolnir worker"),
+            );
+            commands
         }
     };
     Ok(CommandPlan {

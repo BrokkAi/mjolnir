@@ -847,18 +847,10 @@ impl DashboardState {
     /// The child whose open form makes `parent_id` read as waiting when the
     /// parent itself is not, so a person is taken to that form.
     pub(crate) fn waiting_child_of(&self, parent_id: &str) -> Option<String> {
-        if self.attention_level(parent_id) != AttentionLevel::Waiting
-            || self.owns_open_question(parent_id)
-            || self
-                .session_details
-                .get(parent_id)
-                .is_some_and(|detail| !detail.pending_elicitations.is_empty())
-        {
-            return None;
-        }
-        self.session_facts()
-            .waiting_child(parent_id)
-            .map(str::to_owned)
+        self.form_holders
+            .get(parent_id)
+            .filter(|holder| holder.as_str() != parent_id)
+            .cloned()
     }
 
     /// What kind of child [`Self::waiting_child_of`] names, for its label.

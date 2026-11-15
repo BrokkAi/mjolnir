@@ -292,10 +292,9 @@ impl MjolnirAdapter {
         let archive = newest
             .get(session_id)
             .with_context(|| format!("no checkpoint archive for session {session_id}"))?;
-        let snapshot = mj_checkpoint::archive::read_archive_verified(&archive.path)
+        let snapshot = mj_checkpoint::archive::verify_archive_streaming(&archive.path)
             .with_context(|| format!("read checkpoint {}", archive.path.display()))?
-            .canonical_session()
-            .with_context(|| format!("read the transcript of session {session_id}"))?;
+            .canonical_session;
         let mut evidence = provenance::Evidence::default();
         for item in &snapshot.transcript {
             if let mj_core::archive::CanonicalTranscriptBody::Tool { call, .. } = &item.body {
@@ -1160,8 +1159,13 @@ fn native_adapters(config: &mj_core::config::Config) -> Vec<Box<dyn Adapter>> {
                 ));
             }
             HarnessKind::Muse => {
+                // Share the import root, including native Windows separators.
                 adapters.push(Box::new(
-                    sessionwiki::adapters::Muse::in_home(home).keep_configured_paths(),
+                    sessionwiki::adapters::Muse::in_sessions_root(
+                        mj_checkpoint::native::muse_sessions_root(&home)
+                            .expect("Muse always has a nested data directory"),
+                    )
+                    .keep_configured_paths(),
                 ));
             }
             HarnessKind::Dsh => {

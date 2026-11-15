@@ -341,6 +341,7 @@ impl RuntimeState {
         history.publish(full.clone())?;
         source.metadata.unread_frontiers = full.metadata.unread_frontiers.clone();
         source.metadata.notification_dismissals = full.metadata.notification_dismissals.clone();
+        source.metadata.form_holders = full.metadata.form_holders.clone();
         source.metadata.session_attention = full.metadata.session_attention.clone();
         history.attention_source = source;
         history.native_owners = native_owners;

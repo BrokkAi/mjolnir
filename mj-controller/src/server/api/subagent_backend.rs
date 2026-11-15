@@ -95,16 +95,6 @@ pub trait SubagentBackend: Send + Sync {
         ))
     }
 
-    /// `profile_config` without the enabled gate: a disabled profile's home
-    /// still exists, so a read of what its harness advertises is safe.
-    fn discover_profile_config_any_state(
-        &self,
-        profile: String,
-    ) -> BoxFuture<'_, AnyResult<mj_core::worker_launch::ProfileConfig>> {
-        Box::pin(crate::controller::profile_config::discover_any(
-            profile, None, false, true,
-        ))
-    }
     /// What `profile`'s harness advertises before the profile's `models`
     /// allow-list, for `mj doctor`. Backends without the daemon's catalogue
     /// answer with the ordinary choices.
@@ -196,7 +186,16 @@ pub trait SubagentBackend: Send + Sync {
                 .read_file(session_id, path, mj_checkpoint::archive::FetchMode::Content)
                 .await?;
             match fetched.kind {
-                mj_checkpoint::archive::FetchedKind::File => Ok(fetched.bytes),
+                mj_checkpoint::archive::FetchedKind::File => {
+                    tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
+                        let mut bytes = Vec::new();
+                        std::io::Read::read_to_end(&mut fetched.reader(), &mut bytes)?;
+                        Ok(bytes)
+                    })
+                    .await
+                    .map_err(|error| ExportError::Failed(error.into()))?
+                    .map_err(ExportError::Failed)
+                }
                 _ => Err(ExportError::Refused(format!(
                     "{} is a directory, not a file",
                     fetched.path

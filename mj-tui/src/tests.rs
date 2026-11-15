@@ -1678,6 +1678,82 @@ fn right_click_on_a_session_row_opens_its_context_menu() {
     assert_eq!(dashboard.selected_visible_index(), selected);
 }
 
+// Hard-won: 91244ea: an unopened child held the approval behind a disabled Dismiss row.
+#[test]
+fn row_menu_opens_served_holder_without_child_details_and_rechecks_on_activation() {
+    let (mut dashboard, parent) = dashboard_with_one_subagent();
+    dashboard.session_details.remove("child-session");
+    dashboard.set_current_session(Some("child-session"));
+    crate::test_support::serve_attention(
+        &mut dashboard,
+        &[&parent, "child-session"],
+        mj_core::attention::SessionAttention::NeedsInput,
+    );
+    dashboard.set_current_session(None);
+    dashboard.set_form_holders(
+        [
+            (parent.clone(), "child-session".into()),
+            ("child-session".into(), "child-session".into()),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    assert_eq!(
+        dashboard.waiting_child_of(&parent).as_deref(),
+        Some("child-session")
+    );
+    assert!(dashboard.notification_events(0).is_empty());
+    let due = dashboard.notification_events(2_000);
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].session_id, parent);
+    dashboard.set_current_session(Some("child-session"));
+    dashboard.begin_session_row_menu(&parent, (1, 1));
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Open sub-agent question")),
+        "{lines:#?}"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.contains("Dismiss notification")),
+        "{lines:#?}"
+    );
+    dashboard.set_form_holders(Default::default());
+    assert_eq!(dashboard.waiting_child_of(&parent), None);
+    assert_eq!(
+        dashboard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        DashboardAction::None
+    );
+    assert!(
+        dashboard.pane_menu.is_some(),
+        "stale menu entry is disabled"
+    );
+    dashboard.set_form_holders(
+        [
+            (parent.clone(), "child-session".into()),
+            ("child-session".into(), "child-session".into()),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    dashboard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(dashboard.pane_menu.is_none());
+    assert_eq!(dashboard.selected_session_id(), Some("child-session"));
+    dashboard.set_form_holders([(parent.clone(), parent.clone())].into_iter().collect());
+    assert_eq!(dashboard.waiting_child_of(&parent), None);
+    dashboard.begin_session_row_menu(&parent, (1, 1));
+    let lines = drawn(&mut dashboard, 120, 40);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Dismiss notification")),
+        "{lines:#?}"
+    );
+}
+
 /// A dashboard with `count` running sessions, each carrying a numbered
 /// conversation long enough to scroll.
 fn dashboard_with_conversations(count: usize) -> DashboardState {
@@ -1752,9 +1828,7 @@ fn newly_ready_session_can_be_selected_after_state_refresh() {
     assert_eq!(dashboard.selected_session().unwrap().id, "new-session");
 }
 
-/// A failed session has two reasonable answers to Enter, and recovery
-/// replaces the target, so the surface asks instead of guessing. The row
-/// is red before the key is ever pressed, so the dialog is not a surprise.
+/// A failed session offers both inspection and recovery.
 #[test]
 fn enter_on_a_failed_session_offers_recovery_and_the_transcript() {
     let mut session = stopped_session();
@@ -1806,12 +1880,11 @@ fn enter_on_a_failed_session_offers_recovery_and_the_transcript() {
     assert_eq!(dashboard.focus, Focus::Prompt);
 }
 
-/// Recovery is only on offer when there is a verified copy to recover
-/// from; without one the prompt says so rather than showing a button that
-/// cannot work.
+/// An absent environment with no archive cannot be recovered.
 #[test]
 fn a_failed_session_without_a_recovery_copy_is_not_offered_recovery() {
     let mut session = stopped_session();
+    session.target = None;
     session.state = SessionState::Error;
     session.checkpoint = None;
     session.last_error = Some("worker bootstrap failed".into());
@@ -1829,6 +1902,23 @@ fn a_failed_session_without_a_recovery_copy_is_not_offered_recovery() {
             recoverable: false,
         }
     );
+}
+
+// Hard-won: 94d7 resume: failed sessions could retain current work without an archive.
+#[test]
+fn a_failed_session_with_a_retained_target_offers_resume_without_an_archive() {
+    let mut session = stopped_session();
+    session.state = SessionState::Error;
+    session.checkpoint = None;
+    session.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+        worker_root: "/retained/session-1".into(),
+    }));
+    let mut dashboard = dashboard_with_session(session);
+    dashboard.handle_key(key(KeyCode::Enter));
+    assert!(matches!(&dashboard.mode, Mode::Confirm(dialog)
+        if matches!(dialog.confirmation, Confirmation::RecoverFailed { recoverable: true, .. })));
+    dashboard.begin_resume_for("session-1");
+    assert!(matches!(dashboard.mode, Mode::Resume(_)));
 }
 
 /// Two running sessions in the active workspace, so a pane can be given one
@@ -4160,6 +4250,11 @@ fn resize_mode_respects_custom_commands_and_workspace_changes() {
 #[test]
 fn a_subagent_question_marks_its_parent_for_attention() {
     let (mut dashboard, parent) = dashboard_with_one_subagent();
+    let child_form = || {
+        let mut request = question("child-session");
+        request.tool_permission = Some(mj_core::elicitation::ToolPermissionForm { skip: true });
+        request
+    };
     dashboard
         .state
         .sessions
@@ -4176,11 +4271,20 @@ fn a_subagent_question_marks_its_parent_for_attention() {
         .session_details
         .get_mut("child-session")
         .unwrap()
-        .pending_elicitations = vec![question("child-session")];
+        .pending_elicitations = vec![child_form()];
     crate::test_support::serve_attention(
         &mut dashboard,
         &[&parent, "child-session"],
         mj_core::attention::SessionAttention::NeedsInput,
+    );
+
+    dashboard.set_form_holders(
+        [
+            (parent.clone(), "child-session".into()),
+            ("child-session".into(), "child-session".into()),
+        ]
+        .into_iter()
+        .collect(),
     );
 
     // The parent's own turn still runs, so its turn controls still apply.
@@ -4251,6 +4355,8 @@ fn a_subagent_question_marks_its_parent_for_attention() {
 
     assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Working);
 
+    dashboard.set_form_holders(Default::default());
+
     // The parent's own question was seen; a child's form that arrives while
     // it is still open has its own episode and still rings.
     dashboard
@@ -4264,6 +4370,8 @@ fn a_subagent_question_marks_its_parent_for_attention() {
         mj_core::attention::SessionAttention::NeedsInput,
     );
 
+    dashboard.set_form_holders([(parent.clone(), parent.clone())].into_iter().collect());
+    assert_eq!(dashboard.waiting_child_of(&parent), None);
     dashboard.set_current_session(Some(&parent));
     assert!(dashboard.notification_events(3_000).is_empty());
     dashboard.set_current_session(None);
@@ -4271,13 +4379,23 @@ fn a_subagent_question_marks_its_parent_for_attention() {
         .session_details
         .get_mut("child-session")
         .unwrap()
-        .pending_elicitations = vec![question("child-session")];
+        .pending_elicitations = vec![child_form()];
     crate::test_support::serve_attention(
         &mut dashboard,
         &[&parent, "child-session"],
         mj_core::attention::SessionAttention::NeedsInput,
     );
 
+    // Hard-won: 1be86a096: the parent's own form hid the child's notification episode.
+    dashboard.set_form_holders(
+        [
+            (parent.clone(), parent.clone()),
+            ("child-session".into(), "child-session".into()),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    assert_eq!(dashboard.waiting_child_of(&parent), None);
     assert!(dashboard.notification_events(3_000).is_empty());
     let due = dashboard.notification_events(5_000);
     assert_eq!(due.len(), 1, "{due:?}");
@@ -4292,7 +4410,7 @@ fn a_subagent_question_marks_its_parent_for_attention() {
     dashboard.set_current_session(Some("child-session"));
     assert!(dashboard.notification_events(6_000).is_empty());
     dashboard.set_current_session(None);
-    let mut second = question("child-session");
+    let mut second = child_form();
     second.id = "child-session-second-question".into();
     second.message = "Allow the command?".into();
     dashboard
@@ -4312,7 +4430,7 @@ fn a_subagent_question_marks_its_parent_for_attention() {
     // The open conversation shows only its first form, so a form that
     // arrives behind it while the child is on screen still rings.
     dashboard.set_current_session(Some("child-session"));
-    let mut third = question("child-session");
+    let mut third = child_form();
     third.id = "child-session-third-question".into();
     third.message = "Approve the plan?".into();
     dashboard
@@ -4354,6 +4472,14 @@ fn a_reviewer_question_names_the_reviewer_and_leads_to_its_workspace() {
         mj_core::attention::SessionAttention::NeedsInput,
     );
 
+    dashboard.set_form_holders(
+        [
+            (parent.clone(), "child-session".into()),
+            ("child-session".into(), "child-session".into()),
+        ]
+        .into_iter()
+        .collect(),
+    );
     let lines = drawn(&mut dashboard, 120, 40);
     assert!(
         lines.iter().any(|line| line.contains("Reviewer question")),
@@ -4396,6 +4522,15 @@ fn a_childs_reviewer_question_reaches_the_top_level_row() {
         mj_core::attention::SessionAttention::NeedsInput,
     );
 
+    dashboard.set_form_holders(
+        [
+            (parent.clone(), "reviewer-session".into()),
+            ("child-session".into(), "reviewer-session".into()),
+            ("reviewer-session".into(), "reviewer-session".into()),
+        ]
+        .into_iter()
+        .collect(),
+    );
     assert_eq!(dashboard.attention_level(&parent), AttentionLevel::Waiting);
     let lines = drawn(&mut dashboard, 120, 40);
     assert!(

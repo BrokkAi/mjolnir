@@ -12,15 +12,13 @@ pub(super) async fn profile_config(
     Query(query): Query<ProfileConfigQuery>,
 ) -> Result<Json<mj_core::worker_launch::ProfileConfig>, ApiFailure> {
     // The served profile list holds enabled profiles only; a disabled one is
-    // still discoverable when the caller asks for it, and discovery itself
-    // refuses an id the configuration does not have.
+    // still discoverable when the caller asks for it, through the same
+    // catalogue, which refuses an id the configuration does not have.
     if !query.with_disabled {
         crate::server::require_profile(&state.snapshot_rx.borrow(), &profile_id)?;
     }
     let backend = backend(&state)?;
-    let choices = if query.with_disabled {
-        backend.discover_profile_config_any_state(profile_id).await
-    } else if query.unrestricted {
+    let choices = if query.unrestricted {
         backend.unrestricted_profile_config(profile_id).await
     } else {
         backend.profile_config(profile_id, query.model, false).await
@@ -34,7 +32,7 @@ pub(super) async fn subagent_options(
     Path(profile_id): Path<String>,
     Query(query): Query<ProfileConfigQuery>,
 ) -> Result<Json<mj_core::subagent::SubagentOptions>, ApiFailure> {
-    crate::server::require_profile(&state.snapshot_rx.borrow(), &profile_id)?;
+    crate::server::require_named_profile(&state.snapshot_rx.borrow(), &profile_id)?;
     let config = tokio::task::spawn_blocking(mj_core::config::Config::load)
         .await
         .map_err(|error| ApiFailure::unavailable(error.to_string()))?

@@ -812,7 +812,7 @@ mod tests {
             canonical_session: canonical,
             native_artifacts: vec![NativeArtifact {
                 relative_path: "projects/-work/native-1.jsonl".into(),
-                data: native.into_bytes(),
+                data: (native.into_bytes()).into(),
                 mode: 0o600,
             }],
             repositories: Vec::new(),

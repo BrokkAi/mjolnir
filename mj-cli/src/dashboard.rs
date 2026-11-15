@@ -1901,6 +1901,7 @@ impl DashboardContext {
         dashboard.set_workspace_names(workspace_names);
         dashboard.set_launch_recency(launch_recency);
         dashboard.set_session_attention(bootstrap.projection.metadata.session_attention.clone());
+        dashboard.set_form_holders(bootstrap.projection.metadata.form_holders.clone());
         dashboard.set_unread_frontiers(bootstrap.projection.metadata.unread_frontiers.clone());
         dashboard.set_notification_dismissals(
             bootstrap
@@ -1912,18 +1913,6 @@ impl DashboardContext {
         // Sessions inherit this host's Git author identity; the first new
         // session of the run makes sure there is one.
         dashboard.require_git_identity_check();
-        // Tabs follow creation order, which a restart does not change; the
-        // listing itself leads with the most recently opened workspace.
-        let mut by_creation = workspaces.iter().collect::<Vec<_>>();
-        by_creation.sort_by(|left, right| {
-            (&left.created_at, &left.id).cmp(&(&right.created_at, &right.id))
-        });
-        dashboard.order_workspaces(
-            &by_creation
-                .into_iter()
-                .map(|workspace| workspace.id.clone())
-                .collect::<Vec<_>>(),
-        );
         for (id, sizes) in &layouts {
             dashboard.cache_workspace_pane_sizes(id, *sizes);
         }

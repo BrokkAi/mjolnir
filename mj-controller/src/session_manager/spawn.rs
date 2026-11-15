@@ -13,6 +13,7 @@ pub(crate) fn spawn_session_manager_observed(
     updates_tx.delegation = delegation;
     let session_cpu = updates_tx.cpu.subscribe();
     let model_policies = updates_tx.model_policies.clone();
+    let harness_failure = updates_tx.harness_failure.clone();
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
     let task = tokio::spawn(async move {
         let mut actors = BTreeMap::<String, ActorRegistration>::new();
@@ -115,6 +116,7 @@ pub(crate) fn spawn_session_manager_observed(
         session_cpu: session_cpu.clone(),
         targets: targets_tx,
         control: SessionManagerControl {
+            harness_failure,
             model_policies,
             commands: commands_tx,
             session_cpu,

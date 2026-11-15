@@ -146,3 +146,24 @@ test('unrestored draft is not cleared on navigation and late restore respects an
   await restore;
   assert.equal(context.draft, '', 'late restore cannot reverse the user clear');
 });
+
+// Hard-won: 91244ea: an unopened descendant's approval had no navigable surface.
+test('sub-agent input opens the served holder without loading child details', () => {
+  const navigated = [];
+  const session = { id: 'parent', form_holder: 'deep-reviewer' };
+  const context = vm.createContext({
+    activeSession: () => session,
+    navigate: route => navigated.push(route),
+    childSessionIds: () => [],
+  });
+  vm.runInContext(extract('function childFormHolder(', '\nsubagentsButton.onclick'), context);
+  vm.runInContext("openChildWorkspace('worker')", context);
+  assert.equal(navigated.length, 1);
+  assert.equal(navigated[0].sessionId, 'deep-reviewer');
+  session.form_holder = session.id;
+  vm.runInContext("openChildWorkspace('worker')", context);
+  assert.equal(navigated.length, 1, 'a self holder stays in its own conversation');
+  delete session.form_holder;
+  vm.runInContext("openChildWorkspace('worker')", context);
+  assert.equal(navigated.length, 1, 'an ordinary child question does not offer input navigation');
+});

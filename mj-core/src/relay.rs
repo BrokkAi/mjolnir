@@ -17,6 +17,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 pub use types::*;
 
+/// Observed harness startup allowance: first launches can take minutes.
+/// The worker owns expiry; controller request waits use the same allowance.
+pub const NATIVE_SESSION_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// Serialized bytes of observations allowed in one attach response, well under
 /// `MAX_FRAME_BYTES` to leave room for the envelope.
@@ -150,7 +154,10 @@ pub const RELAY_ATTENTION_PROTOCOL: u32 = 63;
 pub const RELAY_OPEN_REQUEST_PROTOCOL: u32 = 64;
 /// Structured lifecycle notices for sessions following a pull request.
 pub const RELAY_FOLLOWED_LIFECYCLE_PROTOCOL: u32 = 65;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_FOLLOWED_LIFECYCLE_PROTOCOL;
+/// 66 gives harness startup expiry to the worker. Older workers require the
+/// daemon's legacy deadline; workers at this version have exactly one owner.
+pub const RELAY_WORKER_STARTUP_DEADLINE_PROTOCOL: u32 = 66;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_WORKER_STARTUP_DEADLINE_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

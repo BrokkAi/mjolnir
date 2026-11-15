@@ -4,7 +4,7 @@ mod backend;
 mod cache_host;
 pub(crate) mod checkpoint;
 mod container_upgrade;
-mod environment;
+pub(crate) mod environment;
 pub(crate) use environment::StoppedWorker;
 mod git_cache;
 mod github_app;
@@ -959,12 +959,7 @@ impl Controller {
             }
             None => None,
         };
-        let profile = self
-            .config
-            .profiles
-            .get(profile_id)
-            .with_context(|| format!("unknown profile {profile_id:?}"))?;
-        ensure!(profile.enabled, "profile {profile_id:?} is disabled");
+        let profile = self.config.named_profile(profile_id)?;
         let template = self.config.ensure_target_enabled(target_id)?;
         if create_managed_worktree == Some(true) && !is_bare_project_target(template) {
             bail!("managed worktree creation requires a bare Git project");
@@ -1710,6 +1705,9 @@ fn execute_checked(executor: &impl CommandExecutor, command: CommandSpec) -> Res
 /// `output` of `command` when it succeeded, otherwise the error its stderr
 /// describes.
 fn check_output(command: &CommandSpec, output: CommandOutput) -> Result<CommandOutput> {
+    if let Some(error) = targets::step_script_error(&output) {
+        bail!("{error}");
+    }
     if output.status != 0 {
         let detail = command_error_detail(&output.stderr);
         if detail.is_empty() {

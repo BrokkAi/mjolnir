@@ -103,6 +103,14 @@ impl ViewerPublication {
         for (id, _) in self
             .runtime
             .metadata
+            .form_holders
+            .changes(&next.metadata.form_holders)
+        {
+            self.dirty.insert(id.clone());
+        }
+        for (id, _) in self
+            .runtime
+            .metadata
             .notification_dismissals
             .changes(&next.metadata.notification_dismissals)
         {
@@ -218,6 +226,7 @@ impl ViewerPublication {
                 .notification_dismissals
                 .get(&id)
                 .cloned();
+            row.form_holder = self.runtime.metadata.form_holders.get(&id).cloned();
             row.capabilities.dismiss_notification = row.notification_dismissal.is_some();
             row.native_subagent_attention = row
                 .native_subagents

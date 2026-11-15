@@ -728,16 +728,19 @@ container, so one session can read evidence another session cites. A relative
 `--path` resolves in the directory the session's agent runs in; an absolute
 one is read as the target spells it. After symlinks are resolved, the path
 must lie in the session's workspace, its sub-agent report directories, or the
-target's temporary directory. A file is copied as it is, up to 16 MiB. A
-directory arrives as a zip archive of at most 16 MiB, made from at most
-128 MiB of files; symlinks inside it are stored as links, not followed. The
+target's temporary directory. A file is copied as it is. A directory arrives
+as a zip archive; symlinks inside it are stored as links, not followed. Fetch
+imposes no size limit. The
 copy lands in `$TMPDIR/mjolnir/<session>/` followed by the path on the target,
 with `.zip` after a directory's name, and `mj fetch` prints that local path.
 For example, `mj fetch --session d8443f17… --path /tmp/rust-veto-cf` prints
 `/tmp/mjolnir/d8443f17…/tmp/rust-veto-cf.zip`. With `--json` it prints the
 local `path`, the `kind` (`file` or `directory`), the `source` path on the
 target, and the `bytes` written. `--stdout` writes the file, or the zip
-archive, to standard output instead.
+archive, to standard output instead. File and archive payloads pass through
+temporary files and I/O chunks rather than whole-payload memory buffers. If
+the daemon restarts during a download, the CLI reconnects and retries it
+automatically; a partial download is never published or written to stdout.
 
 `mj fetch --ls` lists the path on standard output instead of copying it: a
 directory's entries in name order, or the file itself. Each line gives the size

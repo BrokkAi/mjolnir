@@ -1138,8 +1138,8 @@ fn stream_command_with_stdin(
         .context("streamed command stderr missing")?;
     // Reader threads keep the child's output pipes drained; a child that fills
     // one while nobody reads would block instead of exiting.
-    let stdout_reader = PipeCollector::spawn_scanning(stdout, gate.cloned());
-    let stderr_reader = PipeCollector::spawn(stderr);
+    let mut stdout_reader = PipeCollector::spawn_scanning(stdout, gate.cloned());
+    let mut stderr_reader = PipeCollector::spawn(stderr);
     let process_result = std::thread::scope(|scope| -> Result<_> {
         // Pipe writes can block forever when a remote helper stops reading.
         // Keep the writer off the supervising thread so cancellation can kill
@@ -1182,6 +1182,12 @@ fn stream_command_with_stdin(
         let mut exited_at = None;
         let mut group_killed = false;
         let status = loop {
+            if status.is_none() && (stdout_reader.failed() || stderr_reader.failed()) {
+                terminate_cancellable_child(&mut child, false);
+                status = child
+                    .try_wait()
+                    .context("reap command after pipe failure")?;
+            }
             if is_cancelled() {
                 terminate_cancellable_child(&mut child, false);
                 if let Err(error) = input_writer.join() {
@@ -1448,7 +1454,12 @@ pollable_pipe!(std::process::ChildStderr);
 struct PipeCollector {
     bytes: Arc<std::sync::Mutex<Vec<u8>>>,
     stop: Arc<AtomicBool>,
-    thread: Option<std::thread::JoinHandle<std::io::Result<()>>>,
+    task: PipeTask,
+}
+
+enum PipeTask {
+    Running(std::thread::JoinHandle<std::io::Result<()>>),
+    Finished(std::io::Result<()>),
 }
 
 impl PipeCollector {
@@ -1460,7 +1471,15 @@ impl PipeCollector {
     /// from the front, the first byte reports the session's start, and the end
     /// of the pipe reports that it ended; the gate settles however the thread
     /// stops.
-    fn spawn_scanning(mut pipe: impl PollablePipe, gate: Option<Arc<StartGate>>) -> Self {
+    fn spawn_scanning(pipe: impl PollablePipe, gate: Option<Arc<StartGate>>) -> Self {
+        Self::spawn_output(pipe, gate, None)
+    }
+
+    fn spawn_output(
+        mut pipe: impl PollablePipe,
+        gate: Option<Arc<StartGate>>,
+        mut output: Option<std::fs::File>,
+    ) -> Self {
         let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let (collected, stopped) = (bytes.clone(), stop.clone());
@@ -1485,9 +1504,19 @@ impl PipeCollector {
                                     if scan.push(&chunk[..count], &mut passed) {
                                         gate.mark_started();
                                     }
-                                    collected.extend_from_slice(&passed);
+                                    if let Some(file) = &mut output {
+                                        file.write_all(&passed)?;
+                                    } else {
+                                        collected.extend_from_slice(&passed);
+                                    }
                                 }
-                                _ => collected.extend_from_slice(&chunk[..count]),
+                                _ => {
+                                    if let Some(file) = &mut output {
+                                        file.write_all(&chunk[..count])?;
+                                    } else {
+                                        collected.extend_from_slice(&chunk[..count]);
+                                    }
+                                }
                             }
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
@@ -1496,14 +1525,21 @@ impl PipeCollector {
                 }
                 Ok(())
             })();
-            if let Some(scan) = &mut scan {
-                passed.clear();
-                scan.finish(&mut passed);
-                collected
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .extend_from_slice(&passed);
-            }
+            let result = result.and_then(|()| {
+                if let Some(scan) = &mut scan {
+                    passed.clear();
+                    scan.finish(&mut passed);
+                    if let Some(file) = &mut output {
+                        file.write_all(&passed)?;
+                    } else {
+                        collected
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .extend_from_slice(&passed);
+                    }
+                }
+                Ok(())
+            });
             if let Some(gate) = &gate {
                 gate.mark_ended();
             }
@@ -1512,14 +1548,35 @@ impl PipeCollector {
         Self {
             bytes,
             stop,
-            thread: Some(thread),
+            task: PipeTask::Running(thread),
         }
     }
 
     fn is_finished(&self) -> bool {
-        self.thread
-            .as_ref()
-            .is_none_or(std::thread::JoinHandle::is_finished)
+        match &self.task {
+            PipeTask::Running(thread) => thread.is_finished(),
+            PipeTask::Finished(_) => true,
+        }
+    }
+
+    fn join(&mut self) {
+        if let PipeTask::Running(thread) =
+            std::mem::replace(&mut self.task, PipeTask::Finished(Ok(())))
+        {
+            self.task =
+                PipeTask::Finished(thread.join().unwrap_or_else(|_| {
+                    Err(std::io::Error::other("command pipe reader panicked"))
+                }));
+        }
+    }
+
+    /// A finished reader owns its one result. The supervisor observes failure
+    /// before waiting for a child that may otherwise keep working forever.
+    fn failed(&mut self) -> bool {
+        if matches!(&self.task, PipeTask::Running(thread) if thread.is_finished()) {
+            self.join();
+        }
+        matches!(&self.task, PipeTask::Finished(Err(_)))
     }
 
     /// Waits for end of stream until `deadline`, then stops the reader and
@@ -1529,12 +1586,15 @@ impl PipeCollector {
             std::thread::sleep(Duration::from_millis(5));
         }
         self.stop.store(true, Ordering::Release);
-        self.thread
-            .take()
-            .context("command reader already joined")?
-            .join()
-            .map_err(|_| anyhow::anyhow!("command {stream} reader panicked"))?
-            .with_context(|| format!("read command {stream}"))?;
+        if matches!(self.task, PipeTask::Running(_)) {
+            self.join();
+        }
+        let PipeTask::Finished(result) =
+            std::mem::replace(&mut self.task, PipeTask::Finished(Ok(())))
+        else {
+            unreachable!()
+        };
+        result.with_context(|| format!("read command {stream}"))?;
         let mut bytes = self
             .bytes
             .lock()
@@ -1583,6 +1643,47 @@ impl CancellableProcessExecutor {
         command: &CommandSpec,
         gate: Option<&Arc<StartGate>>,
     ) -> Result<CommandOutput> {
+        self.run_once_output(command, gate, None)
+    }
+
+    /// Stream stdout into a file, retaining the shared cancellation, process-group,
+    /// and SSH refusal/start-marker semantics. Returned stdout is empty.
+    pub fn execute_to_file(
+        &self,
+        command: &CommandSpec,
+        output: &std::fs::File,
+    ) -> Result<CommandOutput> {
+        use std::io::{Seek, SeekFrom};
+        ensure!(
+            command.sensitive_stdin.is_none(),
+            "file-output commands cannot carry buffered stdin"
+        );
+        crate::runtime::off_async_worker(|| {
+            let _running = BlockingOperation::command(command);
+            self.describe_cancellation(
+                command,
+                with_ssh_refusal_retry(
+                    command,
+                    self,
+                    Some(&|| self.is_cancelled()),
+                    |command, gate| {
+                        let mut file = output.try_clone().context("clone command output file")?;
+                        file.set_len(0).context("reset command output file")?;
+                        file.seek(SeekFrom::Start(0))
+                            .context("rewind command output file")?;
+                        self.run_once_output(command, gate, Some(file))
+                    },
+                ),
+            )
+        })
+    }
+
+    fn run_once_output(
+        &self,
+        command: &CommandSpec,
+        gate: Option<&Arc<StartGate>>,
+        output: Option<std::fs::File>,
+    ) -> Result<CommandOutput> {
         let mut process = cancellable_command(command);
         #[cfg(unix)]
         let _foreground = if self.foreground_terminal {
@@ -1613,11 +1714,17 @@ impl CancellableProcessExecutor {
             .then(|| crate::subprocess::ProcessGroupGuard::new(Some(child.id())));
         let stdout = child.stdout.take().context("command stdout missing")?;
         let stderr = child.stderr.take().context("command stderr missing")?;
-        let stdout_reader = PipeCollector::spawn_scanning(stdout, gate.cloned());
-        let stderr_reader = PipeCollector::spawn(stderr);
+        let mut stdout_reader = PipeCollector::spawn_output(stdout, gate.cloned(), output);
+        let mut stderr_reader = PipeCollector::spawn(stderr);
         let mut status = None;
         let mut exited_at = None;
         let status = loop {
+            if status.is_none() && (stdout_reader.failed() || stderr_reader.failed()) {
+                terminate_cancellable_child(&mut child, command.preserve_children_on_cancel);
+                status = child
+                    .try_wait()
+                    .context("reap command after pipe failure")?;
+            }
             if self.is_cancelled() {
                 terminate_cancellable_child(&mut child, command.preserve_children_on_cancel);
                 let deadline = Instant::now() + IO_DRAIN_TIMEOUT;
@@ -1817,6 +1924,157 @@ pub fn validate_inherited_environment_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// One argv-only operation in an ordered shell batch.
+#[derive(Debug, Clone)]
+pub struct CommandStep {
+    argv: Vec<String>,
+    purpose: String,
+    accepted_statuses: Vec<i32>,
+    cleanup: bool,
+    best_effort: bool,
+}
+
+impl CommandStep {
+    pub fn new(
+        purpose: impl Into<String>,
+        argv: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            argv: argv.into_iter().map(Into::into).collect(),
+            purpose: purpose.into(),
+            accepted_statuses: vec![0],
+            cleanup: false,
+            best_effort: false,
+        }
+    }
+
+    pub fn accepted_statuses(mut self, statuses: impl IntoIterator<Item = i32>) -> Self {
+        self.accepted_statuses = statuses.into_iter().collect();
+        self
+    }
+
+    /// Run on shell exit, including when an earlier operation failed.
+    pub fn cleanup(mut self) -> Self {
+        self.cleanup = true;
+        self
+    }
+
+    /// Report a cleanup failure to the caller without failing the batch.
+    /// Callers must log [`step_script_warnings`] even when execution failed.
+    pub fn best_effort_cleanup(mut self) -> Self {
+        self.cleanup = true;
+        self.best_effort = true;
+        self
+    }
+}
+
+/// Build one `sh -c` argv. Local decisions and transport selection stay with
+/// the caller; only these already-decided operations run in the script.
+pub fn step_script(steps: impl IntoIterator<Item = CommandStep>) -> Vec<String> {
+    let steps: Vec<_> = steps.into_iter().collect();
+    let mut script = String::new();
+    for (index, step) in steps.iter().enumerate() {
+        let argv = step
+            .argv
+            .iter()
+            .map(|arg| posix_quote(arg))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let statuses = step
+            .accepted_statuses
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("|");
+        let purpose = serde_json::to_string(&step.purpose).expect("serialize step purpose");
+        let marker = if step.best_effort {
+            "MJ_STEP_WARNING"
+        } else {
+            "MJ_STEP_FAILED"
+        };
+        let returned = if step.best_effort {
+            "0"
+        } else {
+            "\"$mj_status\""
+        };
+        script.push_str(&format!(
+            "mj_step_{index}() {{\n( {argv} )\nmj_status=$?\ncase $mj_status in {statuses}) return 0;; esac\nprintf '\\n{marker} {index} %s %s\\n' \"$mj_status\" {} >&2\nreturn {returned}\n}}\n",
+            posix_quote(&purpose),
+        ));
+    }
+    if steps.iter().any(|step| step.cleanup) {
+        script.push_str("mj_cleanup() {\nmj_original=$?\ntrap - EXIT HUP INT TERM\n");
+        for (index, step) in steps.iter().enumerate() {
+            if step.cleanup {
+                script.push_str(&format!("mj_step_{index}\nmj_result=$?\nif [ \"$mj_original\" -eq 0 ]; then mj_original=$mj_result; fi\n"));
+            }
+        }
+        script.push_str("exit \"$mj_original\"\n}\ntrap mj_cleanup EXIT\ntrap 'exit 129' HUP\ntrap 'exit 130' INT\ntrap 'exit 143' TERM\n");
+    }
+    for (index, step) in steps.iter().enumerate() {
+        if !step.cleanup {
+            script.push_str(&format!("mj_step_{index} || exit $?\n"));
+        }
+    }
+    script.push_str("exit 0\n");
+    vec!["sh".into(), "-c".into(), script, "mj-steps".into()]
+}
+
+/// Decode the first failed step, preserving its stderr and original purpose.
+/// The marker includes JSON-escaped purpose text so transports and serialized
+/// plans need no extra metadata, including for purposes containing newlines.
+pub fn step_script_error(output: &CommandOutput) -> Option<String> {
+    if output.status == 0 {
+        return None;
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut failure = None;
+    let mut detail = Vec::new();
+    for line in stderr.lines() {
+        let parsed = parse_step_marker(line, "MJ_STEP_FAILED ");
+        if let Some(parsed) = parsed {
+            failure.get_or_insert(parsed);
+        } else if parse_step_marker(line, "MJ_STEP_WARNING ").is_none() {
+            detail.push(line);
+        }
+    }
+    failure.map(|(status, purpose)| {
+        format!(
+            "{purpose} failed with status {status}: {}",
+            detail.join("\n").trim()
+        )
+    })
+}
+
+/// Failures of cleanup steps marked best-effort. Always inspect these before
+/// checking the command result, so an earlier failure cannot hide cleanup errors.
+pub fn step_script_warnings(output: &CommandOutput) -> Vec<String> {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let detail = stderr
+        .lines()
+        .filter(|line| !line.starts_with("MJ_STEP_"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    stderr
+        .lines()
+        .filter_map(|line| {
+            let (status, purpose) = parse_step_marker(line, "MJ_STEP_WARNING ")?;
+            Some(format!(
+                "{purpose} failed with status {status}: {}",
+                detail.trim()
+            ))
+        })
+        .collect()
+}
+
+fn parse_step_marker(line: &str, prefix: &str) -> Option<(i32, String)> {
+    let mut fields = line.strip_prefix(prefix)?.splitn(3, ' ');
+    let _index = fields.next()?.parse::<usize>().ok()?;
+    let status = fields.next()?.parse::<i32>().ok()?;
+    let purpose = serde_json::from_str::<String>(fields.next()?).ok()?;
+    Some((status, purpose))
+}
+
 impl CommandPlan {
     /// Supply one container environment value without placing it in the
     /// Podman/SSH argument vector. See [`Self::provide_target_environment_secrets`].
@@ -1899,15 +2157,7 @@ impl CommandPlan {
         let mut outputs = Vec::with_capacity(self.commands.len());
         for command in &self.commands {
             let output = executor.execute(command)?;
-            if output.status != 0 {
-                bail!(
-                    "{} failed with status {}: {}",
-                    command.purpose,
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-            outputs.push(output);
+            outputs.push(checked_command_output(command, output)?);
         }
         Ok(outputs)
     }
@@ -1999,6 +2249,9 @@ pub fn checked_command_output(
     command: &CommandSpec,
     output: CommandOutput,
 ) -> Result<CommandOutput> {
+    if let Some(error) = step_script_error(&output) {
+        bail!("{error}");
+    }
     if output.status != 0 {
         bail!(
             "{} failed with status {}: {}",
@@ -3000,6 +3253,59 @@ exit 125
 
 #[cfg(all(test, unix))]
 mod executor_tests {
+    #[test]
+    #[cfg(unix)]
+    fn step_script_reports_partial_failure_and_runs_cleanup() {
+        use super::*;
+        let directory = tempfile::tempdir().unwrap();
+        let cleaned = directory.path().join("cleanup 'with spaces");
+        let skipped = directory.path().join("must not run");
+        let argv = step_script([
+            CommandStep::new("absent Git key", ["sh", "-c", "exit 5"]).accepted_statuses([0, 5]),
+            CommandStep::new(
+                "failing middle step",
+                ["sh", "-c", "echo precise-error >&2; exit 7"],
+            ),
+            CommandStep::new("later operation", ["touch", skipped.to_str().unwrap()]),
+            CommandStep::new("remove staging", ["touch", cleaned.to_str().unwrap()]).cleanup(),
+            CommandStep::new(
+                "optional cleanup",
+                ["sh", "-c", "echo cleanup-error >&2; exit 9"],
+            )
+            .best_effort_cleanup(),
+        ]);
+        let command = CommandSpec::new(&argv[0], argv[1..].iter().cloned()).purpose("batch");
+        let output = ProcessExecutor.execute(&command).unwrap();
+        assert_eq!(output.status, 7);
+        let warnings = step_script_warnings(&output);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("optional cleanup failed with status 9"));
+        assert!(warnings[0].contains("cleanup-error"));
+        let error = checked_command_output(&command, output)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("failing middle step failed with status 7: precise-error"),
+            "{error}"
+        );
+        assert!(cleaned.exists());
+        assert!(!skipped.exists());
+
+        // Cleanup failure remains visible even after successful publication.
+        let argv = step_script([CommandStep::new(
+            "optional discard",
+            ["sh", "-c", "echo discard-error >&2; exit 9"],
+        )
+        .best_effort_cleanup()]);
+        let command = CommandSpec::new(&argv[0], argv[1..].iter().cloned());
+        let output = ProcessExecutor.execute(&command).unwrap();
+        assert_eq!(output.status, 0);
+        assert_eq!(
+            step_script_warnings(&output),
+            ["optional discard failed with status 9: discard-error"]
+        );
+    }
+
     use std::fs;
 
     use super::*;
@@ -3575,6 +3881,118 @@ mod executor_tests {
             assert_eq!(fake.attempts(), 3, "cancellable: {cancellable}");
         }
         set_ssh_connection_sharing_for_test(None);
+    }
+
+    #[test]
+    fn file_output_preserves_large_ssh_stdout_across_refusals_and_cancels() {
+        let _guard = ssh::SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _fast_retries = FastRetries::new();
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
+        let fake = fake_ssh::FakeSsh::new(&["refuse-session", "refuse-auth"]);
+        let command = fake.command(&[
+            "sh",
+            "-c",
+            "head -c 307200 /dev/zero; printf diagnostic >&2",
+        ]);
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"old output that must be truncated")
+            .unwrap();
+        let output = CancellableProcessExecutor::new(Default::default())
+            .execute_to_file(&command, &file)
+            .unwrap();
+        assert_eq!(output.status, 0);
+        assert!(output.stdout.is_empty());
+        assert_eq!(output.stderr, b"diagnostic");
+        assert_eq!(file.metadata().unwrap().len(), 307200);
+        assert_eq!(fake.attempts(), 3);
+        use std::io::{Seek as _, SeekFrom};
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let mut received = Vec::new();
+        file.read_to_end(&mut received).unwrap();
+        assert_eq!(received, vec![0; 307200]);
+        set_ssh_connection_sharing_for_test(None);
+
+        let token = tokio_util::sync::CancellationToken::new();
+        let executor =
+            CancellableProcessExecutor::new(Default::default()).with_cancellation(token.clone());
+        let file = tempfile::tempfile().unwrap();
+        let probe = file.try_clone().unwrap();
+        let pending = std::thread::spawn(move || {
+            executor.execute_to_file(
+                &CommandSpec::new("sh", ["-c", "head -c 307200 /dev/zero; sleep 600"]),
+                &file,
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while probe.metadata().unwrap().len() < 307200 {
+            assert!(
+                Instant::now() < deadline,
+                "child did not produce its output"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        token.cancel();
+        assert!(
+            pending
+                .join()
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("cancelled")
+        );
+    }
+
+    // Hard-won: #1544: a failed output spool was observed only after the child exited.
+    #[test]
+    fn file_output_failure_terminates_a_child_that_keeps_running() {
+        const CHILD: &str = "MJ_TEST_FETCH_WRITE_FAILURE";
+        if std::env::var_os(CHILD).is_some() {
+            // Restrict only this test subprocess's regular-file writes. Pipe
+            // writes are unaffected, so the producer can still fill stdout.
+            unsafe {
+                libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+                let limit = libc::rlimit {
+                    rlim_cur: 128 * 1024,
+                    rlim_max: 128 * 1024,
+                };
+                assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &limit), 0);
+            }
+            let file = tempfile::tempfile().unwrap();
+            let error = CancellableProcessExecutor::new(Default::default())
+                .execute_to_file(
+                    &CommandSpec::new("sh", ["-c", "head -c 1048576 /dev/zero; sleep 600"]),
+                    &file,
+                )
+                .unwrap_err();
+            assert!(
+                error.chain().any(|cause| cause
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.raw_os_error() == Some(libc::EFBIG))),
+                "{error:#}"
+            );
+            return;
+        }
+        let mut command = CommandSpec::new(
+            std::env::current_exe().unwrap().to_string_lossy(),
+            [
+                "--exact",
+                "targets::executor_tests::file_output_failure_terminates_a_child_that_keeps_running",
+                "--nocapture",
+            ],
+        );
+        command.env.insert(CHILD.into(), "1".into());
+        let output = CancellableProcessExecutor::with_timeout(Duration::from_secs(10))
+            .execute(&command)
+            .unwrap();
+        assert_eq!(
+            output.status,
+            0,
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     /// `scp` exits 1, not ssh's 255, while relaying the refusal of the `ssh` it
