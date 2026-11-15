@@ -17,13 +17,15 @@ After this change, the controller sends each distinct profile file to a host onc
 ## Progress
 
 - [x] (2026-11-15 06:10Z) Diagnosed the incident from the daemon log and mapped both areas with read-only child investigations. Findings: `.mj/agents/98f62e22782823df6b3d6d3e298d2000/findings.md` (profile archive) and `.mj/agents/5eb1525f3de8aadc518093a8507a917f/findings.md` (round trips). These are local, uncommitted report directories; this plan repeats every fact it relies on.
-- [ ] Milestone 1: host profile content store (send each file once per host).
+- [x] (2026-11-15) Milestone 1: host profile content store implemented and validated; real-shell regressions, full controller suite (2,651 passed, 27 ignored), workspace clippy and formatting pass.
 - [ ] Milestone 2: shared step-script helper, then batch the identified command groups.
 - [ ] Milestone 3: live check on a small EC2 host from an isolated instance; record timings here.
 
 
 ## Surprises & Discoveries
 
+- Observation: a byte-only store key loses executable modes when two paths have identical bytes but different modes. A filesystem probe with equal-content 0700 and 0600 files produced one shared inode; changing either link's mode changed both paths and the store. The parent approved separate `<sha256>` and `<sha256>.x` keys.
+  Evidence: `profile_archive_tests::streamed_profile_roundtrips_through_system_tar_without_per_file_commands` includes equal-content executable and non-executable paths and checks their installed modes and store keys.
 - Observation: the four sessions each copying the worker binary into their containers was not repeated host uploads. Each container has its own worker store at `/var/lib/hel/workers/worker-binaries`, and all four reused the host's transport cache. The two `stage replacement Mjolnir worker` records per session are an SSH `true` followed by `podman cp`, and the `true` does nothing.
   Evidence: `mj-controller/src/controller/worker_binary/store.rs:7-24` (store and gate identity include the container), `upgrade.rs:683-693` (the `true` is chosen when `remote_source` is set).
 - Observation: Claude writes into its own `plugins/` directory (marketplace metadata, directory cache). A single shared, writable plugin directory would therefore share mutable state between sessions, and a read-only mount would break Claude's writes.
@@ -34,6 +36,9 @@ After this change, the controller sends each distinct profile file to a host onc
 
 ## Decision Log
 
+- Decision: encode the user executable bit in the content key: `<sha256>` is stored at 0600 and `<sha256>.x` at 0700. Both the digest query and archive link targets use that key. Restrict extracted private files before creating hardlinks, and discard any previous staging directory before extraction, so neither an initial upload nor a repeat runs chmod through a stored inode.
+  Rationale: byte identity alone cannot preserve differing executable modes. This keeps the approved symlink-then-hardlink mechanism and private final copies. The existing upload's umask and permission restriction remove group and other permissions.
+  Date/Author: 2026-11-15, parent ruling implemented by Milestone 1 worker.
 - Decision: change only how profile bytes reach the host; each session still receives a private, writable copy of its whole profile.
   Rationale: Claude writes into `plugins/`, and Resume, Move and profile refresh all delete and reinstall the profile directory (`controller/resume.rs:811-818`, `worker_binary/install.rs:1043-1093`). Sharing the final tree would touch all of those flows. Sending bytes once per host removes the measured bottleneck and keeps the session's files exactly as they are today. The worker binary store's host transport cache (`store.rs:582-656`) already works this way.
   Date/Author: 2026-11-15, parent session.
@@ -59,7 +64,7 @@ After this change, the controller sends each distinct profile file to a host onc
 
 ## Outcomes & Retrospective
 
-(To be written at milestones.)
+Milestone 1 is complete. Only harness-declared shared trees enter the host content store; each launch still installs a private profile. The real-shell integration tests cover more than 8 MiB of content, spaces, newline and leading-dash filenames, empty directories, distinct executable modes for identical bytes, collection of stale and abandoned content, an upload without shared content on the second launch, independent installed inodes, and a missing-content repeat. Full validation passed with `cargo test -p brokk-mj-controller` (2,651 passed, 27 ignored), `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all -- --check`, and `git diff --check`. The first round-trip run exposed a fixture omission: the helper now applies the real SSH installer's final chmod after copying, and the targeted rerun and full suite pass. Milestones 2 and 3 remain separate work; no live EC2 or macOS check was run in this lane.
 
 
 ## Context and Orientation
@@ -96,9 +101,9 @@ Replace the internals of `upload_profile_archive` while keeping its contract: af
 
 The new flow has two SSH commands.
 
-The first command is a digest query. Under the per-host store gate, the controller sends the list of SHA-256 digests of the shared files, one lowercase hex digest per line, on stdin. A remote `sh` script creates the store directory `~/.cache/mjolnir/profile-content` (mode 0700) if needed. It updates the modification time of each digest file that exists and prints each digest that does not. Updating the time is what keeps garbage collection from removing a file between the two commands.
+The first command is a digest query. Under the per-host store gate, the controller sends the list of SHA-256 digests of the shared files, one content key per line (a lowercase SHA-256 digest, with `.x` appended for user-executable files), on stdin. A remote `sh` script creates the store directory `~/.cache/mjolnir/profile-content` (mode 0700) if needed. It updates the modification time of each digest file that exists and prints each digest that does not. Updating the time is what keeps garbage collection from removing a file between the two commands.
 
-The second command is the upload. The controller streams one gzip tar containing three kinds of entries: the private files at their own paths; each missing shared file as `.mj-content/<digest>`; and each shared file whose digest is already stored as a symlink at its own path, whose target text is `mj-profile-content/<digest>`. The remote script extracts the tar into the destination. It moves each `.mj-content/<digest>` into the store: it first verifies the digest with `sha256sum`, or `shasum -a 256` on macOS, then writes a unique temporary name in the store and renames it. If the store already has the file, it discards the new copy. The script then replaces every symlink whose target starts with `mj-profile-content/` with a hard link to the store file named by the target's last path component. It does this with `find … -type l -exec sh -c '…' sh {} +`, so file names pass as arguments and are never parsed from text. Finally, it removes `.mj-content` and applies `chmod -R go-rwx` as today. Missing files that the stage held only as `.mj-content` entries must also appear at their real paths. Give those a symlink entry too, so one mechanism places every shared file.
+The second command is the upload. The controller streams one gzip tar containing three kinds of entries: the private files at their own paths; each missing shared file as `.mj-content/<key>`; and each shared file whose digest is already stored as a symlink at its own path, whose target text is `mj-profile-content/<key>`. The remote script discards any earlier staging directory and extracts the tar into the destination. It moves each `.mj-content/<key>` into the store: it first verifies the digest with `sha256sum`, or `shasum -a 256` on macOS, then writes a unique temporary name in the store and renames it. If the store already has the file, it discards the new copy. The script then replaces every symlink whose target starts with `mj-profile-content/` with a hard link to the store file named by the target's last path component. It does this with `find … -type l -exec sh -c '…' sh {} +`, so file names pass as arguments and are never parsed from text. It applies `go-rwx` to extracted directories and regular files before linking any stored inodes, then removes `.mj-content` after linking. Missing files that the stage held only as `.mj-content` entries must also appear at their real paths. Give those a symlink entry too, so one mechanism places every shared file.
 
 Because staging follows symlinks today, the stage holds no symlinks of its own, so every symlink in the extracted tree is one this flow created. Keep the target-prefix filter anyway.
 
@@ -181,3 +186,5 @@ Claude profile source measurement (fast gzip): whole snapshot 780 files, 22,085,
 ## Interfaces and Dependencies
 
 No new crates. Use the existing `tar` and `flate2` dependencies for the stream and `sha2` (already used by the worker store) for digests. Run commands through the existing executor (`execute_with_stdin` for the streamed upload); do not hand-roll pipes. The step-script helper lives in `mj-core/src/targets.rs` beside `CommandPlan` and returns errors through the same `anyhow` context style as `execute_checked`. No database migration and no relay protocol change are expected; if one becomes necessary, stop and record why in the Decision Log.
+
+Plan update (2026-11-15, Milestone 1 worker): implemented the host content store and recorded the parent-approved executable-mode key refinement; focused integration tests, the full controller suite, workspace clippy and formatting all pass.

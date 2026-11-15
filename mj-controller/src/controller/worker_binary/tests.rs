@@ -1573,6 +1573,10 @@ impl CommandExecutor for SshHostExecutor {
         command: &CommandSpec,
         input: &mut (dyn Read + Send),
     ) -> Result<CommandOutput> {
+        if command.purpose == "query host profile content" {
+            std::io::copy(input, &mut std::io::sink())?;
+            return self.execute(command);
+        }
         // The transport boundary receives a complete archive, rather than a
         // test-only fallback to file-by-file copy.
         let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(input));
@@ -1600,6 +1604,7 @@ fn install_on_ssh_host(
         &fixture.ownership,
         &fixture.profile_stage,
         None,
+        &[],
     )
     .unwrap();
     rendered(&executor.commands.take())
@@ -1733,6 +1738,7 @@ fn docker_uploads_and_replacements_are_usable_by_the_non_root_worker() {
             &fixture.ownership,
             &fixture.profile_stage,
             None,
+            &[],
         )?;
         let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
             &session,
@@ -2043,6 +2049,7 @@ fn a_container_runs_its_images_worker_through_the_hel_link() {
             &fixture.ownership,
             &fixture.profile_stage,
             None,
+            &[],
         )?;
         as_root(&format!("test ! -e {unused}"))?;
         execute_checked(
