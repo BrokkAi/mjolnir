@@ -1541,8 +1541,19 @@ impl CommandExecutor for SshHostExecutor {
         let mut stdout = Vec::new();
         let remote = command.args.last().cloned().unwrap_or_default();
         if command.purpose == "publish shared Mjolnir worker" {
-            let words = remote.split_whitespace().collect::<Vec<_>>();
-            let directory = words[words.len() - 2].trim_matches('\'');
+            // Publication now shares one shell batch with verification and
+            // discard. Its directory is an argument inside the quoted script.
+            let unquoted = remote.replace(['\'', '\\', '"'], "");
+            let directory = unquoted
+                .split_whitespace()
+                .find(|word| {
+                    word.rsplit_once("worker-binaries/")
+                        .is_some_and(|(_, digest)| {
+                            digest.len() == 64
+                                && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        })
+                })
+                .expect("published worker store directory");
             self.host_files
                 .borrow_mut()
                 .insert(format!("{directory}/hel"));
