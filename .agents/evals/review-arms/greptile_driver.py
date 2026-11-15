@@ -72,12 +72,12 @@ def greptile(*args, cwd=REPO):
     return r
 
 
-def runs_for(sha):
-    """Greptile's saved runs for a commit, newest first, with their createdAt and
-    completedAt. History groups runs by commit and names only the latest branch,
-    so a run's tier comes from `review show` (its "effort" field)."""
+def runs_for(sha, base):
+    """Greptile's saved runs for a commit reviewed against `base`, newest first, with
+    their createdAt and completedAt. History groups runs by commit and names only the
+    latest branch, so a run's tier comes from `review show` (its "effort" field)."""
     history = json.loads(greptile("review", "show", "--json").stdout)
-    runs = [r for g in history if g.get("headSha") == sha for r in g["reviews"]]
+    runs = [r for g in history if g.get("headSha") == sha and g.get("baseSha") == base for r in g["reviews"]]
     return sorted(runs, key=lambda r: r["createdAt"], reverse=True)
 
 
@@ -107,7 +107,7 @@ def finish(d, bug, tier, run_id, stderr=""):
     raw, review = fetch(run_id)
     assert review.get("effort") == tier, (review.get("effort"), tier)
     (d / "review.json").write_text(raw)
-    run = next(x for x in runs_for(bug["intro_commit"]) if x["runId"] == run_id)
+    run = next(x for x in runs_for(bug["intro_commit"], bug["base_commit"]) if x["runId"] == run_id)
     child = hashlib.sha256(f"greptile:{run_id}".encode()).hexdigest()[:32]
     sd = d / "reviewers" / child[:12]
     sd.mkdir(parents=True, exist_ok=True)
@@ -133,10 +133,14 @@ def run_job(job):
     if (d / "launch-intent.json").exists():
         # A dispatched run may have finished, and been charged, after its CLI stopped:
         # fetch it instead of paying again. Only a cancelled or failed run is dispatched again.
-        live = [r for r in runs_for(bug["intro_commit"]) if r["status"] != "CANCELLED" and tier_of(r) == tier]
+        # Only a run this launch created: one made after its intent was recorded.
+        since = json.loads((d / "launch-intent.json").read_text())["time_ns"] / 1e9
+        live = [r for r in runs_for(bug["intro_commit"], bug["base_commit"])
+                if iso_s(r["createdAt"]) >= since and r["status"] != "CANCELLED" and tier_of(r) == tier]
         if live:
             finish(d, bug, tier, live[0]["runId"])
             return "recovered"
+        (ROOT / "failed-attempts").mkdir(exist_ok=True)
         d.rename(ROOT / "failed-attempts" / f"{bug['id']}-G-{tier}-no-result-{time.time_ns()}")
     if wt.exists():
         git("worktree", "remove", "--force", str(wt))
@@ -150,7 +154,7 @@ def run_job(job):
     if r.returncode:
         raise RuntimeError(f"greptile exit {r.returncode}: {r.stderr[-800:]}")
     # The newest run for this commit is ours: a diff's tiers never run at the same time.
-    finish(d, bug, tier, runs_for(bug["intro_commit"])[0]["runId"], r.stderr)
+    finish(d, bug, tier, runs_for(bug["intro_commit"], bug["base_commit"])[0]["runId"], r.stderr)
     git("worktree", "remove", "--force", str(wt))
     git("branch", "-D", branch)
     return "done"
@@ -162,11 +166,12 @@ def main():
     p.add_argument("--concurrency", type=int, default=1)
     a = p.parse_args()
     jobs = json.loads(pathlib.Path(a.jobs).read_text())
-    # Greptile runs one review per commit at a time and cancels the older one, so a
-    # diff's tiers run one after another inside one worker.
+    # Greptile runs one review per commit at a time and cancels the older one, so all
+    # jobs on one commit (a diff's tiers, or corpus entries that share a commit) run
+    # one after another inside one worker.
     by_diff = {}
     for j in jobs:
-        by_diff.setdefault(j["bug"], []).append(j)
+        by_diff.setdefault(CORPUS[j["bug"]]["intro_commit"], []).append(j)
 
     def one(diff_jobs):
         results = []
