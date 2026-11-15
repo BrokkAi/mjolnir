@@ -2,6 +2,7 @@
 //! its cut (campaign finding I2-3).
 use super::test_support::*;
 use super::*;
+#[cfg(unix)]
 use crate::acp::RuntimeEvent;
 use agent_client_protocol::v1::schema::ContentChunk;
 
@@ -226,6 +227,8 @@ fn a_question_during_a_barrier_is_journaled_at_once() {
 /// ready. With no harness turn open the result journals nothing, so it must
 /// not end the hold: the marker waits and the Close still matches its cut.
 // Hard-won: 634af0a36: a runtime event that journaled nothing ended the cut hold, so a late usage_update moved the cut
+// Runtime events reach the relay only through the Unix worker runtime.
+#[cfg(unix)]
 #[test]
 fn a_runtime_event_that_journals_nothing_leaves_the_cut_held() {
     let temp = tempfile::tempdir().unwrap();
@@ -295,6 +298,8 @@ fn a_runtime_event_that_journals_nothing_leaves_the_cut_held() {
 /// journals nothing, so the frontier still equals the cut. Close must still be
 /// refused: sealing there would stop work the cut never saw.
 // Hard-won: 15e0e5b35: background work that started after the cut and journaled nothing let Close stop it
+// Runtime events reach the relay only through the Unix worker runtime.
+#[cfg(unix)]
 #[test]
 fn background_work_started_after_the_cut_refuses_the_close() {
     let temp = tempfile::tempdir().unwrap();

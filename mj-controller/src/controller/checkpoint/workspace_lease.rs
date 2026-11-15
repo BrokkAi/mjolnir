@@ -1,5 +1,8 @@
 use super::*;
 
+// Preserve the existing upgrade handshake deadline for both connection owners.
+const IDLE_WORKER_RESERVATION_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// An idle workspace operation holds the managed connection and a worker
 /// barrier. Dropping this value disconnects and cancels the barrier; releasing
 /// it resumes dispatch without claiming that an archive covers the journal.
@@ -24,24 +27,47 @@ impl IdleWorkspaceLease {
         else {
             return Ok(None);
         };
-        tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::time::timeout(IDLE_WORKER_RESERVATION_TIMEOUT, async {
             let Some(mut lease) = handle.lease_idle_connection(harness).await? else {
                 return Ok(None);
             };
+            let Some((command_id, ready_cursor)) =
+                Self::reserve_connection_for_upgrade(lease.connection_mut(), harness).await?
+            else {
+                // A legacy bootstrap may already hold BeginCheckpoint.
+                // Disconnect on deferral so the worker cancels that barrier.
+                return Ok(None);
+            };
+            Ok(Some(Self {
+                lease,
+                command_id,
+                harness,
+                ready_cursor,
+                _worker_owner: worker_owner,
+            }))
+        })
+        .await
+        .context("idle worker reservation timed out; worker was left running")?
+    }
+
+    /// The same atomic idle/barrier handshake for managed and recovery connections.
+    pub(in crate::controller) async fn reserve_connection_for_upgrade(
+        connection: &mut StandaloneSession,
+        harness: HarnessKind,
+    ) -> Result<Option<(String, RelayCursor)>> {
+        tokio::time::timeout(IDLE_WORKER_RESERVATION_TIMEOUT, async {
+            if !connection.operational().safe_to_replace(harness) {
+                return Ok(None);
+            }
             let command_id = new_command_id("worker-upgrade")?;
-            let protocol = lease.connection_mut().protocol_version();
-            let operational = lease.connection_mut().operational();
+            let protocol = connection.protocol_version();
+            let operational = connection.operational();
             let preparation_failed = operational.harness_preparation_failed();
             let legacy_goal = (21..mj_core::relay::RELAY_IDLE_GOAL_INTENT_PROTOCOL)
                 .contains(&protocol)
                 && operational.facts().goal_active;
             if !preparation_failed && protocol >= 21 && !legacy_goal {
-                if !lease
-                    .connection_mut()
-                    .reserve_idle(command_id.clone())
-                    .await?
-                {
-                    lease.release();
+                if !connection.reserve_idle(command_id.clone()).await? {
                     return Ok(None);
                 }
             } else {
@@ -49,8 +75,7 @@ impl IdleWorkspaceLease {
                 // work is running. Bootstrap with observed idle and a dispatch
                 // barrier, not an atomic idle reservation. Failed preparation
                 // also uses this path. Recheck work and the cut before swapping.
-                lease
-                    .connection_mut()
+                connection
                     .submit(
                         command_id.clone(),
                         RelayCommand::BeginCheckpoint {
@@ -60,7 +85,7 @@ impl IdleWorkspaceLease {
                     .await?;
             }
             loop {
-                let mut snapshot = lease.connection_mut().sync().await?;
+                let mut snapshot = connection.sync().await?;
                 let ready = checkpoint_barrier_is_ready(&snapshot, &command_id);
                 let ready_cursor = if ready {
                     let cursor = snapshot
@@ -93,21 +118,12 @@ impl IdleWorkspaceLease {
                     // The pending/active barrier prevents new reviewer admission.
                     if legacy_goal
                         && !preparation_failed
-                        && !lease
-                            .connection_mut()
-                            .reserve_idle(command_id.clone())
-                            .await?
+                        && !connection.reserve_idle(command_id.clone()).await?
                     {
                         // Disconnect so the worker cancels the accepted barrier.
                         return Ok(None);
                     }
-                    return Ok(Some(Self {
-                        lease,
-                        command_id,
-                        harness,
-                        ready_cursor,
-                        _worker_owner: worker_owner,
-                    }));
+                    return Ok(Some((command_id, ready_cursor)));
                 }
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
@@ -121,14 +137,29 @@ impl IdleWorkspaceLease {
     }
 
     pub(in crate::controller) async fn verify_for_upgrade(&mut self) -> Result<bool> {
-        let mut snapshot = self.lease.connection_mut().sync().await?;
-        if !checkpoint_barrier_is_ready(&snapshot, &self.command_id)
-            || snapshot.operational.checkpoint_ready.as_ref() != Some(&self.ready_cursor)
+        Self::verify_reserved_connection(
+            self.lease.connection_mut(),
+            self.harness,
+            &self.command_id,
+            &self.ready_cursor,
+        )
+        .await
+    }
+
+    pub(in crate::controller) async fn verify_reserved_connection(
+        connection: &mut StandaloneSession,
+        harness: HarnessKind,
+        command_id: &str,
+        ready_cursor: &RelayCursor,
+    ) -> Result<bool> {
+        let mut snapshot = connection.sync().await?;
+        if !checkpoint_barrier_is_ready(&snapshot, command_id)
+            || snapshot.operational.checkpoint_ready.as_ref() != Some(ready_cursor)
         {
             return Ok(false);
         }
         if let Err(error) =
-            validate_checkpoint_barrier_snapshot(&snapshot, &self.command_id, &self.ready_cursor)
+            validate_checkpoint_barrier_snapshot(&snapshot, command_id, ready_cursor)
         {
             if error.is::<CheckpointDeferred>() {
                 return Ok(false);
@@ -136,7 +167,7 @@ impl IdleWorkspaceLease {
             return Err(error);
         }
         snapshot.operational.checkpoint_barrier = None;
-        Ok(snapshot.operational.safe_to_replace(self.harness))
+        Ok(snapshot.operational.safe_to_replace(harness))
     }
 
     pub(in crate::controller) fn finish_replacement(mut self, connection: StandaloneSession) {

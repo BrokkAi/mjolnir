@@ -74,6 +74,8 @@ impl Controller {
                             reconnect: &reconnect,
                             launch: Some(&launch),
                             prepared: false,
+                            discard_queued_prompts: None,
+                            swap_admission: None,
                             messages: &RESTART_FOR_CHECKPOINT,
                         },
                     )
@@ -193,6 +195,8 @@ impl Controller {
                 reconnect,
                 launch: Some(&launch),
                 prepared: false,
+                discard_queued_prompts: None,
+                swap_admission: None,
                 messages: &RESTART_FOR_CHECKPOINT,
             },
         )
@@ -216,6 +220,8 @@ impl Controller {
                 reconnect,
                 launch: None,
                 prepared: false,
+                discard_queued_prompts: None,
+                swap_admission: None,
                 messages: &RESTART_FOR_CHECKPOINT,
             },
         )

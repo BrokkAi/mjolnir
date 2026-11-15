@@ -386,6 +386,25 @@ impl DurableRelay {
         Self::open_with_harness(root, session_id, relay_version, true, None, &[])
     }
 
+    pub(crate) fn discard_queued_prompts_before_start(
+        root: &Path,
+        session_id: &str,
+        command_id: &str,
+    ) -> Result<()> {
+        let mut relay = Self::open_with_harness(
+            root.to_path_buf(),
+            session_id.to_owned(),
+            env!("CARGO_PKG_VERSION"),
+            true,
+            None,
+            &[],
+        )?;
+        relay
+            .submit_command(command_id, RelayCommand::ClearQueuedPrompts)?
+            .map_err(|error| anyhow!("discard queued prompts before startup: {}", error.message))?;
+        Ok(())
+    }
+
     fn open_with_harness(
         root: impl Into<PathBuf>,
         session_id: impl Into<String>,

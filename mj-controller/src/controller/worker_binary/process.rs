@@ -93,31 +93,63 @@ pub(in crate::controller) enum WorkerRecovery {
     Unknown,
 }
 
+/// Reports `recoverable`, `nothing` (present without relay state), or `absent`.
+/// Lookup failures exit nonzero; Resume needs absence, not just no relay state.
 pub(in crate::controller) fn worker_recovery_command(
     locator: &targets::TargetLocator,
     worker_root: &str,
 ) -> CommandSpec {
-    // Decided from directory listings, never from the shell's file tests
-    // alone: those are false on any lookup error (a stale NFS handle, a
-    // permission error), so they cannot tell "no such entry" from "could not
-    // look". The root is absent only when its parent's listing works and has
-    // no entry with its name. A root holds nothing to recover only when its
-    // own listing works and has neither the relay state nor the journal. An
-    // entry that exists but is not a usable directory, or a listing that
-    // fails, exits nonzero: Unknown.
-    let path = std::path::Path::new(worker_root);
-    let parent = path
-        .parent()
-        .map(|parent| parent.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "/".to_owned());
-    let name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    // Entries are matched with `case`, not grep, so only the listings
-    // themselves can fail, and a failing listing exits nonzero.
+    directory_probe_command(locator, worker_root, true).purpose("probe Mjolnir worker root")
+}
+
+/// Positive directory presence/absence; lookup failures remain errors.
+pub(in crate::controller) fn directory_presence_command(
+    locator: &targets::TargetLocator,
+    directory: &str,
+) -> CommandSpec {
+    directory_probe_command(locator, directory, false)
+        .purpose("probe retained environment directory")
+}
+
+fn directory_probe_command(
+    locator: &targets::TargetLocator,
+    directory: &str,
+    relay_contents: bool,
+) -> CommandSpec {
+    // A failed file test is not absence. Climb to a readable ancestor: if
+    // its listing contains the next component, the failed lookup is Unknown.
+    // Only a readable listing without that component proves absence.
+    let mut missing = String::new();
+    for path in std::path::Path::new(directory).ancestors() {
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        missing.push_str(&format!(
+            "if entries=$(ls -1A {parent}); then \
+             if hel_lists \"$entries\" {name} {name}; then exit 1; fi; \
+             printf 'absent\\n'; exit 0; fi; ",
+            parent = targets::posix_quote(&parent.to_string_lossy()),
+            name = targets::posix_quote(&name.to_string_lossy()),
+        ));
+    }
+    let present = if relay_contents {
+        format!(
+            "if hel_lists \"$entries\" resume-checkout-recovery.json resume-checkout-recovery.json; then printf 'checkout-partial\\n'; \
+             elif hel_lists \"$entries\" resume-parent-recovery.json resume-parent-recovery.json; then printf 'partial\\n'; \
+             elif hel_lists \"$entries\" {state} {journal}; then \
+             printf 'recoverable\\n'; else printf 'nothing\\n'; fi;",
+            state = targets::posix_quote(mj_core::relay::RELAY_STATE_FILE),
+            journal = targets::posix_quote(mj_core::relay::RELAY_JOURNAL_DIR),
+        )
+    } else {
+        "printf 'present\\n';".into()
+    };
     let script = format!(
-        "root={root}; parent={parent}; name={name}; \
+        "root={root}; \
          hel_lists() {{ \
            while IFS= read -r hel_entry; do \
              case \"$hel_entry\" in \"$2\"|\"$3\") return 0 ;; esac; \
@@ -126,21 +158,11 @@ $1
 MJ_ENTRIES
            return 1; }}; \
          if [ -d \"$root\" ]; then \
-           entries=$(ls -1A \"$root\") || exit 1; \
-           if hel_lists \"$entries\" {state} {journal}; then \
-             printf 'recoverable\\n'; else printf 'nothing\\n'; fi; \
-         elif entries=$(ls -1A \"$parent\"); then \
-           if hel_lists \"$entries\" \"$name\" \"$name\"; then exit 1; fi; \
-           printf 'nothing\\n'; \
-         else exit 1; fi",
-        root = targets::posix_quote(worker_root),
-        parent = targets::posix_quote(&parent),
-        name = targets::posix_quote(&name),
-        state = targets::posix_quote(mj_core::relay::RELAY_STATE_FILE),
-        journal = targets::posix_quote(mj_core::relay::RELAY_JOURNAL_DIR),
+           entries=$(ls -1A \"$root\") || exit 1; {present} \
+         else {missing} exit 1; fi",
+        root = targets::posix_quote(directory),
     );
     targets::locator_command(locator, vec!["sh".into(), "-c".into(), script])
-        .purpose("probe Mjolnir worker root")
 }
 
 /// Ask the target whether `worker_root` holds anything to recover. Only the
@@ -163,12 +185,14 @@ pub(in crate::controller) fn worker_recovery(
         _ => None,
     };
     match answer(worker_recovery_command(locator, worker_root)).as_deref() {
-        Some("recoverable") => WorkerRecovery::Recoverable,
-        Some("nothing") => match answer(worker_liveness_command(locator, worker_root)).as_deref() {
-            Some("dead") => WorkerRecovery::NothingToRecover,
-            Some("alive" | "starting") => WorkerRecovery::Recoverable,
-            _ => WorkerRecovery::Unknown,
-        },
+        Some("recoverable" | "partial" | "checkout-partial") => WorkerRecovery::Recoverable,
+        Some("nothing" | "absent") => {
+            match answer(worker_liveness_command(locator, worker_root)).as_deref() {
+                Some("dead") => WorkerRecovery::NothingToRecover,
+                Some("alive" | "starting") => WorkerRecovery::Recoverable,
+                _ => WorkerRecovery::Unknown,
+            }
+        }
         _ => WorkerRecovery::Unknown,
     }
 }
