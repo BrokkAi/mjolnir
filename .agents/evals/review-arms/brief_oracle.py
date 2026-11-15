@@ -10,6 +10,12 @@ Usage:
            "item": <the published brief's item that carries the fact, quoted exactly>}}
    for every primary and secondary diff; a decision counts only for the brief whose hash it names)
   python3 brief_oracle.py collect   # again: publishes briefs/oracle/<diff>/brief.md
+  python3 brief_oracle.py blind-collect <blind-leak-out.json>
+      stage B: publishes leak-rewritten blind briefs of primary and secondary diffs (run the
+      workflow with blind_only: true on them); the writer's text is kept as brief-original.md
+  python3 brief_oracle.py annotate <out.json> --run-started <ISO time>
+      records judged_blind_sha256 for a result saved before the workflow returned it, only if
+      every item file it read predates the run
   python3 brief_oracle.py merge <rerun-out.json>
       replaces the named diffs' results in workflow-out.json with a rerun of the workflow on them
       (for a brief whose hand check failed); every published brief keeps its own leak verdict
@@ -35,6 +41,27 @@ import driver
 from driver import ROOT, SCRIPTS, save
 
 PLAN = (SCRIPTS / "brief/PLAN.md").read_text()
+
+
+def sha(text):
+    return hashlib.sha256(text.strip().encode()).hexdigest()
+
+
+def judged_matches(r, d):
+    """The verdict in r was produced for the blind brief now published in d, or r is already applied.
+
+    The workflow returns judged_blind_sha256, the hash build gave it for the text the judge read.
+    A result already applied left the writer's text in brief-original.md and its rewrite in brief.md.
+    """
+    judged = r.get("judged_blind_sha256")
+    current = (d / "brief.md").read_text()
+    if judged is None:
+        return False
+    if judged == sha(current):
+        return True
+    original = d / "brief-original.md"
+    return bool(r["final_brief"]) and original.exists() and judged == sha(original.read_text()) \
+        and sha(r["final_brief"]) == sha(current)
 
 
 def frozen(name):
@@ -76,7 +103,7 @@ def build():
             save(W / f"record-{bug}.json", {k: c[k] for k in ("id", "defect", "location", "trigger", "match_rule",
                                                              "near_misses", "why_findable", "intro_commit",
                                                              "fix_commit")})
-            diffs.append({"id": bug, "group": group})
+            diffs.append({"id": bug, "group": group, "blind_sha256": sha(blind)})
     print(json.dumps({"dir": str(W), "diffs": diffs}))
 
 
@@ -103,6 +130,11 @@ def collect():
         d = ROOT / "briefs/oracle" / bug
         d.mkdir(parents=True, exist_ok=True)
         blind = ROOT / "briefs/blind" / bug / "brief.md"
+        if r["group"] == "C" and not judged_matches(r, blind.parent):
+            # Its leak verdict was produced for other text than the blind brief: unpublish.
+            (d / "brief.md").unlink(missing_ok=True)
+            rejected.append(bug)
+            continue
         # A control brief that needed no rewrite comes back as null: it is the blind brief.
         final = (r["final_brief"] or blind.read_text()).rstrip() + "\n"
         # A secondary oracle item may relate two changed locations: the editor's item, or the
@@ -175,12 +207,80 @@ def merge(path):
     print(json.dumps({"replaced": sorted(replaced), "previous_kept_in": str(history)}))
 
 
+def blind_collect(path):
+    out = json.loads(pathlib.Path(path).read_text())
+    assert not out["missing"], out["missing"]
+    s = sets()
+    # Every P and S blind brief needs the check before stage B; a subset run is not completion.
+    assert sorted(r["id"] for r in out["results"]) == sorted(s["P"] + s["S"]), \
+        "blind leak check must cover exactly the primary and secondary diffs"
+    rejected, rows = [], []
+    for r in out["results"]:
+        bug = r["id"]
+        assert r["edit"] is None, f"{bug}: blind leak check runs without the editor"
+        d = ROOT / "briefs/blind" / bug
+        # The verdict holds only for the text it judged (hash returned by the workflow).
+        if not judged_matches(r, d):
+            rejected.append((bug, ["the judged brief is not the published one; rerun build and the check"]))
+            continue
+        save(d / "blind-leak.json", r)
+        rows.append({"id": bug, "leak_first": r["leak"][0]["label"], "leak_final": r["leak"][-1]["label"],
+                     "rewritten": r["final_brief"] is not None})
+        if r["final_brief"] is None:
+            continue
+        final = r["final_brief"].rstrip() + "\n"
+        problems = brief_driver.lint(final, driver.CORPUS[bug])
+        if problems:
+            (d / "brief-rejected-rewrite.md").write_text(final)
+            rejected.append((bug, problems))
+            continue
+        original = d / "brief-original.md"
+        if not original.exists():
+            original.write_text((d / "brief.md").read_text())
+        (d / "brief.md").write_text(final)
+    for row in rows:
+        print(json.dumps(row))
+    if rejected:
+        raise SystemExit(f"rewrites that break the rules were not published: {rejected}")
+
+
+def annotate(path, run_started):
+    """Adds judged_blind_sha256 to a result saved before the workflow returned it.
+
+    Valid only when every item file the run read is older than the run, so the
+    judge saw the current item text; refuses otherwise. The evidence is kept.
+    """
+    import datetime
+    start = datetime.datetime.fromisoformat(run_started).timestamp()
+    W = ROOT / "briefs/oracle-work"
+    out = json.loads(pathlib.Path(path).read_text())
+    for r in out["results"]:
+        if r.get("judged_blind_sha256") or r.get("final_brief") and r.get("edit"):
+            continue  # already bound, or an editor result judged inline
+        item = W / f"item-{r['id']}.json"
+        text = json.loads(item.read_text())["blind_brief"]
+        when = lambda f: datetime.datetime.fromtimestamp(f.stat().st_mtime).isoformat()
+        # Only an item file older than the run shows what the judge read; a rebuilt item does not.
+        if item.stat().st_mtime < start:
+            evidence = f"item file unchanged since {when(item)}"
+        else:
+            raise SystemExit(f"{r['id']}: no evidence the judge read the current text; rerun the check")
+        r["judged_blind_sha256"] = sha(text)
+        r["judged_hash_source"] = f"{evidence}, before the run started at {run_started}"
+    save(pathlib.Path(path), out)
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("step", choices=["build", "collect", "merge"])
+    p.add_argument("step", choices=["build", "collect", "merge", "blind-collect", "annotate"])
     p.add_argument("path", nargs="?")
+    p.add_argument("--run-started", help="annotate: ISO time the workflow run started")
     a = p.parse_args()
     if a.step == "merge":
         merge(a.path)
+    elif a.step == "blind-collect":
+        blind_collect(a.path)
+    elif a.step == "annotate":
+        annotate(a.path, a.run_started)
     else:
         {"build": build, "collect": collect}[a.step]()

@@ -39,9 +39,12 @@ const SCHEMA = {
   required: ['records'],
 }
 phase('Probe')
-const results = await parallel(args.groups.map((ids, n) => () => agent(
+// Serial: every worktree shares one Bifrost cache, and concurrent processes wait on its
+// build lock (the first run timed out that way), so one agent runs at a time.
+const results = []
+for (const [n, ids] of args.groups.entries()) results.push(await agent(
   `Read ${args.spec} and follow it exactly. Your records: ${ids.join(', ')}. Return one entry per record.`,
   { label: `group ${n}`, phase: 'Probe', schema: SCHEMA, model: 'sonnet', effort: 'high' },
-).then(r => (r?.records || []).filter(x => ids.includes(x.id)))))
+).then(r => (r?.records || []).filter(x => ids.includes(x.id))))
 const records = results.filter(Boolean).flat()
 return { records, missing: args.groups.flat().filter(id => !records.some(r => r.id === id)) }

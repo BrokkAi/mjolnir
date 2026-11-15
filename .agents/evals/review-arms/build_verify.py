@@ -1,8 +1,11 @@
 """Builds blind verification batches from every finished run.
 
 Usage: python3 build_verify.py <out-dir> [--per-batch 2] [--ready-jobs jobs.json] [--append]
+                                         [--arms A,BT] [--bugs-from jobs.json]
 
---ready-jobs includes only diffs whose every job in that file has finished, so
+--arms pools only those arms' sessions (relation-brief control 2 compares no-brief
+Terra/high with blind-brief Terra/high), and --bugs-from limits the diffs to a jobs
+file's. --ready-jobs includes only diffs whose every job in that file has finished, so
 verification can start while other reviews still run. --append adds diffs not
 yet in the key as new batches and leaves existing batches and IDs unchanged.
 
@@ -26,7 +29,11 @@ p.add_argument("out")
 p.add_argument("--per-batch", type=int, default=2)
 p.add_argument("--ready-jobs")
 p.add_argument("--append", action="store_true")
+p.add_argument("--arms", help="comma-separated arms to pool; default every arm")
+p.add_argument("--bugs-from", help="jobs file whose diffs are the only ones batched")
 a = p.parse_args()
+arms = set(a.arms.split(",")) if a.arms else None
+only = {j["bug"] for j in json.loads(pathlib.Path(a.bugs_from).read_text())} if a.bugs_from else None
 out = ROOT / a.out
 out.mkdir(parents=True, exist_ok=True)
 
@@ -67,6 +74,12 @@ for done_path in sorted(ROOT.glob("runs/*/*/done.json")):
     done = json.loads(done_path.read_text())
     run = done_path.parent
     if done["bug"] in batched or (ready is not None and done["bug"] not in ready):
+        continue
+    if (arms is not None and done["arm"] not in arms) or (only is not None and done["bug"] not in only):
+        continue
+    # With --arms, a diff is batched only once every selected arm has finished on it;
+    # batching it earlier would leave the later arm out of its pool for good.
+    if arms is not None and not all((ROOT / "runs" / done["bug"] / arm / "done.json").exists() for arm in arms):
         continue
     for r in done["reviewers"]:
         covered.append(r["child"])

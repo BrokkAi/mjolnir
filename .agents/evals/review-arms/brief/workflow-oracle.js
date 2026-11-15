@@ -6,7 +6,8 @@ export const meta = {
     { title: 'Leak', detail: 'Opus/high judge reads each brief as a review output; rewrite once if caught or partial' },
   ],
 }
-// args: {dir: '<REVIEW_ARMS_DIR>/briefs/oracle-work', diffs: [{id, group: 'P'|'S'|'C'}]}
+// args: {dir: '<REVIEW_ARMS_DIR>/briefs/oracle-work', diffs: [{id, group: 'P'|'S'|'C', blind_sha256}], blind_only?: true}
+// blind_only: leak-check each diff's blind brief without the editor (stage B; brief_oracle.py blind-collect).
 // Written by brief_oracle.py build: ORACLE.md, WRITER.md, JUDGE.md, item-<id>.json, record-<id>.json.
 const DIR = args.dir
 const ROOT = DIR.replace(/\/briefs\/oracle-work\/?$/, '')
@@ -35,6 +36,12 @@ const VERDICT = {
   },
   required: ['label', 'matching_finding', 'rationale', 'confidence'],
 }
+// Verdicts on an item file's blind brief also report the hash of the text the judge read.
+const VERDICT_ITEM = {
+  ...VERDICT,
+  properties: { ...VERDICT.properties, read_sha256: { type: 'string' } },
+  required: [...VERDICT.required, 'read_sha256'],
+}
 const REWRITE = {
   type: 'object',
   properties: { brief: { type: 'string' }, changes: { type: 'string' } },
@@ -58,8 +65,9 @@ ${FENCE}`,
 const results = await pipeline(
   args.diffs,
   async d => {
-    // Control briefs are the blind brief; the editor never sees them.
-    if (d.group === 'C') return { edit: null, brief: null }
+    // Control briefs are the blind brief; the editor never sees them. blind_only checks every
+    // diff's blind brief that way.
+    if (d.group === 'C' || args.blind_only) return { edit: null, brief: null }
     const edit = await agent(
       `Read ${DIR}/ORACLE.md and follow it exactly. The brief format and rules are in ${DIR}/WRITER.md. Your item file: ${DIR}/item-${d.id}.json (id "${d.id}").
 
@@ -74,11 +82,17 @@ ${FENCE}`,
       : await agent(
         `Read ${DIR}/JUDGE.md. It describes judging code-review outputs against a known bug. Apply its Decision section to one output: the \`blind_brief\` field of ${DIR}/item-${d.id}.json, which you judge as if it were a review output. Return your verdict through the StructuredOutput tool instead of writing verdicts.jsonl.
 
+First run this command and put its output in \`read_sha256\`; it hashes the text you will judge:
+python3 -c "import hashlib,json,sys;print(hashlib.sha256(json.load(open(sys.argv[1]))['blind_brief'].strip().encode()).hexdigest())" ${DIR}/item-${d.id}.json
+
 The known bug's record: ${DIR}/record-${d.id}.json
 
 ${FENCE}`,
-        { ...OPTS, label: `leak ${d.id}`, phase: 'Leak', schema: VERDICT })
+        { ...OPTS, label: `leak ${d.id}`, phase: 'Leak', schema: VERDICT_ITEM })
     if (!first) throw new Error(`no leak verdict for ${d.id}`)
+    // The judge's own hash of what it read must be the text build described in the arguments.
+    if (!brief && first.read_sha256 !== d.blind_sha256)
+      throw new Error(`${d.id}: the judge read text whose hash ${first.read_sha256} is not ${d.blind_sha256}; rerun build and the check`)
     const leak = [first]
     let final = brief
     if (first.label !== 'missed') {
@@ -96,7 +110,9 @@ ${FENCE}`,
       leak.push({ ...again, rewrite_changes: rw.changes })
     }
     // final_brief is null when a control brief needed no rewrite: it is the blind brief.
-    return { id: d.id, group: d.group, edit, leak, final_brief: final }
+    // judged_blind_sha256 binds a verdict on the item file's blind brief to that text.
+    return { id: d.id, group: d.group, edit, leak, final_brief: final,
+             judged_blind_sha256: brief ? null : first.read_sha256 }
   },
 )
 const done = results.filter(Boolean)
