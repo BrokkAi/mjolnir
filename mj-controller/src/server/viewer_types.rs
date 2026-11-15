@@ -1052,6 +1052,9 @@ impl ViewerTurnReview {
 pub struct ViewerWorkspace {
     pub id: String,
     pub name: String,
+    /// Workspaces arrive in name order; the viewer opens the most recently
+    /// opened one when the route names none.
+    pub last_opened_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

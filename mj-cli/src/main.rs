@@ -1987,8 +1987,11 @@ async fn start_dashboard(
                     workspaces.iter().map(|candidate| &candidate.workspace),
                 )
             })?
-    } else if let Some(workspace) = workspaces.first() {
-        // The database orders workspaces by most recent opening.
+    } else if let Some(workspace) = workspaces
+        .iter()
+        .max_by_key(|candidate| &candidate.workspace.last_opened_at)
+    {
+        // The listing is alphabetical; reopen the most recently opened one.
         workspace.workspace.id.clone()
     } else {
         daemon

@@ -2,7 +2,7 @@ use super::*;
 
 #[derive(Clone)]
 pub struct SessionManagerControl {
-    pub(super) readiness_failure: Arc<std::sync::OnceLock<HarnessReadinessFailureHandler>>,
+    pub(super) harness_failure: Arc<std::sync::OnceLock<HarnessFailureHandler>>,
     pub(super) model_policies: watch::Sender<BTreeMap<String, SessionModelPolicy>>,
     pub(crate) session_cpu: watch::Receiver<SessionCpuTable>,
     pub(super) commands: mpsc::Sender<ManagerCommand>,
@@ -17,12 +17,9 @@ pub struct ManagedSessionHandle {
 }
 
 impl SessionManagerControl {
-    pub(crate) fn install_harness_readiness_handler(
-        &self,
-        handler: HarnessReadinessFailureHandler,
-    ) {
+    pub(crate) fn install_harness_failure_handler(&self, handler: HarnessFailureHandler) {
         assert!(
-            self.readiness_failure.set(handler).is_ok(),
+            self.harness_failure.set(handler).is_ok(),
             "readiness failure handler installed once"
         );
     }

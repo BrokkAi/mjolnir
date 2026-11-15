@@ -194,17 +194,17 @@ pub(super) async fn run_daemon_runtime(
         worker_upgrades.observer(),
         workspaces,
     ));
-    let readiness_runtime = Arc::downgrade(&state);
-    manager_control.install_harness_readiness_handler(Arc::new(move |id, timeout| {
-        let runtime = readiness_runtime.clone();
+    let failure_runtime = Arc::downgrade(&state);
+    manager_control.install_harness_failure_handler(Arc::new(move |id, failure| {
+        let runtime = failure_runtime.clone();
         Box::pin(async move {
             let runtime = runtime
                 .upgrade()
                 .context("daemon stopped before readiness failure could be applied")?;
-            runtime.fail_unready_session(id, timeout).await
+            runtime.fail_unready_session(id, failure).await
         })
     }));
-    // Install the bounded write handler before any worker can arm its clock.
+    // Install the bounded failure recorder before worker observations start.
     manager_targets.send_replace(dashboard_worker_targets(&controller));
     log_relay_actors_launched(&manager_targets.borrow());
     state
