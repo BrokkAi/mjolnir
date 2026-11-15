@@ -431,13 +431,15 @@ diff-only question at the introducing commit and classed the result.
 
 | Set | A: computed today | A0: anchor, relation not stated | B: graph relation not exposed | C: outside a code graph |
 |---|---:|---:|---:|---:|
-| Primary (18) | 1 | 8 | 7 | 2 |
+| Primary (18) | 0 | 9 | 7 | 2 |
 | Secondary (4) | 0 | 3 | 1 | 0 |
 
 - A means the output states the decisive relation (a reviewer review added A0
-  for outputs that contain the anchor but not the relation). The one A is
-  `github-token-in-container-argv` (the field scan shows `extra_run_args`
-  extended into `container_run_args`).
+  for outputs that contain the anchor but not the relation). No record is A.
+  The probe classed `github-token-in-container-argv` A (the field scan shows
+  `extra_run_args` extended into `container_run_args`), but the census fact
+  also needs those arguments to become a logged `CommandSpec`, which the
+  output does not show, so it is A0.
 - A0 outputs usually list the right caller or field use among others but not
   the part that matters: the constant argument, the lock held at the call,
   read versus write, or which branch a call sits in. Two A0 anchors came only
