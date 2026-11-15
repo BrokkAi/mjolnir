@@ -1950,3 +1950,28 @@ async fn quota_owner_wait_rechecks_identity_and_turn_without_holding_handoff() {
         remote.shutdown.shutdown().await.unwrap();
     }
 }
+
+// Hard-won: 25b8a2fd3 review: actor-owned timeout evidence must survive the continuation feed.
+#[tokio::test]
+async fn readiness_timeout_evidence_passes_through_the_update_feed() {
+    let (manager, input) = coalesced_update_channel();
+    let remote = spawn_remote_session_manager().unwrap();
+    let cancellation = CancellationToken::new();
+    let mut feed = idle_feed(remote.control, input, cancellation.clone());
+    manager.send(SessionManagerUpdate {
+        harness_timeout: Some(crate::session_manager::HarnessReadinessTimeout {
+            observed_updated_at: "test-revision".to_owned(),
+            waited: Duration::from_secs(300),
+        }),
+        raw_observation: None,
+        session_id: "unready".to_owned(),
+        view: ManagedSessionView::default(),
+    });
+    let update = feed.next().await.unwrap().unwrap();
+    assert_eq!(
+        update.harness_timeout.unwrap().waited,
+        Duration::from_secs(300)
+    );
+    cancellation.cancel();
+    feed.join().await.unwrap();
+}

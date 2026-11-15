@@ -113,7 +113,6 @@ impl RuntimeState {
             committed: None,
             workspace_closes: Mutex::new(BTreeMap::new()),
             workspace_resume_admission: Mutex::new(BTreeMap::new()),
-            harness_readiness: Mutex::new(HarnessReadinessWatch::default()),
             startup_prompts: Mutex::new(BTreeMap::new()),
             startup_enqueue: tokio::sync::Mutex::new(()),
             startup_delivery_gates: Mutex::new(BTreeMap::new()),

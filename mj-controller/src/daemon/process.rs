@@ -457,8 +457,6 @@ pub(super) async fn run_daemon_runtime(
     // How often the harness readiness wait is looked at. The wait itself is
     // minutes long, so this only bounds how late a failure is noticed, and it
     // reads in-memory state rather than the store.
-    let mut readiness_tick = tokio::time::interval(Duration::from_secs(5));
-    readiness_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut progress_tick = tokio::time::interval(Duration::from_secs(1));
     progress_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let (interrupted_close_tx, mut interrupted_close_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -733,19 +731,6 @@ pub(super) async fn run_daemon_runtime(
                     state.refresh_background_policies();
                     state.resume_startup_cleanups(false);
                 }
-                _ = readiness_tick.tick() => {
-                    progress.phase(ServingPhase::Readiness);
-                    // A live session whose harness never advertised itself
-                    // takes no prompt and reports no failure, so nothing else
-                    // ever ends its wait (#1090). The store write runs off
-                    // this loop.
-                    for unready in state.sessions_without_a_usable_harness() {
-                        let state = state.clone();
-                        client_tasks.spawn(async move {
-                            state.fail_unready_session(unready).await;
-                        });
-                    }
-                }
                 completed = interrupted_close_rx.recv() => {
                     progress.phase(ServingPhase::SuspensionRecovery);
                     if let Some(completed) = completed {
@@ -792,6 +777,16 @@ pub(super) async fn run_daemon_runtime(
                     // continuation service and closes this channel, so a
                     // closed channel is not evidence of a failure.
                     let Some(update) = update? else { break };
+                    if let Some(timeout) = update.harness_timeout
+                        && let Some(observed_updated_at) = state.harness_timeout_record(&update.session_id)
+                        && timeout.observed_updated_at == observed_updated_at
+                    {
+                        let state = state.clone();
+                        let session_id = update.session_id.clone();
+                        client_tasks.spawn(async move {
+                            state.fail_unready_session(session_id, timeout, observed_updated_at).await;
+                        });
+                    }
                     if let Some(raw) = update.raw_observation.as_ref()
                         && raw.native_session_is_ready()
                         && let Some(build) = update.view.snapshot.as_ref().and_then(|snapshot| snapshot.worker_build.clone())

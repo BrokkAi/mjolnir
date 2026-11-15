@@ -375,6 +375,7 @@ fn publish(
         (environment.review)(&session_id, &view);
     }
     tx.send(SessionManagerUpdate {
+        harness_timeout: None,
         session_id,
         view,
         raw_observation: None,
@@ -572,13 +573,17 @@ fn spawn_with_gate(
                                 }
                             } => {
                                 if let Some(view) = latest.get(&id) {
-                                    return Some(SessionManagerUpdate { session_id: id, view: view.clone(), raw_observation: None });
+                                    return Some(SessionManagerUpdate { harness_timeout: None, session_id: id, view: view.clone(), raw_observation: None });
                                 }
                             }
                         }
                     }
                 } => {
                     let Some(update) = update else { break FeedEnd::SessionManagerStopped };
+                    if update.harness_timeout.is_some() {
+                        tx.send(update);
+                        continue;
+                    }
                     if let Some(raw) = update.raw_observation {
                         tx.pending_observations.lock().expect("pending observations poisoned").insert(update.session_id.clone(), raw);
                     }
@@ -774,7 +779,7 @@ fn spawn_with_gate(
                                     match result {
                                         Ok(view) => {
                                             latest.insert(id.clone(), (*view).clone());
-                                            tx.send(SessionManagerUpdate {
+                                            tx.send(SessionManagerUpdate { harness_timeout: None,
                                                 raw_observation: None,
                                                 session_id: id,
                                                 view: *view,

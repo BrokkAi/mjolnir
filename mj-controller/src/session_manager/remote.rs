@@ -225,6 +225,7 @@ pub(super) fn spawn_remote_actor(
         },
     );
     updates.send(SessionManagerUpdate {
+        harness_timeout: None,
         session_id,
         view,
         raw_observation: None,
