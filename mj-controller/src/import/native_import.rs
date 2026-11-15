@@ -58,8 +58,28 @@ pub fn import_native_session(
         .transpose()?;
     let mut repositories =
         collect_local_repositories(bundle, &targets.git_roots, raw_project.is_none(), control)?;
-    let native_artifacts =
+    let mut native_artifacts =
         collect_import_native_artifacts(harness, harness_home, native_session_id, source_path)?;
+    // Muse compares a preview with captured native state. Own that capture
+    // through archive publication so later harness writes cannot change it.
+    let _native_snapshot = if harness == HarnessKind::Muse {
+        fs::create_dir_all(archive_directory)?;
+        let snapshot = tempfile::Builder::new()
+            .prefix("native-import-")
+            .tempdir_in(archive_directory)?;
+        for (index, artifact) in native_artifacts.iter_mut().enumerate() {
+            let path = snapshot.path().join(index.to_string());
+            {
+                let mut source = artifact.reader()?;
+                let mut target = fs::File::create(&path)?;
+                std::io::copy(&mut source, &mut target)?;
+            }
+            artifact.data = mj_checkpoint::archive::NativeArtifactData::File(path);
+        }
+        Some(snapshot)
+    } else {
+        None
+    };
     if harness == HarnessKind::Muse {
         // The preview may precede a user's confirmation by minutes. Never
         // pair its old transcript with a newer native conversation.
@@ -75,13 +95,15 @@ pub fn import_native_session(
             "native session changed after it was selected; select it again"
         );
         ensure!(
-            native_artifacts
-                == collect_import_native_artifacts(
+            native_import_artifacts_match(
+                &native_artifacts,
+                &collect_import_native_artifacts(
                     harness,
                     harness_home,
                     native_session_id,
-                    source_path
-                )?,
+                    source_path,
+                )?
+            )?,
             "native session changed while being imported; stop its harness and retry"
         );
     }
@@ -662,4 +684,36 @@ impl<'a> ImportProjectRemap<'a> {
         }
         Ok(())
     }
+}
+
+/// Compare captured contents, independently of whether bodies live in memory
+/// or private snapshot files. Reader chunk boundaries need not agree.
+fn native_import_artifacts_match(
+    captured: &[mj_checkpoint::archive::NativeArtifact],
+    current: &[mj_checkpoint::archive::NativeArtifact],
+) -> Result<bool> {
+    if captured.len() != current.len() {
+        return Ok(false);
+    }
+    for (captured, current) in captured.iter().zip(current) {
+        if captured.relative_path != current.relative_path || captured.mode != current.mode {
+            return Ok(false);
+        }
+        let mut captured = BufReader::new(captured.reader()?);
+        let mut current = BufReader::new(current.reader()?);
+        loop {
+            let left = captured.fill_buf()?;
+            let right = current.fill_buf()?;
+            if left.is_empty() && right.is_empty() {
+                break;
+            }
+            let size = left.len().min(right.len());
+            if size == 0 || left[..size] != right[..size] {
+                return Ok(false);
+            }
+            captured.consume(size);
+            current.consume(size);
+        }
+    }
+    Ok(true)
 }
