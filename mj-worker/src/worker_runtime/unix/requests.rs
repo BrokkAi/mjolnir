@@ -343,33 +343,47 @@ async fn apply_install_credentials(
 /// are connection-only and are never journaled as conversation history.
 pub(crate) async fn run_serialized_project_memory_io<T, F>(
     project_memory_io: &Arc<tokio::sync::Semaphore>,
+    cancel: &CancellationToken,
+    mutates_memory: bool,
     operation: F,
-) -> std::result::Result<Result<T>, tokio::task::JoinError>
+) -> Option<std::result::Result<Result<T>, tokio::task::JoinError>>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T> + Send + 'static,
 {
-    // A timed-out client can abandon this future, but Tokio cannot cancel
-    // blocking filesystem work after it starts. Keep the permit inside
-    // that work so reconnects wait instead of piling more reads and fsyncs
-    // onto the degraded storage device.
-    let permit = project_memory_io
-        .clone()
-        .acquire_owned()
-        .await
-        .expect("project memory I/O semaphore is never closed");
-    tokio::task::spawn_blocking(move || {
+    let permit = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return None,
+        permit = project_memory_io.clone().acquire_owned() => {
+            permit.expect("project memory I/O semaphore is never closed")
+        }
+    };
+    // Acquiring the semaphore admits the operation. No await separates that
+    // decision from starting its task. A stalled mutating write holding the
+    // checkpoint barrier is the true filesystem state, not something to time out.
+    let work = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         operation()
-    })
-    .await
+    });
+    if mutates_memory {
+        Some(work.await)
+    } else {
+        // A disconnected reader can leave this task running, but its permit
+        // and transfer state stay with it until its filesystem work finishes.
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => None,
+            result = work => Some(result),
+        }
+    }
 }
 
 pub(super) async fn project_memory_response(
     envelope: RelayRequestEnvelope,
     endpoint: &ProjectMemoryEndpoint,
     transfer: &mut ConnectionProjectMemoryTransfer,
-) -> RelayResponseEnvelope {
+    cancel: CancellationToken,
+) -> Option<RelayResponseEnvelope> {
     let body = match endpoint.config.as_ref() {
         None => RelayResponseBody::Error {
             error: RelayProtocolError {
@@ -385,25 +399,50 @@ pub(super) async fn project_memory_response(
             let request_id = envelope.request_id.clone();
             let protocol_version = envelope.protocol_version;
             let mut connection_transfer = std::mem::take(transfer);
+            let mutates_memory = matches!(
+                &request,
+                RelayRequest::InstallProjectMemorySnapshot { .. }
+                    | RelayRequest::ReplaceProjectMemoryTree { .. }
+                    | RelayRequest::ProjectMemoryTransfer {
+                        action: mj_core::relay::ProjectMemoryTransferAction::CommitUpload { .. }
+                    }
+            );
             #[cfg(test)]
             endpoint.io_requested.notify_one();
-            match run_serialized_project_memory_io(&endpoint.io, move || {
-                let result = match &request {
-                    RelayRequest::ProjectMemoryTransfer { action } => {
-                        apply_project_memory_transfer_request(
-                            &memory,
-                            &mut connection_transfer,
-                            action,
-                            &request_id,
-                            protocol_version,
-                        )
+            #[cfg(test)]
+            let io_block = endpoint.io_block.clone();
+            let result = run_serialized_project_memory_io(
+                &endpoint.io,
+                &cancel,
+                mutates_memory,
+                move || {
+                    #[cfg(test)]
+                    if let Some(block) = io_block {
+                        block.started.notify_one();
+                        block
+                            .release
+                            .lock()
+                            .expect("test I/O gate poisoned")
+                            .recv()
+                            .context("test I/O gate closed")??;
                     }
-                    _ => apply_project_memory_request(&memory, &request),
-                };
-                Ok((result, connection_transfer))
-            })
-            .await
-            {
+                    let result = match &request {
+                        RelayRequest::ProjectMemoryTransfer { action } => {
+                            apply_project_memory_transfer_request(
+                                &memory,
+                                &mut connection_transfer,
+                                action,
+                                &request_id,
+                                protocol_version,
+                            )
+                        }
+                        _ => apply_project_memory_request(&memory, &request),
+                    };
+                    Ok((result, connection_transfer))
+                },
+            )
+            .await?;
+            match result {
                 Ok(Ok((result, connection_transfer))) => {
                     *transfer = connection_transfer;
                     match result {
@@ -437,11 +476,11 @@ pub(super) async fn project_memory_response(
             }
         }
     };
-    RelayResponseEnvelope {
+    Some(RelayResponseEnvelope {
         request_id: envelope.request_id,
         protocol_version: envelope.protocol_version,
         body,
-    }
+    })
 }
 
 #[derive(Default)]

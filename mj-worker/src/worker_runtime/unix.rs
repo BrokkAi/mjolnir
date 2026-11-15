@@ -656,8 +656,18 @@ pub(super) struct ProjectMemoryEndpoint {
     pub(super) io: Arc<tokio::sync::Semaphore>,
     #[cfg(test)]
     pub(super) io_requested: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    pub(super) io_disconnected: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    pub(super) io_block: Option<Arc<ProjectMemoryIoBlock>>,
     history: super::history::HistoryEndpoint,
     cwd: PathBuf,
+}
+
+#[cfg(test)]
+pub(super) struct ProjectMemoryIoBlock {
+    pub(super) started: tokio::sync::Notify,
+    pub(super) release: std::sync::Mutex<std::sync::mpsc::Receiver<Result<()>>>,
 }
 
 #[cfg(test)]
@@ -804,6 +814,10 @@ impl ProjectMemoryEndpoint {
             io: Arc::new(tokio::sync::Semaphore::new(1)),
             #[cfg(test)]
             io_requested: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(test)]
+            io_disconnected: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(test)]
+            io_block: None,
             history: Default::default(),
             cwd: PathBuf::new(),
         }
@@ -2458,16 +2472,29 @@ pub(super) async fn serve_client_with_memory(
                     | RelayRequest::ProjectMemoryTransfer { .. }
             ) {
                 let operation = envelope.request.method_name();
+                let cancel = CancellationToken::new();
+                let response = project_memory_response(
+                    envelope,
+                    &project_memory,
+                    &mut project_memory_transfer,
+                    cancel.clone(),
+                );
+                tokio::pin!(response);
                 // The relay protocol is strictly request-then-response per connection.
                 let response = tokio::select! {
-                    response = project_memory_response(
-                        envelope,
-                        &project_memory,
-                        &mut project_memory_transfer,
-                    ) => response,
+                    response = &mut response => response,
                     disconnected = reader.fill_buf() => {
-                        // Observe EOF while I/O is queued or running so the connection's
-                        // barrier owner below can resume harness dispatch.
+                        // Cancel queued work and reads, but keep ownership of
+                        // an admitted write until its filesystem mutation ends.
+                        cancel.cancel();
+                        #[cfg(test)]
+                        project_memory.io_disconnected.notify_one();
+                        if let Some(response) = response.await {
+                            if let RelayResponseBody::Error { error } = response.body {
+                                bail!("project-memory {operation} failed after disconnect: {}", error.message);
+                            }
+                            tracing::debug!(session_id, operation, "project-memory operation completed after disconnect");
+                        }
                         anyhow::ensure!(
                             disconnected?.is_empty(),
                             "protocol error: received a request before the project-memory response",
@@ -2475,6 +2502,7 @@ pub(super) async fn serve_client_with_memory(
                         return Ok(());
                     }
                 };
+                let Some(response) = response else { return Ok(()) };
                 write_logged_response(&mut writer, &response, &session_id, operation).await?;
                 continue;
             }

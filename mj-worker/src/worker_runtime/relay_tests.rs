@@ -5358,7 +5358,16 @@ async fn a_removed_worker_root_reports_a_fatal_failure_to_the_daemon() {
 // Hard-won: 656a36132 review: cancelling a checkpoint left its barrier held until queued project-memory I/O finished
 #[tokio::test]
 async fn client_disconnect_during_memory_io_releases_checkpoint_and_runs_queued_prompt() {
-    for pipeline in [false, true] {
+    for mode in [
+        "queued_read",
+        "pipeline",
+        "queued_write",
+        "running_read",
+        "started_write",
+        "failed_write",
+    ] {
+        let queued = matches!(mode, "queued_read" | "pipeline" | "queued_write");
+        let mutates_memory = matches!(mode, "queued_write" | "started_write" | "failed_write");
         let temp = tempfile::tempdir().unwrap();
         let relay = Arc::new(RelayCell::new(
             DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
@@ -5378,7 +5387,7 @@ async fn client_disconnect_during_memory_io_releases_checkpoint_and_runs_queued_
             })
             .unwrap();
         let (server, client) = tokio::net::UnixStream::pair().unwrap();
-        let endpoint = unix::ProjectMemoryEndpoint::new(Some(ProjectMemoryLaunchConfig {
+        let mut endpoint = unix::ProjectMemoryEndpoint::new(Some(ProjectMemoryLaunchConfig {
             history_socket: None,
             project_key: "project".into(),
             root: temp.path().join("replica"),
@@ -5386,18 +5395,35 @@ async fn client_disconnect_during_memory_io_releases_checkpoint_and_runs_queued_
             repository_roots: BTreeMap::new(),
             mcp_delivery: ProjectMemoryMcpDelivery::Acp,
         }));
-        let io = endpoint.io.clone();
-        let (io_started, started) = tokio::sync::oneshot::channel();
         let (release_io, blocked) = std::sync::mpsc::channel();
-        let blocked_io = tokio::spawn(async move {
-            unix::run_serialized_project_memory_io(&io, move || {
-                io_started.send(()).unwrap();
-                blocked.recv().unwrap();
-                Ok(())
-            })
-            .await
+        let block = Arc::new(unix::ProjectMemoryIoBlock {
+            started: Default::default(),
+            release: std::sync::Mutex::new(blocked),
         });
-        started.await.unwrap();
+        let blocked_io = if queued {
+            let io = endpoint.io.clone();
+            let block = block.clone();
+            Some(tokio::spawn(async move {
+                unix::run_serialized_project_memory_io(
+                    &io,
+                    &tokio_util::sync::CancellationToken::new(),
+                    false,
+                    move || {
+                        block.started.notify_one();
+                        block.release.lock().unwrap().recv().unwrap()?;
+                        Ok(())
+                    },
+                )
+                .await
+            }))
+        } else {
+            endpoint.io_block = Some(block.clone());
+            None
+        };
+        if queued {
+            block.started.notified().await;
+        }
+        let mut release_io = Some(release_io);
         let server_task = tokio::spawn(unix::serve_client_with_memory(
             server,
             relay.clone(),
@@ -5463,20 +5489,36 @@ async fn client_disconnect_during_memory_io_releases_checkpoint_and_runs_queued_
             serde_json::from_str(&response).unwrap();
         assert!(matches!(response.body, RelayResponseBody::Ok { .. }));
 
+        let installed = mj_core::project_memory::ProjectMemorySnapshot {
+            files: BTreeMap::from([("/MEMORY.md".into(), "installed before dispatch\n".into())]),
+        };
         let memory = RelayRequestEnvelope {
             request_id: "blocked-memory".into(),
             protocol_version: RELAY_PROTOCOL_VERSION,
-            request: RelayRequest::ProjectMemoryTransfer {
-                action: mj_core::relay::ProjectMemoryTransferAction::BeginSnapshot,
+            request: if mutates_memory {
+                RelayRequest::ReplaceProjectMemoryTree {
+                    expected_replica: mj_core::project_memory::ProjectMemorySnapshot::default()
+                        .version(),
+                    tree: mj_core::relay::ProjectMemoryWireTree::encode(
+                        installed.clone(),
+                        RELAY_PROTOCOL_VERSION,
+                    )
+                    .unwrap(),
+                }
+            } else {
+                RelayRequest::ProjectMemoryTransfer {
+                    action: mj_core::relay::ProjectMemoryTransferAction::BeginSnapshot,
+                }
             },
         };
         let mut encoded = serde_json::to_vec(&memory).unwrap();
         encoded.push(b'\n');
         writer.write_all(&encoded).await.unwrap();
-        // The request has entered the response future and is queued behind the
-        // controlled blocking operation. Keep that operation blocked until dispatch.
         endpoint.io_requested.notified().await;
-        if pipeline {
+        if !queued {
+            block.started.notified().await;
+        }
+        if mode == "pipeline" {
             writer
                 .write_all(b"unexpected pipelined request\n")
                 .await
@@ -5485,12 +5527,48 @@ async fn client_disconnect_during_memory_io_releases_checkpoint_and_runs_queued_
         writer.shutdown().await.unwrap();
         drop(writer);
         drop(lines);
+        endpoint.io_disconnected.notified().await;
+        if mutates_memory && !queued {
+            assert!(
+                !server_task.is_finished(),
+                "disconnect detached an admitted write"
+            );
+            assert_eq!(
+                relay
+                    .lock()
+                    .unwrap()
+                    .operational_state()
+                    .checkpoint_barrier
+                    .as_deref(),
+                Some("checkpoint-1")
+            );
+            assert!(matches!(
+                command_rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+            release_io
+                .take()
+                .unwrap()
+                .send(if mode == "failed_write" {
+                    Err(anyhow::anyhow!("controlled write failure"))
+                } else {
+                    Ok(())
+                })
+                .unwrap();
+        }
         let served = tokio::time::timeout(std::time::Duration::from_secs(5), server_task)
             .await
             .expect("disconnect waited for project-memory I/O")
             .unwrap();
-        if pipeline {
+        if mode == "pipeline" {
             assert!(served.unwrap_err().to_string().contains("protocol error"));
+        } else if mode == "failed_write" {
+            assert!(
+                served
+                    .unwrap_err()
+                    .to_string()
+                    .contains("controlled write failure")
+            );
         } else {
             served.unwrap();
         }
@@ -5511,9 +5589,29 @@ async fn client_disconnect_during_memory_io_releases_checkpoint_and_runs_queued_
             "prompt-1",
             "runs after disconnect",
         );
-        assert!(!blocked_io.is_finished());
-        release_io.send(()).unwrap();
-        blocked_io.await.unwrap().unwrap().unwrap();
+        if let Some(blocked_io) = blocked_io {
+            assert!(!blocked_io.is_finished());
+            release_io.take().unwrap().send(Ok(())).unwrap();
+            blocked_io.await.unwrap().unwrap().unwrap().unwrap();
+        } else if let Some(release_io) = release_io.take() {
+            // A running snapshot can finish after dispatch; wait for its permit
+            // before removing its temporary filesystem fixture.
+            release_io.send(Ok(())).unwrap();
+        }
+        drop(endpoint.io.acquire().await.unwrap());
+        let expected = if mode == "started_write" {
+            installed
+        } else {
+            Default::default()
+        };
+        for directory in ["replica", "baseline"] {
+            assert_eq!(
+                mj_core::project_memory::ProjectMemoryStore::new(temp.path().join(directory))
+                    .snapshot()
+                    .unwrap(),
+                expected
+            );
+        }
         assert!(
             relay
                 .lock()
@@ -8079,11 +8177,16 @@ async fn abandoned_project_memory_requests_do_not_overlap_blocking_io() {
     let (release_first_tx, release_first_rx) = std::sync::mpsc::channel();
     let first_gate = gate.clone();
     let first = tokio::spawn(async move {
-        unix::run_serialized_project_memory_io(&first_gate, move || {
-            first_started_tx.send(()).unwrap();
-            release_first_rx.recv().unwrap();
-            Ok(())
-        })
+        unix::run_serialized_project_memory_io(
+            &first_gate,
+            &tokio_util::sync::CancellationToken::new(),
+            false,
+            move || {
+                first_started_tx.send(()).unwrap();
+                release_first_rx.recv().unwrap();
+                Ok(())
+            },
+        )
         .await
     });
     first_started_rx.await.unwrap();
@@ -8094,10 +8197,15 @@ async fn abandoned_project_memory_requests_do_not_overlap_blocking_io() {
     let (second_started_tx, second_started_rx) = tokio::sync::oneshot::channel();
     let second_gate = gate.clone();
     let second = tokio::spawn(async move {
-        unix::run_serialized_project_memory_io(&second_gate, move || {
-            second_started_tx.send(()).unwrap();
-            Ok(())
-        })
+        unix::run_serialized_project_memory_io(
+            &second_gate,
+            &tokio_util::sync::CancellationToken::new(),
+            false,
+            move || {
+                second_started_tx.send(()).unwrap();
+                Ok(())
+            },
+        )
         .await
     });
     let mut second_started_rx = std::pin::pin!(second_started_rx);
@@ -8116,7 +8224,7 @@ async fn abandoned_project_memory_requests_do_not_overlap_blocking_io() {
         .await
         .expect("the queued request did not start after prior I/O completed")
         .unwrap();
-    second.await.unwrap().unwrap().unwrap();
+    second.await.unwrap().unwrap().unwrap().unwrap();
 }
 
 #[tokio::test]
