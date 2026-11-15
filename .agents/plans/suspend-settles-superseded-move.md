@@ -1,4 +1,3 @@
-```md
 # Suspend settles a Move it supersedes, and failed lifecycle work says why
 
 This ExecPlan is a living document. The sections `Progress`, `Surprises & Discoveries`, `Decision Log`, and `Outcomes & Retrospective` must be kept up to date as work proceeds. It is maintained in accordance with `.agents/PLANS.md` at the repository root. Part of BrokkAi/mjolnir#1542 (cases 2 and 4).
@@ -13,15 +12,21 @@ After this change, a Suspend or Close that supersedes a Move ends in a terminal 
 
 ## Progress
 
-- [x] (2026-11-15) Milestone 1: settlement of a superseded Move under the existing lifecycle owner, and Closing → terminal transitions for every failure exit, including startup recovery of an interrupted close.
-- [x] (2026-11-15) Milestone 2: the safe lifecycle-failure renderer (cause, next action, reference), reused by close, supervisor and startup failures.
-- [x] (2026-11-15) Hard-won regression passed: live/restart settlement with full-checkpoint, retained-workspace and unproven-seal cuts, plus Running destination readiness surviving Closing (15.59 s).
-- [x] (2026-11-15) Existing failure-publication regression passed (0.30 s); missing-worker startup suspension regression passed with Error and safe cause/action/reference assertions (8.03 s). rustfmt and diff whitespace checks passed.
-- [ ] Commit and review; fix substantive findings with focused checks.
-- [ ] Final full brokk-mj-controller suite and workspace clippy on the dev profile outside the sandbox.
+
+- [x] (2026-11-15) Parent-approved source settlement and safe stored failure guidance implemented; CLI acceptance behavior unchanged.
+- [x] (2026-11-15) Initial commit 59b3ff06f reviewed; all three findings fixed through atomic source/Move publication, latest-intent resolution, and complete prepared-resource cleanup.
+- [x] (2026-11-15) Final tricky-condition regression passed (17.83 s), including live/restart cuts, retained workspaces, unproven seals, atomic abort rollback, fake AWS cleanup, and real daemon recovery of ready-destination Destroying.
+- [x] (2026-11-15) Existing in-place retry regression passed (12.99 s); missing-worker safe failure and preservation checks passed.
+- [x] (2026-11-15) Full controller unit run: 2,659 passed, 27 ignored, one old HTTP message expectation corrected; its only targeted retry passed. Aggregate: 2,660 passing cases. Skipped doctest stage completed with zero cases.
+- [x] (2026-11-15) Workspace clippy with all targets and warnings denied passed on dev profile outside the sandbox (20 m 01 s). Formatting and whitespace checks passed.
+- [x] (2026-11-15) Validated fixes prepared for commit and independent review. The review tool owns the asynchronous acceptance verdict; the final sub-agent report records that verdict.
 
 
 ## Surprises & Discoveries
+
+- Full controller validation found one expected-output correction: the existing HTTP guidance case expected lowercase `reference`, while the new safe failure sentence uses `Reference`. The existing case now checks the full cause/action/reference message. Evidence: `/tmp/suspend-controller-suite.log`; only this failing case is rerun.
+
+- The ready-close regression's first run passed its terminal Stopped/checkpoint/Move-resolution assertions, then failed when it reset the fixture onto an already reclaimed placement. The reset now uses a fresh destination locator, respecting the environment ledger's ownership boundary; the focused retry is running. Evidence: `/tmp/suspend-ready-close-regression.log`.
 
 - The first test command used the directory name instead of the Cargo package name; corrected `mj-controller` to `brokk-mj-controller` before any tests ran.
 - Dev dependency compilation encountered many mbx shared C-object coordination waits; normal build storage and cargo wrappers were preserved.
@@ -31,6 +36,13 @@ After this change, a Suspend or Close that supersedes a Move ends in a terminal 
 
 
 ## Decision Log
+
+- Decision: the same startup ownership predicate also routes a cancelled pre-queue Move with a recorded ready destination in Destroying to interrupted suspension recovery. Rationale: a crash in the newly added ordinary destination teardown must resume that teardown rather than treating it as a retained source stop. Parent approved this completion-path correction, 2026-11-15.
+
+- Decision: ordinary verified close resolves a cancelled pre-queue Move in the same transaction that publishes its restored destination as Stopped, retaining the destination checkpoint. Rationale: preserving readiness must not leave Resume blocked after successful close. This is the final parent-approved scope extension, 2026-11-15.
+
+- Decision: persist restored source identity/environment binding and Move resolution in the same resumed-session transaction, reading the latest Move intent inside that transaction. Rationale: Error must never commit with an unresolved source-owning Move, and cleanup updates must not be overwritten by stale snapshots. Review findings accepted, 2026-11-15.
+- Decision: retire prepared destinations before either source settlement branch, including Created and CleanupPending states without target locators. Rationale: successful physical cleanup must precede release of durable ownership. Review finding accepted, 2026-11-15.
 
 - Decision: no proven source seal (`recovery_session` absent) means Error with every placement kept; Resume repairs in place before retrying Suspend. Do not ask a possibly sealed relay and then destroy from an older full checkpoint. Rationale: an early-cancelled Move requiring an extra step is preferable to losing newer source work. Approved by parent, 2026-11-15.
 
@@ -49,12 +61,38 @@ After this change, a Suspend or Close that supersedes a Move ends in a terminal 
 
 ## Outcomes & Retrospective
 
-Implementation and targeted regressions are complete. Review and final validation remain. No CLI wait behavior, persisted format, schema, or relay protocol changed.
+
+Cases 2 and 4 are implemented and validated. A superseded Move settles from its durable source cut without leasing an uninstalled destination worker. Source restoration and Move resolution commit together; prepared cleanup state survives resolution; verified destination teardown resolves its Move while retaining the destination checkpoint. Unproven seals keep every placement and report actionable Error. Stored failure guidance carries a safe cause, next action, and reference. No CLI wait behavior, persisted format, schema, or relay protocol changed.
+
+The initial review exposed real atomicity and resource-ownership defects, all corrected in the existing owners. The expanded regression protects those failures and the readiness completion path. Validation used isolated data and real LocalBare cleanup with fake AWS commands, not a live remote clone or harness repair smoke test. The final review verdict is reported by the review tool and in the sub-agent handback.
 
 
 ## Validation and Acceptance
 
 One Hard-won test of the Tricky-condition kind, at the real Move/close ownership boundary. It holds destination clone preparation until a Suspend cancels it, then asserts the terminal state, the preserved checkpoint and record, and the correct cleanup of placements. Mark it `// Hard-won: #1542: Suspend superseding a Move mid-clone left the session in Closing indefinitely`. Add boundary coverage for "destination ready" versus "unsealed source" only where no existing test protects it. Extend an existing lifecycle error golden if one exists. Run targeted tests per round, then the full suites of the touched crates and workspace clippy once, on the dev profile, outside the sandbox. Isolate the known hook flakes.
-```
 
 Plan update (2026-11-15): recorded approved readiness/startup/no-seal decisions and successful focused regressions; deferred full validation until the final review round.
+
+Plan update (2026-11-15): incorporated all initial review findings; expanded the existing regression with SQLite abort rollback and isolated fake AWS cleanup checks.
+
+Plan update (2026-11-15): final focused checks passed; full validation runs before the next review so its results are included in the same fix commit.
+
+
+## Repository Orientation and Verification
+
+
+`mj-controller/src/daemon/close.rs` waits for the superseded Move and invokes settlement before choosing the ordinary close route. `mj-controller/src/controller/move_session.rs` decides from the Move's durable seal and readiness fields. The existing rollback owners in `controller/move_session/transfer.rs` and `controller/resume/in_place.rs` accept the close's persistence continuation. `database/sessions.rs` restores source/session ownership or publishes terminal destination teardown, and `database/session_move.rs` resolves only the cancelled Move's restore authority in those same transactions. `daemon/session_move.rs` assigns interrupted work to exactly one startup owner. Trusted failure reasons originate at lifecycle boundaries and cross both daemon and phone result channels.
+
+Run verification from this worktree with its normal mbx cargo wrapper and normal build storage. Run every Cargo test and clippy invocation outside the restricted sandbox. The tests supply named isolated stores; do not start a test binary against the default instance.
+
+    cargo test -p brokk-mj-controller suspend_superseding_move_before_worker_install_settles_the_source
+    cargo test -p brokk-mj-controller in_place_move_failure_retains_environment_for_retry
+    cargo test -p brokk-mj-controller
+    cargo test -p brokk-mj-controller each_rejected_action_keeps_its_own_status_and_guidance
+    cargo test -p brokk-mj-controller --doc
+    cargo clippy --workspace --all-targets -- -D warnings
+    cargo fmt --all -- --check
+
+The full unit run completed with 2,659 passing tests, 27 ignored tests, and one old error-text expectation. Only that expectation was updated, and its targeted retry passed, giving 2,660 passing cases across the full run and correction. Doctests completed with zero cases. Do not repeat the full suite to reconfirm this one expectation correction. Detailed logs are in the assigned agent report directory; the final report names them.
+
+Plan update (2026-11-15): all required validation completed; the full run's sole old text expectation was corrected with a targeted retry, and workspace clippy passed without warnings.

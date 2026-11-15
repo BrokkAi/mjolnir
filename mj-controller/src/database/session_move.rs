@@ -219,6 +219,31 @@ pub(super) fn load_move_operation_with(
     Ok(json.and_then(|json| decode_move_operation(session_id, &json)))
 }
 
+/// Release only the cancelled Move's restore authority. Placement ownership
+/// has already been settled; do not adopt or recreate it while resolving.
+pub(super) fn resolve_cancelled_move_for_close_with(
+    connection: &Connection,
+    session_id: &str,
+    operation_id: &str,
+    updated_at: &str,
+) -> Result<()> {
+    let mut operation = load_move_operation_with(connection, session_id)?
+        .context("superseded Move disappeared before close publication")?;
+    ensure!(
+        operation.operation_id == operation_id
+            && operation.phase == mj_core::state::MovePhase::Cancelled
+            && !operation.queue_admission_started,
+        "superseded Move no longer permits close settlement"
+    );
+    operation.queue_admission_finished = true;
+    operation.updated_at = updated_at.to_owned();
+    connection.execute(
+        "UPDATE session_moves SET operation_json=?2 WHERE session_id=?1",
+        params![session_id, serde_json::to_string(&operation)?],
+    )?;
+    Ok(())
+}
+
 /// Decode one stored move intent, or `None` when it no longer decodes.
 ///
 /// A move intent recorded before a harness was removed keeps that harness in

@@ -7193,7 +7193,39 @@ async fn suspension_intent_survives_restart_and_missing_worker_reports_failure()
 #[tokio::test]
 async fn suspend_superseding_move_before_worker_install_settles_the_source() {
     const NAME: &str = "suspend_superseding_move_before_worker_install_settles_the_source";
-    if !in_isolated_parked_test(NAME) {
+    const CHILD: &str = "MJ_TEST_SUPERSEDED_MOVE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("home");
+        let bin = directory.path().join("bin");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        mj_core::test_hooks::install_fake_command(
+            &bin,
+            "aws",
+            r#"
+printf '%s\n' "$*" >> "$MJ_TEST_MOVE_AWS_LOG"
+case "$*" in
+  *"ec2 terminate-instances"*|*"ec2 wait instance-terminated"*) exit 0 ;;
+  *) exit 92 ;;
+esac
+"#,
+        );
+        let path = std::env::join_paths(
+            std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .isolated_store(directory.path())
+        .env(CHILD, "1")
+        .env("HOME", &home)
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("PATH", path)
+        .env("MJ_TEST_MOVE_AWS_LOG", directory.path().join("aws-calls"))
+        .run();
         return;
     }
     let _writer = crate::database::install_isolated_test_writer();
@@ -7216,7 +7248,7 @@ async fn suspend_superseding_move_before_worker_install_settles_the_source() {
             (_, true, false) => "15420000000000000000000000000006",
         };
         let source_root = root.path().join("source").join(id);
-        let destination_root = root.path().join("destination").join(id);
+        let mut destination_root = root.path().join("destination").join(id);
         std::fs::create_dir_all(&source_root).unwrap();
         std::fs::create_dir_all(&destination_root).unwrap();
         std::fs::write(
@@ -7240,7 +7272,32 @@ async fn suspend_superseding_move_before_worker_install_settles_the_source() {
         let mut operation = mj_core::state::MoveOperation {
             quota_stop_reason: None,
             quota_continuation: None,
-            prepared_destination: None,
+            prepared_destination: (retained_workspace && sealed).then(|| {
+                let mut runtime = mj_core::state::TargetRuntimeSettings::from(
+                    &mj_core::config::TargetTemplate::LocalBare,
+                );
+                runtime.kind = "aws-ec2".into();
+                runtime.connection = mj_core::state::TargetConnection::Aws {
+                    profile: "isolated-fixture".into(),
+                    region: "us-east-1".into(),
+                    ssh_user: "fixture".into(),
+                    identity_file: None,
+                    ssh_args: Vec::new(),
+                };
+                mj_core::state::PreparedMoveDestination {
+                    launch_args: Vec::new(),
+                    runtime,
+                    state: if restart {
+                        mj_core::state::PreparedDestinationState::CleanupPending {
+                            instance_id: Some(format!("i-{id}")),
+                        }
+                    } else {
+                        mj_core::state::PreparedDestinationState::Created {
+                            instance_id: format!("i-{id}"),
+                        }
+                    },
+                }
+            }),
             accepted_preparation: None,
             acknowledge_interruption: false,
             workspace_transfer: retained_workspace.then(|| {
@@ -7305,11 +7362,14 @@ async fn suspend_superseding_move_before_worker_install_settles_the_source() {
             destination.state = SessionState::Closing;
             crate::database::save_lifecycle_session(&destination).unwrap();
         }
-        if restart && !retained_workspace {
+        if restart && sealed {
             // Restore can publish Running just before Move records StartingQueue.
             // Closing and that destination's readiness must become durable together.
             destination.state = SessionState::Running;
             crate::database::save_lifecycle_session(&destination).unwrap();
+            let mut ready_operation = operation.clone();
+            ready_operation.prepared_destination = None;
+            crate::database::save_move_operation(&ready_operation).unwrap();
             let ready = test_runtime_state_loading_the_store();
             ready.prepare_suspension(id).await.unwrap();
             let saved = crate::database::load_session_record(id).unwrap().unwrap();
@@ -7330,10 +7390,89 @@ async fn suspend_superseding_move_before_worker_install_settles_the_source() {
                     .await
                     .unwrap()
             );
+            let destination_archives = root.path().join("destination-checkpoints");
+            std::fs::create_dir(&destination_archives).unwrap();
+            let destination_checkpoint =
+                crate::controller::test_support::write_checkpoint_gate_archive(
+                    &destination_archives,
+                    id,
+                    17,
+                );
+            controller.state.sessions.get_mut(id).unwrap().checkpoint =
+                Some(Box::new(destination_checkpoint.clone()));
+            crate::database::save_checkpointed_session(&controller.state.sessions[id]).unwrap();
+            // The daemon stopped after committing verified teardown, before
+            // publishing Stopped. Startup must give this cut to close, not Move.
+            controller.state.sessions.get_mut(id).unwrap().state = SessionState::Destroying;
+            crate::database::save_lifecycle_session(&controller.state.sessions[id]).unwrap();
+            let teardown = test_runtime_state_loading_the_store();
+            let teardown_move = crate::database::load_move_operation(id).unwrap().unwrap();
+            assert!(
+                !teardown
+                    .recover_moves(vec![teardown_move])
+                    .unwrap()
+                    .contains(id)
+            );
+            tokio::time::timeout(Duration::from_secs(30), teardown.suspend_session(id.into()))
+                .await
+                .unwrap()
+                .unwrap();
+            let closed = crate::database::load_session_record(id).unwrap().unwrap();
+            let resolved = crate::database::load_move_operation(id).unwrap().unwrap();
+            assert_eq!(closed.state, SessionState::Stopped);
+            assert_eq!(closed.checkpoint.as_deref(), Some(&destination_checkpoint));
+            assert!(resolved.is_resolved());
+            assert!(
+                !resolved.holds_source_environment(),
+                "Resume must accept the destination checkpoint"
+            );
             // Return to the earlier clone cut for the restart assertion below.
             crate::database::save_move_operation(&operation).unwrap();
+            destination_root = root.path().join("destination-after-close").join(id);
+            destination.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+                worker_root: destination_root.clone(),
+            }));
+            std::fs::create_dir_all(&destination_root).unwrap();
+            std::fs::write(
+                destination_root.join("clone.partial"),
+                "unfinished checkout",
+            )
+            .unwrap();
             destination.state = SessionState::Closing;
-            crate::database::save_lifecycle_session(&destination).unwrap();
+            crate::database::save_resumed_session(&destination, None).unwrap();
+        }
+        if restart && retained_workspace && sealed {
+            let connection = rusqlite::Connection::open(crate::database::database_path()).unwrap();
+            connection.execute_batch("CREATE TRIGGER reject_move_settlement BEFORE UPDATE OF operation_json ON session_moves
+                WHEN json_extract(NEW.operation_json, '$.queue_admission_finished')=1
+                BEGIN SELECT RAISE(ABORT, 'injected Move resolution failure'); END;").unwrap();
+            let source_environment =
+                crate::database::move_source_environment(&operation.operation_id)
+                    .unwrap()
+                    .unwrap();
+            let mut restored = source.clone();
+            restored.state = SessionState::Error;
+            // Hard-won: 59b3ff0: restoring the source before resolving Move blocked Resume after a crash.
+            assert!(
+                crate::database::settle_superseded_move_source(
+                    &restored,
+                    Some(&source_environment.id),
+                    &operation.operation_id
+                )
+                .is_err()
+            );
+            let unchanged = crate::database::load_session_record(id).unwrap().unwrap();
+            assert_eq!(unchanged.target, destination.target);
+            assert_eq!(unchanged.state, SessionState::Closing);
+            assert!(
+                !crate::database::load_move_operation(id)
+                    .unwrap()
+                    .unwrap()
+                    .is_resolved()
+            );
+            connection
+                .execute_batch("DROP TRIGGER reject_move_settlement")
+                .unwrap();
         }
         let state = test_runtime_state_loading_the_store();
         let cloning = Arc::new(tokio::sync::Notify::new());
@@ -7398,9 +7537,29 @@ async fn suspend_superseding_move_before_worker_install_settles_the_source() {
         assert_eq!(
             destination_root.exists(),
             !sealed,
-            "an unsealed source keeps every placement; a sealed source permits destination cleanup"
+            "an unsealed source keeps every placement; a sealed source permits destination cleanup ({id})"
         );
         let settled = crate::database::load_move_operation(id).unwrap().unwrap();
+        if retained_workspace && sealed {
+            assert!(matches!(
+                settled.prepared_destination.as_ref().unwrap().state,
+                mj_core::state::PreparedDestinationState::Released
+            ));
+            let calls =
+                std::fs::read_to_string(std::env::var_os("MJ_TEST_MOVE_AWS_LOG").unwrap()).unwrap();
+            assert!(
+                calls
+                    .lines()
+                    .any(|call| call.contains("terminate-instances") && call.contains(id)),
+                "{calls}"
+            );
+            assert!(
+                calls
+                    .lines()
+                    .any(|call| call.contains("instance-terminated") && call.contains(id)),
+                "{calls}"
+            );
+        }
         assert_eq!(settled.is_resolved(), sealed);
         assert!(
             !settled.holds_source_environment(),

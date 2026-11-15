@@ -961,22 +961,36 @@ impl Controller {
         if let Some(before_close) = before_close {
             before_close.await?;
         }
+        // Created/CleanupPending destinations may not have a target locator
+        // yet. Their durable owner must still retire them before resolution.
+        self.cleanup_prepared_move_destination(&mut operation, executor)
+            .context(super::lifecycle::LifecycleFailureReason::Cleanup)?;
         if retained_source {
             let reason =
                 anyhow::Error::new(super::lifecycle::LifecycleFailureReason::RetainedMoveSource);
+            let persist = |record: &mj_core::state::SessionRecord, environment: Option<&str>| {
+                crate::database::settle_superseded_move_source(
+                    record,
+                    environment,
+                    &operation.operation_id,
+                )
+            };
             if operation.workspace_transfer.is_some() {
-                self.rollback_move_destination(&operation, reason, executor)
+                self.rollback_move_destination_with_persist(&operation, reason, executor, persist)
                     .context(super::lifecycle::LifecycleFailureReason::Cleanup)?;
             } else {
-                self.retain_failed_in_place_move(session_id, &source, reason)?;
+                self.retain_failed_in_place_move_with_persist(
+                    session_id,
+                    &source,
+                    reason,
+                    |record| persist(record, None),
+                )?;
             }
         } else {
             // The environment ledger owns both identities, even when the
             // failed provisioning left only a partial destination checkout.
             let source_environment =
                 crate::database::move_source_environment(&operation.operation_id)?;
-            self.cleanup_prepared_move_destination(&mut operation, executor)
-                .context(super::lifecycle::LifecycleFailureReason::Cleanup)?;
             let current = self.state.sessions[session_id].clone();
             if current.target.is_some() {
                 super::environment::retire_session_environment(
@@ -1003,18 +1017,16 @@ impl Controller {
             stopped.checkpoint = operation.checkpoint.clone().map(Box::new);
             stopped.last_error = None;
             stopped.updated_at = now();
-            if let Some(environment) = source_environment {
-                crate::database::restore_resumed_session(&stopped, &environment.id)?;
-            } else {
-                crate::database::save_resumed_session(&stopped, None)?;
-            }
+            crate::database::settle_superseded_move_source(
+                &stopped,
+                source_environment
+                    .as_ref()
+                    .map(|environment| environment.id.as_str()),
+                &operation.operation_id,
+            )?;
             self.state.sessions.insert(session_id.to_owned(), stopped);
         }
-        // The source identity is durable before releasing the Move's restore
-        // authority. Resume can now repair it without a second lifecycle owner.
-        operation.queue_admission_finished = true;
-        operation.updated_at = now();
-        crate::database::save_move_operation(&operation)?;
+        // Source ownership and the Move's resolution became durable together.
         release_move_queue_hold(session_id);
         if retained_source {
             return Err(super::lifecycle::LifecycleFailureReason::RetainedMoveSource.into());

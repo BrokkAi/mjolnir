@@ -694,6 +694,7 @@ pub(crate) fn accept_resumed_session(
                 .map(|(host, size)| (host.as_str(), *size)),
             None,
             Some(&requests),
+            None,
         )
     })
 }
@@ -703,7 +704,7 @@ pub(super) fn save_resumed_session_to(
     session: &SessionRecord,
     container_size: Option<(&str, HostContainerSize)>,
 ) -> Result<()> {
-    save_resumed_session_in_environment_to(path, session, container_size, None, None)
+    save_resumed_session_in_environment_to(path, session, container_size, None, None, None)
 }
 
 pub(crate) fn restore_resumed_session(session: &SessionRecord, environment_id: &str) -> Result<()> {
@@ -716,6 +717,29 @@ pub(crate) fn restore_resumed_session(session: &SessionRecord, environment_id: &
             None,
             Some(&environment_id),
             None,
+            None,
+        )
+    })
+}
+
+/// Restore the source and release Move's restore authority in one commit.
+/// Read the latest intent here: destination retirement may have updated it.
+pub(crate) fn settle_superseded_move_source(
+    session: &SessionRecord,
+    environment_id: Option<&str>,
+    operation_id: &str,
+) -> Result<()> {
+    let session = session.clone();
+    let environment_id = environment_id.map(str::to_owned);
+    let operation_id = operation_id.to_owned();
+    submit_database_write("settle superseded Move source", move |_| {
+        save_resumed_session_in_environment_to(
+            &database_path(),
+            &session,
+            None,
+            environment_id.as_deref(),
+            None,
+            Some(&operation_id),
         )
     })
 }
@@ -726,6 +750,7 @@ fn save_resumed_session_in_environment_to(
     container_size: Option<(&str, HostContainerSize)>,
     environment_id: Option<&str>,
     requests: Option<&crate::controller::SessionResumeOptions>,
+    close_move: Option<&str>,
 ) -> Result<()> {
     validate_session_record(session)?;
     let mut connection = open(path)?;
@@ -790,6 +815,14 @@ fn save_resumed_session_in_environment_to(
     if let Some((host, size)) = container_size {
         write_host_container_size(&tx, host, size)?;
     }
+    if let Some(operation_id) = close_move {
+        super::session_move::resolve_cancelled_move_for_close_with(
+            &tx,
+            &session.id,
+            operation_id,
+            &session.updated_at,
+        )?;
+    }
     tx.commit()?;
     Ok(())
 }
@@ -801,6 +834,46 @@ pub fn save_lifecycle_session(session: &SessionRecord) -> Result<()> {
     let session = session.clone();
     submit_database_write("save_lifecycle_session", move |_| {
         save_lifecycle_session_to(&database_path(), &session)
+    })
+}
+
+/// A verified close of a restored destination also ends its cancelled Move.
+/// Check the old placement before publishing the terminal lifecycle state.
+pub(crate) fn save_closed_session(session: &SessionRecord) -> Result<()> {
+    let session = session.clone();
+    submit_database_write("save closed session", move |connection| {
+        validate_session_record(&session)?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let ready_move = if session.state == SessionState::Stopped {
+            super::session_move::load_move_operation_with(&tx, &session.id)?.filter(|operation| {
+                operation.phase == mj_core::state::MovePhase::Cancelled
+                    && !operation.queue_admission_started
+                    && operation.destination_target.is_some()
+            })
+        } else {
+            None
+        };
+        let ready_move = match ready_move {
+            Some(operation)
+                if super::state_io::read_targets(&tx, Some(&session.id))?
+                    .iter()
+                    .any(|(_, target)| Some(target) == operation.destination_target.as_ref()) =>
+            {
+                Some(operation)
+            }
+            _ => None,
+        };
+        update_lifecycle_fields(&tx, &session)?;
+        if let Some(operation) = ready_move {
+            super::session_move::resolve_cancelled_move_for_close_with(
+                &tx,
+                &session.id,
+                &operation.operation_id,
+                &session.updated_at,
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     })
 }
 

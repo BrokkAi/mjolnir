@@ -452,7 +452,11 @@ impl RuntimeState {
                     .state
                     .sessions
                     .get(&op.selection.session_id)
-                    .is_some_and(|session| session.state == SessionState::Closing)
+                    .is_some_and(|session| {
+                        session.state == SessionState::Closing
+                            || (session.state == SessionState::Destroying
+                                && op.destination_target.is_some())
+                    })
             {
                 return false;
             }

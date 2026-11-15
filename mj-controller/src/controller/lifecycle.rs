@@ -979,7 +979,7 @@ impl Controller {
             session_id,
             verified,
             executor,
-            crate::database::save_lifecycle_session,
+            crate::database::save_closed_session,
         )
     }
 
