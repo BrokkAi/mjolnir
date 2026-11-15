@@ -15,29 +15,19 @@ use std::time::{Duration, Instant};
 ///
 /// This is the same ceiling `mj` already gives a harness to open its session
 /// while a create or resume waits on it, so the daemon cannot disagree with
-/// its own launch path about when a startup has gone on too long. Everything
-/// the wait is for has already happened by the time a record says `running`,
-/// so this is a generous bound, deliberately: failing a session that would
-/// have answered is worse than the stall it replaces.
+/// its own launch path about when a startup has gone on too long. The wait
+/// begins only after this daemon hears from the worker and harness preparation
+/// has ended. A record write says nothing about startup.
 pub(super) const HARNESS_READINESS_TIMEOUT: Duration =
     crate::controller::NATIVE_SESSION_STARTUP_TIMEOUT;
 
 /// What the daemon knows about one live session at one sweep.
 pub(super) struct ReadinessObservation {
     pub(super) session_id: String,
-    /// Whether the daemon holds a relay snapshot whose worker reports a usable
-    /// native session.
-    ///
-    /// Empty `config_options` alone is deliberately not the test: a harness is
-    /// allowed to offer no settings, and failing those sessions would be worse
-    /// than the stall this timer ends. A worker that has opened its ACP
-    /// session has published its configuration with it.
-    pub(super) harness_ready: bool,
-    /// How long ago the durable record was last written, when that can be
-    /// read. A record that has not been written since it started running
-    /// carries the moment the session reported ready, which is what the wait
-    /// is measured from.
-    pub(super) record_age: Option<Duration>,
+    /// The worker state this daemon has actually received. No snapshot means
+    /// startup is unknown, regardless of how recently the record was written.
+    pub(super) operational:
+        Option<mj_core::snapshot_map::SharedSnapshot<mj_core::relay::RelayOperationalState>>,
     /// The durable record's `updated_at`, so the write that fails the session
     /// can refuse to act on a record that has moved since.
     pub(super) updated_at: String,
@@ -59,7 +49,7 @@ impl UnreadySession {
     /// The sentence stored on the record and shown to the person.
     pub(super) fn cause(&self) -> String {
         let mut cause = format!(
-            "the harness never advertised its configuration within {}s, so this session cannot be used; destroy it and create a replacement",
+            "the daemon did not observe a usable harness within {}s after hearing from the worker; use Restart agent to retry in the existing environment",
             self.waited.as_secs()
         );
         if let Some(detail) = &self.detail {
@@ -71,7 +61,7 @@ impl UnreadySession {
 }
 
 struct Waiting {
-    /// When the session reported ready, as far as the daemon can tell.
+    /// When this daemon first observed the worker waiting for its harness.
     since: Instant,
     reported: bool,
 }
@@ -102,33 +92,29 @@ impl HarnessReadinessWatch {
         });
         let mut unready = Vec::new();
         for observation in observations {
-            if observation.harness_ready {
+            let Some(operational) = observation.operational else {
+                self.waiting.remove(&observation.session_id);
+                continue;
+            };
+            // Like the launch path's NativeStartupDeadline, wait until harness
+            // preparation ends. A restarted daemon starts with no knowledge of
+            // this worker; neither a record write nor wall time can supply it.
+            if operational.native_session_is_ready()
+                || matches!(
+                    operational.harness_preparation,
+                    Some(mj_core::relay::HarnessPreparation::Preparing { .. })
+                )
+            {
                 self.waiting.remove(&observation.session_id);
                 continue;
             }
-            if !self.waiting.contains_key(&observation.session_id) {
-                // Only a session that reported ready recently is armed. A
-                // daemon that has just restarted onto sessions it did not
-                // start must not fail them because their worker is behind an
-                // outage it has been told nothing about.
-                let Some(age) = observation
-                    .record_age
-                    .filter(|age| *age < HARNESS_READINESS_TIMEOUT)
-                else {
-                    continue;
-                };
-                self.waiting.insert(
-                    observation.session_id.clone(),
-                    Waiting {
-                        since: now.checked_sub(age).unwrap_or(now),
-                        reported: false,
-                    },
-                );
-            }
             let waiting = self
                 .waiting
-                .get_mut(&observation.session_id)
-                .expect("the session was armed above");
+                .entry(observation.session_id.clone())
+                .or_insert(Waiting {
+                    since: now,
+                    reported: false,
+                });
             let waited = now.saturating_duration_since(waiting.since);
             if waiting.reported || waited < HARNESS_READINESS_TIMEOUT {
                 continue;
@@ -150,10 +136,12 @@ mod tests {
     use super::*;
 
     fn observation(session_id: &str, harness_ready: bool) -> ReadinessObservation {
+        let mut operational =
+            mj_core::relay::RelaySnapshot::new(session_id.to_owned()).operational_state();
+        operational.native_session_id = harness_ready.then(|| "native-session".to_owned());
         ReadinessObservation {
             session_id: session_id.to_owned(),
-            harness_ready,
-            record_age: Some(Duration::ZERO),
+            operational: Some(operational.into()),
             updated_at: "2026-09-18T15:28:35Z".to_owned(),
             detail: None,
         }
@@ -198,12 +186,13 @@ mod tests {
         );
         assert!(
             unready[0].cause().starts_with(&format!(
-                "the harness never advertised its configuration within {}s",
+                "the daemon did not observe a usable harness within {}s",
                 HARNESS_READINESS_TIMEOUT.as_secs()
             )),
             "{}",
             unready[0].cause()
         );
+        assert!(unready[0].cause().contains("use Restart agent"));
         assert!(
             unready[0].cause().contains("relay worker is unreachable"),
             "the reason carries what the daemon last saw"
@@ -249,57 +238,49 @@ mod tests {
         );
     }
 
+    // Hard-won: 07d2 handoff: a recent unrelated record write armed the readiness timer and a fresh daemon failed a live session
     #[test]
-    fn the_wait_is_measured_from_the_moment_the_session_reported_ready() {
+    fn a_recent_record_write_cannot_arm_a_new_daemon_without_a_worker_snapshot() {
         let mut watch = HarnessReadinessWatch::default();
         let start = Instant::now();
-        let already_waited = HARNESS_READINESS_TIMEOUT - Duration::from_secs(60);
-
+        // A failed Move just wrote this timestamp. No worker snapshot has
+        // arrived at this daemon, so there is no evidence of harness startup.
+        let recent_write = chrono::Utc::now().to_rfc3339();
+        for elapsed in [Duration::ZERO, HARNESS_READINESS_TIMEOUT * 2] {
+            assert!(
+                watch
+                    .observe(
+                        start + elapsed,
+                        vec![ReadinessObservation {
+                            operational: None,
+                            updated_at: recent_write.clone(),
+                            ..observation("session-1", false)
+                        }]
+                    )
+                    .is_empty()
+            );
+        }
+        let heard_worker = start + HARNESS_READINESS_TIMEOUT * 2;
         assert!(
             watch
-                .observe(
-                    start,
-                    vec![ReadinessObservation {
-                        record_age: Some(already_waited),
-                        ..observation("session-1", false)
-                    }],
-                )
+                .observe(heard_worker, vec![observation("session-1", false)])
                 .is_empty()
         );
-
-        let unready = watch.observe(
-            start + Duration::from_secs(60),
-            vec![ReadinessObservation {
-                record_age: Some(already_waited + Duration::from_secs(60)),
-                ..observation("session-1", false)
-            }],
-        );
-        assert_eq!(unready.len(), 1, "the record's own clock starts the wait");
-        assert_eq!(unready[0].waited, HARNESS_READINESS_TIMEOUT);
-    }
-
-    #[test]
-    fn a_session_the_daemon_did_not_see_start_is_left_alone() {
-        let mut watch = HarnessReadinessWatch::default();
-        let start = Instant::now();
-        let stale = ReadinessObservation {
-            record_age: Some(HARNESS_READINESS_TIMEOUT + Duration::from_secs(1)),
-            ..observation("session-1", false)
-        };
-
-        assert!(watch.observe(start, vec![stale]).is_empty());
         assert!(
             watch
                 .observe(
-                    start + HARNESS_READINESS_TIMEOUT * 2,
-                    vec![ReadinessObservation {
-                        record_age: Some(HARNESS_READINESS_TIMEOUT * 3),
-                        ..observation("session-1", false)
-                    }],
+                    heard_worker + HARNESS_READINESS_TIMEOUT - Duration::from_secs(1),
+                    vec![observation("session-1", false)],
                 )
                 .is_empty(),
-            "a session that was already running before the daemon saw it keeps reconnecting"
+            "the full wait starts only after hearing from the worker"
         );
+        let unready = watch.observe(
+            heard_worker + HARNESS_READINESS_TIMEOUT,
+            vec![observation("session-1", false)],
+        );
+        assert_eq!(unready.len(), 1);
+        assert_eq!(unready[0].waited, HARNESS_READINESS_TIMEOUT);
     }
 
     #[test]
@@ -312,16 +293,39 @@ mod tests {
                 .observe(start, vec![observation("session-1", false)])
                 .is_empty()
         );
-        // A lifecycle operation owns the session, so it is not observed.
+        // Worker preparation resets the startup wait, as in the launch path.
+        let mut preparing = observation("session-1", false);
+        preparing.operational.as_mut().unwrap().harness_preparation =
+            Some(mj_core::relay::HarnessPreparation::Preparing {
+                step: "Downloading".to_owned(),
+                since_ms: 0,
+            });
         assert!(
             watch
-                .observe(start + Duration::from_secs(30), Vec::new())
+                .observe(start + HARNESS_READINESS_TIMEOUT, vec![preparing])
                 .is_empty()
         );
         assert!(
             watch
                 .observe(
-                    start + HARNESS_READINESS_TIMEOUT,
+                    start + HARNESS_READINESS_TIMEOUT + Duration::from_secs(10),
+                    vec![observation("session-1", false)],
+                )
+                .is_empty()
+        );
+        // A lifecycle operation owns the session, so it is not observed.
+        assert!(
+            watch
+                .observe(
+                    start + HARNESS_READINESS_TIMEOUT + Duration::from_secs(30),
+                    Vec::new()
+                )
+                .is_empty()
+        );
+        assert!(
+            watch
+                .observe(
+                    start + HARNESS_READINESS_TIMEOUT * 3,
                     vec![observation("session-1", false)],
                 )
                 .is_empty(),

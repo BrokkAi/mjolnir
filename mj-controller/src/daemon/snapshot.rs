@@ -202,7 +202,6 @@ impl RuntimeState {
     /// this belongs on the daemon's background tick. The write it leads to
     /// does not; see [`Self::fail_unready_session`].
     pub(super) fn sessions_without_a_usable_harness(&self) -> Vec<UnreadySession> {
-        let now = chrono::Utc::now();
         let observations = {
             let owner = self.owner();
             owner
@@ -220,12 +219,7 @@ impl RuntimeState {
                 .map(|record| {
                     let view = owner.sessions.get(&record.id);
                     ReadinessObservation {
-                        harness_ready: view.is_some_and(|view| {
-                            view.operational.as_deref().is_some_and(
-                                mj_core::relay::RelayOperationalState::native_session_is_ready,
-                            )
-                        }),
-                        record_age: record_age(&record.updated_at, now),
+                        operational: view.and_then(|view| view.operational.clone()),
                         updated_at: record.updated_at.clone(),
                         detail: view
                             .and_then(|view| view.error.as_ref())
@@ -388,18 +382,6 @@ impl RuntimeState {
         self.publish_revision();
         Ok(())
     }
-}
-
-/// How long ago a durable record was written, when its timestamp can be read.
-///
-/// A record written in the future — a clock that moved backwards, a store
-/// written by another host — reports no age rather than a wrapped one, so the
-/// readiness wait leaves those sessions alone.
-fn record_age(updated_at: &str, now: chrono::DateTime<chrono::Utc>) -> Option<Duration> {
-    let written = chrono::DateTime::parse_from_rfc3339(updated_at).ok()?;
-    now.signed_duration_since(written.with_timezone(&chrono::Utc))
-        .to_std()
-        .ok()
 }
 
 impl RuntimeState {
