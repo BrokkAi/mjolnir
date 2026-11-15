@@ -608,4 +608,5 @@ python3 pareto.py verify5 --exclude DSF/low --bootstrap 300 \
   --sessions Sol/medium=2,Terra/xhigh=2,Sol/xhigh=2,Greptile/base=1,Greptile/plus=1,Ember/xhigh=1,Gemini/high=1,Kimi/high=1
 python3 compare.py verify5 Terra/xhigh+Terra/xhigh Terra/xhigh+Terra/xhigh+Gemini/high
 python3 knownbug.py verify5 results/known-bug.jsonl --groups-from verify2 --exclude DSF/low
+uv run --with matplotlib python3 plot_pareto.py <out-dir>         # latency vs. findings chart, both frontiers + Greptile
 ```
