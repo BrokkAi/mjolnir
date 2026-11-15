@@ -466,6 +466,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn refusal(result: Result<FetchedPath, SessionExportError>) -> String {
         match result {
             Err(SessionExportError::Refused(reason)) => reason,
