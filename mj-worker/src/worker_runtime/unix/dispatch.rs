@@ -303,12 +303,20 @@ async fn run_relay_coordinator(
         let stop_at = stop_timer.map_or_else(tokio::time::Instant::now, |(_, wake)| wake);
         tokio::select! {
             biased;
-            _ = tokio::time::sleep_until(startup_deadline.unwrap_or_else(tokio::time::Instant::now)), if startup_deadline.is_some() => {
+            _ = tokio::time::sleep_until(startup_deadline.unwrap_or_else(tokio::time::Instant::now)), if startup_deadline.is_some() && !held => {
+                let cause = format!("the harness did not open its session within {}s; use Restart agent to retry in the existing environment", mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT.as_secs());
+                {
+                    let mut state = relay.lock().expect("relay state lock poisoned");
+                    // A control request may have acquired a cut since `held`
+                    // was observed. Decide and journal under its owner's lock.
+                    if state.worker_writes_held() || state.close_pending() {
+                        continue;
+                    }
+                    state.set_acp_ready(false);
+                    interrupt_in_flight_locked(&mut state, &mut in_flight, &cause)?;
+                }
                 let startup = startup.as_mut().expect("guarded startup deadline");
                 *startup.idle_dispatch_wakes.lock().expect("idle dispatch wake lock poisoned") = Some(dispatch_wakes);
-                relay.lock().expect("relay state lock poisoned").set_acp_ready(false);
-                let cause = format!("the harness did not open its session within {}s; use Restart agent to retry in the existing environment", mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT.as_secs());
-                interrupt_in_flight(&relay, &mut in_flight, &cause)?;
                 startup.fail(cause);
                 // No more runtime events can be accepted after failure. The
                 // runtime owner stops ACP and retains the failed relay.
@@ -1144,6 +1152,14 @@ pub(crate) fn interrupt_in_flight(
     message: &str,
 ) -> Result<()> {
     let mut relay = relay.lock().expect("relay state lock poisoned");
+    interrupt_in_flight_locked(&mut relay, in_flight, message)
+}
+
+fn interrupt_in_flight_locked(
+    relay: &mut DurableRelay,
+    in_flight: &mut BTreeMap<String, RelayCommand>,
+    message: &str,
+) -> Result<()> {
     relay.record_observation(RelayObservation::SessionFault {
         reason: mj_core::event_outcome::OutcomeReason::RuntimeUnavailable,
         message: message.into(),
@@ -1560,11 +1576,31 @@ mod verdict_tests;
 mod startup_tests {
     use super::*;
 
+    fn submit(relay: &Arc<RelayCell>, command_id: &str, command: RelayCommand) {
+        let response = relay
+            .lock()
+            .unwrap()
+            .handle(mj_core::relay::RelayRequestEnvelope {
+                request_id: command_id.into(),
+                protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+                request: mj_core::relay::RelayRequest::Submit {
+                    command_id: command_id.into(),
+                    command,
+                },
+            });
+        assert!(matches!(
+            response.body,
+            mj_core::relay::RelayResponseBody::Ok {
+                payload: mj_core::relay::RelayResponsePayload::Accepted { .. }
+            }
+        ));
+    }
+
     // Hard-won: 4cb21a5d8 review: the actor's startup deadline could fail a harness that became ready during its write
     #[tokio::test(start_paused = true)]
     async fn harness_startup_ready_and_expiry_have_one_outcome() {
         let allowance = mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT;
-        for offset in [-2_i64, -1, 0, 1] {
+        for offset in [-2_i64, -1, 0, 1, 2] {
             let ready_before_deadline = offset < 0;
             let temp = tempfile::tempdir().unwrap();
             let relay = Arc::new(RelayCell::new(
@@ -1574,6 +1610,28 @@ mod startup_tests {
                 .lock()
                 .unwrap()
                 .set_turn_verdict_harness(HarnessKind::Codex);
+            let checkpoint = if offset == 2 {
+                submit(
+                    &relay,
+                    "startup-cut",
+                    RelayCommand::BeginCheckpoint { reason: None },
+                );
+                relay
+                    .lock()
+                    .unwrap()
+                    .dispatch_preparation_lifecycle()
+                    .unwrap();
+                Some(
+                    relay
+                        .lock()
+                        .unwrap()
+                        .operational_state()
+                        .checkpoint_ready
+                        .unwrap(),
+                )
+            } else {
+                None
+            };
             let (status, preparation) = watch::channel(PreparationSnapshot {
                 state: Some(mj_core::relay::HarnessPreparation::Started),
                 services: None,
@@ -1597,22 +1655,24 @@ mod startup_tests {
             .await;
             // Queue both readiness events at the boundary before the owner is
             // polled. Its expiry branch wins a tie; events cannot revive it.
-            events
-                .send(RuntimeEvent::SessionStarted {
-                    native_session_id: "native".into(),
-                    resumed: false,
-                    execution_mode: None,
-                    native_continuity_lost: false,
-                    replaced_unused_native_session_id: None,
-                })
-                .await
-                .unwrap();
-            events
-                .send(RuntimeEvent::SessionConfigured {
-                    config_options: Vec::new(),
-                })
-                .await
-                .unwrap();
+            if checkpoint.is_none() {
+                events
+                    .send(RuntimeEvent::SessionStarted {
+                        native_session_id: "native".into(),
+                        resumed: false,
+                        execution_mode: None,
+                        native_continuity_lost: false,
+                        replaced_unused_native_session_id: None,
+                    })
+                    .await
+                    .unwrap();
+                events
+                    .send(RuntimeEvent::SessionConfigured {
+                        config_options: Vec::new(),
+                    })
+                    .await
+                    .unwrap();
+            }
             let coordinator = tokio::spawn(run_relay_coordinator(
                 relay.clone(),
                 received,
@@ -1624,7 +1684,42 @@ mod startup_tests {
                 None,
                 Some(startup),
             ));
-            if ready_before_deadline {
+            if let Some(cut) = checkpoint {
+                // Ensure the owner has polled the overdue timer and consumed
+                // an event whose warning must wait behind the same cut.
+                events
+                    .send(RuntimeEvent::Connected {
+                        agent_name: None,
+                        agent_version: None,
+                        protocol_version: None,
+                        capabilities: None,
+                        agent_info: None,
+                        steering_supported: None,
+                    })
+                    .await
+                    .unwrap();
+                while events.capacity() < 16 && !coordinator.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+                let state = relay.lock().unwrap();
+                // Hard-won: 8d32fbf09 review: expiry wrote faults through a held checkpoint cut.
+                assert!(state.worker_writes_held());
+                assert_eq!(state.latest_ordinal(), cut.ordinal);
+                assert!(matches!(
+                    preparation.borrow().state,
+                    Some(mj_core::relay::HarnessPreparation::Started)
+                ));
+                assert!(!coordinator.is_finished());
+                drop(state);
+                submit(
+                    &relay,
+                    "release-startup-cut",
+                    RelayCommand::CompleteCheckpoint {
+                        barrier_command_id: "startup-cut".into(),
+                    },
+                );
+                wake.send(()).await.unwrap();
+            } else if ready_before_deadline {
                 while !relay
                     .lock()
                     .unwrap()
@@ -1642,22 +1737,7 @@ mod startup_tests {
                 ));
                 assert!(!coordinator.is_finished());
                 if offset == -2 {
-                    let response =
-                        relay
-                            .lock()
-                            .unwrap()
-                            .handle(mj_core::relay::RelayRequestEnvelope {
-                                request_id: "submit-clear".into(),
-                                protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
-                                request: mj_core::relay::RelayRequest::Submit {
-                                    command_id: "clear-startup".into(),
-                                    command: RelayCommand::ClearContext,
-                                },
-                            });
-                    assert!(matches!(
-                        response.body,
-                        mj_core::relay::RelayResponseBody::Ok { .. }
-                    ));
+                    submit(&relay, "clear-startup", RelayCommand::ClearContext);
                     wake.send(()).await.unwrap();
                     assert!(matches!(requests.recv().await,
                         Some(CommandRequest::ClearContext { request_id }) if request_id == "clear-startup"));
