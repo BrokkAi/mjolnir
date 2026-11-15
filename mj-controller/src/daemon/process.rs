@@ -173,8 +173,6 @@ pub(super) async fn run_daemon_runtime(
     let manager = crate::session_manager::spawn_session_manager_observed(Some(delegation_tx))?;
     manager.control.update_model_policies(&controller);
     let manager_targets = manager.targets;
-    manager_targets.send_replace(dashboard_worker_targets(&controller));
-    log_relay_actors_launched(&manager_targets.borrow());
     let manager_updates = manager.updates;
     let manager_control = manager.control.clone();
     let manager_shutdown = manager.shutdown;
@@ -196,6 +194,19 @@ pub(super) async fn run_daemon_runtime(
         worker_upgrades.observer(),
         workspaces,
     ));
+    let readiness_runtime = Arc::downgrade(&state);
+    manager_control.install_harness_readiness_handler(Arc::new(move |id, timeout| {
+        let runtime = readiness_runtime.clone();
+        Box::pin(async move {
+            let runtime = runtime
+                .upgrade()
+                .context("daemon stopped before readiness failure could be applied")?;
+            runtime.fail_unready_session(id, timeout).await
+        })
+    }));
+    // Install the bounded write handler before any worker can arm its clock.
+    manager_targets.send_replace(dashboard_worker_targets(&controller));
+    log_relay_actors_launched(&manager_targets.borrow());
     state
         .reviewer_runtime
         .set(Arc::downgrade(&state))
@@ -777,16 +788,6 @@ pub(super) async fn run_daemon_runtime(
                     // continuation service and closes this channel, so a
                     // closed channel is not evidence of a failure.
                     let Some(update) = update? else { break };
-                    if let Some(timeout) = update.harness_timeout
-                        && let Some(observed_updated_at) = state.harness_timeout_record(&update.session_id)
-                        && timeout.observed_updated_at == observed_updated_at
-                    {
-                        let state = state.clone();
-                        let session_id = update.session_id.clone();
-                        client_tasks.spawn(async move {
-                            state.fail_unready_session(session_id, timeout, observed_updated_at).await;
-                        });
-                    }
                     if let Some(raw) = update.raw_observation.as_ref()
                         && raw.native_session_is_ready()
                         && let Some(build) = update.view.snapshot.as_ref().and_then(|snapshot| snapshot.worker_build.clone())

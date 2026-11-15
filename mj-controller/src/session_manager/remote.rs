@@ -225,7 +225,6 @@ pub(super) fn spawn_remote_actor(
         },
     );
     updates.send(SessionManagerUpdate {
-        harness_timeout: None,
         session_id,
         view,
         raw_observation: None,
@@ -323,6 +322,7 @@ pub fn spawn_remote_session_manager() -> Result<RemoteSessionManagerChannels> {
     Ok(RemoteSessionManagerChannels {
         targets: targets_tx,
         control: SessionManagerControl {
+            readiness_failure: Default::default(),
             model_policies: watch::channel(BTreeMap::new()).0,
             commands: commands_tx,
             session_cpu: watch::channel(SessionCpuTable::new()).1,

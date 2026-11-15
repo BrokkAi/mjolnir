@@ -217,34 +217,36 @@ impl RuntimeState {
         &self,
         session_id: String,
         timeout: crate::session_manager::HarnessReadinessTimeout,
-        observed_updated_at: String,
-    ) {
+    ) -> Result<bool> {
+        let _activity = crate::upgrade::activity_unless_draining("harness readiness failure")?;
+        if self.harness_timeout_record(&session_id).as_deref()
+            != Some(timeout.observed_updated_at.as_str())
+        {
+            return Ok(false);
+        }
         let cause = timeout.cause();
+        let observed_updated_at = timeout.observed_updated_at.clone();
         tracing::warn!(%session_id, waited_seconds = timeout.waited.as_secs(), "{cause}");
         let applied = blocking({
             let session_id = session_id.clone();
             let cause = cause.clone();
+            let activity = _activity.clone();
             move || {
+                let _activity = activity;
                 let mut controller = Controller::load()?;
                 controller.fail_unready_session(&session_id, &cause, &observed_updated_at)
             }
         })
         .await;
-        match applied {
-            Ok(true) => {
-                if let Err(error) = self.reload_controller().await {
-                    tracing::warn!(%session_id, error = format!("{error:#}"), "could not reload state after failing an unready session");
-                }
-                self.push_notice(&session_id, cause);
-                self.publish_revision();
+        let applied = applied?;
+        if applied {
+            if let Err(error) = self.reload_controller().await {
+                tracing::warn!(%session_id, error = format!("{error:#}"), "could not reload state after failing an unready session");
             }
-            Ok(false) => {}
-            Err(error) => tracing::warn!(
-                %session_id,
-                error = format!("{error:#}"),
-                "could not record that a session's harness never became usable"
-            ),
+            self.push_notice(&session_id, cause);
+            self.publish_revision();
         }
+        Ok(applied)
     }
 
     pub(super) async fn publish_session(

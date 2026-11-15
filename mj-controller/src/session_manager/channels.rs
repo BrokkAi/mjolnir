@@ -2,7 +2,6 @@ use super::*;
 
 #[derive(Debug, Clone)]
 pub struct SessionManagerUpdate {
-    pub(crate) harness_timeout: Option<HarnessReadinessTimeout>,
     /// Daemon-only cache input captured before model-policy projection. Never sent on the wire.
     pub raw_observation: Option<mj_core::snapshot_map::SharedSnapshot<RelayOperationalState>>,
     pub session_id: String,
@@ -10,13 +9,12 @@ pub struct SessionManagerUpdate {
 }
 
 impl SessionManagerUpdate {
-    /// A client-surface view update, without actor-owned timeout evidence.
+    /// A view update from a client surface.
     pub fn from_view(session_id: String, view: ManagedSessionView) -> Self {
         Self {
             session_id,
             view,
             raw_observation: None,
-            harness_timeout: None,
         }
     }
 }
@@ -337,6 +335,7 @@ impl Drop for SessionManagerShutdown {
 
 #[derive(Clone)]
 pub(crate) struct CoalescedUpdateSender {
+    pub(super) readiness_failure: Arc<std::sync::OnceLock<HarnessReadinessFailureHandler>>,
     // Continuation checks can hold a view; keep its newest raw cache input until publication.
     pub(crate) pending_observations:
         Arc<Mutex<BTreeMap<String, mj_core::snapshot_map::SharedSnapshot<RelayOperationalState>>>>,
@@ -404,11 +403,6 @@ impl UpdateMailbox {
             && let Some(previous) = self.pending.get_mut(&session_id)
         {
             pending.update.raw_observation = previous.update.raw_observation.take();
-        }
-        if pending.update.harness_timeout.is_none()
-            && let Some(previous) = self.pending.get_mut(&session_id)
-        {
-            pending.update.harness_timeout = previous.update.harness_timeout.take();
         }
         // Replacing a pending view keeps its place; a delivered session's
         // next view joins the tail so it cannot overtake waiting sessions.
@@ -570,6 +564,7 @@ pub(crate) fn coalesced_update_channel() -> (CoalescedUpdateSender, SessionManag
     let (wake_tx, wake_rx) = mpsc::channel(1);
     (
         CoalescedUpdateSender {
+            readiness_failure: Default::default(),
             pending_observations: Default::default(),
             last_raw_options: Default::default(),
             model_policies: watch::channel(BTreeMap::new()).0,

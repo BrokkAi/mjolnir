@@ -19,19 +19,34 @@ impl HarnessReadinessTimeout {
         )
     }
 }
+pub(crate) type HarnessReadinessFailureHandler = std::sync::Arc<
+    dyn Fn(
+            String,
+            HarnessReadinessTimeout,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<bool>> + Send>>
+        + Send
+        + Sync,
+>;
+
 struct Waiting {
     since: Instant,
-    reported: bool,
 }
 enum HarnessStartupWait {
     Legacy(Waiting),
     Started(Waiting),
+    Applied,
 }
 #[derive(Default)]
 pub(super) struct HarnessReadinessWatch {
     waiting: Option<HarnessStartupWait>,
 }
 impl HarnessReadinessWatch {
+    /// Called only after the guarded write was accepted inside the actor loop.
+    pub(super) fn applied(&mut self) {
+        self.waiting = Some(HarnessStartupWait::Applied);
+    }
+
     /// Only the owning actor calls this after successful hello/sync, including
     /// unchanged syncs. None clears contact immediately, independently of the
     /// delayed display status. Never run a clock decision on a cached view.
@@ -55,10 +70,7 @@ impl HarnessReadinessWatch {
         }
         let waiting = self
             .waiting
-            .get_or_insert(HarnessStartupWait::Legacy(Waiting {
-                since: now,
-                reported: false,
-            }));
+            .get_or_insert(HarnessStartupWait::Legacy(Waiting { since: now }));
         // Match the launch path: an observed harness start gets its own full
         // allowance, rather than spending the worker's earlier legacy wait.
         if matches!(
@@ -66,19 +78,16 @@ impl HarnessReadinessWatch {
             Some(HarnessPreparation::Started)
         ) && matches!(waiting, HarnessStartupWait::Legacy(_))
         {
-            *waiting = HarnessStartupWait::Started(Waiting {
-                since: now,
-                reported: false,
-            });
+            *waiting = HarnessStartupWait::Started(Waiting { since: now });
         }
         let timer = match waiting {
             HarnessStartupWait::Legacy(timer) | HarnessStartupWait::Started(timer) => timer,
+            HarnessStartupWait::Applied => return None,
         };
         let waited = now.saturating_duration_since(timer.since);
-        if timer.reported || waited < HARNESS_READINESS_TIMEOUT {
+        if waited < HARNESS_READINESS_TIMEOUT {
             return None;
         }
-        timer.reported = true;
         Some(waited)
     }
 }
@@ -93,8 +102,9 @@ mod tests {
         state
     }
 
+    // Hard-won: b2b519c3f review: a rejected timeout write consumed the wait permanently.
     #[test]
-    fn an_unready_harness_expires_once_across_unchanged_syncs() {
+    fn an_unready_harness_retries_rejected_writes_until_applied() {
         let mut watch = HarnessReadinessWatch::default();
         let start = Instant::now();
         let state = snapshot(false);
@@ -111,6 +121,17 @@ mod tests {
             .observe(start + HARNESS_READINESS_TIMEOUT, Some(&state))
             .unwrap();
         assert_eq!(timeout, HARNESS_READINESS_TIMEOUT);
+        // A rejected write or store error leaves the wait eligible, but only
+        // a later successful sync calls observe again.
+        assert!(
+            watch
+                .observe(
+                    start + HARNESS_READINESS_TIMEOUT + Duration::from_secs(1),
+                    Some(&state)
+                )
+                .is_some()
+        );
+        watch.applied();
         assert!(
             watch
                 .observe(start + HARNESS_READINESS_TIMEOUT * 2, Some(&state))

@@ -65,8 +65,8 @@ fn storage_wait_detail(problem: &str, error: &anyhow::Error) -> String {
     )
 }
 
-/// Bind the actor's timeout evidence to the durable lifecycle revision before
-/// it enters the coalesced feed. A later lifecycle write invalidates the event.
+/// Bind the actor's decision to the durable lifecycle revision before applying
+/// it inside the actor loop. A later lifecycle write rejects the transition.
 async fn capture_harness_timeout(
     target: &RelaySessionTarget,
     waited: Duration,
@@ -339,15 +339,22 @@ pub(super) async fn run_session_actor(
                 match result {
                     Ok((snapshot, observed_at)) => {
                         failures = 0;
-                        let timeout = harness_readiness.observe(
-                            observed_at,
-                            Some(
-                                connection
-                                    .as_ref()
-                                    .expect("synced connection")
-                                    .operational(),
-                            ),
-                        );
+                        let timeout = if updates.readiness_failure.get().is_some() {
+                            harness_readiness.observe(
+                                observed_at,
+                                Some(
+                                    connection
+                                        .as_ref()
+                                        .expect("synced connection")
+                                        .operational(),
+                                ),
+                            )
+                        } else {
+                            tracing::warn!(session_id = %target.session_id,
+                                "readiness failure handler is missing; waiting for a later successful sync");
+                            harness_readiness.observe(observed_at, None);
+                            None
+                        };
                         storage_wait = None;
                         schedule.after(sync_delay(connection.as_ref()));
                         if let Some(snapshot) = snapshot {
@@ -364,18 +371,29 @@ pub(super) async fn run_session_actor(
                             );
                         }
                         if let Some(waited) = timeout {
-                            match capture_harness_timeout(&target, waited).await {
-                                Ok(Some(timeout)) => updates.send(SessionManagerUpdate {
-                                    harness_timeout: Some(timeout),
-                                    raw_observation: None,
-                                    session_id: target.session_id.clone(),
-                                    view: view_tx.borrow().clone(),
-                                }),
-                                Ok(None) => {}
+                            let result = match capture_harness_timeout(&target, waited).await {
+                                Ok(Some(timeout)) => {
+                                    // Installed once before actors start. Await the guarded
+                                    // write here: no ready observation can overtake it.
+                                    match updates.readiness_failure.get() {
+                                        Some(handler) => {
+                                            handler(target.session_id.clone(), timeout).await
+                                        }
+                                        None => Err(anyhow::anyhow!(
+                                            "readiness failure handler is missing"
+                                        )),
+                                    }
+                                }
+                                Ok(None) => Ok(false),
+                                Err(error) => Err(error),
+                            };
+                            match result {
+                                Ok(true) => harness_readiness.applied(),
+                                Ok(false) => tracing::warn!(session_id = %target.session_id,
+                                    "harness readiness failure rejected by lifecycle or record revision; retrying after a later successful sync"),
                                 Err(error) => {
-                                    harness_readiness.observe(tokio::time::Instant::now(), None);
-                                    tracing::warn!(session_id = %target.session_id, %error,
-                                        "could not capture harness timeout; restarting the readiness wait");
+                                    tracing::warn!(session_id = %target.session_id, error = format!("{error:#}"),
+                                    "could not apply harness readiness failure; retrying after a later successful sync")
                                 }
                             }
                         }
@@ -1852,7 +1870,6 @@ pub(super) fn publish_view(
     });
     if changed || raw_observation.is_some() {
         updates.send(SessionManagerUpdate {
-            harness_timeout: None,
             raw_observation,
             session_id: session_id.to_owned(),
             view,
