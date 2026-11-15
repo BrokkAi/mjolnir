@@ -456,11 +456,7 @@ pub(super) fn import_profile_id(
     let Some(requested) = requested else {
         return Ok(default_profile(config, harness, home));
     };
-    let profile = config
-        .profiles
-        .get(requested)
-        .with_context(|| format!("unknown import profile {requested:?}"))?;
-    ensure!(profile.enabled, "import profile {requested:?} is disabled");
+    let profile = config.named_profile(requested)?;
     ensure!(
         profile.kind == harness,
         "import profile {requested:?} does not use {harness:?}"

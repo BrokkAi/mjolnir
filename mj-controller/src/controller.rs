@@ -959,12 +959,7 @@ impl Controller {
             }
             None => None,
         };
-        let profile = self
-            .config
-            .profiles
-            .get(profile_id)
-            .with_context(|| format!("unknown profile {profile_id:?}"))?;
-        ensure!(profile.enabled, "profile {profile_id:?} is disabled");
+        let profile = self.config.named_profile(profile_id)?;
         let template = self.config.ensure_target_enabled(target_id)?;
         if create_managed_worktree == Some(true) && !is_bare_project_target(template) {
             bail!("managed worktree creation requires a bare Git project");

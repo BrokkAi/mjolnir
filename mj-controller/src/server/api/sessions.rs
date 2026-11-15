@@ -336,7 +336,11 @@ fn resolve_launch(
     )?;
     if !model_first
         && let Some(profile_id) = profile_id.as_deref()
-        && let Err(error) = crate::server::require_profile(&snapshot, profile_id)
+        && let Err(error) = if request.profile_id.is_some() {
+            crate::server::require_named_profile(&snapshot, profile_id)
+        } else {
+            crate::server::require_profile(&snapshot, profile_id).map(|_| ())
+        }
     {
         return Err(if request.profile_id.is_some() {
             error.into()
@@ -648,7 +652,7 @@ pub(super) async fn wiki_restore(
     Json(request): Json<WikiRestoreBody>,
 ) -> Result<(StatusCode, Json<StartSessionResponse>), ApiFailure> {
     let backend = backend(&state)?.clone();
-    crate::server::require_profile(&state.snapshot_rx.borrow(), &request.profile_id)?;
+    crate::server::require_named_profile(&state.snapshot_rx.borrow(), &request.profile_id)?;
     // Also requires a launchable target.
     let resource_allocation = new_session_allocation(&state, &request.target_id, None, None)?;
     let session_id = backend
