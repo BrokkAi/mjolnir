@@ -77,15 +77,29 @@ for done_path in sorted(ROOT.glob("runs/*/*/done.json")):
         if r["child"] not in covered:
             continue
         sd = done_path.parent / "reviewers" / r["child"][:12]
+        if (sd / "measured.json").exists():
+            # An external reviewer (greptile_driver.py): wall time and list price, no token counts.
+            m = json.loads((sd / "measured.json").read_text())
+            sessions[r["child"]] = {
+                "bug": done["bug"], "session": r["child"], "model": r["model"], "effort": r["effort"],
+                "review": f"{done['bug']}/{done['arm']}", "profile": r["profile"], "latency_s": m["latency_s"],
+                "total_tokens": m["total_tokens"], "output_tokens": m["output_tokens"], "cost_usd": m["cost_usd"]}
+            continue
         usage = json.loads((sd / "usage.json").read_text())
         ticks = usage.get("turn_cost_usd_ticks")
         sessions[r["child"]] = {
             "bug": done["bug"], "session": r["child"], "model": r["model"], "effort": r["effort"],
             "review": f"{done['bug']}/{done['arm']}", "profile": r["profile"], "latency_s": latency(sd),
-            "total_tokens": usage["totals"]["total_tokens"]["tokens"],
-            "output_tokens": usage["totals"]["output_tokens"]["tokens"],
+            # Antigravity reports no token totals; missing stays missing, never zero.
+            "total_tokens": (usage["totals"].get("total_tokens") or {}).get("tokens"),
+            "output_tokens": (usage["totals"].get("output_tokens") or {}).get("tokens"),
             # mj's estimated API-price cost; 10^10 ticks per dollar (mj-core/src/usage.rs).
-            "cost_usd": round(ticks / 1e10, 4) if isinstance(ticks, (int, float)) else None,
+            # Priced only when every turn has a provider or estimated cost. Subscription
+            # harnesses such as Muse, Antigravity and Kimi report 0 ticks with no priced
+            # turns, which is unknown, not free.
+            "cost_usd": (round(ticks / 1e10, 4) if isinstance(ticks, (int, float)) and
+                         usage["coverage"].get("provider_cost_turns", 0) + usage["coverage"].get("estimated_cost_turns", 0)
+                         == usage["coverage"].get("recorded_turns") else None),
         }
 
 

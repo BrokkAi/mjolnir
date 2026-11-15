@@ -23,13 +23,15 @@ import os
 import pathlib
 import statistics
 
-LABELS = {"gpt-6.1-terra": "Terra", "gpt-6.1-sol": "Sol", "muse-ember-1.0": "Ember"}
+LABELS = {"gpt-6.1-terra": "Terra", "gpt-6.1-sol": "Sol", "muse-ember-1.0": "Ember", "greptile": "Greptile",
+          "gemini-4-hydrogen": "Gemini", "kimi-code/k3.1-pro": "Kimi", "deepseek-flash": "DSF"}
 ROOT = pathlib.Path(os.environ.get("REVIEW_ARMS_DIR", "/mnt/optane/review-arms-20261113"))
 p = argparse.ArgumentParser()
 p.add_argument("verify")
 p.add_argument("known")
 p.add_argument("--labels", default="match")
 p.add_argument("--groups-from", help="verification whose group IDs known-bug.jsonl names")
+p.add_argument("--exclude", default="", help="configurations left out, e.g. one that ran on only some diffs")
 a = p.parse_args()
 V = ROOT / a.verify
 labels = set(a.labels.split(","))
@@ -66,7 +68,7 @@ by_diff = collections.defaultdict(lambda: collections.defaultdict(list))
 for s in csv.DictReader(open(V / "sessions.csv")):
     # Keyed by model and effort, as in pareto.py, so efforts are never pooled.
     by_diff[s["bug"]][f"{LABELS.get(s['model'], s['model'])}/{s['effort']}"].append(s["session"])
-models = sorted({m for d in by_diff.values() for m in d})
+models = sorted({m for d in by_diff.values() for m in d} - set(filter(None, a.exclude.split(","))))
 # A configuration repeats at most as often as every Hard-won diff has sessions of it.
 cap = {m: min(len(by_diff[k["bug"]][m]) for k in known) for m in models}
 options = [o for n in (1, 2, 3) for o in itertools.combinations_with_replacement(models, n)

@@ -1,6 +1,7 @@
 """Builds blind verification batches from every finished run.
 
-Usage: python3 build_verify.py <out-dir> [--per-batch 2] [--ready-jobs jobs.json] [--append]
+Usage: python3 build_verify.py <out-dir> [--per-batch 2] [--ready-jobs jobs.json] [--append] [--arms A,B,...]
+       [--configs model:effort,...]
 
 --ready-jobs includes only diffs whose every job in that file has finished, so
 verification can start while other reviews still run. --append adds diffs not
@@ -26,6 +27,10 @@ p.add_argument("out")
 p.add_argument("--per-batch", type=int, default=2)
 p.add_argument("--ready-jobs")
 p.add_argument("--append", action="store_true")
+p.add_argument("--configs", help="comma-separated reviewer model:effort to include, e.g. to verify a new "
+               "model only against an anchor configuration")
+p.add_argument("--arms", help="comma-separated arms to include; default every arm under runs/. Other "
+               "experiments share runs/ (arms OT, OS, BT, BS give reviewers extra context), so name the arms.")
 a = p.parse_args()
 out = ROOT / a.out
 out.mkdir(parents=True, exist_ok=True)
@@ -68,7 +73,11 @@ for done_path in sorted(ROOT.glob("runs/*/*/done.json")):
     run = done_path.parent
     if done["bug"] in batched or (ready is not None and done["bug"] not in ready):
         continue
+    if a.arms and done["arm"] not in a.arms.split(","):
+        continue
     for r in done["reviewers"]:
+        if a.configs and f"{r['model']}:{r['effort']}" not in a.configs.split(","):
+            continue
         covered.append(r["child"])
         text = (run / "reviewers" / r["child"][:12] / "output.md").read_text()
         findings = split(text)
