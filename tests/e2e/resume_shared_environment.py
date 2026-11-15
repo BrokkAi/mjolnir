@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resume repairs a failed parent while a real child uses its Podman volume.
+"""Resume repairs failed parents while real children use their retained environments.
 
 Uses the container-upgrade lab's deterministic ACP fixture. Build mj with
 --features test-hooks; pass a compatible portable worker and a local image.
@@ -10,12 +10,104 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import subprocess
 
 import container_upgrades
 from container_upgrades import Regression, WAIT
+from reliability_lab import ScenarioFailure
 
 
 class ResumeRegression(Regression):
+    def worker_python(self, session, script, *arguments):
+        target = self.record(session).get("target")
+        if not target:
+            raise ScenarioFailure("worker has no recorded target yet")
+        if target["kind"] == "local-bare":
+            result = subprocess.run(["/usr/bin/python3", "-", target["worker_root"], *arguments],
+                                    input=script, capture_output=True, text=True,
+                                    env=self.environment(), timeout=WAIT)
+            if result.returncode:
+                raise ScenarioFailure(result.stderr)
+            return result.stdout
+        if target["kind"] != "local-podman":
+            raise ScenarioFailure("fixture supports local bare and Podman workers only")
+        return self.podman("exec", "-i", target["container_id"], "/usr/bin/python3", "-",
+                           "/var/lib/hel/workers/" + session, *arguments, input=script)
+
+    def worker_status(self, session):
+        script = r'''
+import json, socket, sys, uuid
+with socket.socket(socket.AF_UNIX) as connection:
+    connection.settimeout(float(sys.argv[2]))
+    connection.connect(sys.argv[1] + "/control.sock")
+    with connection.makefile("rb") as reader:
+        request = {"request_id":uuid.uuid4().hex,"protocol_version":1,"request":{"method":"hello","params":{"controller_version":"resume-regression","supported":{"min":1,"max":4294967295}}}}
+        connection.sendall(json.dumps(request).encode()+b"\n")
+        hello = json.loads(reader.readline())
+        assert hello["result"] == "ok", hello
+        request = {"request_id":uuid.uuid4().hex,"protocol_version":hello["protocol_version"],"request":{"method":"status"}}
+        connection.sendall(json.dumps(request).encode()+b"\n")
+        status = json.loads(reader.readline())
+        assert status["result"] == "ok", status
+        print(json.dumps({"hello":hello["payload"],"state":status["payload"]["data"]}))
+'''
+        return json.loads(self.worker_python(session, script, str(WAIT)))
+
+    def finish_child_turn(self, child, active, prompt_file):
+        text = prompt_file.read_text()
+        marker = self.runtime_root / "releases" / hashlib.sha256(text.encode()).hexdigest()
+        marker.touch()
+        def completed():
+            current = self.working(child)
+            return current is None or current["command_id"] != active["command_id"]
+        self.wait(completed, "original child turn completion")
+        self.worker_status(child)
+
+    # Hard-won: 07d2 readiness failure: Resume must reattach a live bare worker too.
+    def bare_regression(self, workspace):
+        status, response = self.request("POST", "/api/actions", {
+            "action": "new", "workspace_id": workspace, "profile_id": "fake",
+            "bundle_id": "bare-fixture", "target_id": "localhost", "title": "resume-bare",
+            "project_directory": str(self.runtime_root / "bare-project"),
+            "create_managed_worktree": True, "subagents": {"mode": "mjolnir"},
+        }, timeout=WAIT)
+        assert status == 202, response
+        def ready():
+            value = self.snapshot()
+            return next((row["id"] for row in value.get("sessions", [])
+                         if row.get("title") == "resume-bare" and row.get("state") == "running"), None)
+        parent = self.wait(ready, "managed bare worker ready")
+        self.sessions.append(parent)
+        record = self.record(parent)
+        checkout = Path(record["managed_worktree"]["worktree_root"])
+        root = Path(record["target"]["worker_root"])
+        native_home = Path(json.loads((root / "launch.json").read_text())["environment"]["CODEX_HOME"])
+        self.cli("checkpoint", "--session", parent)
+        (checkout / "resume-worktree-sentinel").write_text("newer work")
+        (native_home / "resume-native-sentinel").write_text("newer native state")
+        pid = (root / "worker.pid").read_text()
+        native = self.worker_status(parent)["state"]["native_session_id"]
+        child = self.tool(parent, "spawn", {"task_name": "bare-child", "task_type": "straightforward",
+                          "instructions": "Keep working during bare parent repair."})["child_session_id"]
+        active = self.wait(lambda: self.working(child), "bare child active turn")
+        child_root = Path(self.record(child)["target"]["worker_root"])
+        child_pid = (child_root / "worker.pid").read_text()
+        self.cli("daemon", "stop")
+        with sqlite3.connect(self.data / "mj.sqlite3") as database:
+            database.execute("UPDATE sessions SET state='error',last_error='injected readiness timer failure after handoff' WHERE session_id=?", (parent,))
+        self.cli("resume", "--session", parent)
+        self.authenticate()
+        self.wait(lambda: self.record(parent)["state"] == "running", "bare worker reattached")
+        assert self.record(parent)["target"]["worker_root"] == str(root)
+        assert (root / "worker.pid").read_text() == pid
+        assert (child_root / "worker.pid").read_text() == child_pid
+        assert self.worker_status(parent)["state"]["native_session_id"] == native
+        assert (checkout / "resume-worktree-sentinel").read_text() == "newer work"
+        assert (native_home / "resume-native-sentinel").read_text() == "newer native state"
+        assert self.working(child)["command_id"] == active["command_id"]
+        self.finish_child_turn(child, active, self.runtime_root / "bare-child-prompt.txt")
+        return parent, child
+
     def tool(self, session, action, params):
         script = r'''
 import json, socket, sys, time, uuid
@@ -23,14 +115,13 @@ request = {"request_id": uuid.uuid4().hex, "created_at_ms": int(time.time() * 10
            "action": {"action": sys.argv[2], "params": json.loads(sys.argv[3])}}
 with socket.socket(socket.AF_UNIX) as connection:
     connection.settimeout(float(sys.argv[4]))
-    connection.connect("/var/lib/hel/workers/" + sys.argv[1] + "/subagents.sock")
+    connection.connect(sys.argv[1] + "/subagents.sock")
     connection.sendall(json.dumps(request).encode() + b"\n")
     reply = json.loads(connection.makefile("rb").readline())
 assert not reply["result"]["is_error"], reply
 print(reply["result"]["message"])
 '''
-        return json.loads(self.podman("exec", "-i", self.container(session),
-            "/usr/bin/python3", "-", session, action, json.dumps(params), str(WAIT), input=script))
+        return json.loads(self.worker_python(session, script, action, json.dumps(params), str(WAIT)))
 
     def kill_parent_worker(self, parent):
         self.podman("exec", self.container_from_database(parent), "/usr/bin/python3", "-c",
@@ -66,9 +157,15 @@ else:
         script = script.replace('    elif method == "session/set_mode":',
             '    elif method == "session/set_config_option":\n        result = {"configOptions": ' + repr(options) + '}\n    elif method == "session/set_mode":')
         script = script.replace('def wait_for_prompt_cancel():\n',
-            'def wait_for_prompt_cancel():\n    if "Keep working during parent repair." in text:\n        open(' + repr(str(self.runtime_root / "child-prompt.txt")) + ', "w").write(text)\n')
+            'def wait_for_prompt_cancel():\n    if "Keep working during" in text and "parent repair." in text:\n        name = "bare-child-prompt.txt" if "bare parent repair." in text else "child-prompt.txt"\n        open(' + repr(str(self.runtime_root)) + ' + "/" + name, "w").write(text)\n')
         compile(script, str(bridge), "exec")
         bridge.write_text(script)
+        bare_project = self.runtime_root / "bare-project"
+        self.git_output(["clone", "--no-hardlinks", str(self.project), str(bare_project)], self.runtime_root)
+        origin = self.git_output(["remote", "get-url", "origin"], self.project).strip()
+        self.git_output(["remote", "set-url", "origin", origin.replace("host.containers.internal", "127.0.0.1")], bare_project)
+        config = self.config / "config.toml"
+        config.write_text(config.read_text() + '\n[bundles.bare-fixture]\nprimary_repo = "fixture"\n[[bundles.bare-fixture.repositories]]\nid = "fixture"\nlocal = ' + json.dumps(str(bare_project)) + '\ndestination = "fixture"\n')
         config = self.config / "config.toml"
         config.write_text(config.read_text() + '\n[subagents.straightforward]\nmodel = "tiny"\neffort = "high"\n')
         self.cli("workspaces", "create", "Resume shared environment")
@@ -138,17 +235,27 @@ else:
         assert self.worker_status(parent)["state"]["native_session_id"] == native
         assert self.working(child)["command_id"] == active["command_id"]
         assert self.podman("exec", self.container(parent), "cat", workspace_path + "/resume-sentinel") == "newer"
-        child_prompt = (self.runtime_root / "child-prompt.txt").read_text()
-        marker = self.runtime_root / "releases" / hashlib.sha256(child_prompt.encode()).hexdigest()
-        marker.touch()
-        # A handback reminder can start immediately after this turn completes.
-        # Ask the worker about the original command, not a transient idle gap.
-        def child_finished():
-            current = self.working(child)
-            return current is None or current["command_id"] != active["command_id"]
-        self.wait(child_finished, "original child turn completion")
-        self.worker_status(child)
-        print(json.dumps({"result": "passed", "instance": self.instance, "parent": parent, "child": child, "artifacts": str(self.root)}), flush=True)
+        self.finish_child_turn(child, active, self.runtime_root / "child-prompt.txt")
+        # A stored locator is not a usable repair source after proven absence.
+        # Keep volume ownership for explicit cleanup, but stop offering Resume.
+        container = self.container(parent)
+        volume = self.record(parent)["target"]["workspace_storage"]["name"]
+        self.cli("daemon", "stop")
+        self.podman("container", "rm", "--force", container)
+        with sqlite3.connect(self.data / "mj.sqlite3") as database:
+            database.execute("UPDATE sessions SET state='error' WHERE session_id=?", (parent,))
+        self.cli("resume", "--session", parent, check=False)
+        self.authenticate()
+        self.wait(lambda: self.record(parent)["state"] == "lost", "absent target published")
+        assert self.record(parent).get("target") is None
+        row = self.session(self.snapshot(), parent)
+        assert not row["capabilities"]["resume"] and row["capabilities"]["destroy"]
+        refusal = self.cli("resume", "--session", parent, check=False)
+        assert refusal.returncode != 0 and "destroy" in refusal.stderr.lower(), refusal.stderr
+        self.podman("volume", "exists", volume)
+        bare_parent, bare_child = self.bare_regression(workspace)
+        print(json.dumps({"result": "passed", "instance": self.instance, "parent": parent, "child": child,
+                          "bare_parent": bare_parent, "bare_child": bare_child, "artifacts": str(self.root)}), flush=True)
 
 
 def main():

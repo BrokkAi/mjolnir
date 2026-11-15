@@ -402,7 +402,7 @@ pub(super) async fn resume(
             return Err(ApiFailure::conflict(resume_refusal(session)));
         }
         // Failed sessions can repair their retained environment without an archive.
-        if !session.has_checkpoint && !(session.state == "error" && session.retained_target) {
+        if !session.has_resume_source() {
             return Err(ApiFailure::conflict(no_checkpoint_refusal(session)));
         }
         let resolved = |named: Option<String>, recorded: &str, field: &str| match named {
@@ -517,6 +517,10 @@ pub(super) fn resume_refusal(session: &ViewerSession) -> String {
         ViewerLifecycleCategory::Live => {
             "this session is already running; to restart it, suspend it first (`mj suspend`), then resume it".to_owned()
         }
+        ViewerLifecycleCategory::Suspended | ViewerLifecycleCategory::Failed
+            if !session.has_resume_source() => {
+                no_checkpoint_refusal(session)
+            }
         ViewerLifecycleCategory::Suspended | ViewerLifecycleCategory::Failed => {
             "this session has an operation running; wait for it to finish, then resume".to_owned()
         }

@@ -292,8 +292,7 @@ fn prompt_refusal(session: &ViewerSession) -> String {
     }
     let id = &session.id;
     let ways_out = [
-        ((session.has_checkpoint || (session.state == "error" && session.retained_target))
-            && session.capabilities.resume)
+        (session.has_resume_source() && session.capabilities.resume)
             .then(|| format!("resume it with `mj resume --session {id}`")),
         session
             .capabilities

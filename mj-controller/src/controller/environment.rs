@@ -945,6 +945,60 @@ fn locator_is_remote(locator: &mj_core::targets::TargetLocator) -> bool {
     )
 }
 
+/// Apple's default list contains only running containers (see cleanup.rs).
+/// Resume may start the exact retained container; Restart's probe stays read-only.
+fn start_retained_apple_for_resume(
+    locator: &targets::TargetLocator,
+    executor: &impl CommandExecutor,
+) -> Result<()> {
+    let (ssh, container_id) = match locator {
+        targets::TargetLocator::AppleContainer { container_id, .. } => (None, container_id),
+        targets::TargetLocator::SshAppleContainer {
+            ssh, container_id, ..
+        } => (Some(ssh), container_id),
+        _ => return Ok(()),
+    };
+    let command = |args: Vec<String>, purpose| {
+        match ssh {
+            Some(ssh) => targets::ssh_command_owned(ssh, args),
+            None => CommandSpec::new(&args[0], args[1..].to_vec()),
+        }
+        .purpose(purpose)
+    };
+    let running = command(
+        vec!["container".into(), "list".into(), "--quiet".into()],
+        "list running retained Apple containers for Resume",
+    );
+    let is_running = || -> Result<bool> {
+        let output = executor.execute(&running)?;
+        ensure!(
+            output.status == 0,
+            "list running Apple containers: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(String::from_utf8(output.stdout)?
+            .lines()
+            .any(|id| id.trim() == container_id))
+    };
+    if !is_running()? {
+        let start = command(
+            vec!["container".into(), "start".into(), container_id.clone()],
+            "start retained Apple container for Resume",
+        );
+        let output = executor.execute(&start)?;
+        ensure!(
+            output.status == 0,
+            "start retained Apple container: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        ensure!(
+            is_running()?,
+            "retained Apple container did not become running"
+        );
+    }
+    Ok(())
+}
+
 /// Evidence for Resume, obtained while its worker lifecycle permit is held.
 pub(super) enum ResumeEnvironment {
     LiveWorker,
@@ -965,6 +1019,7 @@ pub(super) fn classify_resume_environment(
             TargetAvailability::Reachable => {}
         }
         let (backend, root) = controller.worker_placement(session_id)?;
+        start_retained_apple_for_resume(&backend, executor)?;
         let output = executor.execute(&super::worker_binary::worker_liveness_command(
             &backend, &root,
         ))?;

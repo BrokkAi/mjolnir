@@ -168,54 +168,64 @@ async fn repairing_an_accepted_source_preserves_repository_ids_and_layout_across
 /// A person choosing a container for a local session has to see what the
 /// move does before it happens, and a person resuming the same session in
 /// place must not be asked anything.
+// Hard-won: c77d71fc3 review: a retained failed target skipped conversion confirmation.
 #[tokio::test]
 async fn a_local_checkout_resuming_into_a_container_preflights_its_conversion() {
-    let (checkout, _remote_parent, remote) = checkout_with_network_remote();
-    std::fs::write(checkout.path().join("untracked.txt"), "u".repeat(2048)).unwrap();
-    let mut session = raw_session_on("local-bare", &checkout.path().to_string_lossy());
-    let mut config = resume_compatibility_config();
-    config
-        .bundles
-        .insert(session.bundle_id.clone(), local_bundle(checkout.path()));
-    session.checkpoint = Some(Box::new(mj_core::state::CheckpointMetadata {
-        archive_path: checkout.path().join("unused.hel.zip"),
-        sha256: "a".repeat(64),
-        created_at: "2026-09-14T00:00:00Z".into(),
-        event_frontier: 3,
-    }));
-    let session_id = session.id.clone();
-    let controller = Controller {
-        config,
-        state: State {
-            sessions: [(session_id.clone(), session)].into_iter().collect(),
-            ..State::default()
-        },
-    };
-    let executor = FixtureRemoteExecutor { remote };
+    for failed in [false, true] {
+        let (checkout, _remote_parent, remote) = checkout_with_network_remote();
+        std::fs::write(checkout.path().join("untracked.txt"), "u".repeat(2048)).unwrap();
+        let mut session = raw_session_on("local-bare", &checkout.path().to_string_lossy());
+        if failed {
+            session.state = SessionState::Error;
+            session.target = Some(Box::new(TargetLocator::LocalBare {
+                worker_root: checkout.path().join("missing-worker"),
+            }));
+        }
+        let mut config = resume_compatibility_config();
+        config
+            .bundles
+            .insert(session.bundle_id.clone(), local_bundle(checkout.path()));
+        session.checkpoint = Some(Box::new(mj_core::state::CheckpointMetadata {
+            archive_path: checkout.path().join("unused.hel.zip"),
+            sha256: "a".repeat(64),
+            created_at: "2026-09-14T00:00:00Z".into(),
+            event_frontier: 3,
+        }));
+        let session_id = session.id.clone();
+        let controller = Controller {
+            config,
+            state: State {
+                sessions: [(session_id.clone(), session)].into_iter().collect(),
+                ..State::default()
+            },
+        };
+        let executor = FixtureRemoteExecutor { remote };
 
-    let converting = controller
-        .preflight_resume_repository_sources(&session_id, "podman", &executor)
-        .await
-        .unwrap();
-    let ResumeRepositorySourcePreflight::ConvertingRawCheckout { receipt, preview } = converting
-    else {
-        panic!("a container destination converts the checkout, got {converting:?}");
-    };
-    assert_eq!(receipt.session_id, session_id);
-    assert_eq!(preview.fetch_url, FIXTURE_FETCH_URL);
-    assert_eq!(preview.untracked_files, 1);
-    assert!(preview.host_checkout_retained);
+        let converting = controller
+            .preflight_resume_repository_sources(&session_id, "podman", &executor)
+            .await
+            .unwrap();
+        let ResumeRepositorySourcePreflight::ConvertingRawCheckout { receipt, preview } =
+            converting
+        else {
+            panic!("a container destination converts the checkout, got {converting:?}");
+        };
+        assert_eq!(receipt.session_id, session_id);
+        assert_eq!(preview.fetch_url, FIXTURE_FETCH_URL);
+        assert_eq!(preview.untracked_files, 1);
+        assert!(preview.host_checkout_retained);
 
-    assert!(
-        matches!(
-            controller
-                .preflight_resume_repository_sources(&session_id, "local-bare", &executor)
-                .await
-                .unwrap(),
-            ResumeRepositorySourcePreflight::Ready(_)
-        ),
-        "resuming in place asks nothing"
-    );
+        assert!(
+            matches!(
+                controller
+                    .preflight_resume_repository_sources(&session_id, "local-bare", &executor)
+                    .await
+                    .unwrap(),
+                ResumeRepositorySourcePreflight::Ready(_)
+            ),
+            "resuming in place asks nothing"
+        );
+    }
 }
 
 const RESUME_ROLLBACK_TEST_CHILD: &str = "MJ_RESUME_ROLLBACK_TEST_CHILD";
@@ -2444,6 +2454,32 @@ fn failed_resume_keeps_present_and_unknown_environments_without_an_archive() {
             ..State::default()
         },
     };
+    let engine = Engine {
+        exists_status: 0,
+        commands: Mutex::default(),
+    };
+    controller
+        .rollback_failed_resume(
+            id,
+            &parent,
+            Some(&original),
+            false,
+            anyhow::anyhow!("failure before creating a destination"),
+            &engine,
+        )
+        .unwrap();
+    assert!(engine.commands.lock().unwrap().is_empty());
+    assert_eq!(
+        crate::database::session_environment(id)
+            .unwrap()
+            .unwrap()
+            .placement
+            .target,
+        original.placement.target
+    );
+    // Rollback settles its attempt as stopped; probe each condition from Error.
+    controller.state.sessions.insert(id.into(), parent.clone());
+    crate::database::save_session(&parent).unwrap();
     for status in [0, 125, 1] {
         let engine = Engine {
             exists_status: status,
@@ -2472,7 +2508,19 @@ fn failed_resume_keeps_present_and_unknown_environments_without_an_archive() {
         if status == 0 {
             assert!(!error.contains("no checkpoint"), "{error}");
         }
-        assert_eq!(controller.state.sessions[id].target, parent.target);
+        if status == 1 {
+            assert!(controller.state.sessions[id].target.is_none());
+            assert_eq!(controller.state.sessions[id].state, SessionState::Lost);
+            let view = crate::server::ViewerSnapshot::from_config_state(
+                &controller.config,
+                &controller.state,
+                1,
+            );
+            assert!(!view.sessions[0].capabilities.resume);
+            assert!(view.sessions[0].capabilities.destroy);
+        } else {
+            assert_eq!(controller.state.sessions[id].target, parent.target);
+        }
         let environment = crate::database::session_environment(id).unwrap().unwrap();
         assert_eq!(environment.id, original.id);
         assert_eq!(environment.phase, original.phase);
@@ -2485,27 +2533,147 @@ fn failed_resume_keeps_present_and_unknown_environments_without_an_archive() {
             "{commands:?}"
         );
     }
-    let engine = Engine {
-        exists_status: 0,
-        commands: Mutex::default(),
-    };
-    controller
-        .rollback_failed_resume(
-            id,
-            &parent,
-            Some(&original),
-            false,
-            anyhow::anyhow!("failure before creating a destination"),
-            &engine,
-        )
-        .unwrap();
-    assert!(engine.commands.lock().unwrap().is_empty());
-    assert_eq!(
-        crate::database::session_environment(id)
-            .unwrap()
-            .unwrap()
-            .placement
-            .target,
-        original.placement.target
-    );
+}
+
+// Hard-won: c77d71fc3 review: an intact stopped Apple container was never started by Resume.
+#[test]
+fn resume_starts_retained_apple_containers_before_probing_their_worker() {
+    const CHILD: &str = "MJ_RESUME_APPLE_START_TEST";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new("controller::resume::tests::resume_starts_retained_apple_containers_before_probing_their_worker")
+            .env(CHILD, "1").isolated_store(directory.path()).run();
+        return;
+    }
+    struct AppleEngine {
+        container: String,
+        remote: bool,
+        running: Mutex<bool>,
+        fail_start: bool,
+        commands: Mutex<Vec<String>>,
+    }
+    impl CommandExecutor for AppleEngine {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            assert_eq!(command.program == "ssh", self.remote);
+            self.commands.lock().unwrap().push(command.purpose.clone());
+            let mut running = self.running.lock().unwrap();
+            let (status, stdout) = match command.purpose.as_str() {
+                "check retained Apple container before Restart" => {
+                    (0, format!("{}\n", self.container))
+                }
+                "list running retained Apple containers for Resume" => (
+                    0,
+                    if *running {
+                        format!("{}\n", self.container)
+                    } else {
+                        String::new()
+                    },
+                ),
+                "start retained Apple container for Resume" => {
+                    if self.fail_start {
+                        (1, String::new())
+                    } else {
+                        *running = true;
+                        (0, String::new())
+                    }
+                }
+                "probe Mjolnir worker daemon liveness" => {
+                    assert!(*running, "worker probe ran inside a stopped container");
+                    (0, "dead\n".into())
+                }
+                other => anyhow::bail!("unexpected operation {other}"),
+            };
+            Ok(CommandOutput {
+                status,
+                stdout: stdout.into_bytes(),
+                stderr: Vec::new(),
+            })
+        }
+    }
+    let id = "0123456789abcdef0123456789abcdef";
+    for remote in [false, true] {
+        for (running, fail_start) in [(false, false), (true, false), (false, true)] {
+            let mut config = resume_compatibility_config();
+            let TargetTemplate::LocalPodman { container } = config.targets["podman"].clone() else {
+                unreachable!()
+            };
+            let template = if remote {
+                TargetTemplate::SshAppleContainer {
+                    container,
+                    ssh: mj_core::config::SshConnection {
+                        host: "apple.invalid".into(),
+                        user: None,
+                        identity_file: None,
+                        extra_args: Vec::new(),
+                    },
+                }
+            } else {
+                TargetTemplate::AppleContainer { container }
+            };
+            config.targets.insert("apple".into(), template);
+            let container_id = targets::resource_name(id).unwrap();
+            let mut session = checkpoint_test_session(id);
+            session.state = SessionState::Error;
+            session.target_template_id = "apple".into();
+            session.target = Some(Box::new(if remote {
+                TargetLocator::SshAppleContainer {
+                    host: "apple.invalid".into(),
+                    container_id: container_id.clone(),
+                    borrowed_from: None,
+                }
+            } else {
+                TargetLocator::AppleContainer {
+                    container_id: container_id.clone(),
+                    borrowed_from: None,
+                }
+            }));
+            let controller = Controller {
+                config,
+                state: State {
+                    sessions: [(id.into(), session)].into_iter().collect(),
+                    ..State::default()
+                },
+            };
+            let engine = AppleEngine {
+                container: container_id,
+                remote,
+                running: Mutex::new(running),
+                fail_start,
+                commands: Mutex::default(),
+            };
+            let condition = crate::controller::environment::classify_resume_environment(
+                &controller,
+                id,
+                &engine,
+            );
+            if fail_start {
+                assert!(matches!(
+                    condition,
+                    crate::controller::environment::ResumeEnvironment::Unknown(_)
+                ));
+                assert!(
+                    !engine
+                        .commands
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|name| name.contains("worker daemon liveness"))
+                );
+            } else {
+                assert!(matches!(
+                    condition,
+                    crate::controller::environment::ResumeEnvironment::WorkerMissing
+                ));
+            }
+            assert_eq!(
+                engine
+                    .commands
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|name| name == "start retained Apple container for Resume"),
+                !running
+            );
+        }
+    }
 }

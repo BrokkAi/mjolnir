@@ -403,7 +403,12 @@ impl ViewerSnapshot {
                         suspend: lifecycle.is_dashboard_visible(),
                         destroy: true,
                         rename: true,
-                        resume: !lifecycle.is_dashboard_visible(),
+                        resume: !lifecycle.is_dashboard_visible()
+                            && resume_source_available(
+                                session.state.as_str(),
+                                session.checkpoint.is_some(),
+                                session.target.is_some(),
+                            ),
                         move_session: false,
                         set_config: false,
                         set_plan_mode: false,
@@ -546,7 +551,16 @@ pub(super) fn project_key(identity: &str) -> String {
     mj_core::hex::lower_hex(&digest[..8])
 }
 
+fn resume_source_available(state: &str, has_checkpoint: bool, retained_target: bool) -> bool {
+    has_checkpoint || (state == "error" && retained_target)
+}
+
 impl ViewerSession {
+    /// Recorded repair/restore candidates; the environment owner proves existence.
+    pub(crate) fn has_resume_source(&self) -> bool {
+        resume_source_available(&self.state, self.has_checkpoint, self.retained_target)
+    }
+
     /// One interpretation for both current-state persistence and live API delivery.
     pub(crate) fn api_activity(&self) -> mj_core::storage::ApiActivityState {
         mj_core::storage::ApiActivityState {

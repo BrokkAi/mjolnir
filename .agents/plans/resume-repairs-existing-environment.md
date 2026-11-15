@@ -14,6 +14,11 @@ After this change, Resume of a failed session whose environment still exists bri
 
 ## Progress
 
+- [x] First required review completed; all three findings accepted and implemented.
+- [x] Review regressions for Apple local/SSH start ordering and failed-checkout conversion previews passed.
+- [x] Review regression for absent-target admission and extended Podman run passed; the same run also passed live-worker repair in a localhost managed worktree.
+- [x] Post-review validation completed; follow-up commit prepared for required review.
+
 - [x] Milestone 1: Resume decides from the environment's actual condition (live worker reachable / container present but worker gone / container proven absent / unknown) instead of from the `Error` state.
 - [x] Milestone 2: repair-in-place path (reattach the live worker and journal when reachable; otherwise start a fresh worker and harness in the existing container) and the archive path gated on proven absence; `rollback_failed_resume` (~2160-2182) no longer destroys an environment that was present before Resume began.
 - [x] Milestone 3: end-to-end test in an isolated instance; validation; prepared commit.
@@ -29,6 +34,10 @@ After this change, Resume of a failed session whose environment still exists bri
 
 ## Surprises & Discoveries
 
+- The second production incident (`07d292ca`, localhost managed worktree) used the same Error branch after a false readiness failure. The generic classifier and live-worker attach cover bare targets too. The real isolated E2E now checkpoints a managed worktree, writes newer workspace and native-home files, keeps a child busy, injects Error with the daemon stopped, and verifies the same parent and child PIDs, native session ID, files and original child command through completion. `/tmp/resume-e2e-bare-review.log` passed.
+
+- Required review of `c77d71fc3` found three gaps. Apple `list --all` proves presence but not that `exec` can run; Resume now checks the running list and starts only the retained container, on its owning host. Restart's probe behavior is unchanged. Raw-to-workspace conversions still take the normal credential/preview path before confirmation. Proven absence with no checkpoint now publishes `Lost` with no usable session target, while the durable environment/worker inventory retains ownership of physical resources for explicit Destroy.
+
 - Validation fixture corrections: container creation needs explicit CPU/RAM allocation and the container harness's lifecycle wait, rather than generic five-second HTTP / twenty-second snapshot waits. Child completion must track its original command ID because a handback reminder can immediately start another turn. Shell `kill -- -PID` was replaced with Python `killpg`. An ACP initialization error occurs after coordinator startup; an invalid private Codex config produces the required terminal preparation state before startup.
 
 - Implementation: Restart already had an engine availability probe. It now delegates to the environment module, preserving Restart's existing reachable/missing/unreachable behavior; Resume adds worker liveness classification and treats unreachable as unknown.
@@ -40,6 +49,8 @@ After this change, Resume of a failed session whose environment still exists bri
 
 
 ## Decision Log
+
+- Review decision: `Lost` and a cleared session target express proven absence when no archive exists. This changes client admission without erasing the environment ledger or reclaiming storage. The existing state and fields need no schema/protocol change; API admission/refusal use one projected source predicate. Date: 2026-11-14.
 
 - Implementation decision: a present placement keeps its current profile and target; changing them follows repair through Move. Requested resource or mount changes produce a notice that the existing container settings were kept. Date: 2026-11-14.
 
@@ -55,11 +66,15 @@ After this change, Resume of a failed session whose environment still exists bri
 
 ## Outcomes & Retrospective
 
+The first commit is `c77d71fc39d248c5dd9536dbaf728e761497ad3a`. Its required review identified Apple startup, conversion confirmation, and repeated admission of absent targets; fixes passed post-review validation and are prepared for the next required review. Apple command ordering is covered by hand-written local/SSH engine-contract fakes on Linux, not a native Mac run. No push or master CI dispatch is part of this detached-HEAD task.
+
 Resume now derives teardown permission from proven absence, rather than `Error`. Existing environments reattach their worker or restart only the parent worker in its retained root. A terminal preparation failure is repaired in place after its cause is corrected; unknown availability and failed repairs preserve the environment. Archive restoration remains the absent-environment path. Rollback distinguishes retained runtime ownership from placements created by the attempt. No schema or protocol change was needed.
+
+The extended isolated E2E passed for local Podman and localhost managed worktrees (`/tmp/resume-e2e-bare-review.log`). The bare case preserves newer workspace/native state and the same parent/child worker PIDs while the original child finishes. The Podman case also proves that an absent target without an archive becomes Lost, stops offering Resume, and keeps its volume for explicit Destroy.
 
 The real local Podman regression passed live reattachment, dead-worker repair with no checkpoint metadata, and repair following an actual terminal profile-preparation failure, while preserving the container, volume mounts, newer sentinel, native session ID and the child's original command. The child completed after release. This uses the deterministic ACP fixture and local Podman, not a live provider or Podman over SSH. Initial `Error` states are injected while the isolated daemon is stopped; the final preparation failure is produced by temporarily invalidating and then restoring the parent's private Codex configuration.
 
-Final controller validation had one unrelated failure: `daemon::tests::move_task_panic_reports_failure_and_releases_mutation_hold` timed out at its existing two-second wait (`daemon/tests.rs:2611`). Its isolated rerun passed in 0.81 seconds. All other controller tests passed, as did the full TUI suite, doc tests and workspace clippy. Evidence is retained in the sub-agent report directory; the final handback records the commit and review verdict.
+The initial controller validation had one unrelated failure: `daemon::tests::move_task_panic_reports_failure_and_releases_mutation_hold` timed out at its existing two-second wait (`daemon/tests.rs:2611`). Its isolated rerun passed in 0.81 seconds. All other controller tests passed, as did the full TUI suite, doc tests and workspace clippy. Post-review full suites completed with 2,648 controller passes / 27 ignored and two failures: the expected phone capability golden change (updated and verified) and the unchanged startup-image draft recovery race. The latter passed alone in 0.75 seconds. The full TUI suite again passed (591 / two ignored), both doc suites passed, and workspace clippy passed. No unresolved validation failure remains. Evidence is retained in the sub-agent report directory; the final handback records both commits and the review verdict.
 
 The existing explicit container-upgrade admission appears sound for this issue: `daemon/restart.rs::try_commit_container_upgrade` serializes cancellation through the lifecycle owner and invokes `database/session_restart.rs::try_commit_container_upgrade`, whose transaction refuses commit while children have live workers or targets, or accepted delegation requests remain. Child registration uses that database writer too. This behavior is unchanged.
 

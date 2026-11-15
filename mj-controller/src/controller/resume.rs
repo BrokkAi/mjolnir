@@ -123,13 +123,8 @@ impl Controller {
         target_id: &str,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<ResumeRepositorySourcePreflight> {
-        if self
-            .state
-            .sessions
-            .get(session_id)
-            .is_some_and(|session| session.state == SessionState::Error && session.target.is_some())
-        {
-            return self.preflight_repository_sources(session_id, target_id, true, None, executor);
+        if let Some(receipt) = self.repair_preflight_receipt(session_id, target_id)? {
+            return Ok(ResumeRepositorySourcePreflight::Ready(receipt));
         }
         let github_token = self
             .github_token_for_repository_preflight(session_id)
@@ -155,6 +150,35 @@ impl Controller {
         self.preflight_repository_sources(session_id, target_id, true, github_token, executor)
     }
 
+    /// Retained placements can repair without repository credentials or an
+    /// archive, but a raw conversion still needs its preview and confirmation.
+    fn repair_preflight_receipt(
+        &self,
+        session_id: &str,
+        target_id: &str,
+    ) -> Result<Option<ResumeRepositorySourceReceipt>> {
+        let session = self
+            .state
+            .sessions
+            .get(session_id)
+            .context("session missing")?;
+        if session.state != SessionState::Error || session.target.is_none() {
+            return Ok(None);
+        }
+        let checkout = self.state.checkout(session_id)?;
+        let plan = resume_compatibility_with_checkout(session, &checkout, &self.config, target_id)
+            .map_err(|reason| anyhow::anyhow!(reason))?;
+        if plan == ResumePlan::RawToWorkspace {
+            return Ok(None);
+        }
+        Ok(Some(ResumeRepositorySourceReceipt {
+            session_id: session_id.to_owned(),
+            bundle_id: session.bundle_id.clone(),
+            checkpoint_sha256: String::new(),
+            repositories: Vec::new(),
+        }))
+    }
+
     /// `describe_conversion` buys the conversion preview with a read of the
     /// checkout and a question to its remote. The resume itself only needs to
     /// know whether a configured source moved, and the person has already
@@ -172,22 +196,16 @@ impl Controller {
             .sessions
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?;
-        // A failed session may still own current work and need no archive.
-        // The lifecycle owner probes it at admission, not this UI preflight.
-        if describe_conversion && session.state == SessionState::Error && session.target.is_some() {
-            return Ok(ResumeRepositorySourcePreflight::Ready(
-                ResumeRepositorySourceReceipt {
-                    session_id: session_id.to_owned(),
-                    bundle_id: session.bundle_id.clone(),
-                    checkpoint_sha256: String::new(),
-                    repositories: Vec::new(),
-                },
-            ));
+        if describe_conversion
+            && let Some(receipt) = self.repair_preflight_receipt(session_id, target_id)?
+        {
+            return Ok(ResumeRepositorySourcePreflight::Ready(receipt));
         }
         let checkpoint = session
             .checkpoint
             .as_ref()
             .context("session has no checkpoint")?;
+
         let checkout = self.state.checkout(session_id)?;
         let plan = resume_compatibility_with_checkout(session, &checkout, &self.config, target_id)
             .map_err(|reason| anyhow::anyhow!(reason))?;
@@ -1642,7 +1660,21 @@ impl Controller {
                 ResumeEnvironment::Unknown(error) => {
                     bail!("Could not establish the existing environment for session {session_id}: {error:#}. Everything was kept. Retry Resume when the target is reachable.");
                 }
-                ResumeEnvironment::Absent => true,
+                ResumeEnvironment::Absent => {
+                    if previous.checkpoint.is_none() {
+                        let record = self.state.sessions.get_mut(session_id).context("session disappeared")?;
+                        // Presentation loses the absent target; the environment
+                        // ledger retains all physical ownership for explicit Destroy.
+                        record.target = None;
+                        record.state = SessionState::Lost;
+                        record.updated_at = now();
+                        let reason = format!("The target is confirmed absent and this session has no checkpoint. Run `mj destroy --session {session_id}` to clean its remaining resources, or restore another recovery archive.");
+                        record.last_error = Some(reason.clone());
+                        crate::database::save_lifecycle_session(record)?;
+                        bail!("{reason}");
+                    }
+                    true
+                },
             }
         } else {
             false
