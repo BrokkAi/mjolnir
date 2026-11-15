@@ -18,6 +18,27 @@ impl NativeCheckpointState for NativeState {
             Ok(Vec::new())
         }
     }
+    fn restore_missing(
+        &self,
+        session: &SessionManifest,
+        home: &Path,
+        path: &Path,
+        data: &[u8],
+    ) -> Result<Option<bool>> {
+        if !codex_goal::is_artifact(path) {
+            return Ok(None);
+        }
+        ensure!(
+            session.harness_kind == HarnessKind::Codex,
+            "goal artifact belongs to a non-Codex session"
+        );
+        Ok(Some(codex_goal::restore_missing(
+            home,
+            &session.native_session_id,
+            path,
+            data,
+        )?))
+    }
     fn restore(
         &self,
         session: &SessionManifest,
@@ -58,7 +79,118 @@ pub fn pack_from_spec_reader(reader: &mut impl std::io::Read) -> Result<TargetCh
     let spec: CheckpointPackSpec = read_json_from(reader, "checkpoint pack spec")?;
     pack_checkpoint(&spec)
 }
+pub fn restore_checkout_from_spec_file(path: &Path) -> Result<()> {
+    use mj_checkpoint::archive::{GitCommand, GitCommandRunner};
+    let mut spec: CheckoutRecoverySpec = serde_json::from_slice(&fs::read(path)?)?;
+    ensure!(
+        spec.version == 1 && spec.restore.restore_repositories && !spec.restore.restore_native,
+        "unsupported checkout recovery specification"
+    );
+    spec.restore.archive_path = resolve_target_path(&spec.restore.archive_path)?;
+    spec.restore.workspace_root = resolve_target_path(&spec.restore.workspace_root)?;
+    spec.staged_checkout = resolve_target_path(&spec.staged_checkout)?;
+    spec.destination_checkout = resolve_target_path(&spec.destination_checkout)?;
+    let already_present = spec.destination_checkout.try_exists()?;
+    if !already_present {
+        ensure!(spec.staged_checkout.is_dir(), "staged checkout is missing");
+    }
+    if !already_present {
+        restore_repositories(
+            &spec.restore.archive_path,
+            &spec.restore.workspace_root,
+            &SystemGit,
+        )?;
+    }
+    let published = if already_present {
+        false
+    } else {
+        rename_directory_without_replacement(&spec.staged_checkout, &spec.destination_checkout)?
+    };
+    if spec.destination_checkout.join(".git").is_file() {
+        let output = SystemGit.run(
+            &spec.destination_checkout,
+            &GitCommand {
+                arguments: vec![
+                    "worktree".into(),
+                    "repair".into(),
+                    spec.destination_checkout.as_os_str().to_owned(),
+                ],
+                ..GitCommand::default()
+            },
+        )?;
+        ensure!(
+            output.status == 0,
+            "repair published worktree: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    println!("{}", serde_json::json!({"published": published}));
+    Ok(())
+}
+
+fn rename_directory_without_replacement(source: &Path, destination: &Path) -> Result<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let source = std::ffi::CString::new(source.as_os_str().as_bytes())?;
+        let destination = std::ffi::CString::new(destination.as_os_str().as_bytes())?;
+        // The kernel makes absence and publication one decision. A child's
+        // newly created directory can never be replaced by this archive.
+        #[cfg(target_os = "linux")]
+        let status = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                libc::AT_FDCWD,
+                source.as_ptr(),
+                libc::AT_FDCWD,
+                destination.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        #[cfg(target_os = "macos")]
+        let status =
+            unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) };
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        anyhow::bail!("atomic checkout publication is unsupported on this host");
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            if status == 0 {
+                return Ok(true);
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                return Ok(false);
+            }
+            Err(error).context("publish recovered checkout without replacing current files")
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows refuses replacement of directories, including empty ones.
+        match fs::rename(source, destination) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(error) => Err(error).context("publish recovered checkout"),
+        }
+    }
+}
+
+pub fn restore_missing_from_spec_file(path: &Path, seed_path: Option<&Path>) -> Result<()> {
+    let spec = read_restore_spec(path)?;
+    let seed: Option<mj_core::relay::RestoredRelaySeed> = seed_path
+        .map(|path| serde_json::from_slice(&fs::read(path)?).map_err(anyhow::Error::from))
+        .transpose()?;
+    let outcome = restore_missing_parent_checkpoint(&spec, &NativeState, seed.as_ref())?;
+    println!("{}", serde_json::to_string(&outcome)?);
+    Ok(())
+}
+
 pub fn restore_from_spec_file(path: &Path) -> Result<()> {
+    let spec = read_restore_spec(path)?;
+    restore_checkpoint_with_native_state(&spec, &SystemGit, &NativeState)
+}
+
+fn read_restore_spec(path: &Path) -> Result<CheckpointRestoreSpec> {
     let body = fs::read(path)
         .with_context(|| format!("read checkpoint restore spec {}", path.display()))?;
     let mut spec: CheckpointRestoreSpec = serde_json::from_slice(&body)
@@ -67,5 +199,28 @@ pub fn restore_from_spec_file(path: &Path) -> Result<()> {
     spec.workspace_root = resolve_target_path(&spec.workspace_root)?;
     spec.relay_root = resolve_target_path(&spec.relay_root)?;
     spec.harness_home = resolve_target_path(&spec.harness_home)?;
-    restore_checkpoint_with_native_state(&spec, &SystemGit, &NativeState)
+    Ok(spec)
+}
+
+#[cfg(all(test, unix))]
+mod recovery_tests {
+    use super::*;
+
+    #[test]
+    fn checkout_publication_never_replaces_a_directory_created_by_another_writer() {
+        let temp = tempfile::tempdir().unwrap();
+        let staged = temp.path().join("staged");
+        let current = temp.path().join("current");
+        fs::create_dir(&staged).unwrap();
+        fs::write(staged.join("file"), b"archived").unwrap();
+        fs::create_dir(&current).unwrap();
+        fs::write(current.join("file"), b"new current work").unwrap();
+        assert!(!rename_directory_without_replacement(&staged, &current).unwrap());
+        assert_eq!(fs::read(current.join("file")).unwrap(), b"new current work");
+        assert_eq!(fs::read(staged.join("file")).unwrap(), b"archived");
+        let absent = temp.path().join("absent");
+        assert!(rename_directory_without_replacement(&staged, &absent).unwrap());
+        assert_eq!(fs::read(absent.join("file")).unwrap(), b"archived");
+        assert!(!staged.exists());
+    }
 }

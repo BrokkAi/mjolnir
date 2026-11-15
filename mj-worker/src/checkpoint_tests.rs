@@ -202,3 +202,74 @@ fn restored_seed(relay_root: &Path) -> mj_core::relay::RestoredRelaySeed {
     serde_json::from_slice(&fs::read(mj_core::relay::restored_relay_seed_path(relay_root)).unwrap())
         .unwrap()
 }
+
+// Hard-won: 055d8a772 review: recovery of one component must preserve newer parent state and current files.
+#[test]
+fn checkout_recovery_publishes_only_the_staged_checkout_and_preserves_a_new_current_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let (source, archive_path) = fixture(temp.path());
+    export_checkpoint(&source).unwrap();
+    let stage = temp.path().join("checkout-stage");
+    fs::create_dir(&stage).unwrap();
+    git(
+        &stage,
+        &[
+            "clone",
+            "--quiet",
+            source.workspace_root.join("app").to_str().unwrap(),
+            "app",
+        ],
+    );
+    let parent_native = temp.path().join("current-native");
+    fs::create_dir(&parent_native).unwrap();
+    fs::write(parent_native.join("sentinel"), b"newer native state").unwrap();
+    let parent_relay = temp.path().join("current-relay");
+    fs::create_dir(&parent_relay).unwrap();
+    fs::write(
+        parent_relay.join(mj_core::relay::RELAY_STATE_FILE),
+        b"current relay",
+    )
+    .unwrap();
+    let destination = temp.path().join("checkout-current");
+    let spec = CheckoutRecoverySpec {
+        version: 1,
+        checkpoint_sha256: verify_archive_streaming(&archive_path)
+            .unwrap()
+            .archive_sha256,
+        staging_root: stage.clone(),
+        staged_checkout: stage.clone(),
+        destination_checkout: destination.clone(),
+        restore: CheckpointRestoreSpec {
+            archive_path,
+            workspace_root: stage.clone(),
+            report_root: None,
+            relay_root: parent_relay.clone(),
+            harness_home: parent_native.clone(),
+            restore_repositories: true,
+            restore_native: false,
+            queue_policy: QueueRestorePolicy::Restore,
+            primary_repository_root: None,
+        },
+    };
+    let spec_path = temp.path().join("checkout-recovery.json");
+    fs::write(&spec_path, serde_json::to_vec(&spec).unwrap()).unwrap();
+    crate::checkpoint::restore_checkout_from_spec_file(&spec_path).unwrap();
+    assert!(destination.join("app/.git").is_dir());
+    assert!(!stage.exists());
+    fs::write(destination.join("app/current-work"), b"new current files").unwrap();
+    // An interrupted caller can retry after publication; it must not replay
+    // the archive over the now-current checkout, even without its old staging.
+    crate::checkpoint::restore_checkout_from_spec_file(&spec_path).unwrap();
+    assert_eq!(
+        fs::read(destination.join("app/current-work")).unwrap(),
+        b"new current files"
+    );
+    assert_eq!(
+        fs::read(parent_native.join("sentinel")).unwrap(),
+        b"newer native state"
+    );
+    assert_eq!(
+        fs::read(parent_relay.join(mj_core::relay::RELAY_STATE_FILE)).unwrap(),
+        b"current relay"
+    );
+}

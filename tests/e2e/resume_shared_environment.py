@@ -8,13 +8,16 @@ All daemon operations use --instance and private configuration/data directories.
 import argparse
 import hashlib
 import json
+import os
+import shutil
+import signal
 from pathlib import Path
 import sqlite3
 import subprocess
 
 import container_upgrades
 from container_upgrades import Regression, WAIT
-from reliability_lab import ScenarioFailure
+from reliability_lab import ScenarioFailure, process_is_running
 
 
 class ResumeRegression(Regression):
@@ -34,6 +37,39 @@ class ResumeRegression(Regression):
         return self.podman("exec", "-i", target["container_id"], "/usr/bin/python3", "-",
                            "/var/lib/hel/workers/" + session, *arguments, input=script)
 
+    def lose_bare_parent_root(self, parent, root, child_pid):
+        # Stop exactly the private parent's worker/supervisor/harness groups
+        # before deleting its runtime. The child's group is independent.
+        groups = set()
+        selected = []
+        for pid, description in self.owned_processes():
+            try:
+                environment = set(Path(f"/proc/{pid}/environ").read_bytes().split(b"\0"))
+                command = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+                ours = f"MJ_SESSION_ID={parent}".encode() in environment
+                ours |= (b"--root" in command and str(root).encode() in command)
+                if ours:
+                    selected.append(pid)
+                    groups.add(os.getpgid(pid))
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+        assert groups and os.getpgrp() not in groups
+        assert os.getpgid(int(child_pid)) not in groups
+        for group in groups:
+            try:
+                os.killpg(group, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        self.wait(lambda: not any(process_is_running(pid) for pid in selected), "bare parent process groups stopped")
+        shutil.rmtree(root)
+
+    def wait_recovery_notice(self, parent, copy_time):
+        def visible():
+            status, conversation = self.request("GET", f"/api/conversations/{parent}", timeout=WAIT)
+            text = json.dumps(conversation)
+            return (status == 200 and copy_time in text and "files are current" in text)
+        self.wait(visible, "timestamped native-history recovery notice")
+
     def worker_status(self, session):
         script = r'''
 import json, socket, sys, uuid
@@ -52,6 +88,14 @@ with socket.socket(socket.AF_UNIX) as connection:
         print(json.dumps({"hello":hello["payload"],"state":status["payload"]["data"]}))
 '''
         return json.loads(self.worker_python(session, script, str(WAIT)))
+
+    def wait_child_started(self, child):
+        def settled():
+            if self.record(child)["state"] != "running":
+                return False
+            with sqlite3.connect(f"file:{self.data / 'mj.sqlite3'}?mode=ro", uri=True) as database:
+                return database.execute("SELECT 1 FROM worker_restart_intents WHERE session_id=?", (child,)).fetchone() is None
+        self.wait(settled, "child startup durably completed")
 
     def finish_child_turn(self, child, active, prompt_file):
         text = prompt_file.read_text()
@@ -90,6 +134,7 @@ with socket.socket(socket.AF_UNIX) as connection:
         child = self.tool(parent, "spawn", {"task_name": "bare-child", "task_type": "straightforward",
                           "instructions": "Keep working during bare parent repair."})["child_session_id"]
         active = self.wait(lambda: self.working(child), "bare child active turn")
+        self.wait_child_started(child)
         child_root = Path(self.record(child)["target"]["worker_root"])
         child_pid = (child_root / "worker.pid").read_text()
         self.cli("daemon", "stop")
@@ -105,8 +150,61 @@ with socket.socket(socket.AF_UNIX) as connection:
         assert (checkout / "resume-worktree-sentinel").read_text() == "newer work"
         assert (native_home / "resume-native-sentinel").read_text() == "newer native state"
         assert self.working(child)["command_id"] == active["command_id"]
+        # The checkout and child remain current when only the parent runtime
+        # and native home disappear. Restore parent history, never the worktree.
+        copy_time = self.record(parent)["checkpoint"]["created_at"]
+        self.cli("daemon", "stop")
+        assert not child_root.is_relative_to(root)
+        self.lose_bare_parent_root(parent, root, child_pid)
+        with sqlite3.connect(self.data / "mj.sqlite3") as database:
+            database.execute("UPDATE sessions SET state='error',last_error='injected parent runtime loss' WHERE session_id=?", (parent,))
+        self.cli("resume", "--session", parent)
+        self.authenticate()
+        self.wait(lambda: self.record(parent)["state"] == "running", "missing bare parent data recovered")
+        assert (checkout / "resume-worktree-sentinel").read_text() == "newer work"
+        assert (child_root / "worker.pid").read_text() == child_pid
+        assert self.worker_status(parent)["state"]["native_session_id"] == native
+        assert self.working(child)["command_id"] == active["command_id"]
+        self.wait_recovery_notice(parent, copy_time)
         self.finish_child_turn(child, active, self.runtime_root / "bare-child-prompt.txt")
         return parent, child
+
+    def retained_bind_regression(self, workspace):
+        directory = self.runtime_root / "bound-checkout"
+        directory.mkdir()
+        status, response = self.request("POST", "/api/actions", {
+            "action": "new", "workspace_id": workspace, "profile_id": "fake",
+            "bundle_id": "fixture", "target_id": "podman-bind", "title": "resume-bound",
+            "additional_mounts": [
+                {"source": str(self.runtime_root), "destination": str(self.runtime_root), "access": "rw"},
+                {"source": str(directory), "destination": "/workspace", "access": "rw"}],
+            "resource_allocation": {"kind": "container", "cpus": 2, "memory_bytes": 4 * 1024 ** 3},
+        }, timeout=WAIT)
+        assert status == 202, response
+        def ready():
+            return next((row["id"] for row in self.snapshot().get("sessions", [])
+                         if row.get("title") == "resume-bound" and row.get("state") == "running"), None)
+        parent = self.wait(ready, "bound checkout parent ready")
+        self.sessions.append(parent)
+        self.cli("checkpoint", "--session", parent)
+        copy_time = self.record(parent)["checkpoint"]["created_at"]
+        checkout = directory / Path(self.record(parent)["container_workspace"]).relative_to("/workspace") / "fixture"
+        readme = checkout / "README.md"
+        assert readme.is_file()
+        readme.write_text("newer tracked work after checkpoint")
+        index = self.git_output(["ls-files", "--stage"], checkout)
+        container = self.container(parent)
+        self.cli("daemon", "stop")
+        self.podman("container", "rm", "--force", container)
+        with sqlite3.connect(self.data / "mj.sqlite3") as database:
+            database.execute("UPDATE sessions SET state='error' WHERE session_id=?", (parent,))
+        self.cli("resume", "--session", parent)
+        self.authenticate()
+        self.wait(lambda: self.record(parent)["state"] == "running", "container recovered around bound checkout")
+        assert readme.read_text() == "newer tracked work after checkpoint"
+        assert self.git_output(["ls-files", "--stage"], checkout) == index
+        self.wait_recovery_notice(parent, copy_time)
+        return parent
 
     def tool(self, session, action, params):
         script = r'''
@@ -168,6 +266,7 @@ else:
         config.write_text(config.read_text() + '\n[bundles.bare-fixture]\nprimary_repo = "fixture"\n[[bundles.bare-fixture.repositories]]\nid = "fixture"\nlocal = ' + json.dumps(str(bare_project)) + '\ndestination = "fixture"\n')
         config = self.config / "config.toml"
         config.write_text(config.read_text() + '\n[subagents.straightforward]\nmodel = "tiny"\neffort = "high"\n')
+        config.write_text(config.read_text() + '\n[targets.podman-bind]\nkind = "podman"\nworkspace_storage = { kind = "container-layer" }\nimage = ' + json.dumps(self.args.image) + '\npull_policy = "never"\n')
         self.cli("workspaces", "create", "Resume shared environment")
         self.authenticate()
         workspace = self.snapshot()["workspaces"][0]["id"]
@@ -194,6 +293,7 @@ else:
         self.podman("exec", self.container(parent), "sh", "-c", 'printf newer >"$1/resume-sentinel"', "sh", workspace_path)
         child = self.tool(parent, "spawn", {"task_name": "live-child", "task_type": "straightforward", "instructions": "Keep working during parent repair."})["child_session_id"]
         active = self.wait(lambda: self.working(child), "child active turn")
+        self.wait_child_started(child)
         for dead in [False, True]:
             # Inject the durable result of failed harness preparation while the
             # daemon is stopped. Workers and the child's turn remain independent.
@@ -236,13 +336,30 @@ else:
         assert self.working(child)["command_id"] == active["command_id"]
         assert self.podman("exec", self.container(parent), "cat", workspace_path + "/resume-sentinel") == "newer"
         self.finish_child_turn(child, active, self.runtime_root / "child-prompt.txt")
-        # A stored locator is not a usable repair source after proven absence.
-        # Keep volume ownership for explicit cleanup, but stop offering Resume.
-        container = self.container(parent)
+        # A missing container does not authorize replacing a surviving volume.
+        self.cli("checkpoint", "--session", parent)
         volume = self.record(parent)["target"]["workspace_storage"]["name"]
+        copy_time = self.record(parent)["checkpoint"]["created_at"]
+        old_container = self.inspect(parent)["Id"]
+        container_name = self.container(parent)
         self.cli("daemon", "stop")
-        self.podman("container", "rm", "--force", container)
+        self.podman("container", "rm", "--force", container_name)
         with sqlite3.connect(self.data / "mj.sqlite3") as database:
+            database.execute("UPDATE sessions SET state='error' WHERE session_id=?", (parent,))
+        self.cli("resume", "--session", parent)
+        self.authenticate()
+        self.wait(lambda: self.record(parent)["state"] == "running", "container recreated on retained volume")
+        assert self.inspect(parent)["Id"] != old_container
+        assert self.record(parent)["target"]["workspace_storage"]["name"] == volume
+        assert self.podman("exec", self.container(parent), "cat", workspace_path + "/resume-sentinel") == "newer"
+        self.wait_recovery_notice(parent, copy_time)
+        # Proven absence of all components and no archive stops offering Resume.
+        container_name = self.container(parent)
+        self.cli("daemon", "stop")
+        self.podman("container", "rm", "--force", container_name)
+        self.podman("volume", "rm", volume)
+        with sqlite3.connect(self.data / "mj.sqlite3") as database:
+            database.execute("DELETE FROM session_checkpoints WHERE session_id=?", (parent,))
             database.execute("UPDATE sessions SET state='error' WHERE session_id=?", (parent,))
         self.cli("resume", "--session", parent, check=False)
         self.authenticate()
@@ -252,10 +369,10 @@ else:
         assert not row["capabilities"]["resume"] and row["capabilities"]["destroy"]
         refusal = self.cli("resume", "--session", parent, check=False)
         assert refusal.returncode != 0 and "destroy" in refusal.stderr.lower(), refusal.stderr
-        self.podman("volume", "exists", volume)
+        bound_parent = self.retained_bind_regression(workspace)
         bare_parent, bare_child = self.bare_regression(workspace)
         print(json.dumps({"result": "passed", "instance": self.instance, "parent": parent, "child": child,
-                          "bare_parent": bare_parent, "bare_child": bare_child, "artifacts": str(self.root)}), flush=True)
+                          "bare_parent": bare_parent, "bare_child": bare_child, "bound_parent": bound_parent, "artifacts": str(self.root)}), flush=True)
 
 
 def main():
@@ -271,6 +388,21 @@ def main():
     regression = ResumeRegression(args)
     try:
         regression.run_regression()
+    except Exception:
+        # Capture only platform facts, never engine environment/credentials.
+        diagnostics = []
+        for session in regression.sessions:
+            try:
+                container = regression.container_from_database(session)
+                probe = subprocess.run(["podman", "exec", container, "/bin/sh", "-c",
+                    "command -v uname; uname -sm; /usr/bin/uname -sm; printf 'PATH=%s\\n' \"$PATH\""],
+                    capture_output=True, text=True, timeout=WAIT)
+                diagnostics.append({"session": session, "status": probe.returncode,
+                    "stdout": probe.stdout[:4000], "stderr": probe.stderr[:4000]})
+            except Exception as error:
+                diagnostics.append({"session": session, "error": str(error)})
+        (regression.root / "failure-platform.json").write_text(json.dumps(diagnostics, indent=2))
+        raise
     finally:
         regression.cleanup()
 

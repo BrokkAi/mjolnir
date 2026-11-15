@@ -4,6 +4,7 @@ use crate::targets::CommandSpec;
 use anyhow::{Context, Result, bail, ensure};
 use mj_core::config::Config;
 use mj_core::state::{ManagedWorktree, SessionRecord};
+use std::path::PathBuf;
 
 use super::backend::recorded_backend_locator;
 use super::lifecycle::BranchDisposition;
@@ -837,6 +838,15 @@ pub(crate) fn target_availability(
     session_id: &str,
     executor: &impl CommandExecutor,
 ) -> Result<TargetAvailability> {
+    target_availability_with_start(controller, session_id, executor, true)
+}
+
+fn target_availability_with_start(
+    controller: &Controller,
+    session_id: &str,
+    executor: &impl CommandExecutor,
+    start: bool,
+) -> Result<TargetAvailability> {
     let record = controller
         .state
         .sessions
@@ -852,6 +862,7 @@ pub(crate) fn target_availability(
             .execute(&plan.exists)
             .context("check retained target before Restart")?;
         match output.status {
+            0 if !start => Ok(TargetAvailability::Reachable),
             0 => match crate::targets::ensure_recovery_target_running(executor, Some(&plan))? {
                 crate::targets::TargetRecoveryOutcome::Missing => Ok(TargetAvailability::Missing),
                 crate::targets::TargetRecoveryOutcome::AlreadyRunning
@@ -999,10 +1010,142 @@ fn start_retained_apple_for_resume(
     Ok(())
 }
 
+/// Directory evidence shared by advisory preflight and the lifecycle decision.
+pub(super) fn directory_available(
+    backend: &targets::TargetLocator,
+    directory: &str,
+    executor: &impl CommandExecutor,
+) -> Result<bool> {
+    let output = executor.execute(&super::worker_binary::directory_presence_command(
+        backend, directory,
+    ))?;
+    ensure!(
+        output.status == 0,
+        "cannot inspect retained directory {directory:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    match String::from_utf8_lossy(&output.stdout).trim() {
+        "present" => Ok(true),
+        "absent" => Ok(false),
+        value => bail!("unexpected directory presence response {value:?}"),
+    }
+}
+
+fn retained_container_checkout_available(
+    controller: &Controller,
+    session_id: &str,
+    backend: &targets::TargetLocator,
+    executor: &impl CommandExecutor,
+) -> Result<bool> {
+    if targets::retained_workspace_volume_exists(backend, session_id, executor)? {
+        return Ok(true);
+    }
+    let record = &controller.state.sessions[session_id];
+    let workspace = PathBuf::from(resume_checkout_directory(controller, session_id, backend)?);
+    let direct = match backend {
+        targets::TargetLocator::LocalPodman {
+            workspace_storage: targets::PodmanWorkspaceLocator::HostPath { path, .. },
+            ..
+        }
+        | targets::TargetLocator::SshPodman {
+            workspace_storage: targets::PodmanWorkspaceLocator::HostPath { path, .. },
+            ..
+        } => Some(PathBuf::from(path)),
+        _ => None,
+    };
+    let attachment = mj_core::state::applied_container_settings(record)
+        .additional_mounts
+        .iter()
+        .filter(|mount| workspace.starts_with(&mount.destination))
+        .max_by_key(|mount| mount.destination.components().count())
+        .map(|mount| {
+            mount.source.join(
+                workspace
+                    .strip_prefix(&mount.destination)
+                    .expect("matching mount"),
+            )
+        });
+    let Some(path) = direct.or(attachment) else {
+        return Ok(false);
+    };
+    let host = match backend {
+        targets::TargetLocator::SshPodman { ssh, .. }
+        | targets::TargetLocator::SshDocker { ssh, .. }
+        | targets::TargetLocator::SshAppleContainer { ssh, .. }
+        | targets::TargetLocator::SshNitro { ssh, .. } => targets::TargetLocator::SshBare {
+            ssh: ssh.clone(),
+            workspace: String::new(),
+            worker_id: None,
+        },
+        _ => targets::TargetLocator::LocalBare {
+            worker_root: path.to_string_lossy().into_owned(),
+        },
+    };
+    directory_available(&host, &path.to_string_lossy(), executor)
+}
+
+pub(super) fn resume_checkout_available(
+    controller: &Controller,
+    session_id: &str,
+    executor: &impl CommandExecutor,
+) -> Result<bool> {
+    let (backend, _) = controller.worker_placement(session_id)?;
+    match target_availability_with_start(controller, session_id, executor, false)? {
+        TargetAvailability::Unreachable => bail!("target engine is unreachable"),
+        TargetAvailability::Missing => {
+            return retained_container_checkout_available(
+                controller, session_id, &backend, executor,
+            );
+        }
+        TargetAvailability::Reachable => {}
+    }
+    let (_, root) = controller.worker_placement(session_id)?;
+    let pending = executor.execute(&super::worker_binary::worker_recovery_command(
+        &backend, &root,
+    ))?;
+    ensure!(
+        pending.status == 0,
+        "cannot inspect pending checkout recovery"
+    );
+    if String::from_utf8_lossy(&pending.stdout).trim() == "checkout-partial" {
+        return Ok(false);
+    }
+    directory_available(
+        &backend,
+        &resume_checkout_directory(controller, session_id, &backend)?,
+        executor,
+    )
+}
+
+pub(super) fn resume_checkout_directory(
+    controller: &Controller,
+    session_id: &str,
+    backend: &targets::TargetLocator,
+) -> Result<String> {
+    let session = &controller.state.sessions[session_id];
+    if let Some(path) = controller.state.checkout(session_id)?.project_directory() {
+        return Ok(path.to_string_lossy().into_owned());
+    }
+    let root = PathBuf::from(super::network_git::workspace_root(
+        backend,
+        session.container_workspace.as_deref(),
+    ));
+    Ok(session
+        .project_bundle(&controller.config)
+        .and_then(|bundle| bundle.primary())
+        .map(|primary| root.join(&primary.destination))
+        .unwrap_or(root)
+        .to_string_lossy()
+        .into_owned())
+}
+
 /// Evidence for Resume, obtained while its worker lifecycle permit is held.
 pub(super) enum ResumeEnvironment {
     LiveWorker,
     WorkerMissing,
+    ParentDataMissing,
+    RetainedContainerMissing,
+    CheckoutMissing,
     Absent,
     Unknown(anyhow::Error),
 }
@@ -1013,33 +1156,21 @@ pub(super) fn classify_resume_environment(
     executor: &impl CommandExecutor,
 ) -> ResumeEnvironment {
     let probe = || -> Result<ResumeEnvironment> {
+        let (backend, root) = controller.worker_placement(session_id)?;
         match target_availability(controller, session_id, executor)? {
-            TargetAvailability::Missing => return Ok(ResumeEnvironment::Absent),
+            TargetAvailability::Missing => {
+                return Ok(
+                    if retained_container_checkout_available(
+                        controller, session_id, &backend, executor,
+                    )? {
+                        ResumeEnvironment::RetainedContainerMissing
+                    } else {
+                        ResumeEnvironment::Absent
+                    },
+                );
+            }
             TargetAvailability::Unreachable => bail!("the target engine is unreachable"),
             TargetAvailability::Reachable => {}
-        }
-        let (backend, root) = controller.worker_placement(session_id)?;
-        if matches!(
-            backend,
-            targets::TargetLocator::LocalBare { .. }
-                | targets::TargetLocator::SshBare { .. }
-                | targets::TargetLocator::AwsEc2 { .. }
-        ) {
-            // A reachable bare host says nothing about its retained files. Reuse
-            // the listing probe so lookup errors cannot authorize archive restore.
-            let output = executor.execute(&super::worker_binary::worker_recovery_command(
-                &backend, &root,
-            ))?;
-            ensure!(
-                output.status == 0,
-                "worker root probe failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            match String::from_utf8_lossy(&output.stdout).trim() {
-                "absent" => return Ok(ResumeEnvironment::Absent),
-                "recoverable" | "nothing" => {}
-                value => bail!("unexpected worker root response {value:?}"),
-            }
         }
         start_retained_apple_for_resume(&backend, executor)?;
         let output = executor.execute(&super::worker_binary::worker_liveness_command(
@@ -1051,10 +1182,59 @@ pub(super) fn classify_resume_environment(
             String::from_utf8_lossy(&output.stderr)
         );
         match String::from_utf8_lossy(&output.stdout).trim() {
-            "alive" | "starting" => Ok(ResumeEnvironment::LiveWorker),
-            "dead" => Ok(ResumeEnvironment::WorkerMissing),
+            "alive" | "starting" => return Ok(ResumeEnvironment::LiveWorker),
+            "dead" => {}
             value => bail!("unexpected worker liveness response {value:?}"),
         }
+        let checkout = directory_available(
+            &backend,
+            &resume_checkout_directory(controller, session_id, &backend)?,
+            executor,
+        )?;
+        let output = executor.execute(&super::worker_binary::worker_recovery_command(
+            &backend, &root,
+        ))?;
+        ensure!(
+            output.status == 0,
+            "cannot inspect retained parent runtime: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let runtime = match String::from_utf8_lossy(&output.stdout).trim() {
+            "partial" => {
+                return Ok(if checkout {
+                    ResumeEnvironment::ParentDataMissing
+                } else {
+                    ResumeEnvironment::CheckoutMissing
+                });
+            }
+            "checkout-partial" => return Ok(ResumeEnvironment::CheckoutMissing),
+            "recoverable" => true,
+            "nothing" | "absent" => false,
+            value => bail!("unexpected parent runtime response {value:?}"),
+        };
+        let profile = controller
+            .config
+            .named_profile(&controller.state.sessions[session_id].last_profile)?;
+        let native = directory_available(
+            &backend,
+            &super::target_profile_home(&backend, session_id, profile),
+            executor,
+        )?;
+        Ok(
+            if !checkout && !runtime && !native && backend.container_engine().is_none() {
+                ResumeEnvironment::Absent
+            } else if !checkout {
+                ResumeEnvironment::CheckoutMissing
+            } else if (!runtime || !native)
+                && controller.state.sessions[session_id]
+                    .native_session_id
+                    .is_some()
+            {
+                ResumeEnvironment::ParentDataMissing
+            } else {
+                ResumeEnvironment::WorkerMissing
+            },
+        )
     };
     probe().unwrap_or_else(ResumeEnvironment::Unknown)
 }

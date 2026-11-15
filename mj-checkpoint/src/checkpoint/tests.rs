@@ -4269,3 +4269,106 @@ fn captured_checkpoint_accepts_an_older_workers_json() {
     let decoded: CheckpointExportSpec = serde_json::from_value(json).unwrap();
     assert!(decoded.report_directories.is_none());
 }
+
+// Hard-won: 055d8a772 review: parent runtime loss must not rewind a retained checkout or child state.
+#[cfg(unix)]
+#[test]
+fn missing_parent_restore_preserves_current_components_and_retries_partial_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let (spec, _) = fixture(temp.path());
+    let native_relative = PathBuf::from(format!("sessions/2026/08/09/rollout-{NATIVE}.jsonl"));
+    let archived_native = vec![b'n'; 128 * 1024];
+    fs::write(spec.harness_home.join(&native_relative), &archived_native).unwrap();
+    export_checkpoint(&spec).unwrap();
+    let checkout = spec.workspace_root.join("app");
+    let current = checkout.join("README.md");
+    fs::write(&current, b"current work after checkpoint").unwrap();
+    let index = git(&checkout, &["ls-files", "--stage"]);
+    let child_report = spec.workspace_root.join(".mj/agents/child/report.txt");
+    fs::create_dir_all(child_report.parent().unwrap()).unwrap();
+    fs::write(&child_report, b"current child report").unwrap();
+    let restore = CheckpointRestoreSpec {
+        archive_path: spec.output_path.clone(),
+        workspace_root: spec.workspace_root.clone(),
+        report_root: Some(spec.workspace_root.join(".mj/agents")),
+        relay_root: temp.path().join("recovered-parent"),
+        harness_home: temp.path().join("recovered-native"),
+        restore_repositories: false,
+        restore_native: true,
+        queue_policy: QueueRestorePolicy::Restore,
+        primary_repository_root: Some(checkout.clone()),
+    };
+    fs::create_dir_all(&restore.relay_root).unwrap();
+    let seed = restore
+        .relay_root
+        .join(mj_core::relay::RESTORED_RELAY_SEED_FILE);
+    let mut current_projection = spec.canonical_session.clone();
+    current_projection.event_frontier = 27;
+    current_projection.event_frontier_digest = "b".repeat(64);
+    current_projection.queued_prompts.clear();
+    let current_seed =
+        relay_seed_for_restore(&current_projection, true, QueueRestorePolicy::Restore).unwrap();
+    std::os::unix::fs::symlink(&current, &seed).unwrap();
+    assert!(
+        restore_missing_parent_checkpoint(&restore, &NoNativeCheckpointState, Some(&current_seed))
+            .is_err()
+    );
+    assert_eq!(
+        fs::read(&current).unwrap(),
+        b"current work after checkpoint"
+    );
+    assert_eq!(
+        fs::read(restore.harness_home.join(&native_relative)).unwrap(),
+        archived_native
+    );
+    fs::remove_file(&seed).unwrap();
+    let retry =
+        restore_missing_parent_checkpoint(&restore, &NoNativeCheckpointState, Some(&current_seed))
+            .unwrap();
+    assert!(!retry.native_restored);
+    assert!(retry.relay_restored);
+    let recovered_seed: mj_core::relay::RestoredRelaySeed =
+        serde_json::from_slice(&fs::read(&seed).unwrap()).unwrap();
+    assert_eq!(recovered_seed.event_frontier, 27);
+    assert!(
+        recovered_seed.queued_prompts.is_empty(),
+        "the archive must not replay already completed queued work"
+    );
+    fs::write(
+        restore.harness_home.join(&native_relative),
+        b"newer native history",
+    )
+    .unwrap();
+    let relay = restore.relay_root.join(mj_core::relay::RELAY_STATE_FILE);
+    fs::write(&relay, b"current relay state").unwrap();
+    let repeated =
+        restore_missing_parent_checkpoint(&restore, &NoNativeCheckpointState, Some(&current_seed))
+            .unwrap();
+    assert!(!repeated.native_restored && !repeated.relay_restored);
+    assert_eq!(fs::read(&relay).unwrap(), b"current relay state");
+    assert_eq!(
+        fs::read(restore.harness_home.join(&native_relative)).unwrap(),
+        b"newer native history"
+    );
+    assert_eq!(
+        fs::read(&current).unwrap(),
+        b"current work after checkpoint"
+    );
+    assert_eq!(fs::read(&child_report).unwrap(), b"current child report");
+    assert_eq!(git(&checkout, &["ls-files", "--stage"]), index);
+    let mut from_store = restore.clone();
+    from_store.archive_path = temp.path().join("no-recovery-archive");
+    from_store.relay_root = temp.path().join("runtime-from-store");
+    from_store.restore_native = false;
+    let result = restore_missing_parent_checkpoint(
+        &from_store,
+        &NoNativeCheckpointState,
+        Some(&current_seed),
+    )
+    .unwrap();
+    assert!(result.relay_restored && !result.native_restored);
+    assert_eq!(
+        fs::read(from_store.harness_home.join(&native_relative)).unwrap(),
+        b"newer native history"
+    );
+}

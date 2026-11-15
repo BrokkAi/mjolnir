@@ -175,6 +175,19 @@ pub(super) fn is_artifact(path: &Path) -> bool {
     path.starts_with(ARTIFACT_ROOT)
 }
 
+pub(super) fn restore_missing(
+    home: &Path,
+    thread_id: &str,
+    path: &Path,
+    data: &[u8],
+) -> Result<bool> {
+    if home.join(DATABASE).try_exists()? {
+        return Ok(false);
+    }
+    restore(home, thread_id, path, data)?;
+    Ok(true)
+}
+
 pub(super) fn restore(home: &Path, thread_id: &str, path: &Path, data: &[u8]) -> Result<()> {
     validate_component(thread_id, "native goal thread ID")?;
     ensure!(
@@ -315,6 +328,42 @@ mod tests {
         let other = fixture(target.path(), "existing-other", "keep target session");
         let artifact = collect(source.path(), "selected").unwrap().unwrap();
         assert!(!String::from_utf8_lossy(&artifact.data).contains("unrelated private"));
+        // Partial recovery must preserve any current native database, including
+        // goals owned by other conversations in this home.
+        assert!(
+            !restore_missing(
+                target.path(),
+                "selected",
+                &artifact.relative_path,
+                &artifact.data
+            )
+            .unwrap()
+        );
+        let retained = Connection::open(target.path().join(DATABASE)).unwrap();
+        assert!(read_goal(&retained, "selected").unwrap().is_none());
+        assert_eq!(
+            read_goal(&retained, "existing-other").unwrap(),
+            Some(other.clone())
+        );
+        let missing = tempfile::tempdir().unwrap();
+        assert!(
+            restore_missing(
+                missing.path(),
+                "selected",
+                &artifact.relative_path,
+                &artifact.data
+            )
+            .unwrap()
+        );
+        assert!(
+            !restore_missing(
+                missing.path(),
+                "selected",
+                &artifact.relative_path,
+                &artifact.data
+            )
+            .unwrap()
+        );
         restore(
             target.path(),
             "selected",

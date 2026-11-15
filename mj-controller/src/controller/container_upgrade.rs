@@ -153,17 +153,39 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
+        self.recover_removed_container_with_mode(session_id, executor, false)
+            .await
+    }
+
+    pub(super) async fn recover_removed_resume_container(
+        &mut self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<()> {
+        self.recover_removed_container_with_mode(session_id, executor, true)
+            .await
+    }
+
+    async fn recover_removed_container_with_mode(
+        &mut self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        for_resume: bool,
+    ) -> Result<()> {
         let record = self
             .state
             .sessions
             .get(session_id)
             .context("session missing")?
             .clone();
-        let checkpoint = record
-            .checkpoint
-            .as_ref()
-            .context("legacy upgrade has no recovery archive")?;
-        super::resume::verify_resume_checkpoint(session_id, checkpoint)?;
+        if let Some(checkpoint) = &record.checkpoint {
+            super::resume::verify_resume_checkpoint(session_id, checkpoint)?;
+        } else {
+            ensure!(
+                for_resume && record.native_session_id.is_none(),
+                "The retained workspace was kept but no recovery copy holds the missing parent history. Supply a recovery archive and retry Resume."
+            );
+        }
         let configured = self
             .config
             .targets
@@ -253,13 +275,46 @@ impl Controller {
             session_id,
             &mounts,
             &targets::container_workspace_root(record.container_workspace.as_deref()),
+            for_resume,
             executor,
         )?;
         let current = self.state.sessions.get_mut(session_id).unwrap();
         current.state = SessionState::Closing;
         self.persist_session_state(session_id)?;
-        self.restore_legacy_container(session_id, restore_repositories, executor)
-            .await
+        if for_resume {
+            ensure!(
+                !restore_repositories,
+                "retained workspace disappeared while replacing its container; recovery copy and any remaining storage were kept"
+            );
+            match super::environment::classify_resume_environment(self, session_id, executor) {
+                super::environment::ResumeEnvironment::CheckoutMissing => self
+                    .recover_missing_checkout(session_id, false, executor)
+                    .await
+                    .map(|_| ()),
+                super::environment::ResumeEnvironment::WorkerMissing
+                    if record.native_session_id.is_none() =>
+                {
+                    self.repair_existing_environment(
+                        session_id,
+                        super::resume::RetainedWorker::Missing,
+                        false,
+                        executor,
+                    )
+                    .await
+                    .map(|_| ())
+                }
+                super::environment::ResumeEnvironment::Unknown(error) => Err(error.context(
+                    "replacement storage was kept; retry Resume when its components are reachable",
+                )),
+                _ => self
+                    .recover_missing_parent_data(session_id, false, executor)
+                    .await
+                    .map(|_| ()),
+            }
+        } else {
+            self.restore_legacy_container(session_id, restore_repositories, executor)
+                .await
+        }
     }
     pub(crate) fn plan_container_upgrade(
         &self,

@@ -49,6 +49,17 @@ pub trait NativeCheckpointState: Sync {
         path: &Path,
         data: &[u8],
     ) -> Result<bool>;
+    /// Handle target-owned artifacts without replacing existing state.
+    /// None means this is an ordinary file; Some reports whether data changed.
+    fn restore_missing(
+        &self,
+        _session: &SessionManifest,
+        _home: &Path,
+        _path: &Path,
+        _data: &[u8],
+    ) -> Result<Option<bool>> {
+        Ok(None)
+    }
 }
 struct NoNativeCheckpointState;
 impl NativeCheckpointState for NoNativeCheckpointState {

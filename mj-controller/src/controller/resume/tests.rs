@@ -349,7 +349,7 @@ async fn network_resume_ignores_host_history_but_an_explicit_raw_move_checks_it(
         "project".into(),
         super::super::test_support::local_bundle(repository.path()),
     );
-    let controller = Controller {
+    let mut controller = Controller {
         config,
         state: State {
             sessions: [(session_id.into(), session)].into_iter().collect(),
@@ -372,6 +372,38 @@ async fn network_resume_ignores_host_history_but_an_explicit_raw_move_checks_it(
     };
     assert_eq!(mismatch.missing_commit, "a".repeat(40));
     assert!(!repository.path().join(".mj/worktrees").exists());
+    // Hard-won: 055d8a772 review: a stale locator hid source confirmation.
+    struct MissingTarget;
+    impl CommandExecutor for MissingTarget {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            if command.purpose == "check for Mjolnir session container" {
+                return Ok(CommandOutput {
+                    status: 1,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                });
+            }
+            ProcessExecutor.execute(command)
+        }
+    }
+    let row = controller.state.sessions.get_mut(session_id).unwrap();
+    row.state = SessionState::Error;
+    row.target = Some(Box::new(TargetLocator::LocalPodman {
+        container_id: targets::resource_name(session_id).unwrap(),
+        workspace_storage: Default::default(),
+        borrowed_from: None,
+    }));
+    assert!(matches!(
+        controller
+            .preflight_resume_repository_sources_with_token(
+                session_id,
+                "local-bare",
+                None,
+                &MissingTarget
+            )
+            .unwrap(),
+        ResumeRepositorySourcePreflight::RepositoryMoved(_)
+    ));
 }
 
 #[tokio::test]
@@ -2425,6 +2457,8 @@ fn failed_resume_keeps_present_and_unknown_environments_without_an_archive() {
                     "State": {"Status": "running"}
                 }])).unwrap()),
                 "probe Mjolnir worker daemon liveness" => (0, b"dead\n".to_vec()),
+                "probe retained environment directory" => (0, b"present\n".to_vec()),
+                "probe Mjolnir worker root" => (0, b"recoverable\n".to_vec()),
                 _ => anyhow::bail!("injected harness preparation failure: {}", command.purpose),
             };
             Ok(CommandOutput {
@@ -2533,6 +2567,41 @@ fn failed_resume_keeps_present_and_unknown_environments_without_an_archive() {
             "{commands:?}"
         );
     }
+    // A new placement stops being disposable when its boot owner is admitted,
+    // including a lost launch acknowledgement before Running was published.
+    parent.state = SessionState::Provisioning;
+    controller.state.sessions.insert(id.into(), parent.clone());
+    crate::database::save_session(&parent).unwrap();
+    let owner =
+        crate::worker_lifecycle::WorkerPermit::try_acquire(id, "resume rollback boot regression")
+            .unwrap()
+            .unwrap();
+    owner.scope_blocking(|| {
+        let intent = crate::database::WorkerRestartIntent {
+            operation_id: owner.operation_id().into(),
+            target: *parent.target.clone().unwrap(),
+            desired_build: String::new(),
+        };
+        crate::database::begin_worker_restart(id, &intent).unwrap();
+        let engine = Engine {
+            exists_status: 0,
+            commands: Mutex::default(),
+        };
+        controller
+            .rollback_failed_resume(
+                id,
+                &parent,
+                None,
+                false,
+                anyhow::anyhow!("lost startup acknowledgement"),
+                &engine,
+            )
+            .unwrap();
+        assert!(engine.commands.lock().unwrap().is_empty());
+        assert_eq!(controller.state.sessions[id].state, SessionState::Error);
+        assert_eq!(controller.state.sessions[id].target, parent.target);
+        crate::database::finish_worker_restart(id, &intent.operation_id).unwrap();
+    });
 }
 
 // Hard-won: c77d71fc3 review: an intact stopped Apple container was never started by Resume.
@@ -2577,6 +2646,8 @@ fn resume_starts_retained_apple_containers_before_probing_their_worker() {
                         (0, String::new())
                     }
                 }
+                "probe retained environment directory" => (0, "present\n".into()),
+                "probe Mjolnir worker root" => (0, "recoverable\n".into()),
                 "probe Mjolnir worker daemon liveness" => {
                     assert!(*running, "worker probe ran inside a stopped container");
                     (0, "dead\n".into())
@@ -2594,6 +2665,13 @@ fn resume_starts_retained_apple_containers_before_probing_their_worker() {
     for remote in [false, true] {
         for (running, fail_start) in [(false, false), (true, false), (false, true)] {
             let mut config = resume_compatibility_config();
+            config.profiles.insert(
+                "codex".into(),
+                HarnessProfile::new(
+                    mj_core::config::HarnessKind::Codex,
+                    PathBuf::from(std::env::var_os("MJ_DATA_DIR").unwrap()).join("codex"),
+                ),
+            );
             let TargetTemplate::LocalPodman { container } = config.targets["podman"].clone() else {
                 unreachable!()
             };
@@ -2703,6 +2781,7 @@ fn resume_distinguishes_absent_bare_roots_from_empty_or_unknown_roots() {
                 "probe retained target before Restart"
                     | "probe Mjolnir worker root"
                     | "probe Mjolnir worker daemon liveness"
+                    | "probe retained environment directory"
             ));
             let mut local = if command.program == "ssh" {
                 CommandSpec::new(
@@ -2728,6 +2807,10 @@ fn resume_distinguishes_absent_bare_roots_from_empty_or_unknown_roots() {
         std::fs::create_dir_all(&root).unwrap();
         let mut session = checkpoint_test_session(id);
         session.state = SessionState::Error;
+        session.native_session_id = None;
+        let checkout = home.path().join("current-checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        session.project_directory = Some(checkout.clone());
         session.target_template_id = if remote { "ssh-bare" } else { "local-bare" }.into();
         session.target = Some(Box::new(if remote {
             TargetLocator::SshBare {
@@ -2740,8 +2823,16 @@ fn resume_distinguishes_absent_bare_roots_from_empty_or_unknown_roots() {
                 worker_root: root.clone(),
             }
         }));
-        let controller = Controller {
-            config: resume_compatibility_config(),
+        let mut config = resume_compatibility_config();
+        config.profiles.insert(
+            "codex".into(),
+            HarnessProfile::new(
+                mj_core::config::HarnessKind::Codex,
+                home.path().join("profile-config"),
+            ),
+        );
+        let mut controller = Controller {
+            config,
             state: State {
                 sessions: [(id.into(), session)].into_iter().collect(),
                 ..State::default()
@@ -2760,11 +2851,29 @@ fn resume_distinguishes_absent_bare_roots_from_empty_or_unknown_roots() {
             worker_recovery(&executor, &backend, &worker_root),
             WorkerRecovery::NothingToRecover
         );
+        controller
+            .state
+            .sessions
+            .get_mut(id)
+            .unwrap()
+            .native_session_id = Some("retained-native".into());
         std::fs::remove_dir(&root).unwrap();
+        assert!(matches!(
+            classify_resume_environment(&controller, id, &executor),
+            ResumeEnvironment::ParentDataMissing
+        ));
+        // Missing ancestors prove runtime absence, never checkout loss.
+        std::fs::remove_dir_all(root.parent().unwrap()).unwrap();
+        assert!(matches!(
+            classify_resume_environment(&controller, id, &executor),
+            ResumeEnvironment::ParentDataMissing
+        ));
+        std::fs::remove_dir_all(&checkout).unwrap();
         assert!(matches!(
             classify_resume_environment(&controller, id, &executor),
             ResumeEnvironment::Absent
         ));
+        std::fs::create_dir_all(root.parent().unwrap()).unwrap();
         // The other caller keeps its existing no-relay recovery semantics.
         assert_eq!(
             worker_recovery(&executor, &backend, &worker_root),
