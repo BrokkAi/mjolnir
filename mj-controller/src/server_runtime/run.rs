@@ -1373,7 +1373,7 @@ pub(crate) async fn run_server(
                         };
                         if let (Err(failure), Some(prefix), Some(id)) = (&result, lifecycle_failure_prefix, &session_id) {
                             failure_runtime.record_lifecycle_failure(id, &action_reference(action_id), &crate::daemon::LifecycleFailure {
-                                detail: failure.detail.clone(), refusal: failure.refusal.clone(),
+                                detail: failure.detail.clone(), refusal: failure.refusal.clone(), reason: failure.reason,
                             }, prefix).await;
                         }
                         let notice = match (&result, notice_action, &session_id) {

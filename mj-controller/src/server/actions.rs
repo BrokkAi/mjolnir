@@ -370,8 +370,8 @@ impl ActionOutcome {
             Self::Failed { reference } => Some(ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!(
-                    "the controller could not start this action; \
-                     the daemon log records the reason under reference {reference}"
+                    "the controller could not start this action. Retry the action; if the \
+                     runtime is unavailable, Resume the session to repair it first. Reference {reference}."
                 ),
             )),
         }

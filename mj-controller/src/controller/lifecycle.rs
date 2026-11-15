@@ -21,6 +21,31 @@ use super::{Controller, now, persist_session_record_transition_or_restore};
 
 mod subagent;
 
+/// Trusted public guidance attached at the failing lifecycle boundary. Never
+/// derive it from an error chain, which can contain credentials and host paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LifecycleFailureReason {
+    WorkerContact,
+    Checkpoint,
+    Cleanup,
+    RetainedMoveSource,
+    UnsealedMoveSource,
+}
+
+impl std::fmt::Display for LifecycleFailureReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::WorkerContact => "Suspension could not contact the worker. Resume the session to repair its runtime, then retry suspension.",
+            Self::Checkpoint => "Suspension could not save its recovery checkpoint. Retry suspension; the existing environment was kept.",
+            Self::Cleanup => "Suspension could not finish removing its target. Retry suspension to finish cleanup; retained environments and recovery data were kept.",
+            Self::RetainedMoveSource => "Suspension interrupted Move before the destination was ready; the source workspace was kept. Resume the session to repair its runtime, then retry suspension.",
+            Self::UnsealedMoveSource => "Suspension could not establish a sealed Move checkpoint. Resume the session to repair its runtime, then retry suspension; existing environments and recovery data were kept.",
+        })
+    }
+}
+
+impl std::error::Error for LifecycleFailureReason {}
+
 /// What destroying a session does with its managed worktree's git branch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BranchDisposition {
@@ -301,6 +326,7 @@ impl Controller {
                 }
                 return Err(
                     self.persist_failed_checkpoint_state_or_restore(session_id, &previous, error)
+                        .context(LifecycleFailureReason::Checkpoint)
                 );
             }
         };
@@ -561,7 +587,7 @@ impl Controller {
             Ok(deferred) => Ok(deferred),
             Err(error) => {
                 self.record_interrupted_close(session_id, &error)?;
-                Err(error)
+                Err(error.context(LifecycleFailureReason::Cleanup))
             }
         }
 
@@ -645,7 +671,8 @@ impl Controller {
                     "suspension could not query its worker; retaining target and checkpoint"
                 );
                 self.diagnose_suspension_worker(session_id, phase).await;
-                return Err(error.context(format!("{phase} while recovering suspension")));
+                return Err(error.context(format!("{phase} while recovering suspension"))
+                    .context(LifecycleFailureReason::WorkerContact));
             }
         };
         tracing::info!(
@@ -689,6 +716,7 @@ impl Controller {
             before_close.await?;
         }
         self.destroy_after_verified_checkpoint(session_id, &verified, executor)
+            .context(LifecycleFailureReason::Cleanup)
 
         }).await
     }
@@ -849,6 +877,12 @@ impl Controller {
         // outcome, including when an older raw error was already recorded.
         let previous = record.clone();
         let record = self.state.sessions.get_mut(session_id).unwrap();
+        if matches!(
+            record.state,
+            SessionState::Closing | SessionState::Provisioning
+        ) {
+            record.state = SessionState::Error;
+        }
         record.last_error = Some(cause.to_owned());
         record.updated_at = now();
         persist_session_record_transition_or_restore(

@@ -747,6 +747,7 @@ enum DaemonLifecycleResult {
 pub(crate) struct LifecycleFailure {
     pub(crate) detail: String,
     pub(crate) refusal: Option<Refusal>,
+    pub(crate) reason: Option<crate::controller::LifecycleFailureReason>,
 }
 
 /// One lifecycle operation's outcome, and the channel every waiter reads it
@@ -771,6 +772,9 @@ impl LifecycleFailure {
         Self {
             detail: format!("{error:#}"),
             refusal: Refusal::of(error),
+            reason: error
+                .downcast_ref::<crate::controller::LifecycleFailureReason>()
+                .copied(),
         }
     }
 
@@ -780,15 +784,31 @@ impl LifecycleFailure {
         Self {
             detail: detail.into(),
             refusal: None,
+            reason: None,
         }
     }
 
     /// Rebuild the error a waiter sees, with the refusal still attached.
     fn into_error(self) -> anyhow::Error {
-        match self.refusal {
+        let error = match self.refusal {
             Some(refusal) => anyhow::Error::new(refusal).context(self.detail),
             None => anyhow::Error::msg(self.detail),
+        };
+        match self.reason {
+            Some(reason) => error.context(reason),
+            None => error,
         }
+    }
+
+    fn public_message(&self, prefix: &str, reference: &str) -> String {
+        let reason = if let Some(refusal) = &self.refusal {
+            format!("{refusal}. Follow this guidance, then retry the action.")
+        } else if let Some(reason) = self.reason {
+            reason.to_string()
+        } else {
+            "The lifecycle operation could not finish. Retry the action; if the runtime is unavailable, Resume the session to repair it first.".into()
+        };
+        format!("{prefix}: {reason} Reference {reference}.")
     }
 }
 

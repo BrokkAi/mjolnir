@@ -441,6 +441,21 @@ impl RuntimeState {
             crate::controller::move_session::restore_move_queue_hold(operation);
         }
         for operation in operations.into_iter().filter(|op| {
+            // A superseding Suspend owns this durable close. Recover it
+            // through the same settlement as a live supersession, before
+            // trying to lease an uninstalled destination worker.
+            if op.phase == mj_core::state::MovePhase::Cancelled
+                && !op.queue_admission_started
+                && self
+                    .owner()
+                    .controller()
+                    .state
+                    .sessions
+                    .get(&op.selection.session_id)
+                    .is_some_and(|session| session.state == SessionState::Closing)
+            {
+                return false;
+            }
             op.is_active()
                 || self
                     .owner()

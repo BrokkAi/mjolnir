@@ -9,6 +9,7 @@ pub(crate) use environment::StoppedWorker;
 mod git_cache;
 mod github_app;
 mod lifecycle;
+pub(crate) use lifecycle::LifecycleFailureReason;
 pub mod local_profile_homes;
 pub(crate) mod mbx;
 pub mod move_session;

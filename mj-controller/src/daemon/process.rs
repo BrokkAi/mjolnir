@@ -254,7 +254,6 @@ pub(super) async fn run_daemon_runtime(
                 .map(|intent| intent.session_id.clone()),
         );
         lifecycle_owned.extend(state.recover_restarts(restart_intents)?);
-        lifecycle_owned.extend(move_sessions.iter().cloned());
         let (retained_cleanups, startup_cleanups) = {
             let owner = state.owner();
             let sessions = &owner.controller().state.sessions;

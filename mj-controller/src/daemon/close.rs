@@ -49,6 +49,7 @@ impl RuntimeState {
                     .sessions
                     .get_mut(&session_id)
                     .with_context(|| format!("unknown session {session_id}"))?;
+                let ready_move = crate::controller::move_session::move_destination_before_close(record)?;
                 if matches!(
                     record.state,
                     SessionState::Running
@@ -58,7 +59,11 @@ impl RuntimeState {
                     record.state = SessionState::Closing;
                     record.last_error = None;
                     record.updated_at = chrono::Utc::now().to_rfc3339();
-                    crate::database::save_lifecycle_session(record)?;
+                    if let Some(operation) = ready_move {
+                        crate::database::adopt_move_destination(&operation, record)?;
+                    } else {
+                        crate::database::save_lifecycle_session(record)?;
+                    }
                 } else if record.public_error().is_some() {
                     record.last_error = None;
                     crate::database::save_lifecycle_session(record)?;
@@ -547,6 +552,16 @@ impl RuntimeState {
         ignore_nested_repositories: bool,
         commit: Option<&LifecycleControl>,
     ) -> Result<DaemonLifecycleResult> {
+        if controller
+            .settle_superseded_move_for_close(
+                session_id,
+                executor,
+                Some(self.stop_subagents_before_close(session_id, commit.cloned())),
+            )
+            .await?
+        {
+            return Ok(DaemonLifecycleResult::Done);
+        }
         let route = close_route(
             controller.state.sessions.get(session_id),
             controller.state.subagents.contains_key(session_id),

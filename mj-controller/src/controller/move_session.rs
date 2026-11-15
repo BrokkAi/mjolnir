@@ -54,6 +54,30 @@ pub fn move_has_pending_queue(session_id: &str) -> bool {
     )
 }
 
+/// Preserve a restored destination's readiness when close replaces Running
+/// with Closing. The caller saves this intent and the session in one transaction.
+pub(crate) fn move_destination_before_close(
+    session: &mj_core::state::SessionRecord,
+) -> Result<Option<MoveOperation>> {
+    if session.state != SessionState::Running {
+        return Ok(None);
+    }
+    let Some(mut operation) = crate::database::load_move_operation(&session.id)? else {
+        return Ok(None);
+    };
+    if operation.phase != MovePhase::Cancelled
+        || operation.is_resolved()
+        || operation.queue_admission_started
+        || operation.recovery_session.is_none()
+    {
+        return Ok(None);
+    }
+    operation.destination_target = session.target.clone().map(|target| *target);
+    operation.destination_native_session_id = session.native_session_id.clone();
+    operation.updated_at = now();
+    Ok(Some(operation))
+}
+
 pub fn release_move_queue_hold(session_id: &str) {
     set_move_queue_hold(session_id, false);
 }
@@ -889,6 +913,114 @@ fn replace_queued_images_with_placeholders(
 }
 
 impl Controller {
+    /// Close takes over only after the Move owner has actually stopped. A
+    /// placement published during cloning is not a destination worker.
+    pub(crate) async fn settle_superseded_move_for_close(
+        &mut self,
+        session_id: &str,
+        executor: &(impl CommandExecutor + Sync),
+        before_close: Option<super::lifecycle::BeforeClose>,
+    ) -> Result<bool> {
+        let Some(mut operation) = crate::database::load_move_operation(session_id)? else {
+            return Ok(false);
+        };
+        if operation.phase != MovePhase::Cancelled
+            || operation.is_resolved()
+            || operation.queue_admission_started
+        {
+            return Ok(false);
+        }
+        let Some(source) = operation.recovery_session.clone() else {
+            // An archive written before sealing cannot authorize teardown;
+            // even a Closed source might contain work newer than its checkpoint.
+            return Err(super::lifecycle::LifecycleFailureReason::UnsealedMoveSource.into());
+        };
+        let current = self
+            .state
+            .sessions
+            .get(session_id)
+            .context("Move session disappeared")?;
+        // Restore publishes a boot owner before launching the harness. It
+        // may already accept work before Running or StartingQueue is saved.
+        if current.state == SessionState::Running
+            || (current.target.is_some()
+                && current.target.as_deref() == operation.destination_target.as_ref())
+            || crate::database::load_worker_restart(session_id)?
+                .is_some_and(|intent| current.target.as_deref() == Some(&intent.target))
+        {
+            return Ok(false);
+        }
+        let retained_source = operation.retains_source_environment();
+        if !retained_source {
+            let verified = operation
+                .checkpoint
+                .as_ref()
+                .context("superseded Move has no full source checkpoint")?;
+            super::checkpoint::verify_installed_checkpoint_gate(session_id, verified)?;
+        }
+        if let Some(before_close) = before_close {
+            before_close.await?;
+        }
+        if retained_source {
+            let reason =
+                anyhow::Error::new(super::lifecycle::LifecycleFailureReason::RetainedMoveSource);
+            if operation.workspace_transfer.is_some() {
+                self.rollback_move_destination(&operation, reason, executor)
+                    .context(super::lifecycle::LifecycleFailureReason::Cleanup)?;
+            } else {
+                self.retain_failed_in_place_move(session_id, &source, reason)?;
+            }
+        } else {
+            // The environment ledger owns both identities, even when the
+            // failed provisioning left only a partial destination checkout.
+            let source_environment =
+                crate::database::move_source_environment(&operation.operation_id)?;
+            self.cleanup_prepared_move_destination(&mut operation, executor)
+                .context(super::lifecycle::LifecycleFailureReason::Cleanup)?;
+            let current = self.state.sessions[session_id].clone();
+            if current.target.is_some() {
+                super::environment::retire_session_environment(
+                    &current,
+                    &self.config,
+                    executor,
+                    super::BranchDisposition::Keep,
+                )
+                .context(super::lifecycle::LifecycleFailureReason::Cleanup)?;
+            }
+            if let Some(environment) = &source_environment {
+                super::environment::retire_owned_environment(
+                    environment.clone(),
+                    &self.config,
+                    executor,
+                    super::BranchDisposition::Keep,
+                    super::CheckoutDisposition::Remove,
+                )
+                .context(super::lifecycle::LifecycleFailureReason::Cleanup)?;
+            }
+            let mut stopped = source;
+            stopped.state = SessionState::Stopped;
+            stopped.target = None;
+            stopped.checkpoint = operation.checkpoint.clone().map(Box::new);
+            stopped.last_error = None;
+            stopped.updated_at = now();
+            if let Some(environment) = source_environment {
+                crate::database::restore_resumed_session(&stopped, &environment.id)?;
+            } else {
+                crate::database::save_resumed_session(&stopped, None)?;
+            }
+            self.state.sessions.insert(session_id.to_owned(), stopped);
+        }
+        // The source identity is durable before releasing the Move's restore
+        // authority. Resume can now repair it without a second lifecycle owner.
+        operation.queue_admission_finished = true;
+        operation.updated_at = now();
+        crate::database::save_move_operation(&operation)?;
+        release_move_queue_hold(session_id);
+        if retained_source {
+            return Err(super::lifecycle::LifecycleFailureReason::RetainedMoveSource.into());
+        }
+        Ok(true)
+    }
     /// Returns the planned conversion when this move turns a local checkout
     /// into an isolated workspace, so the caller can describe it without
     /// reading Git a second time.
