@@ -600,21 +600,28 @@ mod tests {
     impl CommandExecutor for FixtureTransport {
         fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
             let mut command = command.clone();
-            ensure!(command.program == "git", "fixture executes only Git");
-            let mut arguments = vec![
-                "-c".into(),
-                format!(
-                    "url.{}.insteadOf=https://fetch.example.test/repo.git",
-                    self.fetch.display()
-                ),
-                "-c".into(),
-                format!(
-                    "url.{}.insteadOf=https://push.example.test/repo.git",
-                    self.push.display()
-                ),
-            ];
-            arguments.extend(command.args);
-            command.args = arguments;
+            ensure!(
+                matches!(command.program.as_str(), "git" | "sh"),
+                "fixture executes Git and its step scripts"
+            );
+            // Environment configuration reaches Git inside the configuration
+            // batch too; transport rewrites have one owner for both surfaces.
+            command.env.insert("GIT_CONFIG_COUNT".into(), "2".into());
+            for (index, (path, url)) in [
+                (&self.fetch, "https://fetch.example.test/repo.git"),
+                (&self.push, "https://push.example.test/repo.git"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                command.env.insert(
+                    format!("GIT_CONFIG_KEY_{index}"),
+                    format!("url.{}.insteadOf", path.display()),
+                );
+                command
+                    .env
+                    .insert(format!("GIT_CONFIG_VALUE_{index}"), url.into());
+            }
             ProcessExecutor.execute(&command)
         }
     }
