@@ -16,8 +16,11 @@ pub use crate::local_git::resolve_local_repository;
 
 /// Finalize a managed checkout using its recorded immutable launch base.
 /// The caller supplies the command boundary (local Git or a target executor).
+/// Only legacy restores whose base object is already absent skip retention;
+/// their recorded markers retain the same meaning as before base refs existed.
 pub fn finalize_managed_checkout(
     base: &str,
+    retain_base: bool,
     mut run: impl FnMut(&[&str]) -> Result<()>,
 ) -> Result<()> {
     anyhow::ensure!(
@@ -25,7 +28,9 @@ pub fn finalize_managed_checkout(
         "managed checkout has no immutable base commit"
     );
     // Git config is not a GC root when the launch commit becomes orphaned.
-    run(&["update-ref", crate::targets::HistoryCutoff::BASE_REF, base])?;
+    if retain_base {
+        run(&["update-ref", crate::targets::HistoryCutoff::BASE_REF, base])?;
+    }
     for (key, value) in [
         ("push.default", "current"),
         ("push.autoSetupRemote", "true"),

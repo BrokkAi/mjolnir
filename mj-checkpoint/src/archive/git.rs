@@ -2277,19 +2277,46 @@ fn restore_remote_workspace_configuration(
             "restore Git push URL",
         )?;
     }
-    mj_core::remote_git::finalize_managed_checkout(&metadata.base_commit, |arguments| {
-        git_success(
-            runner,
-            repository,
-            GitCommand {
-                arguments: arguments.iter().map(OsString::from).collect(),
-                stdin: Vec::new(),
-                env: Vec::new(),
-            },
-            "restore managed Git configuration",
-        )?;
-        Ok(())
-    })?;
+    // Older archives could retain the recorded base without carrying its
+    // object. Adding a GC root must not turn those existing restores into
+    // failures; their marker/config behavior remains unchanged.
+    let base = run_git(
+        runner,
+        repository,
+        [
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{}^{{commit}}", metadata.base_commit),
+        ],
+        &[],
+    )?;
+    let retain_base = match base.status {
+        0 => true,
+        1 => {
+            tracing::warn!(repository = %repository.display(), base_commit = %metadata.base_commit,
+                "legacy checkpoint base object is absent; preserving its recorded base without a GC ref");
+            false
+        }
+        _ => return Err(git_failure("inspect restored managed base", &base)),
+    };
+    mj_core::remote_git::finalize_managed_checkout(
+        &metadata.base_commit,
+        retain_base,
+        |arguments| {
+            git_success(
+                runner,
+                repository,
+                GitCommand {
+                    arguments: arguments.iter().map(OsString::from).collect(),
+                    stdin: Vec::new(),
+                    env: Vec::new(),
+                },
+                "restore managed Git configuration",
+            )?;
+            Ok(())
+        },
+    )?;
     Ok(())
 }
 

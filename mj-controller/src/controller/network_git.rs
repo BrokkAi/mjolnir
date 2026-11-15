@@ -293,7 +293,7 @@ pub(super) fn configure_workspace(
         argv
     };
     let mut steps = Vec::new();
-    mj_core::remote_git::finalize_managed_checkout(base, |arguments| {
+    mj_core::remote_git::finalize_managed_checkout(base, true, |arguments| {
         steps.push(targets::CommandStep::new(
             "initialize network session Git checkout",
             argv(arguments),
