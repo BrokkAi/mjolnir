@@ -1193,7 +1193,8 @@ rm -rf -- "$destination"
 mkdir -p -- "$destination" "$store"
 chmod -- 700 "$store"
 tar -xzf - --no-same-owner --no-same-permissions -C "$destination"
-# Restrict private files before creating links, so chmod never touches a store inode.
+# Shared content is copied, not linked, below: a hard link would survive `podman cp`
+# and join identical files inside the session, where in-place writes would change both.
 find "$destination" -type d -exec chmod -- go-rwx {} +
 find "$destination" -type f -exec chmod -- go-rwx {} +
 for content in "$destination"/.mj-content/*; do
@@ -1227,7 +1228,7 @@ find "$destination" -type l -exec sh -c '
             continue
         fi
         rm -f -- "$path"
-        if ! ln -- "$store/$key" "$path"; then
+        if ! cp -- "$store/$key" "$path"; then
             if [ ! -f "$store/$key" ]; then printf "%s\n" "$key"; else exit 1; fi
         fi
     done

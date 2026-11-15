@@ -60,6 +60,9 @@ After this change, the controller sends each distinct profile file to a host onc
 - Decision: the late mbx configuration inspection reuses the existing resolution owner (`RESOLUTIONS` in `mj-controller/src/controller/mbx.rs:38`, `:102-156`) instead of calling `inspect_host` directly (`:392`). Do not add another cache.
   Rationale: one owner per fact (AGENTS.md concurrency rule). The duplicate native-version read and host inspection come from bypassing that owner.
   Date/Author: 2026-11-15, parent session.
+- Decision: the install script copies stored content into the staging directory instead of hard-linking it. This supersedes the earlier hard-link wording.
+  Rationale: `podman cp` sends a tar stream, and tar preserves hard links. Two profile files with identical bytes, both linked to one store file, would therefore arrive in the container as one shared inode. An in-place write by the harness (Node's `writeFileSync` writes into the existing file) would then change both. Copying costs about 22 MB of local disk traffic on the host per launch. It also means no staging or session file ever shares an inode with the store, so the ordering rule "restrict permissions before linking" is no longer needed.
+  Date/Author: 2026-11-15, parent session (review of 50d715dcb).
 
 
 ## Outcomes & Retrospective
