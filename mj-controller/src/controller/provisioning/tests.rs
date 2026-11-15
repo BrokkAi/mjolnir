@@ -1438,7 +1438,7 @@ fn inherited_git_settings_target_only_isolated_workers() {
             commands[0]
                 .args
                 .iter()
-                .any(|argument| argument.contains("- Agent O'"))
+                .any(|argument| argument.contains("Agent") && argument.contains("日本語"))
         );
         if matches!(
             locator,

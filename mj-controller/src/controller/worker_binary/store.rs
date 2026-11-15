@@ -182,6 +182,10 @@ fn script(
     args: &[&str],
     purpose: &str,
 ) -> CommandSpec {
+    targets::locator_command(locator, script_argv(body, args)).purpose(purpose)
+}
+
+fn script_argv(body: &str, args: &[&str]) -> Vec<String> {
     let mut argv = vec![
         "sh".into(),
         "-c".into(),
@@ -189,7 +193,7 @@ fn script(
         "mj-worker-store".into(),
     ];
     argv.extend(args.iter().map(|arg| (*arg).to_owned()));
-    targets::locator_command(locator, argv).purpose(purpose)
+    argv
 }
 
 // Rename an old entry out of the published namespace before deciding whether
@@ -519,6 +523,7 @@ fn ensure_published(
         || super::upgrade::file_size(source),
         "stage the replacement Mjolnir worker",
     )?;
+    let mut batch_completed = false;
     let transfer = (|| -> Result<()> {
         execute_checked(
             executor,
@@ -526,23 +531,21 @@ fn ensure_published(
                 .purpose("create private worker store upload"),
         )?;
         transfer_binary(executor, locator, session_id, worker, &temporary)?;
-        execute_checked(
-            executor,
-            script(
-                locator,
-                r#"set -eu
+        let steps = [
+            targets::CommandStep::new(
+                "verify uploaded Mjolnir worker",
+                script_argv(
+                    r#"set -eu
 case $(uname -s) in Darwin) actual=$(shasum -a 256 -- "$1");; *) actual=$(sha256sum -- "$1");; esac
 [ "${actual%% *}" = "$2" ] || { echo 'uploaded Mjolnir worker digest mismatch' >&2; exit 1; }
 "#,
-                &[&temporary, digest],
-                "verify uploaded Mjolnir worker",
+                    &[&temporary, digest],
+                ),
             ),
-        )?;
-        execute_checked(
-            executor,
-            script(
-                locator,
-                r#"set -eu
+            targets::CommandStep::new(
+                "publish shared Mjolnir worker",
+                script_argv(
+                    r#"set -eu
 mkdir -p -- "$2"
 # Copies such as docker cp keep the source build's age; collection must see a
 # fresh entry.
@@ -559,22 +562,39 @@ if [ "${actual%% *}" != "$3" ]; then
     mv -f -- "$1" "$2/hel"
 fi
 "#,
-                &[&temporary, &directory, digest],
-                "publish shared Mjolnir worker",
+                    &[&temporary, &directory, digest],
+                ),
             ),
-        )?;
+            targets::CommandStep::new(
+                "discard private worker store upload",
+                ["rm", "-rf", "--", &upload],
+            )
+            .best_effort_cleanup(),
+        ];
+        let command = targets::locator_command(locator, targets::step_script(steps))
+            .purpose("publish shared Mjolnir worker");
+        // A failed or disconnected batch may not have reached its EXIT trap.
+        // Retry its idempotent discard through the executor's cleanup path.
+        let output = executor.execute(&command)?;
+        batch_completed = output.status == 0;
+        for warning in targets::step_script_warnings(&output) {
+            tracing::warn!("{warning}");
+        }
+        targets::checked_command_output(&command, output)?;
         Ok(())
     })();
-    let cleanup = executor.execute_cleanup(
-        &targets::locator_command(
-            locator,
-            vec!["rm".into(), "-rf".into(), "--".into(), upload],
-        )
-        .purpose("discard private worker store upload"),
-    );
-    match cleanup {
-        Ok(output) if output.status == 0 => {}
-        other => tracing::warn!(result = ?other, "worker store upload cleanup failed"),
+    if !batch_completed {
+        let cleanup = executor.execute_cleanup(
+            &targets::locator_command(
+                locator,
+                vec!["rm".into(), "-rf".into(), "--".into(), upload],
+            )
+            .purpose("discard private worker store upload"),
+        );
+        match cleanup {
+            Ok(output) if output.status == 0 => {}
+            other => tracing::warn!(result = ?other, "worker store upload cleanup failed"),
+        }
     }
     transfer
 }
