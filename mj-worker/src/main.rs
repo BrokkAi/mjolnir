@@ -666,8 +666,9 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             directory,
             length,
         } => {
-            let bytes = mj_checkpoint::archive::read_session_file_input(std::io::stdin().lock())
-                .map_err(export_error)?;
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut bytes)
+                .context("read incoming fetch")?;
             anyhow::ensure!(
                 bytes.len() == length,
                 "incomplete fetch transfer: expected {length} bytes, received {}",
@@ -895,13 +896,14 @@ mod tests {
         assert!(failed.downcast_ref::<ExportRefused>().is_none());
     }
 
+    // Hard-won: #1543: the receiving worker also capped fetched artifacts at 16 MiB.
     #[test]
-    fn fetch_storage_streams_the_maximum_file_and_refuses_truncated_input() {
+    fn fetch_storage_accepts_large_files_and_refuses_truncated_input() {
         use mj_core::targets::{CancellableProcessExecutor, CommandExecutor, CommandSpec};
         const CHILD_ROOT: &str = "MJ_TEST_FETCH_STORAGE_ROOT";
         const SOURCE: &str = "/workspace/λ binary.dat";
         const SESSION: &str = "source-session";
-        const LENGTH: usize = mj_checkpoint::archive::MAX_SESSION_FILE_BYTES as usize;
+        const LENGTH: usize = 17 * 1024 * 1024;
         if std::env::var_os(CHILD_ROOT).is_some() {
             tokio::runtime::Runtime::new()
                 .unwrap()
@@ -922,7 +924,7 @@ mod tests {
         }
         let root = tempfile::tempdir().unwrap();
         let bytes: Vec<u8> = (0..LENGTH).map(|i| (i % 251) as u8).collect();
-        let name = "tests::fetch_storage_streams_the_maximum_file_and_refuses_truncated_input";
+        let name = "tests::fetch_storage_accepts_large_files_and_refuses_truncated_input";
         let mut command = CommandSpec::new(
             std::env::current_exe().unwrap().to_string_lossy(),
             ["--exact", name, "--nocapture", "--quiet"],
