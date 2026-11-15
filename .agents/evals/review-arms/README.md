@@ -309,6 +309,58 @@ item also wrote the tool's output and rated how specific it would be.
   languages, and medium-specificity outputs still need the reviewer to judge
   intent.
 
+## Relation briefs, stage A (oracle): does a reviewer act on the decisive fact?
+
+Plan, frozen sets and decision rule: `brief/PLAN.md` (committed before any
+run). Results: `results/brief-stage-a/`.
+
+- Briefs: a gpt-6.1-sol/high writer per Hard-won diff, with the reviewers'
+  isolation, wrote a blind relation brief (`brief_driver.py`). It fully held
+  the decisive fact for 7 of 18 primary diffs and partly for 8. An Opus
+  editor inserted the census relation where it was absent, a leak judge read
+  each brief as a review output, and every carrying item was checked by hand
+  (`brief_oracle.py`). One rewrite removed the decisive fact and that diff
+  was rerun. 13 of 22 primary and secondary oracle briefs are still judged
+  partial (12) or caught (1) as text: for these the neutral relation itself
+  points at the defect, and the plan keeps it.
+- Runs: oracle arms `OT` (3 Terra/high) and `OS` (3 Sol/high) on all 30
+  diffs, 180 sessions; every reviewer received the brief and every audit hit
+  was a false positive. Baseline: the stored no-brief Terra/high and
+  Sol/high sessions on the same diffs (191).
+- Judging: all 371 outputs in blind mixed batches, two Opus/high judges
+  (366 of 371 agree); the 138 caught or partial verdicts and 5
+  disagreements were checked by hand (the 5 became partial).
+
+Catch rate per session (share of a diff's sessions that caught its defect,
+mean over diffs, 95% bootstrap interval over diffs):
+
+| Set | Model | No brief | Oracle brief | Effect (points) |
+|---|---|---:|---:|---:|
+| Primary (18) | Terra/high | 20.4% | 59.3% | +38.9 (+16.7 to +61.1) |
+| Primary (18) | Sol/high | 22.2% | 48.1% | +25.9 (+7.4 to +46.3) |
+| Secondary (4) | Terra/high | 33.3% | 50.0% | +16.7 |
+| Secondary (4) | Sol/high | 25.0% | 25.0% | 0 |
+| Control (8) | Terra/high | 20.8% | 16.7% | −4.2 |
+| Control (8) | Sol/high | 37.5% | 25.0% | −12.5 |
+
+- Decision (`brief_score.py score`): **supports building**. Terra's effect
+  is at least 30 points and control 1 passes (no gain on control diffs), so
+  stage B runs.
+- Not only leakage: on the 8 primary diffs whose oracle brief the leak judge
+  rated missed, the effect is +29.2 points for Terra (+4.2 to +62.5) and
+  +33.3 for Sol (0 to +70.8).
+- The effect is concentrated: 7 diffs move from rarely caught to mostly or
+  always caught; on 6 diffs no reviewer acted on the fact even with it in the
+  prompt (`per-diff.jsonl`).
+- Expected catches of 30 for one reviewer: Terra 6.7 → 14.0, Sol 8.0 → 11.7
+  with the oracle brief (stored Sol + 2× Terra without a brief: 11.3).
+- Cost: medians per session, tokens Terra 260k → 189k, Sol 484k → 431k;
+  latency Terra 44 s → 32 s, Sol 103 s → 100 s; tool calls Terra 8 → 5.
+- Limits: the oracle guarantees the fact, so this is an upper bound for a
+  real tool. The baseline sessions ran one day earlier with the same harness
+  pins. Judges could sometimes tell from an output that it used a brief.
+  18 primary diffs give wide intervals.
+
 ## Running
 
 The scripts read the corpus from this directory and keep everything else
