@@ -40,7 +40,7 @@ def run(diff, binary, checkout, cache, version):
     d.mkdir(parents=True, exist_ok=True)
     bug = CORPUS[diff]
     args = json.dumps({"base": bug["base_commit"], "target": bug["intro_commit"]})
-    command = [binary, "--root", str(checkout), "--tool", "relation_brief", "--args", args]
+    command = [str(binary), "--root", str(checkout), "--tool", "relation_brief", "--args", args]
     start = time.monotonic()
     # Subprocess rule: output is drained by subprocess.run; nothing is written to stdin.
     proc = subprocess.run(command, capture_output=True, env={**os.environ, "BIFROST_CACHE_ROOT": str(cache)})

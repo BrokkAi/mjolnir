@@ -1,10 +1,13 @@
 """Control 2 of brief/PLAN.md: do blind briefs cost findings or add false ones on ordinary diffs?
 
-Usage: python3 brief_control2.py [--verify verify-brief] [--jobs stageB-ordinary-jobs.json]
+Usage: python3 brief_control2.py [--arm BT|FT] [--verify verify-brief] [--jobs stageB-ordinary-jobs.json]
                                  [--handmarks results/brief-stage-b/control2-citing-handmarks.json]
 
+--arm names the brief arm compared with arm A (default BT, blind briefs; stage C:
+`--arm FT --verify verify-bifrost`, read against briefs/bifrost/). Text below says BT for the default.
+
 Inputs under REVIEW_ARMS_DIR: the verify dir built with
-`build_verify.py <verify> --arms A,BT --bugs-from <jobs>` and verified by
+`build_verify.py <verify> --arms A,<arm> --bugs-from <jobs>` and verified by
 verify_driver.py, then scored by `score.py <verify>` (sessions.csv,
 groups.csv, session_groups.csv); its private key; the batches (finding text);
 and each diff's blind brief.
@@ -40,10 +43,14 @@ def spans(text):
     return [(path, int(a), int(b or a)) for path, a, b in ANCHOR.findall(text)]
 
 p = argparse.ArgumentParser()
+p.add_argument("--arm", default="BT", choices=sorted(driver.BRIEF_ARMS),
+               help="brief arm compared with no-brief arm A; its briefs are read from briefs/<kind>/ "
+                    "(BT: blind; FT: bifrost, scored with --verify verify-bifrost)")
 p.add_argument("--verify", default="verify-brief")
 p.add_argument("--jobs", default="stageB-ordinary-jobs.json")
 p.add_argument("--handmarks", help="JSON {finding id: {relies_on_brief, why}} for every broad-match finding")
 a = p.parse_args()
+ARM = a.arm
 V = ROOT / a.verify
 diffs = sorted({j["bug"] for j in json.loads((ROOT / a.jobs).read_text())})
 key = json.loads((ROOT / "private" / f"key-{V.name}.json").read_text())
@@ -53,7 +60,7 @@ findings, covered = key["findings"], set(key["sessions"])
 sessions = {r["session"]: r for r in csv.DictReader(open(V / "sessions.csv"))}
 arm_of = {}
 for bug in diffs:
-    for arm in ("A", "BT"):
+    for arm in ("A", ARM):
         done = json.loads((ROOT / "runs" / bug / arm / "done.json").read_text())
         for r in done["reviewers"]:
             assert r["child"] in covered, f"{bug}/{arm}: session {r['child']} was not batched"
@@ -68,12 +75,12 @@ by_session = collections.defaultdict(set)
 for r in csv.DictReader(open(V / "session_groups.csv")):
     by_session[r["session"]].add(r["group"])
 
-per_diff = collections.defaultdict(lambda: {"A": [], "BT": []})
+per_diff = collections.defaultdict(lambda: {"A": [], ARM: []})
 for s, (bug, arm) in arm_of.items():
     confirmed = sum(groups[g]["verdict"] == "confirmed" for g in by_session.get(s, ()))
     per_diff[bug][arm].append(confirmed)
 mean = lambda arm: statistics.fmean(statistics.fmean(per_diff[b][arm]) for b in diffs)
-diff_values = [statistics.fmean(per_diff[b]["BT"]) - statistics.fmean(per_diff[b]["A"]) for b in diffs]
+diff_values = [statistics.fmean(per_diff[b][ARM]) - statistics.fmean(per_diff[b]["A"]) for b in diffs]
 rng = random.Random(3)
 boot = sorted(statistics.fmean(rng.choices(diff_values, k=len(diff_values))) for _ in range(10000))
 
@@ -95,7 +102,7 @@ def brief_anchors(bug, outside_only=True):
     """Anchors in the diff's blind brief. The decision counts only anchors outside the changed
     lines: a finding citing a changed line may have taken it from the diff, not the brief."""
     changed = brief_driver.changed_lines(driver.CORPUS[bug])
-    brief = (ROOT / "briefs/blind" / bug / "brief.md").read_text()
+    brief = (ROOT / "briefs" / driver.BRIEF_ARMS[ARM] / bug / "brief.md").read_text()
     return [(path, a, b) for path, a, b in spans(brief)
             if not (outside_only and path in changed and set(range(a, b + 1)) <= changed[path])]
 
@@ -108,7 +115,7 @@ def cites(anchors, finding_text):
 
 citing, citing_any = [], []
 for fid, k in findings.items():
-    if k["arm"] != "BT" or verdict_of.get(fid) != "rejected":
+    if k["arm"] != ARM or verdict_of.get(fid) != "rejected":
         continue
     if cites(brief_anchors(k["bug"]), text[fid]):
         citing.append({"finding": fid, "bug": k["bug"], "text": text[fid][:300]})
@@ -125,13 +132,13 @@ if a.handmarks:
         raise SystemExit(f"broad-match findings without a hand mark: {unmarked}")
     relying = sorted(f for f in citing_any if marks[f]["relies_on_brief"])
 
-a_mean, bt_mean = mean("A"), mean("BT")
+a_mean, bt_mean = mean("A"), mean(ARM)
 citing_count = len(relying) if relying is not None else len(citing)
 report = {
     "diffs": len(diffs),
-    "sessions": {arm: sum(len(per_diff[b][arm]) for b in diffs) for arm in ("A", "BT")},
-    "confirmed_per_session": {"A": round(a_mean, 3), "BT": round(bt_mean, 3)},
-    "ratio_BT_to_A": round(bt_mean / a_mean, 3) if a_mean else None,
+    "sessions": {arm: sum(len(per_diff[b][arm]) for b in diffs) for arm in ("A", ARM)},
+    "confirmed_per_session": {"A": round(a_mean, 3), ARM: round(bt_mean, 3)},
+    f"ratio_{ARM}_to_A": round(bt_mean / a_mean, 3) if a_mean else None,
     "difference_ci95": [round(boot[250], 3), round(boot[9750], 3)],
     "rejected_findings_citing_brief": len(citing),
     # Broader count for reference: also matches brief anchors on changed lines.
