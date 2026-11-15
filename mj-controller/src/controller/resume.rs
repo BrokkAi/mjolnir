@@ -2515,7 +2515,7 @@ fn conversion_notice(
 /// The snapshot carries network provenance, so this archive is what lets the
 /// destination clone a real remote and later checkpoint like any other
 /// isolated session.
-fn conversion_checkpoint(
+pub(super) fn conversion_checkpoint(
     previous_archive: &Path,
     snapshot: mj_checkpoint::archive::RepositorySnapshot,
     output: &Path,
