@@ -47,7 +47,13 @@ asked only about things the diff shows, and if not, why not.
    time. A failure is a result; do not work around it.
 5. Classify the record:
    - `A` (computed today): a call returned the decisive anchor from a
-     diff-only query.
+     diff-only query, in output that states the decisive relation itself
+     (for example a caller-to-callee edge, or a reference from the changed
+     symbol to the anchor), not only a list that happens to contain the
+     anchor's file and line.
+   - `A0` (anchor only): a call returned the decisive anchor, but its output
+     does not state the relation (for example, it lists the caller but not
+     the lock it holds); say in `missing` what the output leaves out.
    - `B` (graph relation not exposed today): not returned, but the fact is one
      of these over Rust code: call graph, references to a symbol, field or
      constant, the same function called with the same constant argument, a
@@ -56,7 +62,7 @@ asked only about things the diff shows, and if not, why not.
    - `C` (outside a code graph): it crosses languages (Rust to JavaScript,
      shell or SQL), depends on runtime or event ordering, concurrency
      interleaving or database semantics, or is a claim that no path exists.
-   For `B` and `C`, name the missing piece in one clause (`missing`). For `A`,
+   For `A0`, `B` and `C`, name the missing piece in one clause (`missing`). For `A`,
    say in `note` whether the reviewer could have found the anchor in that
    output (rank and count).
 

@@ -27,7 +27,7 @@ const SCHEMA = {
           diff_only_query: { type: 'string' },
           calls: { type: 'array', items: CALL },
           anchor_found: { type: 'boolean' },
-          class: { type: 'string', enum: ['A', 'B', 'C'] },
+          class: { type: 'string', enum: ['A', 'A0', 'B', 'C'] },
           missing: { type: ['string', 'null'] },
           note: { type: 'string' },
           index_seconds: { type: ['number', 'null'] },
