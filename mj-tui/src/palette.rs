@@ -2147,17 +2147,27 @@ mod tests {
         let (mut dashboard, parent) = crate::test_support::dashboard_with_one_subagent();
         crate::test_support::set_working(&mut dashboard, &parent);
         crate::test_support::set_working(&mut dashboard, "child-session");
-        dashboard
-            .session_details
-            .get_mut("child-session")
-            .unwrap()
-            .pending_elicitations = vec![crate::test_support::question("child-session")];
+        // The child has only summary state; the daemon supplies the holder.
+        dashboard.set_form_holders(
+            [(parent.clone(), "child-session".into())]
+                .into_iter()
+                .collect(),
+        );
         crate::test_support::serve_attention(
             &mut dashboard,
             &[&parent, "child-session"],
             mj_core::attention::SessionAttention::NeedsInput,
         );
         dashboard.focus_sessions();
+        let lines = right_click_first_row(&mut dashboard);
+        append_golden_state(
+            &mut output,
+            "row context menu, sub-agent approval",
+            120,
+            40,
+            &lines,
+        );
+        dashboard.handle_key(key(KeyCode::Esc));
         dashboard.begin_session_palette();
         let lines = drawn(&mut dashboard, 120, 40);
         append_golden_state(&mut output, "sub-agent question menu", 120, 40, &lines);

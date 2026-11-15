@@ -328,6 +328,9 @@ pub struct RuntimeMetadata {
     pub unread_frontiers: SnapshotMap<String, u64>,
     #[serde(default)]
     pub notification_dismissals: SnapshotMap<String, mj_core::attention::NotificationDismissal>,
+    /// The descendant holding the person-owned form that raises this session.
+    #[serde(default)]
+    pub form_holders: SnapshotMap<String, String>,
     pub session_attention: SnapshotMap<String, mj_core::attention::SessionAttention>,
     #[serde(default)]
     pub operator_presence: mj_core::state::OperatorPresence,
@@ -976,15 +979,21 @@ mod tests {
             config: Config::default().with_local_targets().into(),
             ..Default::default()
         };
+        metadata
+            .form_holders
+            .insert("parent".into(), "child".into());
         metadata.default_targets = metadata.config.default_targets.clone();
         assert!(metadata.default_targets.contains("docker"));
         let mut value = serde_json::to_value(&metadata).unwrap();
         let received: RuntimeMetadata = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(received.form_holders["parent"], "child");
         // The config alone loses the origin; the field restores it.
         assert!(!received.config.is_default_target("docker"));
         assert!(received.installed_config().is_default_target("docker"));
         value.as_object_mut().unwrap().remove("default_targets");
+        value.as_object_mut().unwrap().remove("form_holders");
         let older: RuntimeMetadata = serde_json::from_value(value).unwrap();
+        assert!(older.form_holders.is_empty());
         assert!(!older.installed_config().is_default_target("docker"));
         let held = metadata.clone();
         metadata.config.advanced.auto_afk_minutes = 3;

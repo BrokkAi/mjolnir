@@ -62,6 +62,7 @@ pub(super) fn update(previous: &RuntimeProjection, next: &mut RuntimeProjection)
         next.metadata.unread_frontiers = previous.metadata.unread_frontiers.clone();
         next.metadata.notification_dismissals = previous.metadata.notification_dismissals.clone();
         next.metadata.session_attention = previous.metadata.session_attention.clone();
+        next.metadata.form_holders = previous.metadata.form_holders.clone();
         return;
     }
     for id in ids.clone() {
@@ -80,11 +81,25 @@ pub(super) fn update(previous: &RuntimeProjection, next: &mut RuntimeProjection)
             }
         }
     }
-    let (states, targets) = project_states(next, ids.clone());
+    let AttentionProjection {
+        states,
+        targets,
+        holders,
+    } = project_states(next, ids.clone());
+    next.metadata.form_holders = previous.metadata.form_holders.clone();
     next.metadata.session_attention = previous.metadata.session_attention.clone();
     next.metadata.notification_dismissals = previous.metadata.notification_dismissals.clone();
     next.metadata.unread_frontiers = previous.metadata.unread_frontiers.clone();
     for id in ids {
+        if let Some(holder) = holders.get(&id) {
+            if next.metadata.form_holders.get(&id) != Some(holder) {
+                next.metadata
+                    .form_holders
+                    .insert(id.clone(), holder.clone());
+            }
+        } else {
+            next.metadata.form_holders.remove(&id);
+        }
         if let Some(frontier) = unread_frontier(next, &id) {
             if next.metadata.unread_frontiers.get(&id) != Some(&frontier) {
                 next.metadata.unread_frontiers.insert(id.clone(), frontier);
@@ -342,16 +357,16 @@ fn project_ids(
     runtime: &RuntimeProjection,
     ids: BTreeSet<String>,
 ) -> BTreeMap<String, SessionAttention> {
-    project_states(runtime, ids).0
+    project_states(runtime, ids).states
 }
 
-fn project_states(
-    runtime: &RuntimeProjection,
-    ids: BTreeSet<String>,
-) -> (
-    BTreeMap<String, SessionAttention>,
-    BTreeMap<String, mj_core::attention::NotificationDismissal>,
-) {
+struct AttentionProjection {
+    states: BTreeMap<String, SessionAttention>,
+    targets: BTreeMap<String, mj_core::attention::NotificationDismissal>,
+    holders: BTreeMap<String, String>,
+}
+
+fn project_states(runtime: &RuntimeProjection, ids: BTreeSet<String>) -> AttentionProjection {
     use SessionAttention::*;
     let mut reviews = BTreeMap::new();
     for review in &runtime.metadata.reviews {
@@ -385,39 +400,57 @@ fn project_states(
             current = &parent.parent_session_id;
         }
     }
-    for id in runtime
+    let mut holders = BTreeMap::new();
+    for (id, person_owned) in runtime
         .transcripts
         .iter()
         .filter(|(_, tail)| !tail.header.pending_elicitations.is_empty())
-        .map(|(id, _)| id)
-        .chain(
-            reviews
-                .values()
-                .filter(|review| !review.questions.is_empty())
-                .map(|review| &review.session_id),
-        )
+        .map(|(id, tail)| {
+            (
+                id,
+                tail.header
+                    .pending_elicitations
+                    .iter()
+                    .any(|request| !request.goes_to_parent()),
+            )
+        })
+        .chain(reviews.values().flat_map(|review| {
+            review
+                .questions
+                .iter()
+                // The review host publishes only forms the person answers
+                // (plan reviews are declined for them), so each one raises
+                // the reviewed session.
+                .map(|question| (&question.role, true))
+        }))
     {
-        if runtime
+        if !runtime
             .records
             .get(id)
             .is_some_and(|record| record.state.is_active())
         {
-            let mut current = id.as_str();
-            let mut visited = BTreeSet::new();
-            while visited.insert(current.to_owned()) {
-                questions.insert(current.to_owned());
-                let Some(parent) = runtime.subagents.get(current) else {
-                    break;
-                };
-                current = &parent.parent_session_id;
-                if !runtime
+            continue;
+        }
+        questions.insert(id.clone());
+        if !person_owned {
+            continue;
+        }
+        let mut current = id.as_str();
+        let mut visited = BTreeSet::from([current]);
+        while let Some(parent) = runtime.subagents.get(current) {
+            current = &parent.parent_session_id;
+            if !visited.insert(current)
+                || !runtime
                     .records
                     .get(current)
                     .is_some_and(|record| record.state.is_active())
-                {
-                    break;
-                }
+            {
+                break;
             }
+            questions.insert(current.to_owned());
+            holders
+                .entry(current.to_owned())
+                .or_insert_with(|| id.clone());
         }
     }
     let mut attention: BTreeMap<_, _> = ids
@@ -530,7 +563,21 @@ fn project_states(
         .filter(|(id, _)| !questions.contains(id.as_str()))
         .filter_map(|(id, state)| dismissal(runtime, id, *state).map(|target| (id.clone(), target)))
         .collect();
-    (attention, targets)
+    // A session's own form comes before a descendant's: the person answers it
+    // in that session, so no holder sends them elsewhere.
+    holders.retain(|id, _| {
+        ids.contains(id)
+            && attention.get(id) == Some(&NeedsInput)
+            && runtime
+                .transcripts
+                .get(id)
+                .is_none_or(|tail| tail.header.pending_elicitations.is_empty())
+    });
+    AttentionProjection {
+        states: attention,
+        targets,
+        holders,
+    }
 }
 
 #[cfg(test)]
@@ -786,7 +833,26 @@ mod tests {
                             message: "Which?".into(),
                             title: None,
                             description: None,
-                            fields: vec![],
+                            fields: if step % 24 == 2 {
+                                vec![mj_core::elicitation::ElicitationField {
+                                    id: "secret".into(),
+                                    title: "Secret".into(),
+                                    description: None,
+                                    required: true,
+                                    secret: true,
+                                    custom_answer_for: None,
+                                    custom_answer_option: None,
+                                    kind: mj_core::elicitation::ElicitationFieldKind::Text {
+                                        default: None,
+                                        min_length: None,
+                                        max_length: None,
+                                        pattern: None,
+                                        format: None,
+                                    },
+                                }]
+                            } else {
+                                vec![]
+                            },
                             tool_permission: None,
                         },
                     );
@@ -842,7 +908,17 @@ mod tests {
                     .iter()
                     .collect::<BTreeMap<_, _>>(),
                 project_states(&next, next.records.keys().cloned().collect())
-                    .1
+                    .targets
+                    .iter()
+                    .collect::<BTreeMap<_, _>>()
+            );
+            assert_eq!(
+                next.metadata
+                    .form_holders
+                    .iter()
+                    .collect::<BTreeMap<_, _>>(),
+                project_states(&next, next.records.keys().cloned().collect())
+                    .holders
                     .iter()
                     .collect::<BTreeMap<_, _>>()
             );
@@ -862,7 +938,12 @@ mod tests {
                     .changes(&next.metadata.session_attention)
                     .map(|(id, _)| id.as_str())
                     .collect();
-                assert_eq!(changed, BTreeSet::from(["child", "parent"]));
+                let expected = if step % 24 == 2 || step % 24 == 3 {
+                    BTreeSet::from(["child", "parent"])
+                } else {
+                    BTreeSet::from(["child"])
+                };
+                assert_eq!(changed, expected);
                 assert!(std::ptr::eq(
                     published
                         .metadata
@@ -1226,7 +1307,7 @@ mod tests {
         assert_eq!(project(&runtime)["parent"], SessionAttention::NeedsInput);
         assert!(matches!(
             project_states(&runtime, BTreeSet::from(["parent".into()]))
-                .1
+                .targets
                 .get("parent"),
             Some(mj_core::attention::NotificationDismissal::Question(_))
         ));
@@ -1259,7 +1340,7 @@ mod tests {
         assert_eq!(project(&runtime)["parent"], SessionAttention::Important);
         assert_eq!(
             project_states(&runtime, BTreeSet::from(["parent".into()]))
-                .1
+                .targets
                 .get("parent"),
             Some(&mj_core::attention::NotificationDismissal::ReadThrough(10))
         );
@@ -1469,7 +1550,29 @@ mod tests {
     #[test]
     fn attention_descendant_question_propagates_clears_and_terminates_on_cycles() {
         let mut runtime = runtime();
-        for (child, parent) in [("child", "parent"), ("parent", "child")] {
+        runtime.records.insert(
+            "grandparent".into(),
+            super::super::tests::runtime_test_session(
+                "grandparent",
+                "workspace",
+                SessionState::Running,
+            ),
+        );
+        runtime.sessions.insert(
+            "grandparent".into(),
+            mj_client::daemon::RuntimeSessionView::from_managed(
+                "grandparent".into(),
+                mj_client::session::ManagedSessionView {
+                    connected: true,
+                    ..Default::default()
+                },
+            ),
+        );
+        for (child, parent) in [
+            ("child", "parent"),
+            ("parent", "grandparent"),
+            ("grandparent", "child"),
+        ] {
             runtime.subagents.insert(
                 child.into(),
                 mj_core::subagent::SubagentMetadata {
@@ -1505,7 +1608,93 @@ mod tests {
             "child".into(),
             mj_client::runtime_feed::SessionTail::of(&materialized, &window, 10),
         );
+        assert_eq!(project(&runtime)["child"], SessionAttention::NeedsInput);
+        assert_ne!(project(&runtime)["parent"], SessionAttention::NeedsInput);
+        assert_ne!(
+            project(&runtime)["grandparent"],
+            SessionAttention::NeedsInput
+        );
+        assert!(
+            project_states(&runtime, runtime.records.keys().cloned().collect())
+                .holders
+                .is_empty()
+        );
+        // A plan approval belongs to the person and identifies the actual holder.
+        materialized.pending_elicitations[0].id =
+            format!("{}approval", mj_core::acp::PLAN_REVIEW_ID_PREFIX);
+        runtime.transcripts.insert(
+            "child".into(),
+            mj_client::runtime_feed::SessionTail::of(&materialized, &window, 11),
+        );
         assert_eq!(project(&runtime)["parent"], SessionAttention::NeedsInput);
+        assert_eq!(
+            project_states(&runtime, runtime.records.keys().cloned().collect())
+                .holders
+                .get("parent")
+                .map(String::as_str),
+            Some("child")
+        );
+        // The parent's own form comes first: no holder sends the person away
+        // from it, while the grandparent still names the child.
+        let mut own = MaterializedSession::empty("parent");
+        own.pending_elicitations
+            .push(materialized.pending_elicitations[0].clone());
+        runtime.transcripts.insert(
+            "parent".into(),
+            mj_client::runtime_feed::SessionTail::of(&own, &ProjectionWindow::of(&own), 11),
+        );
+        let holders = project_states(&runtime, runtime.records.keys().cloned().collect()).holders;
+        assert!(!holders.contains_key("parent"));
+        assert_eq!(
+            holders.get("grandparent").map(String::as_str),
+            Some("child")
+        );
+        runtime.transcripts.remove("parent");
+        let previous = runtime.clone();
+        materialized.pending_elicitations[0].id = "tool-approval".into();
+        materialized.pending_elicitations[0].tool_permission =
+            Some(mj_core::elicitation::ToolPermissionForm { skip: true });
+        runtime.transcripts.insert(
+            "child".into(),
+            mj_client::runtime_feed::SessionTail::of(&materialized, &window, 12),
+        );
+        update(&previous, &mut runtime);
+        assert_eq!(runtime.metadata.form_holders["parent"], "child");
+        assert_eq!(runtime.metadata.form_holders["grandparent"], "child");
+        assert!(!runtime.metadata.form_holders.contains_key("child"));
+        assert!(
+            !runtime
+                .metadata
+                .notification_dismissals
+                .contains_key("parent")
+        );
+        // The review projection names the child that owns the form too.
+        let approval = materialized.pending_elicitations[0].clone();
+        runtime.transcripts.remove("child");
+        runtime
+            .metadata
+            .reviews
+            .push(mj_client::review::RuntimeReviewView {
+                child_session_id: Some("child".into()),
+                session_id: "parent".into(),
+                phase: TurnReviewPhase::Running { roles: vec![] },
+                roles: vec![],
+                status: String::new(),
+                verdict: None,
+                questions: vec![mj_client::review::ReviewerQuestion {
+                    role: "child".into(),
+                    request: approval,
+                }],
+            });
+        assert_eq!(
+            project_states(&runtime, runtime.records.keys().cloned().collect()).holders["parent"],
+            "child"
+        );
+        runtime.metadata.reviews.clear();
+        runtime.transcripts.insert(
+            "child".into(),
+            mj_client::runtime_feed::SessionTail::of(&materialized, &window, 12),
+        );
         runtime
             .metadata
             .reviews
