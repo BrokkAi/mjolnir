@@ -434,6 +434,31 @@ pub fn remote_workspace_base(
     Ok(Some(base))
 }
 
+/// Whether the recorded managed base is an available commit in this checkout.
+/// A missing legacy object is distinct from a Git execution/storage failure.
+pub fn managed_base_is_available(
+    runner: &dyn GitCommandRunner,
+    repository: &Path,
+    base: &str,
+) -> Result<bool> {
+    let output = run_git(
+        runner,
+        repository,
+        [
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{base}^{{commit}}"),
+        ],
+        &[],
+    )?;
+    match output.status {
+        0 => Ok(true),
+        1 => Ok(false),
+        _ => Err(git_failure("inspect managed base object", &output)),
+    }
+}
+
 fn merge_base(
     runner: &dyn GitCommandRunner,
     repository: &Path,
@@ -2280,26 +2305,11 @@ fn restore_remote_workspace_configuration(
     // Older archives could retain the recorded base without carrying its
     // object. Adding a GC root must not turn those existing restores into
     // failures; their marker/config behavior remains unchanged.
-    let base = run_git(
-        runner,
-        repository,
-        [
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("{}^{{commit}}", metadata.base_commit),
-        ],
-        &[],
-    )?;
-    let retain_base = match base.status {
-        0 => true,
-        1 => {
-            tracing::warn!(repository = %repository.display(), base_commit = %metadata.base_commit,
-                "legacy checkpoint base object is absent; preserving its recorded base without a GC ref");
-            false
-        }
-        _ => return Err(git_failure("inspect restored managed base", &base)),
-    };
+    let retain_base = managed_base_is_available(runner, repository, &metadata.base_commit)?;
+    if !retain_base {
+        tracing::warn!(repository = %repository.display(), base_commit = %metadata.base_commit,
+            "legacy checkpoint base object is absent; preserving its recorded base without a GC ref");
+    }
     mj_core::remote_git::finalize_managed_checkout(
         &metadata.base_commit,
         retain_base,

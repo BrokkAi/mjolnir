@@ -292,6 +292,23 @@ pub fn capture(
                 &root,
             )?,
         };
+        let managed_base = match managed_base {
+            Some(base)
+                if mj_checkpoint::archive::managed_base_is_available(
+                    &mj_checkpoint::archive::SystemGit,
+                    &root,
+                    &base,
+                )? =>
+            {
+                Some(base)
+            }
+            Some(base) => {
+                tracing::warn!(repository = %repository.id, base_commit = %base,
+                    "legacy managed base object is absent; Move captures available history without an explicit base");
+                None
+            }
+            None => None,
+        };
         bundle_args.extend(managed_base.as_deref());
         git_file(&root, &bundle_args, &stage.join("git-output"))?;
         fs::remove_file(stage.join("git-output"))?;

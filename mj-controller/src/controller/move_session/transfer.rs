@@ -192,6 +192,10 @@ fn utility(
         "Move workspace operation failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    if !output.stderr.is_empty() {
+        tracing::warn!(session_id = id, detail = %String::from_utf8_lossy(&output.stderr),
+            "Move workspace helper reported diagnostics");
+    }
     serde_json::from_slice(&output.stdout).context("read Move workspace result")
 }
 
@@ -1483,7 +1487,7 @@ mod tests {
         };
         use mj_checkpoint::archive::{
             GitCollectionSpec, GitCommand, GitCommandRunner, GitHistoryMode, SystemGit,
-            collect_git_metadata_snapshot,
+            collect_git_metadata_snapshot, collect_git_snapshot,
         };
         use mj_checkpoint::checkpoint::{
             CHECKPOINT_EXPORT_PROTOCOL_VERSION, CheckpointExportSpec, CheckpointRepositoryCapture,
@@ -1773,6 +1777,99 @@ mod tests {
             assert_eq!(repository.metadata.base_commit, base);
             assert_ne!(repository.metadata.head_commit, base);
         }
+        // Restore a pinless legacy archive, then Move its available history
+        // into a host checkout even though its recorded base is absent.
+        let missing_base = test_git(sources[1].path(), &["config", "mj.baseCommit"]);
+        let mut legacy_snapshot = collect_git_snapshot(
+            &SystemGit,
+            sources[1].path(),
+            &GitCollectionSpec {
+                id: "legacy".into(),
+                relative_destination: "legacy".into(),
+                history: GitHistoryMode::CloneFrom(missing_base.clone()),
+                origin_override: Some("https://example.invalid/legacy.git".into()),
+            },
+        )
+        .unwrap();
+        legacy_snapshot.metadata.remote_workspace = true;
+        assert!(
+            !legacy_snapshot
+                .metadata
+                .saved_refs
+                .contains_key(mj_core::targets::HistoryCutoff::BASE_REF)
+        );
+        let mut legacy_input =
+            checkpoint_archive_input("legacy-move-session", 0, vec![legacy_snapshot], Vec::new());
+        legacy_input.bundle.primary_repository = "legacy".into();
+        let legacy_archive = crate::controller::test_support::write_checkpoint_archive_input(
+            directory.path(),
+            "legacy-move-session",
+            &legacy_input,
+        );
+        let legacy_workspace = directory.path().join("legacy-source-workspace");
+        std::fs::create_dir_all(&legacy_workspace).unwrap();
+        let legacy_repository = legacy_workspace.join("legacy");
+        test_git(
+            directory.path(),
+            &[
+                "clone",
+                "--no-local",
+                sources[1].path().to_str().unwrap(),
+                legacy_repository.to_str().unwrap(),
+            ],
+        );
+        assert!(
+            !mj_checkpoint::archive::managed_base_is_available(
+                &SystemGit,
+                &legacy_repository,
+                &missing_base
+            )
+            .unwrap()
+        );
+        mj_checkpoint::checkpoint::restore_repositories(
+            &legacy_archive.archive_path,
+            &legacy_workspace,
+            &SystemGit,
+        )
+        .unwrap();
+        assert_eq!(
+            mj_checkpoint::archive::remote_workspace_base(&SystemGit, &legacy_repository).unwrap(),
+            Some(missing_base.clone())
+        );
+        let legacy_stage = directory.path().join("legacy-move-stage");
+        mj_worker::move_workspace::capture(
+            &[WorkspaceRepository {
+                id: "legacy".into(),
+                root: legacy_repository.clone(),
+                base_commit: Some(missing_base),
+            }],
+            &WorkspaceSelection::default(),
+            &legacy_stage,
+        )
+        .unwrap();
+        let host = committed_repository();
+        mj_worker::move_workspace::restore(
+            &legacy_stage,
+            &[WorkspaceRepository {
+                id: "legacy".into(),
+                root: host.path().into(),
+                base_commit: None,
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            test_git(host.path(), &["rev-parse", "HEAD"]),
+            test_git(&legacy_repository, &["rev-parse", "HEAD"])
+        );
+        assert_eq!(
+            std::fs::read(host.path().join("nested/file.txt")).unwrap(),
+            std::fs::read(legacy_repository.join("nested/file.txt")).unwrap()
+        );
+        assert!(
+            mj_checkpoint::archive::remote_workspace_base(&SystemGit, host.path())
+                .unwrap()
+                .is_none()
+        );
     }
 
     // Needs a POSIX shell and rsync.
