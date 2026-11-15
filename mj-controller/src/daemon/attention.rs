@@ -418,10 +418,9 @@ fn project_states(runtime: &RuntimeProjection, ids: BTreeSet<String>) -> Attenti
             review
                 .questions
                 .iter()
-                // The review host publishes only forms the person answers
-                // (plan reviews are declined for them), so each one raises
-                // the reviewed session.
-                .map(|question| (&question.role, true))
+                // A reviewer is a managed child: its ordinary questions belong
+                // to the reviewed session's agent, like any child's.
+                .map(|question| (&question.role, !question.request.goes_to_parent()))
         }))
     {
         if !runtime
@@ -1710,6 +1709,13 @@ mod tests {
             project_states(&runtime, runtime.records.keys().cloned().collect()).holders["child"],
             "child"
         );
+        // An ordinary reviewer question is the reviewed session's agent's.
+        runtime.metadata.reviews[0].questions[0]
+            .request
+            .tool_permission = None;
+        let holders = project_states(&runtime, runtime.records.keys().cloned().collect()).holders;
+        assert!(!holders.contains_key("parent"));
+        assert!(!holders.contains_key("grandparent"));
         runtime.metadata.reviews.clear();
         runtime.transcripts.insert(
             "child".into(),
