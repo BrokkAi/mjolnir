@@ -1514,6 +1514,21 @@ mod tests {
                     "the remote source must be read through SSH"
                 );
                 let remote = command.args.last().context("SSH command missing")?;
+                // Hard-won: #1542: target Git could prompt while Move sealed its source.
+                for (name, value) in mj_checkpoint::archive::NON_INTERACTIVE_GIT_ENV {
+                    ensure!(
+                        remote.contains(&targets::posix_quote(&format!("{name}={value}"))),
+                        "Git environment did not reach the SSH target: {remote}"
+                    );
+                }
+                let ssh = std::env::var("GIT_SSH_COMMAND").unwrap_or_else(|_| {
+                    mj_checkpoint::archive::NON_INTERACTIVE_GIT_SSH_COMMAND.to_owned()
+                });
+                ensure!(
+                    remote.contains(&targets::posix_quote(&format!("GIT_SSH_COMMAND={ssh}"))),
+                    "Git SSH policy did not reach the SSH target: {remote}"
+                );
+
                 let from = targets::posix_quote(self.remote_path.to_str().unwrap());
                 let to = targets::posix_quote(self.source_path.to_str().unwrap());
                 ensure!(
@@ -1731,13 +1746,50 @@ mod tests {
             mj_checkpoint::archive::read_checkpoint_manifest(&checkpoint.archive_path).unwrap();
         let source_repositories = repositories_with_bases(source_repositories, &manifest).unwrap();
         let stage = directory.path().join("transfer");
+        // A managed source carries its GC root through transfer, while the
+        // raw destination gets no pin until managed finalization owns it.
+        test_git(
+            sources[0].path(),
+            &[
+                "update-ref",
+                mj_core::targets::HistoryCutoff::BASE_REF,
+                &bases[0],
+            ],
+        );
         mj_worker::move_workspace::capture(
             &source_repositories,
             &WorkspaceSelection::default(),
             &stage,
         )
         .unwrap();
+        let transfer = mj_worker::move_workspace::verify(&stage).unwrap();
+        assert!(
+            transfer.repositories[0]
+                .refs
+                .iter()
+                .any(|(name, _)| name == mj_core::targets::HistoryCutoff::BASE_REF)
+        );
         mj_worker::move_workspace::restore(&stage, &destinations).unwrap();
+        for destination in &destinations {
+            assert!(
+                test_git(
+                    &destination.root,
+                    &[
+                        "for-each-ref",
+                        "--format=%(refname)",
+                        mj_core::targets::HistoryCutoff::BASE_REF
+                    ]
+                )
+                .is_empty(),
+                "restore must not install a managed base pin in a raw checkout"
+            );
+            assert!(
+                mj_checkpoint::archive::remote_workspace_base(&SystemGit, &destination.root)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
         finalize_move_repositories(
             &targets::ProcessExecutor,
             &targets::TargetLocator::LocalBare {

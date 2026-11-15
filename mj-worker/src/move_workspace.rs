@@ -497,11 +497,16 @@ pub fn restore(source: &Path, repositories: &[WorkspaceRepository]) -> Result<()
             ],
         )?;
         git(root, &["checkout", "--detach", "--force", &repository.head])?;
-        // A manifest written before baseline pins were dropped may carry some.
+        // Transfer keeps base objects, but only managed finalization owns the
+        // base pin. Raw destinations must not retain it. Legacy manifests
+        // may also carry obsolete review baseline pins.
         let wanted_refs: Vec<_> = repository
             .refs
             .iter()
-            .filter(|(name, _)| !mj_core::archive::is_review_baseline_pin(name))
+            .filter(|(name, _)| {
+                !mj_core::archive::is_review_baseline_pin(name)
+                    && name != mj_core::targets::HistoryCutoff::BASE_REF
+            })
             .collect();
         let saved_refs: std::collections::BTreeSet<_> =
             wanted_refs.iter().map(|(name, _)| name.as_str()).collect();
@@ -536,6 +541,9 @@ pub fn restore(source: &Path, repositories: &[WorkspaceRepository]) -> Result<()
             )?;
         }
         for (name, target) in &repository.symbolic_refs {
+            if name == mj_core::targets::HistoryCutoff::BASE_REF {
+                continue;
+            }
             ensure!(
                 name.starts_with("refs/") && target.starts_with("refs/"),
                 "invalid symbolic Move ref"

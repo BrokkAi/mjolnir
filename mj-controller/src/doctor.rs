@@ -3824,9 +3824,22 @@ pub(crate) fn review_residue(repository: &Path) -> ReviewResidue {
             }
         }
     }
-    residue
+    if residue
         .refs
-        .retain(|reference| reference != mj_core::targets::HistoryCutoff::BASE_REF);
+        .iter()
+        .any(|reference| reference == mj_core::targets::HistoryCutoff::BASE_REF)
+        && matches!(
+            mj_checkpoint::archive::remote_workspace_base(
+                &mj_checkpoint::archive::SystemGit,
+                repository
+            ),
+            Ok(Some(_))
+        )
+    {
+        residue
+            .refs
+            .retain(|reference| reference != mj_core::targets::HistoryCutoff::BASE_REF);
+    }
     residue.refs.sort();
     residue.scratch_indexes.sort();
     residue

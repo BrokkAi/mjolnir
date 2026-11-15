@@ -1459,28 +1459,61 @@ impl<E: CommandExecutor + Sync> mj_checkpoint::archive::GitCommandRunner for Exe
             command.stdin.is_empty() && command.env.is_empty(),
             "an executor Git command takes no standard input or extra environment"
         );
-        let arguments = command
-            .arguments
-            .iter()
-            .map(|argument| argument.to_string_lossy().into_owned());
+        let mut environment: Vec<_> = mj_checkpoint::archive::NON_INTERACTIVE_GIT_ENV
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect();
+        environment.push((
+            "GIT_SSH_COMMAND".into(),
+            std::env::var("GIT_SSH_COMMAND").unwrap_or_else(|_| {
+                mj_checkpoint::archive::NON_INTERACTIVE_GIT_SSH_COMMAND.to_owned()
+            }),
+        ));
+        let mut args = vec![
+            "git".into(),
+            "-C".into(),
+            repository.to_string_lossy().into_owned(),
+        ];
+        args.extend(
+            command
+                .arguments
+                .iter()
+                .map(|argument| argument.to_string_lossy().into_owned()),
+        );
         let command = match self.location {
-            ExecutorGitLocation::Local => managed_git_command(
-                &ManagedWorktreeTarget::Local,
-                repository,
-                arguments,
-                "inspect submodules",
-            ),
-            ExecutorGitLocation::Session { backend, id } => {
-                let mut args = vec![
-                    "git".into(),
-                    "-C".into(),
-                    repository.to_string_lossy().into_owned(),
-                ];
-                args.extend(arguments);
-                crate::targets::command_on_locator(
+            ExecutorGitLocation::Local => {
+                let mut command =
+                    CommandSpec::new("git", args.into_iter().skip(1)).purpose("inspect submodules");
+                command.env.extend(environment);
+                command
+            }
+            ExecutorGitLocation::Session {
+                backend: backend @ crate::targets::TargetLocator::LocalBare { .. },
+                id,
+            } => {
+                let mut command = crate::targets::command_on_locator(
                     backend,
                     id,
                     args,
+                    "inspect source checkout base",
+                )?;
+                command.env.extend(environment);
+                command
+            }
+            ExecutorGitLocation::Session { backend, id } => {
+                // Environment belongs to Git on the target, not to the local
+                // SSH/container transport process.
+                let mut remote = vec!["env".into()];
+                remote.extend(
+                    environment
+                        .into_iter()
+                        .map(|(name, value)| format!("{name}={value}")),
+                );
+                remote.extend(args);
+                crate::targets::command_on_locator(
+                    backend,
+                    id,
+                    remote,
                     "inspect source checkout base",
                 )?
             }
