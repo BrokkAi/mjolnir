@@ -397,8 +397,8 @@ mj usage --session <id> [--after-seq <seq>] [--limit <count>] [--json]
 mj put-file --session <id> --path <workspace-relative path> [--overwrite] [--json] <source>|-
 mj elicitations --session <id> [--json]
 mj respond --session <id> --elicitation <id> [<response JSON>|-] [--response-file <path>]
-mj models --profile <id> [--model <name> | --unrestricted] [--json]
-mj quota [--profile <id>] [--refresh] [--json]
+mj models [--profile <id>] [--model <name> | --unrestricted] [--with-disabled] [--json]
+mj quota [--profile <id>] [--refresh] [--with-disabled] [--json]
 mj set-config --session <id> [--key <key> --value <value>] [--json]
 mj ui pane (sessions | targets | profiles) (minimized | standard | maximized) [--json]
 mj ui show <session-id> [--right | --below] [--json]
@@ -514,6 +514,9 @@ mj new --workspace eval --bundle product --target builder \
   target to this machine and prints where it landed. See below.
 - `mj models` lists the models and efforts a profile offers, after the profile's
   `models` allow-list; `--unrestricted` lists everything the harness advertises.
+  Without `--profile` it aggregates every enabled profile: one row per model,
+  normalized across providers, naming the profiles that offer it;
+  `--with-disabled` includes disabled profiles in the aggregate.
   Usage-priced profiles
   include known per-million-token rates; subscription and unknown billing modes
   are labeled without per-token prices. JSON includes a `billing` field and a
@@ -522,7 +525,9 @@ mj new --workspace eval --bundle product --target builder \
   or one with `--profile`: billing mode, each reported window with what remains
   and its reset, and how long ago the value was fetched. A profile whose quota
   cannot be read says why. `--refresh` asks the daemon to probe again and waits
-  for the fresh cycle before printing. JSON carries each profile's full report
+  for the fresh cycle before printing. `--with-disabled` includes disabled
+  profiles, asking the daemon for a one-off probe of any that have no reading.
+  JSON carries each profile's full report
   for scripts that back off before a profile runs out.
 - `mj set-config` applies user-settable session settings the harness advertises,
   such as the model or effort. The target permission policy owns permission

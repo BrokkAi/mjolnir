@@ -171,7 +171,7 @@ fn golden_doctor_reports_external_aws_ssh_docker_and_podman_observations() {
     );
 
     let podman = FakeExecutor::new([Ok(output(
-        b"keys.used=174\nkeys.quota=200\nkeys.max=1000\nmaxstartups=10:30:100\n",
+        b"keys.used=174\nkeys.quota=200\nkeys.max=1000\ninotify.max_user_instances=8192\nmaxstartups=10:30:100\n",
     ))]);
     let podman_check = ssh_podman_limits_check("remote-podman", &ssh, &podman);
     let podman_commands = podman.commands.borrow();
@@ -1016,6 +1016,48 @@ fn host_limits_report_pressure_when_keys_reach_the_quota() {
         limits
             .keyring_sentence("dev@example.test")
             .contains("3300 of its 4096")
+    );
+}
+
+// Hard-won: #1540: mj-made EC2 hosts kept Ubuntu's inotify default, and tests
+// starting file watchers failed with EMFILE at about 30 containers.
+#[test]
+fn host_limits_warn_when_inotify_instances_are_low() {
+    let low = parse_host_limits(b"keys.used=10\nkeys.quota=4096\ninotify.max_user_instances=128\n");
+    assert_eq!(low.inotify_max_user_instances, Some(128));
+    assert!(
+        low.inotify_sentence("dev@example.test").contains("is 128"),
+        "{}",
+        low.inotify_sentence("dev@example.test")
+    );
+    let executor = FakeExecutor::new([Ok(output(
+        b"keys.used=10\nkeys.quota=4096\ninotify.max_user_instances=128\nmaxstartups=10:30:100\n",
+    ))]);
+    let check = ssh_podman_limits_check(
+        "remote-podman",
+        &RuntimeSshTarget::from(&ssh_connection()),
+        &executor,
+    );
+    assert_eq!(check.status, CheckStatus::Warning);
+    assert!(
+        check.detail.contains("Too many open files"),
+        "{}",
+        check.detail
+    );
+    assert!(
+        check
+            .remediation
+            .as_deref()
+            .is_some_and(|remediation| remediation.contains("8192")),
+        "{:?}",
+        check.remediation
+    );
+
+    let healthy = parse_host_limits(b"inotify.max_user_instances=8192\n");
+    assert!(
+        !healthy
+            .inotify_max_user_instances
+            .is_some_and(|max| max < INOTIFY_INSTANCES_HEALTHY)
     );
 }
 

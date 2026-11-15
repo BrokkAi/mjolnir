@@ -1079,6 +1079,11 @@ pub enum DaemonAction {
     /// process that probes; the result arrives in the runtime feed. Added in
     /// protocol 43.
     RefreshQuota,
+    /// Probe exactly these profiles once, even disabled ones, and serve their
+    /// reports in the runtime feed. Added in protocol 99.
+    ProbeQuotaProfiles {
+        profile_ids: Vec<String>,
+    },
     /// Discover eligible subagent models in the daemon, which owns the cache.
     SubagentOptions {
         profile: String,
@@ -2273,6 +2278,19 @@ impl DaemonClient {
         match self.request(DaemonAction::RefreshQuota).await? {
             DaemonReply::Done => Ok(()),
             reply => bail!("unexpected refresh-quota reply {reply:?}"),
+        }
+    }
+
+    /// Ask the daemon to probe exactly these profiles once, even disabled
+    /// ones. Returns when the daemon has queued the probes, not when they
+    /// finish; the reports arrive in the runtime feed.
+    pub async fn probe_quota_profiles(&mut self, profile_ids: Vec<String>) -> Result<()> {
+        match self
+            .request(DaemonAction::ProbeQuotaProfiles { profile_ids })
+            .await?
+        {
+            DaemonReply::Done => Ok(()),
+            reply => bail!("unexpected probe-quota reply {reply:?}"),
         }
     }
 
@@ -3526,7 +3544,8 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Version 95: milestone-4 setup discovery, availability, login status and machine actions.
 // Version 97: the daemon decides which sessions are notifications.
 // Version 98: container settings use the single resource allocation.
-pub const PROTOCOL_VERSION: u32 = 98;
+// Version 99: one-shot quota probes for profiles outside the enabled set.
+pub const PROTOCOL_VERSION: u32 = 99;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///

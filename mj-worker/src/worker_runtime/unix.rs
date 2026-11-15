@@ -1874,7 +1874,13 @@ async fn prepare_and_start_harness(
                 if step_cancel.is_cancelled() {
                     bail!("preparation cancelled before configuring the Kimi profile");
                 }
-                super::subagents::configure_kimi_subagent_mcp(&root, &session_id, &home, role)
+                super::subagents::configure_kimi_subagent_mcp(
+                    &root,
+                    &session_id,
+                    &home,
+                    role,
+                    review_tools,
+                )
             })
             .await?;
             true

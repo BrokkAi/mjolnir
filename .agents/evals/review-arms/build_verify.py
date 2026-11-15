@@ -1,9 +1,13 @@
 """Builds blind verification batches from every finished run.
 
-Usage: python3 build_verify.py <out-dir> [--per-batch 2] [--ready-jobs jobs.json] [--append] [--arms A,B,...]
-       [--configs model:effort,...]
+Usage: python3 build_verify.py <out-dir> [--per-batch 2] [--ready-jobs jobs.json] [--append]
+                                         [--arms A,BT] [--bugs-from jobs.json] [--configs model:effort,...]
 
---ready-jobs includes only diffs whose every job in that file has finished, so
+--arms pools only those arms' sessions (relation-brief control 2 compares no-brief
+Terra/high with blind-brief Terra/high; review-arms stage 4 leaves out the brief
+arms OT, OS, BT and BS), and --bugs-from limits the diffs to a jobs file's.
+--configs pools only reviewers of those model:effort configurations, e.g. to
+verify a new model against one anchor configuration. --ready-jobs includes only diffs whose every job in that file has finished, so
 verification can start while other reviews still run. --append adds diffs not
 yet in the key as new batches and leaves existing batches and IDs unchanged.
 
@@ -27,11 +31,12 @@ p.add_argument("out")
 p.add_argument("--per-batch", type=int, default=2)
 p.add_argument("--ready-jobs")
 p.add_argument("--append", action="store_true")
-p.add_argument("--configs", help="comma-separated reviewer model:effort to include, e.g. to verify a new "
-               "model only against an anchor configuration")
-p.add_argument("--arms", help="comma-separated arms to include; default every arm under runs/. Other "
-               "experiments share runs/ (arms OT, OS, BT, BS give reviewers extra context), so name the arms.")
+p.add_argument("--arms", help="comma-separated arms to pool; default every arm")
+p.add_argument("--bugs-from", help="jobs file whose diffs are the only ones batched")
+p.add_argument("--configs", help="comma-separated reviewer model:effort to pool; default every reviewer")
 a = p.parse_args()
+arms = set(a.arms.split(",")) if a.arms else None
+only = {j["bug"] for j in json.loads(pathlib.Path(a.bugs_from).read_text())} if a.bugs_from else None
 out = ROOT / a.out
 out.mkdir(parents=True, exist_ok=True)
 
@@ -73,7 +78,14 @@ for done_path in sorted(ROOT.glob("runs/*/*/done.json")):
     run = done_path.parent
     if done["bug"] in batched or (ready is not None and done["bug"] not in ready):
         continue
-    if a.arms and done["arm"] not in a.arms.split(","):
+    if (arms is not None and done["arm"] not in arms) or (only is not None and done["bug"] not in only):
+        continue
+    # With --arms and no --ready-jobs, a diff is batched only once every selected arm
+    # has finished on it; batching it earlier would leave the later arm out of its pool
+    # for good. A --ready-jobs file instead names each diff's jobs, so arms that ran on
+    # only some diffs (review-arms stage 4: I and J) do not hold the others back.
+    if arms is not None and ready is None and not all(
+            (ROOT / "runs" / done["bug"] / arm / "done.json").exists() for arm in arms):
         continue
     for r in done["reviewers"]:
         if a.configs and f"{r['model']}:{r['effort']}" not in a.configs.split(","):

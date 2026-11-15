@@ -322,7 +322,7 @@ pub(super) fn input() -> ArchiveInput {
         },
         native_artifacts: vec![NativeArtifact {
             relative_path: PathBuf::from("sessions/native-1/rollout.jsonl"),
-            data: b"native transcript".to_vec(),
+            data: (b"native transcript".to_vec()).into(),
             mode: 0o600,
         }],
         repositories: vec![repository("hel"), repository("worker")],
@@ -387,7 +387,7 @@ fn streaming_verification_does_not_retain_large_noncanonical_payloads() {
     archive_input.repositories.clear();
     archive_input.native_artifacts = vec![NativeArtifact {
         relative_path: PathBuf::from("sessions/native-1/large-rollout.jsonl"),
-        data: vec![b'x'; LARGE_PAYLOAD_BYTES],
+        data: (vec![b'x'; LARGE_PAYLOAD_BYTES]).into(),
         mode: 0o600,
     }];
 
@@ -441,11 +441,12 @@ fn sharded_input() -> (ArchiveInput, Vec<u8>, Vec<u8>) {
         &b"untracked payload line\n".repeat(1_000),
         0o644,
     );
-    archive_input.native_artifacts[0].data = native.clone();
+    archive_input.native_artifacts[0].data = native.clone().into();
     archive_input.repositories[0].untracked_tar = untracked.clone();
     (archive_input, native, untracked)
 }
 
+// Hard-won: 4cc32efd0: last-part EOF checking preceded completion of earlier compression.
 #[test]
 fn oversized_payloads_shard_into_parts_and_read_back_whole() {
     let directory = tempfile::tempdir().unwrap();
@@ -503,6 +504,54 @@ fn oversized_payloads_shard_into_parts_and_read_back_whole() {
         "restore consumers only ever see whole payload paths"
     );
     assert!(verified.payloads.contains_key(native_path));
+
+    // Force the schedule where the last part finishes before the source grows
+    // and the earlier parts finish. Completion belongs to ordered assembly.
+    let source_path = directory.path().join("growing-native.jsonl");
+    fs::write(&source_path, native.repeat(4)).unwrap();
+    let mut file_input = archive_input.clone();
+    file_input.native_artifacts[0].data = NativeArtifactData::File(source_path.clone());
+    let (_, payloads) = prepare_archive_with_part_size(&file_input, TEST_PART_BYTES).unwrap();
+    let payload = payloads
+        .iter()
+        .find(|payload| payload.descriptor.path == native_path)
+        .unwrap();
+    let mut offset = 0;
+    let entries: Vec<_> = payload
+        .descriptor
+        .parts
+        .iter()
+        .map(|part| {
+            let entry = StreamEntry {
+                payload,
+                name: &part.path,
+                size: part.size,
+                digest: &part.sha256,
+                offset,
+            };
+            offset += part.size;
+            entry
+        })
+        .collect();
+    let mut compressed = Vec::new();
+    for entry in entries.iter().rev() {
+        compressed.push(Some(
+            compress_stream_entry(entry, directory.path()).unwrap(),
+        ));
+        if compressed.len() == 1 {
+            OpenOptions::new()
+                .append(true)
+                .open(&source_path)
+                .unwrap()
+                .write_all(b"late source append\n")
+                .unwrap();
+        }
+    }
+    compressed.reverse();
+    let mut output = File::create(directory.path().join("growing.hel.zip")).unwrap();
+    let mut writer = zip::ZipWriter::new(&mut output);
+    let error = append_stream_entries(&mut writer, &entries, compressed).unwrap_err();
+    assert!(format!("{error:#}").contains("payload source grew during export"));
 }
 
 #[test]
@@ -701,7 +750,7 @@ fn streaming_verification_parses_a_sharded_untracked_tar_for_safety() {
         TEST_PART_BYTES,
     );
     let mut file = File::create(&path).unwrap();
-    write_zip(&mut file, &manifest, &payloads).unwrap();
+    write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
     drop(file);
 
     let error = format!("{:#}", verify_archive_streaming(&path).unwrap_err());
@@ -743,7 +792,7 @@ fn streaming_verification_refuses_operation_state_that_is_not_git_operation_stat
         PAYLOAD_PART_BYTES,
     );
     let mut file = File::create(&path).unwrap();
-    write_zip(&mut file, &manifest, &payloads).unwrap();
+    write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
     drop(file);
 
     let error = format!("{:#}", verify_archive_streaming(&path).unwrap_err());
@@ -810,7 +859,7 @@ fn streaming_verification_refuses_working_tree_paths_inside_the_git_directory() 
         }
         let path = directory.path().join(format!("{tampered}.hel.zip"));
         let mut file = File::create(&path).unwrap();
-        write_zip(&mut file, &manifest, &payloads).unwrap();
+        write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
         drop(file);
 
         let error = format!("{:#}", verify_archive_streaming(&path).unwrap_err());
@@ -836,7 +885,7 @@ fn sharded_manifests_reject_reordered_or_missing_parts() {
     descriptor.parts.swap(0, 1);
     let reordered = directory.path().join("reordered.hel.zip");
     let mut file = File::create(&reordered).unwrap();
-    write_zip(&mut file, &manifest, &payloads).unwrap();
+    write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
     drop(file);
     let error = format!("{:#}", verify_archive_streaming(&reordered).unwrap_err());
     assert!(error.contains("part 0 has unexpected path"), "{error}");
@@ -851,7 +900,7 @@ fn sharded_manifests_reject_reordered_or_missing_parts() {
     descriptor.parts.pop().unwrap();
     let truncated = directory.path().join("truncated.hel.zip");
     let mut file = File::create(&truncated).unwrap();
-    write_zip(&mut file, &manifest, &payloads).unwrap();
+    write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
     drop(file);
     let error = format!("{:#}", verify_archive_streaming(&truncated).unwrap_err());
     assert!(error.contains("parts cover"), "{error}");
@@ -914,7 +963,7 @@ fn readers_without_part_support_reject_sharded_archives() {
     manifest.schema_version = ARCHIVE_SCHEMA_VERSION;
     let downgraded = directory.path().join("downgraded.hel.zip");
     let mut file = File::create(&downgraded).unwrap();
-    write_zip(&mut file, &manifest, &payloads).unwrap();
+    write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
     drop(file);
     let error = format!("{:#}", read_archive_verified(&downgraded).unwrap_err());
     assert!(
@@ -1020,7 +1069,7 @@ fn streaming_verification_rejects_noncanonical_corruption() {
     let path = directory.path().join("corrupt-native.hel.zip");
     let mut archive_input = input();
     archive_input.repositories.clear();
-    archive_input.native_artifacts[0].data = b"native payload".to_vec();
+    archive_input.native_artifacts[0].data = b"native payload".to_vec().into();
     write_archive_atomic(&path, &archive_input).unwrap();
 
     let file = OpenOptions::new()
@@ -1105,13 +1154,14 @@ fn streaming_verification_parses_untracked_tar_for_safety() {
     payload.descriptor = descriptor.clone();
     payload.data = Cow::Owned(malicious);
     let mut file = File::create(&path).unwrap();
-    write_zip(&mut file, &manifest, &payloads).unwrap();
+    write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
     drop(file);
 
     let error = verify_archive_streaming(&path).unwrap_err();
     assert!(format!("{error:#}").contains("inside a Git directory"));
 }
 
+// Hard-won: 0d7aa0f1e: streaming restore skipped the whole native digest before mutating targets.
 #[test]
 fn corruption_is_detected_by_payload_digest() {
     let directory = tempfile::tempdir().unwrap();
@@ -1133,6 +1183,64 @@ fn corruption_is_detected_by_payload_digest() {
     drop(file);
 
     assert!(read_archive_verified(&path).is_err());
+
+    // Keep every part intact but corrupt the whole native digest. Every
+    // selective reader must reject it before the caller can mutate a target.
+    let (archive_input, _, _) = sharded_input();
+    let (mut manifest, payloads) =
+        prepare_archive_with_part_size(&archive_input, TEST_PART_BYTES).unwrap();
+    let native = manifest
+        .payloads
+        .iter_mut()
+        .find(|payload| matches!(payload.role, PayloadRole::NativeArtifact { .. }))
+        .unwrap();
+    assert!(!native.parts.is_empty());
+    native.sha256 = "0".repeat(64);
+    let relative = match &native.role {
+        PayloadRole::NativeArtifact { relative_path } => relative_path.clone(),
+        _ => unreachable!(),
+    };
+    let mut file = File::create(&path).unwrap();
+    write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
+    drop(file);
+    for result in [
+        verify_archive_streaming(&path).map(|_| ()),
+        read_archive_repositories(&path).map(|_| ()),
+    ] {
+        assert!(format!("{:#}", result.unwrap_err()).contains("SHA-256 mismatch"));
+    }
+    let workspace = directory.path().join("workspace");
+    let home = directory.path().join("harness");
+    let relay = directory.path().join("relay");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(home.join(&relative).parent().unwrap()).unwrap();
+    fs::write(home.join(&relative), b"existing native state").unwrap();
+    fs::write(workspace.join("keep"), b"existing work").unwrap();
+    for restore_native in [false, true] {
+        let error = crate::checkpoint::restore_checkpoint(
+            &crate::checkpoint::CheckpointRestoreSpec {
+                report_root: None,
+                archive_path: path.clone(),
+                workspace_root: workspace.clone(),
+                relay_root: relay.clone(),
+                harness_home: home.clone(),
+                restore_repositories: true,
+                restore_native,
+                queue_policy: crate::checkpoint::QueueRestorePolicy::Discard,
+                primary_repository_root: None,
+            },
+            &SystemGit,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("SHA-256 mismatch"));
+        assert_eq!(
+            fs::read(home.join(&relative)).unwrap(),
+            b"existing native state"
+        );
+        assert_eq!(fs::read(workspace.join("keep")).unwrap(), b"existing work");
+        assert!(!relay.exists());
+        assert!(!workspace.join("hel").exists());
+    }
 }
 
 #[test]
@@ -1144,7 +1252,7 @@ fn old_and_future_schemas_are_rejected_explicitly() {
         let (mut manifest, payloads) = prepare_archive(&archive_input).unwrap();
         manifest.schema_version = schema_version;
         let mut file = File::create(&path).unwrap();
-        write_zip(&mut file, &manifest, &payloads).unwrap();
+        write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
         drop(file);
 
         let error = read_archive_verified(&path).unwrap_err();
@@ -3296,7 +3404,7 @@ fn archive_round_trip_preserves_clear_boundary_and_requires_context_schema() {
     manifest.schema_version = ARCHIVE_SCHEMA_VERSION_CONTEXT;
     let downgraded = directory.path().join("message-downgraded.hel.zip");
     let mut file = File::create(&downgraded).unwrap();
-    write_zip(&mut file, &manifest, &payloads).unwrap();
+    write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
     drop(file);
     let error = read_archive_verified(&downgraded).unwrap_err();
     assert!(format!("{error:#}").contains("message transcript entries require archive schema 9"));

@@ -247,6 +247,7 @@ fn native_checkpoint_restore_relocates_muse_without_changing_identity() {
     )));
 }
 
+// Hard-won: 70c1a004a: file-backed Muse artifacts lost their captured content identity.
 #[test]
 fn native_import_rejects_changed_preview_and_cancellation_without_publishing() {
     let kind = HarnessKind::Muse;
@@ -314,5 +315,85 @@ fn native_import_rejects_changed_preview_and_cancellation_without_publishing() {
     assert!(state.sessions.is_empty());
     assert!(
         !archive_directory.exists() || fs::read_dir(&archive_directory).unwrap().next().is_none()
+    );
+
+    // A write after validation must not replace the captured native bytes
+    // that were paired with the preview transcript.
+    let directory = tempfile::tempdir().unwrap();
+    let mut source_fixture = fixture(directory.path(), kind);
+    let reply = "h".repeat(128 * 1024);
+    let large = fs::read_to_string(&source_fixture.source_path)
+        .unwrap()
+        .replace("hello back", &reply);
+    fs::write(&source_fixture.source_path, large).unwrap();
+    source_fixture.transcript = read_native_transcript(kind, &source_fixture.source_path).unwrap();
+    let original = fs::read(&source_fixture.source_path).unwrap();
+    assert!(original.len() > 64 * 1024);
+    let changed = String::from_utf8(original.clone())
+        .unwrap()
+        .replace(&reply, "later native reply");
+    let config = test_config();
+    let archive_directory = directory.path().join("snapshot-archives");
+    let mut state = State::default();
+    let cancelled = AtomicBool::new(false);
+    let report = |progress| {
+        if matches!(progress, ImportArchiveProgress::WritingArchive) {
+            fs::write(&source_fixture.source_path, &changed).unwrap();
+        }
+    };
+    let control = ImportControl {
+        cancelled: &cancelled,
+        progress: &report,
+        include_untracked: true,
+    };
+    let imported = import_native_session(
+        &config,
+        &mut state,
+        NativeImportRequest {
+            daemon_project_root: None,
+            harness: kind,
+            harness_home: &source_fixture.home,
+            native_session_id: &source_fixture.native_session_id,
+            source_path: &source_fixture.source_path,
+            transcript: &source_fixture.transcript,
+            bundle_id: "app",
+            profile_id: None,
+            title: None,
+            archive_directory: &archive_directory,
+        },
+        Some(&control),
+    )
+    .unwrap();
+    let checkpoint = state
+        .sessions
+        .get(&imported.session_id)
+        .unwrap()
+        .checkpoint
+        .as_ref()
+        .unwrap();
+    let verified = verify_archive_streaming(&checkpoint.archive_path).unwrap();
+    let native = verified
+        .manifest
+        .payloads
+        .iter()
+        .find(|payload| {
+            matches!(
+                &payload.role, PayloadRole::NativeArtifact { relative_path }
+                    if relative_path.file_name().is_some_and(|name| name == "session.jsonl")
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        mj_checkpoint::archive::read_verified_checkpoint_payload(
+            &checkpoint.archive_path,
+            native,
+            native.size,
+        )
+        .unwrap(),
+        original
+    );
+    assert_eq!(
+        fs::read_to_string(&source_fixture.source_path).unwrap(),
+        changed
     );
 }

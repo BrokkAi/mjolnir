@@ -56,6 +56,11 @@ pub struct ViewerSnapshot {
     pub workspaces: Vec<ViewerWorkspace>,
     pub sessions: ViewerSessions,
     pub profiles: Vec<ViewerProfile>,
+    /// Configured profiles left out of `profiles` because they are disabled.
+    /// Pickers never offer them, but a request that names one explicitly may
+    /// use it. Controller-private: never sent to clients.
+    #[serde(skip)]
+    pub disabled_profile_ids: std::collections::BTreeSet<String>,
     pub targets: Vec<ViewerTarget>,
     pub bundles: Vec<ViewerBundle>,
     /// The bounded part of `[review]` needed to report whether review is
@@ -429,6 +434,12 @@ impl ViewerSnapshot {
                 quota: None,
             })
             .collect();
+        let disabled_profile_ids = config
+            .profiles
+            .iter()
+            .filter(|(_, profile)| !profile.enabled)
+            .map(|(id, _)| id.clone())
+            .collect();
         let targets = config
             .enabled_targets()
             .map(|(id, target)| ViewerTarget {
@@ -508,6 +519,7 @@ impl ViewerSnapshot {
             workspaces: Vec::new(),
             sessions,
             profiles,
+            disabled_profile_ids,
             targets,
             bundles,
             review_config: ViewerReviewConfig {

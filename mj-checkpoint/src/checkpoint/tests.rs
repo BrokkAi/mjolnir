@@ -137,7 +137,7 @@ fn dsh_checkpoint_keeps_the_session_record_and_restores_it_at_the_new_workspace(
         &restored_native_artifact_bytes(
             HarnessKind::Dsh,
             &relative,
-            &artifacts[0].data,
+            &artifact_bytes(&artifacts[0]),
             Some(&moved),
             temp.path(),
         )
@@ -978,8 +978,16 @@ fn native_allowlist_excludes_credentials_and_other_sessions() {
         .iter()
         .find(|artifact| artifact.relative_path.as_path() == Path::new("session_index.jsonl"))
         .unwrap();
-    assert!(std::str::from_utf8(&index.data).unwrap().contains(NATIVE));
-    assert!(!std::str::from_utf8(&index.data).unwrap().contains("other"));
+    assert!(
+        std::str::from_utf8(&index.data.bytes().unwrap())
+            .unwrap()
+            .contains(NATIVE)
+    );
+    assert!(
+        !std::str::from_utf8(&index.data.bytes().unwrap())
+            .unwrap()
+            .contains("other")
+    );
     assert!(artifacts.iter().all(|artifact| {
         !artifact
             .relative_path
@@ -1058,18 +1066,18 @@ fn muse_checkpoint_keeps_selected_child_streams_without_credentials_or_other_ses
     assert!(
         artifacts
             .iter()
-            .any(|artifact| artifact.data.len() == 128 * 1024)
+            .any(|artifact| artifact.size().unwrap() == 128 * 1024)
     );
     assert!(
         artifacts
             .iter()
-            .any(|artifact| artifact.data == b"child history")
+            .any(|artifact| artifact_bytes(artifact) == b"child history")
     );
     let restored = tempfile::tempdir().unwrap();
     for artifact in artifacts {
         let path = restored.path().join(&artifact.relative_path);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, &artifact.data).unwrap();
+        fs::write(path, artifact_bytes(&artifact)).unwrap();
     }
     assert_eq!(
         collect_native_artifacts(HarnessKind::Muse, restored.path(), NATIVE, false)
@@ -1109,7 +1117,7 @@ fn muse_import_normalizes_selected_tree_to_worker_storage() {
             ".data/muse/sessions/2026/09/08/{NATIVE}/session.jsonl"
         ))
     );
-    assert_eq!(artifacts[1].data, b"child");
+    assert_eq!(artifact_bytes(&artifacts[1]), b"child");
     assert!(
         collect_import_native_artifacts(
             HarnessKind::Muse,
@@ -1741,6 +1749,7 @@ fn a_plain_project_directory_is_recorded_but_never_captured_or_restored() {
     assert!(!restore_root.join("notes/drafts").exists());
 }
 
+// Hard-won: 7d68f8bde: the staged copy must own its size when the live source changes at EOF.
 #[test]
 fn staged_checkpoint_preserves_export_contents_and_defers_canonical_history() {
     let temp = tempfile::tempdir().unwrap();
@@ -1749,7 +1758,81 @@ fn staged_checkpoint_preserves_export_contents_and_defers_canonical_history() {
         .harness_home
         .join(format!("sessions/2026/08/09/rollout-{NATIVE}.jsonl"));
     fs::write(&large_native, vec![b'n'; 128 * 1024]).unwrap();
-    export_checkpoint(&export_spec).unwrap();
+    // The same stream used by capture can reach EOF just before the harness
+    // appends. Its result must describe the sealed destination, not the source.
+    struct AppendAtEof {
+        source: File,
+        path: PathBuf,
+        appended: bool,
+    }
+    impl Read for AppendAtEof {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            let count = self.source.read(bytes)?;
+            if count == 0 && !self.appended {
+                self.appended = true;
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(&self.path)?
+                    .write_all(b"later harness bytes")?;
+            }
+            Ok(count)
+        }
+    }
+    let copied = write_private_reader(
+        temp.path(),
+        Path::new("owned-native-copy"),
+        &mut AppendAtEof {
+            source: File::open(&large_native).unwrap(),
+            path: large_native.clone(),
+            appended: false,
+        },
+        0o600,
+    )
+    .unwrap();
+    assert_eq!(
+        copied,
+        fs::metadata(temp.path().join("owned-native-copy"))
+            .unwrap()
+            .len()
+    );
+    assert!(fs::metadata(&large_native).unwrap().len() > copied);
+    struct AppendDuringGit {
+        path: PathBuf,
+        appended: std::sync::atomic::AtomicBool,
+    }
+    impl GitCommandRunner for AppendDuringGit {
+        fn run(&self, repository: &Path, command: &GitCommand) -> Result<GitOutput> {
+            if !self
+                .appended
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(&self.path)?
+                    .write_all(b"async native write during Git")?;
+            }
+            SystemGit.run(repository, command)
+        }
+    }
+    let captured = fs::read(&large_native).unwrap();
+    export_checkpoint_with_git(
+        &export_spec,
+        &AppendDuringGit {
+            path: large_native.clone(),
+            appended: std::sync::atomic::AtomicBool::new(false),
+        },
+    )
+    .unwrap();
+    let legacy = read_archive_verified(&export_spec.output_path).unwrap();
+    let native = legacy
+        .manifest
+        .payloads
+        .iter()
+        .find(|payload| matches!(payload.role, PayloadRole::NativeArtifact { .. }))
+        .unwrap();
+    assert_eq!(legacy.payload(native).unwrap(), captured);
+    assert!(fs::metadata(&large_native).unwrap().len() > captured.len() as u64);
+    fs::write(&large_native, captured).unwrap();
 
     let reports = export_spec
         .workspace_root
@@ -1876,7 +1959,7 @@ fn checkpoint_packaging_throughput() {
             };
             Some(NativeArtifact {
                 relative_path: relative_path.clone(),
-                data: archive.payload(descriptor).unwrap().to_vec(),
+                data: (archive.payload(descriptor).unwrap().to_vec()).into(),
                 mode: descriptor.mode,
             })
         })
@@ -1889,7 +1972,7 @@ fn checkpoint_packaging_throughput() {
         .collect::<Vec<_>>();
     let payload_bytes = native_artifacts
         .iter()
-        .map(|artifact| artifact.data.len() as u64)
+        .map(|artifact| artifact.size().unwrap())
         .chain(repositories.iter().flat_map(|repository| {
             [
                 repository.committed_bundle.len() as u64,
@@ -1913,7 +1996,7 @@ fn checkpoint_packaging_throughput() {
         write_private_file(
             &harness_home,
             &artifact.relative_path,
-            &artifact.data,
+            &artifact.data.bytes().unwrap(),
             artifact.mode,
         )
         .unwrap();
@@ -2043,7 +2126,7 @@ fn codex_root_archive_throughput() {
     .unwrap();
     let native_bytes = native_artifacts
         .iter()
-        .map(|artifact| artifact.data.len() as u64)
+        .map(|artifact| artifact.size().unwrap())
         .sum::<u64>();
     let collect_ms = collect_started.elapsed().as_millis();
     let repositories = metadata
@@ -2157,7 +2240,7 @@ fn checkpoint_collects_the_configured_memory_replica_for_non_claude_harnesses() 
     .unwrap();
     assert!(artifacts.iter().any(|artifact| {
         artifact.relative_path == Path::new("projects/replica/memory/MEMORY.md")
-            && artifact.data == b"remember this"
+            && artifact_bytes(artifact) == b"remember this"
     }));
 }
 
@@ -2203,7 +2286,7 @@ fn checkpoint_collects_memory_from_a_legacy_worker_launch_config() {
 
     assert!(artifacts.iter().any(|artifact| {
         artifact.relative_path == Path::new("projects/replica/memory/MEMORY.md")
-            && artifact.data == b"legacy memory"
+            && artifact_bytes(artifact) == b"legacy memory"
     }));
 }
 
@@ -4268,4 +4351,109 @@ fn captured_checkpoint_accepts_an_older_workers_json() {
     assert!(json.get("report_directories").is_none());
     let decoded: CheckpointExportSpec = serde_json::from_value(json).unwrap();
     assert!(decoded.report_directories.is_none());
+}
+
+// Hard-won: move-a618a54a: a 1 GiB native-file cap made a quota Move of a long Claude session fail
+#[test]
+fn quota_move_streams_a_native_transcript_larger_than_one_gib() {
+    use std::io::{Seek, SeekFrom};
+    let started = std::time::Instant::now();
+    let temp = tempfile::tempdir().unwrap();
+    let (mut spec, _) = fixture(temp.path());
+    spec.session.harness_kind = HarnessKind::Claude;
+    let relative = PathBuf::from(format!("projects/old/{NATIVE}.jsonl"));
+    let source = spec.harness_home.join(&relative);
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    let mut file = File::create(&source).unwrap();
+    file.set_len(1024 * 1024 * 1024 + 65537).unwrap();
+    file.write_all(b"transcript start\n").unwrap();
+    file.seek(SeekFrom::End(-16)).unwrap();
+    file.write_all(b"transcript end!\n").unwrap();
+    drop(file);
+    export_checkpoint(&spec).unwrap();
+    verify_archive_streaming(&spec.output_path).unwrap();
+    let stage_path = spec.relay_root.join("large-native-stage");
+    capture_checkpoint(
+        &CheckpointCaptureSpec {
+            protocol_version: CHECKPOINT_STAGING_PROTOCOL_VERSION,
+            session: spec.session.clone(),
+            target: spec.target.clone(),
+            bundle: spec.bundle.clone(),
+            relay_root: spec.relay_root.clone(),
+            harness_home: spec.harness_home.clone(),
+            workspace_root: spec.workspace_root.clone(),
+            repositories: spec.repositories.clone(),
+            report_directories: None,
+            allow_empty_native: false,
+            stage_path: stage_path.clone(),
+            refresh_existing: false,
+        },
+        &SystemGit,
+    )
+    .unwrap();
+    pack_checkpoint(&CheckpointPackSpec {
+        protocol_version: CHECKPOINT_STAGING_PROTOCOL_VERSION,
+        relay_root: spec.relay_root.clone(),
+        stage_path,
+        canonical_session: spec.canonical_session.clone(),
+        output_path: spec.output_path.clone(),
+    })
+    .unwrap();
+    let repository_archive = crate::archive::read_archive_repositories(&spec.output_path).unwrap();
+    for payload in &repository_archive.manifest.payloads {
+        if matches!(payload.role, PayloadRole::NativeArtifact { .. }) {
+            assert!(!repository_archive.payloads.contains_key(&payload.path));
+        }
+    }
+    let home = temp.path().join("restored-home");
+    restore_checkpoint(
+        &CheckpointRestoreSpec {
+            report_root: None,
+            archive_path: spec.output_path.clone(),
+            workspace_root: spec.workspace_root.clone(),
+            relay_root: temp.path().join("restored-relay"),
+            harness_home: home.clone(),
+            restore_repositories: false,
+            restore_native: true,
+            queue_policy: QueueRestorePolicy::Discard,
+            primary_repository_root: None,
+        },
+        &SystemGit,
+    )
+    .unwrap();
+    let restored_relative = restored_native_relative_path(
+        HarnessKind::Claude,
+        &relative,
+        Some(&spec.workspace_root.join("app")),
+    )
+    .unwrap();
+    let digest = |path: &Path| {
+        let mut source = File::open(path).unwrap();
+        let mut hash = Sha256::new();
+        let mut buffer = [0u8; 65536];
+        loop {
+            let count = source.read(&mut buffer).unwrap();
+            if count == 0 {
+                break;
+            }
+            hash.update(&buffer[..count]);
+        }
+        hash.finalize()
+    };
+    let restored = home.join(restored_relative);
+    assert_eq!(
+        fs::metadata(&source).unwrap().len(),
+        fs::metadata(&restored).unwrap().len()
+    );
+    assert_eq!(digest(&source), digest(&restored));
+    eprintln!(
+        "large native checkpoint round trip: {:?}",
+        started.elapsed()
+    );
+}
+
+fn artifact_bytes(artifact: &NativeArtifact) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    artifact.reader().unwrap().read_to_end(&mut bytes).unwrap();
+    bytes
 }

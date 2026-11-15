@@ -166,7 +166,7 @@ pub(super) fn validate_move_selection(
     }
     if let Some(profile_id) = selection.profile_id.as_deref() {
         validate_public_id(profile_id)?;
-        require_profile(snapshot, profile_id)?;
+        require_named_profile(snapshot, profile_id)?;
     }
     if let Some(target_id) = selection.target_template_id.as_deref() {
         validate_public_id(target_id)?;
@@ -527,7 +527,7 @@ fn validate_action_against(
                     "dirty acknowledgement must name 0-32 repositories",
                 ));
             }
-            require_profile(snapshot, profile_id)?;
+            require_named_profile(snapshot, profile_id)?;
             let target = require_launchable_target(snapshot, target_id)?;
             validate_move_mounts(additional_mounts)?;
             mj_core::targets::validate_additional_mounts(additional_mounts)
@@ -604,7 +604,7 @@ fn validate_action_against(
             validate_public_id(profile_id)?;
             validate_public_id(target_id)?;
             let session = require_session_record(snapshot, session_id)?;
-            require_profile(snapshot, profile_id)?;
+            require_named_profile(snapshot, profile_id)?;
             require_launchable_target(snapshot, target_id)?;
             if session
                 .incompatible_resume_targets
@@ -929,6 +929,15 @@ pub(super) fn require_profile<'a>(
         .iter()
         .find(|profile| profile.id == id)
         .ok_or_else(|| ApiError::bad_request("unknown profile"))
+}
+
+/// A profile the request names explicitly: enabled, or configured but
+/// disabled. Automatic choices use [`require_profile`] instead.
+pub(super) fn require_named_profile(snapshot: &ViewerSnapshot, id: &str) -> Result<(), ApiError> {
+    if snapshot.disabled_profile_ids.contains(id) {
+        return Ok(());
+    }
+    require_profile(snapshot, id).map(|_| ())
 }
 
 pub(super) fn require_target<'a>(

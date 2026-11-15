@@ -1,0 +1,58 @@
+{
+ "f-86d501d1": {
+  "relies_on_brief": false,
+  "why": "claims the history loader sets `hidden`; the brief item only places the styling and click handler"
+ },
+ "f-870d75cf": {
+  "relies_on_brief": true,
+  "why": "builds on the brief's item that discovery can yield an API-key home with no directory"
+ },
+ "f-e78dee71": {
+  "relies_on_brief": false,
+  "why": "the autocomplete popover drawing over the row is not in the brief; cites the diff's own line"
+ },
+ "f-03c4d808": {
+  "relies_on_brief": false,
+  "why": "as f-e78dee71"
+ },
+ "f-8d88772e": {
+  "relies_on_brief": false,
+  "why": "as f-e78dee71"
+ },
+ "f-fe87f0cc": {
+  "relies_on_brief": true,
+  "why": "builds on the brief's item that the watcher checks ownership before polling, then refreshes"
+ },
+ "f-f799a728": {
+  "relies_on_brief": false,
+  "why": "generic test-timing concern on the diff's own test line"
+ },
+ "f-28bb6cd4": {
+  "relies_on_brief": true,
+  "why": "restates the brief's item: rows use sessions_minimized(), the badge checks the configured size"
+ },
+ "f-a33c5be3": {
+  "relies_on_brief": true,
+  "why": "as f-28bb6cd4"
+ },
+ "f-c0df25d3": {
+  "relies_on_brief": true,
+  "why": "builds on the brief's item that renewal and authentication query the same revocation cache"
+ },
+ "f-77656a6b": {
+  "relies_on_brief": false,
+  "why": "atomicity of the diff's new check-then-update, visible in the diff; the brief item is about later saves"
+ },
+ "f-936aada9": {
+  "relies_on_brief": false,
+  "why": "as f-77656a6b"
+ },
+ "f-379fd833": {
+  "relies_on_brief": false,
+  "why": "as f-77656a6b"
+ },
+ "f-dc80a0a7": {
+  "relies_on_brief": true,
+  "why": "builds on the brief's item that other edits advance the clipboard's input generation"
+ }
+}

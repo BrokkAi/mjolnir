@@ -6,7 +6,6 @@
 //! so the dialog can jump straight to one.
 
 use super::{machine_build_cache_summary, pointer, row_label, row_summary, schema, visible_paths};
-use crate::widgets::counted;
 use mj_chat::theme;
 use ratatui::text::{Line, Span};
 use serde_json::Value;
@@ -76,9 +75,8 @@ fn walk(draft: &Value, path: &[String], trail: &str, entries: &mut Vec<SearchEnt
     }
 }
 
-/// What a page row holds, counted the way the page itself lists it: `interface`
-/// gathers three settings stored at the root, and hidden keys are left out. The
-/// stored key count answers neither.
+/// What a page row holds: a first-page section's own summary, or the count
+/// the page row shows everywhere (`contents_summary`).
 fn page_summary(path: &[String], value: &Value, draft: &Value) -> Option<String> {
     if !value.is_object() && !value.is_array() {
         return None;
@@ -92,12 +90,8 @@ fn page_summary(path: &[String], value: &Value, draft: &Value) -> Option<String>
     if let Some(summary) = machine_build_cache_summary(path, value, None) {
         return Some(summary);
     }
-    let count = visible_paths(path, value).len();
-    Some(if value.is_array() {
-        format!("{}  \u{203a}", counted(count, "entry", "entries"))
-    } else {
-        format!("{}  \u{203a}", counted(count, "setting", "settings"))
-    })
+    mj_client::settings::page::contents_summary(path, value)
+        .map(|summary| format!("{summary}  \u{203a}"))
 }
 
 /// The entries matching `query`, as indices into `entries`.

@@ -806,6 +806,7 @@ fn quota_move_candidates_filter_model_health_and_keep_usage_priced_last() {
         "unhealthy",
         "other",
         "wrong-model",
+        "windowed",
     ]
     .into_iter()
     .map(|id| {
@@ -824,7 +825,7 @@ fn quota_move_candidates_filter_model_health_and_keep_usage_priced_last() {
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
                 codex_profile: None,
-                muse_auto_review: None,
+                legacy_muse_auto_review: None,
                 claude_permission_mode: None,
                 aws: None,
                 ..mj_core::config::HarnessProfile::new(kind, PathBuf::default())
@@ -871,9 +872,15 @@ fn quota_move_candidates_filter_model_health_and_keep_usage_priced_last() {
                         None
                     },
                     windows: vec![crate::quota::QuotaWindow {
-                        label: "Week".into(),
+                        label: if id == "windowed" {
+                            "5h".into()
+                        } else {
+                            "Week".into()
+                        },
                         remaining_percent: Some(if matches!(id, "paid" | "empty" | "unhealthy") {
                             0
+                        } else if id == "windowed" {
+                            90
                         } else {
                             10
                         }),
@@ -904,7 +911,9 @@ fn quota_move_candidates_filter_model_health_and_keep_usage_priced_last() {
             .iter()
             .map(|c| c.profile_id.as_str())
             .collect::<Vec<_>>(),
-        ["healthy", "unknown", "paid", "api"]
+        // A top-level quota move ranks the five-hour-windowed profile below
+        // even usage-priced ones, however full its window is.
+        ["healthy", "unknown", "paid", "api", "windowed"]
     );
 }
 

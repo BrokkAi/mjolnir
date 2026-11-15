@@ -234,51 +234,27 @@ fn launch(root: &std::path::Path, script: PathBuf, saved: AcceptedSessionConfig)
     }
 }
 
-/// The worker honors the controller's `muse_auto_review` resolution, carried
-/// in the launch environment's `MUSE_APPROVAL_MODE`: `promptUnmatched` keeps
-/// the reviewer, `allowAll` (or a launch written before the toggle) runs
-/// without permission checks. Guardian Muse always reviews.
+/// Muse's review follows the runtime's policy alone. A launch written by an
+/// older controller for a profile that opted back into review
+/// (`MUSE_APPROVAL_MODE=promptUnmatched`, 2.60 to 2.71) still runs an
+/// unconstrained session without permission checks, and guardian Muse always
+/// reviews.
 #[test]
-fn muse_session_enforcement_follows_the_launch_approval_mode() {
+fn muse_session_enforcement_ignores_a_legacy_launch_approval_mode() {
     let root = std::env::temp_dir();
     let mut spec = launch(&root, root.join("bridge.py"), Default::default());
     spec.harness = HarnessKind::Muse;
     spec.execution_policy = ExecutionPolicy::Unconstrained;
-
-    // No variable (a launch written before the toggle): the no-review default.
-    let enforcement = session_enforcement(&spec).expect("Muse enforces a policy");
-    assert_eq!(enforcement.acp_mode(), Some("allowAll"));
-    assert_eq!(enforcement.acp_setting(), Some(("auto_review", "off")));
-
-    spec.environment
-        .insert("MUSE_APPROVAL_MODE".into(), "allowAll".into());
-    let enforcement = session_enforcement(&spec).expect("Muse enforces a policy");
-    assert_eq!(enforcement.acp_mode(), Some("allowAll"));
-    assert_eq!(enforcement.acp_setting(), Some(("auto_review", "off")));
-
-    // The controller sets this when the profile opts back into review.
     spec.environment
         .insert("MUSE_APPROVAL_MODE".into(), "promptUnmatched".into());
     let enforcement = session_enforcement(&spec).expect("Muse enforces a policy");
+    assert_eq!(enforcement.acp_mode(), Some("allowAll"));
+    assert_eq!(enforcement.acp_setting(), Some(("auto_review", "off")));
+
+    spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
+    let enforcement = session_enforcement(&spec).expect("guardian enforces a policy");
     assert_eq!(enforcement.acp_mode(), Some("promptUnmatched"));
     assert_eq!(enforcement.acp_setting(), Some(("auto_review", "on")));
-
-    // Guardian targets always review, whatever the launch carries.
-    spec.execution_policy = ExecutionPolicy::ConfiguredApprovals;
-    for mode in ["allowAll", "promptUnmatched"] {
-        spec.environment
-            .insert("MUSE_APPROVAL_MODE".into(), mode.into());
-        let enforcement = session_enforcement(&spec).expect("guardian enforces a policy");
-        assert_eq!(enforcement.acp_mode(), Some("promptUnmatched"));
-        assert_eq!(enforcement.acp_setting(), Some(("auto_review", "on")));
-    }
-
-    // Another harness never reads the Muse variable.
-    spec.harness = HarnessKind::Codex;
-    spec.execution_policy = ExecutionPolicy::Unconstrained;
-    let enforcement = session_enforcement(&spec).expect("Codex enforces a policy");
-    assert_eq!(enforcement.acp_mode(), Some("agent-full-access"));
-    assert_eq!(enforcement.acp_setting(), None);
 }
 
 async fn next(events: &mut mpsc::Receiver<RuntimeEvent>) -> RuntimeEvent {

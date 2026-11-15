@@ -65,6 +65,37 @@ fn storage_wait_detail(problem: &str, error: &anyhow::Error) -> String {
     )
 }
 
+/// Bind the actor's decision to the durable lifecycle revision before applying
+/// it inside the actor loop. A later lifecycle write rejects the transition.
+async fn capture_harness_timeout(
+    target: &RelaySessionTarget,
+    waited: Duration,
+) -> Result<Option<HarnessReadinessTimeout>> {
+    let id = target.session_id.clone();
+    let expected_target = target
+        .worker_recovery
+        .as_ref()
+        .map(|plan| plan.source_target.clone());
+    tokio::task::spawn_blocking(move || {
+        let Some(record) = crate::database::load_session_record(&id)? else {
+            return Ok(None);
+        };
+        if record.state != mj_core::state::SessionState::Running
+            || expected_target
+                .as_ref()
+                .is_some_and(|expected| record.target.as_deref() != Some(expected))
+        {
+            return Ok(None);
+        }
+        Ok(Some(HarnessReadinessTimeout {
+            waited,
+            observed_updated_at: record.updated_at,
+        }))
+    })
+    .await
+    .context("capture harness timeout lifecycle revision")?
+}
+
 pub(super) async fn run_session_actor(
     target: RelaySessionTarget,
     mut commands: mpsc::Receiver<ActorCommand>,
@@ -76,6 +107,7 @@ pub(super) async fn run_session_actor(
     let mut policies = updates.model_policies.subscribe();
     let mut connection: Option<StandaloneSession> = None;
     let mut failures = 0_u32;
+    let mut harness_readiness = HarnessReadinessWatch::default();
     let mut next_cpu_read = tokio::time::Instant::now();
     let mut last_recovery_probe = None;
     let mut lifecycle = ActorLifecycle::default();
@@ -102,6 +134,11 @@ pub(super) async fn run_session_actor(
         Storage(std::result::Result<(), watch::error::RecvError>),
     }
     loop {
+        // The connection's owner invalidates the wait on every loss or lease,
+        // including failures in commands whose display error is deferred.
+        if connection.is_none() || lifecycle.is_leased() {
+            harness_readiness.observe(tokio::time::Instant::now(), None);
+        }
         // A command can start work on a quiet session (a prompt) or drop the
         // connection. Bring the next sync forward to what the connection's
         // state now calls for, but never past a reconnect backoff.
@@ -194,6 +231,7 @@ pub(super) async fn run_session_actor(
             Event::Returned(returned) => {
                 let Some(returned) = returned else { continue };
                 if lifecycle.return_lease(returned.lease_id) {
+                    harness_readiness.observe(tokio::time::Instant::now(), None);
                     // A dropped lease returns no connection; `submit_actor_command`
                     // reconnects on demand, so the drain needs no special case.
                     connection = returned.connection.map(|connection| *connection);
@@ -255,6 +293,7 @@ pub(super) async fn run_session_actor(
                 }
                 let sync = async {
                     let snapshot = sync_actor_connection(&target, &mut connection).await?;
+                    let observed_at = tokio::time::Instant::now();
                     let now = tokio::time::Instant::now();
                     if now >= next_cpu_read {
                         next_cpu_read = now + Duration::from_secs(10);
@@ -282,7 +321,7 @@ pub(super) async fn run_session_actor(
                         };
                         updates.publish_cpu(&target.session_id, value);
                     }
-                    Ok(snapshot)
+                    Ok((snapshot, observed_at))
                 };
                 // A connect or catch-up over SSH can take far longer than the
                 // shutdown grace. Retirement ends it here, as the abort after
@@ -298,8 +337,24 @@ pub(super) async fn run_session_actor(
                     break;
                 };
                 match result {
-                    Ok(snapshot) => {
+                    Ok((snapshot, observed_at)) => {
                         failures = 0;
+                        let timeout = if updates.readiness_failure.get().is_some() {
+                            harness_readiness.observe(
+                                observed_at,
+                                Some(
+                                    connection
+                                        .as_ref()
+                                        .expect("synced connection")
+                                        .operational(),
+                                ),
+                            )
+                        } else {
+                            tracing::warn!(session_id = %target.session_id,
+                                "readiness failure handler is missing; waiting for a later successful sync");
+                            harness_readiness.observe(observed_at, None);
+                            None
+                        };
                         storage_wait = None;
                         schedule.after(sync_delay(connection.as_ref()));
                         if let Some(snapshot) = snapshot {
@@ -315,8 +370,36 @@ pub(super) async fn run_session_actor(
                                 &updates,
                             );
                         }
+                        if let Some(waited) = timeout {
+                            let result = match capture_harness_timeout(&target, waited).await {
+                                Ok(Some(timeout)) => {
+                                    // Installed once before actors start. Await the guarded
+                                    // write here: no ready observation can overtake it.
+                                    match updates.readiness_failure.get() {
+                                        Some(handler) => {
+                                            handler(target.session_id.clone(), timeout).await
+                                        }
+                                        None => Err(anyhow::anyhow!(
+                                            "readiness failure handler is missing"
+                                        )),
+                                    }
+                                }
+                                Ok(None) => Ok(false),
+                                Err(error) => Err(error),
+                            };
+                            match result {
+                                Ok(true) => harness_readiness.applied(),
+                                Ok(false) => tracing::warn!(session_id = %target.session_id,
+                                    "harness readiness failure rejected by lifecycle or record revision; retrying after a later successful sync"),
+                                Err(error) => {
+                                    tracing::warn!(session_id = %target.session_id, error = format!("{error:#}"),
+                                    "could not apply harness readiness failure; retrying after a later successful sync")
+                                }
+                            }
+                        }
                     }
                     Err(error) => {
+                        harness_readiness.observe(tokio::time::Instant::now(), None);
                         connection = None;
                         updates.publish_cpu(&target.session_id, None);
                         failures = failures.saturating_add(1);
@@ -556,9 +639,13 @@ pub(super) async fn run_session_actor(
                                         session_id = target.session_id,
                                         "automatic worker recovery suppressed by durable lifecycle or target change"
                                     );
-                                    // The desired-target refresher will remove or replace this
-                                    // stale actor. It must not reconnect in the meantime.
-                                    break;
+                                    // Suppression performed no probe. Retry recovery on
+                                    // the next backed-off reconnect when ownership permits.
+                                    last_recovery_probe = None;
+                                    // Only the desired-target owner retires this actor.
+                                    // Exiting here makes reconciliation respawn it with
+                                    // a fresh failure count, bypassing reconnect backoff.
+                                    schedule.after(reconnect_delay(failures));
                                 }
                                 Ok(WorkerRecoveryOutcome::TargetMissing) => {
                                     let snapshot = view_tx.borrow().snapshot.clone();

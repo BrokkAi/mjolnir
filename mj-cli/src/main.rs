@@ -2465,11 +2465,7 @@ fn profile_ids(config: &Config) -> String {
 
 fn resolve_login_profile(config: &Config, requested: Option<&str>) -> Result<String> {
     if let Some(profile) = requested {
-        let configured = config
-            .profiles
-            .get(profile)
-            .with_context(|| format!("unknown profile {profile:?}"))?;
-        ensure!(configured.enabled, "profile {profile:?} is disabled");
+        config.named_profile(profile)?;
         return Ok(profile.to_owned());
     }
     let mut profiles = config.enabled_profiles().map(|(id, _)| id);
@@ -2608,7 +2604,7 @@ async fn doctor_catalogs(config: &mj_core::config::Config) -> mj_controller::doc
         }
     };
     let read = futures::future::join_all(ids.iter().map(|id| async {
-        match tokio::time::timeout(CATALOG_WAIT, client.models(id, None, true)).await {
+        match tokio::time::timeout(CATALOG_WAIT, client.models(id, None, true, false)).await {
             Ok(Ok(choices)) => Ok(choices),
             Ok(Err(error)) => Err(format!("{error:#}")),
             Err(_) => Err(format!(

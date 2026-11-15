@@ -926,6 +926,54 @@ async fn a_quota_refresh_request_wakes_the_daemons_poller_and_fails_without_one(
 }
 
 #[tokio::test]
+async fn a_probe_quota_request_targets_named_profiles_even_disabled_ones() {
+    let state = test_runtime_state();
+    let metadata = test_metadata(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let cancellation = CancellationToken::new();
+    let mut config = Config::default();
+    config.profiles.insert(
+        "dsh".into(),
+        mj_core::config::HarnessProfile {
+            enabled: false,
+            ..mj_core::config::HarnessProfile::new(
+                mj_core::config::HarnessKind::Dsh,
+                "/home/agent/.dsh",
+            )
+        },
+    );
+    state.owner().install_config(config);
+    let error = handle_action(
+        DaemonAction::ProbeQuotaProfiles {
+            profile_ids: vec!["missing".into()],
+        },
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .expect_err("an unconfigured profile is refused");
+    assert!(error.to_string().contains("no profile named"), "{error:#}");
+
+    let (wake, mut woken) = tokio::sync::mpsc::unbounded_channel();
+    state.attach_quota_refresh(wake);
+    handle_action(
+        DaemonAction::ProbeQuotaProfiles {
+            profile_ids: vec!["dsh".into()],
+        },
+        &metadata,
+        &state,
+        &cancellation,
+    )
+    .await
+    .expect("probe the disabled profile");
+    let Some(QuotaRefreshIntent::ProbeProfiles(requests)) = woken.try_recv().ok() else {
+        panic!("the poller receives the probe");
+    };
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].profile_id, "dsh");
+}
+
+#[tokio::test]
 async fn published_quota_reaches_an_attached_client_through_the_runtime_feed() {
     use mj_client::quota::QuotaSnapshot;
     let state = test_runtime_state();
@@ -6224,7 +6272,7 @@ async fn hung_launch_commands_leave_the_daemon_serving_and_end_when_cancelled() 
             context_window_bytes: None,
             guardian_review_model: None,
             codex_profile: None,
-            muse_auto_review: None,
+            legacy_muse_auto_review: None,
             claude_permission_mode: None,
             aws: None,
             models: Default::default(),

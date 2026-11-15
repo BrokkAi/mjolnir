@@ -1651,11 +1651,8 @@ impl Controller {
         let canonical_session = Arc::clone(&verified_archive.canonical_session);
         let profile = self
             .config
-            .profiles
-            .get(profile_id)
-            .with_context(|| format!("unknown profile {profile_id:?}"))?
+            .named_profile(profile_id)?
             .clone();
-        ensure!(profile.enabled, "profile {profile_id:?} is disabled");
         let target_template = self.config.ensure_target_enabled(target_id)?.clone();
         // Decide the representation before the record changes, so an
         // incompatible target fails here instead of during provisioning.
@@ -2379,10 +2376,19 @@ fn conversion_checkpoint(
     snapshot: mj_checkpoint::archive::RepositorySnapshot,
     output: &Path,
 ) -> Result<mj_core::state::CheckpointMetadata> {
-    let previous = mj_checkpoint::archive::read_archive_verified(previous_archive)
+    let previous = mj_checkpoint::archive::verify_archive_streaming(previous_archive)
         .with_context(|| format!("read checkpoint archive {}", previous_archive.display()))?;
     // Native harness state and relay attachments travel byte for byte: a
     // conversion replaces repository content and nothing else.
+    let parent = output
+        .parent()
+        .context("conversion checkpoint has no parent")?;
+    std::fs::create_dir_all(parent)?;
+    let spool = tempfile::Builder::new()
+        .prefix("conversion-native-")
+        .tempdir_in(parent)?;
+    let mut payload_reader =
+        mj_checkpoint::archive::CheckpointPayloadReader::open(previous_archive)?;
     let native_artifacts = previous
         .manifest
         .payloads
@@ -2393,15 +2399,19 @@ fn conversion_checkpoint(
             }
             _ => None,
         })
-        .map(|(relative_path, descriptor)| {
+        .enumerate()
+        .map(|(index, (relative_path, descriptor))| {
+            let path = spool.path().join(index.to_string());
+            let mut file = std::fs::File::create(&path)?;
+            payload_reader.copy_payload(descriptor, &mut file)?;
             Ok(mj_checkpoint::archive::NativeArtifact {
                 relative_path: relative_path.clone(),
-                data: previous.payload(descriptor)?.to_vec(),
+                data: mj_checkpoint::archive::NativeArtifactData::File(path),
                 mode: descriptor.mode,
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    let canonical_session = previous.canonical_session()?;
+    let canonical_session = previous.canonical_session;
     let event_frontier = canonical_session.event_frontier;
     let written = mj_checkpoint::archive::write_archive_atomic(
         output,

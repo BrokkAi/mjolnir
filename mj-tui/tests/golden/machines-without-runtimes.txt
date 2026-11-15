@@ -9,7 +9,7 @@
 │  Stopped  podman    │   nas                             No runtime  ›                                        Add   │                     │
 │  │ No messages yet  │ No runtime: it did not answer. `ssh nas true` failed: Connection timed out. Check            │                     │
 │  │                  │ that nas is up.                                                                              │                     │
-│                     │   local                           2 settings  ›                                              │                     │
+│                     │   local                           1 setting  ›                                               │                     │
 │                     │   builder                         No runtime  ›                                              │                     │
 │                     │ Save it; opening New session then finds what it can run and adds those runtimes.             │                     │
 │                     │                                                                                              │                     │
@@ -153,7 +153,7 @@ Enter open · / searc                                                           
 │  Stopped  podman    │   nas                             No runtime  ›                                        Add   │                     │
 │  │ No messages yet  │ No runtime: it did not answer. `ssh nas true` failed: Connection timed out. Check            │                     │
 │  │                  │ that nas is up.                                                                              │                     │
-│                     │   local                           2 settings  ›                                              │                     │
+│                     │   local                           1 setting  ›                                               │                     │
 │                     │   builder                         7 settings  ›                                              │                     │
 │                     │                                                                                              │                     │
 │                     │                                                                                              │                     │

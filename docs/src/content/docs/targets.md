@@ -98,9 +98,7 @@ Kimi's mode happens to be named `auto` but is not a risk-selective guardian.
 Muse instead stages `:ask-me`, selects `allowAll` approvals, turns
 muse-acp's auto-review off, and disables only the sandbox
 (`--disable-sandbox`), so it runs without permission checks like the others.
-A Muse profile with `muse_auto_review = true` opts back into the reviewer
-(`promptUnmatched` approvals with auto-review on), which answers each
-approval so critical actions can still be denied. Muse's guardian on raw
+Muse's guardian on raw
 targets is that same review with the sandbox kept on.
 
 Codex, Claude Code, Grok Build, and Muse Code can preserve guardian approvals

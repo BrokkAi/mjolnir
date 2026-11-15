@@ -58,6 +58,9 @@ WORKSPACE = json.loads((ROOT / "instance/workspace.json").read_text())["workspac
 CORPUS = {c["id"]: c for name in ("candidates-all.jsonl", "diffs.jsonl")
           if (SCRIPTS / "corpus" / name).exists()
           for c in map(json.loads, (SCRIPTS / "corpus" / name).read_text().splitlines())}
+# Relation-brief arms (brief/PLAN.md), kept apart from ARMS above.
+ARMS.update({"OT": ["gpt-6.1-terra:high"] * 3, "OS": ["gpt-6.1-sol:high"] * 3,
+             "BT": ["gpt-6.1-terra:high"] * 3, "BS": ["gpt-6.1-sol:high"] * 3})
 
 
 def save(path, value):
@@ -151,11 +154,28 @@ def handback_messages(items):
     return messages
 
 
-def context_text(bug):
+def commit_message(bug):
     message = subprocess.check_output(["git", "-C", REPO, "log", "-1", "--format=%B", bug["intro_commit"]]).decode()
     # Trailers point at external sessions and other branches; the task intent is the rest.
-    message = "\n".join(line for line in message.splitlines()
-                        if not re.match(r"(Co-Authored-By|Claude-Session|Signed-off-by):|\(cherry picked from commit ", line.strip(), re.I)).strip()
+    return "\n".join(line for line in message.splitlines()
+                     if not re.match(r"(Co-Authored-By|Claude-Session|Signed-off-by):|\(cherry picked from commit ", line.strip(), re.I)).strip()
+
+
+# Arms whose reviewers also get a relation brief (brief/PLAN.md), by brief kind.
+BRIEF_ARMS = {"OT": "oracle", "OS": "oracle", "BT": "blind", "BS": "blind"}
+BRIEF_NOTE = ("These are relations computed from the repository at this commit, not findings. "
+              "They may be incomplete.")
+
+
+def brief_section(bug, arm):
+    if arm not in BRIEF_ARMS:
+        return ""
+    brief = (ROOT / "briefs" / BRIEF_ARMS[arm] / bug["id"] / "brief.md").read_text().strip()
+    return f"\n## Relations computed from the repository\n\n{BRIEF_NOTE}\n\n{brief}\n"
+
+
+def context_text(bug, arm=None):
+    message = commit_message(bug)
     return f"""# Historical change for code review
 
 This message is context for a separate code reviewer. The repository is
@@ -166,7 +186,7 @@ branches, tags or remotes. The change is complete and committed.
 ## Commit message
 
 {message}
-
+{brief_section(bug, arm)}
 ## Reviewer constraints
 
 The reviewer reviews only this change, using this checkout and its history.
@@ -239,7 +259,7 @@ def run_job(job, gate):
     assert settings.get("mode") == "plan" and settings.get("web_fetch") == "disabled", settings
     save(d / "carrier-settings.json", settings)
 
-    (d / "historical-context.txt").write_text(context_text(bug))
+    (d / "historical-context.txt").write_text(context_text(bug, arm))
     command = "carrier-" + hashlib.sha256((bug["id"] + arm).encode()).hexdigest()[:32]
     request = mj("message", "--session", sid, "--command-id", command, "--prompt-file", d / "historical-context.txt")
     save(d / "carrier-request.json", request)

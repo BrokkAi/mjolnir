@@ -205,11 +205,7 @@ fn import_source(
     requested: Option<&str>,
 ) -> Result<ImportSource> {
     if let Some(profile_id) = requested {
-        let profile = config
-            .profiles
-            .get(profile_id)
-            .with_context(|| format!("unknown profile {profile_id:?}"))?;
-        ensure!(profile.enabled, "profile {profile_id:?} is disabled");
+        let profile = config.named_profile(profile_id)?;
         ensure!(
             profile.kind == harness,
             "profile {profile_id:?} runs {}, not {}",
@@ -1029,13 +1025,7 @@ fn import_session_from_profile(
         display_title,
     } = pending;
     report(1, None, "Locating native session…", true);
-    let profile = controller
-        .config
-        .profiles
-        .get(profile_id)
-        .with_context(|| format!("unknown profile {profile_id:?}"))?
-        .clone();
-    ensure!(profile.enabled, "profile {profile_id:?} is disabled");
+    let profile = controller.config.named_profile(profile_id)?.clone();
     let homes = client_native_homes(profile.kind, Some(&profile.home), shares_machine?)?;
     let (home, source) = locate_client_native_session(
         profile.kind,
@@ -1306,7 +1296,7 @@ mod tests {
             models: Default::default(),
             legacy_subagents: Default::default(),
             guardian_review_model: None,
-            muse_auto_review: None,
+            legacy_muse_auto_review: None,
             claude_permission_mode: None,
             aws: None,
             codex_profile: None,
@@ -1527,7 +1517,7 @@ mod tests {
                 models: Default::default(),
                 legacy_subagents: Default::default(),
                 guardian_review_model: None,
-                muse_auto_review: None,
+                legacy_muse_auto_review: None,
                 claude_permission_mode: None,
                 aws: None,
                 codex_profile: None,

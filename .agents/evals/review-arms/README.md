@@ -340,6 +340,202 @@ Sol/xhigh + 2× Terra/xhigh (212 s, 120) join the frontier.
   catches 12, Terra/xhigh 9, 2× Terra/xhigh 10, and adding Gemini, Sol/high,
   Sol/xhigh or Greptile Base to 2× Terra/xhigh gives 11.
 
+## Missing-fact labels (for a static-analysis hypothesis)
+
+Jonathan asked, on 2026-11-14, for the one fact each defect's reviewer needed
+that was not in the diff, labeled by kind, to test whether a static analysis
+tool can improve review.
+
+- Items (`label_facts.py build`): the 30 Hard-won diffs with their known
+  defect, and the 31 sampled diffs that have a confirmed problem in `verify3`,
+  each with its most severe one. The 9 sampled diffs with no confirmed
+  problem were left out at his request.
+- Labeling (`label/SPEC.md`, `label/workflow.js`): a Claude Code workflow of
+  13 Opus/high agents, one per batch of 5, working in this repository. Each
+  item gets a defect check, the fact with `file:line` at the intro commit, its
+  kind (affected callers, path, value flow, or none with a reason: in_diff,
+  intent or external), a second kind when two fit, and the tool query that
+  would have produced the fact. 1.13M tokens, 4.7 minutes.
+- `results/missing-facts.jsonl` (`label_facts.py collect`). All 61 defects
+  were confirmed at their intro commit.
+
+  | Kind | Hard-won | Sampled | All |
+  |---|---:|---:|---:|
+  | affected callers | 3 | 8 | 11 |
+  | path | 6 | 6 | 12 |
+  | value flow | 9 | 7 | 16 |
+  | none: in the diff | 5 | 6 | 11 |
+  | none: outside the repository | 7 | 4 | 11 |
+  | none: intent | 0 | 0 | 0 |
+
+- 39 of 61 (64%) need a repository fact a code-analysis tool could supply.
+  45 of the 61 labels name a second kind (path/value flow 13, callers/value
+  flow 10, callers/path 8; 14 pair a tool kind with none), so the split among
+  the three tool kinds is less certain than the tool versus none split. Each label is a single Opus judgment; agreement between
+  labelers has not been measured.
+
+Second pass on the 11 labeled "none: in the diff" (`label/SPEC-pass2.md`,
+`label/workflow-pass2.js`, `results/missing-facts-pass2.jsonl`). These
+defects were visible yet committed, so Jonathan asked again what fact a
+static analysis tool could have stated explicitly. One Opus/high agent per
+item also wrote the tool's output and rated how specific it would be.
+
+- 10 of 11 get a tool-statable fact: value flow 7, path 2, affected
+  callers 1. Specificity: high 3 (a focus handler hiding its focused button;
+  a new field whose only read is an emptiness check; `unused_mut` under the
+  Windows cfg that CI lints), medium 7. The one `none` is
+  `palette-scattered-match-beats-literal`, a scoring-weight error (`logic`).
+- Combined with the first pass, 49 of 61 defects have a fact a tool could
+  surface; 11 depend on behavior outside the repository and 1 on logic.
+- The second-pass question asks for a fact to surface, which invites an
+  answer; several outputs assume a tool that joins facts across files and
+  languages, and medium-specificity outputs still need the reviewer to judge
+  intent.
+
+## Relation briefs, stage A (oracle): does a reviewer act on the decisive fact?
+
+Plan, frozen sets and decision rule: `brief/PLAN.md` (committed before any
+run). Results: `results/brief-stage-a/`.
+
+- Briefs: a gpt-6.1-sol/high writer per Hard-won diff, with the reviewers'
+  isolation, wrote a blind relation brief (`brief_driver.py`). It fully held
+  the decisive fact for 7 of 18 primary diffs and partly for 8. An Opus
+  editor inserted the census relation where it was absent, a leak judge read
+  each brief as a review output, and every carrying item was checked by hand
+  (`brief_oracle.py`). One rewrite removed the decisive fact and that diff
+  was rerun. 13 of 22 primary and secondary oracle briefs are still judged
+  partial (12) or caught (1) as text: for these the neutral relation itself
+  points at the defect, and the plan keeps it.
+- Runs: oracle arms `OT` (3 Terra/high) and `OS` (3 Sol/high) on all 30
+  diffs, 180 sessions; every reviewer received the brief and every audit hit
+  was a false positive. Baseline: the stored no-brief Terra/high and
+  Sol/high sessions on the same diffs (191).
+- Judging: all 371 outputs in blind mixed batches, two Opus/high judges
+  (366 of 371 agree); the 138 caught or partial verdicts and 5
+  disagreements were checked by hand (the 5 became partial).
+
+Catch rate per session (share of a diff's sessions that caught its defect,
+mean over diffs, 95% bootstrap interval over diffs):
+
+| Set | Model | No brief | Oracle brief | Effect (points) |
+|---|---|---:|---:|---:|
+| Primary (18) | Terra/high | 20.4% | 59.3% | +38.9 (+16.7 to +61.1) |
+| Primary (18) | Sol/high | 22.2% | 48.1% | +25.9 (+7.4 to +46.3) |
+| Secondary (4) | Terra/high | 33.3% | 50.0% | +16.7 |
+| Secondary (4) | Sol/high | 25.0% | 25.0% | 0 |
+| Control (8) | Terra/high | 20.8% | 16.7% | −4.2 |
+| Control (8) | Sol/high | 37.5% | 25.0% | −12.5 |
+
+- Decision (`brief_score.py score`): **supports building**. Terra's effect
+  is at least 30 points and control 1 passes (no gain on control diffs), so
+  stage B runs.
+- Not only leakage: on the 8 primary diffs whose oracle brief the leak judge
+  rated missed, the effect is +29.2 points for Terra (+4.2 to +62.5) and
+  +33.3 for Sol (0 to +70.8).
+- The effect is concentrated: 7 diffs move from rarely caught to mostly or
+  always caught; on 6 diffs no reviewer acted on the fact even with it in the
+  prompt (`per-diff.jsonl`).
+- Expected catches of 30 for one reviewer: Terra 6.7 → 14.0, Sol 8.0 → 11.7
+  with the oracle brief (stored Sol + 2× Terra without a brief: 11.3).
+- Cost: medians per session, tokens Terra 260k → 189k, Sol 484k → 431k;
+  latency Terra 44 s → 32 s, Sol 103 s → 100 s; tool calls Terra 8 → 5.
+- Limits: the oracle guarantees the fact, so this is an upper bound for a
+  real tool. The baseline sessions ran one day earlier with the same harness
+  pins. Judges could sometimes tell from an output that it used a brief.
+  18 primary diffs give wide intervals.
+
+## Relation briefs, stage B (blind): does a brief written without the answer help?
+
+Stage A's rule said supports building, so stage B ran (`brief/PLAN.md`).
+Results: `results/brief-stage-b/`.
+
+- Briefs: the stage A blind briefs for the 30 Hard-won diffs, after a leak
+  check (18 missed, 3 partial, 1 caught as text; 4 rewritten to remove
+  consequence wording only), and new blind briefs for the 40 ordinary diffs.
+  Every leak verdict is bound to a hash of the text its judge read.
+- Runs: `BT` (3 Terra/high) and `BS` (3 Sol/high) on the 30 Hard-won diffs,
+  `BT` on the 40 ordinary diffs: 300 sessions, all with the brief, all
+  checkouts unchanged, every audit hit a false positive. One reviewer's model
+  was recorded from its usage and launch after its session suspended before
+  capture (`runs/container-env-lost-during-worker-bootstrap/BS/reviewers-repaired.json`).
+- Judging round B: no-brief, oracle and blind sessions together (551
+  outputs), two Opus/high judges agreeing on all; 210 caught or partial
+  verdicts checked by hand. Round B reproduces stage A's oracle numbers
+  exactly.
+
+Hard-won catch rate per session (mean over diffs, 95% interval of the effect):
+
+| Set | Model | No brief | Blind brief | Oracle brief |
+|---|---|---:|---:|---:|
+| Primary (18) | Terra/high | 20.4% | 55.6% (+35.2; +14.8 to +55.6) | 59.3% |
+| Primary (18) | Sol/high | 22.2% | 40.7% (+18.5; +1.9 to +37.0) | 48.1% |
+| Secondary (4) | Terra/high | 33.3% | 41.7% | 50.0% |
+| Secondary (4) | Sol/high | 25.0% | 25.0% | 25.0% |
+| Control (8) | Terra/high | 20.8% | 12.5% | 16.7% |
+| Control (8) | Sol/high | 37.5% | 33.3% | 25.0% |
+
+- The blind brief keeps about 90% of the oracle effect for Terra and 70% for
+  Sol, with no gain on control diffs (control 1 passes for both briefs).
+- Expected catches of 30 for one reviewer: Terra 6.7 → 12.7 with a blind
+  brief (14.0 oracle); Sol 8.0 → 11.0 (11.7). One Terra/high with a blind
+  brief (12.7) exceeds stored Sol + 2× Terra without one (11.3).
+- Reviewer cost falls: Terra median tokens 260k → 199k, latency 44 s → 35 s,
+  tool calls 8 → 5. The brief itself came from a Sol/high writer session
+  (about 5 minutes and 560k tokens per diff), which a tool would replace.
+
+Control 2, ordinary diffs (`brief_control2.py`; findings of the stored
+no-brief Terra/high sessions and the blind-brief ones pooled and verified
+blind in `verify-brief`, 82 groups: 57 confirmed, 7 plausible, 18 rejected):
+
+- Confirmed problems per session: 0.917 without a brief, 0.808 with it
+  (ratio 0.88; difference −0.11, 95% −0.25 to +0.04). **Control 2 fails** on
+  the 90% threshold by point estimate; the difference is not significant.
+  High-severity problems are equal (0.075 per session in both); medium falls
+  0.36 → 0.28 and low 0.48 → 0.45. Across a diff's three sessions, 48
+  distinct confirmed problems without a brief, 45 with it.
+- Rejected findings rise from 0.125 to 0.167 per session. None cites a brief
+  anchor outside the changed lines; 14 cite a brief anchor when changed-line
+  anchors count too. Read by hand
+  (`results/brief-stage-b/control2-citing-handmarks.json`), 6 of the 14 rely
+  on a relation a brief item states, within the limit of 8, so the citing
+  half of control 2 passes. Five of those six were rejected because the
+  behaviour predates the diff, not because it is false: the brief led
+  reviewers to real behaviour outside the change.
+- Reading: on ordinary diffs the brief costs a little coverage of low and
+  medium problems and adds a few false findings, consistent with reviewers
+  exploring less (fewer tool calls). The no-brief sessions ran a day earlier.
+
+## Bifrost tool coverage: can a code graph produce the decisive fact?
+
+For the Bifrost session, at Jonathan's request (`toolcov/SPEC.md`,
+`toolcov/workflow.js`, `results/tool-coverage.jsonl`): for each relation in
+the census, a Sonnet/high agent asked Bifrost 0.15.2 (latest release) a
+diff-only question at the introducing commit and classed the result.
+
+| Set | A: computed today | A0: anchor, relation not stated | B: graph relation not exposed | C: outside a code graph |
+|---|---:|---:|---:|---:|
+| Primary (18) | 0 | 9 | 7 | 2 |
+| Secondary (4) | 0 | 3 | 1 | 0 |
+
+- A means the output states the decisive relation (a reviewer review added A0
+  for outputs that contain the anchor but not the relation). No record is A.
+  The probe classed `github-token-in-container-argv` A (the field scan shows
+  `extra_run_args` extended into `container_run_args`), but the census fact
+  also needs those arguments to become a logged `CommandSpec`, which the
+  output does not show, so it is A0.
+- A0 outputs usually list the right caller or field use among others but not
+  the part that matters: the constant argument, the lock held at the call,
+  read versus write, or which branch a call sits in. Two A0 anchors came only
+  from `query_code` text search, not a graph relation.
+- The first run was invalid: every worktree of the clone shares one cache
+  (`.bifrost/cache`, 18.8 GB), and concurrent processes waited on its build
+  lock, so 6 records had every call time out. The rerun was serial.
+- 16 calls failed with "Analyzer store failure ... Rust file routes
+  unavailable: ValidationFailed" (`usage_graph`, `scan_usages_by_location`),
+  so some B classes rest partly on failed calls. A first call on a worktree
+  took up to 12 minutes; `usage_graph` calls took 3 to 9 minutes; most
+  results reported `complete=false`.
+
 ## Running
 
 The scripts read the corpus from this directory and keep everything else
@@ -405,7 +601,7 @@ home holds no instructions (see `instance-config.toml` notes above):
 python3 driver.py --jobs jobs.json --concurrency 10     # arms H, K, L (I, J: DSF/low, dropped)
 python3 greptile_driver.py --jobs greptile-jobs.json --concurrency 3   # [{"bug": .., "tier": "base"|"plus"}]
 python3 audit.py runs/<diff>/<arm> ...
-python3 build_verify.py verify5 --arms A,B,D,D2,E,G-base,G-plus,H,J,K,L,I
+python3 build_verify.py verify5 --arms A,B,D,D2,E,G-base,G-plus,H,J,K,L,I --ready-jobs all-jobs.json  # every job of those arms
 python3 verify_driver.py verify5 --concurrency 7
 python3 score.py verify5
 python3 pareto.py verify5 --exclude DSF/low --bootstrap 300 \
