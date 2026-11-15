@@ -838,7 +838,11 @@ impl DashboardState {
                 let previous = manager.selected;
                 manager.select(index);
                 if manager.selected != previous {
-                    manager.error = None;
+                    // An error from the details load belongs to the list, not
+                    // the selection; it stays until a reload retries it.
+                    if manager.busy != Some(WorkspaceMutation::Load) {
+                        manager.error = None;
+                    }
                     manager.success = None;
                 }
             }

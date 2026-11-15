@@ -193,37 +193,28 @@ pub(crate) fn spawn_workspace_management_load(
     generation: u64,
     updates: UnboundedSender<DashboardIoUpdate>,
 ) -> JoinHandle<()> {
-    let report = move |result| DashboardIoUpdate::WorkspaceManagement { generation, result };
-    tokio::spawn(async move {
-        let outcome: Result<()> = async {
-            let mut daemon = daemon::connect_or_start().await?;
-            let mut entries = workspace_management_listings(&mut daemon).await?;
-            // Names first: the dialog opens on this answer while the drafts
-            // query runs.
-            if updates
-                .send(report(Ok(WorkspaceManagementResult {
-                    entries: entries.clone(),
-                    select_workspace: None,
-                    deleted_workspace_id: None,
-                    details_pending: true,
-                })))
-                .is_err()
-            {
-                return Ok(());
-            }
-            fill_workspace_management_drafts(&mut daemon, &mut entries).await?;
-            let _ = updates.send(report(Ok(WorkspaceManagementResult {
-                entries,
+    let names_updates = updates.clone();
+    spawn_workspace_management_operation(generation, "loading workspaces", updates, None, async move {
+        let mut daemon = daemon::connect_or_start().await?;
+        let mut entries = workspace_management_listings(&mut daemon).await?;
+        // Names first: the dialog opens on this answer while the drafts
+        // query runs. The supervised task's own answer carries the details.
+        let _ = names_updates.send(DashboardIoUpdate::WorkspaceManagement {
+            generation,
+            result: Ok(WorkspaceManagementResult {
+                entries: entries.clone(),
                 select_workspace: None,
                 deleted_workspace_id: None,
-                details_pending: false,
-            })));
-            Ok(())
-        }
-        .await;
-        if let Err(error) = outcome {
-            let _ = updates.send(report(Err(format!("{error:#}"))));
-        }
+                details_pending: true,
+            }),
+        });
+        fill_workspace_management_drafts(&mut daemon, &mut entries).await?;
+        Ok(WorkspaceManagementResult {
+            entries,
+            select_workspace: None,
+            deleted_workspace_id: None,
+            details_pending: false,
+        })
     })
 }
 

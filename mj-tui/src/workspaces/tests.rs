@@ -394,6 +394,50 @@ fn manager_shows_the_sorted_list_while_details_load_and_mutations_wait() {
 }
 
 #[test]
+fn a_failed_details_answer_keeps_the_list_openable_and_its_error_visible() {
+    let mut dashboard = dashboard_with_session(running_session());
+    let DashboardAction::LoadWorkspaceManagement { generation } =
+        dashboard.begin_workspace_manager()
+    else {
+        panic!("load");
+    };
+    dashboard.finish_workspace_management(
+        generation,
+        Ok(vec![entry("a", "Alpha"), entry("b", "Beta")]),
+        true,
+    );
+    dashboard.finish_workspace_management(generation, Err("drafts query failed".into()), false);
+    let Mode::WorkspaceManager(manager) = &dashboard.mode else {
+        panic!("manager open");
+    };
+    assert_eq!(manager.error.as_deref(), Some("drafts query failed"));
+    assert!(
+        manager
+            .actions()
+            .iter()
+            .any(|(control, _, enabled)| *control == WorkspaceControl::Open && *enabled)
+    );
+    assert!(
+        manager
+            .actions()
+            .iter()
+            .all(|(control, _, enabled)| *control != WorkspaceControl::Delete || !enabled)
+    );
+    // Moving the selection keeps the failure visible, and Enter still opens.
+    dashboard.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    let Mode::WorkspaceManager(manager) = &dashboard.mode else {
+        panic!("manager open");
+    };
+    assert_eq!(manager.error.as_deref(), Some("drafts query failed"));
+    assert_eq!(
+        dashboard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        DashboardAction::SelectWorkspace {
+            workspace_id: "b".into()
+        }
+    );
+}
+
+#[test]
 fn tabs_scroll_to_the_selected_workspace_and_mouse_hits_unicode_labels() {
     use ratatui::{Terminal, backend::TestBackend};
     let mut dashboard = dashboard_with_session(running_session());
