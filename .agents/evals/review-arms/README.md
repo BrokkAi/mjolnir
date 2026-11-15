@@ -411,8 +411,13 @@ blind in `verify-brief`, 82 groups: 57 confirmed, 7 plausible, 18 rejected):
   0.36 → 0.28 and low 0.48 → 0.45. Across a diff's three sessions, 48
   distinct confirmed problems without a brief, 45 with it.
 - Rejected findings rise from 0.125 to 0.167 per session. None cites a brief
-  anchor outside the changed lines (limit 8); 14 cite a brief anchor when
-  changed-line anchors count too.
+  anchor outside the changed lines; 14 cite a brief anchor when changed-line
+  anchors count too. Read by hand
+  (`results/brief-stage-b/control2-citing-handmarks.json`), 6 of the 14 rely
+  on a relation a brief item states, within the limit of 8, so the citing
+  half of control 2 passes. Five of those six were rejected because the
+  behaviour predates the diff, not because it is false: the brief led
+  reviewers to real behaviour outside the change.
 - Reading: on ordinary diffs the brief costs a little coverage of low and
   medium problems and adds a few false findings, consistent with reviewers
   exploring less (fewer tool calls). The no-brief sessions ran a day earlier.

@@ -1,6 +1,7 @@
 """Control 2 of brief/PLAN.md: do blind briefs cost findings or add false ones on ordinary diffs?
 
 Usage: python3 brief_control2.py [--verify verify-brief] [--jobs stageB-ordinary-jobs.json]
+                                 [--handmarks results/brief-stage-b/control2-citing-handmarks.json]
 
 Inputs under REVIEW_ARMS_DIR: the verify dir built with
 `build_verify.py <verify> --arms A,BT --bugs-from <jobs>` and verified by
@@ -15,7 +16,9 @@ Reports, over the ordinary diffs:
   finding within 3 lines of an anchor in that diff's brief that lies outside
   the changed lines; control 2 needs at most 1 per 5 diffs. The count that
   also matches anchors on changed lines is reported beside it: findings cite
-  the diff's own lines whether or not they used the brief.
+  the diff's own lines whether or not they used the brief. With --handmarks,
+  every broad match is read by hand and the citing criterion counts those
+  that rely on what a brief item states.
 """
 import argparse
 import collections
@@ -39,6 +42,7 @@ def spans(text):
 p = argparse.ArgumentParser()
 p.add_argument("--verify", default="verify-brief")
 p.add_argument("--jobs", default="stageB-ordinary-jobs.json")
+p.add_argument("--handmarks", help="JSON {finding id: {relies_on_brief, why}} for every broad-match finding")
 a = p.parse_args()
 V = ROOT / a.verify
 diffs = sorted({j["bug"] for j in json.loads((ROOT / a.jobs).read_text())})
@@ -111,7 +115,18 @@ for fid, k in findings.items():
     if cites(brief_anchors(k["bug"], outside_only=False), text[fid]):
         citing_any.append(fid)
 
+# Hand marks decide which broad matches relied on what a brief item states; every broad match
+# needs one, so the mark cannot silently skip a finding.
+relying = None
+if a.handmarks:
+    marks = json.loads(open(a.handmarks).read())
+    unmarked = sorted(set(citing_any) - set(marks))
+    if unmarked:
+        raise SystemExit(f"broad-match findings without a hand mark: {unmarked}")
+    relying = sorted(f for f in citing_any if marks[f]["relies_on_brief"])
+
 a_mean, bt_mean = mean("A"), mean("BT")
+citing_count = len(relying) if relying is not None else len(citing)
 report = {
     "diffs": len(diffs),
     "sessions": {arm: sum(len(per_diff[b][arm]) for b in diffs) for arm in ("A", "BT")},
@@ -121,8 +136,11 @@ report = {
     "rejected_findings_citing_brief": len(citing),
     # Broader count for reference: also matches brief anchors on changed lines.
     "rejected_findings_citing_any_brief_anchor": len(citing_any),
+    "rejected_findings_relying_on_brief_hand_marked": relying,
     "limit_citing": len(diffs) / 5,
-    "control_2_passes": bool(a_mean and bt_mean / a_mean >= 0.9 and len(citing) <= len(diffs) / 5),
+    "confirmed_criterion_passes": bool(a_mean and bt_mean / a_mean >= 0.9),
+    "citing_criterion_passes": citing_count <= len(diffs) / 5,
+    "control_2_passes": bool(a_mean and bt_mean / a_mean >= 0.9 and citing_count <= len(diffs) / 5),
     "citing": citing,
 }
 save(V / "control2.json", report)
