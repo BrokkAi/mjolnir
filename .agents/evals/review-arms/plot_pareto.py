@@ -50,7 +50,9 @@ SERIES = [("All confirmed", load("pareto.csv"), "#2a78d6"),
 EXTRA = {"Greptile/base": "Greptile Base ($1 per review)", "Greptile/plus": "Greptile Plus ($3 per review)"}
 
 def label(option):
-    return option.replace("Greptile/base", "Greptile Base").replace("Greptile/plus", "Greptile Plus")
+    # The Gemini model reviewed here is Gemini 4 Hydrogen; name it by its model.
+    return (option.replace("Greptile/base", "Greptile Base").replace("Greptile/plus", "Greptile Plus")
+            .replace("Gemini/", "Hydrogen/"))
 
 # One number per option, ordered by latency across both frontiers; Greptile alone last.
 frontier = {o: float(r["median_latency_s"]) for _, rows, _ in SERIES for o, r in rows.items() if r["frontier"] == "True"}
