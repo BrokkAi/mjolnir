@@ -29,11 +29,11 @@ impl HarnessStartup {
         }
     }
 
-    fn fail(&mut self) {
+    fn fail(&mut self, error: String) {
         self.status.send_replace(PreparationSnapshot {
             state: Some(mj_core::relay::HarnessPreparation::Failed {
                 step: "session-open".to_owned(),
-                error: format!("the harness did not open its session within {}s; use Restart agent to retry in the existing environment", mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT.as_secs()),
+                error,
                 at_ms: chrono::Utc::now().timestamp_millis(),
             }),
             services: None,
@@ -307,7 +307,9 @@ async fn run_relay_coordinator(
                 let startup = startup.as_mut().expect("guarded startup deadline");
                 *startup.idle_dispatch_wakes.lock().expect("idle dispatch wake lock poisoned") = Some(dispatch_wakes);
                 relay.lock().expect("relay state lock poisoned").set_acp_ready(false);
-                startup.fail();
+                let cause = format!("the harness did not open its session within {}s; use Restart agent to retry in the existing environment", mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT.as_secs());
+                interrupt_in_flight(&relay, &mut in_flight, &cause)?;
+                startup.fail(cause);
                 // No more runtime events can be accepted after failure. The
                 // runtime owner stops ACP and retains the failed relay.
                 verdict_tasks.shutdown().await;
@@ -1568,6 +1570,10 @@ mod startup_tests {
             let relay = Arc::new(RelayCell::new(
                 DurableRelay::open(temp.path(), "startup-race", "1.0.0").unwrap(),
             ));
+            relay
+                .lock()
+                .unwrap()
+                .set_turn_verdict_harness(HarnessKind::Codex);
             let (status, preparation) = watch::channel(PreparationSnapshot {
                 state: Some(mj_core::relay::HarnessPreparation::Started),
                 services: None,
@@ -1575,8 +1581,8 @@ mod startup_tests {
             let startup = HarnessStartup::new(status);
             let idle_wakes = startup.idle_dispatch_wakes.clone();
             let (events, received) = mpsc::channel(16);
-            let (_wakes, wakes) = mpsc::channel(1);
-            let (commands, _requests) = mpsc::channel(1);
+            let (wake, wakes) = mpsc::channel(1);
+            let (commands, mut requests) = mpsc::channel(1);
             let (shell_events, _shell_received) = mpsc::channel(1);
             let shells = crate::user_shell::UserShellRegistry::new(
                 temp.path().to_owned(),
@@ -1635,11 +1641,32 @@ mod startup_tests {
                     Some(mj_core::relay::HarnessPreparation::Started)
                 ));
                 assert!(!coordinator.is_finished());
+                if offset == -2 {
+                    let response =
+                        relay
+                            .lock()
+                            .unwrap()
+                            .handle(mj_core::relay::RelayRequestEnvelope {
+                                request_id: "submit-clear".into(),
+                                protocol_version: mj_core::relay::RELAY_PROTOCOL_VERSION,
+                                request: mj_core::relay::RelayRequest::Submit {
+                                    command_id: "clear-startup".into(),
+                                    command: RelayCommand::ClearContext,
+                                },
+                            });
+                    assert!(matches!(
+                        response.body,
+                        mj_core::relay::RelayResponseBody::Ok { .. }
+                    ));
+                    wake.send(()).await.unwrap();
+                    assert!(matches!(requests.recv().await,
+                        Some(CommandRequest::ClearContext { request_id }) if request_id == "clear-startup"));
+                }
                 // Every restart gets a new deadline, even after a ready session.
                 events
                     .send(if offset == -2 {
                         RuntimeEvent::ContextClearing {
-                            request_id: "clear".into(),
+                            request_id: "clear-startup".into(),
                         }
                     } else {
                         RuntimeEvent::HarnessRestarting {
@@ -1674,6 +1701,22 @@ mod startup_tests {
                     .is_err()
             );
             assert!(idle_wakes.lock().unwrap().is_some());
+            if offset == -2 {
+                drop(relay);
+                let replay = DurableRelay::open(temp.path(), "startup-race", "1.0.0").unwrap();
+                // Hard-won: da28ee0bd review: startup expiry stranded a dispatched clear InFlight.
+                assert_eq!(
+                    replay
+                        .events_after(0, mj_core::relay::RELAY_EVENT_GENESIS_DIGEST)
+                        .unwrap()
+                        .iter()
+                        .filter(|event| matches!(&event.observation,
+                        RelayObservation::CommandInterrupted { command_id, message, .. }
+                        if command_id == "clear-startup" && message.contains("Restart agent")))
+                        .count(),
+                    1
+                );
+            }
         }
     }
 }
