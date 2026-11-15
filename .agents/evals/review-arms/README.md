@@ -361,6 +361,62 @@ mean over diffs, 95% bootstrap interval over diffs):
   pins. Judges could sometimes tell from an output that it used a brief.
   18 primary diffs give wide intervals.
 
+## Relation briefs, stage B (blind): does a brief written without the answer help?
+
+Stage A's rule said supports building, so stage B ran (`brief/PLAN.md`).
+Results: `results/brief-stage-b/`.
+
+- Briefs: the stage A blind briefs for the 30 Hard-won diffs, after a leak
+  check (18 missed, 3 partial, 1 caught as text; 4 rewritten to remove
+  consequence wording only), and new blind briefs for the 40 ordinary diffs.
+  Every leak verdict is bound to a hash of the text its judge read.
+- Runs: `BT` (3 Terra/high) and `BS` (3 Sol/high) on the 30 Hard-won diffs,
+  `BT` on the 40 ordinary diffs: 300 sessions, all with the brief, all
+  checkouts unchanged, every audit hit a false positive. One reviewer's model
+  was recorded from its usage and launch after its session suspended before
+  capture (`runs/container-env-lost-during-worker-bootstrap/BS/reviewers-repaired.json`).
+- Judging round B: no-brief, oracle and blind sessions together (551
+  outputs), two Opus/high judges agreeing on all; 210 caught or partial
+  verdicts checked by hand. Round B reproduces stage A's oracle numbers
+  exactly.
+
+Hard-won catch rate per session (mean over diffs, 95% interval of the effect):
+
+| Set | Model | No brief | Blind brief | Oracle brief |
+|---|---|---:|---:|---:|
+| Primary (18) | Terra/high | 20.4% | 55.6% (+35.2; +14.8 to +55.6) | 59.3% |
+| Primary (18) | Sol/high | 22.2% | 40.7% (+18.5; +1.9 to +37.0) | 48.1% |
+| Secondary (4) | Terra/high | 33.3% | 41.7% | 50.0% |
+| Secondary (4) | Sol/high | 25.0% | 25.0% | 25.0% |
+| Control (8) | Terra/high | 20.8% | 12.5% | 16.7% |
+| Control (8) | Sol/high | 37.5% | 33.3% | 25.0% |
+
+- The blind brief keeps about 90% of the oracle effect for Terra and 70% for
+  Sol, with no gain on control diffs (control 1 passes for both briefs).
+- Expected catches of 30 for one reviewer: Terra 6.7 → 12.7 with a blind
+  brief (14.0 oracle); Sol 8.0 → 11.0 (11.7). One Terra/high with a blind
+  brief (12.7) exceeds stored Sol + 2× Terra without one (11.3).
+- Reviewer cost falls: Terra median tokens 260k → 199k, latency 44 s → 35 s,
+  tool calls 8 → 5. The brief itself came from a Sol/high writer session
+  (about 5 minutes and 560k tokens per diff), which a tool would replace.
+
+Control 2, ordinary diffs (`brief_control2.py`; findings of the stored
+no-brief Terra/high sessions and the blind-brief ones pooled and verified
+blind in `verify-brief`, 82 groups: 57 confirmed, 7 plausible, 18 rejected):
+
+- Confirmed problems per session: 0.917 without a brief, 0.808 with it
+  (ratio 0.88; difference −0.11, 95% −0.25 to +0.04). **Control 2 fails** on
+  the 90% threshold by point estimate; the difference is not significant.
+  High-severity problems are equal (0.075 per session in both); medium falls
+  0.36 → 0.28 and low 0.48 → 0.45. Across a diff's three sessions, 48
+  distinct confirmed problems without a brief, 45 with it.
+- Rejected findings rise from 0.125 to 0.167 per session. None cites a brief
+  anchor outside the changed lines (limit 8); 14 cite a brief anchor when
+  changed-line anchors count too.
+- Reading: on ordinary diffs the brief costs a little coverage of low and
+  medium problems and adds a few false findings, consistent with reviewers
+  exploring less (fewer tool calls). The no-brief sessions ran a day earlier.
+
 ## Running
 
 The scripts read the corpus from this directory and keep everything else

@@ -1,0 +1,21 @@
+{
+  "diffs": 40,
+  "sessions": {
+    "A": 120,
+    "BT": 120
+  },
+  "confirmed_per_session": {
+    "A": 0.917,
+    "BT": 0.808
+  },
+  "ratio_BT_to_A": 0.882,
+  "difference_ci95": [
+    -0.25,
+    0.042
+  ],
+  "rejected_findings_citing_brief": 0,
+  "rejected_findings_citing_any_brief_anchor": 14,
+  "limit_citing": 8.0,
+  "control_2_passes": false,
+  "citing": []
+}
