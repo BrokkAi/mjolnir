@@ -1198,12 +1198,22 @@ fn write_zip(
                 }
             })
             .collect::<Result<Vec<_>>>()?;
-        for (entry, temporary) in window.iter().zip(compressed) {
-            let Some(temporary) = temporary else {
-                write_payload_entry(&mut writer, entry)
-                    .with_context(|| format!("write ZIP entry '{}'", entry.name))?;
-                continue;
-            };
+        append_stream_entries(&mut writer, window, compressed)?;
+    }
+
+    writer.finish().context("finish Mjolnir archive ZIP")?;
+    Ok(())
+}
+
+/// Assembly owns payload completion: workers may finish parts out of order,
+/// so only this ordered pass can check EOF after every part has completed.
+fn append_stream_entries(
+    writer: &mut zip::ZipWriter<&mut File>,
+    entries: &[StreamEntry<'_>],
+    compressed: Vec<Option<tempfile::NamedTempFile>>,
+) -> Result<()> {
+    for (entry, temporary) in entries.iter().zip(compressed) {
+        if let Some(temporary) = temporary {
             let mut source = zip::ZipArchive::new(temporary.reopen()?)
                 .with_context(|| format!("reopen compressed ZIP entry '{}'", entry.name))?;
             let compressed_entry = source
@@ -1212,10 +1222,26 @@ fn write_zip(
             writer
                 .raw_copy_file(compressed_entry)
                 .with_context(|| format!("write ZIP entry '{}'", entry.name))?;
+        } else {
+            write_payload_entry(writer, entry)
+                .with_context(|| format!("write ZIP entry '{}'", entry.name))?;
+        }
+        if entry.offset + entry.size == entry.payload.descriptor.size {
+            let mut source = entry
+                .payload
+                .reader_at(entry.payload.descriptor.size)
+                .with_context(|| {
+                    format!(
+                        "reopen completed payload '{}'",
+                        entry.payload.descriptor.path
+                    )
+                })?;
+            ensure!(
+                source.read(&mut [0u8; 1])? == 0,
+                "payload source grew during export"
+            );
         }
     }
-
-    writer.finish().context("finish Mjolnir archive ZIP")?;
     Ok(())
 }
 
@@ -1240,22 +1266,28 @@ fn compress_stream_entry(
     Ok(temporary)
 }
 
+impl PendingPayload<'_> {
+    fn reader_at(&self, offset: u64) -> Result<Box<dyn Read + '_>> {
+        Ok(match self.source {
+            Some(path) => {
+                let mut file = NativeArtifactData::open_file(path)?;
+                file.seek(SeekFrom::Start(offset))?;
+                Box::new(file)
+            }
+            None => {
+                let mut cursor = Cursor::new(self.data.as_ref());
+                cursor.set_position(offset);
+                Box::new(cursor)
+            }
+        })
+    }
+}
+
 fn write_payload_entry(
     writer: &mut zip::ZipWriter<&mut File>,
     entry: &StreamEntry<'_>,
 ) -> Result<()> {
-    let mut source: Box<dyn Read> = match entry.payload.source {
-        Some(path) => {
-            let mut file = NativeArtifactData::open_file(path)?;
-            file.seek(SeekFrom::Start(entry.offset))?;
-            Box::new(file)
-        }
-        None => {
-            let mut cursor = Cursor::new(entry.payload.data.as_ref());
-            cursor.set_position(entry.offset);
-            Box::new(cursor)
-        }
-    };
+    let mut source = entry.payload.reader_at(entry.offset)?;
     write_stream_entry(
         writer,
         entry.name,
@@ -1265,12 +1297,6 @@ fn write_payload_entry(
         &mut source.by_ref().take(entry.size),
         entry.digest,
     )?;
-    if entry.offset + entry.size == entry.payload.descriptor.size {
-        ensure!(
-            source.read(&mut [0u8; 1])? == 0,
-            "payload source grew during export"
-        );
-    }
     Ok(())
 }
 

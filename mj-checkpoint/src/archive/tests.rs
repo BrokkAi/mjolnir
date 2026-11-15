@@ -446,6 +446,7 @@ fn sharded_input() -> (ArchiveInput, Vec<u8>, Vec<u8>) {
     (archive_input, native, untracked)
 }
 
+// Hard-won: 4cc32efd0: last-part EOF checking preceded completion of earlier compression.
 #[test]
 fn oversized_payloads_shard_into_parts_and_read_back_whole() {
     let directory = tempfile::tempdir().unwrap();
@@ -503,6 +504,54 @@ fn oversized_payloads_shard_into_parts_and_read_back_whole() {
         "restore consumers only ever see whole payload paths"
     );
     assert!(verified.payloads.contains_key(native_path));
+
+    // Force the schedule where the last part finishes before the source grows
+    // and the earlier parts finish. Completion belongs to ordered assembly.
+    let source_path = directory.path().join("growing-native.jsonl");
+    fs::write(&source_path, native.repeat(4)).unwrap();
+    let mut file_input = archive_input.clone();
+    file_input.native_artifacts[0].data = NativeArtifactData::File(source_path.clone());
+    let (_, payloads) = prepare_archive_with_part_size(&file_input, TEST_PART_BYTES).unwrap();
+    let payload = payloads
+        .iter()
+        .find(|payload| payload.descriptor.path == native_path)
+        .unwrap();
+    let mut offset = 0;
+    let entries: Vec<_> = payload
+        .descriptor
+        .parts
+        .iter()
+        .map(|part| {
+            let entry = StreamEntry {
+                payload,
+                name: &part.path,
+                size: part.size,
+                digest: &part.sha256,
+                offset,
+            };
+            offset += part.size;
+            entry
+        })
+        .collect();
+    let mut compressed = Vec::new();
+    for entry in entries.iter().rev() {
+        compressed.push(Some(
+            compress_stream_entry(entry, directory.path()).unwrap(),
+        ));
+        if compressed.len() == 1 {
+            OpenOptions::new()
+                .append(true)
+                .open(&source_path)
+                .unwrap()
+                .write_all(b"late source append\n")
+                .unwrap();
+        }
+    }
+    compressed.reverse();
+    let mut output = File::create(directory.path().join("growing.hel.zip")).unwrap();
+    let mut writer = zip::ZipWriter::new(&mut output);
+    let error = append_stream_entries(&mut writer, &entries, compressed).unwrap_err();
+    assert!(format!("{error:#}").contains("payload source grew during export"));
 }
 
 #[test]
