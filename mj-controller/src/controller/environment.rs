@@ -1110,11 +1110,47 @@ pub(super) fn resume_checkout_available(
     if String::from_utf8_lossy(&pending.stdout).trim() == "checkout-partial" {
         return Ok(false);
     }
-    directory_available(
-        &backend,
-        &resume_checkout_directory(controller, session_id, &backend)?,
-        executor,
-    )
+    resume_checkouts_present(controller, session_id, &backend, executor)
+}
+
+pub(super) fn resume_checkout_directories(
+    controller: &Controller,
+    session_id: &str,
+    backend: &targets::TargetLocator,
+) -> Result<Vec<PathBuf>> {
+    if matches!(
+        controller.state.checkout(session_id)?.effective(),
+        mj_core::state::Checkout::ManagedWorkspace
+    ) {
+        let record = &controller.state.sessions[session_id];
+        if let Some(bundle) = record.project_bundle(&controller.config) {
+            let workspace = PathBuf::from(super::network_git::workspace_root(
+                backend,
+                record.container_workspace.as_deref(),
+            ));
+            return Ok(bundle
+                .repositories
+                .iter()
+                .map(|repo| workspace.join(&repo.destination))
+                .collect());
+        }
+    }
+    Ok(vec![PathBuf::from(resume_checkout_directory(
+        controller, session_id, backend,
+    )?)])
+}
+
+fn resume_checkouts_present(
+    controller: &Controller,
+    session_id: &str,
+    backend: &targets::TargetLocator,
+    executor: &impl CommandExecutor,
+) -> Result<bool> {
+    let mut present = true;
+    for directory in resume_checkout_directories(controller, session_id, backend)? {
+        present &= directory_available(backend, &directory.to_string_lossy(), executor)?;
+    }
+    Ok(present)
 }
 
 pub(super) fn resume_checkout_directory(
@@ -1181,16 +1217,12 @@ pub(super) fn classify_resume_environment(
             "worker liveness probe failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        match String::from_utf8_lossy(&output.stdout).trim() {
-            "alive" | "starting" => return Ok(ResumeEnvironment::LiveWorker),
-            "dead" => {}
+        let live = match String::from_utf8_lossy(&output.stdout).trim() {
+            "alive" | "starting" => true,
+            "dead" => false,
             value => bail!("unexpected worker liveness response {value:?}"),
-        }
-        let checkout = directory_available(
-            &backend,
-            &resume_checkout_directory(controller, session_id, &backend)?,
-            executor,
-        )?;
+        };
+        let checkout = resume_checkouts_present(controller, session_id, &backend, executor)?;
         let output = executor.execute(&super::worker_binary::worker_recovery_command(
             &backend, &root,
         ))?;
@@ -1199,7 +1231,15 @@ pub(super) fn classify_resume_environment(
             "cannot inspect retained parent runtime: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let runtime = match String::from_utf8_lossy(&output.stdout).trim() {
+        let recovery = String::from_utf8_lossy(&output.stdout);
+        if live && recovery.trim() != "checkout-partial" {
+            return Ok(if checkout {
+                ResumeEnvironment::LiveWorker
+            } else {
+                ResumeEnvironment::CheckoutMissing
+            });
+        }
+        let runtime = match recovery.trim() {
             "partial" => {
                 return Ok(if checkout {
                     ResumeEnvironment::ParentDataMissing

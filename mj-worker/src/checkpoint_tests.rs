@@ -207,7 +207,29 @@ fn restored_seed(relay_root: &Path) -> mj_core::relay::RestoredRelaySeed {
 #[test]
 fn checkout_recovery_publishes_only_the_staged_checkout_and_preserves_a_new_current_directory() {
     let temp = tempfile::tempdir().unwrap();
-    let (source, archive_path) = fixture(temp.path());
+    let (mut source, archive_path) = fixture(temp.path());
+    git(
+        &source.workspace_root,
+        &["clone", "--quiet", "app", "second"],
+    );
+    source.repositories.push(CheckpointRepositorySpec {
+        id: "second".into(),
+        relative_destination: "second".into(),
+        capture: CheckpointRepositoryCapture::DeltaFrom {
+            base_commit: git(
+                &source.workspace_root.join("second"),
+                &["rev-parse", "HEAD"],
+            )
+            .trim()
+            .into(),
+        },
+        origin_override: None,
+    });
+    fs::write(
+        source.workspace_root.join("second/README.md"),
+        b"archived second repository work",
+    )
+    .unwrap();
     export_checkpoint(&source).unwrap();
     let stage = temp.path().join("checkout-stage");
     fs::create_dir(&stage).unwrap();
@@ -218,6 +240,15 @@ fn checkout_recovery_publishes_only_the_staged_checkout_and_preserves_a_new_curr
             "--quiet",
             source.workspace_root.join("app").to_str().unwrap(),
             "app",
+        ],
+    );
+    git(
+        &stage,
+        &[
+            "clone",
+            "--quiet",
+            source.workspace_root.join("second").to_str().unwrap(),
+            "second",
         ],
     );
     let parent_native = temp.path().join("current-native");
@@ -237,8 +268,12 @@ fn checkout_recovery_publishes_only_the_staged_checkout_and_preserves_a_new_curr
             .unwrap()
             .archive_sha256,
         staging_root: stage.clone(),
-        staged_checkout: stage.clone(),
-        destination_checkout: destination.clone(),
+        staged_checkout: stage.join("app"),
+        destination_checkout: destination.join("app"),
+        additional_checkouts: vec![CheckoutRecoveryPublication {
+            staged_checkout: stage.join("second"),
+            destination_checkout: destination.join("second"),
+        }],
         restore: CheckpointRestoreSpec {
             archive_path,
             workspace_root: stage.clone(),
@@ -255,7 +290,12 @@ fn checkout_recovery_publishes_only_the_staged_checkout_and_preserves_a_new_curr
     fs::write(&spec_path, serde_json::to_vec(&spec).unwrap()).unwrap();
     crate::checkpoint::restore_checkout_from_spec_file(&spec_path).unwrap();
     assert!(destination.join("app/.git").is_dir());
-    assert!(!stage.exists());
+    assert!(!stage.join("app").exists());
+    assert!(!stage.join("second").exists());
+    assert_eq!(
+        fs::read(destination.join("second/README.md")).unwrap(),
+        b"archived second repository work"
+    );
     fs::write(destination.join("app/current-work"), b"new current files").unwrap();
     // An interrupted caller can retry after publication; it must not replay
     // the archive over the now-current checkout, even without its old staging.

@@ -169,6 +169,52 @@ with socket.socket(socket.AF_UNIX) as connection:
         self.finish_child_turn(child, active, self.runtime_root / "bare-child-prompt.txt")
         return parent, child
 
+    # Hard-won: 337bc5e review: a live worker hid missing bundle checkouts.
+    def live_missing_checkouts_regression(self, workspace):
+        status, response = self.request("POST", "/api/actions", {
+            "action": "new", "workspace_id": workspace, "profile_id": "fake",
+            "bundle_id": "multiple", "target_id": "podman", "title": "resume-multiple",
+            "additional_mounts": [{"source": str(self.runtime_root), "destination": str(self.runtime_root), "access": "rw"}],
+            "subagents": {"mode": "mjolnir"},
+            "resource_allocation": {"kind": "container", "cpus": 2, "memory_bytes": 4 * 1024 ** 3},
+        }, timeout=WAIT)
+        assert status == 202, response
+        parent = self.wait(lambda: next((row["id"] for row in self.snapshot().get("sessions", [])
+                            if row.get("title") == "resume-multiple" and row.get("state") == "running"), None), "multi-repository parent ready")
+        self.sessions.append(parent)
+        container = self.container(parent)
+        root = self.record(parent)["container_workspace"]
+        self.podman("exec", container, "sh", "-c", 'printf archived-second >"$1/second/README.md"', "fixture", root)
+        self.cli("checkpoint", "--session", parent)
+        self.podman("exec", container, "sh", "-c", 'printf current-third >"$1/current/README.md"', "fixture", root)
+        text = "hold parent work while its checkout is reconstructed"
+        command = self.prompt(parent, text)
+        pid_script = 'import pathlib,sys; print((pathlib.Path(sys.argv[1]) / "worker.pid").read_text())'
+        parent_pid = self.worker_python(parent, pid_script)
+        child = self.tool(parent, "spawn", {"task_name": "checkout-child", "task_type": "straightforward",
+                          "instructions": "Keep working during parent repair."})["child_session_id"]
+        active = self.wait(lambda: self.working(child), "checkout child busy")
+        self.wait_child_started(child)
+        child_pid = self.worker_python(child, pid_script)
+        self.cli("daemon", "stop")
+        self.podman("exec", container, "/usr/bin/python3", "-c", "import shutil,sys; [shutil.rmtree(sys.argv[1]+'/'+name) for name in ['fixture','second']]", root)
+        with sqlite3.connect(self.data / "mj.sqlite3") as database:
+            database.execute("UPDATE sessions SET state='error' WHERE session_id=?", (parent,))
+        self.cli("resume", "--session", parent)
+        self.authenticate()
+        self.wait(lambda: self.podman("exec", container, "test", "-d", root + "/second/.git") == "", "both checkouts republished")
+        assert self.worker_python(parent, pid_script) == parent_pid
+        assert self.working(parent)["command_id"] == command
+        assert self.worker_python(child, pid_script) == child_pid
+        assert self.working(child)["command_id"] == active["command_id"]
+        self.release(parent, text)
+        self.wait(lambda: self.record(parent)["state"] == "running" and self.worker_python(parent, pid_script) != parent_pid, "idle parent restarted after checkout recovery")
+        assert self.podman("exec", container, "cat", root + "/second/README.md") == "archived-second"
+        assert self.podman("exec", container, "cat", root + "/current/README.md") == "current-third"
+        assert self.worker_python(child, pid_script) == child_pid
+        self.finish_child_turn(child, active, self.runtime_root / "child-prompt.txt")
+        return parent
+
     def retained_bind_regression(self, workspace):
         directory = self.runtime_root / "bound-checkout"
         directory.mkdir()
@@ -265,6 +311,10 @@ else:
         config = self.config / "config.toml"
         config.write_text(config.read_text() + '\n[bundles.bare-fixture]\nprimary_repo = "fixture"\n[[bundles.bare-fixture.repositories]]\nid = "fixture"\nlocal = ' + json.dumps(str(bare_project)) + '\ndestination = "fixture"\n')
         config = self.config / "config.toml"
+        multiple = '\n[bundles.multiple]\nprimary_repo = "fixture"\n'
+        for name in ["fixture", "second", "current"]:
+            multiple += '\n[[bundles.multiple.repositories]]\nid = ' + json.dumps(name) + '\nlocal = ' + json.dumps(str(self.project)) + '\ndestination = ' + json.dumps(name) + '\n'
+        config.write_text(config.read_text() + multiple)
         config.write_text(config.read_text() + '\n[subagents.straightforward]\nmodel = "tiny"\neffort = "high"\n')
         config.write_text(config.read_text() + '\n[targets.podman-bind]\nkind = "podman"\nworkspace_storage = { kind = "container-layer" }\nimage = ' + json.dumps(self.args.image) + '\npull_policy = "never"\n')
         self.cli("workspaces", "create", "Resume shared environment")
@@ -341,14 +391,32 @@ else:
         volume = self.record(parent)["target"]["workspace_storage"]["name"]
         copy_time = self.record(parent)["checkpoint"]["created_at"]
         old_container = self.inspect(parent)["Id"]
+        self.prompt(parent, "work lost with removed fixture container")
+        discarded = self.prompt(parent, "queued prompt explicitly discarded during replacement")
+        self.wait(lambda: any(item["command_id"] == discarded for item in self.worker_status(parent)["state"]["queued_prompts"]), "prompt queued before container loss")
         container_name = self.container(parent)
         self.cli("daemon", "stop")
         self.podman("container", "rm", "--force", container_name)
         with sqlite3.connect(self.data / "mj.sqlite3") as database:
             database.execute("UPDATE sessions SET state='error' WHERE session_id=?", (parent,))
+        config = self.config / "config.toml"
+        good_config = config.read_text()
+        config.write_text(good_config.replace(json.dumps(self.args.image), '"localhost/mj-resume-missing-image:review-regression"'))
         self.cli("resume", "--session", parent)
         self.authenticate()
+        self.wait(lambda: self.record(parent)["state"] == "error" and "image" in (self.record(parent).get("last_error") or "").lower(), "failed container recreation remains retryable")
+        self.cli("daemon", "stop")
+        config.write_text(good_config)
+        self.cli("workspaces", "list")
+        self.authenticate()
+        status, response = self.request("POST", "/api/actions", {
+            "action": "resume", "session_id": parent, "workspace_id": workspace,
+            "profile_id": "fake", "target_id": "podman", "queue": "discard",
+        }, timeout=WAIT)
+        assert status == 202, response
         self.wait(lambda: self.record(parent)["state"] == "running", "container recreated on retained volume")
+        assert not self.worker_status(parent)["state"]["queued_prompts"]
+        assert not self.working(parent), "discarded prompts must not start after replacement"
         assert self.inspect(parent)["Id"] != old_container
         assert self.record(parent)["target"]["workspace_storage"]["name"] == volume
         assert self.podman("exec", self.container(parent), "cat", workspace_path + "/resume-sentinel") == "newer"
@@ -369,10 +437,11 @@ else:
         assert not row["capabilities"]["resume"] and row["capabilities"]["destroy"]
         refusal = self.cli("resume", "--session", parent, check=False)
         assert refusal.returncode != 0 and "destroy" in refusal.stderr.lower(), refusal.stderr
+        multiple_parent = self.live_missing_checkouts_regression(workspace)
         bound_parent = self.retained_bind_regression(workspace)
         bare_parent, bare_child = self.bare_regression(workspace)
         print(json.dumps({"result": "passed", "instance": self.instance, "parent": parent, "child": child,
-                          "bare_parent": bare_parent, "bare_child": bare_child, "bound_parent": bound_parent, "artifacts": str(self.root)}), flush=True)
+                          "bare_parent": bare_parent, "bare_child": bare_child, "bound_parent": bound_parent, "multiple_parent": multiple_parent, "artifacts": str(self.root)}), flush=True)
 
 
 def main():

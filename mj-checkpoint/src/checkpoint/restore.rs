@@ -174,6 +174,15 @@ pub struct CheckoutRecoverySpec {
     pub staging_root: PathBuf,
     pub staged_checkout: PathBuf,
     pub destination_checkout: PathBuf,
+    #[serde(default)]
+    pub additional_checkouts: Vec<CheckoutRecoveryPublication>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckoutRecoveryPublication {
+    pub staged_checkout: PathBuf,
+    pub destination_checkout: PathBuf,
 }
 
 /// Target-side partial recovery never writes checkout files, refs or child reports.
@@ -829,13 +838,14 @@ fn write_private_file_with_policy(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
     }
+    if missing_only {
+        return publish_missing_private_file(&path, mode, |file| {
+            std::io::Write::write_all(file, bytes).context("write staged recovery file")
+        });
+    }
     let mut options = fs::OpenOptions::new();
     options.write(true);
-    if missing_only {
-        options.create_new(true);
-    } else {
-        options.create(true).truncate(true);
-    }
+    options.create(true).truncate(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -843,9 +853,6 @@ fn write_private_file_with_policy(
     }
     let mut file = match options.open(&path) {
         Ok(file) => file,
-        Err(error) if missing_only && error.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Ok(false);
-        }
         Err(error) => return Err(error).with_context(|| format!("write {}", path.display())),
     };
     std::io::Write::write_all(&mut file, bytes)
@@ -858,4 +865,71 @@ fn write_private_file_with_policy(
     #[cfg(not(unix))]
     let _ = mode;
     Ok(true)
+}
+
+fn publish_missing_private_file(
+    path: &Path,
+    mode: u32,
+    write: impl FnOnce(&mut fs::File) -> Result<()>,
+) -> Result<bool> {
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(path.parent().context("recovery file has no parent")?)?;
+    write(temporary.as_file_mut())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(mode & 0o700))?;
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    temporary.as_file().sync_all()?;
+    match temporary.persist_noclobber(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => {
+            Err(error).with_context(|| format!("publish recovery file {}", path.display()))
+        }
+    }
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+    use std::io::Write;
+
+    // Hard-won: 337bc5e review: an interrupted missing-only write became permanent truncated history.
+    #[test]
+    fn failed_recovery_write_never_publishes_a_partial_file_and_retry_keeps_concurrent_work() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("native-history");
+        let bytes = vec![b'n'; 128 * 1024];
+        assert!(
+            publish_missing_private_file(&destination, 0o600, |file| {
+                file.write_all(&bytes[..70 * 1024])?;
+                anyhow::bail!("injected write failure")
+            })
+            .is_err()
+        );
+        assert!(!destination.exists());
+        assert!(
+            publish_missing_private_file(&destination, 0o600, |file| {
+                file.write_all(&bytes)?;
+                Ok(())
+            })
+            .unwrap()
+        );
+        assert_eq!(fs::read(&destination).unwrap(), bytes);
+        fs::remove_file(&destination).unwrap();
+        assert!(
+            !publish_missing_private_file(&destination, 0o600, |file| {
+                file.write_all(&bytes)?;
+                fs::write(&destination, b"concurrent native work")?;
+                Ok(())
+            })
+            .unwrap()
+        );
+        assert_eq!(fs::read(&destination).unwrap(), b"concurrent native work");
+    }
 }

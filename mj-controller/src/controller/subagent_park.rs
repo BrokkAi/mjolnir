@@ -308,6 +308,7 @@ impl Controller {
                         reconnect: &reconnect,
                         launch: Some(&launch),
                         prepared: true,
+                        swap_admission: None,
                         messages: &RESTART_FROM_PARKED,
                     },
                 )

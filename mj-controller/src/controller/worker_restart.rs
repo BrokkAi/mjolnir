@@ -85,6 +85,7 @@ pub(super) struct InstalledWorkerRestart<'a> {
     pub reconnect: &'a CommandSpec,
     pub launch: Option<&'a mj_core::worker_launch::WorkerLaunchConfig>,
     pub prepared: bool,
+    pub swap_admission: Option<crate::upgrade::Work>,
     pub messages: &'a WorkerRestartMessages,
 }
 
@@ -144,6 +145,86 @@ fn worker_runs_installed_build(reported: Option<&str>, installed: &str) -> bool 
 }
 
 impl Controller {
+    /// A reconstructed pathname cannot repair a process's unlinked cwd.
+    /// Reuse the upgrade reservation before replacing only this parent.
+    pub(in crate::controller) async fn restart_worker_after_checkout_recovery(
+        &mut self,
+        session_id: &str,
+        discard_queue: bool,
+        executor: &(impl CommandExecutor + Sync),
+    ) -> Result<mj_core::state::MaterializedSession> {
+        let (backend, root) = self.worker_placement(session_id)?;
+        let harness = self.state.sessions[session_id].harness_kind;
+        let reconnect = targets::reconnect_plan(&backend, session_id)?
+            .commands
+            .into_iter()
+            .next()
+            .context("missing reconnect command")?;
+        let clear_id = crate::session_manager::new_command_id("resume-clear-queue")?;
+        executor.begin_resumable_work()?;
+        loop {
+            let mut connection = connect_started_worker_with_timeout(
+                &reconnect,
+                session_id,
+                executor,
+                &backend,
+                &root,
+                WORKER_RESTART_TIMEOUT,
+            )
+            .await?;
+            wait_for_native_session(&mut connection, executor, harness).await?;
+            if discard_queue {
+                connection
+                    .submit(
+                        clear_id.clone(),
+                        mj_core::relay::RelayCommand::ClearQueuedPrompts,
+                    )
+                    .await?;
+            }
+            let swap = crate::upgrade::activity_unless_draining("resume checkout worker swap")?;
+            if let Some((command_id, cursor)) =
+                super::IdleWorkspaceLease::reserve_connection_for_upgrade(&mut connection, harness)
+                    .await?
+                && super::IdleWorkspaceLease::verify_reserved_connection(
+                    &mut connection,
+                    harness,
+                    &command_id,
+                    &cursor,
+                )
+                .await?
+            {
+                executor.end_resumable_work("restart parent after checkout recovery")?;
+                if let Some(intent) = crate::database::load_worker_restart(session_id)?
+                    && self.state.sessions[session_id].target.as_deref() == Some(&intent.target)
+                {
+                    crate::database::finish_worker_restart(session_id, &intent.operation_id)?;
+                }
+                let result = self
+                    .repair_existing_environment(
+                        session_id,
+                        super::resume::RetainedWorker::Reserved(swap),
+                        false,
+                        executor,
+                    )
+                    .await;
+                // Keep the reservation connection through replacement; the
+                // launch owner releases swap admission after durable launch.
+                drop(connection);
+                return result;
+            }
+            drop(swap);
+            let snapshot = connection.sync().await?;
+            executor.notify_notice(&format!(
+                "Checkout restored. Waiting to restart the parent: active prompt {}, {} queued prompts, {} tools, {} terminals and {} shells; accepted work and children are kept.",
+                snapshot.operational.active_prompt.as_ref().map(|prompt| prompt.command_id.as_str()).unwrap_or("none"),
+                snapshot.operational.queued_prompts.len(), snapshot.operational.tools_in_flight.len(),
+                snapshot.operational.active_agent_terminals.len(), snapshot.operational.active_user_shells.len(),
+            ));
+            drop(connection);
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+
     /// Replace a session's worker with the binary this controller would
     /// install, when the session is quiet and its worker is incompatible.
     ///
@@ -395,6 +476,7 @@ impl Controller {
                 launch,
                 prepared,
                 messages,
+                swap_admission,
             } = restart;
             let owner = crate::worker_lifecycle::require(session_id)?;
             let target = self
@@ -466,6 +548,12 @@ impl Controller {
             }
             .await
             .map_err(|error| error.context(WorkerRestartLeftNoWorker))?;
+            if swap_admission.is_some() {
+                // Boot/journal recovery is durable and resumable. Match the
+                // upgrade path: readiness cannot hold daemon handoff.
+                executor.begin_resumable_work()?;
+            }
+            drop(swap_admission);
             self.observe_started_worker(
                 session_id,
                 executor,
@@ -476,6 +564,7 @@ impl Controller {
                     launch,
                     prepared,
                     messages,
+                    swap_admission: None,
                 },
             )
             .await
@@ -605,6 +694,116 @@ mod tests {
     #[cfg(unix)]
     use crate::targets::CommandOutput;
 
+    // Hard-won: 337bc5e follow-up: checkout repair held swap admission through slow harness readiness.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn checkout_repair_releases_swap_admission_after_durable_launch_before_readiness() {
+        const ID: &str = "aabbccddeeff00112233445566778899";
+        const LABEL: &str = "checkout repair swap regression";
+        const CHILD: &str = "MJ_CHECKOUT_SWAP_HANDOFF_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            crate::controller::test_support::IsolatedTest::new(
+                "controller::worker_restart::tests::checkout_repair_releases_swap_admission_after_durable_launch_before_readiness",
+            ).env(CHILD, "1").isolated_store(directory.path()).run();
+            return;
+        }
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct LaunchThenHandoff {
+            started: AtomicBool,
+            yielded: AtomicBool,
+        }
+        impl CommandExecutor for LaunchThenHandoff {
+            fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+                if !self.yielded.load(Ordering::SeqCst) {
+                    assert!(
+                        crate::upgrade::active_labels()
+                            .iter()
+                            .any(|label| label == LABEL)
+                    );
+                }
+                if command.purpose == "start detached Mjolnir worker" {
+                    self.started.store(true, Ordering::SeqCst);
+                }
+                Ok(CommandOutput {
+                    status: 0,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                })
+            }
+            fn begin_resumable_work(&self) -> Result<()> {
+                assert!(self.started.load(Ordering::SeqCst));
+                assert_eq!(
+                    crate::database::worker_restart_phase(ID)?,
+                    Some(crate::database::WorkerRestartPhase::AwaitingReadiness)
+                );
+                self.yielded.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+            fn cancellation_requested(&self) -> bool {
+                let yielded = self.yielded.load(Ordering::SeqCst);
+                if yielded {
+                    assert!(
+                        !crate::upgrade::active_labels()
+                            .iter()
+                            .any(|label| label == LABEL)
+                    );
+                }
+                yielded
+            }
+        }
+        let _writer = crate::database::install_isolated_test_writer();
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join(ID).to_string_lossy().into_owned();
+        let backend = targets::TargetLocator::LocalBare {
+            worker_root: root.clone(),
+        };
+        let mut record = crate::controller::test_support::checkpoint_test_session(ID);
+        record.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+            worker_root: root.clone().into(),
+        }));
+        record.target_template_id = "localhost".into();
+        record.state = mj_core::state::SessionState::Error;
+        crate::database::save_session(&record).unwrap();
+        let controller = Controller {
+            config: mj_core::config::Config::default(),
+            state: mj_core::state::State {
+                sessions: [(ID.into(), record)].into_iter().collect(),
+                ..Default::default()
+            },
+        };
+        let executor = LaunchThenHandoff {
+            started: AtomicBool::new(false),
+            yielded: AtomicBool::new(false),
+        };
+        let reconnect = CommandSpec::new("unused", std::iter::empty::<&str>());
+        let error = match controller
+            .restart_worker_with_installed_binary(
+                ID,
+                &executor,
+                InstalledWorkerRestart {
+                    backend: &backend,
+                    worker_root: &root,
+                    reconnect: &reconnect,
+                    launch: None,
+                    prepared: true,
+                    swap_admission: Some(crate::upgrade::activity_unless_draining(LABEL).unwrap()),
+                    messages: &RESTART_FOR_UPGRADE,
+                },
+            )
+            .await
+        {
+            Ok(_) => panic!("handoff must cancel observation"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
+        assert!(executor.yielded.load(Ordering::SeqCst));
+        assert_eq!(
+            crate::database::worker_restart_phase(ID).unwrap(),
+            Some(crate::database::WorkerRestartPhase::AwaitingReadiness)
+        );
+    }
+
     /// Fails every command after the first, so a restart gets past its stop and
     /// then loses the worker it was replacing.
     #[cfg(unix)]
@@ -674,6 +873,7 @@ mod tests {
                     reconnect: &reconnect,
                     launch: None,
                     prepared: false,
+                    swap_admission: None,
                     messages: &RESTART_FOR_CHECKPOINT,
                 },
             )

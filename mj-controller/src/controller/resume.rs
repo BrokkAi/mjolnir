@@ -1677,7 +1677,7 @@ impl Controller {
                 }
                 ResumeEnvironment::RetainedContainerMissing => {
                     on_accepted();
-                    self.recover_removed_resume_container(session_id, executor).await?;
+                    self.recover_removed_resume_container(session_id, discard_queue, executor).await?;
                     return crate::database::load_materialized_session(session_id)?.context("restored parent projection is missing");
                 }
                 ResumeEnvironment::CheckoutMissing => {

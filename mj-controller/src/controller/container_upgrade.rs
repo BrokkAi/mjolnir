@@ -153,17 +153,32 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
-        self.recover_removed_container_with_mode(session_id, executor, false)
+        self.recover_removed_container_with_mode(session_id, executor, false, false)
             .await
     }
 
     pub(super) async fn recover_removed_resume_container(
         &mut self,
         session_id: &str,
+        discard_queue: bool,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<()> {
-        self.recover_removed_container_with_mode(session_id, executor, true)
-            .await
+        let result = self
+            .recover_removed_container_with_mode(session_id, executor, true, discard_queue)
+            .await;
+        if let Err(error) = &result {
+            let current = self
+                .state
+                .sessions
+                .get_mut(session_id)
+                .context("repair session missing")?;
+            current.state = SessionState::Error;
+            current.last_error = Some(format!(
+                "{error:#}. Storage and current work were kept; retry Resume."
+            ));
+            self.persist_session_state(session_id)?;
+        }
+        result
     }
 
     async fn recover_removed_container_with_mode(
@@ -171,6 +186,7 @@ impl Controller {
         session_id: &str,
         executor: &(impl CommandExecutor + Sync),
         for_resume: bool,
+        discard_queue: bool,
     ) -> Result<()> {
         let record = self
             .state
@@ -214,7 +230,9 @@ impl Controller {
         {
             let current = self.state.sessions.get_mut(session_id).unwrap();
             current.target = Some(canonical);
-            current.state = SessionState::Closing;
+            if !for_resume {
+                current.state = SessionState::Closing;
+            }
         }
         self.persist_session_state(session_id)?;
         let (_, template) = target
@@ -279,7 +297,9 @@ impl Controller {
             executor,
         )?;
         let current = self.state.sessions.get_mut(session_id).unwrap();
-        current.state = SessionState::Closing;
+        if !for_resume {
+            current.state = SessionState::Closing;
+        }
         self.persist_session_state(session_id)?;
         if for_resume {
             ensure!(
@@ -288,7 +308,7 @@ impl Controller {
             );
             match super::environment::classify_resume_environment(self, session_id, executor) {
                 super::environment::ResumeEnvironment::CheckoutMissing => self
-                    .recover_missing_checkout(session_id, false, executor)
+                    .recover_missing_checkout(session_id, discard_queue, executor)
                     .await
                     .map(|_| ()),
                 super::environment::ResumeEnvironment::WorkerMissing
@@ -297,7 +317,7 @@ impl Controller {
                     self.repair_existing_environment(
                         session_id,
                         super::resume::RetainedWorker::Missing,
-                        false,
+                        discard_queue,
                         executor,
                     )
                     .await
@@ -307,7 +327,7 @@ impl Controller {
                     "replacement storage was kept; retry Resume when its components are reachable",
                 )),
                 _ => self
-                    .recover_missing_parent_data(session_id, false, executor)
+                    .recover_missing_parent_data(session_id, discard_queue, executor)
                     .await
                     .map(|_| ()),
             }

@@ -5,11 +5,11 @@ use crate::controller::worker_restart::{InstalledWorkerRestart, WorkerRestartMes
 
 /// Installation is a completed action under the lifecycle owner, not another
 /// platform/build probe against a second snapshot of the same target.
-#[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::controller) enum RetainedWorker {
     Live,
     Missing,
     Installed,
+    Reserved(crate::upgrade::Work),
 }
 
 const REPAIR: WorkerRestartMessages = WorkerRestartMessages {
@@ -29,6 +29,10 @@ impl Controller {
         discard_queue: bool,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<MaterializedSession> {
+        let (worker_state, mut swap_admission) = match worker_state {
+            RetainedWorker::Reserved(admission) => (RetainedWorker::Installed, Some(admission)),
+            state => (state, None),
+        };
         executor.notify_notice(
             "Resuming in the existing environment; current files and sub-agents are kept.",
         );
@@ -42,7 +46,7 @@ impl Controller {
                 .into_iter()
                 .next()
                 .context("missing reconnect command")?;
-            let attached = if worker_state == RetainedWorker::Live {
+            let attached = if matches!(&worker_state, RetainedWorker::Live) {
                 // A lost handshake cannot prove death. Only the worker's terminal
                 // preparation failure permits replacing an otherwise live worker:
                 // that boot has no coordinator and can never dispatch ACP work.
@@ -56,6 +60,7 @@ impl Controller {
                             reconnect: &reconnect,
                             launch: None,
                             prepared: true,
+                            swap_admission: None,
                             messages: &REPAIR,
                         },
                     )
@@ -100,7 +105,7 @@ impl Controller {
                 relay
             } else {
                 let launch = self.current_worker_launch_config(session_id, &backend)?;
-                if worker_state != RetainedWorker::Installed {
+                if !matches!(&worker_state, RetainedWorker::Installed) {
                     let worker = WorkerInstall::for_target(&backend, executor)?;
                     prepare_managed_harness_for_upgrade(executor, &backend, session_id, &worker, &launch)?;
                 }
@@ -112,7 +117,8 @@ impl Controller {
                         worker_root: &root,
                         reconnect: &reconnect,
                         launch: Some(&launch),
-                        prepared: worker_state == RetainedWorker::Installed,
+                        prepared: matches!(&worker_state, RetainedWorker::Installed),
+                        swap_admission: swap_admission.take(),
                         messages: &REPAIR,
                     },
                 )
@@ -469,7 +475,7 @@ impl Controller {
         discard_queue: bool,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<MaterializedSession> {
-        use mj_checkpoint::checkpoint::CheckoutRecoverySpec;
+        use mj_checkpoint::checkpoint::{CheckoutRecoveryPublication, CheckoutRecoverySpec};
         let record = self.state.sessions[session_id].clone();
         let checkpoint = record.checkpoint.as_ref().context(
             "The parent history was kept but its checkout is missing and no recovery archive holds the files. Supply a recovery archive or restore the checkout, then retry Resume.")?;
@@ -609,6 +615,29 @@ impl Controller {
                     staging_root: target_path(&stage),
                     staged_checkout: target_path(&staged_checkout),
                     destination_checkout: target_path(&destination),
+                    additional_checkouts: if worktree.is_none() {
+                        let current_workspace =
+                            PathBuf::from(super::super::network_git::workspace_root(
+                                &backend,
+                                record.container_workspace.as_deref(),
+                            ));
+                        super::super::environment::resume_checkout_directories(
+                            self, session_id, &backend,
+                        )?
+                        .into_iter()
+                        .filter(|path| path != &destination)
+                        .map(|path| {
+                            Ok(CheckoutRecoveryPublication {
+                                staged_checkout: target_path(
+                                    &stage.join(path.strip_prefix(&current_workspace)?),
+                                ),
+                                destination_checkout: target_path(&path),
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?
+                    } else {
+                        Vec::new()
+                    },
                     restore: CheckpointRestoreSpec {
                         archive_path: restore_archive_path(
                             &backend,
@@ -637,6 +666,29 @@ impl Controller {
                         recovery.destination_checkout == target_path(project)
                     })
             });
+        let allowed_checkouts =
+            super::super::environment::resume_checkout_directories(self, session_id, &backend)?;
+        ensure!(
+            recovery.additional_checkouts.iter().all(|publication| {
+                allowed_checkouts
+                    .iter()
+                    .any(|path| target_path(path) == publication.destination_checkout)
+                    && publication
+                        .staged_checkout
+                        .starts_with(&recovery.staging_root)
+                    && [
+                        &publication.staged_checkout,
+                        &publication.destination_checkout,
+                    ]
+                    .iter()
+                    .all(|path| {
+                        !path
+                            .components()
+                            .any(|part| part == std::path::Component::ParentDir)
+                    })
+            }),
+            "pending bundle recovery identity changed; all files were kept"
+        );
         destination = live_path(&recovery.destination_checkout);
         let stage_parent = worktree
             .as_ref()
@@ -687,11 +739,19 @@ impl Controller {
             &local_spec,
             &remote_spec,
         )?;
-        if !super::super::environment::directory_available(
+        let mut missing = !super::super::environment::directory_available(
             &backend,
             &destination.to_string_lossy(),
             executor,
-        )? {
+        )?;
+        for publication in &recovery.additional_checkouts {
+            missing |= !super::super::environment::directory_available(
+                &backend,
+                &live_path(&publication.destination_checkout).to_string_lossy(),
+                executor,
+            )?;
+        }
+        if missing {
             if let Some(mut staged) = worktree {
                 let original_root = staged.worktree_root.clone();
                 staged.worktree_root = live_path(&recovery.staging_root)
@@ -710,12 +770,26 @@ impl Controller {
             } else {
                 let bundle =
                     super::super::backend::backend_session_bundle(&record, &self.config, executor)?;
+                let mut existing_repositories = std::collections::BTreeSet::new();
+                for repository in &bundle.repositories {
+                    let git = live_path(&recovery.restore.workspace_root)
+                        .join(&repository.destination)
+                        .join(".git");
+                    if super::super::environment::directory_available(
+                        &backend,
+                        &git.to_string_lossy(),
+                        executor,
+                    )? {
+                        existing_repositories.insert(repository.destination.clone());
+                    }
+                }
                 targets::recover_checkout_plan(
                     &backend,
                     session_id,
                     &bundle,
                     &live_path(&recovery.restore.workspace_root).to_string_lossy(),
                     github_token.as_deref(),
+                    &existing_repositories,
                 )?
                 .execute_concurrent(executor)?;
             }
@@ -753,10 +827,26 @@ impl Controller {
             )?,
         )?;
         executor.end_resumable_work("resume recovered checkout")?;
-        // This missing-only operation also repairs any parent components lost
-        // with the checkout, while preserving a newer native home or journal.
-        self.recover_missing_parent_data(session_id, discard_queue, executor)
-            .await
+        let liveness = executor.execute(&super::super::worker_binary::worker_liveness_command(
+            &backend, &root,
+        ))?;
+        ensure!(
+            liveness.status == 0,
+            "cannot establish parent worker state after checkout recovery; everything was kept, retry Resume"
+        );
+        match String::from_utf8_lossy(&liveness.stdout).trim() {
+            "alive" | "starting" => {
+                self.restart_worker_after_checkout_recovery(session_id, discard_queue, executor)
+                    .await
+            }
+            "dead" => {
+                self.recover_missing_parent_data(session_id, discard_queue, executor)
+                    .await
+            }
+            _ => bail!(
+                "cannot establish parent worker state after checkout recovery; everything was kept, retry Resume"
+            ),
+        }
     }
 }
 

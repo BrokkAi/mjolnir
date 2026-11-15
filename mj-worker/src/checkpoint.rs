@@ -90,39 +90,70 @@ pub fn restore_checkout_from_spec_file(path: &Path) -> Result<()> {
     spec.restore.workspace_root = resolve_target_path(&spec.restore.workspace_root)?;
     spec.staged_checkout = resolve_target_path(&spec.staged_checkout)?;
     spec.destination_checkout = resolve_target_path(&spec.destination_checkout)?;
-    let already_present = spec.destination_checkout.try_exists()?;
-    if !already_present {
-        ensure!(spec.staged_checkout.is_dir(), "staged checkout is missing");
+    spec.staging_root = resolve_target_path(&spec.staging_root)?;
+    let mut publications = vec![CheckoutRecoveryPublication {
+        staged_checkout: spec.staged_checkout,
+        destination_checkout: spec.destination_checkout,
+    }];
+    for mut publication in spec.additional_checkouts {
+        publication.staged_checkout = resolve_target_path(&publication.staged_checkout)?;
+        publication.destination_checkout = resolve_target_path(&publication.destination_checkout)?;
+        publications.push(publication);
     }
-    if !already_present {
+    let mut missing = false;
+    for publication in &publications {
+        if !publication.destination_checkout.try_exists()? {
+            ensure!(
+                publication.staged_checkout.is_dir(),
+                "staged checkout is missing"
+            );
+            missing = true;
+        }
+    }
+    let ready = spec.staging_root.join(".mj-checkouts-restored");
+    if missing && !ready.try_exists()? {
         restore_repositories(
             &spec.restore.archive_path,
             &spec.restore.workspace_root,
             &SystemGit,
         )?;
+        mj_core::config::atomic_write(&ready, spec.checkpoint_sha256.as_bytes())?;
     }
-    let published = if already_present {
-        false
-    } else {
-        rename_directory_without_replacement(&spec.staged_checkout, &spec.destination_checkout)?
-    };
-    if spec.destination_checkout.join(".git").is_file() {
-        let output = SystemGit.run(
-            &spec.destination_checkout,
-            &GitCommand {
-                arguments: vec![
-                    "worktree".into(),
-                    "repair".into(),
-                    spec.destination_checkout.as_os_str().to_owned(),
-                ],
-                ..GitCommand::default()
-            },
-        )?;
+    if ready.try_exists()? {
         ensure!(
-            output.status == 0,
-            "repair published worktree: {}",
-            String::from_utf8_lossy(&output.stderr)
+            fs::read_to_string(&ready)? == spec.checkpoint_sha256,
+            "staged checkout recovery identity changed"
         );
+    }
+    let mut published = false;
+    for publication in publications {
+        if !publication.destination_checkout.try_exists()? {
+            if let Some(parent) = publication.destination_checkout.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            published |= rename_directory_without_replacement(
+                &publication.staged_checkout,
+                &publication.destination_checkout,
+            )?;
+        }
+        if publication.destination_checkout.join(".git").is_file() {
+            let output = SystemGit.run(
+                &publication.destination_checkout,
+                &GitCommand {
+                    arguments: vec![
+                        "worktree".into(),
+                        "repair".into(),
+                        publication.destination_checkout.as_os_str().to_owned(),
+                    ],
+                    ..GitCommand::default()
+                },
+            )?;
+            ensure!(
+                output.status == 0,
+                "repair published worktree: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
     println!("{}", serde_json::json!({"published": published}));
     Ok(())

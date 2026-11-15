@@ -268,6 +268,7 @@ impl Controller {
                     reconnect: &reconnect,
                     launch: None,
                     prepared: false,
+                    swap_admission: None,
                     messages: &RESTART_FOR_CHECKPOINT,
                 },
                 // An automatic close is not worth restarting a worker for.

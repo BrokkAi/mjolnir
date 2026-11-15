@@ -38,6 +38,7 @@ pub(crate) fn recover_checkout_plan(
     bundle: &ProjectBundleSpec,
     workspace: &str,
     github_token: Option<&str>,
+    existing_repositories: &std::collections::BTreeSet<String>,
 ) -> Result<CommandPlan> {
     bundle.validate()?;
     verify_locator(locator, session_id)?;
@@ -45,9 +46,13 @@ pub(crate) fn recover_checkout_plan(
         !is_borrowed(locator),
         "recover the owning session's checkout first"
     );
+    let mut missing = bundle.clone();
+    missing
+        .repositories
+        .retain(|repository| !existing_repositories.contains(&repository.destination));
     Ok(CommandPlan {
         description: "reconstruct missing checkout in staging".into(),
-        commands: clone_commands(bundle, workspace, github_token, |args| {
+        commands: clone_commands(&missing, workspace, github_token, |args| {
             locator_command(locator, args)
         }),
     })
