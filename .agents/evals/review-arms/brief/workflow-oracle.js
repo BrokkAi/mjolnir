@@ -6,7 +6,8 @@ export const meta = {
     { title: 'Leak', detail: 'Opus/high judge reads each brief as a review output; rewrite once if caught or partial' },
   ],
 }
-// args: {dir: '<REVIEW_ARMS_DIR>/briefs/oracle-work', diffs: [{id, group: 'P'|'S'|'C'}]}
+// args: {dir: '<REVIEW_ARMS_DIR>/briefs/oracle-work', diffs: [{id, group: 'P'|'S'|'C'}], blind_only?: true}
+// blind_only: leak-check each diff's blind brief without the editor (stage B; brief_oracle.py blind-collect).
 // Written by brief_oracle.py build: ORACLE.md, WRITER.md, JUDGE.md, item-<id>.json, record-<id>.json.
 const DIR = args.dir
 const ROOT = DIR.replace(/\/briefs\/oracle-work\/?$/, '')
@@ -58,8 +59,9 @@ ${FENCE}`,
 const results = await pipeline(
   args.diffs,
   async d => {
-    // Control briefs are the blind brief; the editor never sees them.
-    if (d.group === 'C') return { edit: null, brief: null }
+    // Control briefs are the blind brief; the editor never sees them. blind_only checks every
+    // diff's blind brief that way.
+    if (d.group === 'C' || args.blind_only) return { edit: null, brief: null }
     const edit = await agent(
       `Read ${DIR}/ORACLE.md and follow it exactly. The brief format and rules are in ${DIR}/WRITER.md. Your item file: ${DIR}/item-${d.id}.json (id "${d.id}").
 

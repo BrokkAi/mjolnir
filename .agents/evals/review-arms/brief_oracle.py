@@ -10,6 +10,9 @@ Usage:
            "item": <the published brief's item that carries the fact, quoted exactly>}}
    for every primary and secondary diff; a decision counts only for the brief whose hash it names)
   python3 brief_oracle.py collect   # again: publishes briefs/oracle/<diff>/brief.md
+  python3 brief_oracle.py blind-collect <blind-leak-out.json>
+      stage B: publishes leak-rewritten blind briefs of primary and secondary diffs (run the
+      workflow with blind_only: true on them); the writer's text is kept as brief-original.md
   python3 brief_oracle.py merge <rerun-out.json>
       replaces the named diffs' results in workflow-out.json with a rerun of the workflow on them
       (for a brief whose hand check failed); every published brief keeps its own leak verdict
@@ -175,12 +178,44 @@ def merge(path):
     print(json.dumps({"replaced": sorted(replaced), "previous_kept_in": str(history)}))
 
 
+def blind_collect(path):
+    out = json.loads(pathlib.Path(path).read_text())
+    assert not out["missing"], out["missing"]
+    s = sets()
+    rejected, rows = [], []
+    for r in out["results"]:
+        bug = r["id"]
+        assert bug in s["P"] + s["S"] and r["edit"] is None, f"{bug}: blind leak check covers P and S only"
+        d = ROOT / "briefs/blind" / bug
+        save(d / "blind-leak.json", r)
+        rows.append({"id": bug, "leak_first": r["leak"][0]["label"], "leak_final": r["leak"][-1]["label"],
+                     "rewritten": r["final_brief"] is not None})
+        if r["final_brief"] is None:
+            continue
+        final = r["final_brief"].rstrip() + "\n"
+        problems = brief_driver.lint(final, driver.CORPUS[bug])
+        if problems:
+            (d / "brief-rejected-rewrite.md").write_text(final)
+            rejected.append((bug, problems))
+            continue
+        original = d / "brief-original.md"
+        if not original.exists():
+            original.write_text((d / "brief.md").read_text())
+        (d / "brief.md").write_text(final)
+    for row in rows:
+        print(json.dumps(row))
+    if rejected:
+        raise SystemExit(f"rewrites that break the rules were not published: {rejected}")
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("step", choices=["build", "collect", "merge"])
+    p.add_argument("step", choices=["build", "collect", "merge", "blind-collect"])
     p.add_argument("path", nargs="?")
     a = p.parse_args()
     if a.step == "merge":
         merge(a.path)
+    elif a.step == "blind-collect":
+        blind_collect(a.path)
     else:
         {"build": build, "collect": collect}[a.step]()
