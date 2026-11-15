@@ -196,6 +196,46 @@ def decide(rate):
                           for k, m in per_model.items()}}
 
 
+def decide_c(rate):
+    """Stage C decision of brief/PLAN-bifrost.md. E = F - N and G = B - F per model on P, with paired
+    bootstrap intervals over the diffs; control 1 on C (F - N < 10 points for both models), else E is
+    taken net of the C gain as in stage A. Terra/high decides; outcomes are checked in plan order."""
+    terra, sol = MODELS
+    per_model = {}
+    for model in MODELS:
+        f, n, b = (rate[("P", cond, model)] for cond in ("bifrost", "no-brief", "blind"))
+        c_f, c_n = rate[("C", "bifrost", model)], rate[("C", "no-brief", model)]
+        e = [f[x][0] - n[x][0] for x in sorted(f)]
+        g = [b[x][0] - f[x][0] for x in sorted(f)]
+        c = [c_f[x][0] - c_n[x][0] for x in sorted(c_f)]
+        per_model[model] = {"effect": statistics.fmean(e), "ci": boot(e), "gap": statistics.fmean(g),
+                            "gap_ci": boot(g), "control_gain": statistics.fmean(c), "e": e, "c": c}
+    control_passes = all(m["control_gain"] < 0.10 for m in per_model.values())
+    for m in per_model.values():
+        if control_passes:
+            m["decision_effect"], m["decision_ci"] = m["effect"], m["ci"]
+        else:
+            m["decision_effect"] = m["effect"] - m["control_gain"]
+            m["decision_ci"] = boot_difference(m["e"], m["c"])
+    t = per_model[terra]
+    if t["decision_effect"] >= 0.30 and t["gap"] <= 0.10 and control_passes:
+        decision = "location is enough"
+    elif all(m["decision_effect"] < 0.15 and m["decision_ci"][1] < 0.30 for m in per_model.values()):
+        decision = "site context needed"
+    elif t["decision_effect"] >= 0.15 and t["gap_ci"][0] > 0:
+        decision = "relations add"
+    else:
+        decision = "inconclusive"
+    pts = lambda x: round(100 * x, 1)
+    return {"decision": decision, "control_1_passes": control_passes, "primary_model": terra,
+            "per_model": {k: {"effect_points": pts(m["effect"]), "ci95_points": [pts(x) for x in m["ci"]],
+                              "gap_points": pts(m["gap"]), "gap_ci95_points": [pts(x) for x in m["gap_ci"]],
+                              "control_gain_points": pts(m["control_gain"]),
+                              "decision_effect_points": pts(m["decision_effect"]),
+                              "decision_ci95_points": [pts(x) for x in m["decision_ci"]]}
+                          for k, m in per_model.items()}}
+
+
 def boot(diff_values, n=10000):
     """95% bootstrap interval of the mean over diffs."""
     rng = random.Random(1)
@@ -260,6 +300,8 @@ def score():
                                       "median_tool_calls": statistics.median(k["tool_calls"] for k in ks)})
     if "oracle" in conds:
         report["stage_a"] = decide(rate)
+    if "bifrost" in conds and "blind" in conds:
+        report["stage_c"] = decide_c(rate)
     save(J / "score.json", report)
     print(json.dumps(report, indent=1))
 
