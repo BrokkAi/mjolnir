@@ -701,7 +701,7 @@ fn streaming_verification_parses_a_sharded_untracked_tar_for_safety() {
         TEST_PART_BYTES,
     );
     let mut file = File::create(&path).unwrap();
-    write_zip(&mut file, &manifest, &payloads).unwrap();
+    write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
     drop(file);
 
     let error = format!("{:#}", verify_archive_streaming(&path).unwrap_err());
@@ -743,7 +743,7 @@ fn streaming_verification_refuses_operation_state_that_is_not_git_operation_stat
         PAYLOAD_PART_BYTES,
     );
     let mut file = File::create(&path).unwrap();
-    write_zip(&mut file, &manifest, &payloads).unwrap();
+    write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
     drop(file);
 
     let error = format!("{:#}", verify_archive_streaming(&path).unwrap_err());
@@ -810,7 +810,7 @@ fn streaming_verification_refuses_working_tree_paths_inside_the_git_directory() 
         }
         let path = directory.path().join(format!("{tampered}.hel.zip"));
         let mut file = File::create(&path).unwrap();
-        write_zip(&mut file, &manifest, &payloads).unwrap();
+        write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
         drop(file);
 
         let error = format!("{:#}", verify_archive_streaming(&path).unwrap_err());
@@ -836,7 +836,7 @@ fn sharded_manifests_reject_reordered_or_missing_parts() {
     descriptor.parts.swap(0, 1);
     let reordered = directory.path().join("reordered.hel.zip");
     let mut file = File::create(&reordered).unwrap();
-    write_zip(&mut file, &manifest, &payloads).unwrap();
+    write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
     drop(file);
     let error = format!("{:#}", verify_archive_streaming(&reordered).unwrap_err());
     assert!(error.contains("part 0 has unexpected path"), "{error}");
@@ -851,7 +851,7 @@ fn sharded_manifests_reject_reordered_or_missing_parts() {
     descriptor.parts.pop().unwrap();
     let truncated = directory.path().join("truncated.hel.zip");
     let mut file = File::create(&truncated).unwrap();
-    write_zip(&mut file, &manifest, &payloads).unwrap();
+    write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
     drop(file);
     let error = format!("{:#}", verify_archive_streaming(&truncated).unwrap_err());
     assert!(error.contains("parts cover"), "{error}");
@@ -914,7 +914,7 @@ fn readers_without_part_support_reject_sharded_archives() {
     manifest.schema_version = ARCHIVE_SCHEMA_VERSION;
     let downgraded = directory.path().join("downgraded.hel.zip");
     let mut file = File::create(&downgraded).unwrap();
-    write_zip(&mut file, &manifest, &payloads).unwrap();
+    write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
     drop(file);
     let error = format!("{:#}", read_archive_verified(&downgraded).unwrap_err());
     assert!(
@@ -1105,7 +1105,7 @@ fn streaming_verification_parses_untracked_tar_for_safety() {
     payload.descriptor = descriptor.clone();
     payload.data = Cow::Owned(malicious);
     let mut file = File::create(&path).unwrap();
-    write_zip(&mut file, &manifest, &payloads).unwrap();
+    write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
     drop(file);
 
     let error = verify_archive_streaming(&path).unwrap_err();
@@ -1152,7 +1152,7 @@ fn corruption_is_detected_by_payload_digest() {
         _ => unreachable!(),
     };
     let mut file = File::create(&path).unwrap();
-    write_zip(&mut file, &manifest, &payloads).unwrap();
+    write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
     drop(file);
     for result in [
         verify_archive_streaming(&path).map(|_| ()),
@@ -1203,7 +1203,7 @@ fn old_and_future_schemas_are_rejected_explicitly() {
         let (mut manifest, payloads) = prepare_archive(&archive_input).unwrap();
         manifest.schema_version = schema_version;
         let mut file = File::create(&path).unwrap();
-        write_zip(&mut file, &manifest, &payloads).unwrap();
+        write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
         drop(file);
 
         let error = read_archive_verified(&path).unwrap_err();
@@ -3355,7 +3355,7 @@ fn archive_round_trip_preserves_clear_boundary_and_requires_context_schema() {
     manifest.schema_version = ARCHIVE_SCHEMA_VERSION_CONTEXT;
     let downgraded = directory.path().join("message-downgraded.hel.zip");
     let mut file = File::create(&downgraded).unwrap();
-    write_zip(&mut file, &manifest, &payloads).unwrap();
+    write_zip(&mut file, directory.path(), &manifest, &payloads).unwrap();
     drop(file);
     let error = read_archive_verified(&downgraded).unwrap_err();
     assert!(format!("{error:#}").contains("message transcript entries require archive schema 9"));

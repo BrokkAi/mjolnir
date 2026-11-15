@@ -9,7 +9,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
@@ -343,7 +343,7 @@ fn write_archive_installed_view(
     let mut temporary = tempfile::NamedTempFile::new_in(parent)
         .with_context(|| format!("create temporary archive in {}", parent.display()))?;
     restrict_archive_permissions(temporary.path())?;
-    write_zip(temporary.as_file_mut(), &manifest, &payloads)?;
+    write_zip(temporary.as_file_mut(), parent, &manifest, &payloads)?;
     temporary
         .as_file_mut()
         .sync_all()
@@ -1120,6 +1120,7 @@ fn plan_payload_parts(
 
 fn write_zip(
     output: &mut File,
+    spool_parent: &Path,
     manifest: &ArchiveManifest,
     payloads: &[PendingPayload<'_>],
 ) -> Result<()> {
@@ -1139,44 +1140,117 @@ fn write_zip(
         &mut Cursor::new(&manifest_bytes),
         &digest_bytes(&manifest_bytes),
     )?;
+    let mut spool_builder = tempfile::Builder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        spool_builder.permissions(fs::Permissions::from_mode(0o700));
+    }
+    let spool = spool_builder
+        .tempdir_in(spool_parent)
+        .context("create ZIP compression spool")?;
+    let mut entries = Vec::new();
     for payload in payloads {
         let descriptor = &payload.descriptor;
-        let mut source: Box<dyn Read> = match payload.source {
-            Some(path) => Box::new(NativeArtifactData::open_file(path)?),
-            None => Box::new(Cursor::new(payload.data.as_ref())),
-        };
-        let method = payload_compression(&descriptor.role);
         if descriptor.parts.is_empty() {
-            write_stream_entry(
-                &mut writer,
-                &descriptor.path,
-                descriptor.mode,
-                method,
-                descriptor.size,
-                &mut source,
-                &descriptor.sha256,
-            )?;
+            entries.push(StreamEntry {
+                payload,
+                name: &descriptor.path,
+                size: descriptor.size,
+                digest: &descriptor.sha256,
+                offset: 0,
+            });
         } else {
+            let mut offset = 0_u64;
             for part in &descriptor.parts {
-                write_stream_entry(
-                    &mut writer,
-                    &part.path,
-                    descriptor.mode,
-                    method,
-                    part.size,
-                    &mut source.by_ref().take(part.size),
-                    &part.sha256,
-                )?;
+                entries.push(StreamEntry {
+                    payload,
+                    name: &part.path,
+                    size: part.size,
+                    digest: &part.sha256,
+                    offset,
+                });
+                offset = offset
+                    .checked_add(part.size)
+                    .context("payload parts overflow")?;
             }
+            ensure!(
+                offset == descriptor.size,
+                "payload parts do not cover its body"
+            );
         }
+    }
+    // Reuse Rayon's compression parallelism. One spool per active worker bounds
+    // scratch disk to a worker-sized window instead of the entire archive.
+    for window in entries.chunks(rayon::current_num_threads()) {
+        let compressed = window
+            .par_iter()
+            .map(|entry| {
+                compress_stream_entry(entry, spool.path())
+                    .with_context(|| format!("compress ZIP entry '{}'", entry.name))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for (entry, temporary) in window.iter().zip(compressed) {
+            let mut source = zip::ZipArchive::new(temporary.reopen()?)
+                .with_context(|| format!("reopen compressed ZIP entry '{}'", entry.name))?;
+            let compressed_entry = source
+                .by_index(0)
+                .with_context(|| format!("read compressed ZIP entry '{}'", entry.name))?;
+            writer
+                .raw_copy_file(compressed_entry)
+                .with_context(|| format!("write ZIP entry '{}'", entry.name))?;
+        }
+    }
+
+    writer.finish().context("finish Mjolnir archive ZIP")?;
+    Ok(())
+}
+
+struct StreamEntry<'a> {
+    payload: &'a PendingPayload<'a>,
+    name: &'a str,
+    size: u64,
+    digest: &'a str,
+    offset: u64,
+}
+
+/// A private single-entry ZIP lets assembly reuse the codec output and CRC
+/// through raw_copy_file without retaining compressed payloads in memory.
+fn compress_stream_entry(
+    entry: &StreamEntry<'_>,
+    directory: &Path,
+) -> Result<tempfile::NamedTempFile> {
+    let mut source: Box<dyn Read> = match entry.payload.source {
+        Some(path) => {
+            let mut file = NativeArtifactData::open_file(path)?;
+            file.seek(SeekFrom::Start(entry.offset))?;
+            Box::new(file)
+        }
+        None => {
+            let mut cursor = Cursor::new(entry.payload.data.as_ref());
+            cursor.set_position(entry.offset);
+            Box::new(cursor)
+        }
+    };
+    let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
+    let mut writer = zip::ZipWriter::new(temporary.as_file_mut());
+    write_stream_entry(
+        &mut writer,
+        entry.name,
+        entry.payload.descriptor.mode,
+        payload_compression(&entry.payload.descriptor.role),
+        entry.size,
+        &mut source.by_ref().take(entry.size),
+        entry.digest,
+    )?;
+    if entry.offset + entry.size == entry.payload.descriptor.size {
         ensure!(
             source.read(&mut [0u8; 1])? == 0,
             "payload source grew during export"
         );
     }
-
-    writer.finish().context("finish Mjolnir archive ZIP")?;
-    Ok(())
+    writer.finish().context("finish compressed ZIP entry")?;
+    Ok(temporary)
 }
 
 fn write_stream_entry(
