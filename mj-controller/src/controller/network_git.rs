@@ -276,7 +276,7 @@ fn initialize_workspace(
     configure_workspace(executor, backend, session_id, directory, &base)
 }
 
-fn configure_workspace(
+pub(super) fn configure_workspace(
     executor: &impl CommandExecutor,
     backend: &targets::TargetLocator,
     session_id: &str,
@@ -292,22 +292,14 @@ fn configure_workspace(
         argv.extend(arguments.iter().map(|argument| (*argument).to_owned()));
         argv
     };
-    let mut steps: Vec<_> = [
-        ("push.default", "current"),
-        ("push.autoSetupRemote", "true"),
-        ("remote.pushDefault", "origin"),
-        ("remote.origin.mirror", "false"),
-        ("mj.baseCommit", base),
-        ("mj.remoteWorkspace", "true"),
-    ]
-    .into_iter()
-    .map(|(key, value)| {
-        targets::CommandStep::new(
+    let mut steps = Vec::new();
+    mj_core::remote_git::finalize_managed_checkout(base, |arguments| {
+        steps.push(targets::CommandStep::new(
             "initialize network session Git checkout",
-            argv(&["config", "--local", "--replace-all", key, value]),
-        )
-    })
-    .collect();
+            argv(arguments),
+        ));
+        Ok(())
+    })?;
     steps.push(
         targets::CommandStep::new(
             "initialize network session Git checkout",

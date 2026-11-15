@@ -205,6 +205,9 @@ pub fn collect_git_metadata_snapshot(
     validate_archive_relative_path(&spec.relative_destination)?;
     let identity = collect_git_identity(runner, repository, spec.origin_override.as_deref())?;
     let saved_refs = collect_review_refs(runner, repository)?;
+    // Move handoffs omit workspace payloads but still own the immutable base
+    // needed to finalize the independently transferred destination checkout.
+    let managed_base = remote_workspace_base(runner, repository)?;
     Ok(RepositorySnapshot {
         metadata: RepositoryMetadata {
             // Every capture here is metadata only, whether or not it carries
@@ -224,9 +227,9 @@ pub fn collect_git_metadata_snapshot(
             checkout_subdirectory: None,
             origin: identity.origin,
             push_urls: identity.push_urls,
-            remote_workspace: false,
+            remote_workspace: managed_base.is_some(),
             plain_directory: false,
-            base_commit: identity.head_commit.clone(),
+            base_commit: managed_base.unwrap_or_else(|| identity.head_commit.clone()),
             head_commit: identity.head_commit,
             branch: identity.branch,
         },
@@ -2274,31 +2277,19 @@ fn restore_remote_workspace_configuration(
             "restore Git push URL",
         )?;
     }
-    for (key, value) in [
-        ("mj.remoteWorkspace", "true"),
-        ("mj.baseCommit", metadata.base_commit.as_str()),
-        ("push.default", "current"),
-        ("push.autoSetupRemote", "true"),
-        ("remote.pushDefault", "origin"),
-        ("remote.origin.mirror", "false"),
-    ] {
+    mj_core::remote_git::finalize_managed_checkout(&metadata.base_commit, |arguments| {
         git_success(
             runner,
             repository,
             GitCommand {
-                arguments: vec![
-                    "config".into(),
-                    "--local".into(),
-                    "--replace-all".into(),
-                    key.into(),
-                    value.into(),
-                ],
+                arguments: arguments.iter().map(OsString::from).collect(),
                 stdin: Vec::new(),
                 env: Vec::new(),
             },
             "restore managed Git configuration",
         )?;
-    }
+        Ok(())
+    })?;
     Ok(())
 }
 

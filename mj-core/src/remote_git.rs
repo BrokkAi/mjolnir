@@ -14,6 +14,29 @@ use crate::targets::{CommandExecutor, CommandOutput, CommandSpec};
 
 pub use crate::local_git::resolve_local_repository;
 
+/// Finalize a managed checkout using its recorded immutable launch base.
+/// The caller supplies the command boundary (local Git or a target executor).
+pub fn finalize_managed_checkout(
+    base: &str,
+    mut run: impl FnMut(&[&str]) -> Result<()>,
+) -> Result<()> {
+    anyhow::ensure!(
+        !base.is_empty(),
+        "managed checkout has no immutable base commit"
+    );
+    for (key, value) in [
+        ("push.default", "current"),
+        ("push.autoSetupRemote", "true"),
+        ("remote.pushDefault", "origin"),
+        ("remote.origin.mirror", "false"),
+        ("mj.baseCommit", base),
+        ("mj.remoteWorkspace", "true"),
+    ] {
+        run(&["config", "--local", "--replace-all", key, value])?;
+    }
+    Ok(())
+}
+
 /// An immutable starting selection for one repository in a bundle. The API
 /// names it `at` and `branch`; the daemon picks the bundle's primary
 /// repository.
