@@ -1129,6 +1129,7 @@ struct FakeBackend {
     diff: Option<String>,
     diff_options: Mutex<Vec<DiffOptions>>,
     file: Option<mj_checkpoint::archive::FetchedPath>,
+    file_pending: bool,
     pushed: Option<PushedBranch>,
     bundle: Option<BundleExport>,
     installation_token: Option<String>,
@@ -1496,6 +1497,9 @@ impl SubagentBackend for FakeBackend {
     ) -> BoxFuture<'_, Result<mj_checkpoint::archive::FetchedPath, ExportError>> {
         Box::pin(async move {
             self.file_paths.lock().unwrap().push((path, mode));
+            if self.file_pending {
+                std::future::pending::<()>().await;
+            }
             self.file
                 .clone()
                 .ok_or_else(|| ExportError::Refused("this session has no live target".into()))
@@ -5050,11 +5054,7 @@ async fn the_file_route_serves_files_and_zipped_directories_with_the_path_they_r
     use mj_checkpoint::archive::{FetchMode, FetchedKind, FetchedPath};
     let fetch = |kind, path: &str, bytes: &[u8]| {
         let backend = Arc::new(FakeBackend {
-            file: Some(FetchedPath {
-                kind,
-                path: path.to_owned(),
-                bytes: bytes.to_vec(),
-            }),
+            file: Some(FetchedPath::from_reader(kind, path.to_owned(), bytes).unwrap()),
             ..FakeBackend::default()
         });
         let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
@@ -5079,12 +5079,66 @@ async fn the_file_route_serves_files_and_zipped_directories_with_the_path_they_r
         response.headers().get(CONTENT_TYPE).unwrap(),
         "application/octet-stream"
     );
+    assert_eq!(response.headers()[axum::http::header::CONTENT_LENGTH], "10");
     assert_eq!(
         decode_fetched_path(response.headers()[FETCHED_PATH_HEADER].as_bytes()).as_deref(),
         Some("/workspace/app/README.md")
     );
     let body = response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(body.as_ref(), b"file bytes");
+
+    let payload = vec![0x83; 256 * 1024];
+    let (large_app, _) = fetch(FetchedKind::File, "/tmp/large.bin", &payload);
+    let response = get(large_app, "/tmp/large.bin").await;
+    assert_eq!(
+        response.headers()[axum::http::header::CONTENT_LENGTH],
+        payload.len().to_string()
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.as_ref(), payload);
+
+    // A slow download must release the server on shutdown, not retain its
+    // remaining payload or keep daemon replacement waiting for a consumer.
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let streaming_backend = Arc::new(FakeBackend {
+        file: Some(
+            FetchedPath::from_reader(
+                FetchedKind::File,
+                "/tmp/large.bin".into(),
+                payload.as_slice(),
+            )
+            .unwrap(),
+        ),
+        shutdown: shutdown.clone(),
+        ..FakeBackend::default()
+    });
+    let (stream_app, ..) = api_app(streaming_backend, |_| {});
+    let response = get(stream_app, "/tmp/large.bin").await;
+    let mut body = response.into_body().into_data_stream();
+    use futures::StreamExt as _;
+    let first = body.next().await.unwrap().unwrap();
+    assert!(first.len() < payload.len());
+    shutdown.cancel();
+    assert!(
+        body.next().await.is_none(),
+        "shutdown must end the stream immediately"
+    );
+
+    // Manual restart has no upgrade gate closure. An interrupted preparation
+    // still tells a CLI GET that it is safe to reconnect and repeat the read.
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let pending_backend = Arc::new(FakeBackend {
+        file_pending: true,
+        shutdown: shutdown.clone(),
+        ..FakeBackend::default()
+    });
+    let (pending_app, ..) = api_app(pending_backend, |_| {});
+    shutdown.cancel();
+    let response = get(pending_app, "/tmp/large.bin").await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let failure: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(failure["code"], DAEMON_HANDOFF_CODE);
 
     // A `..` names a sibling repository in a multi-repo bundle, and an
     // absolute path names a report directory or scratch outside the agent's

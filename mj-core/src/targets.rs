@@ -1460,7 +1460,15 @@ impl PipeCollector {
     /// from the front, the first byte reports the session's start, and the end
     /// of the pipe reports that it ended; the gate settles however the thread
     /// stops.
-    fn spawn_scanning(mut pipe: impl PollablePipe, gate: Option<Arc<StartGate>>) -> Self {
+    fn spawn_scanning(pipe: impl PollablePipe, gate: Option<Arc<StartGate>>) -> Self {
+        Self::spawn_output(pipe, gate, None)
+    }
+
+    fn spawn_output(
+        mut pipe: impl PollablePipe,
+        gate: Option<Arc<StartGate>>,
+        mut output: Option<std::fs::File>,
+    ) -> Self {
         let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let (collected, stopped) = (bytes.clone(), stop.clone());
@@ -1485,9 +1493,19 @@ impl PipeCollector {
                                     if scan.push(&chunk[..count], &mut passed) {
                                         gate.mark_started();
                                     }
-                                    collected.extend_from_slice(&passed);
+                                    if let Some(file) = &mut output {
+                                        file.write_all(&passed)?;
+                                    } else {
+                                        collected.extend_from_slice(&passed);
+                                    }
                                 }
-                                _ => collected.extend_from_slice(&chunk[..count]),
+                                _ => {
+                                    if let Some(file) = &mut output {
+                                        file.write_all(&chunk[..count])?;
+                                    } else {
+                                        collected.extend_from_slice(&chunk[..count]);
+                                    }
+                                }
                             }
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
@@ -1496,14 +1514,21 @@ impl PipeCollector {
                 }
                 Ok(())
             })();
-            if let Some(scan) = &mut scan {
-                passed.clear();
-                scan.finish(&mut passed);
-                collected
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .extend_from_slice(&passed);
-            }
+            let result = result.and_then(|()| {
+                if let Some(scan) = &mut scan {
+                    passed.clear();
+                    scan.finish(&mut passed);
+                    if let Some(file) = &mut output {
+                        file.write_all(&passed)?;
+                    } else {
+                        collected
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .extend_from_slice(&passed);
+                    }
+                }
+                Ok(())
+            });
             if let Some(gate) = &gate {
                 gate.mark_ended();
             }
@@ -1583,6 +1608,47 @@ impl CancellableProcessExecutor {
         command: &CommandSpec,
         gate: Option<&Arc<StartGate>>,
     ) -> Result<CommandOutput> {
+        self.run_once_output(command, gate, None)
+    }
+
+    /// Stream stdout into a file, retaining the shared cancellation, process-group,
+    /// and SSH refusal/start-marker semantics. Returned stdout is empty.
+    pub fn execute_to_file(
+        &self,
+        command: &CommandSpec,
+        output: &std::fs::File,
+    ) -> Result<CommandOutput> {
+        use std::io::{Seek, SeekFrom};
+        ensure!(
+            command.sensitive_stdin.is_none(),
+            "file-output commands cannot carry buffered stdin"
+        );
+        crate::runtime::off_async_worker(|| {
+            let _running = BlockingOperation::command(command);
+            self.describe_cancellation(
+                command,
+                with_ssh_refusal_retry(
+                    command,
+                    self,
+                    Some(&|| self.is_cancelled()),
+                    |command, gate| {
+                        let mut file = output.try_clone().context("clone command output file")?;
+                        file.set_len(0).context("reset command output file")?;
+                        file.seek(SeekFrom::Start(0))
+                            .context("rewind command output file")?;
+                        self.run_once_output(command, gate, Some(file))
+                    },
+                ),
+            )
+        })
+    }
+
+    fn run_once_output(
+        &self,
+        command: &CommandSpec,
+        gate: Option<&Arc<StartGate>>,
+        output: Option<std::fs::File>,
+    ) -> Result<CommandOutput> {
         let mut process = cancellable_command(command);
         #[cfg(unix)]
         let _foreground = if self.foreground_terminal {
@@ -1613,7 +1679,7 @@ impl CancellableProcessExecutor {
             .then(|| crate::subprocess::ProcessGroupGuard::new(Some(child.id())));
         let stdout = child.stdout.take().context("command stdout missing")?;
         let stderr = child.stderr.take().context("command stderr missing")?;
-        let stdout_reader = PipeCollector::spawn_scanning(stdout, gate.cloned());
+        let stdout_reader = PipeCollector::spawn_output(stdout, gate.cloned(), output);
         let stderr_reader = PipeCollector::spawn(stderr);
         let mut status = None;
         let mut exited_at = None;
@@ -3774,6 +3840,67 @@ mod executor_tests {
             assert_eq!(fake.attempts(), 3, "cancellable: {cancellable}");
         }
         set_ssh_connection_sharing_for_test(None);
+    }
+
+    #[test]
+    fn file_output_preserves_large_ssh_stdout_across_refusals_and_cancels() {
+        let _guard = ssh::SHARING_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _fast_retries = FastRetries::new();
+        set_ssh_connection_sharing_for_test(Some(SshSharingForTest::Disabled));
+        let fake = fake_ssh::FakeSsh::new(&["refuse-session", "refuse-auth"]);
+        let command = fake.command(&[
+            "sh",
+            "-c",
+            "head -c 307200 /dev/zero; printf diagnostic >&2",
+        ]);
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"old output that must be truncated")
+            .unwrap();
+        let output = CancellableProcessExecutor::new(Default::default())
+            .execute_to_file(&command, &file)
+            .unwrap();
+        assert_eq!(output.status, 0);
+        assert!(output.stdout.is_empty());
+        assert_eq!(output.stderr, b"diagnostic");
+        assert_eq!(file.metadata().unwrap().len(), 307200);
+        assert_eq!(fake.attempts(), 3);
+        use std::io::{Seek as _, SeekFrom};
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let mut received = Vec::new();
+        file.read_to_end(&mut received).unwrap();
+        assert_eq!(received, vec![0; 307200]);
+        set_ssh_connection_sharing_for_test(None);
+
+        let token = tokio_util::sync::CancellationToken::new();
+        let executor =
+            CancellableProcessExecutor::new(Default::default()).with_cancellation(token.clone());
+        let file = tempfile::tempfile().unwrap();
+        let probe = file.try_clone().unwrap();
+        let pending = std::thread::spawn(move || {
+            executor.execute_to_file(
+                &CommandSpec::new("sh", ["-c", "head -c 307200 /dev/zero; sleep 600"]),
+                &file,
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while probe.metadata().unwrap().len() < 307200 {
+            assert!(
+                Instant::now() < deadline,
+                "child did not produce its output"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        token.cancel();
+        assert!(
+            pending
+                .join()
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("cancelled")
+        );
     }
 
     /// `scp` exits 1, not ssh's 255, while relaying the refusal of the `ssh` it

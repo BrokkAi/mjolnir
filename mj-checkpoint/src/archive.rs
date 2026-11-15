@@ -495,6 +495,7 @@ pub fn verify_archive_streaming_cancellable(
         len: file.metadata()?.len(),
         file: std::sync::Arc::new(file),
         position: 0,
+        start: 0,
         cancelled: Some(cancelled),
     };
     Ok(VerifiedArchiveMetadata {
@@ -1392,6 +1393,7 @@ fn open_archive_cancellable(
         file: std::sync::Arc::new(file),
         len,
         position: 0,
+        start: 0,
         cancelled,
     })
     .context("open Mjolnir archive ZIP")
@@ -1405,6 +1407,7 @@ struct ArchiveFile {
     file: std::sync::Arc<File>,
     len: u64,
     position: u64,
+    start: u64,
 }
 
 impl Read for ArchiveFile {
@@ -1416,10 +1419,18 @@ impl Read for ArchiveFile {
         {
             return Err(std::io::Error::other("archive verification cancelled"));
         }
+        let count = usize::try_from(self.len.saturating_sub(self.position))
+            .unwrap_or(usize::MAX)
+            .min(buf.len());
+        let offset = self
+            .start
+            .checked_add(self.position)
+            .ok_or_else(|| std::io::Error::other("file read offset overflow"))?;
         #[cfg(unix)]
-        let read = std::os::unix::fs::FileExt::read_at(&*self.file, buf, self.position)?;
+        let read = std::os::unix::fs::FileExt::read_at(&*self.file, &mut buf[..count], offset)?;
         #[cfg(windows)]
-        let read = std::os::windows::fs::FileExt::seek_read(&*self.file, buf, self.position)?;
+        let read =
+            std::os::windows::fs::FileExt::seek_read(&*self.file, &mut buf[..count], offset)?;
         self.position += read as u64;
         Ok(read)
     }

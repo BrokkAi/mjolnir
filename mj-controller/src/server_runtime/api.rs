@@ -31,6 +31,7 @@ use mj_checkpoint::archive::{FetchMode, FetchedPath};
 use mj_client::session::{BoxFuture, SessionControl, SessionHandle, new_command_id};
 use mj_core::relay::RelayCommand;
 
+mod fetch_transfer;
 mod oracle;
 mod subagent_input;
 
@@ -1024,32 +1025,18 @@ impl ApiBackend {
                     .map_err(fetch_error)?;
                 if *ls {
                     let listing: mj_checkpoint::archive::SessionListing =
-                        serde_json::from_slice(&fetched.bytes).context("decode the listing")?;
+                        blocking("decode fetched listing", move || {
+                            serde_json::from_reader(fetched.reader()).context("decode the listing")
+                        })
+                        .await?;
                     return Ok(serde_json::to_value(listing)?);
                 }
                 self.require_live_target(parent_session_id)
                     .map_err(fetch_error)?;
-                let layout = export_layout(parent_session_id.to_owned())
-                    .await
-                    .map_err(fetch_error)?;
-                let mut arguments = vec![
-                    "store-fetch".to_owned(),
-                    "--session".to_owned(),
-                    session_id.clone(),
-                    "--source".to_owned(),
-                    fetched.path,
-                    "--length".to_owned(),
-                    fetched.bytes.len().to_string(),
-                ];
-                if fetched.kind == mj_checkpoint::archive::FetchedKind::Directory {
-                    arguments.push("--directory".to_owned());
-                }
-                let output = worker_command_with_input(
-                    layout,
+                let output = fetch_transfer::store(
                     parent_session_id.to_owned(),
-                    arguments,
-                    "session fetched file storage",
-                    Some(fetched.bytes),
+                    session_id.clone(),
+                    fetched,
                 )
                 .await
                 .map_err(fetch_error)?;
@@ -3182,13 +3169,7 @@ async fn worker_command_with_input(
     input: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, ExportError> {
     let output: CommandOutput = export_blocking(purpose, move || {
-        let binary = format!(
-            "{}/hel",
-            targets::worker_root(&layout.backend, &session_id)?
-        );
-        let mut argv = vec![binary, "worker".to_owned()];
-        argv.extend(arguments);
-        let mut command = targets::command_on_locator(&layout.backend, &session_id, argv, purpose)?;
+        let mut command = worker_command_spec(layout, &session_id, arguments, purpose)?;
         if let Some(input) = input {
             command = command.with_sensitive_stdin(input);
         }
@@ -3196,6 +3177,18 @@ async fn worker_command_with_input(
     })
     .await?;
     worker_output(output, purpose)
+}
+
+fn worker_command_spec(
+    layout: SessionExportLayout,
+    session: &str,
+    arguments: Vec<String>,
+    purpose: &'static str,
+) -> Result<mj_core::targets::CommandSpec> {
+    let binary = format!("{}/hel", targets::worker_root(&layout.backend, session)?);
+    let mut argv = vec![binary, "worker".into()];
+    argv.extend(arguments);
+    targets::command_on_locator(&layout.backend, session, argv, purpose)
 }
 
 fn worker_output(output: CommandOutput, purpose: &str) -> Result<Vec<u8>, ExportError> {
@@ -3877,11 +3870,7 @@ impl SubagentBackend for ApiBackend {
     ) -> BoxFuture<'_, std::result::Result<FetchedPath, ExportError>> {
         Box::pin(async move {
             self.require_live_target(&session_id)?;
-            let layout = export_layout(session_id.clone()).await?;
-            let arguments = fetch_arguments(&layout, &path, mode)?;
-            let output =
-                worker_command(layout, session_id, arguments, "session file fetch").await?;
-            FetchedPath::decode(output).map_err(ExportError::Failed)
+            fetch_transfer::read(session_id, path, mode).await
         })
     }
 

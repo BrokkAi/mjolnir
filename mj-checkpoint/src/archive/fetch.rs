@@ -2,8 +2,9 @@ use super::SessionExportError;
 use anyhow::{Context, anyhow, ensure};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Cursor;
+use std::io::{BufRead, Read, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use zip::CompressionMethod;
 use zip::write::SimpleFileOptions;
 
@@ -61,12 +62,14 @@ pub enum ListedKind {
 }
 
 /// One path read from a session's target by [`fetch_session_path`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct FetchedPath {
     pub kind: FetchedKind,
     /// The path on the target after symlinks were resolved.
     pub path: String,
-    pub bytes: Vec<u8>,
+    payload: Arc<fs::File>,
+    length: u64,
+    offset: u64,
 }
 
 /// A fetched copy on the calling machine, without its content in the response.
@@ -75,81 +78,187 @@ pub struct SavedFetch {
     pub path: PathBuf,
     pub kind: FetchedKind,
     pub source: String,
-    pub bytes: usize,
+    pub bytes: u64,
 }
 
 #[derive(Serialize, Deserialize)]
 struct FetchedHeader {
     kind: FetchedKind,
     path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    length: Option<u64>,
 }
 
 impl FetchedPath {
     /// Keep the source's whole path below `<temp>/mjolnir/<session>` so equal
     /// filenames from different paths or sessions cannot overwrite each other.
     pub fn local_path(&self, temp: &Path, session: &str) -> anyhow::Result<PathBuf> {
-        let mut components = Path::new(session).components();
-        ensure!(
-            matches!(
-                (components.next(), components.next()),
-                (Some(std::path::Component::Normal(_)), None)
-            ),
-            "session id {session:?} cannot name a directory"
-        );
-        let mut local = temp.join("mjolnir").join(session);
-        let mut named = false;
-        for component in Path::new(&self.path).components() {
-            if let std::path::Component::Normal(part) = component {
-                local.push(part);
-                named = true;
-            }
+        local_fetch_path(self.kind, &self.path, temp, session)
+    }
+
+    pub fn from_file(kind: FetchedKind, path: String, file: fs::File) -> anyhow::Result<Self> {
+        let length = file.metadata().context("inspect fetched payload")?.len();
+        Ok(Self {
+            kind,
+            path,
+            payload: Arc::new(file),
+            length,
+            offset: 0,
+        })
+    }
+
+    pub fn from_reader(
+        kind: FetchedKind,
+        path: String,
+        mut reader: impl Read,
+    ) -> anyhow::Result<Self> {
+        let mut file = tempfile::tempfile().context("create fetch spool")?;
+        std::io::copy(&mut reader, &mut file).context("spool fetched payload")?;
+        Self::from_file(kind, path, file)
+    }
+
+    pub fn len(&self) -> u64 {
+        self.length
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.length == 0
+    }
+
+    /// Readers have independent positions even when their file handle is shared.
+    pub fn reader(&self) -> impl Read + Seek + Send + 'static {
+        super::ArchiveFile {
+            file: self.payload.clone(),
+            len: self.length,
+            position: 0,
+            start: self.offset,
+            cancelled: None,
         }
-        ensure!(named, "the target answered no path for the fetch");
-        if self.kind == FetchedKind::Directory {
-            let mut name = local.file_name().unwrap_or_default().to_os_string();
-            name.push(".zip");
-            local.set_file_name(name);
-        }
-        Ok(local)
     }
 
     pub fn save(&self, temp: &Path, session: &str) -> anyhow::Result<SavedFetch> {
-        let path = self.local_path(temp, session)?;
-        mj_core::config::atomic_write(&path, &self.bytes)?;
+        Self::store(
+            self.kind,
+            self.path.clone(),
+            temp,
+            session,
+            self.length,
+            self.reader(),
+        )
+    }
+
+    /// Stage on the destination filesystem and publish only a complete transfer.
+    pub fn store(
+        kind: FetchedKind,
+        source: String,
+        temp: &Path,
+        session: &str,
+        expected: u64,
+        mut reader: impl Read,
+    ) -> anyhow::Result<SavedFetch> {
+        let path = local_fetch_path(kind, &source, temp, session)?;
+        let parent = path.parent().context("fetch destination has no parent")?;
+        fs::create_dir_all(parent).context("create fetch destination")?;
+        let mut staged =
+            tempfile::NamedTempFile::new_in(parent).context("stage fetch destination")?;
+        let received = std::io::copy(&mut reader, &mut staged).context("write fetched payload")?;
+        ensure!(
+            received == expected,
+            "incomplete fetch transfer: expected {expected} bytes, received {received}"
+        );
+        mj_core::test_hooks::reach_test_hook("fetch_destination_ready")?;
+        staged
+            .as_file()
+            .sync_all()
+            .context("sync fetched payload")?;
+        staged.persist(&path).context("publish fetched payload")?;
         Ok(SavedFetch {
             path,
-            kind: self.kind,
-            source: self.path.clone(),
-            bytes: self.bytes.len(),
+            kind,
+            source,
+            bytes: received,
         })
     }
 
-    /// The worker's standard output: one JSON line naming the kind and the
-    /// resolved path, then the bytes.
-    pub fn encode(&self) -> anyhow::Result<Vec<u8>> {
-        let mut output = serde_json::to_vec(&FetchedHeader {
-            kind: self.kind,
-            path: self.path.clone(),
-        })?;
-        output.push(b'\n');
-        output.extend_from_slice(&self.bytes);
-        Ok(output)
+    /// Metadata framing is unchanged: a JSON line followed by payload bytes.
+    pub fn write_to(&self, mut writer: impl Write) -> anyhow::Result<()> {
+        serde_json::to_writer(
+            &mut writer,
+            &FetchedHeader {
+                kind: self.kind,
+                path: self.path.clone(),
+                length: Some(self.length),
+            },
+        )?;
+        writer.write_all(b"\n")?;
+        std::io::copy(&mut self.reader(), &mut writer).context("stream fetched payload")?;
+        writer.flush().context("flush fetched payload")
     }
 
-    pub fn decode(mut output: Vec<u8>) -> anyhow::Result<Self> {
-        let end = output
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .context("the fetched path has no header line")?;
+    /// Keep the wire payload in its original anonymous file. The metadata line
+    /// is a prefix, not another copy of the artifact to allocate or rewrite.
+    pub fn read_from(file: fs::File) -> anyhow::Result<Self> {
+        let mut reader = std::io::BufReader::new(file);
+        reader.rewind()?;
+        let mut line = String::new();
+        ensure!(
+            reader.read_line(&mut line)? != 0,
+            "the fetched path has no header line"
+        );
         let header: FetchedHeader =
-            serde_json::from_slice(&output[..end]).context("decode the fetched path header")?;
-        let bytes = output.split_off(end + 1);
+            serde_json::from_str(&line).context("decode fetched path header")?;
+        let offset = reader.stream_position()?;
+        let file = reader.into_inner();
+        let length = file
+            .metadata()?
+            .len()
+            .checked_sub(offset)
+            .context("fetch header exceeds payload")?;
+        if let Some(expected) = header.length {
+            ensure!(
+                length == expected,
+                "incomplete fetch transfer: expected {expected} bytes, received {length}"
+            );
+        }
         Ok(Self {
             kind: header.kind,
             path: header.path,
-            bytes,
+            payload: Arc::new(file),
+            length,
+            offset,
         })
     }
+}
+
+fn local_fetch_path(
+    kind: FetchedKind,
+    source: &str,
+    temp: &Path,
+    session: &str,
+) -> anyhow::Result<PathBuf> {
+    let mut components = Path::new(session).components();
+    ensure!(
+        matches!(
+            (components.next(), components.next()),
+            (Some(std::path::Component::Normal(_)), None)
+        ),
+        "session id {session:?} cannot name a directory"
+    );
+    let mut local = temp.join("mjolnir").join(session);
+    let mut named = false;
+    for component in Path::new(source).components() {
+        if let std::path::Component::Normal(part) = component {
+            local.push(part);
+            named = true;
+        }
+    }
+    ensure!(named, "the target answered no path for the fetch");
+    if kind == FetchedKind::Directory {
+        let mut name = local.file_name().unwrap_or_default().to_os_string();
+        name.push(".zip");
+        local.set_file_name(name);
+    }
+    Ok(local)
 }
 
 /// Read a file, zip a directory, or list either, when it lies inside one of
@@ -216,37 +325,31 @@ pub fn fetch_session_path(
     let metadata =
         fs::metadata(&resolved).with_context(|| format!("inspect {}", resolved.display()))?;
     let display = resolved.to_string_lossy().into_owned();
-    if mode == FetchMode::Listing {
-        let bytes = list_path(&resolved, &metadata)?;
-        return Ok(FetchedPath {
-            kind: FetchedKind::Listing,
-            path: display,
-            bytes,
-        });
-    }
-    if metadata.is_file() {
-        let bytes = fs::read(&resolved).with_context(|| format!("read {display}"))?;
-        return Ok(FetchedPath {
-            kind: FetchedKind::File,
-            path: display,
-            bytes,
-        });
-    }
-    if !metadata.is_dir() {
+    let mut payload = tempfile::tempfile().context("create fetch spool")?;
+    let kind = if mode == FetchMode::Listing {
+        list_path(&resolved, &metadata, &mut payload)?;
+        FetchedKind::Listing
+    } else if metadata.is_file() {
+        let mut file = fs::File::open(&resolved).with_context(|| format!("open {display}"))?;
+        std::io::copy(&mut file, &mut payload).with_context(|| format!("read {display}"))?;
+        FetchedKind::File
+    } else if metadata.is_dir() {
+        zip_directory(&resolved, &mut payload)?;
+        FetchedKind::Directory
+    } else {
         return Err(SessionExportError::Refused(format!(
             "{display} is neither a regular file nor a directory"
         )));
-    }
-    let bytes = zip_directory(&resolved)?;
-    Ok(FetchedPath {
-        kind: FetchedKind::Directory,
-        path: display,
-        bytes,
-    })
+    };
+    Ok(FetchedPath::from_file(kind, display, payload)?)
 }
 
 /// A [`SessionListing`] of `path` as JSON.
-fn list_path(path: &Path, metadata: &fs::Metadata) -> Result<Vec<u8>, SessionExportError> {
+fn list_path(
+    path: &Path,
+    metadata: &fs::Metadata,
+    writer: impl Write,
+) -> Result<(), SessionExportError> {
     let display = path.to_string_lossy().into_owned();
     let entries = if metadata.is_dir() {
         let mut names = fs::read_dir(path)
@@ -271,12 +374,15 @@ fn list_path(path: &Path, metadata: &fs::Metadata) -> Result<Vec<u8>, SessionExp
             .unwrap_or_else(|| display.clone());
         vec![listed_entry(path, name, metadata)?]
     };
-    let bytes = serde_json::to_vec(&SessionListing {
-        path: display.clone(),
-        entries,
-    })
+    serde_json::to_writer(
+        writer,
+        &SessionListing {
+            path: display.clone(),
+            entries,
+        },
+    )
     .context("encode the listing")?;
-    Ok(bytes)
+    Ok(())
 }
 
 fn listed_entry(path: &Path, name: String, metadata: &fs::Metadata) -> anyhow::Result<ListedEntry> {
@@ -347,7 +453,7 @@ fn collect_entries(
     Ok(())
 }
 
-fn zip_directory(directory: &Path) -> Result<Vec<u8>, SessionExportError> {
+fn zip_directory(directory: &Path, output: impl Write + Seek) -> Result<(), SessionExportError> {
     let name = directory
         .file_name()
         .map(PathBuf::from)
@@ -360,7 +466,7 @@ fn zip_directory(directory: &Path) -> Result<Vec<u8>, SessionExportError> {
             .into()
     };
     let parent = directory.parent().unwrap_or(directory);
-    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let mut writer = zip::ZipWriter::new(output);
     for (entry_name, entry) in &entries {
         // Zip names use `/` whatever the target's separator is.
         let zip_name = entry_name
@@ -407,24 +513,21 @@ fn zip_directory(directory: &Path) -> Result<Vec<u8>, SessionExportError> {
             }
         }
     }
-    let buffer = writer.finish().map_err(|error| failed(error, directory))?;
-    Ok(buffer.into_inner())
+    writer.finish().map_err(|error| failed(error, directory))?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read as _;
 
     #[test]
     fn a_fetched_path_lands_under_its_session_and_cannot_leave_it() {
         let fetched_location =
             |temp: &Path, session: &str, fetched: &FetchedPath| fetched.local_path(temp, session);
         let temp = PathBuf::from("/scratch");
-        let fetched = |kind, path: &str| FetchedPath {
-            kind,
-            path: path.to_owned(),
-            bytes: Vec::new(),
+        let fetched = |kind, path: &str| {
+            FetchedPath::from_reader(kind, path.to_owned(), std::io::empty()).unwrap()
         };
         // Two children's reports share a name; the target path keeps them apart.
         assert_eq!(
@@ -510,12 +613,13 @@ mod tests {
 
         let fetched = fetch_session_path(&evidence, &roots, false, FetchMode::Content).unwrap();
         assert_eq!(fetched.kind, FetchedKind::Directory);
-        assert_eq!(
-            fetched,
-            FetchedPath::decode(fetched.encode().unwrap()).unwrap(),
-            "the worker's framing carries the archive intact"
-        );
-        let mut archive = zip::ZipArchive::new(Cursor::new(fetched.bytes)).unwrap();
+        let mut wire = tempfile::tempfile().unwrap();
+        fetched.write_to(&mut wire).unwrap();
+        wire.rewind().unwrap();
+        let decoded = FetchedPath::read_from(wire).unwrap();
+        assert_eq!(decoded.kind, fetched.kind);
+        assert_eq!(decoded.path, fetched.path);
+        let mut archive = zip::ZipArchive::new(decoded.reader()).unwrap();
         let names: Vec<_> = archive.file_names().map(str::to_owned).collect();
         let mut sorted = names.clone();
         sorted.sort();
@@ -565,21 +669,32 @@ mod tests {
         fs::write(&file, &noise).unwrap();
         let roots = [workspace.path().to_path_buf()];
         let fetched = fetch_session_path(&file, &roots, false, FetchMode::Content).unwrap();
-        assert_eq!(
-            FetchedPath::decode(fetched.encode().unwrap())
-                .unwrap()
-                .bytes,
-            noise
-        );
+        let mut restored = Vec::new();
+        fetched.reader().read_to_end(&mut restored).unwrap();
+        assert_eq!(restored, noise);
         // This compresses well but exceeds the former directory input limit.
         fs::File::create(directory.join("zeros.bin"))
             .unwrap()
             .set_len(129 * 1024 * 1024)
             .unwrap();
         let fetched = fetch_session_path(&directory, &roots, false, FetchMode::Content).unwrap();
-        assert!(fetched.bytes.len() > 16 * 1024 * 1024);
-        let decoded = FetchedPath::decode(fetched.encode().unwrap()).unwrap();
-        let mut archive = zip::ZipArchive::new(Cursor::new(decoded.bytes)).unwrap();
+        assert!(fetched.len() > 16 * 1024 * 1024);
+        let mut wire = tempfile::tempfile().unwrap();
+        fetched.write_to(&mut wire).unwrap();
+        wire.rewind().unwrap();
+        let truncated = wire.try_clone().unwrap();
+        let decoded = FetchedPath::read_from(wire).unwrap();
+        let mut first = decoded.reader();
+        let mut second = decoded.reader();
+        let mut prefix = [0; 128 * 1024];
+        let mut other_prefix = [0; 128 * 1024];
+        first.read_exact(&mut prefix).unwrap();
+        second.read_exact(&mut other_prefix).unwrap();
+        assert_eq!(
+            prefix, other_prefix,
+            "readers must not share the spool cursor"
+        );
+        let mut archive = zip::ZipArchive::new(decoded.reader()).unwrap();
         let mut restored = Vec::new();
         archive
             .by_name("probes/noise.bin")
@@ -593,5 +708,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bytes, 129 * 1024 * 1024);
+        truncated
+            .set_len(truncated.metadata().unwrap().len() - 1)
+            .unwrap();
+        assert!(
+            FetchedPath::read_from(truncated)
+                .unwrap_err()
+                .to_string()
+                .contains("incomplete fetch transfer")
+        );
     }
 }

@@ -737,7 +737,10 @@ For example, `mj fetch --session d8443f17… --path /tmp/rust-veto-cf` prints
 `/tmp/mjolnir/d8443f17…/tmp/rust-veto-cf.zip`. With `--json` it prints the
 local `path`, the `kind` (`file` or `directory`), the `source` path on the
 target, and the `bytes` written. `--stdout` writes the file, or the zip
-archive, to standard output instead.
+archive, to standard output instead. File and archive payloads pass through
+temporary files and I/O chunks rather than whole-payload memory buffers. If
+the daemon restarts during a download, the CLI reconnects and retries it
+automatically; a partial download is never published or written to stdout.
 
 `mj fetch --ls` lists the path on standard output instead of copying it: a
 directory's entries in name order, or the file itself. Each line gives the size

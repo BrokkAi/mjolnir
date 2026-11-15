@@ -692,11 +692,10 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             } else {
                 mj_checkpoint::archive::FetchMode::Content
             };
-            write_stdout(
-                &mj_checkpoint::archive::fetch_session_path(&path, &roots, temp, mode)
-                    .map_err(export_error)?
-                    .encode()?,
-            )
+            let fetched = mj_checkpoint::archive::fetch_session_path(&path, &roots, temp, mode)
+                .map_err(export_error)?;
+            mj_core::test_hooks::reach_test_hook("fetch_source_ready")?;
+            fetched.write_to(std::io::stdout().lock())
         }
         WorkerCommand::StoreFetch {
             session,
@@ -704,26 +703,20 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             directory,
             length,
         } => {
-            let mut bytes = Vec::new();
-            std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut bytes)
-                .context("read incoming fetch")?;
-            anyhow::ensure!(
-                bytes.len() == length,
-                "incomplete fetch transfer: expected {length} bytes, received {}",
-                bytes.len()
-            );
-            let fetched = mj_checkpoint::archive::FetchedPath {
-                kind: if directory {
-                    mj_checkpoint::archive::FetchedKind::Directory
-                } else {
-                    mj_checkpoint::archive::FetchedKind::File
-                },
-                path: source,
-                bytes,
+            let kind = if directory {
+                mj_checkpoint::archive::FetchedKind::Directory
+            } else {
+                mj_checkpoint::archive::FetchedKind::File
             };
-            write_stdout(&serde_json::to_vec(
-                &fetched.save(&std::env::temp_dir(), &session)?,
-            )?)
+            let saved = mj_checkpoint::archive::FetchedPath::store(
+                kind,
+                source,
+                &std::env::temp_dir(),
+                &session,
+                length as u64,
+                std::io::stdin().lock(),
+            )?;
+            write_stdout(&serde_json::to_vec(&saved)?)
         }
         WorkerCommand::WriteFile {
             root,
@@ -996,7 +989,7 @@ mod tests {
                 .starts_with(root.path().join("mjolnir").join(SESSION))
         );
         assert_eq!(saved.source, SOURCE);
-        assert_eq!(saved.bytes, LENGTH);
+        assert_eq!(saved.bytes, LENGTH as u64);
         assert_eq!(std::fs::read(&saved.path).unwrap(), bytes);
         let truncated = command.with_sensitive_stdin(vec![0; 128 * 1024]);
         let output = execute(&truncated);
