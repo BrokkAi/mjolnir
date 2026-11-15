@@ -41,7 +41,12 @@ fn write_session(kind: HarnessKind, home: &Path, cwd: &Path) -> PathBuf {
         ),
         HarnessKind::Muse => {
             let path = home
-                .join(".data/muse/sessions/2026/09/08")
+                .join(".data")
+                .join("muse")
+                .join("sessions")
+                .join("2026")
+                .join("09")
+                .join("08")
                 .join(MUSE_ID)
                 .join("session.jsonl");
             fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -49,7 +54,9 @@ fn write_session(kind: HarnessKind, home: &Path, cwd: &Path) -> PathBuf {
             path
         }
         HarnessKind::Dsh => {
-            let path = home.join("sessions/90c30a64-54f7-4261-90f1-e75b1c14311c.json");
+            let path = home
+                .join("sessions")
+                .join("90c30a64-54f7-4261-90f1-e75b1c14311c.json");
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(
                 &path,
@@ -124,6 +131,7 @@ fn muse_native_search_and_import_agree_on_the_xdg_root() {
 }
 
 // Hard-won: cff4a06e6: canonical Grok/Muse roots changed existing keys beneath symlinked homes.
+// Hard-won: nightly 43732928402: fixture keys used mixed separators on Windows.
 #[test]
 fn native_profiles_search_and_reconcile_only_their_own_home() {
     let _held = tags::testing::lock();
