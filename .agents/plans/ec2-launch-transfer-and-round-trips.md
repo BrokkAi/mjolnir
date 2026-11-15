@@ -1,0 +1,183 @@
+# Faster SSH-host launches: send profile content once per host and batch launch commands
+
+This ExecPlan is a living document. The sections `Progress`, `Surprises & Discoveries`, `Decision Log`, and `Outcomes & Retrospective` must be kept up to date as work proceeds. It follows `.agents/PLANS.md` from the repository root. Tracking issue: #1541.
+
+
+## Purpose / Big Picture
+
+A Mjolnir session on an SSH host (an EC2 machine registered as an `ssh-podman` target, or any `ssh-bare` target) should start in well under a minute even when several sessions start on the same host at once. Today it does not. On 2026-11-15 four Claude sessions started on one EC2 host within 30 seconds, and session `2b0ac47bdab7045c3eb55f39c82acbfa` took 211 seconds. Two costs dominated, both visible in the daemon log `~/.local/share/mjolnir/logs/mj-daemon-20261115T051028.347Z-3559993.log`.
+
+First, every session uploads its whole harness profile (the set of files a harness such as Claude Code reads from its configuration directory) as one compressed archive. For Claude that archive is about 10.7 MB, and about 10.0 MB of it is the `plugins/` directory, which is the same for every session that uses the same profile. Four concurrent uploads took 62 to 87 seconds each and filled the controller's outbound link.
+
+Second, after the upload the launch runs about 69 separate remote commands, one after another. Each normally takes about 0.2 seconds. While the link was full, each took 2.5 to 5 seconds, which cost about 130 seconds.
+
+After this change, the controller sends each distinct profile file to a host once, and later sessions on that host reuse the stored copy. The launch also issues far fewer remote commands, because commands that do not depend on each other's results run as one remote script. To see it working, start four sessions on one EC2 host at the same time. The daemon log should show that only the first session sends plugin content. It should also show fewer `session command stage finished` records per launch, and a much shorter `provision session` phase.
+
+
+## Progress
+
+- [x] (2026-11-15 06:10Z) Diagnosed the incident from the daemon log and mapped both areas with read-only child investigations. Findings: `.mj/agents/98f62e22782823df6b3d6d3e298d2000/findings.md` (profile archive) and `.mj/agents/5eb1525f3de8aadc518093a8507a917f/findings.md` (round trips). These are local, uncommitted report directories; this plan repeats every fact it relies on.
+- [ ] Milestone 1: host profile content store (send each file once per host).
+- [ ] Milestone 2: shared step-script helper, then batch the identified command groups.
+- [ ] Milestone 3: live check on a small EC2 host from an isolated instance; record timings here.
+
+
+## Surprises & Discoveries
+
+- Observation: the four sessions each copying the worker binary into their containers was not repeated host uploads. Each container has its own worker store at `/var/lib/hel/workers/worker-binaries`, and all four reused the host's transport cache. The two `stage replacement Mjolnir worker` records per session are an SSH `true` followed by `podman cp`, and the `true` does nothing.
+  Evidence: `mj-controller/src/controller/worker_binary/store.rs:7-24` (store and gate identity include the container), `upgrade.rs:683-693` (the `true` is chosen when `remote_source` is set).
+- Observation: Claude writes into its own `plugins/` directory (marketplace metadata, directory cache). A single shared, writable plugin directory would therefore share mutable state between sessions, and a read-only mount would break Claude's writes.
+  Evidence: strings in the pinned Claude Code 2.1.323 binary, saved by the profile mapper in `claude-pinned-plugin-evidence.txt`.
+- Observation: the per-profile plugin trees differ between profiles (`~/.claude`, `~/.claude2`, … each have a distinct digest), but they hold mostly the same marketplace files at different versions. Storing content per file, not per tree, lets different profiles and later marketplace updates reuse most stored files.
+- Observation: two of the launch's Git records report `succeeded=false` but are expected probes: a missing fresh-checkout marker (status 1) and an absent push refspec (status 5). `daemon/support.rs:134` treats only status 0 as success in the log.
+
+
+## Decision Log
+
+- Decision: change only how profile bytes reach the host; each session still receives a private, writable copy of its whole profile.
+  Rationale: Claude writes into `plugins/`, and Resume, Move and profile refresh all delete and reinstall the profile directory (`controller/resume.rs:811-818`, `worker_binary/install.rs:1043-1093`). Sharing the final tree would touch all of those flows. Sending bytes once per host removes the measured bottleneck and keeps the session's files exactly as they are today. The worker binary store's host transport cache (`store.rs:582-656`) already works this way.
+  Date/Author: 2026-11-15, parent session.
+- Decision: store content per file, keyed by its SHA-256 digest, not per directory tree.
+  Rationale: tree digests differ between profiles and change on every marketplace refresh; per-file digests are shared across both.
+  Date/Author: 2026-11-15, parent session.
+- Decision: only harness-declared shared content trees go into the host store (for Claude, `plugins/` and `skills/`). Credentials, settings, native configuration, instructions, hooks and project memory stay in the per-session archive, exactly as today.
+  Rationale: the store outlives the session. Secrets must not stay on the host after the session's own copy is gone. The shared trees are about 99% of the bytes, so nothing is lost by excluding the small private files. Mark the shared entries in the existing allowlist table in `mj-controller/src/controller/worker_binary/harness.rs:161-205`. Do not create a second list.
+  Date/Author: 2026-11-15, parent session.
+- Decision: the store does not mount, symlink or hardlink into a session's live profile. Hardlinks are used only inside the host staging directory, which the existing install steps copy from and then delete.
+  Rationale: the session never shares an inode with the store, so a write by the harness cannot change stored content. Garbage collection can then decide by age alone.
+  Date/Author: 2026-11-15, parent session.
+- Decision: serialize the "which digests are missing, then upload them" decision per host with the existing daemon-local store gate (`store_gate` in `store.rs:33`), keyed by the host store path and an `SshBare` locator for the host (as `transfer_binary` does). Across daemons, publication converges through atomic rename.
+  Rationale: the incident was concurrent sessions sending the same bytes. Without one decision point per host, each session would see the same digests missing and upload them in parallel.
+  Date/Author: 2026-11-15, parent session.
+- Decision: batch only commands whose inputs are known before the batch starts. Commands whose output feeds a local decision keep that decision local. They are batched only where the decision can be returned as a structured result without moving the state machine into shell.
+  Rationale: the round-trip mapper showed that worker linking, mbx inspection and Git default-branch selection are state machines with distinct failure policies. Concatenating them into one `set -e` script would lose those distinctions.
+  Date/Author: 2026-11-15, parent session.
+- Decision: the late mbx configuration inspection reuses the existing resolution owner (`RESOLUTIONS` in `mj-controller/src/controller/mbx.rs:38`, `:102-156`) instead of calling `inspect_host` directly (`:392`). Do not add another cache.
+  Rationale: one owner per fact (AGENTS.md concurrency rule). The duplicate native-version read and host inspection come from bypassing that owner.
+  Date/Author: 2026-11-15, parent session.
+
+
+## Outcomes & Retrospective
+
+(To be written at milestones.)
+
+
+## Context and Orientation
+
+The daemon (`mj daemon-run`, crate `mj-controller`) creates sessions. A session runs a worker process (crate `mj-worker`) next to a harness (the coding agent CLI, such as Claude Code). A target is where the worker runs. An `ssh-podman` target is a remote Linux host reached over SSH, where each session gets its own Podman container. EC2 machines created with `mj ec2 create` are registered as `ssh-podman` targets. An `ssh-bare` target runs the worker directly on a remote host, without a container. The controller is the machine running the daemon.
+
+Every remote command is a `CommandSpec` (in `mj-core/src/targets.rs`) with a `purpose` text and a provisioning stage. The executor runs it over a shared SSH connection; each host has one SSH master connection (`ControlMaster=yes`), and commands open channels on it (`mj-core/src/targets/ssh.rs:2083-2087`, `:2339-2365`). The daemon logs one `session command stage finished … purpose=… duration_ms=…` record per command (`mj-controller/src/daemon/support.rs:118-161`). Launch phases are timed by `mj-controller/src/launch_timing.rs` and logged as `session launch phase started/ended`.
+
+Profile staging: `Controller::stage_worker_files_for` (`mj-controller/src/controller/worker_binary/launch.rs:212`) builds a private local directory. `stage_profile` (`worker_binary/harness.rs:207-270`) copies the harness's allowlisted files from the profile home, following symlinks so the stage holds only regular files and directories. Session-specific overlays are then added (`launch.rs:305-381`). `upload_profile_archive` (`worker_binary/install.rs:1148-1185`) packs the stage as one gzip tar and extracts it into a host directory with `umask 077` and `chmod -R go-rwx`. Two callers use it. `install_worker_over_ssh` (`install.rs:1099-1144`, ssh-bare) extracts into `<profile_home>.incoming`, then runs `cp -R` into the profile home. The remote-container branch (`install.rs:932-1038`) extracts into `~/.cache/mjolnir/uploads/<session>/profile` on the host, then runs seven separate commands. These create the container directories, `podman cp` the launch file, the ownership file and the profile into the container, match ownership, restrict permissions, and remove the host staging directory.
+
+The worker binary store (`worker_binary/store.rs`) is the precedent for per-host content. It keys immutable files by SHA-256 and publishes them by writing a unique temporary file and renaming it. It serializes decisions with `store_gate` (a daemon-local, cancellable gate). `transfer_binary` (`:582-656`) installs the binary into a host-level store once, then copies it into each container.
+
+Remote command groups identified in the incident window (file:line from the round-trip mapper):
+
+1. Remote-container profile install, seven commands with no output-dependent decisions: `worker_binary/install.rs:970-1033`.
+2. Worker replacement plan, seven commands including a useless SSH `true`: `worker_binary/upgrade.rs:680-713`.
+3. Container worker store verify, publish and private-upload cleanup after a copy: `worker_binary/store.rs:475-571`.
+4. Three inherited global Git settings (`pull.rebase`, `user.email`, `user.name`) written one per command: `controller/provisioning.rs:1914-1927`.
+5. Network Git initialization: a marker read, default-branch selection, branch resolution and switch, then six `config --replace-all` writes and one `--unset-all`: `controller/network_git.rs:225-298`.
+6. mbx (the Rust build cache tool) setup: a repeated native-version probe and a full host inspection that bypasses the existing resolution cache (`controller/mbx.rs:392`, `:769`), plus `install the shared-cache mbx shims` and `link the shared machine mbx configuration`, which can run as one script.
+
+No existing helper runs several steps in one remote script and reports which step failed. `CommandPlan::execute` (`mj-core/src/targets.rs:1898`) still issues separate commands.
+
+
+## Plan of Work
+
+### Milestone 1: host profile content store
+
+At the end of this milestone, a second session that starts on a host with the same profile sends only its small private files. The daemon log for it shows a `send profile content` record (or the chosen purpose) with a small byte count.
+
+Mark shared content trees in the allowlist table in `mj-controller/src/controller/worker_binary/harness.rs`: `plugins/` and `skills/` for Claude, Kimi and Grok; `skills/` and `rules/` for Codex and Muse; `agents/` for Kimi; `skills/` for every other harness. The Mjolnir-managed skill under `skills/` is version-dependent but not secret, so it may be stored. Expose this to the upload, so it knows which top-level paths of the stage are shared.
+
+Replace the internals of `upload_profile_archive` while keeping its contract: afterwards, the destination host directory holds exactly the stage's files and directories, with the same executable bits, owned by the login user and readable only by it. Both callers stay unchanged apart from passing the shared-path set.
+
+The new flow has two SSH commands.
+
+The first command is a digest query. Under the per-host store gate, the controller sends the list of SHA-256 digests of the shared files, one lowercase hex digest per line, on stdin. A remote `sh` script creates the store directory `~/.cache/mjolnir/profile-content` (mode 0700) if needed. It updates the modification time of each digest file that exists and prints each digest that does not. Updating the time is what keeps garbage collection from removing a file between the two commands.
+
+The second command is the upload. The controller streams one gzip tar containing three kinds of entries: the private files at their own paths; each missing shared file as `.mj-content/<digest>`; and each shared file whose digest is already stored as a symlink at its own path, whose target text is `mj-profile-content/<digest>`. The remote script extracts the tar into the destination. It moves each `.mj-content/<digest>` into the store: it first verifies the digest with `sha256sum`, or `shasum -a 256` on macOS, then writes a unique temporary name in the store and renames it. If the store already has the file, it discards the new copy. The script then replaces every symlink whose target starts with `mj-profile-content/` with a hard link to the store file named by the target's last path component. It does this with `find … -type l -exec sh -c '…' sh {} +`, so file names pass as arguments and are never parsed from text. Finally, it removes `.mj-content` and applies `chmod -R go-rwx` as today. Missing files that the stage held only as `.mj-content` entries must also appear at their real paths. Give those a symlink entry too, so one mechanism places every shared file.
+
+Because staging follows symlinks today, the stage holds no symlinks of its own, so every symlink in the extracted tree is one this flow created. Keep the target-prefix filter anyway.
+
+Garbage collection runs inside the digest query, at most once per hour per store; record the last run in a stamp file. It deletes store files whose modification time is more than one day old. It uses the same one-day and one-hour values as the worker store's collection (`store.rs:197-280`); cite that source in a comment. No session file shares an inode with a store file after its staging directory is removed, so age is the only criterion needed.
+
+If a store file disappears between the two commands, for example because a different daemon's collection ran, the link step fails. The upload command then exits with a distinct status and prints the missing digests. The controller repeats the upload once, with those digests sent as content. A second miss is reported as an error. This retry is bounded because its input changes: the missing files are sent.
+
+Local targets keep their current copy path; they have no network transfer.
+
+### Milestone 2: step scripts and batching
+
+At the end of this milestone, the incident launch issues about 40 remote commands instead of 69. Every batched failure still names the step that failed, in the same words as today's purpose text.
+
+Add one shared helper next to `CommandPlan` in `mj-core/src/targets.rs`. It builds one `sh -c` script from an ordered list of steps. Each step has an argv, a purpose, and the exit statuses it accepts (default: 0 only). It runs the steps in order. When a step's status is not accepted, it prints a marker line to stderr naming the step index and status, then exits with that status. The Rust side decodes the marker into an error that names the failing step's purpose and includes its stderr, in the same format `execute_checked` produces today. Steps marked as cleanup run whether or not earlier steps failed, through an `EXIT` trap. Quote every argument with the existing shell-quoting helper; search for it before writing one. The command's logged purpose is the batch's purpose. Cancellation behaves as it does for any single command: the process group is stopped, and cleanup steps run where the trap can still run.
+
+Use the helper for the following groups, in this order, each as its own commit:
+
+1. The seven remote-container profile install commands in `worker_binary/install.rs:970-1033`, with host staging removal as a cleanup step only where today's code removes it on success. Do not change cleanup on failure in this milestone.
+2. The worker replacement plan in `worker_binary/upgrade.rs:680-713`. Delete the SSH `true` chosen when `remote_source` is set.
+3. Container worker store verify, publish and private-upload discard (`store.rs:475-571`). Keep the store gates and the final session link exactly where they are.
+4. The three inherited global Git settings in `controller/provisioning.rs:1914-1927`.
+5. The six `config --replace-all` writes and the `--unset-all remote.origin.push` (accepted statuses 0 and 5) in `controller/network_git.rs:284-298`. Keep the marker read, default-branch selection and branch resolution as they are.
+6. mbx: make `prepare_session_configuration` obtain host facts from the existing resolution owner (`mbx.rs:102-156`) instead of `inspect_host`. Keep the recorded directory projection used for retained configuration (`:388`, `:403`), and keep the compare-and-replace reread in `publish_at` (`:357-364`). Run `install the shared-cache mbx shims` and `link the shared machine mbx configuration` as one step script.
+
+Do not move any local decision into shell in this milestone.
+
+### Milestone 3: live check
+
+From an isolated instance, create a small EC2 host with `mj ec2 create`. Start one session, then start four sessions with the same Claude profile at the same time. Record the `provision session` and `prepare worker files` phase times and the number of command records per launch, from that instance's daemon log. Then destroy the host.
+
+
+## Concrete Steps
+
+Work from the repository root. Implementers build and test only in their own detached worktree (`git worktree add --detach ~/Projects/mjolnir-wt/<name> HEAD`) and commit on its detached HEAD. The parent cherry-picks the commits onto master.
+
+Focused tests during the work:
+
+    cargo test -p mj-controller worker_binary
+    cargo test -p mj-core targets
+
+Full validation once, after the last round: `cargo clippy --all-targets -- -D warnings` for the workspace, plus the full suites of the touched crates (`mj-core`, `mj-controller`). Run `cargo test` outside the restricted sandbox.
+
+Live check (Milestone 3), from an isolated instance only:
+
+    mj --instance launch-perf ec2 create <small instance type>
+    mj --instance launch-perf new … (five sessions; four at once)
+    grep 'session launch phase ended' ~/.local/share/mjolnir/instances/launch-perf/logs/mj-daemon-*.log
+
+Adjust the log path to the instance's data directory.
+
+
+## Validation and Acceptance
+
+Milestone 1 acceptance: an integration test runs the real remote scripts with `sh` against a temporary host directory standing in for the SSH host. These tests already exist in the style of `mbx_shim_tests` in `install.rs`. The test stages a tree whose shared part is larger than 64 KB and has file names with spaces, a newline and a leading dash, plus empty directories and an executable file. It uploads it twice, into two destinations, and checks three things. First, both destinations are byte-for-byte equal to the stage, including modes after `go-rwx`. Second, the second upload's tar holds no shared content. Third, no destination file shares an inode with a store file after the staging directory is removed. A second test deletes one store file between the digest query and the upload, and checks that the single repeat succeeds. Run the scripts with both GNU and BSD-compatible flags in mind; macOS ssh-bare hosts run BSD tools.
+
+Milestone 2 acceptance: for each batched group, an existing test of that code path keeps passing. A test of the step-script helper runs a real `sh` and shows three things: a failing middle step is reported with its own purpose and stderr; an accepted nonzero status (5) continues; and a cleanup step runs after a failure. That helper test is a tricky-condition test (partial failure); do not add happy-path unit tests.
+
+Milestone 3 acceptance: in the four-session burst, only the first session's upload carries plugin content. The other three report uploads of under 1 MB. Each launch's `provision session` time is recorded in this plan. Command records per launch drop from about 69 to about 40 in the incident's window.
+
+
+## Idempotence and Recovery
+
+The digest query and the upload can be repeated safely. Store publication is a rename of a verified temporary file, so a crash leaves at most an orphaned temporary file. Collection removes temporary files older than one day along with old store files. Deleting `~/.cache/mjolnir/profile-content` on a host is always safe: the next launch sends everything again. EC2 hosts created for the live check must be destroyed afterwards with `mj --instance launch-perf ec2 destroy`.
+
+
+## Artifacts and Notes
+
+Incident timing (daemon log, session 2b0ac47b):
+
+    plan checkout and provision target   8098 ms
+    prepare worker files               169044 ms
+      upload staged harness profile archive  61926 ms
+      ~45 sequential commands at 2.5-5 s each after 05:39:50
+    initialize workspace                27840 ms
+    provision session                  211108 ms
+
+Claude profile source measurement (fast gzip): whole snapshot 780 files, 22,085,092 bytes, 10,663,949 compressed. Of that, `plugins/` is 759 files, 19,329,159 bytes, 10,009,850 compressed, and `skills/` is 600,357 bytes compressed.
+
+
+## Interfaces and Dependencies
+
+No new crates. Use the existing `tar` and `flate2` dependencies for the stream and `sha2` (already used by the worker store) for digests. Run commands through the existing executor (`execute_with_stdin` for the streamed upload); do not hand-roll pipes. The step-script helper lives in `mj-core/src/targets.rs` beside `CommandPlan` and returns errors through the same `anyhow` context style as `execute_checked`. No database migration and no relay protocol change are expected; if one becomes necessary, stop and record why in the Decision Log.
