@@ -4322,6 +4322,16 @@ fn missing_parent_restore_preserves_current_components_and_retries_partial_failu
         archived_native
     );
     fs::remove_file(&seed).unwrap();
+    // Hard-won: 98a60381e: a leftover seed must not replay completed work after journal loss.
+    fs::write(
+        &seed,
+        serde_json::to_vec(
+            &relay_seed_for_restore(&spec.canonical_session, true, QueueRestorePolicy::Restore)
+                .unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
     let retry =
         restore_missing_parent_checkpoint(&restore, &NoNativeCheckpointState, Some(&current_seed))
             .unwrap();

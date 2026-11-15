@@ -219,6 +219,7 @@ fn rename_directory_without_replacement(source: &Path, destination: &Path) -> Re
 
 pub fn restore_missing_from_spec_file(path: &Path, seed_path: Option<&Path>) -> Result<()> {
     let spec = read_restore_spec(path)?;
+    let _owner = crate::worker_runtime::WorkerRootOwner::acquire(&spec.relay_root)?;
     let seed: Option<mj_core::relay::RestoredRelaySeed> = seed_path
         .map(|path| serde_json::from_slice(&fs::read(path)?).map_err(anyhow::Error::from))
         .transpose()?;

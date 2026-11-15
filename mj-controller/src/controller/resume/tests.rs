@@ -2857,6 +2857,14 @@ fn resume_distinguishes_absent_bare_roots_from_empty_or_unknown_roots() {
             .get_mut(id)
             .unwrap()
             .native_session_id = Some("retained-native".into());
+        // Hard-won: 98a60381e: an old bootstrap seed cannot establish current relay state.
+        let stale_seed = root.join(mj_core::relay::RESTORED_RELAY_SEED_FILE);
+        std::fs::write(&stale_seed, b"old bootstrap input").unwrap();
+        assert_eq!(
+            worker_recovery(&executor, &backend, &worker_root),
+            WorkerRecovery::NothingToRecover
+        );
+        std::fs::remove_file(stale_seed).unwrap();
         std::fs::remove_dir(&root).unwrap();
         assert!(matches!(
             classify_resume_environment(&controller, id, &executor),

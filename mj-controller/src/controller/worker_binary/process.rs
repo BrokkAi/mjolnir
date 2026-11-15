@@ -140,11 +140,10 @@ fn directory_probe_command(
         format!(
             "if hel_lists \"$entries\" resume-checkout-recovery.json resume-checkout-recovery.json; then printf 'checkout-partial\\n'; \
              elif hel_lists \"$entries\" resume-parent-recovery.json resume-parent-recovery.json; then printf 'partial\\n'; \
-             elif hel_lists \"$entries\" {state} {journal} || hel_lists \"$entries\" {seed} {seed}; then \
+             elif hel_lists \"$entries\" {state} {journal}; then \
              printf 'recoverable\\n'; else printf 'nothing\\n'; fi;",
             state = targets::posix_quote(mj_core::relay::RELAY_STATE_FILE),
             journal = targets::posix_quote(mj_core::relay::RELAY_JOURNAL_DIR),
-            seed = targets::posix_quote(mj_core::relay::RESTORED_RELAY_SEED_FILE),
         )
     } else {
         "printf 'present\\n';".into()

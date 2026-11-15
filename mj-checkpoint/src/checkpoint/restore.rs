@@ -252,12 +252,29 @@ fn restore_missing_parent_relay(
     if !parent_relay_missing(root)? {
         return Ok(false);
     }
-    write_missing_private_file(
-        root,
-        Path::new(mj_core::relay::RESTORED_RELAY_SEED_FILE),
-        &serde_json::to_vec(seed)?,
-        0o600,
-    )
+    let relative = Path::new(mj_core::relay::RESTORED_RELAY_SEED_FILE);
+    ensure_no_symlink_ancestors(root, relative)?;
+    fs::create_dir_all(root)?;
+    let destination = root.join(relative);
+    match fs::symlink_metadata(&destination) {
+        Ok(metadata) => ensure!(
+            metadata.is_file() && !metadata.file_type().is_symlink(),
+            "invalid parent relay seed destination"
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    // A seed is bootstrap input, not the durable journal. Once that journal
+    // is lost, only the chosen current projection can authorize its queue.
+    let mut temporary = tempfile::NamedTempFile::new_in(root)?;
+    std::io::Write::write_all(&mut temporary, &serde_json::to_vec(seed)?)?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(&destination)
+        .map_err(|error| error.error)?;
+    #[cfg(unix)]
+    fs::File::open(root)?.sync_all()?;
+    Ok(true)
 }
 
 /// Collapse a legacy database/WAL family before publishing any authoritative

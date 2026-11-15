@@ -14,6 +14,9 @@ After this change, Resume of a failed session whose environment still exists bri
 
 ## Progress
 
+- [x] Eighth review: relative remote native relocation explicitly declined under the parent's narrowed acceptance rule; stale-seed replay accepted and corrected in environment evidence and bootstrap publication, using the existing root owner.
+- [x] Both stale-seed regressions passed; final suites/docs completed, workspace clippy and format checks passed. One unchanged readiness-cancellation elapsed<250ms baseline failed full and isolated runs and remains reported, without changing its timeout/assertion. Correction prepared for independent review.
+
 - [x] Seventh review ruling applied: live repair passes its discard command through the existing observer; both reconnect paths clear before native readiness. No native-presence probe is added; that finding was explicitly declined by the parent as speculative and recorded through override_review.
 - [x] Live queue/readiness ordering regression passed; final suites completed (175 checkpoint, 2,650 controller plus three passing isolated reruns, 590 TUI plus one passing isolated rerun, 851 worker library and all 29 worker main/integration cases; docs passed). Workspace clippy passed after removing a redundant let-and-return. Final correction prepared for independent review.
 
@@ -122,6 +125,8 @@ After this change, Resume of a failed session whose environment still exists bri
 
 
 ## Outcomes & Retrospective
+
+Eighth review found that a seed left by an earlier restore was mistaken for durable runtime after relay state and journal loss. The environment probe now requires state or journal evidence. Missing-relay recovery atomically replaces bootstrap input from the chosen current projection, while the target command holds the existing worker-root ownership lock; present relay state/journal still prevents replacement. Existing checkpoint retry and local/SSH-shaped shell regressions passed. Full suites and docs completed and workspace clippy passed; one unchanged readiness-cancellation test failed its existing 250ms timing assertion both in the full run and isolated rerun, recorded as an unresolved baseline. The relative remote native-relocation finding was declined under the parent's final acceptance rule because it reports visible failure while preserving current work and the archive. No database, protocol or archive contract changed.
 
 Seventh review applies queue disposition at the existing worker serialized command boundary immediately after connection, before native readiness. Live repair supplies the observer's existing discard field; checkout-recovery reconnect uses the same ordering. The relay regression withholds native readiness until its discard command arrives, so the old ordering cannot complete. Parent explicitly declined the native-artifact probe: deletion of only the recorded transcript inside a surviving profile home is unobserved, has a visible harness failure with Restart agent guidance, and destroys no retained state. No new probe, protocol, schema or durable mechanism was added. Final full suites and docs completed; four unchanged controller/TUI fixtures passed exact-name reruns. Workspace clippy passed after a mechanical redundant-binding fix. Evidence is in the assigned validation report.
 
