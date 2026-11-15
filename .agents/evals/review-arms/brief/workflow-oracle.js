@@ -6,7 +6,7 @@ export const meta = {
     { title: 'Leak', detail: 'Opus/high judge reads each brief as a review output; rewrite once if caught or partial' },
   ],
 }
-// args: {dir: '<REVIEW_ARMS_DIR>/briefs/oracle-work', diffs: [{id, group: 'P'|'S'|'C'}], blind_only?: true}
+// args: {dir: '<REVIEW_ARMS_DIR>/briefs/oracle-work', diffs: [{id, group: 'P'|'S'|'C', blind_sha256}], blind_only?: true}
 // blind_only: leak-check each diff's blind brief without the editor (stage B; brief_oracle.py blind-collect).
 // Written by brief_oracle.py build: ORACLE.md, WRITER.md, JUDGE.md, item-<id>.json, record-<id>.json.
 const DIR = args.dir
@@ -98,7 +98,9 @@ ${FENCE}`,
       leak.push({ ...again, rewrite_changes: rw.changes })
     }
     // final_brief is null when a control brief needed no rewrite: it is the blind brief.
-    return { id: d.id, group: d.group, edit, leak, final_brief: final }
+    // judged_blind_sha256 binds a verdict on the item file's blind brief to that text.
+    return { id: d.id, group: d.group, edit, leak, final_brief: final,
+             judged_blind_sha256: brief ? null : (d.blind_sha256 ?? null) }
   },
 )
 const done = results.filter(Boolean)
