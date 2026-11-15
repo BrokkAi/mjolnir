@@ -653,6 +653,9 @@ impl DashboardState {
                     manager.entries = entries;
                     manager.selected = previous_selected_id
                         .as_deref()
+                        // The first answer has no previous selection: offer
+                        // the active workspace, as the complete answer does.
+                        .or(active_workspace_id.as_deref())
                         .and_then(|id| {
                             manager
                                 .entries

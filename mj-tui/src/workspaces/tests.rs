@@ -351,6 +351,8 @@ fn manager_shows_the_sorted_list_while_details_load_and_mutations_wait() {
             .collect::<Vec<_>>(),
         ["a", "b"]
     );
+    // The names answer offers the active workspace, as the complete one does.
+    assert_eq!(manager.selected, 1);
     assert!(matches!(manager.view, WorkspaceManagerView::List));
     dashboard.finish_workspace_management(
         generation,
