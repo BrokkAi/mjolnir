@@ -14,6 +14,8 @@ After this change, Resume of a failed session whose environment still exists bri
 
 ## Progress
 
+- [x] Second review: distinguish a deleted bare worker root from a reachable host. Real local/SSH-shaped shell regression passed; full touched-crate suites and workspace clippy completed. Follow-up commit prepared for required review.
+
 - [x] First required review completed; all three findings accepted and implemented.
 - [x] Review regressions for Apple local/SSH start ordering and failed-checkout conversion previews passed.
 - [x] Review regression for absent-target admission and extended Podman run passed; the same run also passed live-worker repair in a localhost managed worktree.
@@ -34,6 +36,8 @@ After this change, Resume of a failed session whose environment still exists bri
 
 ## Surprises & Discoveries
 
+- Second review (`4c7ea3e31`) found that the shared target probe only proves bare-host reachability. Resume now also consults the existing directory-listing worker-root probe. That probe had merged absent roots with empty roots; it now reports them separately, while its original recovery consumer still treats both as no durable relay state. The regression executes real shell probes locally and through the SSH command quoting boundary, including an unusable non-directory path that must remain Unknown. Its first fixtures violated existing cleanup identity rules: local worker roots and SSH workspaces must both end in the exact session ID. Those paths were corrected; diagnostic assertions retain the underlying error for future failures.
+
 - The second production incident (`07d292ca`, localhost managed worktree) used the same Error branch after a false readiness failure. The generic classifier and live-worker attach cover bare targets too. The real isolated E2E now checkpoints a managed worktree, writes newer workspace and native-home files, keeps a child busy, injects Error with the daemon stopped, and verifies the same parent and child PIDs, native session ID, files and original child command through completion. `/tmp/resume-e2e-bare-review.log` passed.
 
 - Required review of `c77d71fc3` found three gaps. Apple `list --all` proves presence but not that `exec` can run; Resume now checks the running list and starts only the retained container, on its owning host. Restart's probe behavior is unchanged. Raw-to-workspace conversions still take the normal credential/preview path before confirmation. Proven absence with no checkpoint now publishes `Lost` with no usable session target, while the durable environment/worker inventory retains ownership of physical resources for explicit Destroy.
@@ -50,6 +54,8 @@ After this change, Resume of a failed session whose environment still exists bri
 
 ## Decision Log
 
+- Second review: bare Resume uses the existing worker-root directory-listing probe after host reachability. The probe now distinguishes proven absence from an empty present root; its recovery caller retains the same no-relay semantics for both. Missing roots take archive recovery, empty roots repair, lookup errors remain Unknown. No persisted or wire format changes. Date: 2026-11-14.
+
 - Review decision: `Lost` and a cleared session target express proven absence when no archive exists. This changes client admission without erasing the environment ledger or reclaiming storage. The existing state and fields need no schema/protocol change; API admission/refusal use one projected source predicate. Date: 2026-11-14.
 
 - Implementation decision: a present placement keeps its current profile and target; changing them follows repair through Move. Requested resource or mount changes produce a notice that the existing container settings were kept. Date: 2026-11-14.
@@ -65,6 +71,8 @@ After this change, Resume of a failed session whose environment still exists bri
 
 
 ## Outcomes & Retrospective
+
+The second review finding is addressed: bare hosts now require positive worker-root evidence for repair; a proven missing root uses the existing archive branch. `resume_distinguishes_absent_bare_roots_from_empty_or_unknown_roots` passed in 9.02 seconds after fixing its invalid local-root and SSH-workspace fixture identities. The full touched-crate run passed 2,650 other controller tests / 27 ignored, 591 TUI tests / two ignored, and both doc suites. Its only failure was this regression using its pre-correction fixture; the targeted rerun resolves it. Final workspace clippy and format/diff checks passed. Root-loss coverage uses real shell scripts with an emulated SSH host shell, not a full archive-restoration E2E; the earlier Podman and localhost live-worker E2E remains evidence for the preserved-environment paths.
 
 The first commit is `c77d71fc39d248c5dd9536dbaf728e761497ad3a`. Its required review identified Apple startup, conversion confirmation, and repeated admission of absent targets; fixes passed post-review validation and are prepared for the next required review. Apple command ordering is covered by hand-written local/SSH engine-contract fakes on Linux, not a native Mac run. No push or master CI dispatch is part of this detached-HEAD task.
 

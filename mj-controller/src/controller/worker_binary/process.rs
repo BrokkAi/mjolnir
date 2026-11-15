@@ -93,6 +93,8 @@ pub(in crate::controller) enum WorkerRecovery {
     Unknown,
 }
 
+/// Reports `recoverable`, `nothing` (present without relay state), or `absent`.
+/// Lookup failures exit nonzero; Resume needs absence, not just no relay state.
 pub(in crate::controller) fn worker_recovery_command(
     locator: &targets::TargetLocator,
     worker_root: &str,
@@ -131,7 +133,7 @@ MJ_ENTRIES
              printf 'recoverable\\n'; else printf 'nothing\\n'; fi; \
          elif entries=$(ls -1A \"$parent\"); then \
            if hel_lists \"$entries\" \"$name\" \"$name\"; then exit 1; fi; \
-           printf 'nothing\\n'; \
+           printf 'absent\\n'; \
          else exit 1; fi",
         root = targets::posix_quote(worker_root),
         parent = targets::posix_quote(&parent),
@@ -164,11 +166,13 @@ pub(in crate::controller) fn worker_recovery(
     };
     match answer(worker_recovery_command(locator, worker_root)).as_deref() {
         Some("recoverable") => WorkerRecovery::Recoverable,
-        Some("nothing") => match answer(worker_liveness_command(locator, worker_root)).as_deref() {
-            Some("dead") => WorkerRecovery::NothingToRecover,
-            Some("alive" | "starting") => WorkerRecovery::Recoverable,
-            _ => WorkerRecovery::Unknown,
-        },
+        Some("nothing" | "absent") => {
+            match answer(worker_liveness_command(locator, worker_root)).as_deref() {
+                Some("dead") => WorkerRecovery::NothingToRecover,
+                Some("alive" | "starting") => WorkerRecovery::Recoverable,
+                _ => WorkerRecovery::Unknown,
+            }
+        }
         _ => WorkerRecovery::Unknown,
     }
 }

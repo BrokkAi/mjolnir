@@ -2677,3 +2677,108 @@ fn resume_starts_retained_apple_containers_before_probing_their_worker() {
         }
     }
 }
+
+// Hard-won: 4c7ea3e31 review: a reachable bare host hid a deleted worker root from archive recovery.
+#[cfg(unix)]
+#[test]
+fn resume_distinguishes_absent_bare_roots_from_empty_or_unknown_roots() {
+    use crate::controller::environment::{ResumeEnvironment, classify_resume_environment};
+    use crate::controller::worker_binary::{WorkerRecovery, worker_recovery};
+    const CHILD: &str = "MJ_RESUME_BARE_ROOT_TEST";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new("controller::resume::tests::resume_distinguishes_absent_bare_roots_from_empty_or_unknown_roots")
+            .env(CHILD, "1").isolated_store(directory.path()).run();
+        return;
+    }
+    // Execute the actual listing/liveness scripts. The SSH host shell is run
+    // locally so both its quoting and its home-relative root are exercised.
+    struct HostShell {
+        home: PathBuf,
+    }
+    impl CommandExecutor for HostShell {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            assert!(matches!(
+                command.purpose.as_str(),
+                "probe retained target before Restart"
+                    | "probe Mjolnir worker root"
+                    | "probe Mjolnir worker daemon liveness"
+            ));
+            let mut local = if command.program == "ssh" {
+                CommandSpec::new(
+                    "sh",
+                    vec!["-c".into(), command.args.last().unwrap().clone()],
+                )
+            } else {
+                command.clone()
+            };
+            local.cwd = Some(self.home.clone());
+            ProcessExecutor.execute(&local)
+        }
+    }
+    let id = "0123456789abcdef0123456789abcdef";
+    for remote in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let relative = if remote {
+            PathBuf::from(format!(".local/share/hel/workers/{id}"))
+        } else {
+            PathBuf::from("worker's retained roots").join(id)
+        };
+        let root = home.path().join(&relative);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut session = checkpoint_test_session(id);
+        session.state = SessionState::Error;
+        session.target_template_id = if remote { "ssh-bare" } else { "local-bare" }.into();
+        session.target = Some(Box::new(if remote {
+            TargetLocator::SshBare {
+                host: "builder".into(),
+                workspace: home.path().join("workspace").join(id),
+                worker_id: None,
+            }
+        } else {
+            TargetLocator::LocalBare {
+                worker_root: root.clone(),
+            }
+        }));
+        let controller = Controller {
+            config: resume_compatibility_config(),
+            state: State {
+                sessions: [(id.into(), session)].into_iter().collect(),
+                ..State::default()
+            },
+        };
+        let executor = HostShell {
+            home: home.path().into(),
+        };
+        match classify_resume_environment(&controller, id, &executor) {
+            ResumeEnvironment::WorkerMissing => {}
+            ResumeEnvironment::Unknown(error) => panic!("remote={remote}: {error:#}"),
+            _ => panic!("remote={remote}: empty root was not classified for repair"),
+        }
+        let (backend, worker_root) = controller.worker_placement(id).unwrap();
+        assert_eq!(
+            worker_recovery(&executor, &backend, &worker_root),
+            WorkerRecovery::NothingToRecover
+        );
+        std::fs::remove_dir(&root).unwrap();
+        assert!(matches!(
+            classify_resume_environment(&controller, id, &executor),
+            ResumeEnvironment::Absent
+        ));
+        // The other caller keeps its existing no-relay recovery semantics.
+        assert_eq!(
+            worker_recovery(&executor, &backend, &worker_root),
+            WorkerRecovery::NothingToRecover
+        );
+        // A present non-directory is evidence of an unusable lookup, not loss.
+        std::fs::write(&root, "keep this unexpected file").unwrap();
+        assert!(matches!(
+            classify_resume_environment(&controller, id, &executor),
+            ResumeEnvironment::Unknown(_)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&root).unwrap(),
+            "keep this unexpected file"
+        );
+    }
+}

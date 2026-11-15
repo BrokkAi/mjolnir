@@ -1019,6 +1019,28 @@ pub(super) fn classify_resume_environment(
             TargetAvailability::Reachable => {}
         }
         let (backend, root) = controller.worker_placement(session_id)?;
+        if matches!(
+            backend,
+            targets::TargetLocator::LocalBare { .. }
+                | targets::TargetLocator::SshBare { .. }
+                | targets::TargetLocator::AwsEc2 { .. }
+        ) {
+            // A reachable bare host says nothing about its retained files. Reuse
+            // the listing probe so lookup errors cannot authorize archive restore.
+            let output = executor.execute(&super::worker_binary::worker_recovery_command(
+                &backend, &root,
+            ))?;
+            ensure!(
+                output.status == 0,
+                "worker root probe failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            match String::from_utf8_lossy(&output.stdout).trim() {
+                "absent" => return Ok(ResumeEnvironment::Absent),
+                "recoverable" | "nothing" => {}
+                value => bail!("unexpected worker root response {value:?}"),
+            }
+        }
         start_retained_apple_for_resume(&backend, executor)?;
         let output = executor.execute(&super::worker_binary::worker_liveness_command(
             &backend, &root,
