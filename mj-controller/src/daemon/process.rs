@@ -173,8 +173,6 @@ pub(super) async fn run_daemon_runtime(
     let manager = crate::session_manager::spawn_session_manager_observed(Some(delegation_tx))?;
     manager.control.update_model_policies(&controller);
     let manager_targets = manager.targets;
-    manager_targets.send_replace(dashboard_worker_targets(&controller));
-    log_relay_actors_launched(&manager_targets.borrow());
     let manager_updates = manager.updates;
     let manager_control = manager.control.clone();
     let manager_shutdown = manager.shutdown;
@@ -196,6 +194,19 @@ pub(super) async fn run_daemon_runtime(
         worker_upgrades.observer(),
         workspaces,
     ));
+    let readiness_runtime = Arc::downgrade(&state);
+    manager_control.install_harness_readiness_handler(Arc::new(move |id, timeout| {
+        let runtime = readiness_runtime.clone();
+        Box::pin(async move {
+            let runtime = runtime
+                .upgrade()
+                .context("daemon stopped before readiness failure could be applied")?;
+            runtime.fail_unready_session(id, timeout).await
+        })
+    }));
+    // Install the bounded write handler before any worker can arm its clock.
+    manager_targets.send_replace(dashboard_worker_targets(&controller));
+    log_relay_actors_launched(&manager_targets.borrow());
     state
         .reviewer_runtime
         .set(Arc::downgrade(&state))
@@ -457,8 +468,6 @@ pub(super) async fn run_daemon_runtime(
     // How often the harness readiness wait is looked at. The wait itself is
     // minutes long, so this only bounds how late a failure is noticed, and it
     // reads in-memory state rather than the store.
-    let mut readiness_tick = tokio::time::interval(Duration::from_secs(5));
-    readiness_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut progress_tick = tokio::time::interval(Duration::from_secs(1));
     progress_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let (interrupted_close_tx, mut interrupted_close_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -732,19 +741,6 @@ pub(super) async fn run_daemon_runtime(
                     progress.phase(ServingPhase::BackgroundPolicy);
                     state.refresh_background_policies();
                     state.resume_startup_cleanups(false);
-                }
-                _ = readiness_tick.tick() => {
-                    progress.phase(ServingPhase::Readiness);
-                    // A live session whose harness never advertised itself
-                    // takes no prompt and reports no failure, so nothing else
-                    // ever ends its wait (#1090). The store write runs off
-                    // this loop.
-                    for unready in state.sessions_without_a_usable_harness() {
-                        let state = state.clone();
-                        client_tasks.spawn(async move {
-                            state.fail_unready_session(unready).await;
-                        });
-                    }
                 }
                 completed = interrupted_close_rx.recv() => {
                     progress.phase(ServingPhase::SuspensionRecovery);

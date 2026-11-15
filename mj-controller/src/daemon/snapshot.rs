@@ -195,82 +195,58 @@ impl RuntimeState {
         }
     }
 
-    /// One pass of the harness readiness wait: which live sessions have run
-    /// out of time to become usable.
-    ///
-    /// Locks are taken one at a time and nothing here touches the store, so
-    /// this belongs on the daemon's background tick. The write it leads to
-    /// does not; see [`Self::fail_unready_session`].
-    pub(super) fn sessions_without_a_usable_harness(&self) -> Vec<UnreadySession> {
-        let now = chrono::Utc::now();
-        let observations = {
-            let owner = self.owner();
-            owner
-                .indexes
-                .running
-                .keys()
-                .filter(|id| {
-                    !owner
-                        .lifecycle
-                        .get(*id)
-                        .is_some_and(|active| active.is_running())
-                })
-                .filter(|id| !owner.close_requested.contains(*id))
-                .filter_map(|id| owner.controller().state.sessions.get(id))
-                .map(|record| {
-                    let view = owner.sessions.get(&record.id);
-                    ReadinessObservation {
-                        harness_ready: view.is_some_and(|view| {
-                            view.operational.as_deref().is_some_and(
-                                mj_core::relay::RelayOperationalState::native_session_is_ready,
-                            )
-                        }),
-                        record_age: record_age(&record.updated_at, now),
-                        updated_at: record.updated_at.clone(),
-                        detail: view
-                            .and_then(|view| view.error.as_ref())
-                            .map(|error| error.detail().to_owned()),
-                        session_id: record.id.clone(),
-                    }
-                })
-                .collect::<Vec<_>>()
-        };
-        self.harness_readiness
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .observe(std::time::Instant::now(), observations)
+    /// Capture only durable/lifecycle ownership for actor-reported failures.
+    /// The relay actor alone decides whether the harness wait expired.
+    pub(super) fn harness_timeout_record(&self, id: &str) -> Option<String> {
+        let owner = self.owner();
+        if owner
+            .lifecycle
+            .get(id)
+            .is_some_and(|active| active.is_running())
+            || owner.close_requested.contains(id)
+        {
+            return None;
+        }
+        let record = owner.controller().state.sessions.get(id)?;
+        (record.state == SessionState::Running).then(|| record.updated_at.clone())
     }
 
     /// Fail one session whose harness never became usable, so it stops looking
     /// like a session a driver can wait for.
-    pub(super) async fn fail_unready_session(&self, unready: UnreadySession) {
-        let cause = unready.cause();
-        let session_id = unready.session_id.clone();
-        tracing::warn!(%session_id, waited_seconds = unready.waited.as_secs(), "{cause}");
+    pub(super) async fn fail_unready_session(
+        &self,
+        session_id: String,
+        timeout: crate::session_manager::HarnessReadinessTimeout,
+    ) -> Result<bool> {
+        let _activity = crate::upgrade::activity_unless_draining("harness readiness failure")?;
+        if self.harness_timeout_record(&session_id).as_deref()
+            != Some(timeout.observed_updated_at.as_str())
+        {
+            return Ok(false);
+        }
+        let cause = timeout.cause();
+        let observed_updated_at = timeout.observed_updated_at.clone();
+        tracing::warn!(%session_id, waited_seconds = timeout.waited.as_secs(), "{cause}");
         let applied = blocking({
             let session_id = session_id.clone();
             let cause = cause.clone();
+            let activity = _activity.clone();
             move || {
+                let _activity = activity;
                 let mut controller = Controller::load()?;
-                controller.fail_unready_session(&session_id, &cause, &unready.observed_updated_at)
+                controller.fail_unready_session(&session_id, &cause, &observed_updated_at)
             }
         })
         .await;
-        match applied {
-            Ok(true) => {
-                if let Err(error) = self.reload_controller().await {
-                    tracing::warn!(%session_id, error = format!("{error:#}"), "could not reload state after failing an unready session");
-                }
-                self.push_notice(&session_id, cause);
-                self.publish_revision();
+        let applied = applied?;
+        if applied {
+            if let Err(error) = self.reload_controller().await {
+                tracing::warn!(%session_id, error = format!("{error:#}"), "could not reload state after failing an unready session");
             }
-            Ok(false) => {}
-            Err(error) => tracing::warn!(
-                %session_id,
-                error = format!("{error:#}"),
-                "could not record that a session's harness never became usable"
-            ),
+            self.push_notice(&session_id, cause);
+            self.publish_revision();
         }
+        Ok(applied)
     }
 
     pub(super) async fn publish_session(
@@ -388,18 +364,6 @@ impl RuntimeState {
         self.publish_revision();
         Ok(())
     }
-}
-
-/// How long ago a durable record was written, when its timestamp can be read.
-///
-/// A record written in the future — a clock that moved backwards, a store
-/// written by another host — reports no age rather than a wrapped one, so the
-/// readiness wait leaves those sessions alone.
-fn record_age(updated_at: &str, now: chrono::DateTime<chrono::Utc>) -> Option<Duration> {
-    let written = chrono::DateTime::parse_from_rfc3339(updated_at).ok()?;
-    now.signed_duration_since(written.with_timezone(&chrono::Utc))
-        .to_std()
-        .ok()
 }
 
 impl RuntimeState {
