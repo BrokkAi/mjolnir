@@ -39,6 +39,11 @@ edit files, or use the network.
      relate two changed locations), and none of the words bug, wrong,
      missing, should, risk, unsafe, issue, problem, incorrect, broken, fail
      to, forget, or similar judgments.
+   - When the decisive fact is that code does not do something (a path a
+     script leaves in place, a check a route skips, a field a writer never
+     sets), state that explicitly with the exact name, for example "removes
+     `a` and `b` under the root but not `<root>/c`". A contrast with other
+     code is not enough.
    - State it in the same tone as the brief's other items. It must not stand
      out by length, emphasis or wording.
    - Put it in the section that fits (Affected callers, Paths, Value flow) at

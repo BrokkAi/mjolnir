@@ -93,6 +93,11 @@ def collect():
     decisions_path = W / "factcheck-decisions.json"
     decisions = json.loads(decisions_path.read_text()) if decisions_path.exists() else {}
     rows, rejected, factcheck, undecided = [], [], [], []
+    # The group decides whether a diff needs the fact check; take it from PLAN.md, not the run.
+    group_of = {bug: g for g, bugs in sets().items() for bug in bugs}
+    mislabeled = [r["id"] for r in out["results"] if group_of.get(r["id"]) != r["group"]]
+    assert not mislabeled, f"results whose group differs from brief/PLAN.md: {mislabeled}"
+    assert sorted(r["id"] for r in out["results"]) == sorted(group_of), "results must cover the 30 frozen diffs"
     for r in out["results"]:
         bug = r["id"]
         d = ROOT / "briefs/oracle" / bug
@@ -100,7 +105,10 @@ def collect():
         blind = ROOT / "briefs/blind" / bug / "brief.md"
         # A control brief that needed no rewrite comes back as null: it is the blind brief.
         final = (r["final_brief"] or blind.read_text()).rstrip() + "\n"
-        inserted = [(r.get("edit") or {}).get("inserted_item")] if r["group"] == "S" else []
+        # A secondary oracle item may relate two changed locations: the editor's item, or the
+        # hand-checked item it became after a leak rewrite.
+        inserted = ([(r.get("edit") or {}).get("inserted_item"), (decisions.get(bug) or {}).get("item")]
+                    if r["group"] == "S" else [])
         problems = brief_driver.lint(final, driver.CORPUS[bug], in_diff_items=inserted)
         if r["group"] in "PS":
             norm = lambda t: " ".join((t or "").removeprefix("- ").split())
@@ -156,6 +164,8 @@ def merge(path):
     replaced = {r["id"]: r for r in rerun["results"]}
     previous = [r for r in out["results"] if r["id"] in replaced]
     assert len(previous) == len(replaced), "a rerun may only replace diffs already in workflow-out.json"
+    wrong = [r["id"] for r in previous if replaced[r["id"]]["group"] != r["group"]]
+    assert not wrong, f"a rerun must keep each diff's group: {wrong}"
     history = W / "replaced-results.jsonl"
     with history.open("a") as f:
         for r in previous:
