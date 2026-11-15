@@ -173,7 +173,6 @@ impl Controller {
                 WORKER_RESTART_TIMEOUT,
             )
             .await?;
-            wait_for_native_session(&mut connection, executor, harness).await?;
             if discard_queue {
                 connection
                     .submit(
@@ -182,6 +181,7 @@ impl Controller {
                     )
                     .await?;
             }
+            wait_for_native_session(&mut connection, executor, harness).await?;
             let swap = crate::upgrade::activity_unless_draining("resume checkout worker swap")?;
             if let Some((command_id, cursor)) =
                 super::IdleWorkspaceLease::reserve_connection_for_upgrade(&mut connection, harness)
@@ -625,6 +625,7 @@ impl Controller {
             reconnect,
             launch,
             messages,
+            discard_queued_prompts,
             ..
         } = restart;
         let owner = crate::worker_lifecycle::require(session_id)?;
@@ -649,6 +650,11 @@ impl Controller {
                 .context(messages.connect)
                 .context(WorkerRestartLeftNoWorker)
         })?;
+        if let Some(command_id) = discard_queued_prompts {
+            connection
+                .submit(command_id, mj_core::relay::RelayCommand::ClearQueuedPrompts)
+                .await?;
+        }
         let project_memory = match self.project_memory_sync_target(session_id) {
             Ok(target) => target,
             Err(error) => {

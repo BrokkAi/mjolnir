@@ -61,7 +61,7 @@ impl Controller {
                             reconnect: &reconnect,
                             launch: None,
                             prepared: true,
-                            discard_queued_prompts: None,
+                            discard_queued_prompts: if discard_queue { Some(new_command_id("resume-clear-queue")?) } else { None },
                             swap_admission: None,
                             messages: &REPAIR,
                         },
@@ -103,15 +103,15 @@ impl Controller {
                     return Box::pin(self.recover_missing_parent_data(session_id, discard_queue, executor)).await;
                 }
             }
-            let (mut relay, clear_live_queue) = if let Some(relay) = attached {
-                (relay, discard_queue)
+            let mut relay = if let Some(relay) = attached {
+                relay
             } else {
                 let launch = self.current_worker_launch_config(session_id, &backend)?;
                 if !matches!(&worker_state, RetainedWorker::Installed) {
                     let worker = WorkerInstall::for_target(&backend, executor)?;
                     prepare_managed_harness_for_upgrade(executor, &backend, session_id, &worker, &launch)?;
                 }
-                let relay = self.restart_worker_with_installed_binary(
+                self.restart_worker_with_installed_binary(
                     session_id,
                     executor,
                     InstalledWorkerRestart {
@@ -125,18 +125,9 @@ impl Controller {
                         messages: &REPAIR,
                     },
                 )
-                .await?;
-                (relay, false)
+                .await?
             };
             executor.end_resumable_work("resume repair publication")?;
-            if clear_live_queue {
-                relay
-                    .submit(
-                        new_command_id("resume-clear-queue")?,
-                        RelayCommand::ClearQueuedPrompts,
-                    )
-                    .await?;
-            }
             let snapshot = relay.sync().await?;
             self.mark_worker_connected(
                 session_id,
