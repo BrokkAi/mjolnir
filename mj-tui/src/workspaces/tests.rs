@@ -354,6 +354,31 @@ fn manager_shows_the_sorted_list_while_details_load_and_mutations_wait() {
     // The names answer offers the active workspace, as the complete one does.
     assert_eq!(manager.selected, 1);
     assert!(matches!(manager.view, WorkspaceManagerView::List));
+    // Opening the selected workspace needs no details: it works while the
+    // details answer is still out.
+    assert!(
+        manager
+            .actions()
+            .iter()
+            .any(|(control, _, enabled)| *control == WorkspaceControl::Open && *enabled)
+    );
+    assert_eq!(
+        dashboard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        DashboardAction::SelectWorkspace {
+            workspace_id: "b".into()
+        }
+    );
+    // Reopen for the rename: the pending command fires on the complete answer.
+    let DashboardAction::LoadWorkspaceManagement { generation } =
+        chord(&mut dashboard, crate::CommandId::RenameWorkspace)
+    else {
+        panic!("reload");
+    };
+    dashboard.finish_workspace_management(
+        generation,
+        Ok(vec![entry("b", "Beta"), entry("a", "Alpha")]),
+        true,
+    );
     dashboard.finish_workspace_management(
         generation,
         Ok(vec![entry("b", "Beta"), entry("a", "Alpha")]),

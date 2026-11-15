@@ -284,7 +284,14 @@ impl WorkspaceManager {
                 if selected.is_some_and(|entry| !entry.drafts.is_empty()) {
                     actions.push((Drafts, "Drafts", ready));
                 }
-                actions.push((Open, "Open", ready && selected.is_some()));
+                // Opening a workspace needs no details: it stays available
+                // while the details load runs or failed, but not while a
+                // mutation is in flight.
+                let openable = selected.is_some()
+                    && self
+                        .busy
+                        .is_none_or(|mutation| mutation == WorkspaceMutation::Load);
+                actions.push((Open, "Open", openable));
                 actions
             }
             WorkspaceManagerView::Create => vec![
@@ -842,7 +849,11 @@ impl DashboardState {
             }
             Some(Interaction::Activate(control)) => match control {
                 WorkspaceControl::List | WorkspaceControl::Open => {
-                    if manager.busy.is_none()
+                    // Opening needs no details: it is allowed while the
+                    // details load runs or failed, not during a mutation.
+                    if manager
+                        .busy
+                        .is_none_or(|mutation| mutation == WorkspaceMutation::Load)
                         && let Some(workspace_id) = manager
                             .selected_entry()
                             .map(|entry| entry.workspace.id.clone())
