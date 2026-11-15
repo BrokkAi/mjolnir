@@ -66,9 +66,6 @@ pub fn capture_checkpoint_with_native_state(
         resolved.allow_empty_native,
         native_state,
     )?;
-    let repositories =
-        collect_checkpoint_repositories(&resolved.workspace_root, &resolved.repositories, git)?;
-    let repository_bytes = checkpoint_repository_bytes(&repositories)?;
 
     let parent = resolved
         .stage_path
@@ -102,6 +99,12 @@ pub fn capture_checkpoint_with_native_state(
             body_path,
         });
     }
+    // Native bytes are copied before repository collection, which can take
+    // long enough for the harness to append more history; the stage must hold
+    // the native state selected above, as it did when bodies were read eagerly.
+    let repositories =
+        collect_checkpoint_repositories(&resolved.workspace_root, &resolved.repositories, git)?;
+    let repository_bytes = checkpoint_repository_bytes(&repositories)?;
     let staged_repositories = write_staged_repositories(temporary.path(), repositories)?;
     let source_fingerprint_after = checkpoint_source_fingerprint(
         &resolved.harness_home,
