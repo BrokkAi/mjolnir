@@ -1307,7 +1307,8 @@ pub(crate) async fn run_server(
                     let notice_sessions = session_control.clone();
                     let failure_runtime = daemon_runtime.clone();
                     let lifecycle_failure_prefix = match &action {
-                        ControllerAction::Suspend { .. } => Some(mj_core::state::CLOSE_FAILURE_PREFIX),
+                        // Admitted Suspend failures belong to the lifecycle
+                        // supervisor; an unaccepted phone request owns no close.
                         ControllerAction::Destroy { .. } => Some(mj_core::state::DESTRUCTION_FAILURE_PREFIX),
                         _ => None,
                     };
@@ -1373,7 +1374,7 @@ pub(crate) async fn run_server(
                         };
                         if let (Err(failure), Some(prefix), Some(id)) = (&result, lifecycle_failure_prefix, &session_id) {
                             failure_runtime.record_lifecycle_failure(id, &action_reference(action_id), &crate::daemon::LifecycleFailure {
-                                detail: failure.detail.clone(), refusal: failure.refusal.clone(),
+                                detail: failure.detail.clone(), refusal: failure.refusal.clone(), reason: failure.reason,
                             }, prefix).await;
                         }
                         let notice = match (&result, notice_action, &session_id) {

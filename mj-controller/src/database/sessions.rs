@@ -694,6 +694,7 @@ pub(crate) fn accept_resumed_session(
                 .map(|(host, size)| (host.as_str(), *size)),
             None,
             Some(&requests),
+            None,
         )
     })
 }
@@ -703,7 +704,7 @@ pub(super) fn save_resumed_session_to(
     session: &SessionRecord,
     container_size: Option<(&str, HostContainerSize)>,
 ) -> Result<()> {
-    save_resumed_session_in_environment_to(path, session, container_size, None, None)
+    save_resumed_session_in_environment_to(path, session, container_size, None, None, None)
 }
 
 pub(crate) fn restore_resumed_session(session: &SessionRecord, environment_id: &str) -> Result<()> {
@@ -716,6 +717,29 @@ pub(crate) fn restore_resumed_session(session: &SessionRecord, environment_id: &
             None,
             Some(&environment_id),
             None,
+            None,
+        )
+    })
+}
+
+/// Restore the source and release Move's restore authority in one commit.
+/// Read the latest intent here: destination retirement may have updated it.
+pub(crate) fn settle_superseded_move_source(
+    session: &SessionRecord,
+    environment_id: Option<&str>,
+    operation_id: &str,
+) -> Result<()> {
+    let session = session.clone();
+    let environment_id = environment_id.map(str::to_owned);
+    let operation_id = operation_id.to_owned();
+    submit_database_write("settle superseded Move source", move |_| {
+        save_resumed_session_in_environment_to(
+            &database_path(),
+            &session,
+            None,
+            environment_id.as_deref(),
+            None,
+            Some(&operation_id),
         )
     })
 }
@@ -726,6 +750,7 @@ fn save_resumed_session_in_environment_to(
     container_size: Option<(&str, HostContainerSize)>,
     environment_id: Option<&str>,
     requests: Option<&crate::controller::SessionResumeOptions>,
+    close_move: Option<&str>,
 ) -> Result<()> {
     validate_session_record(session)?;
     let mut connection = open(path)?;
@@ -790,6 +815,14 @@ fn save_resumed_session_in_environment_to(
     if let Some((host, size)) = container_size {
         write_host_container_size(&tx, host, size)?;
     }
+    if let Some(operation_id) = close_move {
+        super::session_move::resolve_cancelled_move_for_close_with(
+            &tx,
+            &session.id,
+            operation_id,
+            &session.updated_at,
+        )?;
+    }
     tx.commit()?;
     Ok(())
 }
@@ -801,6 +834,140 @@ pub fn save_lifecycle_session(session: &SessionRecord) -> Result<()> {
     let session = session.clone();
     submit_database_write("save_lifecycle_session", move |_| {
         save_lifecycle_session_to(&database_path(), &session)
+    })
+}
+
+/// Acceptance of Suspend owns its intent, readiness and Closing publication.
+pub(crate) fn save_suspension_intent(
+    session: &SessionRecord,
+    ready_move: Option<&mj_core::state::MoveOperation>,
+) -> Result<()> {
+    let mut session = session.clone();
+    let ready_move = ready_move.cloned();
+    submit_database_write("save suspension intent", move |connection| {
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut operation = super::session_move::load_move_operation_with(&tx, &session.id)?;
+        if let Some(operation) = operation.as_mut() {
+            if operation.is_resolved() {
+                tx.execute("UPDATE session_moves SET close_requested_operation_id=NULL WHERE session_id=?1", [&session.id])?;
+            } else {
+                if let Some(ready) = ready_move
+                    .as_ref()
+                    .filter(|ready| ready.operation_id == operation.operation_id)
+                {
+                    operation.destination_target = ready.destination_target.clone();
+                    operation.destination_native_session_id =
+                        ready.destination_native_session_id.clone();
+                    operation.updated_at = session.updated_at.clone();
+                    super::session_move::save_move_operation_with(&tx, operation)?;
+                }
+                // Only this accepted request grants close authority. A Move's
+                // cancellation/phase alone never does, even for historical rows.
+                if session.state != SessionState::Destroying {
+                    session.state = SessionState::Closing;
+                }
+                tx.execute("UPDATE session_moves SET close_requested_operation_id=?2 WHERE session_id=?1 AND operation_id=?2", params![session.id, operation.operation_id])?;
+            }
+        }
+        validate_session_record(&session)?;
+        update_lifecycle_fields(&tx, &session)?;
+        tx.commit()?;
+        Ok(())
+    })
+}
+
+pub(crate) fn save_failed_close(session: &SessionRecord) -> Result<SessionRecord> {
+    let mut session = session.clone();
+    submit_database_write("save failed close", move |connection| {
+        validate_session_record(&session)?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let current: String = tx.query_row(
+            "SELECT state FROM sessions WHERE session_id=?1",
+            [&session.id],
+            |row| row.get(0),
+        )?;
+        session.state = stored_session_state(&current);
+        let operation = super::session_move::load_move_operation_with(&tx, &session.id)?;
+        let close_intent: Option<(String, Option<String>)> = tx.query_row(
+            "SELECT operation_id, close_requested_operation_id FROM session_moves WHERE session_id=?1",
+            [&session.id], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        let accepted_move_close = operation
+            .as_ref()
+            .filter(|operation| !operation.is_resolved())
+            .zip(close_intent.as_ref())
+            .is_some_and(|(operation, (row_id, close_id))| {
+                super::session_move::exact_move_close_intent(
+                    &operation.operation_id,
+                    row_id,
+                    close_id.as_deref(),
+                )
+            });
+        let unresolved_move = operation
+            .as_ref()
+            .is_some_and(|operation| !operation.is_resolved());
+        if (session.state == SessionState::Closing && (!unresolved_move || accepted_move_close))
+            || (session.state == SessionState::Provisioning && accepted_move_close)
+        {
+            session.state = SessionState::Error;
+        }
+        update_lifecycle_fields(&tx, &session)?;
+        // Destroying is still an owned, verified teardown, not a terminal
+        // failure. Its request must survive until startup finishes cleanup.
+        if session.state != SessionState::Destroying {
+            tx.execute(
+                "UPDATE session_moves SET close_requested_operation_id=NULL WHERE session_id=?1",
+                [&session.id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(session)
+    })
+}
+
+/// A verified close of a restored destination also ends its cancelled Move.
+/// Check the old placement before publishing the terminal lifecycle state.
+pub(crate) fn save_closed_session(session: &SessionRecord) -> Result<()> {
+    let session = session.clone();
+    submit_database_write("save closed session", move |connection| {
+        validate_session_record(&session)?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let ready_move = if session.state == SessionState::Stopped {
+            super::session_move::load_move_operation_with(&tx, &session.id)?.filter(|operation| {
+                operation.phase == mj_core::state::MovePhase::Cancelled
+                    && !operation.queue_admission_started
+                    && operation.destination_target.is_some()
+            })
+        } else {
+            None
+        };
+        let ready_move = match ready_move {
+            Some(operation)
+                if super::state_io::read_targets(&tx, Some(&session.id))?
+                    .iter()
+                    .any(|(_, target)| Some(target) == operation.destination_target.as_ref()) =>
+            {
+                Some(operation)
+            }
+            _ => None,
+        };
+        update_lifecycle_fields(&tx, &session)?;
+        if let Some(operation) = ready_move {
+            super::session_move::resolve_cancelled_move_for_close_with(
+                &tx,
+                &session.id,
+                &operation.operation_id,
+                &session.updated_at,
+            )?;
+        }
+        if session.state == SessionState::Stopped {
+            tx.execute(
+                "UPDATE session_moves SET close_requested_operation_id=NULL WHERE session_id=?1",
+                [&session.id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     })
 }
 

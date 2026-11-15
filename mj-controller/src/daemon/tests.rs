@@ -7151,6 +7151,14 @@ async fn suspension_intent_survives_restart_and_missing_worker_reports_failure()
     let restored = crate::database::load_state().unwrap();
     let retained = &restored.sessions[&session.id];
     assert_eq!(retained.target, session.target);
+    assert_eq!(retained.state, SessionState::Error);
+    let message = retained.public_error().unwrap();
+    assert!(
+        message.contains("could not contact the worker"),
+        "{message}"
+    );
+    assert!(message.contains("Resume the session"), "{message}");
+    assert!(message.contains("Reference "), "{message}");
     assert!(
         retained
             .public_error()
@@ -7178,6 +7186,642 @@ async fn suspension_intent_survives_restart_and_missing_worker_reports_failure()
         !root.path().join(&session.id).exists(),
         "diagnosis must not create worker state"
     );
+}
+
+// Hard-won: #1542: Suspend superseding a Move mid-clone left the session in Closing indefinitely
+#[cfg(unix)]
+#[tokio::test]
+async fn suspend_superseding_move_before_worker_install_settles_the_source() {
+    const NAME: &str = "suspend_superseding_move_before_worker_install_settles_the_source";
+    const CHILD: &str = "MJ_TEST_SUPERSEDED_MOVE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("home");
+        let bin = directory.path().join("bin");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        mj_core::test_hooks::install_fake_command(
+            &bin,
+            "aws",
+            r#"
+printf '%s\n' "$*" >> "$MJ_TEST_MOVE_AWS_LOG"
+case "$*" in
+  *"ec2 terminate-instances"*|*"ec2 wait instance-terminated"*) exit 0 ;;
+  *) exit 92 ;;
+esac
+"#,
+        );
+        let path = std::env::join_paths(
+            std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+        crate::controller::test_support::IsolatedTest::new(
+            crate::controller::test_support::test_name(module_path!(), NAME),
+        )
+        .isolated_store(directory.path())
+        .env(CHILD, "1")
+        .env("HOME", &home)
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("PATH", path)
+        .env("MJ_TEST_MOVE_AWS_LOG", directory.path().join("aws-calls"))
+        .run();
+        return;
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let workspace = crate::database::create_workspace("Superseded Move").unwrap();
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Origin {
+        Suspend,
+        Cancel,
+        StaleCancel,
+    }
+    for (retained_workspace, restart, sealed, origin) in [
+        (false, false, true, Origin::Suspend),
+        (true, false, true, Origin::Suspend),
+        (false, true, true, Origin::Suspend),
+        (true, true, true, Origin::Suspend),
+        (true, false, false, Origin::Suspend),
+        (true, true, false, Origin::Suspend),
+        (true, true, true, Origin::Cancel),
+        (true, true, true, Origin::StaleCancel),
+    ] {
+        let requested_close = origin == Origin::Suspend;
+        let root = tempfile::tempdir().unwrap();
+        let id = match origin {
+            Origin::Cancel => "15420000000000000000000000000007",
+            Origin::StaleCancel => "15420000000000000000000000000008",
+            Origin::Suspend => match (retained_workspace, restart, sealed) {
+                (false, false, true) => "15420000000000000000000000000001",
+                (true, false, true) => "15420000000000000000000000000002",
+                (false, true, true) => "15420000000000000000000000000003",
+                (true, true, true) => "15420000000000000000000000000004",
+                (_, false, false) => "15420000000000000000000000000005",
+                (_, true, false) => "15420000000000000000000000000006",
+            },
+        };
+        let source_root = root.path().join("source").join(id);
+        let mut destination_root = root.path().join("destination").join(id);
+        std::fs::create_dir_all(&source_root).unwrap();
+        std::fs::create_dir_all(&destination_root).unwrap();
+        std::fs::write(
+            source_root.join("uncheckpointed-work"),
+            "keep source workspace",
+        )
+        .unwrap();
+        std::fs::write(
+            destination_root.join("clone.partial"),
+            "unfinished checkout",
+        )
+        .unwrap();
+        let checkpoint =
+            crate::controller::test_support::write_checkpoint_gate_archive(root.path(), id, 7);
+        let mut source = runtime_test_session(id, &workspace.id, SessionState::Stopped);
+        source.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+            worker_root: source_root.clone(),
+        }));
+        source.checkpoint = Some(Box::new(checkpoint.clone()));
+        crate::database::save_session(&source).unwrap();
+        let mut operation = mj_core::state::MoveOperation {
+            quota_stop_reason: None,
+            quota_continuation: None,
+            prepared_destination: (retained_workspace && sealed).then(|| {
+                let mut runtime = mj_core::state::TargetRuntimeSettings::from(
+                    &mj_core::config::TargetTemplate::LocalBare,
+                );
+                runtime.kind = "aws-ec2".into();
+                runtime.connection = mj_core::state::TargetConnection::Aws {
+                    profile: "isolated-fixture".into(),
+                    region: "us-east-1".into(),
+                    ssh_user: "fixture".into(),
+                    identity_file: None,
+                    ssh_args: Vec::new(),
+                };
+                mj_core::state::PreparedMoveDestination {
+                    launch_args: Vec::new(),
+                    runtime,
+                    state: if restart {
+                        mj_core::state::PreparedDestinationState::CleanupPending {
+                            instance_id: Some(format!("i-{id}")),
+                        }
+                    } else {
+                        mj_core::state::PreparedDestinationState::Created {
+                            instance_id: format!("i-{id}"),
+                        }
+                    },
+                }
+            }),
+            accepted_preparation: None,
+            acknowledge_interruption: false,
+            workspace_transfer: retained_workspace.then(|| {
+                mj_core::move_workspace::WorkspaceTransfer {
+                    assessment: Default::default(),
+                    source: Box::new(source.clone()),
+                    source_stage: root.path().join("source-stage"),
+                    controller_stage: root.path().join("controller-stage"),
+                    phase: mj_core::move_workspace::WorkspaceTransferPhase::SourceStopped,
+                }
+            }),
+            handoff: retained_workspace.then(|| checkpoint.clone()),
+            source_checkpoint_only: false,
+            in_place: false,
+            operation_id: format!("mid-clone-{id}"),
+            selection: mj_core::state::MoveSelection {
+                session_id: id.into(),
+                profile_id: Some("codex".into()),
+                target_template_id: Some("local".into()),
+                workspace: Default::default(),
+                clear_resource_allocation: false,
+                additional_mounts: None,
+                resource_allocation: None,
+                subagents: None,
+                oracle: None,
+                oracle_choice: None,
+            },
+            source_profile_id: source.last_profile.clone(),
+            source_target_template_id: source.target_template_id.clone(),
+            source_target: source.target.clone().map(|target| *target),
+            source_native_session_id: None,
+            inherited_resource_allocation: None,
+            inherited_additional_mounts: Vec::new(),
+            source_additional_mounts: Vec::new(),
+            source_resource_allocation: None,
+            destination_target: None,
+            destination_native_session_id: None,
+            destination_store_id: None,
+            configuration_fingerprint: "mid-clone".into(),
+            checkpoint: Some(checkpoint.clone()),
+            recovery_session: sealed.then(|| source.clone()),
+            queue: mj_core::state::ResumeQueueDisposition::Discard,
+            phase: mj_core::state::MovePhase::ResumingDestination,
+            queue_admission_started: false,
+            queue_admission_finished: false,
+            cancellation_requested: false,
+            created_at: source.created_at.clone(),
+            updated_at: source.updated_at.clone(),
+            error: None,
+        };
+        crate::database::save_move_operation(&operation).unwrap();
+        let mut destination = source.clone();
+        destination.state = SessionState::Provisioning;
+        destination.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+            worker_root: destination_root.clone(),
+        }));
+        crate::database::save_resumed_session(&destination, None).unwrap();
+        if restart {
+            operation.phase = mj_core::state::MovePhase::Cancelled;
+            operation.cancellation_requested = true;
+            crate::database::save_move_operation(&operation).unwrap();
+            destination.state = SessionState::Closing;
+            crate::database::save_lifecycle_session(&destination).unwrap();
+        }
+        if requested_close && restart && sealed {
+            // Restore can publish Running just before Move records StartingQueue.
+            // Closing and that destination's readiness must become durable together.
+            destination.state = SessionState::Running;
+            crate::database::save_lifecycle_session(&destination).unwrap();
+            let mut ready_operation = operation.clone();
+            ready_operation.prepared_destination = None;
+            crate::database::save_move_operation(&ready_operation).unwrap();
+            let ready = test_runtime_state_loading_the_store();
+            ready.prepare_suspension(id).await.unwrap();
+            let saved = crate::database::load_session_record(id).unwrap().unwrap();
+            let saved_move = crate::database::load_move_operation(id).unwrap().unwrap();
+            assert_eq!(saved.state, SessionState::Closing);
+            assert_eq!(
+                saved_move.destination_target.as_ref(),
+                destination.target.as_deref()
+            );
+            let mut controller = Controller::load().unwrap();
+            assert!(
+                !controller
+                    .settle_superseded_move_for_close(
+                        id,
+                        &RefusingExecutor("a ready destination must never be rolled back"),
+                        None,
+                    )
+                    .await
+                    .unwrap()
+            );
+            let destination_archives = root.path().join("destination-checkpoints");
+            std::fs::create_dir(&destination_archives).unwrap();
+            let destination_checkpoint =
+                crate::controller::test_support::write_checkpoint_gate_archive(
+                    &destination_archives,
+                    id,
+                    17,
+                );
+            controller.state.sessions.get_mut(id).unwrap().checkpoint =
+                Some(Box::new(destination_checkpoint.clone()));
+            crate::database::save_checkpointed_session(&controller.state.sessions[id]).unwrap();
+            // The daemon stopped after committing verified teardown, before
+            // publishing Stopped. Startup must give this cut to close, not Move.
+            controller.state.sessions.get_mut(id).unwrap().state = SessionState::Destroying;
+            crate::database::save_lifecycle_session(&controller.state.sessions[id]).unwrap();
+            controller
+                .record_failed_close(
+                    id,
+                    &format!(
+                        "{}: Teardown was interrupted; retry suspension.",
+                        mj_core::state::CLOSE_FAILURE_PREFIX
+                    ),
+                )
+                .unwrap();
+            let teardown = test_runtime_state_loading_the_store();
+            let (teardown_moves, close_operations) = crate::database::load_move_recovery().unwrap();
+            let owners = teardown
+                .recover_moves(teardown_moves, &close_operations)
+                .unwrap();
+            assert!(!owners.moves.contains(id));
+            assert!(owners.closes.contains(id));
+            tokio::time::timeout(Duration::from_secs(30), teardown.suspend_session(id.into()))
+                .await
+                .unwrap()
+                .unwrap();
+            let closed = crate::database::load_session_record(id).unwrap().unwrap();
+            let resolved = crate::database::load_move_operation(id).unwrap().unwrap();
+            assert_eq!(closed.state, SessionState::Stopped);
+            assert_eq!(closed.checkpoint.as_deref(), Some(&destination_checkpoint));
+            assert!(resolved.is_resolved());
+            assert!(
+                !resolved.holds_source_environment(),
+                "Resume must accept the destination checkpoint"
+            );
+            // Return to the earlier clone cut for the restart assertion below.
+            crate::database::save_move_operation(&operation).unwrap();
+            destination_root = root.path().join("destination-after-close").join(id);
+            destination.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+                worker_root: destination_root.clone(),
+            }));
+            std::fs::create_dir_all(&destination_root).unwrap();
+            std::fs::write(
+                destination_root.join("clone.partial"),
+                "unfinished checkout",
+            )
+            .unwrap();
+            destination.state = SessionState::Closing;
+            crate::database::save_resumed_session(&destination, None).unwrap();
+        }
+        if requested_close && restart {
+            test_runtime_state_loading_the_store()
+                .prepare_suspension(id)
+                .await
+                .unwrap();
+        }
+        if requested_close && restart && retained_workspace && sealed {
+            let connection = rusqlite::Connection::open(crate::database::database_path()).unwrap();
+            connection.execute_batch("CREATE TRIGGER reject_move_settlement BEFORE UPDATE OF operation_json ON session_moves
+                WHEN json_extract(NEW.operation_json, '$.queue_admission_finished')=1
+                BEGIN SELECT RAISE(ABORT, 'injected Move resolution failure'); END;").unwrap();
+            let source_environment =
+                crate::database::move_source_environment(&operation.operation_id)
+                    .unwrap()
+                    .unwrap();
+            let mut restored = source.clone();
+            restored.state = SessionState::Error;
+            // Hard-won: 59b3ff0: restoring the source before resolving Move blocked Resume after a crash.
+            assert!(
+                crate::database::settle_superseded_move_source(
+                    &restored,
+                    Some(&source_environment.id),
+                    &operation.operation_id
+                )
+                .is_err()
+            );
+            let unchanged = crate::database::load_session_record(id).unwrap().unwrap();
+            assert_eq!(unchanged.target, destination.target);
+            assert_eq!(unchanged.state, SessionState::Closing);
+            assert!(
+                !crate::database::load_move_operation(id)
+                    .unwrap()
+                    .unwrap()
+                    .is_resolved()
+            );
+            connection
+                .execute_batch("DROP TRIGGER reject_move_settlement")
+                .unwrap();
+        }
+        if !requested_close {
+            let (_, close_operations) = crate::database::load_move_recovery().unwrap();
+            assert!(
+                !close_operations.contains(&operation.operation_id),
+                "NULL grants no close authority"
+            );
+            if origin == Origin::StaleCancel {
+                let raw = rusqlite::Connection::open(crate::database::database_path()).unwrap();
+                raw.execute("UPDATE session_moves SET close_requested_operation_id='stale-other-operation' WHERE session_id=?1", [id]).unwrap();
+            }
+            let (operations, close_operations) = crate::database::load_move_recovery().unwrap();
+            assert!(!close_operations.contains(&operation.operation_id));
+            let cancelled = test_runtime_state_loading_the_store();
+            // Hard-won: 4c3c932: plain Move cancellation incorrectly granted Suspend authority after restart.
+            let owners = cancelled
+                .recover_moves(operations, &close_operations)
+                .unwrap();
+            assert!(owners.moves.contains(id));
+            assert!(!owners.closes.contains(id));
+            tokio::time::timeout(Duration::from_secs(30), async {
+                while cancelled
+                    .owner()
+                    .lifecycle
+                    .get(id)
+                    .is_some_and(|active| active.is_running())
+                {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let kept = crate::database::load_session_record(id).unwrap().unwrap();
+            assert_eq!(kept.state, SessionState::Error);
+            assert_eq!(kept.target, source.target);
+            assert!(source_root.join("uncheckpointed-work").exists());
+            assert!(!destination_root.exists());
+            let kept_move = crate::database::load_move_operation(id).unwrap().unwrap();
+            assert!(
+                !kept_move.is_resolved(),
+                "plain cancellation must keep Move retry authority"
+            );
+            assert!(matches!(
+                kept_move.prepared_destination.unwrap().state,
+                mj_core::state::PreparedDestinationState::Released
+            ));
+            continue;
+        }
+        let state = test_runtime_state_loading_the_store();
+        let cloning = Arc::new(tokio::sync::Notify::new());
+        let active_move = if restart {
+            state.prepare_suspension(id).await.unwrap();
+            // Even with every archive gone, GC must retain the durable owner
+            // until close publishes its terminal outcome.
+            let raw = rusqlite::Connection::open(crate::database::database_path()).unwrap();
+            let before_gc = crate::database::load_move_operation(id).unwrap().unwrap();
+            raw.execute(
+                "UPDATE session_moves SET operation_json=json_set(operation_json, '$.checkpoint', NULL, '$.handoff', NULL, '$.prepared_destination', NULL) WHERE session_id=?1",
+                [id],
+            ).unwrap();
+            crate::database::reap_finished_move_intents().unwrap();
+            assert!(
+                crate::database::load_move_operation(id).unwrap().is_some(),
+                "pending close must retain its Move even without an archive"
+            );
+            crate::database::save_move_operation(&before_gc).unwrap();
+            let (operations, close_operations) = crate::database::load_move_recovery().unwrap();
+            let owned = state.recover_moves(operations, &close_operations).unwrap();
+            assert!(
+                !owned.moves.contains(id),
+                "startup must leave superseded Move to close"
+            );
+            assert!(owned.closes.contains(id));
+            assert!(
+                interrupted_suspend_session_ids(&Controller::load().unwrap())
+                    .contains(&id.to_owned())
+            );
+            None
+        } else {
+            Some(
+                state
+                    .start_or_join_lifecycle(id.into(), LifecycleKind::Move, {
+                        let cloning = cloning.clone();
+                        move |_, _, cancelled| async move {
+                            // Hold the destination-cloning cut before any worker is installed.
+                            cloning.notify_one();
+                            while !cancelled.load(Ordering::Acquire) {
+                                tokio::time::sleep(Duration::from_millis(1)).await;
+                            }
+                            operation.phase = mj_core::state::MovePhase::Cancelled;
+                            operation.cancellation_requested = true;
+                            crate::database::save_move_operation(&operation)?;
+                            bail!("clone cancelled by Suspend")
+                        }
+                    })
+                    .unwrap(),
+            )
+        };
+        if !restart {
+            cloning.notified().await;
+        }
+        let result =
+            tokio::time::timeout(Duration::from_secs(30), state.suspend_session(id.into()))
+                .await
+                .unwrap();
+        assert_eq!(result.is_err(), retained_workspace, "{result:?}");
+        if let Some(active_move) = active_move {
+            assert!(
+                RuntimeState::wait_lifecycle_result(active_move)
+                    .await
+                    .is_err()
+            );
+        }
+        let stored = crate::database::load_state().unwrap();
+        let record = &stored.sessions[id];
+        assert_eq!(
+            record.state,
+            if retained_workspace {
+                SessionState::Error
+            } else {
+                SessionState::Stopped
+            }
+        );
+        assert!(checkpoint.archive_path.exists());
+        assert_eq!(record.checkpoint.as_deref(), Some(&checkpoint));
+        assert_eq!(
+            destination_root.exists(),
+            !sealed,
+            "an unsealed source keeps every placement; a sealed source permits destination cleanup ({id})"
+        );
+        let settled = crate::database::load_move_operation(id).unwrap().unwrap();
+        assert!(
+            !crate::database::load_move_recovery()
+                .unwrap()
+                .1
+                .contains(&settled.operation_id),
+            "terminal outcome must consume Suspend intent"
+        );
+        if retained_workspace && sealed {
+            assert!(matches!(
+                settled.prepared_destination.as_ref().unwrap().state,
+                mj_core::state::PreparedDestinationState::Released
+            ));
+            let calls =
+                std::fs::read_to_string(std::env::var_os("MJ_TEST_MOVE_AWS_LOG").unwrap()).unwrap();
+            assert!(
+                calls
+                    .lines()
+                    .any(|call| call.contains("terminate-instances") && call.contains(id)),
+                "{calls}"
+            );
+            assert!(
+                calls
+                    .lines()
+                    .any(|call| call.contains("instance-terminated") && call.contains(id)),
+                "{calls}"
+            );
+        }
+        assert_eq!(settled.is_resolved(), sealed);
+        assert!(
+            !settled.holds_source_environment(),
+            "Resume must not be blocked by Move"
+        );
+        if !sealed {
+            assert_eq!(record.target, destination.target);
+            assert!(source_root.join("uncheckpointed-work").exists());
+            let message = record.public_error().unwrap();
+            assert!(
+                message.contains("could not establish a sealed Move checkpoint"),
+                "{message}"
+            );
+            assert!(message.contains("Resume the session"), "{message}");
+            assert!(message.contains("Reference "), "{message}");
+        } else if retained_workspace {
+            assert_eq!(record.target, source.target);
+            assert_eq!(
+                std::fs::read_to_string(source_root.join("uncheckpointed-work")).unwrap(),
+                "keep source workspace"
+            );
+            let message = record.public_error().unwrap();
+            assert!(message.contains("source workspace was kept"), "{message}");
+            assert!(message.contains("Resume the session"), "{message}");
+            assert!(message.contains("Reference "), "{message}");
+        } else {
+            assert!(record.target.is_none());
+            assert!(!source_root.exists());
+        }
+    }
+    // Historical Moves must not turn a workerless cleanup into interrupted
+    // checkpoint recovery merely because their rows are still retained.
+    let historical = crate::database::load_move_operation("15420000000000000000000000000008")
+        .unwrap()
+        .unwrap();
+    for (index, lifecycle) in [
+        SessionState::Provisioning,
+        SessionState::Parked,
+        SessionState::StartupCleanup,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for phase in [
+            mj_core::state::MovePhase::Completed,
+            mj_core::state::MovePhase::Cancelled,
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let id = format!(
+                "1542{:028x}",
+                16 + 2 * index + usize::from(phase == mj_core::state::MovePhase::Cancelled)
+            );
+            let worker_root = root.path().join(&id);
+            std::fs::create_dir(&worker_root).unwrap();
+            std::fs::write(worker_root.join("partial-checkout"), "unfinished startup").unwrap();
+            let mut record = runtime_test_session(&id, &workspace.id, lifecycle);
+            record.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+                worker_root: worker_root.clone(),
+            }));
+            crate::database::save_session(&record).unwrap();
+            if index == 0 && phase == mj_core::state::MovePhase::Completed {
+                for moving_state in [SessionState::Provisioning, SessionState::Closing] {
+                    record.state = moving_state;
+                    crate::database::save_lifecycle_session(&record).unwrap();
+                    let mut pending = retained_startup_test_move(&record);
+                    pending.operation_id = format!("unaccepted-{id}");
+                    crate::database::save_move_operation(&pending).unwrap();
+                    crate::controller::move_session::restore_move_queue_hold(&pending);
+                    let refused = test_runtime_state_loading_the_store();
+                    let error = match refused.start_suspend_session(id.clone(), true, false).await {
+                        Err(error) => error,
+                        Ok(mut started) => started.confirm_acceptance().await.unwrap_err(),
+                    };
+                    assert!(error.to_string().contains("Move queue admission"));
+                    let unchanged = crate::database::load_session_record(&id).unwrap().unwrap();
+                    assert_eq!(
+                        unchanged.state, moving_state,
+                        "an unaccepted close cannot change another lifecycle's state"
+                    );
+                    assert_eq!(unchanged.target, record.target);
+                    assert_eq!(unchanged.last_error, record.last_error);
+                    assert_eq!(unchanged.updated_at, record.updated_at);
+                    assert!(worker_root.exists());
+                    crate::controller::move_session::release_move_queue_hold(&id);
+                }
+                record.state = lifecycle;
+                crate::database::save_lifecycle_session(&record).unwrap();
+            }
+            let mut completed = historical.clone();
+            completed.selection.session_id = id.clone();
+            completed.operation_id = format!("historical-{id}");
+            completed.phase = phase;
+            completed.queue_admission_started = false;
+            completed.queue_admission_finished = true;
+            completed.prepared_destination = None;
+            crate::database::save_move_operation(&completed).unwrap();
+            // A crash during a later ordinary close must leave close recovery
+            // in charge even while its historical Move row remains.
+            record.state = SessionState::Closing;
+            crate::database::save_lifecycle_session(&record).unwrap();
+            for exact_historical_intent in [false, true] {
+                let recovering = test_runtime_state_loading_the_store();
+                let close_ids = if exact_historical_intent {
+                    BTreeSet::from([completed.operation_id.clone()])
+                } else {
+                    BTreeSet::new()
+                };
+                let owners = recovering
+                    .recover_moves(vec![completed.clone()], &close_ids)
+                    .unwrap();
+                assert!(!owners.moves.contains(&id));
+                assert!(!owners.closes.contains(&id));
+                assert!(
+                    interrupted_suspend_session_ids(&Controller::load().unwrap()).contains(&id)
+                );
+            }
+            record.state = lifecycle;
+            crate::database::save_lifecycle_session(&record).unwrap();
+            let runtime = test_runtime_state_loading_the_store();
+            if lifecycle == SessionState::Provisioning {
+                // An older writer can preserve a now-historical exact marker.
+                // It cannot authorize a rejected action to fail a new startup.
+                let raw = rusqlite::Connection::open(crate::database::database_path()).unwrap();
+                raw.execute("UPDATE session_moves SET close_requested_operation_id=operation_id WHERE session_id=?1", [&id]).unwrap();
+                let before = crate::database::load_session_record(&id).unwrap().unwrap();
+                let cancelled = LifecycleControl::default();
+                cancelled.cancelled.store(true, Ordering::Release);
+                assert!(
+                    runtime
+                        .start_suspend_session_controlled(id.clone(), true, false, cancelled)
+                        .await
+                        .is_err()
+                );
+                let unchanged = crate::database::load_session_record(&id).unwrap().unwrap();
+                assert_eq!(unchanged.state, before.state);
+                assert_eq!(unchanged.last_error, before.last_error);
+                assert_eq!(unchanged.updated_at, before.updated_at);
+                assert_eq!(raw.query_row("SELECT close_requested_operation_id FROM session_moves WHERE session_id=?1", [&id], |row| row.get::<_, String>(0)).unwrap(), completed.operation_id);
+            }
+            runtime.prepare_suspension(&id).await.unwrap();
+            assert_eq!(
+                crate::database::load_session_record(&id)
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                lifecycle,
+                "resolved Move must preserve the existing cleanup route"
+            );
+            assert!(
+                !crate::database::load_move_recovery()
+                    .unwrap()
+                    .1
+                    .contains(&completed.operation_id)
+            );
+            tokio::time::timeout(Duration::from_secs(30), runtime.suspend_session(id.clone()))
+                .await
+                .unwrap()
+                .unwrap();
+            let closed = crate::database::load_session_record(&id).unwrap().unwrap();
+            assert_eq!(closed.state, SessionState::Stopped);
+            assert!(closed.target.is_none());
+            assert!(!worker_root.exists());
+        }
+    }
 }
 
 /// #1191: `mj destroy` is answered "accepted" before the destroy finishes,

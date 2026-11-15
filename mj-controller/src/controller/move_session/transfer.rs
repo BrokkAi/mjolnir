@@ -1272,6 +1272,24 @@ impl Controller {
         error: anyhow::Error,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<anyhow::Error> {
+        self.rollback_move_destination_with_persist(
+            operation,
+            error,
+            executor,
+            |source, environment| match environment {
+                Some(environment) => crate::database::restore_resumed_session(source, environment),
+                None => crate::database::save_resumed_session(source, None),
+            },
+        )
+    }
+
+    pub(in crate::controller) fn rollback_move_destination_with_persist(
+        &mut self,
+        operation: &MoveOperation,
+        error: anyhow::Error,
+        executor: &(impl CommandExecutor + Sync),
+        persist: impl Fn(&mj_core::state::SessionRecord, Option<&str>) -> Result<()>,
+    ) -> Result<anyhow::Error> {
         crate::worker_lifecycle::run_blocking(
             &operation.selection.session_id,
             "rollback move destination",
@@ -1284,7 +1302,12 @@ impl Controller {
                 let id = &operation.selection.session_id;
                 let current = &self.state.sessions[id];
                 if current.target == transfer.source.target {
-                    return self.retain_failed_in_place_move(id, &transfer.source, error);
+                    return self.retain_failed_in_place_move_with_persist(
+                        id,
+                        &transfer.source,
+                        error,
+                        |source| persist(source, None),
+                    );
                 }
                 let prepared = operation
                     .prepared_destination
@@ -1321,7 +1344,7 @@ impl Controller {
                 let environment =
                     crate::database::move_source_environment(&operation.operation_id)?
                         .context("Move rollback lost its source environment")?;
-                crate::database::restore_resumed_session(&source, &environment.id)?;
+                persist(&source, Some(&environment.id))?;
                 self.state.sessions.insert(id.clone(), source);
                 Ok(error)
             },

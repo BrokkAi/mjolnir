@@ -239,13 +239,15 @@ pub(super) async fn run_daemon_runtime(
     // are shut down before the process-level writer can be closed.
     let bootstrapping = Instant::now();
     let bootstrap = async {
-        let move_operations = blocking(crate::database::load_move_operations).await?;
+        let (move_operations, close_operations) =
+            blocking(crate::database::load_move_recovery).await?;
         let moves = move_operations.len();
         let move_sessions = move_operations
             .iter()
             .map(|operation| operation.selection.session_id.clone())
             .collect::<BTreeSet<_>>();
-        let mut lifecycle_owned = state.recover_moves(move_operations)?;
+        let move_owners = state.recover_moves(move_operations, &close_operations)?;
+        let mut lifecycle_owned = move_owners.moves;
         let restart_intents = blocking(crate::database::load_session_restarts).await?;
         let restarts = restart_intents.len();
         lifecycle_owned.extend(
@@ -254,7 +256,6 @@ pub(super) async fn run_daemon_runtime(
                 .map(|intent| intent.session_id.clone()),
         );
         lifecycle_owned.extend(state.recover_restarts(restart_intents)?);
-        lifecycle_owned.extend(move_sessions.iter().cloned());
         let (retained_cleanups, startup_cleanups) = {
             let owner = state.owner();
             let sessions = &owner.controller().state.sessions;
@@ -282,11 +283,11 @@ pub(super) async fn run_daemon_runtime(
             "daemon startup: recovery of moves, restarts and cleanups queued"
         );
         state.restore_startup_deliveries(&cancellation).await?;
-        Ok::<_, anyhow::Error>((move_sessions, lifecycle_owned))
+        Ok::<_, anyhow::Error>((move_sessions, lifecycle_owned, move_owners.closes))
     }
     .await;
     log_startup_phase("recover moves and startup deliveries", bootstrapping);
-    let (move_sessions, move_owned) = match bootstrap {
+    let (move_sessions, move_owned, move_closes) = match bootstrap {
         Ok(ownership) => ownership,
         Err(error) => {
             epilogue_started.store(true, Ordering::Release);
@@ -472,7 +473,11 @@ pub(super) async fn run_daemon_runtime(
     progress_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let (interrupted_close_tx, mut interrupted_close_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut interrupted_close_tasks = Vec::new();
-    for session_id in interrupted_suspend_session_ids(&controller) {
+    for session_id in interrupted_suspend_session_ids(&controller)
+        .into_iter()
+        .chain(move_closes)
+        .collect::<BTreeSet<_>>()
+    {
         if move_owned.contains(&session_id) {
             continue;
         }
