@@ -8476,3 +8476,57 @@ fn legacy_snapshot_open_request_upgrade_and_checkpoint_restore() {
         assert!(current.snapshot.open_request().is_none());
     }
 }
+
+// Hard-won: bd6363001 review: reopening a dead relay promoted work before Resume could discard it.
+#[test]
+fn offline_queue_discard_precedes_reopen_promotion_and_requires_exclusive_root_ownership() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    submit_relay(&mut relay, "old-active", prompt("old active turn"));
+    relay.claim_pending_commands(true).unwrap();
+    submit_relay(
+        &mut relay,
+        "explicitly-discarded",
+        prompt("must never execute"),
+    );
+    assert!(
+        queued_command_ids(&relay)
+            .iter()
+            .any(|id| id == "explicitly-discarded")
+    );
+    drop(relay);
+    let owner = crate::worker_runtime::WorkerRootOwner::acquire(temp.path()).unwrap();
+    assert!(
+        crate::checkpoint::discard_queued_prompts_before_start(
+            temp.path(),
+            SESSION,
+            "resume-discard"
+        )
+        .is_err()
+    );
+    drop(owner);
+    crate::checkpoint::discard_queued_prompts_before_start(temp.path(), SESSION, "resume-discard")
+        .unwrap();
+    let mut reopened = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    assert!(
+        !reopened
+            .claim_pending_commands(true)
+            .unwrap()
+            .iter()
+            .any(|command| command.command_id == "explicitly-discarded")
+    );
+    assert!(
+        !queued_command_ids(&reopened)
+            .iter()
+            .any(|id| id == "explicitly-discarded")
+    );
+    let ordinal = reopened.snapshot.handled_commands["resume-discard"].accepted_ordinal;
+    drop(reopened);
+    crate::checkpoint::discard_queued_prompts_before_start(temp.path(), SESSION, "resume-discard")
+        .unwrap();
+    let repeated = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    assert_eq!(
+        repeated.snapshot.handled_commands["resume-discard"].accepted_ordinal,
+        ordinal
+    );
+}

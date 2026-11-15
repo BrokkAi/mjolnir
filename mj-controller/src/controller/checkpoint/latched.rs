@@ -268,6 +268,7 @@ impl Controller {
                     reconnect: &reconnect,
                     launch: None,
                     prepared: false,
+                    discard_queued_prompts: None,
                     swap_admission: None,
                     messages: &RESTART_FOR_CHECKPOINT,
                 },

@@ -605,7 +605,7 @@ fn sqlite_native_database_snapshot(harness: HarnessKind, path: &Path) -> Result<
 /// page in one transaction, so the copy holds exactly what a reader of the
 /// live database sees; copying the file alone would leave out whatever is
 /// still in the log.
-fn sqlite_snapshot(
+pub(super) fn sqlite_snapshot(
     path: &Path,
     label: &str,
     edit: impl FnOnce(&rusqlite::Connection) -> Result<()>,

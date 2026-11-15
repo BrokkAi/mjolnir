@@ -85,6 +85,7 @@ pub(super) struct InstalledWorkerRestart<'a> {
     pub reconnect: &'a CommandSpec,
     pub launch: Option<&'a mj_core::worker_launch::WorkerLaunchConfig>,
     pub prepared: bool,
+    pub discard_queued_prompts: Option<String>,
     pub swap_admission: Option<crate::upgrade::Work>,
     pub messages: &'a WorkerRestartMessages,
 }
@@ -433,12 +434,14 @@ impl Controller {
                         );
                         owner.settle_dead_restart(target)?;
                     }
-                    owner.begin_restart(target, String::new())?;
-                    crate::database::advance_worker_restart(
-                        session_id,
-                        owner.operation_id(),
-                        crate::database::WorkerRestartPhase::Swapping,
-                    )?;
+                    if restart.discard_queued_prompts.is_none() {
+                        owner.begin_restart(target, String::new())?;
+                        crate::database::advance_worker_restart(
+                            session_id,
+                            owner.operation_id(),
+                            crate::database::WorkerRestartPhase::Swapping,
+                        )?;
+                    }
                 }
                 // A failed stop may leave the old worker alive, so it stays outside the
                 // marker the start below applies: only steps after a successful stop
@@ -477,6 +480,7 @@ impl Controller {
                 prepared,
                 messages,
                 swap_admission,
+                discard_queued_prompts,
             } = restart;
             let owner = crate::worker_lifecycle::require(session_id)?;
             let target = self
@@ -504,7 +508,11 @@ impl Controller {
                         owner.settle_dead_restart(target)?;
                     }
                 }
-                if crate::database::load_worker_restart(session_id)?.is_none() {
+            }
+            let admit_start = || -> Result<()> {
+                if let Some(target) = target
+                    && crate::database::load_worker_restart(session_id)?.is_none()
+                {
                     owner.begin_restart(target, String::new())?;
                     crate::database::advance_worker_restart(
                         session_id,
@@ -512,6 +520,10 @@ impl Controller {
                         crate::database::WorkerRestartPhase::Swapping,
                     )?;
                 }
+                Ok(())
+            };
+            if discard_queued_prompts.is_none() {
+                admit_start()?;
             }
             // Everything up to the first successful connection either fails with no
             // worker running or cannot tell: the marker covers all of it.
@@ -529,6 +541,32 @@ impl Controller {
                         )
                         .context("install the current Mjolnir worker launch configuration")?;
                     }
+                }
+                if let Some(command_id) = &discard_queued_prompts {
+                    super::execute_checked(
+                        executor,
+                        targets::command_on_locator(
+                            backend,
+                            session_id,
+                            vec![
+                                format!("{worker_root}/hel"),
+                                "worker".into(),
+                                "discard-queued-prompts".into(),
+                                "--root".into(),
+                                worker_root.into(),
+                                "--session-id".into(),
+                                session_id.into(),
+                                "--command-id".into(),
+                                command_id.clone(),
+                            ],
+                            "discard queued prompts before repaired worker startup",
+                        )?,
+                    )?;
+                }
+                if discard_queued_prompts.is_some() {
+                    // Recovery may launch any recorded boot intent. Establish
+                    // queue disposition before making that restart possible.
+                    admit_start()?;
                 }
                 let started = match target {
                     Some(target) => start_worker_durably(
@@ -564,6 +602,7 @@ impl Controller {
                     launch,
                     prepared,
                     messages,
+                    discard_queued_prompts: None,
                     swap_admission: None,
                 },
             )
@@ -711,6 +750,7 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
         struct LaunchThenHandoff {
             started: AtomicBool,
+            discarded: AtomicBool,
             yielded: AtomicBool,
         }
         impl CommandExecutor for LaunchThenHandoff {
@@ -722,7 +762,17 @@ mod tests {
                             .any(|label| label == LABEL)
                     );
                 }
+                if command.purpose == "discard queued prompts before repaired worker startup" {
+                    assert!(!self.started.load(Ordering::SeqCst));
+                    assert!(crate::database::load_worker_restart(ID)?.is_none());
+                    self.discarded.store(true, Ordering::SeqCst);
+                }
                 if command.purpose == "start detached Mjolnir worker" {
+                    assert!(self.discarded.load(Ordering::SeqCst));
+                    assert_eq!(
+                        crate::database::worker_restart_phase(ID)?,
+                        Some(crate::database::WorkerRestartPhase::Swapping)
+                    );
                     self.started.store(true, Ordering::SeqCst);
                 }
                 Ok(CommandOutput {
@@ -774,6 +824,7 @@ mod tests {
         };
         let executor = LaunchThenHandoff {
             started: AtomicBool::new(false),
+            discarded: AtomicBool::new(false),
             yielded: AtomicBool::new(false),
         };
         let reconnect = CommandSpec::new("unused", std::iter::empty::<&str>());
@@ -787,6 +838,7 @@ mod tests {
                     reconnect: &reconnect,
                     launch: None,
                     prepared: true,
+                    discard_queued_prompts: Some("discard-before-boot".into()),
                     swap_admission: Some(crate::upgrade::activity_unless_draining(LABEL).unwrap()),
                     messages: &RESTART_FOR_UPGRADE,
                 },
@@ -873,6 +925,7 @@ mod tests {
                     reconnect: &reconnect,
                     launch: None,
                     prepared: false,
+                    discard_queued_prompts: None,
                     swap_admission: None,
                     messages: &RESTART_FOR_CHECKPOINT,
                 },

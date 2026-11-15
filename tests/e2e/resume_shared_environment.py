@@ -345,6 +345,10 @@ else:
         active = self.wait(lambda: self.working(child), "child active turn")
         self.wait_child_started(child)
         for dead in [False, True]:
+            if dead:
+                self.prompt(parent, "hold active work before retained worker death")
+                discarded = self.prompt(parent, "discard this before the retained relay can promote it")
+                self.wait(lambda: any(item["command_id"] == discarded for item in self.worker_status(parent)["state"]["queued_prompts"]), "retained relay queue accepted")
             # Inject the durable result of failed harness preparation while the
             # daemon is stopped. Workers and the child's turn remain independent.
             self.cli("daemon", "stop")
@@ -355,9 +359,21 @@ else:
                 if dead:
                     # The second repair must work without any recovery archive.
                     database.execute("DELETE FROM session_checkpoints WHERE session_id=?", (parent,))
-            self.cli("resume", "--session", parent)
-            self.authenticate()
+            if dead:
+                self.cli("workspaces", "list")
+                self.authenticate()
+                status, response = self.request("POST", "/api/actions", {
+                    "action": "resume", "session_id": parent, "workspace_id": workspace,
+                    "profile_id": "fake", "target_id": "podman", "queue": "discard",
+                }, timeout=WAIT)
+                assert status == 202, response
+            else:
+                self.cli("resume", "--session", parent)
+                self.authenticate()
             self.wait(lambda: self.record(parent)["state"] == "running", "parent repaired")
+            if dead:
+                assert not self.working(parent), "discarded retained prompts must never be promoted"
+                assert not self.worker_status(parent)["state"]["queued_prompts"]
             after = self.inspect(parent)
             assert after["Id"] == before["Id"]
             assert after["Mounts"] == before["Mounts"]

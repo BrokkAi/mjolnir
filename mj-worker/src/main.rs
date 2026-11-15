@@ -103,6 +103,16 @@ enum WorkerCommand {
         #[arg(long, requires = "missing_parent")]
         relay_seed: Option<PathBuf>,
     },
+    /// Journal queue discard while the worker is stopped, before any dispatch.
+    #[command(hide = true)]
+    DiscardQueuedPrompts {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        session_id: String,
+        #[arg(long)]
+        command_id: String,
+    },
     /// Install one streamed resource directory on a remote target.
     InstallResource {
         #[arg(long)]
@@ -604,6 +614,15 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
                 mj_worker::checkpoint::restore_from_spec_file(&spec)
             }
         }
+        WorkerCommand::DiscardQueuedPrompts {
+            root,
+            session_id,
+            command_id,
+        } => mj_worker::checkpoint::discard_queued_prompts_before_start(
+            &root,
+            &session_id,
+            &command_id,
+        ),
         WorkerCommand::InstallResource { destination } => {
             mj_checkpoint::resources::install_resource_stream(std::io::stdin(), &destination)
         }

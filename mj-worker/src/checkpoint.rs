@@ -79,6 +79,17 @@ pub fn pack_from_spec_reader(reader: &mut impl std::io::Read) -> Result<TargetCh
     let spec: CheckpointPackSpec = read_json_from(reader, "checkpoint pack spec")?;
     pack_checkpoint(&spec)
 }
+/// The root lock excludes a live worker; the relay's preservation mode never
+/// promotes accepted work while this command journals its queue disposition.
+pub fn discard_queued_prompts_before_start(
+    root: &Path,
+    session_id: &str,
+    command_id: &str,
+) -> Result<()> {
+    let _owner = crate::worker_runtime::WorkerRootOwner::acquire(root)?;
+    crate::relay::DurableRelay::discard_queued_prompts_before_start(root, session_id, command_id)
+}
+
 pub fn restore_checkout_from_spec_file(path: &Path) -> Result<()> {
     use mj_checkpoint::archive::{GitCommand, GitCommandRunner};
     let mut spec: CheckoutRecoverySpec = serde_json::from_slice(&fs::read(path)?)?;

@@ -4372,3 +4372,107 @@ fn missing_parent_restore_preserves_current_components_and_retries_partial_failu
         b"newer native history"
     );
 }
+
+// Hard-won: bd6363001 review: publishing a SQLite database before its WAL made retry silently lose conversation rows.
+#[cfg(unix)]
+#[test]
+fn missing_sqlite_recovery_publishes_a_complete_wal_snapshot_before_other_artifact_failures() {
+    let temp = tempfile::tempdir().unwrap();
+    let (spec, _) = fixture(temp.path());
+    export_checkpoint(&spec).unwrap();
+    let original = read_archive_verified(&spec.output_path).unwrap();
+    let source = temp.path().join("legacy.db");
+    let live = rusqlite::Connection::open(&source).unwrap();
+    live.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE conversation(id TEXT PRIMARY KEY, body TEXT); PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+    let body = "conversation only in WAL ".repeat(8192);
+    live.execute("INSERT INTO conversation VALUES ('wal-only', ?1)", [&body])
+        .unwrap();
+    let wal = fs::read(temp.path().join("legacy.db-wal")).unwrap();
+    assert!(wal.len() > 64 * 1024);
+    let mut session = original.manifest.session.clone();
+    session.harness_kind = HarnessKind::OpenCode;
+    let relative = PathBuf::from(".data/opencode/opencode.db");
+    let legacy = temp.path().join("legacy.hel.zip");
+    write_archive_hashed(
+        &legacy,
+        &ArchiveInput {
+            session,
+            target: original.manifest.target.clone(),
+            bundle: original.manifest.bundle.clone(),
+            canonical_session: original.canonical_session().unwrap(),
+            repositories: original
+                .manifest
+                .repositories
+                .iter()
+                .map(|repository| archived_repository_snapshot(&original, repository).unwrap())
+                .collect(),
+            native_artifacts: vec![
+                NativeArtifact {
+                    relative_path: relative.clone(),
+                    data: fs::read(&source).unwrap(),
+                    mode: 0o600,
+                },
+                NativeArtifact {
+                    relative_path: PathBuf::from(".data/opencode/opencode.db-wal"),
+                    data: wal,
+                    mode: 0o600,
+                },
+                NativeArtifact {
+                    relative_path: PathBuf::from("blocked/late-artifact"),
+                    data: b"last artifact".to_vec(),
+                    mode: 0o600,
+                },
+            ],
+        },
+    )
+    .unwrap();
+    drop(live);
+    let home = temp.path().join("recovered-home");
+    fs::create_dir_all(&home).unwrap();
+    let current = temp.path().join("current-files");
+    fs::create_dir(&current).unwrap();
+    std::os::unix::fs::symlink(&current, home.join("blocked")).unwrap();
+    let restore = CheckpointRestoreSpec {
+        archive_path: legacy,
+        workspace_root: spec.workspace_root.clone(),
+        report_root: None,
+        relay_root: temp.path().join("recovered-relay"),
+        harness_home: home.clone(),
+        restore_repositories: false,
+        restore_native: true,
+        queue_policy: QueueRestorePolicy::Discard,
+        primary_repository_root: Some(spec.workspace_root.join("app")),
+    };
+    assert!(restore_missing_parent_checkpoint(&restore, &NoNativeCheckpointState, None).is_err());
+    assert!(home.join(&relative).is_file());
+    assert!(!home.join(".data/opencode/opencode.db-wal").exists());
+    assert!(!home.join(".data/opencode/opencode.db-shm").exists());
+    let database = rusqlite::Connection::open(home.join(&relative)).unwrap();
+    assert_eq!(
+        database
+            .query_row(
+                "SELECT body FROM conversation WHERE id='wal-only'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        body
+    );
+    drop(database);
+    fs::remove_file(home.join("blocked")).unwrap();
+    restore_missing_parent_checkpoint(&restore, &NoNativeCheckpointState, None).unwrap();
+    let database = rusqlite::Connection::open(home.join(&relative)).unwrap();
+    database
+        .execute("UPDATE conversation SET body='newer conversation'", [])
+        .unwrap();
+    drop(database);
+    restore_missing_parent_checkpoint(&restore, &NoNativeCheckpointState, None).unwrap();
+    let database = rusqlite::Connection::open(home.join(&relative)).unwrap();
+    assert_eq!(
+        database
+            .query_row("SELECT body FROM conversation", [], |row| row
+                .get::<_, String>(0))
+            .unwrap(),
+        "newer conversation"
+    );
+}

@@ -60,6 +60,7 @@ impl Controller {
                             reconnect: &reconnect,
                             launch: None,
                             prepared: true,
+                            discard_queued_prompts: None,
                             swap_admission: None,
                             messages: &REPAIR,
                         },
@@ -101,15 +102,15 @@ impl Controller {
                     return Box::pin(self.recover_missing_parent_data(session_id, discard_queue, executor)).await;
                 }
             }
-            let mut relay = if let Some(relay) = attached {
-                relay
+            let (mut relay, clear_live_queue) = if let Some(relay) = attached {
+                (relay, discard_queue)
             } else {
                 let launch = self.current_worker_launch_config(session_id, &backend)?;
                 if !matches!(&worker_state, RetainedWorker::Installed) {
                     let worker = WorkerInstall::for_target(&backend, executor)?;
                     prepare_managed_harness_for_upgrade(executor, &backend, session_id, &worker, &launch)?;
                 }
-                self.restart_worker_with_installed_binary(
+                let relay = self.restart_worker_with_installed_binary(
                     session_id,
                     executor,
                     InstalledWorkerRestart {
@@ -118,14 +119,16 @@ impl Controller {
                         reconnect: &reconnect,
                         launch: Some(&launch),
                         prepared: matches!(&worker_state, RetainedWorker::Installed),
+                        discard_queued_prompts: if discard_queue { Some(new_command_id("resume-clear-queue")?) } else { None },
                         swap_admission: swap_admission.take(),
                         messages: &REPAIR,
                     },
                 )
-                .await?
+                .await?;
+                (relay, false)
             };
             executor.end_resumable_work("resume repair publication")?;
-            if discard_queue {
+            if clear_live_queue {
                 relay
                     .submit(
                         new_command_id("resume-clear-queue")?,

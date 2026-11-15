@@ -260,28 +260,78 @@ fn restore_missing_parent_relay(
     )
 }
 
+/// Collapse a legacy database/WAL family before publishing any authoritative
+/// file. A retry can then treat a present database as complete, with no receipt
+/// or partially published sidecars to reconcile.
+fn restore_missing_sqlite_families(
+    archive: &crate::archive::VerifiedArchive,
+    spec: &CheckpointRestoreSpec,
+    target_cwd: Option<&Path>,
+) -> Result<(bool, std::collections::BTreeSet<PathBuf>)> {
+    let mut changed = false;
+    let mut families = std::collections::BTreeSet::new();
+    for database in &archive.manifest.payloads {
+        let PayloadRole::NativeArtifact { relative_path } = &database.role else {
+            continue;
+        };
+        if !super::native_scan::is_sqlite_native_database(
+            archive.manifest.session.harness_kind,
+            relative_path,
+        ) {
+            continue;
+        }
+        let sidecars = super::native_scan::sqlite_sidecars(relative_path);
+        families.insert(relative_path.clone());
+        families.extend(sidecars.iter().cloned());
+        if spec.harness_home.join(relative_path).try_exists()? {
+            continue;
+        }
+        for sidecar in &sidecars {
+            ensure!(
+                !spec.harness_home.join(sidecar).try_exists()?,
+                "native database is absent but its sidecar remains; retaining both for recovery"
+            );
+        }
+        let scratch = tempfile::tempdir()?;
+        write_private_file(
+            scratch.path(),
+            relative_path,
+            archive.payload(database)?,
+            database.mode,
+        )?;
+        for sidecar in &sidecars {
+            if let Some(payload) = archive.manifest.payloads.iter().find(|payload| matches!(&payload.role, PayloadRole::NativeArtifact { relative_path } if relative_path == sidecar)) {
+                write_private_file(scratch.path(), sidecar, archive.payload(payload)?, payload.mode)?;
+            }
+        }
+        let complete = super::native_scan::sqlite_snapshot(
+            &scratch.path().join(relative_path),
+            "recovered native",
+            |_| Ok(()),
+        )?;
+        let complete = restored_native_artifact_bytes(
+            archive.manifest.session.harness_kind,
+            relative_path,
+            &complete,
+            target_cwd,
+            &spec.harness_home,
+        )?;
+        changed |= write_missing_private_file(
+            &spec.harness_home,
+            relative_path,
+            &complete,
+            database.mode,
+        )?;
+    }
+    Ok((changed, families))
+}
+
 fn restore_native_artifacts(
     archive: &crate::archive::VerifiedArchive,
     spec: &CheckpointRestoreSpec,
     native_state: &dyn NativeCheckpointState,
     missing_only: bool,
 ) -> Result<bool> {
-    let mut changed = false;
-    let mut retained_databases = std::collections::BTreeSet::new();
-    if missing_only {
-        for descriptor in &archive.manifest.payloads {
-            if let PayloadRole::NativeArtifact { relative_path } = &descriptor.role
-                && super::native_scan::is_sqlite_native_database(
-                    archive.manifest.session.harness_kind,
-                    relative_path,
-                )
-                && spec.harness_home.join(relative_path).try_exists()?
-            {
-                retained_databases.insert(relative_path.clone());
-                retained_databases.extend(super::native_scan::sqlite_sidecars(relative_path));
-            }
-        }
-    }
     let target_cwd = spec.primary_repository_root.clone().or_else(|| {
         target_primary_cwd(
             &archive.manifest.bundle.primary_repository,
@@ -289,6 +339,11 @@ fn restore_native_artifacts(
             &spec.workspace_root,
         )
     });
+    let (mut changed, sqlite_families) = if missing_only {
+        restore_missing_sqlite_families(archive, spec, target_cwd.as_deref())?
+    } else {
+        (false, std::collections::BTreeSet::new())
+    };
     // A restored database replaces the one in the home, and SQLite would
     // replay a write-ahead log left beside the old one over it. An archive
     // from before OpenCode snapshots carries its own log, which the loop
@@ -322,7 +377,7 @@ fn restore_native_artifacts(
         {
             continue;
         }
-        if missing_only && retained_databases.contains(relative_path) {
+        if missing_only && sqlite_families.contains(relative_path) {
             continue;
         }
         let native_data = archive.payload(descriptor)?;
