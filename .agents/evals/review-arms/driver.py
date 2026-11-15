@@ -60,7 +60,9 @@ CORPUS = {c["id"]: c for name in ("candidates-all.jsonl", "diffs.jsonl")
           for c in map(json.loads, (SCRIPTS / "corpus" / name).read_text().splitlines())}
 # Relation-brief arms (brief/PLAN.md), kept apart from ARMS above.
 ARMS.update({"OT": ["gpt-6.1-terra:high"] * 3, "OS": ["gpt-6.1-sol:high"] * 3,
-             "BT": ["gpt-6.1-terra:high"] * 3, "BS": ["gpt-6.1-sol:high"] * 3})
+             "BT": ["gpt-6.1-terra:high"] * 3, "BS": ["gpt-6.1-sol:high"] * 3,
+             # Stage C (brief/PLAN-bifrost.md): the Bifrost relation_brief tool's brief.
+             "FT": ["gpt-6.1-terra:high"] * 3, "FS": ["gpt-6.1-sol:high"] * 3})
 
 
 def save(path, value):
@@ -162,7 +164,7 @@ def commit_message(bug):
 
 
 # Arms whose reviewers also get a relation brief (brief/PLAN.md), by brief kind.
-BRIEF_ARMS = {"OT": "oracle", "OS": "oracle", "BT": "blind", "BS": "blind"}
+BRIEF_ARMS = {"OT": "oracle", "OS": "oracle", "BT": "blind", "BS": "blind", "FT": "bifrost", "FS": "bifrost"}
 BRIEF_NOTE = ("These are relations computed from the repository at this commit, not findings. "
               "They may be incomplete.")
 
