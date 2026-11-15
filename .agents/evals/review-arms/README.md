@@ -422,6 +422,35 @@ blind in `verify-brief`, 82 groups: 57 confirmed, 7 plausible, 18 rejected):
   medium problems and adds a few false findings, consistent with reviewers
   exploring less (fewer tool calls). The no-brief sessions ran a day earlier.
 
+## Bifrost tool coverage: can a code graph produce the decisive fact?
+
+For the Bifrost session, at Jonathan's request (`toolcov/SPEC.md`,
+`toolcov/workflow.js`, `results/tool-coverage.jsonl`): for each relation in
+the census, a Sonnet/high agent asked Bifrost 0.15.2 (latest release) a
+diff-only question at the introducing commit and classed the result.
+
+| Set | A: computed today | A0: anchor, relation not stated | B: graph relation not exposed | C: outside a code graph |
+|---|---:|---:|---:|---:|
+| Primary (18) | 1 | 8 | 7 | 2 |
+| Secondary (4) | 0 | 3 | 1 | 0 |
+
+- A means the output states the decisive relation (a reviewer review added A0
+  for outputs that contain the anchor but not the relation). The one A is
+  `github-token-in-container-argv` (the field scan shows `extra_run_args`
+  extended into `container_run_args`).
+- A0 outputs usually list the right caller or field use among others but not
+  the part that matters: the constant argument, the lock held at the call,
+  read versus write, or which branch a call sits in. Two A0 anchors came only
+  from `query_code` text search, not a graph relation.
+- The first run was invalid: every worktree of the clone shares one cache
+  (`.bifrost/cache`, 18.8 GB), and concurrent processes waited on its build
+  lock, so 6 records had every call time out. The rerun was serial.
+- 16 calls failed with "Analyzer store failure ... Rust file routes
+  unavailable: ValidationFailed" (`usage_graph`, `scan_usages_by_location`),
+  so some B classes rest partly on failed calls. A first call on a worktree
+  took up to 12 minutes; `usage_graph` calls took 3 to 9 minutes; most
+  results reported `complete=false`.
+
 ## Running
 
 The scripts read the corpus from this directory and keep everything else
