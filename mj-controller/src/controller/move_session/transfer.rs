@@ -26,13 +26,10 @@ fn move_handoff_base(
     source: &mj_core::state::SessionRecord,
     metadata: &mj_checkpoint::archive::RepositoryMetadata,
     git: &dyn mj_checkpoint::archive::GitCommandRunner,
+    executor: &impl CommandExecutor,
 ) -> Result<String> {
-    if let Some(base) = source
-        .managed_worktree
-        .as_ref()
-        .and_then(|checkout| checkout.base_commit.as_ref())
-    {
-        return Ok(base.clone());
+    if let Some(worktree) = source.managed_worktree.as_ref() {
+        return super::super::worktree::managed_worktree_base_commit(worktree, executor);
     }
     if metadata.remote_workspace {
         return Ok(metadata.base_commit.clone());
@@ -55,7 +52,7 @@ fn record_move_handoff_bases(
     let git = super::super::worktree::ExecutorGit::for_session(executor, backend, &source.id);
     let mut changed = Vec::new();
     for repository in &archive.manifest.repositories {
-        let base = move_handoff_base(source, &repository.metadata, &git)?;
+        let base = move_handoff_base(source, &repository.metadata, &git, executor)?;
         let mut metadata = repository.metadata.clone();
         metadata.base_commit = base;
         if source.checkout().project_directory().is_some() {
@@ -1528,6 +1525,7 @@ mod tests {
             committed_repository(),
             committed_repository(),
             committed_repository(),
+            committed_repository(),
         ];
         let mut source_repositories = Vec::new();
         let mut destinations = Vec::new();
@@ -1539,6 +1537,12 @@ mod tests {
             // mixups and accidentally substituting the transferred HEAD.
             test_git(source.path(), &["commit", "--allow-empty", "-m", &id]);
             let base = test_git(source.path(), &["rev-parse", "HEAD"]);
+            if index == 3 {
+                // A legacy worktree's session branch starts after existing
+                // local work; its reflog, rather than origin, owns the base.
+                test_git(source.path(), &["checkout", "-b", "mj/legacy-base"]);
+                test_git(source.path(), &["branch", "-D", "master"]);
+            }
             if index == 1 {
                 test_git(source.path(), &["config", "mj.baseCommit", &base]);
                 test_git(source.path(), &["config", "mj.remoteWorkspace", "true"]);
@@ -1574,7 +1578,7 @@ mod tests {
             if index != 1 {
                 source_record.project_directory = Some(source.path().into());
             }
-            if index == 0 {
+            if index == 0 || index == 3 {
                 // A host worktree (or an older capture) reports HEAD as its
                 // metadata base; the controller's persisted launch base wins.
                 source_record.managed_worktree = Some(Box::new(mj_core::state::ManagedWorktree {
@@ -1582,9 +1586,14 @@ mod tests {
                     source_project_directory: source.path().into(),
                     source_repository: source.path().into(),
                     worktree_root: source.path().into(),
-                    branch: "master".into(),
+                    branch: if index == 3 {
+                        "mj/legacy-base"
+                    } else {
+                        "master"
+                    }
+                    .into(),
                     target: mj_core::state::ManagedWorktreeTarget::Local,
-                    base_commit: Some(base.clone()),
+                    base_commit: (index != 3).then(|| base.clone()),
                 }));
             }
             let mut handoff_input =
