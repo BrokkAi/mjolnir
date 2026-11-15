@@ -24,6 +24,8 @@ pub fn finalize_managed_checkout(
         !base.is_empty(),
         "managed checkout has no immutable base commit"
     );
+    // Git config is not a GC root when the launch commit becomes orphaned.
+    run(&["update-ref", crate::targets::HistoryCutoff::BASE_REF, base])?;
     for (key, value) in [
         ("push.default", "current"),
         ("push.autoSetupRemote", "true"),

@@ -1358,7 +1358,7 @@ pub(super) fn raw_conversion_preview_with_checkout(
     let checkout = conversion.checkout.as_path();
     // A dirty submodule cannot be captured, so say so now rather than failing
     // after the session has been stopped.
-    reject_dirty_submodules_for_move(&ExecutorGit(executor), checkout)?;
+    reject_dirty_submodules_for_move(&ExecutorGit::local(executor), checkout)?;
     let default_branch = mj_core::remote_git::default_branch(&conversion.source, executor)?;
     let position = read_checkout_position(executor, &ManagedWorktreeTarget::Local, checkout)?;
     let unpushed_commits = unpushed_commit_count(executor, checkout)?;
@@ -1414,10 +1414,40 @@ fn reject_dirty_submodules_for_move(
     Ok(())
 }
 
-/// Runs the checkpoint library's submodule inspection in a local checkout
-/// through a controller executor, so it keeps the caller's cancellation and
-/// deadline.
-struct ExecutorGit<'a, E>(&'a E);
+/// Runs checkpoint Git policy through the owning command executor, retaining
+/// cancellation and the source target's filesystem namespace.
+pub(super) struct ExecutorGit<'a, E> {
+    executor: &'a E,
+    location: ExecutorGitLocation<'a>,
+}
+
+enum ExecutorGitLocation<'a> {
+    Local,
+    Session {
+        backend: &'a crate::targets::TargetLocator,
+        id: &'a str,
+    },
+}
+
+impl<'a, E> ExecutorGit<'a, E> {
+    fn local(executor: &'a E) -> Self {
+        Self {
+            executor,
+            location: ExecutorGitLocation::Local,
+        }
+    }
+
+    pub(super) fn for_session(
+        executor: &'a E,
+        backend: &'a crate::targets::TargetLocator,
+        id: &'a str,
+    ) -> Self {
+        Self {
+            executor,
+            location: ExecutorGitLocation::Session { backend, id },
+        }
+    }
+}
 
 impl<E: CommandExecutor + Sync> mj_checkpoint::archive::GitCommandRunner for ExecutorGit<'_, E> {
     fn run(
@@ -1429,15 +1459,33 @@ impl<E: CommandExecutor + Sync> mj_checkpoint::archive::GitCommandRunner for Exe
             command.stdin.is_empty() && command.env.is_empty(),
             "an executor Git command takes no standard input or extra environment"
         );
-        let output = self.0.execute(&managed_git_command(
-            &ManagedWorktreeTarget::Local,
-            repository,
-            command
-                .arguments
-                .iter()
-                .map(|argument| argument.to_string_lossy().into_owned()),
-            "inspect submodules",
-        ))?;
+        let arguments = command
+            .arguments
+            .iter()
+            .map(|argument| argument.to_string_lossy().into_owned());
+        let command = match self.location {
+            ExecutorGitLocation::Local => managed_git_command(
+                &ManagedWorktreeTarget::Local,
+                repository,
+                arguments,
+                "inspect submodules",
+            ),
+            ExecutorGitLocation::Session { backend, id } => {
+                let mut args = vec![
+                    "git".into(),
+                    "-C".into(),
+                    repository.to_string_lossy().into_owned(),
+                ];
+                args.extend(arguments);
+                crate::targets::command_on_locator(
+                    backend,
+                    id,
+                    args,
+                    "inspect source checkout base",
+                )?
+            }
+        };
+        let output = self.executor.execute(&command)?;
         Ok(mj_checkpoint::archive::GitOutput {
             status: output.status,
             stdout: output.stdout,

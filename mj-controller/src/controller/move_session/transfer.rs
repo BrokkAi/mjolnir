@@ -25,6 +25,7 @@ fn repositories(
 fn move_handoff_base(
     source: &mj_core::state::SessionRecord,
     metadata: &mj_checkpoint::archive::RepositoryMetadata,
+    git: &dyn mj_checkpoint::archive::GitCommandRunner,
 ) -> Result<String> {
     if let Some(base) = source
         .managed_worktree
@@ -37,12 +38,7 @@ fn move_handoff_base(
         return Ok(metadata.base_commit.clone());
     }
     if let Some(checkout) = source.checkout().project_directory() {
-        return Ok(super::super::worktree::raw_checkout_base(
-            &mj_checkpoint::archive::SystemGit,
-            checkout,
-            &metadata.id,
-        )?
-        .commit);
+        return Ok(super::super::worktree::raw_checkout_base(git, checkout, &metadata.id)?.commit);
     }
     // Remote captures own their immutable base. Moves require an idle source,
     // whose worker is upgraded before capture; do not infer a base at restore.
@@ -52,11 +48,14 @@ fn move_handoff_base(
 fn record_move_handoff_bases(
     source: &mj_core::state::SessionRecord,
     handoff: &mj_core::state::CheckpointMetadata,
+    backend: &targets::TargetLocator,
+    executor: &(impl CommandExecutor + Sync),
 ) -> Result<mj_core::state::CheckpointMetadata> {
     let archive = super::super::resume::verify_resume_checkpoint(&source.id, handoff)?;
+    let git = super::super::worktree::ExecutorGit::for_session(executor, backend, &source.id);
     let mut changed = Vec::new();
     for repository in &archive.manifest.repositories {
-        let base = move_handoff_base(source, &repository.metadata)?;
+        let base = move_handoff_base(source, &repository.metadata, &git)?;
         let mut metadata = repository.metadata.clone();
         metadata.base_commit = base;
         if source.checkout().project_directory().is_some() {
@@ -1007,7 +1006,12 @@ impl Controller {
                 .context("Move target missing")?;
             if !mj_core::config::is_bare_project_target(target) {
                 let handoff = operation.handoff.as_ref().context("Move handoff missing")?;
-                operation.handoff = Some(record_move_handoff_bases(&transfer.source, handoff)?);
+                operation.handoff = Some(record_move_handoff_bases(
+                    &transfer.source,
+                    handoff,
+                    &layout.backend,
+                    executor,
+                )?);
                 crate::database::save_move_operation(operation)?;
             }
             let handoff = operation.handoff.as_ref().context("Move handoff missing")?;
@@ -1489,6 +1493,30 @@ mod tests {
             CheckpointRepositorySpec, export_checkpoint,
         };
 
+        #[cfg(unix)]
+        struct RemoteGit {
+            remote_path: std::path::PathBuf,
+            source_path: std::path::PathBuf,
+        }
+        #[cfg(unix)]
+        impl CommandExecutor for RemoteGit {
+            fn execute(&self, command: &CommandSpec) -> Result<targets::CommandOutput> {
+                ensure!(
+                    command.program == "ssh",
+                    "the remote source must be read through SSH"
+                );
+                let remote = command.args.last().context("SSH command missing")?;
+                let from = targets::posix_quote(self.remote_path.to_str().unwrap());
+                let to = targets::posix_quote(self.source_path.to_str().unwrap());
+                ensure!(
+                    remote.contains(&from),
+                    "source Git used the wrong target path"
+                );
+                targets::ProcessExecutor
+                    .execute(&CommandSpec::new("sh", ["-c", &remote.replace(&from, &to)]))
+            }
+        }
+
         let directory = tempfile::tempdir().unwrap();
         let workspace = directory.path().join("workspace");
         let relay = directory.path().join("move-managed-bundle");
@@ -1567,7 +1595,53 @@ mod tests {
                 &source_id,
                 &handoff_input,
             );
-            let handoff = record_move_handoff_bases(&source_record, &handoff).unwrap();
+            let local = targets::TargetLocator::LocalBare {
+                worker_root: directory
+                    .path()
+                    .join(&source_id)
+                    .to_string_lossy()
+                    .into_owned(),
+            };
+            #[cfg(unix)]
+            let handoff = if index == 2 {
+                let remote_path = directory.path().join("exists-only-on-source");
+                assert!(!remote_path.exists());
+                source_record.project_directory = Some(remote_path.clone());
+                let backend = targets::TargetLocator::SshBare {
+                    ssh: targets::SshTarget {
+                        destination: "source.invalid".into(),
+                        ssh_args: Vec::new(),
+                    },
+                    workspace: format!("/remote/{source_id}"),
+                    worker_id: None,
+                };
+                record_move_handoff_bases(
+                    &source_record,
+                    &handoff,
+                    &backend,
+                    &RemoteGit {
+                        remote_path,
+                        source_path: source.path().into(),
+                    },
+                )
+                .unwrap()
+            } else {
+                record_move_handoff_bases(
+                    &source_record,
+                    &handoff,
+                    &local,
+                    &targets::ProcessExecutor,
+                )
+                .unwrap()
+            };
+            #[cfg(not(unix))]
+            let handoff = record_move_handoff_bases(
+                &source_record,
+                &handoff,
+                &local,
+                &targets::ProcessExecutor,
+            )
+            .unwrap();
             snapshot.metadata =
                 mj_checkpoint::archive::read_checkpoint_manifest(&handoff.archive_path)
                     .unwrap()
@@ -1654,6 +1728,13 @@ mod tests {
             &manifest,
         )
         .unwrap();
+        for repository in &destinations {
+            test_git(
+                &repository.root,
+                &["reflog", "expire", "--expire=now", "--all"],
+            );
+            test_git(&repository.root, &["gc", "--prune=now"]);
+        }
         let export = export_checkpoint(&CheckpointExportSpec {
             protocol_version: CHECKPOINT_EXPORT_PROTOCOL_VERSION,
             ignore_nested_repositories: false,

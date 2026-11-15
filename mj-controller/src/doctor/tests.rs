@@ -1659,6 +1659,7 @@ fn setup_instructions_name_mjolnir_and_the_local_bare_prerequisites() {
 /// and could leave a scratch index behind. Doctor tells the user what is there
 /// and how to remove it, and changes nothing itself.
 // Hard-won: #1065: interrupted review captures left large refs and scratch indexes in the user’s repository.
+// Hard-won: #1542: doctor cleanup must retain the managed base's GC root.
 #[test]
 fn review_leftovers_are_reported_and_left_alone() {
     let repository = tempfile::tempdir().unwrap();
@@ -1680,6 +1681,12 @@ fn review_leftovers_are_reported_and_left_alone() {
     let mut packed = std::fs::read_to_string(git_dir.join("packed-refs")).unwrap();
     packed.push_str(&format!("{} refs/mj/reviewed/tree\n", "e".repeat(40)));
     std::fs::write(git_dir.join("packed-refs"), packed).unwrap();
+    let base_ref = mj_core::targets::HistoryCutoff::BASE_REF;
+    std::fs::write(git_dir.join(base_ref), "f".repeat(41)).unwrap();
+    std::fs::write(git_dir.join(format!("{base_ref}-extra")), "e".repeat(41)).unwrap();
+    let mut packed = std::fs::read_to_string(git_dir.join("packed-refs")).unwrap();
+    packed.push_str(&format!("{} {base_ref}\n", "f".repeat(40)));
+    std::fs::write(git_dir.join("packed-refs"), packed).unwrap();
     let scratch = git_dir.join("hel-review-index-AbCdEf");
     std::fs::write(&scratch, b"scratch").unwrap();
 
@@ -1691,6 +1698,7 @@ fn review_leftovers_are_reported_and_left_alone() {
             "refs/hel/review-baseline",
             "refs/hel/review-capture",
             "refs/hel/worktrees/gone/review-baseline",
+            "refs/mj/base-extra",
             "refs/mj/review-baseline",
             "refs/mj/reviewed/tree"
         ]
