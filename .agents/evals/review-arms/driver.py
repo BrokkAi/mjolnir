@@ -339,7 +339,12 @@ def collect(d, bug, identity, sid, place, before):
             # Its review is still scored, from that last message, and the miss is recorded.
             final = ["".join(c.get("content", {}).get("text", "") for c in i["body"].get("chunks", []))
                      for i in items if i["role"] == "agent"]
-            output = messages[-1] if messages else next((t for t in reversed(final) if t.strip()), None)
+            # Only a turn that ended normally gives a final message; an errored or
+            # cancelled turn may stop on a progress message, so it counts as no output.
+            ended = ((row.get("last_turn_outcome") or {}).get("outcome") or {})
+            completed = ended.get("kind") == "completed" and ended.get("stop_reason") == "EndTurn"
+            output = messages[-1] if messages else (
+                next((t for t in reversed(final) if t.strip()), None) if completed else None)
             if output:
                 (cd / "output.md").write_text(output + "\n")
             reviewers.append({"child": child, "slot": info["slot"], "profile": row.get("profile_id"),
