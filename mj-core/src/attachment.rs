@@ -312,7 +312,7 @@ impl AttachmentStore {
             );
             artifacts.push(crate::archive::NativeArtifact {
                 relative_path: Path::new(ARCHIVE_ATTACHMENT_DIR).join(digest),
-                data,
+                data: data.into(),
                 mode: 0o600,
             });
         }

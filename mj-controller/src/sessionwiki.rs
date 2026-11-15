@@ -292,10 +292,9 @@ impl MjolnirAdapter {
         let archive = newest
             .get(session_id)
             .with_context(|| format!("no checkpoint archive for session {session_id}"))?;
-        let snapshot = mj_checkpoint::archive::read_archive_verified(&archive.path)
+        let snapshot = mj_checkpoint::archive::verify_archive_streaming(&archive.path)
             .with_context(|| format!("read checkpoint {}", archive.path.display()))?
-            .canonical_session()
-            .with_context(|| format!("read the transcript of session {session_id}"))?;
+            .canonical_session;
         let mut evidence = provenance::Evidence::default();
         for item in &snapshot.transcript {
             if let mj_core::archive::CanonicalTranscriptBody::Tool { call, .. } = &item.body {

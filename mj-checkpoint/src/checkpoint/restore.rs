@@ -106,7 +106,8 @@ pub fn restore_checkpoint_with_native_state(
          refusing to restore over it",
         spec.relay_root.display()
     );
-    let archive = read_archive_verified(&spec.archive_path)?;
+    let archive = crate::archive::read_archive_for_restore(&spec.archive_path)?;
+    let mut payload_reader = crate::archive::CheckpointPayloadReader::open(&spec.archive_path)?;
     // Deserialize and validate the schema-2 canonical projection before any
     // repository, relay, or native-session state can be mutated.
     let canonical_session = archive.canonical_session()?;
@@ -190,7 +191,38 @@ pub fn restore_checkpoint_with_native_state(
             {
                 continue;
             }
-            let native_data = archive.payload(descriptor)?;
+            if !relative_path.starts_with(mj_core::goal::NATIVE_ARTIFACT_ROOT) {
+                let destination = restored_native_relative_path(
+                    archive.manifest.session.harness_kind,
+                    relative_path,
+                    target_cwd.as_deref(),
+                )?;
+                // Provider relocation rewrites Kimi/Grok/Muse/DSH records and agy's
+                // SQLite database. Claude and Codex transcripts only remap paths.
+                if target_cwd.is_none()
+                    || native_artifact_relocation(
+                        archive.manifest.session.harness_kind,
+                        &destination,
+                    )
+                    .is_none()
+                {
+                    write_private_with(
+                        &spec.harness_home,
+                        &destination,
+                        descriptor.mode,
+                        |file| payload_reader.copy_payload(descriptor, file),
+                    )?;
+                    continue;
+                }
+            }
+            let mut loaded = Vec::new();
+            let native_data = if let Some(bytes) = archive.payloads.get(&descriptor.path) {
+                bytes.as_slice()
+            } else {
+                payload_reader.copy_payload(descriptor, &mut loaded)?;
+                &loaded
+            };
+
             if native_state.restore(
                 &archive.manifest.session,
                 &spec.harness_home,
@@ -238,7 +270,7 @@ pub fn restore_repositories(
     git: &dyn GitCommandRunner,
 ) -> Result<()> {
     ensure!(workspace_root.is_dir(), "restore workspace is missing");
-    let archive = read_archive_verified(archive_path)?;
+    let archive = crate::archive::read_archive_repositories(archive_path)?;
     restore_repositories_from_archive(&archive, workspace_root, git, true)
 }
 
@@ -367,7 +399,7 @@ pub fn restore_single_repository_onto_branch(
     git: &dyn GitCommandRunner,
 ) -> Result<Option<String>> {
     ensure!(repository_path.is_dir(), "restore checkout is missing");
-    let archive = read_archive_verified(archive_path)?;
+    let archive = crate::archive::read_archive_repositories(archive_path)?;
     let [repository] = archive.manifest.repositories.as_slice() else {
         bail!(
             "this checkpoint holds {} repositories; exactly one can be restored into a checkout",
@@ -402,7 +434,7 @@ pub fn restore_single_repository_into_checkout(
     git: &dyn GitCommandRunner,
 ) -> Result<()> {
     ensure!(repository_path.is_dir(), "restore checkout is missing");
-    let archive = read_archive_verified(archive_path)?;
+    let archive = crate::archive::read_archive_repositories(archive_path)?;
     let [repository] = archive.manifest.repositories.as_slice() else {
         bail!("an isolated checkout requires exactly one archived repository");
     };
@@ -491,6 +523,40 @@ pub(super) fn target_primary_cwd(
         .map(|primary| workspace_root.join(&primary.metadata.relative_destination))
 }
 
+enum NativeRelocation {
+    Muse,
+    Dsh,
+    Antigravity,
+    GrokSummary,
+    KimiRegistry,
+    KimiIndex,
+    KimiState,
+}
+
+/// The single owner of which native formats actually rewrite their contents.
+fn native_artifact_relocation(harness: HarnessKind, path: &Path) -> Option<NativeRelocation> {
+    match harness {
+        HarnessKind::Muse if path.file_name().is_some_and(|name| name == "session.jsonl") => {
+            Some(NativeRelocation::Muse)
+        }
+        HarnessKind::Dsh if path.starts_with("sessions") => Some(NativeRelocation::Dsh),
+        HarnessKind::Antigravity
+            if super::native_scan::is_sqlite_native_database(harness, path) =>
+        {
+            Some(NativeRelocation::Antigravity)
+        }
+        HarnessKind::Grok if is_grok_session_summary(path) => Some(NativeRelocation::GrokSummary),
+        HarnessKind::Kimi if path == Path::new("workspaces.json") => {
+            Some(NativeRelocation::KimiRegistry)
+        }
+        HarnessKind::Kimi if path == Path::new("session_index.jsonl") => {
+            Some(NativeRelocation::KimiIndex)
+        }
+        HarnessKind::Kimi if is_kimi_session_state(path) => Some(NativeRelocation::KimiState),
+        _ => None,
+    }
+}
+
 pub(super) fn restored_native_artifact_bytes(
     harness: HarnessKind,
     relative_path: &Path,
@@ -502,47 +568,29 @@ pub(super) fn restored_native_artifact_bytes(
         return Ok(data.to_vec());
     };
     let target_cwd = &harness_storage_cwd(harness, target_cwd);
-    if harness == HarnessKind::Muse
-        && relative_path
-            .file_name()
-            .is_some_and(|name| name == "session.jsonl")
-    {
-        return crate::native::muse::relocate(data, target_cwd);
-    }
-    if harness == HarnessKind::Dsh && relative_path.starts_with("sessions") {
-        return rewrite_dsh_session_cwd(data, target_cwd);
-    }
-    // agy names the workspace inside the conversation database, and runs
-    // commands in the first root it records.
-    if harness == HarnessKind::Antigravity
-        && super::native_scan::is_sqlite_native_database(harness, relative_path)
-    {
-        return crate::native::antigravity::relocate(data, target_cwd).with_context(|| {
-            format!(
-                "relocate Antigravity conversation {} to {}",
-                relative_path.display(),
-                target_cwd.display()
-            )
-        });
-    }
-    if !matches!(harness, HarnessKind::Kimi | HarnessKind::Grok) {
-        return Ok(data.to_vec());
-    }
-    if harness == HarnessKind::Grok {
-        return if is_grok_session_summary(relative_path) {
-            rewrite_grok_session_summary(data, target_cwd, harness_home)
-        } else {
-            Ok(data.to_vec())
-        };
-    }
-    if relative_path == Path::new("workspaces.json") {
-        return rewrite_kimi_workspace_registry(data, target_cwd);
-    }
-    if relative_path == Path::new("session_index.jsonl") {
-        return rewrite_kimi_session_index(data, target_cwd, harness_home);
-    }
-    if !is_kimi_session_state(relative_path) {
-        return Ok(data.to_vec());
+    match native_artifact_relocation(harness, relative_path) {
+        None => return Ok(data.to_vec()),
+        Some(NativeRelocation::Muse) => return crate::native::muse::relocate(data, target_cwd),
+        Some(NativeRelocation::Dsh) => return rewrite_dsh_session_cwd(data, target_cwd),
+        Some(NativeRelocation::Antigravity) => {
+            return crate::native::antigravity::relocate(data, target_cwd).with_context(|| {
+                format!(
+                    "relocate Antigravity conversation {} to {}",
+                    relative_path.display(),
+                    target_cwd.display()
+                )
+            });
+        }
+        Some(NativeRelocation::GrokSummary) => {
+            return rewrite_grok_session_summary(data, target_cwd, harness_home);
+        }
+        Some(NativeRelocation::KimiRegistry) => {
+            return rewrite_kimi_workspace_registry(data, target_cwd);
+        }
+        Some(NativeRelocation::KimiIndex) => {
+            return rewrite_kimi_session_index(data, target_cwd, harness_home);
+        }
+        Some(NativeRelocation::KimiState) => {}
     }
     let mut state: Value =
         serde_json::from_slice(data).context("parse Kimi native session state")?;
@@ -647,6 +695,26 @@ pub(super) fn write_private_file(
     bytes: &[u8],
     mode: u32,
 ) -> Result<()> {
+    write_private_reader(root, relative, &mut std::io::Cursor::new(bytes), mode).map(|_| ())
+}
+
+pub(super) fn write_private_reader(
+    root: &Path,
+    relative: &Path,
+    reader: &mut dyn Read,
+    mode: u32,
+) -> Result<u64> {
+    write_private_with(root, relative, mode, |file| {
+        Ok(std::io::copy(reader, file)?)
+    })
+}
+
+fn write_private_with<T>(
+    root: &Path,
+    relative: &Path,
+    mode: u32,
+    write: impl FnOnce(&mut File) -> Result<T>,
+) -> Result<T> {
     validate_relative_path(relative)?;
     let path = root.join(relative);
     ensure_no_symlink_ancestors(root, relative)?;
@@ -676,8 +744,7 @@ pub(super) fn write_private_file(
     let mut file = options
         .open(&path)
         .with_context(|| format!("write {}", path.display()))?;
-    std::io::Write::write_all(&mut file, bytes)
-        .with_context(|| format!("write {}", path.display()))?;
+    let result = write(&mut file).with_context(|| format!("write {}", path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -685,5 +752,5 @@ pub(super) fn write_private_file(
     }
     #[cfg(not(unix))]
     let _ = mode;
-    Ok(())
+    Ok(result)
 }

@@ -166,7 +166,7 @@ pub(super) fn collect(home: &Path, thread_id: &str) -> Result<Option<NativeArtif
     }
     Ok(Some(NativeArtifact {
         relative_path: artifact_path(thread_id),
-        data: serde_json::to_vec(&snapshot)?,
+        data: (serde_json::to_vec(&snapshot)?).into(),
         mode: 0o600,
     }))
 }
@@ -314,12 +314,14 @@ mod tests {
         );
         let other = fixture(target.path(), "existing-other", "keep target session");
         let artifact = collect(source.path(), "selected").unwrap().unwrap();
-        assert!(!String::from_utf8_lossy(&artifact.data).contains("unrelated private"));
+        assert!(
+            !String::from_utf8_lossy(&artifact.data.bytes().unwrap()).contains("unrelated private")
+        );
         restore(
             target.path(),
             "selected",
             &artifact.relative_path,
-            &artifact.data,
+            &artifact.data.bytes().unwrap(),
         )
         .unwrap();
         let restored = Connection::open(target.path().join(DATABASE)).unwrap();
@@ -335,7 +337,7 @@ mod tests {
             fresh.path(),
             "selected",
             &artifact.relative_path,
-            &artifact.data,
+            &artifact.data.bytes().unwrap(),
         )
         .unwrap();
         let fresh_db = Connection::open(fresh.path().join(DATABASE)).unwrap();
@@ -355,7 +357,7 @@ mod tests {
                 target.path(),
                 "different",
                 &artifact.relative_path,
-                &artifact.data
+                &artifact.data.bytes().unwrap()
             )
             .is_err()
         );
@@ -365,7 +367,7 @@ mod tests {
             target.path(),
             "selected",
             &artifact.relative_path,
-            &artifact.data,
+            &artifact.data.bytes().unwrap(),
         )
         .unwrap();
         assert!(read_goal(&db, "selected").unwrap().is_none());
@@ -395,7 +397,7 @@ mod tests {
                 target.path(),
                 "selected",
                 &artifact.relative_path,
-                &artifact.data
+                &artifact.data.bytes().unwrap()
             )
             .is_err()
         );
@@ -419,7 +421,7 @@ mod tests {
                 target.path(),
                 "selected",
                 &artifact.relative_path,
-                &artifact.data
+                &artifact.data.bytes().unwrap()
             )
             .is_err()
         );
@@ -469,6 +471,12 @@ mod tests {
         assert_ne!(source, target);
         assert!(!target.join(DATABASE).exists());
         let artifact = collect(&source, &thread_id).unwrap().unwrap();
-        restore(&target, &thread_id, &artifact.relative_path, &artifact.data).unwrap();
+        restore(
+            &target,
+            &thread_id,
+            &artifact.relative_path,
+            &artifact.data.bytes().unwrap(),
+        )
+        .unwrap();
     }
 }

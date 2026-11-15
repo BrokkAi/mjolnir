@@ -116,7 +116,7 @@ pub(super) fn write_checkpoint_archive_with_native_state(
         Vec::new(),
         vec![mj_checkpoint::archive::NativeArtifact {
             relative_path: PathBuf::from("sessions/native-session.jsonl"),
-            data: b"{\"type\":\"message\"}\n".to_vec(),
+            data: (b"{\"type\":\"message\"}\n".to_vec()).into(),
             mode: 0o600,
         }],
     )
