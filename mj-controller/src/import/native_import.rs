@@ -60,26 +60,24 @@ pub fn import_native_session(
         collect_local_repositories(bundle, &targets.git_roots, raw_project.is_none(), control)?;
     let mut native_artifacts =
         collect_import_native_artifacts(harness, harness_home, native_session_id, source_path)?;
-    // Muse compares a preview with captured native state. Own that capture
-    // through archive publication so later harness writes cannot change it.
-    let _native_snapshot = if harness == HarnessKind::Muse {
-        fs::create_dir_all(archive_directory)?;
-        let snapshot = tempfile::Builder::new()
-            .prefix("native-import-")
-            .tempdir_in(archive_directory)?;
-        for (index, artifact) in native_artifacts.iter_mut().enumerate() {
-            let path = snapshot.path().join(index.to_string());
-            {
-                let mut source = artifact.reader()?;
-                let mut target = fs::File::create(&path)?;
-                std::io::copy(&mut source, &mut target)?;
-            }
-            artifact.data = mj_checkpoint::archive::NativeArtifactData::File(path);
+    // Own the selected native bytes through archive publication. A harness may
+    // keep writing its source files after this import's canonical capture.
+    fs::create_dir_all(archive_directory)?;
+    let native_snapshot = tempfile::Builder::new()
+        .prefix("native-import-")
+        .tempdir_in(archive_directory)?;
+    for (index, artifact) in native_artifacts.iter_mut().enumerate() {
+        if let Some(control) = control {
+            control.check_cancelled()?;
         }
-        Some(snapshot)
-    } else {
-        None
-    };
+        let path = native_snapshot.path().join(index.to_string());
+        {
+            let mut source = artifact.reader()?;
+            let mut target = fs::File::create(&path)?;
+            std::io::copy(&mut source, &mut target)?;
+        }
+        artifact.data = mj_checkpoint::archive::NativeArtifactData::File(path);
+    }
     if harness == HarnessKind::Muse {
         // The preview may precede a user's confirmation by minutes. Never
         // pair its old transcript with a newer native conversation.
