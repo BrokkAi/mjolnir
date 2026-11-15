@@ -36,6 +36,12 @@ const VERDICT = {
   },
   required: ['label', 'matching_finding', 'rationale', 'confidence'],
 }
+// Verdicts on an item file's blind brief also report the hash of the text the judge read.
+const VERDICT_ITEM = {
+  ...VERDICT,
+  properties: { ...VERDICT.properties, read_sha256: { type: 'string' } },
+  required: [...VERDICT.required, 'read_sha256'],
+}
 const REWRITE = {
   type: 'object',
   properties: { brief: { type: 'string' }, changes: { type: 'string' } },
@@ -76,11 +82,17 @@ ${FENCE}`,
       : await agent(
         `Read ${DIR}/JUDGE.md. It describes judging code-review outputs against a known bug. Apply its Decision section to one output: the \`blind_brief\` field of ${DIR}/item-${d.id}.json, which you judge as if it were a review output. Return your verdict through the StructuredOutput tool instead of writing verdicts.jsonl.
 
+First run this command and put its output in \`read_sha256\`; it hashes the text you will judge:
+python3 -c "import hashlib,json,sys;print(hashlib.sha256(json.load(open(sys.argv[1]))['blind_brief'].strip().encode()).hexdigest())" ${DIR}/item-${d.id}.json
+
 The known bug's record: ${DIR}/record-${d.id}.json
 
 ${FENCE}`,
-        { ...OPTS, label: `leak ${d.id}`, phase: 'Leak', schema: VERDICT })
+        { ...OPTS, label: `leak ${d.id}`, phase: 'Leak', schema: VERDICT_ITEM })
     if (!first) throw new Error(`no leak verdict for ${d.id}`)
+    // The judge's own hash of what it read must be the text build described in the arguments.
+    if (!brief && first.read_sha256 !== d.blind_sha256)
+      throw new Error(`${d.id}: the judge read text whose hash ${first.read_sha256} is not ${d.blind_sha256}; rerun build and the check`)
     const leak = [first]
     let final = brief
     if (first.label !== 'missed') {
@@ -100,7 +112,7 @@ ${FENCE}`,
     // final_brief is null when a control brief needed no rewrite: it is the blind brief.
     // judged_blind_sha256 binds a verdict on the item file's blind brief to that text.
     return { id: d.id, group: d.group, edit, leak, final_brief: final,
-             judged_blind_sha256: brief ? null : (d.blind_sha256 ?? null) }
+             judged_blind_sha256: brief ? null : first.read_sha256 }
   },
 )
 const done = results.filter(Boolean)

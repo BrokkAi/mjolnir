@@ -131,7 +131,9 @@ def collect():
         d.mkdir(parents=True, exist_ok=True)
         blind = ROOT / "briefs/blind" / bug / "brief.md"
         if r["group"] == "C" and not judged_matches(r, blind.parent):
-            rejected.append(bug)  # its leak verdict was produced for other text than the blind brief
+            # Its leak verdict was produced for other text than the blind brief: unpublish.
+            (d / "brief.md").unlink(missing_ok=True)
+            rejected.append(bug)
             continue
         # A control brief that needed no rewrite comes back as null: it is the blind brief.
         final = (r["final_brief"] or blind.read_text()).rstrip() + "\n"
@@ -257,15 +259,10 @@ def annotate(path, run_started):
             continue  # already bound, or an editor result judged inline
         item = W / f"item-{r['id']}.json"
         text = json.loads(item.read_text())["blind_brief"]
-        # Evidence that the judge read this text: the item file predates the run, or build made
-        # it from a writer brief that predates the run and still has the same text.
-        d = ROOT / "briefs/blind" / r["id"]
-        source = d / "brief-original.md" if (d / "brief-original.md").exists() else d / "brief.md"
         when = lambda f: datetime.datetime.fromtimestamp(f.stat().st_mtime).isoformat()
+        # Only an item file older than the run shows what the judge read; a rebuilt item does not.
         if item.stat().st_mtime < start:
             evidence = f"item file unchanged since {when(item)}"
-        elif sha(source.read_text()) == sha(text) and source.stat().st_mtime < start:
-            evidence = f"item text equals {source.name}, unchanged since {when(source)}"
         else:
             raise SystemExit(f"{r['id']}: no evidence the judge read the current text; rerun the check")
         r["judged_blind_sha256"] = sha(text)
