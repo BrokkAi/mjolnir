@@ -13,13 +13,17 @@ After this change, a Suspend or Close that supersedes a Move ends in a terminal 
 ## Progress
 
 
-- [x] (2026-11-15) Parent-approved source settlement and safe stored failure guidance implemented; CLI acceptance behavior unchanged.
-- [x] (2026-11-15) Initial commit 59b3ff06f reviewed; all three findings fixed through atomic source/Move publication, latest-intent resolution, and complete prepared-resource cleanup.
-- [x] (2026-11-15) Final tricky-condition regression passed (17.83 s), including live/restart cuts, retained workspaces, unproven seals, atomic abort rollback, fake AWS cleanup, and real daemon recovery of ready-destination Destroying.
-- [x] (2026-11-15) Existing in-place retry regression passed (12.99 s); missing-worker safe failure and preservation checks passed.
-- [x] (2026-11-15) Full controller unit run: 2,659 passed, 27 ignored, one old HTTP message expectation corrected; its only targeted retry passed. Aggregate: 2,660 passing cases. Skipped doctest stage completed with zero cases.
-- [x] (2026-11-15) Workspace clippy with all targets and warnings denied passed on dev profile outside the sandbox (20 m 01 s). Formatting and whitespace checks passed.
-- [x] (2026-11-15) Validated fixes prepared for commit and independent review. The review tool owns the asynchronous acceptance verdict; the final sub-agent report records that verdict.
+- [x] (2026-11-15) Initial implementation and review fixes committed at 59b3ff06f and 4c3c932a6; prior checkpoint validation completed (2,660 passing cases, 27 ignored; workspace clippy clean).
+- [x] (2026-11-15) Final rereview found cancellation alone cannot grant Suspend authority. Parent approved an explicit nullable SQL intent with compatible revision 133 and unchanged floor 132 after writer audit.
+- [x] (2026-11-15) Revision-132 writers audited: explicit column lists only; retry invalidation trigger covers reused operation IDs. Isolated migration rollback/old-writer preservation test passed (0.47 s).
+- [x] (2026-11-15) Intent, readiness and Closing publication implemented atomically. Startup selects exclusive Move/close owner from one Move/intent snapshot; terminal outcomes consume intent; committed Destroying retains it.
+- [x] (2026-11-15) Parent approved reusing normal Move rollback for cancelled, unresolved, sealed workspace transfers in Closing without readiness/boot ownership; this keeps source in Error for Move retry rather than granting suspension.
+- [x] (2026-11-15) Strict paired workspace-transfer regression passed (20.45 s): NULL/stale intent keeps source under Move recovery; explicit Suspend follows close recovery.
+- [x] (2026-11-15) Parent approved sharing startup recovery ownership with GC so a missing archive cannot delete a pending close owner. Regression extended; targeted retry passed (18.46 s).
+- [x] (2026-11-15) Full pre-GC controller run: 2,660 passed, 27 ignored, one unrelated Keychain lock-timing failure. Named isolated retry passed (0.25 s).
+- [x] (2026-11-15) Final full controller suite passed: 2,661 passed, 27 ignored, zero failures. Workspace clippy with all targets and denied warnings passed (2m21s); formatting and diff checks passed.
+- [x] (2026-11-15) Doctests passed (zero cases).
+- [ ] Obtain a clean independent review of the final origin and GC fixes.
 
 
 ## Surprises & Discoveries
@@ -37,6 +41,12 @@ After this change, a Suspend or Close that supersedes a Move ends in a terminal 
 
 ## Decision Log
 
+- Decision: revision-132 daemons retain their pre-existing reaper behavior, including possible destructive fallback to an older checkpoint after losing a Move row. Compatibility means no worse than before; the fix applies only to upgraded daemons. Parent explicitly approved retaining minimum revision 132 rather than authorizing a breaking upgrade, 2026-11-15.
+
+- Decision: compatible revision 133 adds nullable `session_moves.close_requested_operation_id`; minimum compatibility stays 132. Parent approved after audit of eligible revision-132 writers, which name columns and preserve the new column. NULL means conservative Move recovery; only an exact current Move-ID match grants close ownership. A trigger clears old intent when an operation ID changes or explicit retry resets cancellation, including writes by older binaries. No JSON shape or wire protocol changes.
+- Decision: only `persist_suspension_intent` writes close authority, together with readiness and Closing. Successful/terminal-failed outcomes clear it in their publication transactions; Destroying is nonterminal and retains accepted teardown authority. Parent approved, 2026-11-15.
+- Decision: plain cancellation of a proven sealed workspace transfer reuses `rollback_move_destination` under Move recovery, with ordinary keep-for-retry persistence and no Move resolution. This is the paired cancellation case, not Suspend, and must preserve source data without leasing an uninstalled destination. Parent approved, 2026-11-15.
+
 - Decision: the same startup ownership predicate also routes a cancelled pre-queue Move with a recorded ready destination in Destroying to interrupted suspension recovery. Rationale: a crash in the newly added ordinary destination teardown must resume that teardown rather than treating it as a retained source stop. Parent approved this completion-path correction, 2026-11-15.
 
 - Decision: ordinary verified close resolves a cancelled pre-queue Move in the same transaction that publishes its restored destination as Stopped, retaining the destination checkpoint. Rationale: preserving readiness must not leave Resume blocked after successful close. This is the final parent-approved scope extension, 2026-11-15.
@@ -46,8 +56,8 @@ After this change, a Suspend or Close that supersedes a Move ends in a terminal 
 
 - Decision: no proven source seal (`recovery_session` absent) means Error with every placement kept; Resume repairs in place before retrying Suspend. Do not ask a possibly sealed relay and then destroy from an older full checkpoint. Rationale: an early-cancelled Move requiring an extra step is preferable to losing newer source work. Approved by parent, 2026-11-15.
 
-- Decision: preserve the already-Running destination identity in the same `adopt_move_destination` transaction that publishes Closing. A matching worker boot intent also prevents source settlement before Running publication. Rationale: destination startup can precede Move's StartingQueue write, so placement alone cannot be readiness. Approved by parent, 2026-11-15.
-- Decision: startup's `recover_moves` declines Cancelled pre-queue Closing sessions; the interrupted-suspension owner receives them via the returned actual ownership set. Remove the unconditional all-Move-session extension that previously masked this route. Rationale: live supersession and restart must use the same settlement. Approved by parent, 2026-11-15.
+- Decision: preserve the already-Running destination identity in the same `save_suspension_intent` transaction that publishes Closing. A matching worker boot intent also prevents source settlement before Running publication. Rationale: destination startup can precede Move's StartingQueue write, so placement alone cannot be readiness. Approved by parent, 2026-11-15.
+- Decision: startup assigns a cancelled Move to close only with an exact persisted Suspend intent. NULL or stale intent keeps interrupted state under Move recovery. The same recovery-owner predicate prevents GC from deleting either interrupted owner. Approved by parent, 2026-11-15.
 
 - Decision: the daemon's existing `wait_before_close` stays the single serialized point of supersession. It cancels the Move, awaits the Move's actual completion, reloads its durable record, then settles under the existing lifecycle owner. Settlement lives in `controller/move_session.rs`, called by close recovery before any worker lease is requested. There is no independent recovery task and no worker-upgrade fallback. Date: 2026-11-15.
 - Decision: the Move record is the authority for source seal, destination readiness, checkpoints, placements and queued admissions. `Cancelled` alone is not evidence of a cut, so classify from the durable boundaries the record retains. Date: 2026-11-15.
@@ -62,7 +72,7 @@ After this change, a Suspend or Close that supersedes a Move ends in a terminal 
 ## Outcomes & Retrospective
 
 
-Cases 2 and 4 are implemented and validated. A superseded Move settles from its durable source cut without leasing an uninstalled destination worker. Source restoration and Move resolution commit together; prepared cleanup state survives resolution; verified destination teardown resolves its Move while retaining the destination checkpoint. Unproven seals keep every placement and report actionable Error. Stored failure guidance carries a safe cause, next action, and reference. No CLI wait behavior, persisted format, schema, or relay protocol changed.
+Cases 2 and 4 are implemented and validated. A superseded Move settles from its durable source cut without leasing an uninstalled destination worker. Source restoration and Move resolution commit together; prepared cleanup state survives resolution; verified destination teardown resolves its Move while retaining the destination checkpoint. Unproven seals keep every placement and report actionable Error. Stored failure guidance carries a safe cause, next action, and reference. CLI wait behavior, Move JSON shape and relay protocol are unchanged. Revision 133 adds a compatible nullable close-intent column while retaining compatibility floor 132.
 
 The initial review exposed real atomicity and resource-ownership defects, all corrected in the existing owners. The expanded regression protects those failures and the readiness completion path. Validation used isolated data and real LocalBare cleanup with fake AWS commands, not a live remote clone or harness repair smoke test. The final review verdict is reported by the review tool and in the sub-agent handback.
 
@@ -96,3 +106,7 @@ Run verification from this worktree with its normal mbx cargo wrapper and normal
 The full unit run completed with 2,659 passing tests, 27 ignored tests, and one old error-text expectation. Only that expectation was updated, and its targeted retry passed, giving 2,660 passing cases across the full run and correction. Doctests completed with zero cases. Do not repeat the full suite to reconfirm this one expectation correction. Detailed logs are in the assigned agent report directory; the final report names them.
 
 Plan update (2026-11-15): all required validation completed; the full run's sole old text expectation was corrected with a targeted retry, and workspace clippy passed without warnings.
+
+Plan update (2026-11-15): rereview origin distinction and the approved compatible intent contract supersede the earlier no-schema expectation; final validation is pending this last round.
+
+Plan update (2026-11-15): final post-GC suite passed (2,661 cases, 27 ignored, no failures), including the previously flaky Keychain test. Workspace clippy and formatting passed. The earlier Keychain failure was unrelated lock-timing flakiness; its named isolated retry also passed. No hook tests are present in this touched crate (zero filtered cases). Compatible revision 133, its rollback and reader-132 preservation all passed under isolated data.

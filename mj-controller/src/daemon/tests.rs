@@ -7230,22 +7230,35 @@ esac
     }
     let _writer = crate::database::install_isolated_test_writer();
     let workspace = crate::database::create_workspace("Superseded Move").unwrap();
-    for (retained_workspace, restart, sealed) in [
-        (false, false, true),
-        (true, false, true),
-        (false, true, true),
-        (true, true, true),
-        (true, false, false),
-        (true, true, false),
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Origin {
+        Suspend,
+        Cancel,
+        StaleCancel,
+    }
+    for (retained_workspace, restart, sealed, origin) in [
+        (false, false, true, Origin::Suspend),
+        (true, false, true, Origin::Suspend),
+        (false, true, true, Origin::Suspend),
+        (true, true, true, Origin::Suspend),
+        (true, false, false, Origin::Suspend),
+        (true, true, false, Origin::Suspend),
+        (true, true, true, Origin::Cancel),
+        (true, true, true, Origin::StaleCancel),
     ] {
+        let requested_close = origin == Origin::Suspend;
         let root = tempfile::tempdir().unwrap();
-        let id = match (retained_workspace, restart, sealed) {
-            (false, false, true) => "15420000000000000000000000000001",
-            (true, false, true) => "15420000000000000000000000000002",
-            (false, true, true) => "15420000000000000000000000000003",
-            (true, true, true) => "15420000000000000000000000000004",
-            (_, false, false) => "15420000000000000000000000000005",
-            (_, true, false) => "15420000000000000000000000000006",
+        let id = match origin {
+            Origin::Cancel => "15420000000000000000000000000007",
+            Origin::StaleCancel => "15420000000000000000000000000008",
+            Origin::Suspend => match (retained_workspace, restart, sealed) {
+                (false, false, true) => "15420000000000000000000000000001",
+                (true, false, true) => "15420000000000000000000000000002",
+                (false, true, true) => "15420000000000000000000000000003",
+                (true, true, true) => "15420000000000000000000000000004",
+                (_, false, false) => "15420000000000000000000000000005",
+                (_, true, false) => "15420000000000000000000000000006",
+            },
         };
         let source_root = root.path().join("source").join(id);
         let mut destination_root = root.path().join("destination").join(id);
@@ -7362,7 +7375,7 @@ esac
             destination.state = SessionState::Closing;
             crate::database::save_lifecycle_session(&destination).unwrap();
         }
-        if restart && sealed {
+        if requested_close && restart && sealed {
             // Restore can publish Running just before Move records StartingQueue.
             // Closing and that destination's readiness must become durable together.
             destination.state = SessionState::Running;
@@ -7405,14 +7418,22 @@ esac
             // publishing Stopped. Startup must give this cut to close, not Move.
             controller.state.sessions.get_mut(id).unwrap().state = SessionState::Destroying;
             crate::database::save_lifecycle_session(&controller.state.sessions[id]).unwrap();
+            controller
+                .record_failed_close(
+                    id,
+                    &format!(
+                        "{}: Teardown was interrupted; retry suspension.",
+                        mj_core::state::CLOSE_FAILURE_PREFIX
+                    ),
+                )
+                .unwrap();
             let teardown = test_runtime_state_loading_the_store();
-            let teardown_move = crate::database::load_move_operation(id).unwrap().unwrap();
-            assert!(
-                !teardown
-                    .recover_moves(vec![teardown_move])
-                    .unwrap()
-                    .contains(id)
-            );
+            let (teardown_moves, close_operations) = crate::database::load_move_recovery().unwrap();
+            let owners = teardown
+                .recover_moves(teardown_moves, &close_operations)
+                .unwrap();
+            assert!(!owners.moves.contains(id));
+            assert!(owners.closes.contains(id));
             tokio::time::timeout(Duration::from_secs(30), teardown.suspend_session(id.into()))
                 .await
                 .unwrap()
@@ -7441,7 +7462,13 @@ esac
             destination.state = SessionState::Closing;
             crate::database::save_resumed_session(&destination, None).unwrap();
         }
-        if restart && retained_workspace && sealed {
+        if requested_close && restart {
+            test_runtime_state_loading_the_store()
+                .prepare_suspension(id)
+                .await
+                .unwrap();
+        }
+        if requested_close && restart && retained_workspace && sealed {
             let connection = rusqlite::Connection::open(crate::database::database_path()).unwrap();
             connection.execute_batch("CREATE TRIGGER reject_move_settlement BEFORE UPDATE OF operation_json ON session_moves
                 WHEN json_extract(NEW.operation_json, '$.queue_admission_finished')=1
@@ -7474,14 +7501,78 @@ esac
                 .execute_batch("DROP TRIGGER reject_move_settlement")
                 .unwrap();
         }
+        if !requested_close {
+            let (_, close_operations) = crate::database::load_move_recovery().unwrap();
+            assert!(
+                !close_operations.contains(&operation.operation_id),
+                "NULL grants no close authority"
+            );
+            if origin == Origin::StaleCancel {
+                let raw = rusqlite::Connection::open(crate::database::database_path()).unwrap();
+                raw.execute("UPDATE session_moves SET close_requested_operation_id='stale-other-operation' WHERE session_id=?1", [id]).unwrap();
+            }
+            let (operations, close_operations) = crate::database::load_move_recovery().unwrap();
+            assert!(!close_operations.contains(&operation.operation_id));
+            let cancelled = test_runtime_state_loading_the_store();
+            // Hard-won: 4c3c932: plain Move cancellation incorrectly granted Suspend authority after restart.
+            let owners = cancelled
+                .recover_moves(operations, &close_operations)
+                .unwrap();
+            assert!(owners.moves.contains(id));
+            assert!(!owners.closes.contains(id));
+            tokio::time::timeout(Duration::from_secs(30), async {
+                while cancelled
+                    .owner()
+                    .lifecycle
+                    .get(id)
+                    .is_some_and(|active| active.is_running())
+                {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let kept = crate::database::load_session_record(id).unwrap().unwrap();
+            assert_eq!(kept.state, SessionState::Error);
+            assert_eq!(kept.target, source.target);
+            assert!(source_root.join("uncheckpointed-work").exists());
+            assert!(!destination_root.exists());
+            let kept_move = crate::database::load_move_operation(id).unwrap().unwrap();
+            assert!(
+                !kept_move.is_resolved(),
+                "plain cancellation must keep Move retry authority"
+            );
+            assert!(matches!(
+                kept_move.prepared_destination.unwrap().state,
+                mj_core::state::PreparedDestinationState::Released
+            ));
+            continue;
+        }
         let state = test_runtime_state_loading_the_store();
         let cloning = Arc::new(tokio::sync::Notify::new());
         let active_move = if restart {
-            let owned = state.recover_moves(vec![operation]).unwrap();
+            state.prepare_suspension(id).await.unwrap();
+            // Even with every archive gone, GC must retain the durable owner
+            // until close publishes its terminal outcome.
+            let raw = rusqlite::Connection::open(crate::database::database_path()).unwrap();
+            let before_gc = crate::database::load_move_operation(id).unwrap().unwrap();
+            raw.execute(
+                "UPDATE session_moves SET operation_json=json_set(operation_json, '$.checkpoint', NULL, '$.handoff', NULL, '$.prepared_destination', NULL) WHERE session_id=?1",
+                [id],
+            ).unwrap();
+            crate::database::reap_finished_move_intents().unwrap();
             assert!(
-                !owned.contains(id),
+                crate::database::load_move_operation(id).unwrap().is_some(),
+                "pending close must retain its Move even without an archive"
+            );
+            crate::database::save_move_operation(&before_gc).unwrap();
+            let (operations, close_operations) = crate::database::load_move_recovery().unwrap();
+            let owned = state.recover_moves(operations, &close_operations).unwrap();
+            assert!(
+                !owned.moves.contains(id),
                 "startup must leave superseded Move to close"
             );
+            assert!(owned.closes.contains(id));
             assert!(
                 interrupted_suspend_session_ids(&Controller::load().unwrap())
                     .contains(&id.to_owned())
@@ -7540,6 +7631,13 @@ esac
             "an unsealed source keeps every placement; a sealed source permits destination cleanup ({id})"
         );
         let settled = crate::database::load_move_operation(id).unwrap().unwrap();
+        assert!(
+            !crate::database::load_move_recovery()
+                .unwrap()
+                .1
+                .contains(&settled.operation_id),
+            "terminal outcome must consume Suspend intent"
+        );
         if retained_workspace && sealed {
             assert!(matches!(
                 settled.prepared_destination.as_ref().unwrap().state,

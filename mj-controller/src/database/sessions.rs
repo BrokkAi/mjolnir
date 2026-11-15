@@ -837,6 +837,64 @@ pub fn save_lifecycle_session(session: &SessionRecord) -> Result<()> {
     })
 }
 
+/// Acceptance of Suspend owns its intent, readiness and Closing publication.
+pub(crate) fn save_suspension_intent(
+    session: &SessionRecord,
+    ready_move: Option<&mj_core::state::MoveOperation>,
+) -> Result<()> {
+    let mut session = session.clone();
+    let ready_move = ready_move.cloned();
+    submit_database_write("save suspension intent", move |connection| {
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut operation = super::session_move::load_move_operation_with(&tx, &session.id)?;
+        if let Some(operation) = operation.as_mut() {
+            if session.state == SessionState::Stopped && operation.is_resolved() {
+                tx.execute("UPDATE session_moves SET close_requested_operation_id=NULL WHERE session_id=?1", [&session.id])?;
+            } else {
+                if let Some(ready) = ready_move
+                    .as_ref()
+                    .filter(|ready| ready.operation_id == operation.operation_id)
+                {
+                    operation.destination_target = ready.destination_target.clone();
+                    operation.destination_native_session_id =
+                        ready.destination_native_session_id.clone();
+                    operation.updated_at = session.updated_at.clone();
+                    super::session_move::save_move_operation_with(&tx, operation)?;
+                }
+                // Only this accepted request grants close authority. A Move's
+                // cancellation/phase alone never does, even for historical rows.
+                if session.state != SessionState::Destroying {
+                    session.state = SessionState::Closing;
+                }
+                tx.execute("UPDATE session_moves SET close_requested_operation_id=?2 WHERE session_id=?1 AND operation_id=?2", params![session.id, operation.operation_id])?;
+            }
+        }
+        validate_session_record(&session)?;
+        update_lifecycle_fields(&tx, &session)?;
+        tx.commit()?;
+        Ok(())
+    })
+}
+
+pub(crate) fn save_failed_close(session: &SessionRecord) -> Result<()> {
+    let session = session.clone();
+    submit_database_write("save failed close", move |connection| {
+        validate_session_record(&session)?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        update_lifecycle_fields(&tx, &session)?;
+        // Destroying is still an owned, verified teardown, not a terminal
+        // failure. Its request must survive until startup finishes cleanup.
+        if session.state != SessionState::Destroying {
+            tx.execute(
+                "UPDATE session_moves SET close_requested_operation_id=NULL WHERE session_id=?1",
+                [&session.id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    })
+}
+
 /// A verified close of a restored destination also ends its cancelled Move.
 /// Check the old placement before publishing the terminal lifecycle state.
 pub(crate) fn save_closed_session(session: &SessionRecord) -> Result<()> {
@@ -870,6 +928,12 @@ pub(crate) fn save_closed_session(session: &SessionRecord) -> Result<()> {
                 &session.id,
                 &operation.operation_id,
                 &session.updated_at,
+            )?;
+        }
+        if session.state == SessionState::Stopped {
+            tx.execute(
+                "UPDATE session_moves SET close_requested_operation_id=NULL WHERE session_id=?1",
+                [&session.id],
             )?;
         }
         tx.commit()?;

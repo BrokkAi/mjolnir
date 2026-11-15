@@ -3,6 +3,11 @@
 use super::*;
 use mj_core::state::MoveOperation;
 
+pub(super) struct MoveRecoveryOwners {
+    pub(super) moves: BTreeSet<String>,
+    pub(super) closes: BTreeSet<String>,
+}
+
 pub(super) fn public_quota_failure(error: &anyhow::Error, reference: &str) -> String {
     // General configuration refusals can contain parser source lines. Only
     // the Move safety check's explicit code certifies journal-safe text.
@@ -435,45 +440,33 @@ impl RuntimeState {
     pub(super) fn recover_moves(
         self: &Arc<Self>,
         operations: Vec<MoveOperation>,
-    ) -> Result<BTreeSet<String>> {
+        close_operations: &BTreeSet<String>,
+    ) -> Result<MoveRecoveryOwners> {
         let mut owned = BTreeSet::new();
+        let mut closes = BTreeSet::new();
         for operation in &operations {
             crate::controller::move_session::restore_move_queue_hold(operation);
         }
-        for operation in operations.into_iter().filter(|op| {
-            // A superseding Suspend owns this durable close. Recover it
-            // through the same settlement as a live supersession, before
-            // trying to lease an uninstalled destination worker.
-            if op.phase == mj_core::state::MovePhase::Cancelled
-                && !op.queue_admission_started
-                && self
-                    .owner()
-                    .controller()
-                    .state
-                    .sessions
-                    .get(&op.selection.session_id)
-                    .is_some_and(|session| {
-                        session.state == SessionState::Closing
-                            || (session.state == SessionState::Destroying
-                                && op.destination_target.is_some())
-                    })
-            {
-                return false;
+        for operation in operations {
+            let state = self
+                .owner()
+                .controller()
+                .state
+                .sessions
+                .get(&operation.selection.session_id)
+                .map(|session| session.state);
+            let owner = crate::database::move_recovery_owner(
+                state,
+                close_operations.contains(&operation.operation_id),
+            );
+            // Cancellation alone grants no teardown authority.
+            if owner == Some(crate::database::MoveRecoveryOwner::Close) {
+                closes.insert(operation.selection.session_id.clone());
+                continue;
             }
-            op.is_active()
-                || self
-                    .owner()
-                    .controller()
-                    .state
-                    .sessions
-                    .get(&op.selection.session_id)
-                    .is_some_and(|session| {
-                        matches!(
-                            session.state,
-                            SessionState::Closing | SessionState::Destroying
-                        )
-                    })
-        }) {
+            if !operation.is_active() && owner.is_none() {
+                continue;
+            }
             let id = operation.selection.session_id.clone();
             let key = format!("recovery:{}", operation.operation_id);
             let phase = if operation.recovery_session.is_some() {
@@ -530,7 +523,10 @@ impl RuntimeState {
                 state.remove_completed_lifecycle(&channel);
             });
         }
-        Ok(owned)
+        Ok(MoveRecoveryOwners {
+            moves: owned,
+            closes,
+        })
     }
 
     pub(super) fn resume_move_destination_cleanups(self: &Arc<Self>, immediately: bool) {

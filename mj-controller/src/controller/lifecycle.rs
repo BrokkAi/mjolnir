@@ -890,7 +890,7 @@ impl Controller {
             session_id,
             &previous,
             "persist the reason a close did not finish",
-            &crate::database::save_lifecycle_session,
+            &crate::database::save_failed_close,
         )?;
         Ok(true)
     }

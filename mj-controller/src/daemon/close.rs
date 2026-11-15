@@ -59,15 +59,10 @@ impl RuntimeState {
                     record.state = SessionState::Closing;
                     record.last_error = None;
                     record.updated_at = chrono::Utc::now().to_rfc3339();
-                    if let Some(operation) = ready_move {
-                        crate::database::adopt_move_destination(&operation, record)?;
-                    } else {
-                        crate::database::save_lifecycle_session(record)?;
-                    }
                 } else if record.public_error().is_some() {
                     record.last_error = None;
-                    crate::database::save_lifecycle_session(record)?;
                 }
+                crate::database::save_suspension_intent(record, ready_move.as_ref())?;
                 Ok(())
             }
         })

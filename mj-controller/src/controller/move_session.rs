@@ -2022,6 +2022,24 @@ impl Controller {
                 self.finish_workspace_transfer(&mut operation, executor)?;
                 return self.admit_move_queue(&mut operation, executor).await;
             }
+            if operation.phase == MovePhase::Cancelled
+                && !operation.is_resolved()
+                && operation.workspace_transfer.is_some()
+                && operation.recovery_session.is_some()
+                && session.state == SessionState::Closing
+                && operation.destination_target.is_none()
+                && !crate::database::load_worker_restart(&id)?
+                    .is_some_and(|intent| session.target.as_deref() == Some(&intent.target))
+            {
+                // Cancellation retains Move's source for retry; it does not
+                // authorize suspension. Its durable seal already proves the
+                // source cut, so never lease an uninstalled destination here.
+                return Err(self.rollback_move_destination(
+                    &operation,
+                    anyhow::anyhow!("Move cancelled after sealing its source; source environment retained for explicit retry"),
+                    executor,
+                )?);
+            }
             if operation.workspace_transfer.is_some() && operation.recovery_session.is_some() && !operation.cancellation_requested
                 && !(operation.phase == MovePhase::ResumingDestination && session.state == SessionState::Running) {
                 if session.state == SessionState::Provisioning || session.target.as_deref() != operation.source_target.as_ref() {
