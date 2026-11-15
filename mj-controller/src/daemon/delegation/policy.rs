@@ -278,8 +278,8 @@ impl Policy {
             match intent {
                 crate::daemon::QuotaRefreshIntent::Force => force = true,
                 crate::daemon::QuotaRefreshIntent::ReconcileSources => reconcile = true,
-                crate::daemon::QuotaRefreshIntent::ProbeProfiles(requests) => {
-                    probes.extend(requests)
+                crate::daemon::QuotaRefreshIntent::ProbeProfiles { requests, forced } => {
+                    probes.extend(requests.into_iter().map(|request| (request, forced)))
                 }
             }
         }
@@ -294,11 +294,17 @@ impl Policy {
         }
     }
 
-    /// One-off probes for profiles outside the batch (a `mj quota
-    /// --with-disabled` read): each is probed once on arrival, and its
-    /// publication stays until the profile's identity changes.
-    fn probe_profiles(&mut self, requests: Vec<crate::quota::QuotaRefreshRequest>) {
-        for request in requests {
+    /// One-off probes: a plain one names a profile the asker wants read once
+    /// (a `mj quota --with-disabled` read of a disabled profile), and its
+    /// publication stays until the profile's identity changes. A forced one is
+    /// a person asking to refresh that row now: it probes even a fresh
+    /// in-batch report, and re-probes an extra it already answered.
+    fn probe_profiles(&mut self, requests: Vec<(crate::quota::QuotaRefreshRequest, bool)>) {
+        let mut forced_now = std::collections::BTreeSet::new();
+        for (request, forced) in requests {
+            if forced {
+                forced_now.insert(request.profile_id.clone());
+            }
             if self
                 .batch
                 .profiles
@@ -318,7 +324,11 @@ impl Policy {
             }
         }
         self.batch.generation = self.batch.generation.saturating_add(1);
+        // A pulse, like `refresh`: the poller consumes it once, and the next
+        // published batch no longer carries it.
+        self.batch.forced_profiles = std::mem::take(&mut forced_now);
         self.profiles_tx.send_replace(self.batch.clone());
+        self.batch.forced_profiles.clear();
         self.reconcile_publications(&self.batch.profiles.clone());
     }
 

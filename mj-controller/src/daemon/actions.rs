@@ -766,7 +766,10 @@ pub(super) async fn handle_action(
             state.request_quota_refresh()?;
             Ok(DaemonReply::Done)
         }
-        DaemonAction::ProbeQuotaProfiles { profile_ids } => {
+        DaemonAction::ProbeQuotaProfiles {
+            profile_ids,
+            forced,
+        } => {
             let config = state.owner().controller().config.clone();
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             let runtime = crate::quota::QuotaRuntimeConfig::of(&config);
@@ -783,7 +786,7 @@ pub(super) async fn handle_action(
                     runtime.clone(),
                 ));
             }
-            state.probe_quota_profiles(requests)?;
+            state.probe_quota_profiles(requests, forced)?;
             Ok(DaemonReply::Done)
         }
         DaemonAction::RenameProfile { old_id, new_id } => {

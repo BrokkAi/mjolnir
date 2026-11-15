@@ -945,6 +945,7 @@ async fn a_probe_quota_request_targets_named_profiles_even_disabled_ones() {
     let error = handle_action(
         DaemonAction::ProbeQuotaProfiles {
             profile_ids: vec!["missing".into()],
+            forced: false,
         },
         &metadata,
         &state,
@@ -959,6 +960,7 @@ async fn a_probe_quota_request_targets_named_profiles_even_disabled_ones() {
     handle_action(
         DaemonAction::ProbeQuotaProfiles {
             profile_ids: vec!["dsh".into()],
+            forced: true,
         },
         &metadata,
         &state,
@@ -966,9 +968,11 @@ async fn a_probe_quota_request_targets_named_profiles_even_disabled_ones() {
     )
     .await
     .expect("probe the disabled profile");
-    let Some(QuotaRefreshIntent::ProbeProfiles(requests)) = woken.try_recv().ok() else {
+    let Some(QuotaRefreshIntent::ProbeProfiles { requests, forced }) = woken.try_recv().ok()
+    else {
         panic!("the poller receives the probe");
     };
+    assert!(forced, "the force flag reaches the poller");
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].profile_id, "dsh");
 }

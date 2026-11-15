@@ -949,7 +949,7 @@ pub(crate) fn spawn_quota_probe_request(
         async move {
             daemon::connect_existing()
                 .await?
-                .probe_quota_profiles(vec![profile_id])
+                .probe_quota_profiles(vec![profile_id], true)
                 .await
         },
         move |result| DashboardIoUpdate::QuotaProbeRequested {

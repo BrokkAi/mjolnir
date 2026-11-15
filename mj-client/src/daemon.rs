@@ -1080,9 +1080,11 @@ pub enum DaemonAction {
     /// protocol 43.
     RefreshQuota,
     /// Probe exactly these profiles once, even disabled ones, and serve their
-    /// reports in the runtime feed. Added in protocol 99.
+    /// reports in the runtime feed. Added in protocol 99; `forced` (probe now,
+    /// off the profile's schedule, even with a fresh report) in protocol 100.
     ProbeQuotaProfiles {
         profile_ids: Vec<String>,
+        forced: bool,
     },
     /// Discover eligible subagent models in the daemon, which owns the cache.
     SubagentOptions {
@@ -2282,11 +2284,19 @@ impl DaemonClient {
     }
 
     /// Ask the daemon to probe exactly these profiles once, even disabled
-    /// ones. Returns when the daemon has queued the probes, not when they
-    /// finish; the reports arrive in the runtime feed.
-    pub async fn probe_quota_profiles(&mut self, profile_ids: Vec<String>) -> Result<()> {
+    /// ones. `forced` probes now, off each profile's schedule, even with a
+    /// fresh report. Returns when the daemon has queued the probes, not when
+    /// they finish; the reports arrive in the runtime feed.
+    pub async fn probe_quota_profiles(
+        &mut self,
+        profile_ids: Vec<String>,
+        forced: bool,
+    ) -> Result<()> {
         match self
-            .request(DaemonAction::ProbeQuotaProfiles { profile_ids })
+            .request(DaemonAction::ProbeQuotaProfiles {
+                profile_ids,
+                forced,
+            })
             .await?
         {
             DaemonReply::Done => Ok(()),

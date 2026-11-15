@@ -16,6 +16,10 @@ pub struct QuotaRefreshBatch {
     /// --with-disabled`): each is probed once when it arrives, never on the
     /// batch's schedule.
     pub extra: Vec<QuotaRefreshRequest>,
+    /// Profiles the person asked to refresh by name: probed now, off their
+    /// schedule, even with a fresh report. A pulse like `refresh`, cleared
+    /// once the poller consumes it.
+    pub forced_profiles: std::collections::BTreeSet<String>,
     /// Access tokens refused by failed turns; a change wakes renewal.
     pub rejected_logins: BTreeMap<String, std::collections::BTreeSet<String>>,
 }

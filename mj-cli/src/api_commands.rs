@@ -2837,7 +2837,7 @@ pub(crate) async fn quota(args: QuotaArgs) -> Result<()> {
             .map(|(id, _)| id.clone())
             .collect();
         if !probe.is_empty() {
-            daemon.probe_quota_profiles(probe.clone()).await?;
+            daemon.probe_quota_profiles(probe.clone(), false).await?;
             let deadline = std::time::Instant::now() + QUOTA_REFRESH_WAIT;
             let pumped = pump_quota_feed(&mut daemon, cursor, metadata, deadline, |metadata| {
                 probe

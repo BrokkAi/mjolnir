@@ -148,7 +148,10 @@ pub(super) fn spawn_quota_refresher_with(
                     let report = quotas.report(&request.profile_id);
                     // A hold outranks even an explicit refresh: probing an
                     // endpoint that just said 429 only extends the limit.
-                    !on_hold(report, now) && (batch.refresh || next_probe_at(report) <= now)
+                    !on_hold(report, now)
+                        && (batch.refresh
+                            || batch.forced_profiles.contains(&request.profile_id)
+                            || next_probe_at(report) <= now)
                 })
                 .cloned()
                 .collect::<Vec<_>>();
@@ -157,6 +160,7 @@ pub(super) fn spawn_quota_refresher_with(
                 .iter()
                 .filter(|request| {
                     batch.refresh
+                        || batch.forced_profiles.contains(&request.profile_id)
                         || probed_extra.get(&request.profile_id) != Some(&request.cache_identity())
                 })
                 .filter(|request| !on_hold(quotas.report(&request.profile_id), now))
@@ -171,6 +175,7 @@ pub(super) fn spawn_quota_refresher_with(
             let generation = batch.generation;
             let forced = batch.refresh;
             batch.refresh = false;
+            batch.forced_profiles.clear();
             if (!due.is_empty() || forced)
                 && !refresh_profile_quotas(&mut quotas, generation, &due, &updates_tx).await
             {
