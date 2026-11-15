@@ -2,15 +2,18 @@
 # Verifies diffs as their reviews finish: batch every ready diff, run the
 # verifiers (finished batches are skipped, started ones resumed), repeat until
 # the review driver has exited, then make one final pass.
-# Usage: REVIEW_ARMS_DIR=... pipeline.sh <jobs.json> <verify-dir> [<driver-jobs.json>]
+# Usage: REVIEW_ARMS_DIR=... pipeline.sh <jobs.json> <verify-dir> [<driver-jobs.json> [build_verify options...]]
 # <driver-jobs.json> is the file the running review driver was given, when it
 # differs from <jobs.json> (greptile_driver.py takes tiers rather than arms).
+# Further arguments go to build_verify.py, e.g. --arms A,B: other experiments
+# share runs/, and a diff's pool cannot be rebuilt once it is batched.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 jobs=$1; verify=$2; watch=${3:-$1}
+extra=("${@:4}")
 while :; do
   reviewing=$(pgrep -f "driver.py --jobs $watch" >/dev/null && echo yes || echo no)
-  python3 -B "$here/build_verify.py" "$verify" --append --ready-jobs "$jobs" || exit 1
+  python3 -B "$here/build_verify.py" "$verify" --append --ready-jobs "$jobs" "${extra[@]}" || exit 1
   failed=no
   python3 -B "$here/verify_driver.py" "$verify" --concurrency 7 || failed=yes
   if [ "$reviewing" = no ]; then

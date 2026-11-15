@@ -99,7 +99,7 @@ for done_path in sorted(ROOT.glob("runs/*/*/done.json")):
             # turns, which is unknown, not free.
             "cost_usd": (round(ticks / 1e10, 4) if isinstance(ticks, (int, float)) and
                          usage["coverage"].get("provider_cost_turns", 0) + usage["coverage"].get("estimated_cost_turns", 0)
-                         == usage["coverage"].get("recorded_turns") else None),
+                         == usage["coverage"].get("recorded_turns") > 0 else None),
         }
 
 

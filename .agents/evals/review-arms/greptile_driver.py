@@ -182,13 +182,20 @@ def main():
 
     def one(diff_jobs):
         results = []
-        for job in diff_jobs:
+        for i, job in enumerate(diff_jobs):
+            d = ROOT / "runs" / job["bug"] / f"G-{job['tier']}"
             try:
                 results.append((job, run_job(job), None))
             except Exception as e:  # report every failure with its job
-                save(ROOT / "runs" / job["bug"] / f"G-{job['tier']}" / "error.json",
-                     {"error": str(e), "traceback": traceback.format_exc(), "time_ns": time.time_ns()})
+                save(d / "error.json", {"error": str(e), "traceback": traceback.format_exc(), "time_ns": time.time_ns()})
                 results.append((job, "failed", str(e)))
+                if (d / "launch-intent.json").exists() and not (d / "done.json").exists():
+                    # Greptile may still be running (and charging for) this review, and a new
+                    # review of the same commit would cancel it: leave the commit's other jobs
+                    # until a later run has recovered or retried this one.
+                    results += [(j, "blocked", f"waits for {job['bug']}/{job['tier']} on the same commit")
+                                for j in diff_jobs[i + 1:]]
+                    break
         return results
 
     unfinished = 0
