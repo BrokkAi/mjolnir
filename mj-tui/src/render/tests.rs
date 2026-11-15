@@ -3579,7 +3579,7 @@ fn golden_dashboard_footer_render() {
     );
 }
 
-// Hard-won: nightly 43732928402: Windows omits the default localhost permission metadata.
+// Hard-won: 3747d578c: Windows omits the default localhost permission metadata.
 #[test]
 fn golden_dashboard_resource_panels() {
     let mut output = String::new();
