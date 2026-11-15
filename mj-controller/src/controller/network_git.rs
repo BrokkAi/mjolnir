@@ -220,7 +220,7 @@ fn initialize_workspace(
         if checkout.no_later_history {
             return configure_workspace_without_origin(&checked, Some(&checkout.commit), &base);
         }
-        return configure_workspace(&git, &checked, &base);
+        return configure_workspace(executor, backend, session_id, directory, &base);
     }
     let marker = git(&["config", "--local", "--get", "mj.remoteWorkspace"])?;
     ensure!(
@@ -273,29 +273,55 @@ fn initialize_workspace(
         }
         _ => anyhow::bail!("could not inspect the selected local branch"),
     }
-    configure_workspace(&git, &checked, &base)
+    configure_workspace(executor, backend, session_id, directory, &base)
 }
 
 fn configure_workspace(
-    git: &impl Fn(&[&str]) -> Result<targets::CommandOutput>,
-    checked: &impl Fn(&[&str]) -> Result<String>,
+    executor: &impl CommandExecutor,
+    backend: &targets::TargetLocator,
+    session_id: &str,
+    directory: &std::path::Path,
     base: &str,
 ) -> Result<()> {
-    for (key, value) in [
+    let argv = |arguments: &[&str]| {
+        let mut argv = vec![
+            "git".into(),
+            "-C".into(),
+            directory.to_string_lossy().into_owned(),
+        ];
+        argv.extend(arguments.iter().map(|argument| (*argument).to_owned()));
+        argv
+    };
+    let mut steps: Vec<_> = [
         ("push.default", "current"),
         ("push.autoSetupRemote", "true"),
         ("remote.pushDefault", "origin"),
         ("remote.origin.mirror", "false"),
         ("mj.baseCommit", base),
         ("mj.remoteWorkspace", "true"),
-    ] {
-        checked(&["config", "--local", "--replace-all", key, value])?;
-    }
-    let removed = git(&["config", "--local", "--unset-all", "remote.origin.push"])?;
-    ensure!(
-        matches!(removed.status, 0 | 5),
-        "could not clear inherited push refspec"
+    ]
+    .into_iter()
+    .map(|(key, value)| {
+        targets::CommandStep::new(
+            "initialize network session Git checkout",
+            argv(&["config", "--local", "--replace-all", key, value]),
+        )
+    })
+    .collect();
+    steps.push(
+        targets::CommandStep::new(
+            "initialize network session Git checkout",
+            argv(&["config", "--local", "--unset-all", "remote.origin.push"]),
+        )
+        .accepted_statuses([0, 5]),
     );
+    let command = targets::command_on_locator(
+        backend,
+        session_id,
+        targets::step_script(steps),
+        "initialize network session Git checkout",
+    )?;
+    targets::checked_command_output(&command, executor.execute(&command)?)?;
     Ok(())
 }
 
