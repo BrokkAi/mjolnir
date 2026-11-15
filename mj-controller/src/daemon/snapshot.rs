@@ -195,60 +195,6 @@ impl RuntimeState {
         }
     }
 
-    /// Capture only durable/lifecycle ownership for actor-reported failures.
-    /// The relay actor alone decides whether the harness wait expired.
-    pub(super) fn harness_timeout_record(&self, id: &str) -> Option<String> {
-        let owner = self.owner();
-        if owner
-            .lifecycle
-            .get(id)
-            .is_some_and(|active| active.is_running())
-            || owner.close_requested.contains(id)
-        {
-            return None;
-        }
-        let record = owner.controller().state.sessions.get(id)?;
-        (record.state == SessionState::Running).then(|| record.updated_at.clone())
-    }
-
-    /// Fail one session whose harness never became usable, so it stops looking
-    /// like a session a driver can wait for.
-    pub(super) async fn fail_unready_session(
-        &self,
-        session_id: String,
-        timeout: crate::session_manager::HarnessReadinessTimeout,
-    ) -> Result<bool> {
-        let _activity = crate::upgrade::activity_unless_draining("harness readiness failure")?;
-        if self.harness_timeout_record(&session_id).as_deref()
-            != Some(timeout.observed_updated_at.as_str())
-        {
-            return Ok(false);
-        }
-        let cause = timeout.cause();
-        let observed_updated_at = timeout.observed_updated_at.clone();
-        tracing::warn!(%session_id, waited_seconds = timeout.waited.as_secs(), "{cause}");
-        let applied = blocking({
-            let session_id = session_id.clone();
-            let cause = cause.clone();
-            let activity = _activity.clone();
-            move || {
-                let _activity = activity;
-                let mut controller = Controller::load()?;
-                controller.fail_unready_session(&session_id, &cause, &observed_updated_at)
-            }
-        })
-        .await;
-        let applied = applied?;
-        if applied {
-            if let Err(error) = self.reload_controller().await {
-                tracing::warn!(%session_id, error = format!("{error:#}"), "could not reload state after failing an unready session");
-            }
-            self.push_notice(&session_id, cause);
-            self.publish_revision();
-        }
-        Ok(applied)
-    }
-
     pub(super) async fn publish_session(
         self: &Arc<Self>,
         session_id: String,

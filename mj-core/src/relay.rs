@@ -17,6 +17,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 pub use types::*;
 
+/// Observed harness startup allowance: first launches can take minutes.
+/// The worker owns expiry; controller request waits use the same allowance.
+pub const NATIVE_SESSION_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// Serialized bytes of observations allowed in one attach response, well under
 /// `MAX_FRAME_BYTES` to leave room for the envelope.

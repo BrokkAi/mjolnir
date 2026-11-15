@@ -17,12 +17,7 @@ use mj_core::relay::{HarnessPreparation, RelayExecutionState};
 
 use super::worker_binary::{WorkerProbe, probe_worker};
 
-/// A harness such as Codex can spend minutes on its first launch, so the
-/// readiness wait has to outlast a slow harness boot rather than a fast one.
-///
-/// The daemon's own readiness timer reuses this, so the two cannot disagree
-/// about how long a harness is given to open its session.
-pub(crate) const NATIVE_SESSION_STARTUP_TIMEOUT: Duration = Duration::from_secs(300);
+pub(crate) use mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT;
 
 /// How long a worker that has said nothing at all is waited for. A worker that
 /// is recording startup progress is waited for longer; see
@@ -124,42 +119,6 @@ pub(super) async fn wait_for_native_session(
     .await
 }
 
-enum NativeStartupDeadline {
-    Unobserved,
-    Legacy(tokio::time::Instant),
-    Preparing,
-    Started(tokio::time::Instant),
-}
-
-impl NativeStartupDeadline {
-    fn deadline(&self) -> Option<tokio::time::Instant> {
-        match self {
-            Self::Legacy(deadline) | Self::Started(deadline) => Some(*deadline),
-            Self::Unobserved | Self::Preparing => None,
-        }
-    }
-
-    fn observe(&mut self, readiness: &NativeSessionReadiness, now: tokio::time::Instant) {
-        match readiness {
-            NativeSessionReadiness::Preparing { .. } => *self = Self::Preparing,
-            NativeSessionReadiness::Started => {
-                if !matches!(self, Self::Started(_)) {
-                    *self = Self::Started(now + NATIVE_SESSION_STARTUP_TIMEOUT);
-                }
-            }
-            NativeSessionReadiness::Waiting
-                if matches!(self, Self::Unobserved | Self::Preparing) =>
-            {
-                *self = Self::Legacy(now + NATIVE_SESSION_STARTUP_TIMEOUT);
-            }
-            NativeSessionReadiness::Waiting
-            | NativeSessionReadiness::Ready(_)
-            | NativeSessionReadiness::PreparationFailed { .. }
-            | NativeSessionReadiness::Closed => {}
-        }
-    }
-}
-
 struct NativeReadinessStage<'a, E: CommandExecutor> {
     executor: &'a E,
     harness: HarnessKind,
@@ -256,7 +215,6 @@ async fn wait_for_startup(
     fallback_stage: ProvisionStage,
     until_prepared: bool,
 ) -> Result<Option<String>> {
-    let mut deadline = NativeStartupDeadline::Unobserved;
     let mut stage = NativeReadinessStage::new(executor, harness, fallback_stage);
     loop {
         if executor.cancellation_requested() {
@@ -267,17 +225,7 @@ async fn wait_for_startup(
             tokio::pin!(readiness);
             loop {
                 let now = tokio::time::Instant::now();
-                if deadline.deadline().is_some_and(|end| now >= end) {
-                    bail!(
-                        "ACP runtime did not report session startup within {}s",
-                        NATIVE_SESSION_STARTUP_TIMEOUT.as_secs()
-                    );
-                }
-                let cancellation_poll = deadline
-                    .deadline()
-                    .map_or(now + CANCELLATION_POLL_INTERVAL, |end| {
-                        std::cmp::min(end, now + CANCELLATION_POLL_INTERVAL)
-                    });
+                let cancellation_poll = now + CANCELLATION_POLL_INTERVAL;
                 tokio::select! {
                     readiness = &mut readiness => break readiness?,
                     _ = tokio::time::sleep_until(cancellation_poll) => {
@@ -291,7 +239,6 @@ async fn wait_for_startup(
         if executor.cancellation_requested() {
             bail!("operation cancelled while waiting for ACP runtime startup");
         }
-        deadline.observe(&readiness, tokio::time::Instant::now());
         stage.observe(&readiness);
         match readiness {
             NativeSessionReadiness::Ready(native_session_id) => {
@@ -317,17 +264,7 @@ async fn wait_for_startup(
             bail!("operation cancelled while waiting for ACP runtime startup");
         }
         let now = tokio::time::Instant::now();
-        if deadline.deadline().is_some_and(|end| now >= end) {
-            bail!(
-                "ACP runtime did not report session startup within {}s",
-                NATIVE_SESSION_STARTUP_TIMEOUT.as_secs()
-            );
-        }
-        let next_poll = deadline
-            .deadline()
-            .map_or(now + std::time::Duration::from_millis(100), |end| {
-                std::cmp::min(end, now + std::time::Duration::from_millis(100))
-            });
+        let next_poll = now + std::time::Duration::from_millis(100);
         loop {
             let now = tokio::time::Instant::now();
             if now >= next_poll {
@@ -891,7 +828,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn native_session_preparing_does_not_count_timeout_and_started_gets_full_budget() {
+    async fn native_session_wait_observes_worker_failure_without_its_own_deadline() {
         use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
         struct ControlledProbe {
@@ -910,7 +847,10 @@ mod tests {
                         self.saw_started.store(true, Ordering::Release);
                         Ok(NativeSessionReadiness::Started)
                     }
-                    _ => Ok(NativeSessionReadiness::Ready("native-1".into())),
+                    _ => Ok(NativeSessionReadiness::PreparationFailed {
+                        step: "session-open".into(),
+                        error: "worker startup deadline expired".into(),
+                    }),
                 }
             }
         }
@@ -952,8 +892,14 @@ mod tests {
         );
         tokio::time::advance(Duration::from_secs(2)).await;
         tokio::task::yield_now().await;
+        assert!(
+            !wait.is_finished(),
+            "only the worker may decide startup expired"
+        );
+        state.store(2, Ordering::Release);
+        tokio::time::advance(Duration::from_millis(100)).await;
         let error = wait.await.unwrap().unwrap_err();
-        assert!(error.to_string().contains("did not report session startup"));
+        assert!(error.downcast_ref::<HarnessPreparationFailure>().is_some());
     }
 
     // A Move reopened sub-agent admission while the worker was still at
@@ -1039,7 +985,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn native_session_without_preparation_field_keeps_300_second_timeout() {
+    async fn legacy_native_session_wait_has_no_competing_deadline() {
         struct LegacyWaitingProbe;
 
         impl NativeSessionProbe for LegacyWaitingProbe {
@@ -1049,7 +995,7 @@ mod tests {
         }
 
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let executor = CancellableProcessExecutor::new(cancelled);
+        let executor = CancellableProcessExecutor::new(cancelled.clone());
         let wait = tokio::spawn(async move {
             wait_for_native_session(&mut LegacyWaitingProbe, &executor, HarnessKind::Codex).await
         });
@@ -1059,12 +1005,15 @@ mod tests {
         assert!(!wait.is_finished());
         tokio::time::advance(Duration::from_secs(2)).await;
         tokio::task::yield_now().await;
+        assert!(!wait.is_finished());
+        cancelled.store(true, std::sync::atomic::Ordering::Release);
+        tokio::time::advance(Duration::from_millis(100)).await;
         assert!(
             wait.await
                 .unwrap()
                 .unwrap_err()
                 .to_string()
-                .contains("did not report session startup")
+                .contains("cancelled")
         );
     }
 

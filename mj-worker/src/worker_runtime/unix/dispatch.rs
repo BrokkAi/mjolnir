@@ -1,7 +1,48 @@
 use super::*;
 use tracing::instrument::WithSubscriber;
 
-pub(crate) async fn run_relay_coordinator_with_shells(
+/// Only the coordinator accepts readiness or expiry. A ready bridge removes
+/// its timer; a restart arms a new one, and expiry exits event processing.
+pub(super) struct HarnessStartup {
+    deadline: Option<tokio::time::Instant>,
+    pub(super) status: watch::Sender<PreparationSnapshot>,
+    pub(super) idle_dispatch_wakes: Arc<Mutex<Option<mpsc::Receiver<()>>>>,
+}
+
+impl HarnessStartup {
+    pub(super) fn new(status: watch::Sender<PreparationSnapshot>) -> Self {
+        Self {
+            deadline: Some(
+                tokio::time::Instant::now() + mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT,
+            ),
+            status,
+            idle_dispatch_wakes: Default::default(),
+        }
+    }
+
+    fn observe(&mut self, ready: bool) {
+        if ready {
+            self.deadline = None;
+        } else if self.deadline.is_none() {
+            self.deadline =
+                Some(tokio::time::Instant::now() + mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT);
+        }
+    }
+
+    fn fail(&mut self) {
+        self.status.send_replace(PreparationSnapshot {
+            state: Some(mj_core::relay::HarnessPreparation::Failed {
+                step: "session-open".to_owned(),
+                error: format!("the harness did not open its session within {}s; use Restart agent to retry in the existing environment", mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT.as_secs()),
+                at_ms: chrono::Utc::now().timestamp_millis(),
+            }),
+            services: None,
+        });
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn run_relay_coordinator_with_shells(
     relay: Arc<RelayCell>,
     events: mpsc::Receiver<RuntimeEvent>,
     dispatch_wakes: mpsc::Receiver<()>,
@@ -9,9 +50,10 @@ pub(crate) async fn run_relay_coordinator_with_shells(
     user_shells: crate::user_shell::UserShellRegistry,
     kimi_tasks: Option<KimiTaskMonitor>,
     capture: Option<crate::work_facts::WorkObserver>,
+    startup: HarnessStartup,
 ) -> Result<()> {
     let verdict = crate::acp::verdict_client::VerdictClient::resolve(None).await;
-    run_relay_coordinator_with_verdict(
+    run_relay_coordinator(
         relay,
         events,
         dispatch_wakes,
@@ -20,14 +62,41 @@ pub(crate) async fn run_relay_coordinator_with_shells(
         kimi_tasks,
         verdict,
         capture,
+        Some(startup),
     )
     .await
 }
 
 // The coordinator owns one handle to each thing it serves; a struct of them
 // would only rename the arguments.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_relay_coordinator_with_verdict(
+    relay: Arc<RelayCell>,
+    events: mpsc::Receiver<RuntimeEvent>,
+    dispatch_wakes: mpsc::Receiver<()>,
+    commands: mpsc::Sender<CommandRequest>,
+    user_shells: crate::user_shell::UserShellRegistry,
+    kimi_tasks: Option<KimiTaskMonitor>,
+    verdict: Option<crate::acp::verdict_client::VerdictClient>,
+    capture: Option<crate::work_facts::WorkObserver>,
+) -> Result<()> {
+    run_relay_coordinator(
+        relay,
+        events,
+        dispatch_wakes,
+        commands,
+        user_shells,
+        kimi_tasks,
+        verdict,
+        capture,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_relay_coordinator(
     relay: Arc<RelayCell>,
     mut events: mpsc::Receiver<RuntimeEvent>,
     mut dispatch_wakes: mpsc::Receiver<()>,
@@ -36,6 +105,7 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
     mut kimi_tasks: Option<KimiTaskMonitor>,
     verdict: Option<crate::acp::verdict_client::VerdictClient>,
     capture: Option<crate::work_facts::WorkObserver>,
+    mut startup: Option<HarnessStartup>,
 ) -> Result<()> {
     let verdict = verdict.map(|client| {
         client.with_log(
@@ -103,6 +173,19 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
     // turn's first ordinal, and when to end the turn if nothing answers it.
     let mut stop_timer: Option<(u64, tokio::time::Instant)> = None;
     loop {
+        if let Some(startup) = &mut startup {
+            // During context clear the old native identity stays in the relay;
+            // only this bridge's configuration can finish its startup.
+            startup.observe(
+                session_configured
+                    && relay
+                        .lock()
+                        .expect("relay state lock poisoned")
+                        .operational_state()
+                        .native_session_is_ready(),
+            );
+        }
+        let startup_deadline = startup.as_ref().and_then(|startup| startup.deadline);
         // While a checkpoint barrier holds its cut, or a Close has sealed the
         // relay at one, the worker writes nothing of its own: the classifier's
         // answer, its assessment bookkeeping and the retry and stop timers all
@@ -220,6 +303,16 @@ pub(crate) async fn run_relay_coordinator_with_verdict(
         let stop_at = stop_timer.map_or_else(tokio::time::Instant::now, |(_, wake)| wake);
         tokio::select! {
             biased;
+            _ = tokio::time::sleep_until(startup_deadline.unwrap_or_else(tokio::time::Instant::now)), if startup_deadline.is_some() => {
+                let startup = startup.as_mut().expect("guarded startup deadline");
+                *startup.idle_dispatch_wakes.lock().expect("idle dispatch wake lock poisoned") = Some(dispatch_wakes);
+                relay.lock().expect("relay state lock poisoned").set_acp_ready(false);
+                startup.fail();
+                // No more runtime events can be accepted after failure. The
+                // runtime owner stops ACP and retains the failed relay.
+                verdict_tasks.shutdown().await;
+                return Ok(());
+            }
             wake = dispatch_wakes.recv(), if wakes_open => {
                 if wake.is_none() {
                     wakes_open = false;
@@ -1460,3 +1553,127 @@ pub(crate) fn wake_dispatch(
 
 #[cfg(test)]
 mod verdict_tests;
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    // Hard-won: 4cb21a5d8 review: the actor's startup deadline could fail a harness that became ready during its write
+    #[tokio::test(start_paused = true)]
+    async fn harness_startup_ready_and_expiry_have_one_outcome() {
+        let allowance = mj_core::relay::NATIVE_SESSION_STARTUP_TIMEOUT;
+        for offset in [-2_i64, -1, 0, 1] {
+            let ready_before_deadline = offset < 0;
+            let temp = tempfile::tempdir().unwrap();
+            let relay = Arc::new(RelayCell::new(
+                DurableRelay::open(temp.path(), "startup-race", "1.0.0").unwrap(),
+            ));
+            let (status, preparation) = watch::channel(PreparationSnapshot {
+                state: Some(mj_core::relay::HarnessPreparation::Started),
+                services: None,
+            });
+            let startup = HarnessStartup::new(status);
+            let idle_wakes = startup.idle_dispatch_wakes.clone();
+            let (events, received) = mpsc::channel(16);
+            let (_wakes, wakes) = mpsc::channel(1);
+            let (commands, _requests) = mpsc::channel(1);
+            let (shell_events, _shell_received) = mpsc::channel(1);
+            let shells = crate::user_shell::UserShellRegistry::new(
+                temp.path().to_owned(),
+                BTreeMap::new(),
+                shell_events,
+            );
+            tokio::time::advance(if ready_before_deadline {
+                allowance - std::time::Duration::from_secs(1)
+            } else {
+                allowance + std::time::Duration::from_secs(offset as u64)
+            })
+            .await;
+            // Queue both readiness events at the boundary before the owner is
+            // polled. Its expiry branch wins a tie; events cannot revive it.
+            events
+                .send(RuntimeEvent::SessionStarted {
+                    native_session_id: "native".into(),
+                    resumed: false,
+                    execution_mode: None,
+                    native_continuity_lost: false,
+                    replaced_unused_native_session_id: None,
+                })
+                .await
+                .unwrap();
+            events
+                .send(RuntimeEvent::SessionConfigured {
+                    config_options: Vec::new(),
+                })
+                .await
+                .unwrap();
+            let coordinator = tokio::spawn(run_relay_coordinator(
+                relay.clone(),
+                received,
+                wakes,
+                commands,
+                shells,
+                None,
+                None,
+                None,
+                Some(startup),
+            ));
+            if ready_before_deadline {
+                while !relay
+                    .lock()
+                    .unwrap()
+                    .operational_state()
+                    .native_session_is_ready()
+                {
+                    tokio::task::yield_now().await;
+                }
+                tokio::task::yield_now().await;
+                tokio::time::advance(allowance * 2).await;
+                tokio::task::yield_now().await;
+                assert!(matches!(
+                    preparation.borrow().state,
+                    Some(mj_core::relay::HarnessPreparation::Started)
+                ));
+                assert!(!coordinator.is_finished());
+                // Every restart gets a new deadline, even after a ready session.
+                events
+                    .send(if offset == -2 {
+                        RuntimeEvent::ContextClearing {
+                            request_id: "clear".into(),
+                        }
+                    } else {
+                        RuntimeEvent::HarnessRestarting {
+                            message: "restart".into(),
+                        }
+                    })
+                    .await
+                    .unwrap();
+                while events.capacity() < 16 {
+                    tokio::task::yield_now().await;
+                }
+                tokio::task::yield_now().await;
+                tokio::time::advance(allowance).await;
+            }
+            coordinator.await.unwrap().unwrap();
+            assert!(matches!(&preparation.borrow().state,
+                Some(mj_core::relay::HarnessPreparation::Failed { error, .. })
+                if error.contains("300s") && error.contains("Restart agent")));
+            assert!(
+                !relay
+                    .lock()
+                    .unwrap()
+                    .operational_state()
+                    .native_session_is_ready()
+            );
+            assert!(
+                events
+                    .send(RuntimeEvent::SessionConfigured {
+                        config_options: Vec::new()
+                    })
+                    .await
+                    .is_err()
+            );
+            assert!(idle_wakes.lock().unwrap().is_some());
+        }
+    }
+}
