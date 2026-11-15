@@ -1,5 +1,7 @@
 //! Physical teardown belongs to an environment, never to a session's UI row.
-use anyhow::{Context, Result, ensure};
+use super::Controller;
+use crate::targets::CommandSpec;
+use anyhow::{Context, Result, bail, ensure};
 use mj_core::config::Config;
 use mj_core::state::{ManagedWorktree, SessionRecord};
 
@@ -821,4 +823,161 @@ mod tests {
                 .contains_key(&later.id)
         );
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TargetAvailability {
+    Reachable,
+    Missing,
+    Unreachable,
+}
+
+pub(crate) fn target_availability(
+    controller: &Controller,
+    session_id: &str,
+    executor: &impl CommandExecutor,
+) -> Result<TargetAvailability> {
+    let record = controller
+        .state
+        .sessions
+        .get(session_id)
+        .with_context(|| format!("unknown session {session_id}"))?;
+    let Some(locator) = record.target.as_ref() else {
+        return Ok(TargetAvailability::Missing);
+    };
+    let locator = crate::controller::backend_locator(locator, record, &controller.config)?;
+
+    if let Some(plan) = crate::targets::target_recovery_plan(&locator, session_id)? {
+        let output = executor
+            .execute(&plan.exists)
+            .context("check retained target before Restart")?;
+        match output.status {
+            0 => match crate::targets::ensure_recovery_target_running(executor, Some(&plan))? {
+                crate::targets::TargetRecoveryOutcome::Missing => Ok(TargetAvailability::Missing),
+                crate::targets::TargetRecoveryOutcome::AlreadyRunning
+                | crate::targets::TargetRecoveryOutcome::Started
+                | crate::targets::TargetRecoveryOutcome::NotRequired => {
+                    Ok(TargetAvailability::Reachable)
+                }
+            },
+            1 => Ok(TargetAvailability::Missing),
+            125 => Ok(TargetAvailability::Unreachable),
+            255 if locator_is_remote(&locator) => Ok(TargetAvailability::Unreachable),
+            status => bail!(
+                "could not confirm retained target availability before Restart (status {status}): {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        }
+    } else if let mj_core::targets::TargetLocator::AppleContainer { container_id, .. }
+    | mj_core::targets::TargetLocator::SshAppleContainer { container_id, .. } = &locator
+    {
+        // Listing runs on the host that owns the runtime, which for a remote
+        // target is the other side of ssh.
+        let engine = locator.container_engine().expect("Apple container locator");
+        let arguments = vec![
+            engine.to_owned(),
+            "list".to_owned(),
+            "--all".to_owned(),
+            "--quiet".to_owned(),
+        ];
+        let list = match &locator {
+            mj_core::targets::TargetLocator::SshAppleContainer { ssh, .. } => {
+                crate::targets::ssh_command_owned(ssh, arguments)
+            }
+            _ => {
+                let mut arguments = arguments.into_iter();
+                CommandSpec::new(
+                    arguments.next().expect("engine"),
+                    arguments.collect::<Vec<_>>(),
+                )
+            }
+        }
+        .purpose("check retained Apple container before Restart");
+        let output = executor
+            .execute(&list)
+            .context("list retained Apple target before Restart")?;
+        if output.status == 255 && locator_is_remote(&locator) {
+            return Ok(TargetAvailability::Unreachable);
+        }
+        ensure!(
+            output.status == 0,
+            "could not confirm Apple target availability before Restart (status {}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        let listed = String::from_utf8(output.stdout)
+            .context("decode Apple container list before Restart")?;
+        if listed.lines().any(|id| id.trim() == container_id) {
+            Ok(TargetAvailability::Reachable)
+        } else {
+            Ok(TargetAvailability::Missing)
+        }
+    } else {
+        let probe = crate::targets::command_on_locator(
+            &locator,
+            session_id,
+            vec!["true".into()],
+            "probe retained target before Restart",
+        )?;
+        let output = executor
+            .execute(&probe)
+            .context("probe retained target before Restart")?;
+        match output.status {
+            0 => Ok(TargetAvailability::Reachable),
+            255 if locator_is_remote(&locator) => Ok(TargetAvailability::Unreachable),
+            status => bail!(
+                "could not confirm retained target availability before Restart (status {status}); refusing destructive fallback: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        }
+    }
+}
+
+fn locator_is_remote(locator: &mj_core::targets::TargetLocator) -> bool {
+    matches!(
+        locator,
+        mj_core::targets::TargetLocator::AwsEc2 { .. }
+            | mj_core::targets::TargetLocator::SshBare { .. }
+            | mj_core::targets::TargetLocator::SshPodman { .. }
+            | mj_core::targets::TargetLocator::SshDocker { .. }
+            | mj_core::targets::TargetLocator::SshAppleContainer { .. }
+            | mj_core::targets::TargetLocator::SshNitro { .. }
+    )
+}
+
+/// Evidence for Resume, obtained while its worker lifecycle permit is held.
+pub(super) enum ResumeEnvironment {
+    LiveWorker,
+    WorkerMissing,
+    Absent,
+    Unknown(anyhow::Error),
+}
+
+pub(super) fn classify_resume_environment(
+    controller: &Controller,
+    session_id: &str,
+    executor: &impl CommandExecutor,
+) -> ResumeEnvironment {
+    let probe = || -> Result<ResumeEnvironment> {
+        match target_availability(controller, session_id, executor)? {
+            TargetAvailability::Missing => return Ok(ResumeEnvironment::Absent),
+            TargetAvailability::Unreachable => bail!("the target engine is unreachable"),
+            TargetAvailability::Reachable => {}
+        }
+        let (backend, root) = controller.worker_placement(session_id)?;
+        let output = executor.execute(&super::worker_binary::worker_liveness_command(
+            &backend, &root,
+        ))?;
+        ensure!(
+            output.status == 0,
+            "worker liveness probe failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        match String::from_utf8_lossy(&output.stdout).trim() {
+            "alive" | "starting" => Ok(ResumeEnvironment::LiveWorker),
+            "dead" => Ok(ResumeEnvironment::WorkerMissing),
+            value => bail!("unexpected worker liveness response {value:?}"),
+        }
+    };
+    probe().unwrap_or_else(ResumeEnvironment::Unknown)
 }

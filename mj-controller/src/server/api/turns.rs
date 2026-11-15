@@ -285,15 +285,15 @@ const PROMPT_READINESS_WAIT: std::time::Duration = std::time::Duration::from_sec
 /// Why a session that is not coming up refuses a prompt. A failed session
 /// will not take one however long the caller waits, so the refusal says it
 /// failed, why, and what can be done with it instead (launch finding R5-8).
-/// Resume is named only for a session with a checkpoint, the one thing a
-/// resume restores from (launch finding R6-1).
+/// Resume can repair a retained target or restore an archive.
 fn prompt_refusal(session: &ViewerSession) -> String {
     if session.lifecycle != ViewerLifecycleCategory::Failed {
         return "this session cannot take a prompt right now".to_owned();
     }
     let id = &session.id;
     let ways_out = [
-        (session.has_checkpoint && session.capabilities.resume)
+        ((session.has_checkpoint || (session.state == "error" && session.retained_target))
+            && session.capabilities.resume)
             .then(|| format!("resume it with `mj resume --session {id}`")),
         session
             .capabilities

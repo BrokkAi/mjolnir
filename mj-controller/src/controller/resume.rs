@@ -123,6 +123,14 @@ impl Controller {
         target_id: &str,
         executor: &(impl CommandExecutor + Sync),
     ) -> Result<ResumeRepositorySourcePreflight> {
+        if self
+            .state
+            .sessions
+            .get(session_id)
+            .is_some_and(|session| session.state == SessionState::Error && session.target.is_some())
+        {
+            return self.preflight_repository_sources(session_id, target_id, true, None, executor);
+        }
         let github_token = self
             .github_token_for_repository_preflight(session_id)
             .await?;
@@ -164,6 +172,18 @@ impl Controller {
             .sessions
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?;
+        // A failed session may still own current work and need no archive.
+        // The lifecycle owner probes it at admission, not this UI preflight.
+        if describe_conversion && session.state == SessionState::Error && session.target.is_some() {
+            return Ok(ResumeRepositorySourcePreflight::Ready(
+                ResumeRepositorySourceReceipt {
+                    session_id: session_id.to_owned(),
+                    bundle_id: session.bundle_id.clone(),
+                    checkpoint_sha256: String::new(),
+                    repositories: Vec::new(),
+                },
+            ));
+        }
         let checkpoint = session
             .checkpoint
             .as_ref()
@@ -1606,6 +1626,27 @@ impl Controller {
         {
             bail!("session {session_id} is not stopped, lost, or retryable");
         }
+        let failed_environment_absent = if !transferring_workspace && previous.state == SessionState::Error && previous.target.is_some() {
+            use super::environment::{ResumeEnvironment, classify_resume_environment};
+            match classify_resume_environment(self, session_id, executor) {
+                condition @ (ResumeEnvironment::LiveWorker | ResumeEnvironment::WorkerMissing) => {
+                    ensure!(profile_id == previous.last_profile && target_id == previous.target_template_id,
+                        "Resume repairs the existing environment; resume with its current profile and target, then use Move to change them");
+                    if additional_mounts.as_ref().is_some_and(|mounts| mounts != &previous.additional_mounts)
+                        || resource_allocation.as_ref().is_some_and(|allocation| Some(allocation) != previous.resource_allocation.as_ref()) {
+                        executor.notify_notice("Resume keeps the existing container resources and attached directories. Use Move after repair to change them.");
+                    }
+                    on_accepted();
+                    return self.repair_existing_environment(session_id, matches!(condition, ResumeEnvironment::LiveWorker), discard_queue, executor).await;
+                }
+                ResumeEnvironment::Unknown(error) => {
+                    bail!("Could not establish the existing environment for session {session_id}: {error:#}. Everything was kept. Retry Resume when the target is reachable.");
+                }
+                ResumeEnvironment::Absent => true,
+            }
+        } else {
+            false
+        };
         let checkpoint = move_operation
             .and_then(|op| op.handoff.as_ref())
             .or(previous.checkpoint.as_deref())
@@ -1724,10 +1765,7 @@ impl Controller {
         targets::validate_additional_mounts(&additional_mounts)?;
         let history_host = mount_history_host(&target_template);
         let history_mounts = additional_mounts.clone();
-        if !transferring_workspace
-            && previous.state == SessionState::Error
-            && previous.target.is_some()
-        {
+        if failed_environment_absent {
             super::environment::remove_runtime_preserving_workspace(&previous,&self.config,executor)
                 .context("clean up target from failed resume")?;
         }
@@ -2172,13 +2210,26 @@ impl Controller {
             .get(session_id)
             .with_context(|| format!("unknown session {session_id}"))?
             .clone();
+        // An environment that still has its original runtime is not owned by
+        // this attempt. A new generation or a previously empty placement is.
         let cleanup = match current.target.as_ref() {
-            Some(_) => super::environment::remove_runtime_preserving_workspace(
-                &current,
-                &self.config,
-                &CancellableProcessExecutor::with_timeout(Duration::from_secs(15)),
-            ),
-            None => Ok(()),
+            Some(_)
+                if source_environment.is_none_or(|source| {
+                    source.placement.target.is_none()
+                        || source.phase == crate::database::EnvironmentPhase::Reclaimed
+                }) || current.target != previous.target
+                    || crate::database::session_environment(session_id)?
+                        .as_ref()
+                        .map(|e| &e.id)
+                        != source_environment.map(|e| &e.id) =>
+            {
+                super::environment::remove_runtime_preserving_workspace(
+                    &current,
+                    &self.config,
+                    &CancellableProcessExecutor::with_timeout(Duration::from_secs(15)),
+                )
+            }
+            _ => Ok(()),
         };
         // A failed target teardown may leave its harness writing. Keep its
         // checkout intact until a later retry proves the process is stopped.
@@ -2819,6 +2870,7 @@ async fn utility_handoff_while_cancellable(
 }
 
 mod in_place;
+mod repair;
 pub(crate) use in_place::InPlaceRestartError;
 
 #[cfg(test)]

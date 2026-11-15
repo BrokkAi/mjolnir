@@ -4,7 +4,7 @@ mod backend;
 mod cache_host;
 pub(crate) mod checkpoint;
 mod container_upgrade;
-mod environment;
+pub(crate) mod environment;
 pub(crate) use environment::StoppedWorker;
 mod git_cache;
 mod github_app;

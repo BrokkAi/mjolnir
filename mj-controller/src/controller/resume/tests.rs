@@ -2388,3 +2388,124 @@ fn only_the_archived_unused_session_may_be_replaced_on_resume() {
         Some("another")
     ));
 }
+
+// Hard-won: 94d7 resume: failed Resume deleted the container its live sub-agents used.
+#[test]
+fn failed_resume_keeps_present_and_unknown_environments_without_an_archive() {
+    const CHILD: &str = "MJ_RESUME_PRESENT_ENVIRONMENT_TEST";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        IsolatedTest::new("controller::resume::tests::failed_resume_keeps_present_and_unknown_environments_without_an_archive")
+            .env(CHILD, "1").isolated_store(directory.path())
+            .env("MJ_WORKER_BINARY", directory.path().join("unavailable-worker"))
+            .run();
+        return;
+    }
+    struct Engine {
+        exists_status: i32,
+        commands: Mutex<Vec<String>>,
+    }
+    impl CommandExecutor for Engine {
+        fn execute(&self, command: &CommandSpec) -> Result<CommandOutput> {
+            self.commands.lock().unwrap().push(command.purpose.clone());
+            let (status, stdout) = match command.purpose.as_str() {
+                "check for Mjolnir session container" => (self.exists_status, Vec::new()),
+                "inspect Mjolnir session container" => (0, serde_json::to_vec(&serde_json::json!([{
+                    "Config": {"Labels": {"dev.mj.managed": "true", "dev.mj.session": "0123456789abcdef0123456789abcdef"}},
+                    "State": {"Status": "running"}
+                }])).unwrap()),
+                "probe Mjolnir worker daemon liveness" => (0, b"dead\n".to_vec()),
+                _ => anyhow::bail!("injected harness preparation failure: {}", command.purpose),
+            };
+            Ok(CommandOutput {
+                status,
+                stdout,
+                stderr: Vec::new(),
+            })
+        }
+    }
+    let _writer = crate::database::install_isolated_test_writer();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let id = "0123456789abcdef0123456789abcdef";
+    let mut parent = checkpoint_test_session(id);
+    parent.state = SessionState::Error;
+    parent.checkpoint = None;
+    parent.target = Some(Box::new(TargetLocator::LocalPodman {
+        container_id: crate::targets::resource_name(id).unwrap(),
+        borrowed_from: None,
+        workspace_storage: Default::default(),
+    }));
+    crate::database::save_session(&parent).unwrap();
+    let original = crate::database::session_environment(id).unwrap().unwrap();
+    let mut controller = Controller {
+        config: resume_compatibility_config(),
+        state: State {
+            sessions: [(id.into(), parent.clone())].into_iter().collect(),
+            ..State::default()
+        },
+    };
+    for status in [0, 125, 1] {
+        let engine = Engine {
+            exists_status: status,
+            commands: Mutex::default(),
+        };
+        let error = runtime
+            .block_on(controller.resume_session_controlled(
+                id,
+                "codex",
+                "podman",
+                SessionResumeOptions {
+                    additional_mounts: None,
+                    resource_allocation: None,
+                    discard_queue: false,
+                },
+                &engine,
+            ))
+            .unwrap_err();
+        let error = format!("{error:#}");
+        if status == 125 {
+            assert!(error.contains("Retry Resume"), "{error}");
+        }
+        if status == 1 {
+            assert!(error.contains("no checkpoint"), "{error}");
+        }
+        if status == 0 {
+            assert!(!error.contains("no checkpoint"), "{error}");
+        }
+        assert_eq!(controller.state.sessions[id].target, parent.target);
+        let environment = crate::database::session_environment(id).unwrap().unwrap();
+        assert_eq!(environment.id, original.id);
+        assert_eq!(environment.phase, original.phase);
+        assert_eq!(environment.placement.target, original.placement.target);
+        let commands = engine.commands.lock().unwrap();
+        assert!(
+            commands
+                .iter()
+                .all(|purpose| !purpose.contains("remove") && !purpose.contains("stop")),
+            "{commands:?}"
+        );
+    }
+    let engine = Engine {
+        exists_status: 0,
+        commands: Mutex::default(),
+    };
+    controller
+        .rollback_failed_resume(
+            id,
+            &parent,
+            Some(&original),
+            false,
+            anyhow::anyhow!("failure before creating a destination"),
+            &engine,
+        )
+        .unwrap();
+    assert!(engine.commands.lock().unwrap().is_empty());
+    assert_eq!(
+        crate::database::session_environment(id)
+            .unwrap()
+            .unwrap()
+            .placement
+            .target,
+        original.placement.target
+    );
+}

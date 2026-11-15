@@ -401,10 +401,8 @@ pub(super) async fn resume(
         if !session.capabilities.resume {
             return Err(ApiFailure::conflict(resume_refusal(session)));
         }
-        // The daemon's resume restores a checkpoint and nothing else. Without
-        // one it could only fail after this route had answered, where the
-        // caller never sees why (launch finding R6-1).
-        if !session.has_checkpoint {
+        // Failed sessions can repair their retained environment without an archive.
+        if !session.has_checkpoint && !(session.state == "error" && session.retained_target) {
             return Err(ApiFailure::conflict(no_checkpoint_refusal(session)));
         }
         let resolved = |named: Option<String>, recorded: &str, field: &str| match named {

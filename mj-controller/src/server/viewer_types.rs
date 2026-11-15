@@ -325,6 +325,7 @@ impl ViewerSnapshot {
                     has_error: session.last_error.is_some()
                         || session.configuration_issue(config).is_some(),
                     has_checkpoint: session.checkpoint.is_some(),
+                    retained_target: session.target.is_some(),
                     configuration_issue: session.configuration_issue(config),
                     // A session that failed to launch (or a close that left it
                     // dead) carries its reason here so a client need not open
@@ -662,13 +663,12 @@ pub struct ViewerSession {
     pub created_at: String,
     pub updated_at: String,
     pub has_error: bool,
-    /// Whether the session has a checkpoint to resume from. A resume restores
-    /// a checkpoint and nothing else, so a session without one, such as a
-    /// launch that failed before its first, cannot be resumed (launch finding
-    /// R6-1). Only the fact travels; the archive's path stays on the
-    /// controller.
+    /// Whether an archive is available when the environment is absent.
     #[serde(default)]
     pub has_checkpoint: bool,
+    /// Internal placement evidence for API admission; existence is probed by Resume.
+    #[serde(skip)]
+    pub retained_target: bool,
     /// Public identifiers and repair guidance only; never raw runtime errors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub configuration_issue: Option<String>,
