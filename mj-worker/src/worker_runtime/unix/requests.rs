@@ -385,6 +385,8 @@ pub(super) async fn project_memory_response(
             let request_id = envelope.request_id.clone();
             let protocol_version = envelope.protocol_version;
             let mut connection_transfer = std::mem::take(transfer);
+            #[cfg(test)]
+            endpoint.io_requested.notify_one();
             match run_serialized_project_memory_io(&endpoint.io, move || {
                 let result = match &request {
                     RelayRequest::ProjectMemoryTransfer { action } => {

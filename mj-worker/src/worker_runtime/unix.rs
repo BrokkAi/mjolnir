@@ -653,7 +653,9 @@ fn unavailable_request(envelope: RelayRequestEnvelope, message: String) -> Relay
 #[derive(Clone)]
 pub(super) struct ProjectMemoryEndpoint {
     config: Option<super::ProjectMemoryLaunchConfig>,
-    io: Arc<tokio::sync::Semaphore>,
+    pub(super) io: Arc<tokio::sync::Semaphore>,
+    #[cfg(test)]
+    pub(super) io_requested: Arc<tokio::sync::Notify>,
     history: super::history::HistoryEndpoint,
     cwd: PathBuf,
 }
@@ -800,6 +802,8 @@ impl ProjectMemoryEndpoint {
         Self {
             config,
             io: Arc::new(tokio::sync::Semaphore::new(1)),
+            #[cfg(test)]
+            io_requested: Arc::new(tokio::sync::Notify::new()),
             history: Default::default(),
             cwd: PathBuf::new(),
         }
@@ -2454,12 +2458,23 @@ pub(super) async fn serve_client_with_memory(
                     | RelayRequest::ProjectMemoryTransfer { .. }
             ) {
                 let operation = envelope.request.method_name();
-                let response = project_memory_response(
-                    envelope,
-                    &project_memory,
-                    &mut project_memory_transfer,
-                )
-                .await;
+                // The relay protocol is strictly request-then-response per connection.
+                let response = tokio::select! {
+                    response = project_memory_response(
+                        envelope,
+                        &project_memory,
+                        &mut project_memory_transfer,
+                    ) => response,
+                    disconnected = reader.fill_buf() => {
+                        // Observe EOF while I/O is queued or running so the connection's
+                        // barrier owner below can resume harness dispatch.
+                        anyhow::ensure!(
+                            disconnected?.is_empty(),
+                            "protocol error: received a request before the project-memory response",
+                        );
+                        return Ok(());
+                    }
+                };
                 write_logged_response(&mut writer, &response, &session_id, operation).await?;
                 continue;
             }

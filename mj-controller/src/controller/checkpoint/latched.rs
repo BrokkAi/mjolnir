@@ -482,6 +482,7 @@ impl Controller {
             let sync = relay
                 .connection_mut()
                 .sync_project_memory(&self.config, memory_sync_cancel.clone());
+            tokio::pin!(sync);
             let cancelled = async {
                 loop {
                     if executor.cancellation_requested() {
@@ -493,10 +494,13 @@ impl Controller {
             };
             tokio::select! {
                 biased;
-                // Dropping sync closes an in-flight transfer's connection;
-                // the worker owns and releases its staging on that connection.
-                () = cancelled => bail!("project-memory synchronization for checkpoint was cancelled"),
-                result = sync => result.context("synchronize project memory for checkpoint")?,
+                // Signal cancellation without dropping sync: a canonical swap
+                // that already started must finish and report its result.
+                () = cancelled => {
+                    sync.await.context("synchronize project memory for checkpoint")?;
+                    bail!("project-memory synchronization for checkpoint was cancelled");
+                },
+                result = &mut sync => result.context("synchronize project memory for checkpoint")?,
             }
         }
         let cursor = barrier

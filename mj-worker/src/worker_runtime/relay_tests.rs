@@ -5355,132 +5355,190 @@ async fn a_removed_worker_root_reports_a_fatal_failure_to_the_daemon() {
     served.await.unwrap().unwrap();
 }
 
+// Hard-won: 656a36132 review: cancelling a checkpoint left its barrier held until queued project-memory I/O finished
 #[tokio::test]
-async fn client_disconnect_releases_checkpoint_and_runs_queued_prompt() {
-    let temp = tempfile::tempdir().unwrap();
-    let relay = Arc::new(RelayCell::new(
-        DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
-    ));
-    let (event_tx, event_rx) = runtime_event_channel();
-    let (wake_tx, wake_rx) = mpsc::channel(1);
-    let (command_tx, mut command_rx) = mpsc::channel(1);
-    let coordinator = tokio::spawn(run_relay_coordinator(
-        relay.clone(),
-        event_rx,
-        wake_rx,
-        command_tx,
-    ));
-    event_tx
-        .send(RuntimeEvent::SessionConfigured {
-            config_options: Vec::new(),
-        })
-        .unwrap();
-    let (server, client) = tokio::net::UnixStream::pair().unwrap();
-    let server_task = tokio::spawn(unix::serve_client(
-        server,
-        relay.clone(),
-        wake_tx.clone(),
-        test_credentials(),
-        None,
-        fatal_reports().0,
-    ));
-    let (reader, mut writer) = client.into_split();
-    let mut lines = BufReader::new(reader).lines();
-
-    let begin = RelayRequestEnvelope {
-        request_id: "begin-checkpoint".into(),
-        protocol_version: RELAY_PROTOCOL_VERSION,
-        request: RelayRequest::Submit {
-            command_id: "checkpoint-1".into(),
-            command: RelayCommand::BeginCheckpoint {
-                reason: Some("test disconnect".into()),
+async fn client_disconnect_during_memory_io_releases_checkpoint_and_runs_queued_prompt() {
+    for pipeline in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let relay = Arc::new(RelayCell::new(
+            DurableRelay::open(temp.path(), SESSION_ID, "1.0.0").unwrap(),
+        ));
+        let (event_tx, event_rx) = runtime_event_channel();
+        let (wake_tx, wake_rx) = mpsc::channel(1);
+        let (command_tx, mut command_rx) = mpsc::channel(1);
+        let coordinator = tokio::spawn(run_relay_coordinator(
+            relay.clone(),
+            event_rx,
+            wake_rx,
+            command_tx,
+        ));
+        event_tx
+            .send(RuntimeEvent::SessionConfigured {
+                config_options: Vec::new(),
+            })
+            .unwrap();
+        let (server, client) = tokio::net::UnixStream::pair().unwrap();
+        let endpoint = unix::ProjectMemoryEndpoint::new(Some(ProjectMemoryLaunchConfig {
+            history_socket: None,
+            project_key: "project".into(),
+            root: temp.path().join("replica"),
+            baseline_root: temp.path().join("baseline"),
+            repository_roots: BTreeMap::new(),
+            mcp_delivery: ProjectMemoryMcpDelivery::Acp,
+        }));
+        let io = endpoint.io.clone();
+        let (io_started, started) = tokio::sync::oneshot::channel();
+        let (release_io, blocked) = std::sync::mpsc::channel();
+        let blocked_io = tokio::spawn(async move {
+            unix::run_serialized_project_memory_io(&io, move || {
+                io_started.send(()).unwrap();
+                blocked.recv().unwrap();
+                Ok(())
+            })
+            .await
+        });
+        started.await.unwrap();
+        let server_task = tokio::spawn(unix::serve_client_with_memory(
+            server,
+            relay.clone(),
+            wake_tx.clone(),
+            test_credentials(),
+            unix::ConnectionRuntime {
+                project_memory: endpoint.clone(),
+                ..Default::default()
             },
-        },
-    };
-    let mut encoded = serde_json::to_vec(&begin).unwrap();
-    encoded.push(b'\n');
-    writer.write_all(&encoded).await.unwrap();
-    let response = lines.next_line().await.unwrap().unwrap();
-    let response: mj_core::relay::RelayResponseEnvelope = serde_json::from_str(&response).unwrap();
-    assert!(matches!(response.body, RelayResponseBody::Ok { .. }));
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        loop {
-            if relay
+            fatal_reports().0,
+        ));
+        let (reader, mut writer) = client.into_split();
+        let mut lines = BufReader::new(reader).lines();
+
+        let begin = RelayRequestEnvelope {
+            request_id: "begin-checkpoint".into(),
+            protocol_version: RELAY_PROTOCOL_VERSION,
+            request: RelayRequest::Submit {
+                command_id: "checkpoint-1".into(),
+                command: RelayCommand::BeginCheckpoint {
+                    reason: Some("test disconnect".into()),
+                },
+            },
+        };
+        let mut encoded = serde_json::to_vec(&begin).unwrap();
+        encoded.push(b'\n');
+        writer.write_all(&encoded).await.unwrap();
+        let response = lines.next_line().await.unwrap().unwrap();
+        let response: mj_core::relay::RelayResponseEnvelope =
+            serde_json::from_str(&response).unwrap();
+        assert!(matches!(response.body, RelayResponseBody::Ok { .. }));
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if relay
+                    .lock()
+                    .unwrap()
+                    .operational_state()
+                    .checkpoint_barrier
+                    .as_deref()
+                    == Some("checkpoint-1")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let queued_prompt = RelayRequestEnvelope {
+            request_id: "queue-prompt".into(),
+            protocol_version: RELAY_PROTOCOL_VERSION,
+            request: RelayRequest::Submit {
+                command_id: "prompt-1".into(),
+                command: prompt("runs after disconnect"),
+            },
+        };
+        let mut encoded = serde_json::to_vec(&queued_prompt).unwrap();
+        encoded.push(b'\n');
+        writer.write_all(&encoded).await.unwrap();
+        let response = lines.next_line().await.unwrap().unwrap();
+        let response: mj_core::relay::RelayResponseEnvelope =
+            serde_json::from_str(&response).unwrap();
+        assert!(matches!(response.body, RelayResponseBody::Ok { .. }));
+
+        let memory = RelayRequestEnvelope {
+            request_id: "blocked-memory".into(),
+            protocol_version: RELAY_PROTOCOL_VERSION,
+            request: RelayRequest::ProjectMemoryTransfer {
+                action: mj_core::relay::ProjectMemoryTransferAction::BeginSnapshot,
+            },
+        };
+        let mut encoded = serde_json::to_vec(&memory).unwrap();
+        encoded.push(b'\n');
+        writer.write_all(&encoded).await.unwrap();
+        // The request has entered the response future and is queued behind the
+        // controlled blocking operation. Keep that operation blocked until dispatch.
+        endpoint.io_requested.notified().await;
+        if pipeline {
+            writer
+                .write_all(b"unexpected pipelined request\n")
+                .await
+                .unwrap();
+        }
+        writer.shutdown().await.unwrap();
+        drop(writer);
+        drop(lines);
+        let served = tokio::time::timeout(std::time::Duration::from_secs(5), server_task)
+            .await
+            .expect("disconnect waited for project-memory I/O")
+            .unwrap();
+        if pipeline {
+            assert!(served.unwrap_err().to_string().contains("protocol error"));
+        } else {
+            served.unwrap();
+        }
+
+        assert!(
+            relay
                 .lock()
                 .unwrap()
                 .operational_state()
                 .checkpoint_barrier
-                .as_deref()
-                == Some("checkpoint-1")
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+                .is_none()
+        );
+        assert_prompt(
+            tokio::time::timeout(std::time::Duration::from_secs(1), command_rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            "prompt-1",
+            "runs after disconnect",
+        );
+        assert!(!blocked_io.is_finished());
+        release_io.send(()).unwrap();
+        blocked_io.await.unwrap().unwrap().unwrap();
+        assert!(
+            relay
+                .lock()
+                .unwrap()
+                .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
+                .unwrap()
+                .iter()
+                .any(|event| matches!(
+                    &event.observation,
+                    RelayObservation::CommandInterrupted { command_id, .. }
+                        if command_id == "checkpoint-1"
+                ))
+        );
 
-    let queued_prompt = RelayRequestEnvelope {
-        request_id: "queue-prompt".into(),
-        protocol_version: RELAY_PROTOCOL_VERSION,
-        request: RelayRequest::Submit {
-            command_id: "prompt-1".into(),
-            command: prompt("runs after disconnect"),
-        },
-    };
-    let mut encoded = serde_json::to_vec(&queued_prompt).unwrap();
-    encoded.push(b'\n');
-    writer.write_all(&encoded).await.unwrap();
-    let response = lines.next_line().await.unwrap().unwrap();
-    let response: mj_core::relay::RelayResponseEnvelope = serde_json::from_str(&response).unwrap();
-    assert!(matches!(response.body, RelayResponseBody::Ok { .. }));
-
-    writer.shutdown().await.unwrap();
-    drop(writer);
-    drop(lines);
-    server_task.await.unwrap().unwrap();
-
-    assert!(
-        relay
-            .lock()
-            .unwrap()
-            .operational_state()
-            .checkpoint_barrier
-            .is_none()
-    );
-    assert_prompt(
-        tokio::time::timeout(std::time::Duration::from_secs(1), command_rx.recv())
-            .await
-            .unwrap()
-            .unwrap(),
-        "prompt-1",
-        "runs after disconnect",
-    );
-    assert!(
-        relay
-            .lock()
-            .unwrap()
-            .events_after(0, RELAY_EVENT_GENESIS_DIGEST)
-            .unwrap()
-            .iter()
-            .any(|event| matches!(
-                &event.observation,
-                RelayObservation::CommandInterrupted { command_id, .. }
-                    if command_id == "checkpoint-1"
-            ))
-    );
-
-    event_tx
-        .send(RuntimeEvent::CommandRejected {
-            request_id: "prompt-1".into(),
-            message: "test shutdown".into(),
-            reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected,
-        })
-        .unwrap();
-    drop(event_tx);
-    drop(wake_tx);
-    coordinator.await.unwrap().unwrap();
+        event_tx
+            .send(RuntimeEvent::CommandRejected {
+                request_id: "prompt-1".into(),
+                message: "test shutdown".into(),
+                reason: mj_core::event_outcome::OutcomeReason::AdmissionRejected,
+            })
+            .unwrap();
+        drop(event_tx);
+        drop(wake_tx);
+        coordinator.await.unwrap().unwrap();
+    }
 }
 
 #[tokio::test]
