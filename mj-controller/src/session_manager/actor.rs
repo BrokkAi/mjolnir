@@ -556,6 +556,9 @@ pub(super) async fn run_session_actor(
                                         session_id = target.session_id,
                                         "automatic worker recovery suppressed by durable lifecycle or target change"
                                     );
+                                    // Suppression performed no probe. Retry recovery on
+                                    // the next backed-off reconnect when ownership permits.
+                                    last_recovery_probe = None;
                                     // Only the desired-target owner retires this actor.
                                     // Exiting here makes reconciliation respawn it with
                                     // a fresh failure count, bypassing reconnect backoff.

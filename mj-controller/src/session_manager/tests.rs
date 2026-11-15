@@ -4626,6 +4626,12 @@ async fn suppressed_recovery_preserves_hello_backoff() {
     // The durable target differs from this actor's stale recovery plan.
     let root = tempfile::tempdir().unwrap();
     let attempts = root.path().join("attempts");
+    let probed = root.path().join("probed");
+    let mut probe = CommandSpec::new("sh", ["-c", "touch \"$PROBED\"; printf starting"])
+        .purpose("record recovery probe");
+    probe
+        .env
+        .insert("PROBED".into(), probed.to_string_lossy().into_owned());
     let mut spec = CommandSpec::new("sh", ["-c", "echo attempt >> \"$ATTEMPTS\"; exit 1"])
         .purpose("failed relay hello");
     spec.env
@@ -4638,8 +4644,7 @@ async fn suppressed_recovery_preserves_hello_backoff() {
             target: None,
             workspace: None,
             exit_record: None,
-            liveness_probe: CommandSpec::new("false", std::iter::empty::<&str>())
-                .purpose("unused probe"),
+            liveness_probe: probe,
             binary_refresh: None,
             launch_refresh: None,
             restart: CommandPlan {
@@ -4682,7 +4687,20 @@ async fn suppressed_recovery_preserves_hello_backoff() {
         std::fs::read_to_string(&attempts).unwrap().lines().count(),
         2
     );
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Once eligible, recovery must not wait out a cooldown for a probe
+    // that suppression never performed.
+    let mut record = crate::database::load_session_record(LEASED_RELAY_SESSION)
+        .unwrap()
+        .unwrap();
+    record.target = Some(Box::new(recovery_source_target()));
+    crate::database::save_session(&record).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !probed.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("suppression must not consume the recovery cooldown");
     assert_eq!(
         std::fs::read_to_string(&attempts).unwrap().lines().count(),
         3
