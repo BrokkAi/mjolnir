@@ -83,7 +83,7 @@ ${FENCE}`,
     let final = brief
     if (first.label !== 'missed') {
       const rw = await agent(
-        `A brief of relations for a code reviewer (rules in ${DIR}/WRITER.md) was judged to point at a known defect: "${first.rationale}". Rewrite it so that it states only relations between code locations, with no judgment, consequence or hint of what goes wrong. Keep every relation and every file:line anchor, including the one the judge matched: remove only wording that goes beyond the relation. Change nothing else.
+        `A brief of relations for a code reviewer (rules in ${DIR}/WRITER.md) was judged to point at a known defect: "${first.rationale}". Rewrite it so that it states only relations between code locations, with no judgment, consequence or hint of what goes wrong. Keep every relation and every file:line anchor, including the one the judge matched: remove only wording that goes beyond the relation. A clause that says what code does or does not do, such as which paths a script removes and which it leaves, or which function a call reaches, is itself a relation: keep it, even if it points at the defect. Remove only evaluative or consequence wording (for example "only" used as emphasis, "so ...", "which means ..."). Change nothing else.
 
 ${brief ? `The brief:\n\n<brief>\n${brief}\n</brief>` : `The brief is the \`blind_brief\` field of ${DIR}/item-${d.id}.json.`}
 

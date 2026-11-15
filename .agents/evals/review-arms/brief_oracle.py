@@ -6,9 +6,13 @@ Usage:
    result as briefs/oracle-work/workflow-out.json)
   python3 brief_oracle.py collect   # checks; writes briefs/oracle-work/factcheck.jsonl
   (read factcheck.jsonl and write briefs/oracle-work/factcheck-decisions.json:
-   {diff: {"decision": "carries" | "does not carry: <reason>", "brief_sha256": <from factcheck.jsonl>}}
+   {diff: {"decision": "carries" | "does not carry: <reason>", "brief_sha256": <from factcheck.jsonl>,
+           "item": <the published brief's item that carries the fact, quoted exactly>}}
    for every primary and secondary diff; a decision counts only for the brief whose hash it names)
   python3 brief_oracle.py collect   # again: publishes briefs/oracle/<diff>/brief.md
+  python3 brief_oracle.py merge <rerun-out.json>
+      replaces the named diffs' results in workflow-out.json with a rerun of the workflow on them
+      (for a brief whose hand check failed); every published brief keeps its own leak verdict
 
 Primary and secondary diffs get an editor item: the blind brief and the census
 record (fact, evidence, other facts, kind; never the census query, which was
@@ -89,6 +93,11 @@ def collect():
     decisions_path = W / "factcheck-decisions.json"
     decisions = json.loads(decisions_path.read_text()) if decisions_path.exists() else {}
     rows, rejected, factcheck, undecided = [], [], [], []
+    # The group decides whether a diff needs the fact check; take it from PLAN.md, not the run.
+    group_of = {bug: g for g, bugs in sets().items() for bug in bugs}
+    mislabeled = [r["id"] for r in out["results"] if group_of.get(r["id"]) != r["group"]]
+    assert not mislabeled, f"results whose group differs from brief/PLAN.md: {mislabeled}"
+    assert sorted(r["id"] for r in out["results"]) == sorted(group_of), "results must cover the 30 frozen diffs"
     for r in out["results"]:
         bug = r["id"]
         d = ROOT / "briefs/oracle" / bug
@@ -96,23 +105,29 @@ def collect():
         blind = ROOT / "briefs/blind" / bug / "brief.md"
         # A control brief that needed no rewrite comes back as null: it is the blind brief.
         final = (r["final_brief"] or blind.read_text()).rstrip() + "\n"
-        inserted = [(r.get("edit") or {}).get("inserted_item")] if r["group"] == "S" else []
+        # A secondary oracle item may relate two changed locations: the editor's item, or the
+        # hand-checked item it became after a leak rewrite.
+        inserted = ([(r.get("edit") or {}).get("inserted_item"), (decisions.get(bug) or {}).get("item")]
+                    if r["group"] == "S" else [])
         problems = brief_driver.lint(final, driver.CORPUS[bug], in_diff_items=inserted)
         if r["group"] in "PS":
-            item = carrier_item(r)
             norm = lambda t: " ".join((t or "").removeprefix("- ").split())
-            if not item or norm(item) not in norm(final):
-                problems.append(f"the item carrying the decisive fact is not in the final brief: {item!r}")
             item_file = json.loads((W / f"item-{bug}.json").read_text())
             digest = hashlib.sha256(final.encode()).hexdigest()
-            factcheck.append({"id": bug, "group": r["group"], "census_fact": item_file["census"]["fact"],
-                              "contains": r["edit"]["contains"], "carrier_item": item,
-                              "rewritten": len(r["leak"]) > 1, "brief_sha256": digest, "final_brief": final})
             decision = decisions.get(bug)
+            factcheck.append({"id": bug, "group": r["group"], "census_fact": item_file["census"]["fact"],
+                              "contains": r["edit"]["contains"], "carrier_item": carrier_item(r),
+                              "rewritten": len(r["leak"]) > 1, "brief_sha256": digest, "final_brief": final})
             if decision is None or decision.get("brief_sha256") != digest:
                 undecided.append(bug)  # never checked, or checked against a different brief
             elif decision["decision"] != "carries":
                 problems.append(f"hand check: {decision['decision']}")
+            else:
+                # The checker quotes the final brief's carrying item (a leak rewrite rewords the
+                # editor's item); without a quote, the editor's item must still be there verbatim.
+                item = decision.get("item") or carrier_item(r)
+                if not item or norm(item) not in norm(final):
+                    problems.append(f"the item carrying the decisive fact is not in the final brief: {item!r}")
         save(d / "oracle.json", {**r, "lint": problems})
         rows.append({"id": bug, "group": r["group"], "contains": (r.get("edit") or {}).get("contains"),
                      "leak_first": r["leak"][0]["label"], "leak_final": r["leak"][-1]["label"],
@@ -141,7 +156,31 @@ def collect():
                          f"{len(undecided)} awaiting a hand check in factcheck-decisions.json {undecided}")
 
 
+def merge(path):
+    W = ROOT / "briefs/oracle-work"
+    out = json.loads((W / "workflow-out.json").read_text())
+    rerun = json.loads(pathlib.Path(path).read_text())
+    assert not rerun["missing"], rerun["missing"]
+    replaced = {r["id"]: r for r in rerun["results"]}
+    previous = [r for r in out["results"] if r["id"] in replaced]
+    assert len(previous) == len(replaced), "a rerun may only replace diffs already in workflow-out.json"
+    wrong = [r["id"] for r in previous if replaced[r["id"]]["group"] != r["group"]]
+    assert not wrong, f"a rerun must keep each diff's group: {wrong}"
+    history = W / "replaced-results.jsonl"
+    with history.open("a") as f:
+        for r in previous:
+            f.write(json.dumps(r) + "\n")
+    out["results"] = [replaced.get(r["id"], r) for r in out["results"]]
+    save(W / "workflow-out.json", out)
+    print(json.dumps({"replaced": sorted(replaced), "previous_kept_in": str(history)}))
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("step", choices=["build", "collect"])
-    {"build": build, "collect": collect}[p.parse_args().step]()
+    p.add_argument("step", choices=["build", "collect", "merge"])
+    p.add_argument("path", nargs="?")
+    a = p.parse_args()
+    if a.step == "merge":
+        merge(a.path)
+    else:
+        {"build": build, "collect": collect}[a.step]()
