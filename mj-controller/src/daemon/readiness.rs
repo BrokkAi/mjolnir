@@ -24,6 +24,9 @@ pub(super) const HARNESS_READINESS_TIMEOUT: Duration =
 /// What the daemon knows about one live session at one sweep.
 pub(super) struct ReadinessObservation {
     pub(super) session_id: String,
+    /// Whether the relay actor still has a connection to this worker. It keeps
+    /// the last snapshot on disconnect for display, not as current evidence.
+    pub(super) connected: bool,
     /// The worker state this daemon has actually received. No snapshot means
     /// startup is unknown, regardless of how recently the record was written.
     pub(super) operational:
@@ -92,7 +95,8 @@ impl HarnessReadinessWatch {
         });
         let mut unready = Vec::new();
         for observation in observations {
-            let Some(operational) = observation.operational else {
+            let Some(operational) = observation.operational.filter(|_| observation.connected)
+            else {
                 self.waiting.remove(&observation.session_id);
                 continue;
             };
@@ -141,6 +145,7 @@ mod tests {
         operational.native_session_id = harness_ready.then(|| "native-session".to_owned());
         ReadinessObservation {
             session_id: session_id.to_owned(),
+            connected: true,
             operational: Some(operational.into()),
             updated_at: "2026-09-18T15:28:35Z".to_owned(),
             detail: None,
@@ -281,6 +286,60 @@ mod tests {
         );
         assert_eq!(unready.len(), 1);
         assert_eq!(unready[0].waited, HARNESS_READINESS_TIMEOUT);
+    }
+
+    // Hard-won: 6ebfb229a review: a disconnected worker's retained snapshot could fail a live harness.
+    #[test]
+    fn a_disconnected_workers_stale_snapshot_cannot_expire_the_wait() {
+        let mut watch = HarnessReadinessWatch::default();
+        let start = Instant::now();
+        assert!(
+            watch
+                .observe(start, vec![observation("session-1", false)])
+                .is_empty()
+        );
+        let disconnected = || ReadinessObservation {
+            connected: false,
+            ..observation("session-1", false)
+        };
+        assert!(
+            watch
+                .observe(
+                    start + HARNESS_READINESS_TIMEOUT - Duration::from_secs(1),
+                    vec![disconnected()],
+                )
+                .is_empty()
+        );
+        assert!(
+            watch
+                .observe(start + HARNESS_READINESS_TIMEOUT * 2, vec![disconnected()],)
+                .is_empty(),
+            "an outage cannot turn a retained snapshot into a harness failure"
+        );
+        let reconnected = start + HARNESS_READINESS_TIMEOUT * 3;
+        assert!(
+            watch
+                .observe(reconnected, vec![observation("session-1", false)])
+                .is_empty()
+        );
+        assert!(
+            watch
+                .observe(
+                    reconnected + HARNESS_READINESS_TIMEOUT - Duration::from_secs(1),
+                    vec![observation("session-1", false)],
+                )
+                .is_empty(),
+            "fresh worker state gets the full wait after reconnecting"
+        );
+        assert_eq!(
+            watch
+                .observe(
+                    reconnected + HARNESS_READINESS_TIMEOUT,
+                    vec![observation("session-1", false)],
+                )
+                .len(),
+            1
+        );
     }
 
     #[test]

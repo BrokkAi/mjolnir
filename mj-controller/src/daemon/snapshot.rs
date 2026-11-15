@@ -219,6 +219,7 @@ impl RuntimeState {
                 .map(|record| {
                     let view = owner.sessions.get(&record.id);
                     ReadinessObservation {
+                        connected: view.is_some_and(|view| view.connected),
                         operational: view.and_then(|view| view.operational.clone()),
                         updated_at: record.updated_at.clone(),
                         detail: view
