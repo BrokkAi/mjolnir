@@ -1,12 +1,14 @@
 """Latency vs. confirmed findings: the stage 4 Pareto frontiers on one chart.
 
-Usage: uv run --with matplotlib python3 plot_pareto.py <out-dir> [--results results/stage4]
+Usage: uv run --with matplotlib python3 plot_pareto.py <out-dir> [--results results/stage4] [--no-greptile-combos]
 
 Reads pareto.csv (all confirmed problems) and pareto-sev-high-medium.csv
 (confirmed medium or high) written by pareto.py, draws each frontier as a line,
 and adds Greptile Base ($1) and Plus ($3) alone for both measures even though
 they are off the frontier. Points are numbered; one option keeps its number on
-both lines, and the key names each option. No metric is recomputed here.
+both lines, and the key names each option. No metric is recomputed here; with
+--no-greptile-combos the frontiers are recomputed, by pareto.py's dominance rule,
+over the options that include no Greptile reviewer.
 Adapted from session b8556873's /tmp/review-eval/pareto/plot.py (label placement).
 """
 import argparse
@@ -25,12 +27,23 @@ from matplotlib.transforms import Bbox
 p = argparse.ArgumentParser()
 p.add_argument("out")
 p.add_argument("--results", default=str(pathlib.Path(__file__).resolve().parent / "results/stage4"))
+p.add_argument("--no-greptile-combos", action="store_true",
+               help="leave options with a Greptile reviewer out of the frontiers (Greptile alone stays marked)")
 a = p.parse_args()
 res, out = pathlib.Path(a.results), pathlib.Path(a.out)
 out.mkdir(parents=True, exist_ok=True)
 
 def load(name):
-    return {r["option"]: r for r in csv.DictReader(open(res / name))}
+    rows = {r["option"]: r for r in csv.DictReader(open(res / name))}
+    if a.no_greptile_combos:
+        pool = {o: r for o, r in rows.items() if "Greptile" not in o}
+        def dominated(r):
+            x, y = float(r["median_latency_s"]), float(r["findings"])
+            return any(float(t["median_latency_s"]) <= x and float(t["findings"]) >= y and
+                       (float(t["median_latency_s"]) < x or float(t["findings"]) > y) for t in pool.values())
+        for o, r in rows.items():
+            r["frontier"] = str(o in pool and not dominated(r))
+    return rows
 
 SERIES = [("All confirmed", load("pareto.csv"), "#2a78d6"),
           ("Medium or high only", load("pareto-sev-high-medium.csv"), "#eb6834")]
@@ -48,8 +61,9 @@ plt.rcParams.update({"font.family": "DejaVu Sans", "font.size": 12, "svg.fonttyp
 BG, INK, MUTED, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#e6e6e3"
 fig = plt.figure(figsize=(20, 12.5), facecolor=BG)
 fig.text(.05, .95, "Review latency vs. confirmed bugs found", fontsize=24, fontweight="bold", color=INK)
-fig.text(.05, .918, "Pareto frontiers over combinations of 1–3 parallel reviewers · 70 historical mjolnir diffs · "
-         "blind Opus/high verification (verify5)", fontsize=13.5, color=MUTED)
+fig.text(.05, .918, "Pareto frontiers over combinations of 1–3 parallel reviewers"
+         + (" without Greptile" if a.no_greptile_combos else "")
+         + " · 70 historical mjolnir diffs · blind Opus/high verification (verify5)", fontsize=13.5, color=MUTED)
 ax = fig.add_axes([.06, .1, .53, .77], facecolor=BG)
 key = fig.add_axes([.63, .08, .36, .81])
 key.set_axis_off()
@@ -148,6 +162,7 @@ for i, o in enumerate(order):
 fig.text(.05, .025, "Latency: median over diffs of the slowest reviewer's own turn. Counts: distinct confirmed "
          "problems, exact mean over assignments of distinct sessions. Greptile's context could not be pinned to "
          "each diff's commit; any leak only helps it.", fontsize=10.5, color=MUTED)
+stem = "review-pareto-latency-findings" + ("-no-greptile-combos" if a.no_greptile_combos else "")
 for ext in ("png", "svg"):
-    fig.savefig(out / f"review-pareto-latency-findings.{ext}", dpi=150, facecolor=BG)
-print(out / "review-pareto-latency-findings.png")
+    fig.savefig(out / f"{stem}.{ext}", dpi=150, facecolor=BG)
+print(out / f"{stem}.png")
