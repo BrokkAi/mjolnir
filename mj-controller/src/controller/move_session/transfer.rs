@@ -133,13 +133,20 @@ fn finalize_move_repositories(
     manifest: &mj_checkpoint::archive::ArchiveManifest,
 ) -> Result<()> {
     for repository in repositories {
+        let base = move_repository_base(manifest, &repository.id)?;
         super::super::network_git::configure_workspace(
             executor,
             backend,
             id,
             &repository.root,
-            move_repository_base(manifest, &repository.id)?,
-        )?;
+            base,
+        )
+        .with_context(|| {
+            format!(
+                "Move could not finalize repository '{}' with recorded base '{base}'; session stays on its source",
+                repository.id
+            )
+        })?;
     }
     Ok(())
 }
@@ -1870,6 +1877,29 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        let legacy_manifest =
+            mj_checkpoint::archive::read_checkpoint_manifest(&legacy_archive.archive_path).unwrap();
+        let error = finalize_move_repositories(
+            &targets::ProcessExecutor,
+            &targets::TargetLocator::LocalBare {
+                worker_root: relay.to_string_lossy().into_owned(),
+            },
+            "move-managed-bundle",
+            &[WorkspaceRepository {
+                id: "legacy".into(),
+                root: host.path().into(),
+                base_commit: None,
+            }],
+            &legacy_manifest,
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("repository 'legacy'"), "{message}");
+        assert!(
+            message.contains(&legacy_manifest.repositories[0].metadata.base_commit),
+            "{message}"
+        );
+        assert!(message.contains("session stays on its source"), "{message}");
     }
 
     // Needs a POSIX shell and rsync.
