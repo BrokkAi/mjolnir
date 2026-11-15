@@ -5356,8 +5356,28 @@ async fn a_removed_worker_root_reports_a_fatal_failure_to_the_daemon() {
 }
 
 // Hard-won: 656a36132 review: cancelling a checkpoint left its barrier held until queued project-memory I/O finished
+// Hard-won: 73b35b226 review: cancelled reads lost their storage failures and task panics.
 #[tokio::test]
 async fn client_disconnect_during_memory_io_releases_checkpoint_and_runs_queued_prompt() {
+    use tracing::instrument::WithSubscriber;
+
+    #[derive(Clone, Default)]
+    struct CapturedLog {
+        bytes: Arc<std::sync::Mutex<Vec<u8>>>,
+        changed: Arc<tokio::sync::Notify>,
+    }
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.bytes.lock().unwrap().extend_from_slice(bytes);
+            self.changed.notify_one();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    crate::test_support::scoped_log_capture_sees_every_callsite();
     for mode in [
         "queued_read",
         "pipeline",
@@ -5365,6 +5385,8 @@ async fn client_disconnect_during_memory_io_releases_checkpoint_and_runs_queued_
         "running_read",
         "started_write",
         "failed_write",
+        "failed_read",
+        "panicked_read",
     ] {
         let queued = matches!(mode, "queued_read" | "pipeline" | "queued_write");
         let mutates_memory = matches!(mode, "queued_write" | "started_write" | "failed_write");
@@ -5399,6 +5421,7 @@ async fn client_disconnect_during_memory_io_releases_checkpoint_and_runs_queued_
         let block = Arc::new(unix::ProjectMemoryIoBlock {
             started: Default::default(),
             release: std::sync::Mutex::new(blocked),
+            panic_after_release: mode == "panicked_read",
         });
         let blocked_io = if queued {
             let io = endpoint.io.clone();
@@ -5424,17 +5447,26 @@ async fn client_disconnect_during_memory_io_releases_checkpoint_and_runs_queued_
             block.started.notified().await;
         }
         let mut release_io = Some(release_io);
-        let server_task = tokio::spawn(unix::serve_client_with_memory(
-            server,
-            relay.clone(),
-            wake_tx.clone(),
-            test_credentials(),
-            unix::ConnectionRuntime {
-                project_memory: endpoint.clone(),
-                ..Default::default()
-            },
-            fatal_reports().0,
-        ));
+        let log = CapturedLog::default();
+        let writer = log.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let server_task = tokio::spawn(
+            unix::serve_client_with_memory(
+                server,
+                relay.clone(),
+                wake_tx.clone(),
+                test_credentials(),
+                unix::ConnectionRuntime {
+                    project_memory: endpoint.clone(),
+                    ..Default::default()
+                },
+                fatal_reports().0,
+            )
+            .with_subscriber(subscriber),
+        );
         let (reader, mut writer) = client.into_split();
         let mut lines = BufReader::new(reader).lines();
 
@@ -5596,9 +5628,33 @@ async fn client_disconnect_during_memory_io_releases_checkpoint_and_runs_queued_
         } else if let Some(release_io) = release_io.take() {
             // A running snapshot can finish after dispatch; wait for its permit
             // before removing its temporary filesystem fixture.
+            if mode == "failed_read" {
+                std::fs::create_dir_all(temp.path().join("replica")).unwrap();
+                std::fs::write(temp.path().join("replica/MEMORY.md"), [0xff]).unwrap();
+            }
             release_io.send(Ok(())).unwrap();
         }
         drop(endpoint.io.acquire().await.unwrap());
+        let message = match mode {
+            "failed_read" => Some("read memory snapshot document /MEMORY.md"),
+            "panicked_read" => Some("controlled read panic"),
+            _ => None,
+        };
+        if let Some(message) = message {
+            wait_for("cancelled memory read failure report", async {
+                loop {
+                    let changed = log.changed.notified();
+                    if String::from_utf8_lossy(&log.bytes.lock().unwrap()).contains(message) {
+                        break;
+                    }
+                    changed.await;
+                }
+            })
+            .await;
+        }
+        if mode == "failed_read" {
+            std::fs::remove_file(temp.path().join("replica/MEMORY.md")).unwrap();
+        }
         let expected = if mode == "started_write" {
             installed
         } else {

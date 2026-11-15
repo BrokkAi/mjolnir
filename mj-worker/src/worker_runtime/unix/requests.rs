@@ -1,4 +1,5 @@
 use super::*;
+use tracing::{Instrument, instrument::WithSubscriber};
 
 /// Answer one relay request, keeping the relay lock for exactly as long as
 /// the request needs it.
@@ -361,9 +362,15 @@ where
     // Acquiring the semaphore admits the operation. No await separates that
     // decision from starting its task. A stalled mutating write holding the
     // checkpoint barrier is the true filesystem state, not something to time out.
-    let work = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        operation()
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
+    let span = tracing::Span::current();
+    let mut work = tokio::task::spawn_blocking(move || {
+        tracing::dispatcher::with_default(&dispatch, || {
+            span.in_scope(|| {
+                let _permit = permit;
+                operation()
+            })
+        })
     });
     if mutates_memory {
         Some(work.await)
@@ -372,8 +379,19 @@ where
         // and transfer state stay with it until its filesystem work finishes.
         tokio::select! {
             biased;
-            () = cancel.cancelled() => None,
-            result = work => Some(result),
+            () = cancel.cancelled() => {
+                // Teardown need not wait for a read, but its completion still
+                // has an observer that reports task failures and panics.
+                tokio::spawn(async move {
+                    match work.await {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(error)) => tracing::warn!(error = format!("{error:#}"), "cancelled project-memory read failed"),
+                        Err(error) => tracing::warn!(%error, "cancelled project-memory read task stopped"),
+                    }
+                }.in_current_span().with_current_subscriber());
+                None
+            },
+            result = &mut work => Some(result),
         }
     }
 }
@@ -411,6 +429,7 @@ pub(super) async fn project_memory_response(
             endpoint.io_requested.notify_one();
             #[cfg(test)]
             let io_block = endpoint.io_block.clone();
+            let io_span = tracing::info_span!("project_memory_io", project_key = %memory.project_key, operation = request.method_name());
             let result = run_serialized_project_memory_io(
                 &endpoint.io,
                 &cancel,
@@ -425,6 +444,7 @@ pub(super) async fn project_memory_response(
                             .expect("test I/O gate poisoned")
                             .recv()
                             .context("test I/O gate closed")??;
+                        assert!(!block.panic_after_release, "controlled read panic");
                     }
                     let result = match &request {
                         RelayRequest::ProjectMemoryTransfer { action } => {
@@ -438,9 +458,16 @@ pub(super) async fn project_memory_response(
                         }
                         _ => apply_project_memory_request(&memory, &request),
                     };
+                    if let Err(error) = &result {
+                        tracing::warn!(
+                            error = format!("{error:#}"),
+                            "project-memory request failed"
+                        );
+                    }
                     Ok((result, connection_transfer))
                 },
             )
+            .instrument(io_span)
             .await?;
             match result {
                 Ok(Ok((result, connection_transfer))) => {

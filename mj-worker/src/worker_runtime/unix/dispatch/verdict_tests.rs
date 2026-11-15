@@ -1,47 +1,11 @@
 use super::*;
 use crate::acp::verdict_client::{VerdictClient, VerdictSource};
-use crate::test_support::wait_for;
+use crate::test_support::{scoped_log_capture_sees_every_callsite, wait_for};
 use mj_core::activity::ActivityState;
 use tokio::io::AsyncReadExt;
 use tracing::instrument::WithSubscriber;
 
 const SESSION_ID: &str = "018f9dd2-a3b4-7c8d-9000-123456789abc";
-
-/// tracing-core caches each callsite's interest process-wide. While at most
-/// one dispatcher is registered it asks only the current thread's default, so
-/// a parallel test reaching a Jev callsite first without a subscriber caches
-/// it as `never`, and this file's scoped log capture silently loses the line.
-/// A global subscriber that answers `sometimes` keeps every callsite asking
-/// the scoped subscriber per event.
-struct DeferToScoped;
-
-impl tracing::Subscriber for DeferToScoped {
-    fn register_callsite(
-        &self,
-        _: &'static tracing::Metadata<'static>,
-    ) -> tracing::subscriber::Interest {
-        tracing::subscriber::Interest::sometimes()
-    }
-    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-        false
-    }
-    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-    fn event(&self, _: &tracing::Event<'_>) {}
-    fn enter(&self, _: &tracing::span::Id) {}
-    fn exit(&self, _: &tracing::span::Id) {}
-}
-
-fn scoped_log_capture_sees_every_callsite() {
-    static INSTALLED: std::sync::Once = std::sync::Once::new();
-    INSTALLED.call_once(|| {
-        tracing::subscriber::set_global_default(DeferToScoped)
-            .expect("no other global subscriber in worker unit tests");
-    });
-}
 
 #[derive(Clone, Copy)]
 enum WhileClassifying {

@@ -668,6 +668,7 @@ pub(super) struct ProjectMemoryEndpoint {
 pub(super) struct ProjectMemoryIoBlock {
     pub(super) started: tokio::sync::Notify,
     pub(super) release: std::sync::Mutex<std::sync::mpsc::Receiver<Result<()>>>,
+    pub(super) panic_after_release: bool,
 }
 
 #[cfg(test)]
