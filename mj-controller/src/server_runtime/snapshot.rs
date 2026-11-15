@@ -607,6 +607,7 @@ pub(super) fn viewer_snapshot_selected(
         .map(|workspace| crate::server::ViewerWorkspace {
             id: workspace.id.clone(),
             name: workspace.name.clone(),
+            last_opened_at: workspace.last_opened_at.clone(),
         })
         .collect();
     let now = std::time::SystemTime::now()

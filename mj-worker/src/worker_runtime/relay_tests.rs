@@ -9435,6 +9435,7 @@ async fn a_sub_agents_prompt_outcome_carries_its_facts_and_the_next_prompt_waits
 /// published with the facts unavailable and the reason, and the event that
 /// stopped it is recorded after the outcome.
 #[cfg(unix)]
+// Hard-won: a09de965f follow-up: startup expiry's event drain overflowed the capture coordinator's stack.
 #[tokio::test]
 async fn a_capture_cancelled_by_the_harness_stopping_publishes_unavailable_facts() {
     let temp = tempfile::tempdir().unwrap();

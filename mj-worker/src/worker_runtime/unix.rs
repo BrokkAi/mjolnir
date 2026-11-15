@@ -71,13 +71,16 @@ struct PreparedConnectionServices {
 }
 
 struct RunningHarness {
+    // On startup failure the coordinator transfers its receiver here so relay
+    // lifecycle requests can still wake it, just as during preparation failure.
+    idle_dispatch_wakes: Arc<Mutex<Option<mpsc::Receiver<()>>>>,
     acp_task: tokio::task::JoinHandle<Result<()>>,
     event_task: tokio::task::JoinHandle<Result<()>>,
     acp_shutdown: CancellationToken,
     commands: mpsc::Sender<CommandRequest>,
-    reviewer: Arc<ReviewCapture>,
+    _reviewer: Arc<ReviewCapture>,
     subagent_socket_guard: Option<super::subagents::SubagentSocketGuard>,
-    subagents: Option<super::subagents::SubagentEndpoint>,
+    _subagents: Option<super::subagents::SubagentEndpoint>,
     harness_gc: Option<tokio::task::JoinHandle<()>>,
     shell_cleanup: tokio_util::task::TaskTracker,
     /// Runtime leases stay in long-lived ACP state so they cover supervisor
@@ -167,6 +170,7 @@ struct PreparedAcpSetup {
 }
 
 struct StartedBridgeTasks {
+    idle_dispatch_wakes: Arc<Mutex<Option<mpsc::Receiver<()>>>>,
     acp_shutdown: Option<CancellationToken>,
     acp_task: Option<tokio::task::JoinHandle<Result<()>>>,
     event_task: Option<tokio::task::JoinHandle<Result<()>>>,
@@ -181,6 +185,7 @@ struct StartedBridgeTasks {
 impl StartedBridgeTasks {
     fn into_running(mut self) -> RunningHarness {
         RunningHarness {
+            idle_dispatch_wakes: self.idle_dispatch_wakes.clone(),
             acp_shutdown: self.acp_shutdown.take().expect("ACP task was started"),
             acp_task: self.acp_task.take().expect("ACP task was started"),
             event_task: self
@@ -192,9 +197,9 @@ impl StartedBridgeTasks {
                 .commands
                 .take()
                 .expect("ACP command sender was prepared"),
-            reviewer: self.reviewer.take().expect("reviewer was prepared"),
+            _reviewer: self.reviewer.take().expect("reviewer was prepared"),
             subagent_socket_guard: self.subagent_socket_guard.take(),
-            subagents: self.subagents.take(),
+            _subagents: self.subagents.take(),
             shell_cleanup: self
                 .shell_cleanup
                 .take()
@@ -410,6 +415,7 @@ fn build_acp_setup(setup: AcpPreparationSetup) -> Result<PreparedAcpSetup> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_bridge(
     setup: PreparedAcpSetup,
     relay: Arc<RelayCell>,
@@ -418,6 +424,7 @@ fn start_bridge(
     capture: Option<crate::work_facts::WorkObserver>,
     runtime: tokio::runtime::Handle,
     cancel: CancellationToken,
+    startup: HarnessStartup,
 ) -> Result<StartedBridgeTasks> {
     let PreparedAcpSetup {
         commands_tx,
@@ -435,6 +442,7 @@ fn start_bridge(
     } = setup;
     let acp_shutdown = CancellationToken::new();
     let mut started = StartedBridgeTasks {
+        idle_dispatch_wakes: startup.idle_dispatch_wakes.clone(),
         acp_shutdown: Some(acp_shutdown.clone()),
         acp_task: None,
         event_task: None,
@@ -455,6 +463,18 @@ fn start_bridge(
     if cancel.is_cancelled() {
         bail!("preparation cancelled while starting the ACP bridge");
     }
+    startup.status.send_replace(PreparationSnapshot {
+        state: Some(mj_core::relay::HarnessPreparation::Started),
+        services: Some(Arc::new(PreparedConnectionServices {
+            commands: commands_tx.clone(),
+            reviewer: started
+                .reviewer
+                .as_ref()
+                .expect("prepared reviewer")
+                .clone(),
+            subagents: started.subagents.clone(),
+        })),
+    });
     started.event_task = Some(runtime.spawn(run_relay_coordinator_with_shells(
         relay,
         events_rx,
@@ -463,6 +483,7 @@ fn start_bridge(
         user_shells,
         kimi_task_home.map(KimiTaskMonitor::new),
         capture,
+        startup,
     )));
     if cancel.is_cancelled() {
         bail!("preparation cancelled while starting the relay coordinator");
@@ -1237,6 +1258,7 @@ pub async fn run_daemon_owned(
     };
 
     let RunningHarness {
+        idle_dispatch_wakes: _idle_dispatch_wakes,
         mut acp_task,
         mut event_task,
         acp_shutdown,
@@ -1351,13 +1373,20 @@ pub async fn run_daemon_owned(
     if let Some(task) = harness_gc {
         task.abort();
     }
-    if !closed {
+    let preparation_failed = matches!(
+        preparation_rx.borrow().state,
+        Some(mj_core::relay::HarnessPreparation::Failed { .. })
+    );
+    if !closed && !preparation_failed {
         client_task.abort();
         return acp_result;
     }
 
-    // Closed relays remain attachable so the controller can finish its
-    // checkpoint. The connection handler rejects harness-only operations.
+    if preparation_failed && let Err(error) = &acp_result {
+        tracing::warn!(%error, "ACP stopped after harness startup failure");
+    }
+    // Closed and failed relays remain attachable so the controller can finish
+    // its checkpoint or Restart agent. Harness-only operations are rejected.
     tokio::select! {
         fatal = fatal_rx.recv() => {
             client_task.abort();
@@ -2032,6 +2061,7 @@ async fn prepare_and_start_harness(
     let relay = relay.clone();
     let bridge_runtime = tokio::runtime::Handle::current();
     let bridge_cancel = cancel.clone();
+    let startup = HarnessStartup::new(status.clone());
     // This stage only schedules prepared async tasks on the captured runtime;
     // it performs no filesystem or process I/O and cannot block a runtime
     // thread. The bounded future keeps cancellation ahead of task creation.
@@ -2047,20 +2077,13 @@ async fn prepare_and_start_harness(
             capture,
             bridge_runtime,
             bridge_cancel,
+            startup,
         )
     })
     .await?;
     let mut running = started.into_running();
     running._managed_harness = managed_harness;
     running._managed_node = managed_node;
-    status.send_replace(PreparationSnapshot {
-        state: Some(mj_core::relay::HarnessPreparation::Started),
-        services: Some(Arc::new(PreparedConnectionServices {
-            commands: running.commands.clone(),
-            reviewer: running.reviewer.clone(),
-            subagents: running.subagents.clone(),
-        })),
-    });
 
     Ok(running)
 }

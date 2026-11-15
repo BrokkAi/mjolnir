@@ -108,9 +108,6 @@ pub(crate) struct SessionFacts {
     inputs: Option<[u64; 5]>,
     /// Served attention with this terminal's unread receipt applied.
     own: HashMap<String, AttentionLevel>,
-    /// For each parent, its first active Mjolnir sub-agent that is waiting
-    /// on a question.
-    waiting_child: HashMap<String, String>,
     /// Live records, and records an operation keeps on screen, by id.
     listed: Vec<String>,
     /// How many times the facts were derived, for tests to count.
@@ -128,38 +125,6 @@ impl SessionFacts {
             .keys()
             .map(|id| (id.clone(), presentation_attention(dashboard, id)))
             .collect::<HashMap<_, _>>();
-        let holds_form = |child: &str| {
-            own.get(child) == Some(&AttentionLevel::Waiting)
-                && dashboard.state.sessions.contains_key(child)
-                && dashboard
-                    .session_details
-                    .get(child)
-                    .is_some_and(|detail| !detail.pending_elicitations.is_empty())
-        };
-        // A descendant holding a form, at any depth, so a child's reviewer
-        // reaches the top-level row too. Validation rejects
-        // ownership cycles; `visited` keeps a malformed state finite anyway.
-        let waiting_child = index
-            .active_children
-            .keys()
-            .filter_map(|parent| {
-                let mut visited = std::collections::HashSet::new();
-                let mut stack = vec![parent.as_str()];
-                while let Some(session) = stack.pop() {
-                    if !visited.insert(session) {
-                        continue;
-                    }
-                    let Some(children) = index.active_children.get(session) else {
-                        continue;
-                    };
-                    if let Some(child) = children.iter().find(|child| holds_form(child)) {
-                        return Some((parent.clone(), child.clone()));
-                    }
-                    stack.extend(children.iter().rev().map(String::as_str));
-                }
-                None
-            })
-            .collect();
         let mut listed = index.live.clone();
         listed.extend(
             own.iter()
@@ -174,7 +139,6 @@ impl SessionFacts {
         Self {
             inputs: Some(inputs),
             own,
-            waiting_child,
             listed,
             #[cfg(test)]
             derivations: 0,
@@ -186,10 +150,6 @@ impl SessionFacts {
             .get(session_id)
             .copied()
             .unwrap_or(AttentionLevel::Inactive)
-    }
-
-    pub(crate) fn waiting_child(&self, parent_id: &str) -> Option<&str> {
-        self.waiting_child.get(parent_id).map(String::as_str)
     }
 
     pub(crate) fn listed(&self) -> &[String] {

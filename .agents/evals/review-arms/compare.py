@@ -18,7 +18,8 @@ import pathlib
 import random
 import statistics
 
-LABELS = {"gpt-6.1-terra": "Terra", "gpt-6.1-sol": "Sol", "muse-ember-1.0": "Ember"}
+LABELS = {"gpt-6.1-terra": "Terra", "gpt-6.1-sol": "Sol", "muse-ember-1.0": "Ember", "greptile": "Greptile",
+          "gemini-4-hydrogen": "Gemini", "kimi-code/k3.1-pro": "Kimi", "deepseek-flash": "DSF"}
 ROOT = pathlib.Path(os.environ.get("REVIEW_ARMS_DIR", "/mnt/optane/review-arms-20261113"))
 p = argparse.ArgumentParser()
 p.add_argument("verify")

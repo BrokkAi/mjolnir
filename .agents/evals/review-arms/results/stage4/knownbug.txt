@@ -1,0 +1,228 @@
+Hard-won diffs: 30; with a match group: 12
+  Ember/xhigh            expected known bugs caught  3.00 of 30
+  Gemini/high            expected known bugs caught  8.00 of 30
+  Greptile/base          expected known bugs caught 10.00 of 30
+  Greptile/plus          expected known bugs caught 12.00 of 30
+  Kimi/high              expected known bugs caught  5.00 of 30
+  Sol/high               expected known bugs caught  8.67 of 30
+  Sol/medium             expected known bugs caught  7.00 of 30
+  Sol/xhigh              expected known bugs caught 10.00 of 30
+  Terra/high             expected known bugs caught  7.00 of 30
+  Terra/xhigh            expected known bugs caught  9.00 of 30
+  Ember/xhigh + Gemini/high expected known bugs caught  9.00 of 30
+  Ember/xhigh + Greptile/base expected known bugs caught 10.00 of 30
+  Ember/xhigh + Greptile/plus expected known bugs caught 12.00 of 30
+  Ember/xhigh + Kimi/high expected known bugs caught  6.00 of 30
+  Ember/xhigh + Sol/high expected known bugs caught  9.00 of 30
+  Ember/xhigh + Sol/medium expected known bugs caught  8.00 of 30
+  Ember/xhigh + Sol/xhigh expected known bugs caught 10.50 of 30
+  Ember/xhigh + Terra/high expected known bugs caught  8.33 of 30
+  Ember/xhigh + Terra/xhigh expected known bugs caught  9.50 of 30
+  Gemini/high + Greptile/base expected known bugs caught 12.00 of 30
+  Gemini/high + Greptile/plus expected known bugs caught 12.00 of 30
+  Gemini/high + Kimi/high expected known bugs caught 10.00 of 30
+  Gemini/high + Sol/high expected known bugs caught 10.67 of 30
+  Gemini/high + Sol/medium expected known bugs caught 10.00 of 30
+  Gemini/high + Sol/xhigh expected known bugs caught 12.00 of 30
+  Gemini/high + Terra/high expected known bugs caught 10.00 of 30
+  Gemini/high + Terra/xhigh expected known bugs caught 11.00 of 30
+  Greptile/base + Greptile/plus expected known bugs caught 12.00 of 30
+  Greptile/base + Kimi/high expected known bugs caught 10.00 of 30
+  Greptile/base + Sol/high expected known bugs caught 11.00 of 30
+  Greptile/base + Sol/medium expected known bugs caught 10.50 of 30
+  Greptile/base + Sol/xhigh expected known bugs caught 11.00 of 30
+  Greptile/base + Terra/high expected known bugs caught 10.33 of 30
+  Greptile/base + Terra/xhigh expected known bugs caught 10.50 of 30
+  Greptile/plus + Kimi/high expected known bugs caught 12.00 of 30
+  Greptile/plus + Sol/high expected known bugs caught 12.00 of 30
+  Greptile/plus + Sol/medium expected known bugs caught 12.00 of 30
+  Greptile/plus + Sol/xhigh expected known bugs caught 12.00 of 30
+  Greptile/plus + Terra/high expected known bugs caught 12.00 of 30
+  Greptile/plus + Terra/xhigh expected known bugs caught 12.00 of 30
+  Kimi/high + Sol/high   expected known bugs caught  9.67 of 30
+  Kimi/high + Sol/medium expected known bugs caught  8.50 of 30
+  Kimi/high + Sol/xhigh  expected known bugs caught 10.00 of 30
+  Kimi/high + Terra/high expected known bugs caught  8.67 of 30
+  Kimi/high + Terra/xhigh expected known bugs caught  9.00 of 30
+  Sol/high + Sol/high    expected known bugs caught  9.67 of 30
+  Sol/high + Sol/medium  expected known bugs caught  9.50 of 30
+  Sol/high + Sol/xhigh   expected known bugs caught 10.50 of 30
+  Sol/high + Terra/high  expected known bugs caught 10.67 of 30
+  Sol/high + Terra/xhigh expected known bugs caught 11.00 of 30
+  Sol/medium + Sol/medium expected known bugs caught 10.00 of 30
+  Sol/medium + Sol/xhigh expected known bugs caught 10.50 of 30
+  Sol/medium + Terra/high expected known bugs caught 10.00 of 30
+  Sol/medium + Terra/xhigh expected known bugs caught 10.50 of 30
+  Sol/xhigh + Sol/xhigh  expected known bugs caught 11.00 of 30
+  Sol/xhigh + Terra/high expected known bugs caught 11.00 of 30
+  Sol/xhigh + Terra/xhigh expected known bugs caught 10.75 of 30
+  Terra/high + Terra/high expected known bugs caught  8.33 of 30
+  Terra/high + Terra/xhigh expected known bugs caught  9.67 of 30
+  Terra/xhigh + Terra/xhigh expected known bugs caught 10.00 of 30
+  Ember/xhigh + Gemini/high + Greptile/base expected known bugs caught 12.00 of 30
+  Ember/xhigh + Gemini/high + Greptile/plus expected known bugs caught 12.00 of 30
+  Ember/xhigh + Gemini/high + Kimi/high expected known bugs caught 10.00 of 30
+  Ember/xhigh + Gemini/high + Sol/high expected known bugs caught 11.00 of 30
+  Ember/xhigh + Gemini/high + Sol/medium expected known bugs caught 10.50 of 30
+  Ember/xhigh + Gemini/high + Sol/xhigh expected known bugs caught 12.00 of 30
+  Ember/xhigh + Gemini/high + Terra/high expected known bugs caught 11.00 of 30
+  Ember/xhigh + Gemini/high + Terra/xhigh expected known bugs caught 11.00 of 30
+  Ember/xhigh + Greptile/base + Greptile/plus expected known bugs caught 12.00 of 30
+  Ember/xhigh + Greptile/base + Kimi/high expected known bugs caught 10.00 of 30
+  Ember/xhigh + Greptile/base + Sol/high expected known bugs caught 11.00 of 30
+  Ember/xhigh + Greptile/base + Sol/medium expected known bugs caught 10.50 of 30
+  Ember/xhigh + Greptile/base + Sol/xhigh expected known bugs caught 11.00 of 30
+  Ember/xhigh + Greptile/base + Terra/high expected known bugs caught 10.33 of 30
+  Ember/xhigh + Greptile/base + Terra/xhigh expected known bugs caught 10.50 of 30
+  Ember/xhigh + Greptile/plus + Kimi/high expected known bugs caught 12.00 of 30
+  Ember/xhigh + Greptile/plus + Sol/high expected known bugs caught 12.00 of 30
+  Ember/xhigh + Greptile/plus + Sol/medium expected known bugs caught 12.00 of 30
+  Ember/xhigh + Greptile/plus + Sol/xhigh expected known bugs caught 12.00 of 30
+  Ember/xhigh + Greptile/plus + Terra/high expected known bugs caught 12.00 of 30
+  Ember/xhigh + Greptile/plus + Terra/xhigh expected known bugs caught 12.00 of 30
+  Ember/xhigh + Kimi/high + Sol/high expected known bugs caught  9.67 of 30
+  Ember/xhigh + Kimi/high + Sol/medium expected known bugs caught  9.00 of 30
+  Ember/xhigh + Kimi/high + Sol/xhigh expected known bugs caught 10.50 of 30
+  Ember/xhigh + Kimi/high + Terra/high expected known bugs caught  9.00 of 30
+  Ember/xhigh + Kimi/high + Terra/xhigh expected known bugs caught  9.50 of 30
+  Ember/xhigh + Sol/high + Sol/high expected known bugs caught  9.67 of 30
+  Ember/xhigh + Sol/high + Sol/medium expected known bugs caught  9.67 of 30
+  Ember/xhigh + Sol/high + Sol/xhigh expected known bugs caught 10.50 of 30
+  Ember/xhigh + Sol/high + Terra/high expected known bugs caught 11.00 of 30
+  Ember/xhigh + Sol/high + Terra/xhigh expected known bugs caught 11.00 of 30
+  Ember/xhigh + Sol/medium + Sol/medium expected known bugs caught 10.00 of 30
+  Ember/xhigh + Sol/medium + Sol/xhigh expected known bugs caught 10.75 of 30
+  Ember/xhigh + Sol/medium + Terra/high expected known bugs caught 10.67 of 30
+  Ember/xhigh + Sol/medium + Terra/xhigh expected known bugs caught 10.75 of 30
+  Ember/xhigh + Sol/xhigh + Sol/xhigh expected known bugs caught 11.00 of 30
+  Ember/xhigh + Sol/xhigh + Terra/high expected known bugs caught 11.17 of 30
+  Ember/xhigh + Sol/xhigh + Terra/xhigh expected known bugs caught 11.00 of 30
+  Ember/xhigh + Terra/high + Terra/high expected known bugs caught  9.33 of 30
+  Ember/xhigh + Terra/high + Terra/xhigh expected known bugs caught  9.83 of 30
+  Ember/xhigh + Terra/xhigh + Terra/xhigh expected known bugs caught 10.00 of 30
+  Gemini/high + Greptile/base + Greptile/plus expected known bugs caught 12.00 of 30
+  Gemini/high + Greptile/base + Kimi/high expected known bugs caught 12.00 of 30
+  Gemini/high + Greptile/base + Sol/high expected known bugs caught 12.00 of 30
+  Gemini/high + Greptile/base + Sol/medium expected known bugs caught 12.00 of 30
+  Gemini/high + Greptile/base + Sol/xhigh expected known bugs caught 12.00 of 30
+  Gemini/high + Greptile/base + Terra/high expected known bugs caught 12.00 of 30
+  Gemini/high + Greptile/base + Terra/xhigh expected known bugs caught 12.00 of 30
+  Gemini/high + Greptile/plus + Kimi/high expected known bugs caught 12.00 of 30
+  Gemini/high + Greptile/plus + Sol/high expected known bugs caught 12.00 of 30
+  Gemini/high + Greptile/plus + Sol/medium expected known bugs caught 12.00 of 30
+  Gemini/high + Greptile/plus + Sol/xhigh expected known bugs caught 12.00 of 30
+  Gemini/high + Greptile/plus + Terra/high expected known bugs caught 12.00 of 30
+  Gemini/high + Greptile/plus + Terra/xhigh expected known bugs caught 12.00 of 30
+  Gemini/high + Kimi/high + Sol/high expected known bugs caught 11.67 of 30
+  Gemini/high + Kimi/high + Sol/medium expected known bugs caught 11.50 of 30
+  Gemini/high + Kimi/high + Sol/xhigh expected known bugs caught 12.00 of 30
+  Gemini/high + Kimi/high + Terra/high expected known bugs caught 11.00 of 30
+  Gemini/high + Kimi/high + Terra/xhigh expected known bugs caught 11.00 of 30
+  Gemini/high + Sol/high + Sol/high expected known bugs caught 11.67 of 30
+  Gemini/high + Sol/high + Sol/medium expected known bugs caught 11.00 of 30
+  Gemini/high + Sol/high + Sol/xhigh expected known bugs caught 12.00 of 30
+  Gemini/high + Sol/high + Terra/high expected known bugs caught 11.67 of 30
+  Gemini/high + Sol/high + Terra/xhigh expected known bugs caught 12.00 of 30
+  Gemini/high + Sol/medium + Sol/medium expected known bugs caught 11.00 of 30
+  Gemini/high + Sol/medium + Sol/xhigh expected known bugs caught 12.00 of 30
+  Gemini/high + Sol/medium + Terra/high expected known bugs caught 11.50 of 30
+  Gemini/high + Sol/medium + Terra/xhigh expected known bugs caught 12.00 of 30
+  Gemini/high + Sol/xhigh + Sol/xhigh expected known bugs caught 12.00 of 30
+  Gemini/high + Sol/xhigh + Terra/high expected known bugs caught 12.00 of 30
+  Gemini/high + Sol/xhigh + Terra/xhigh expected known bugs caught 12.00 of 30
+  Gemini/high + Terra/high + Terra/high expected known bugs caught 10.00 of 30
+  Gemini/high + Terra/high + Terra/xhigh expected known bugs caught 11.00 of 30
+  Gemini/high + Terra/xhigh + Terra/xhigh expected known bugs caught 11.00 of 30
+  Greptile/base + Greptile/plus + Kimi/high expected known bugs caught 12.00 of 30
+  Greptile/base + Greptile/plus + Sol/high expected known bugs caught 12.00 of 30
+  Greptile/base + Greptile/plus + Sol/medium expected known bugs caught 12.00 of 30
+  Greptile/base + Greptile/plus + Sol/xhigh expected known bugs caught 12.00 of 30
+  Greptile/base + Greptile/plus + Terra/high expected known bugs caught 12.00 of 30
+  Greptile/base + Greptile/plus + Terra/xhigh expected known bugs caught 12.00 of 30
+  Greptile/base + Kimi/high + Sol/high expected known bugs caught 11.00 of 30
+  Greptile/base + Kimi/high + Sol/medium expected known bugs caught 10.50 of 30
+  Greptile/base + Kimi/high + Sol/xhigh expected known bugs caught 11.00 of 30
+  Greptile/base + Kimi/high + Terra/high expected known bugs caught 10.33 of 30
+  Greptile/base + Kimi/high + Terra/xhigh expected known bugs caught 10.50 of 30
+  Greptile/base + Sol/high + Sol/high expected known bugs caught 11.00 of 30
+  Greptile/base + Sol/high + Sol/medium expected known bugs caught 11.00 of 30
+  Greptile/base + Sol/high + Sol/xhigh expected known bugs caught 11.00 of 30
+  Greptile/base + Sol/high + Terra/high expected known bugs caught 11.33 of 30
+  Greptile/base + Sol/high + Terra/xhigh expected known bugs caught 11.00 of 30
+  Greptile/base + Sol/medium + Sol/medium expected known bugs caught 11.00 of 30
+  Greptile/base + Sol/medium + Sol/xhigh expected known bugs caught 11.00 of 30
+  Greptile/base + Sol/medium + Terra/high expected known bugs caught 10.83 of 30
+  Greptile/base + Sol/medium + Terra/xhigh expected known bugs caught 10.75 of 30
+  Greptile/base + Sol/xhigh + Sol/xhigh expected known bugs caught 11.00 of 30
+  Greptile/base + Sol/xhigh + Terra/high expected known bugs caught 11.33 of 30
+  Greptile/base + Sol/xhigh + Terra/xhigh expected known bugs caught 11.00 of 30
+  Greptile/base + Terra/high + Terra/high expected known bugs caught 10.67 of 30
+  Greptile/base + Terra/high + Terra/xhigh expected known bugs caught 10.83 of 30
+  Greptile/base + Terra/xhigh + Terra/xhigh expected known bugs caught 11.00 of 30
+  Greptile/plus + Kimi/high + Sol/high expected known bugs caught 12.00 of 30
+  Greptile/plus + Kimi/high + Sol/medium expected known bugs caught 12.00 of 30
+  Greptile/plus + Kimi/high + Sol/xhigh expected known bugs caught 12.00 of 30
+  Greptile/plus + Kimi/high + Terra/high expected known bugs caught 12.00 of 30
+  Greptile/plus + Kimi/high + Terra/xhigh expected known bugs caught 12.00 of 30
+  Greptile/plus + Sol/high + Sol/high expected known bugs caught 12.00 of 30
+  Greptile/plus + Sol/high + Sol/medium expected known bugs caught 12.00 of 30
+  Greptile/plus + Sol/high + Sol/xhigh expected known bugs caught 12.00 of 30
+  Greptile/plus + Sol/high + Terra/high expected known bugs caught 12.00 of 30
+  Greptile/plus + Sol/high + Terra/xhigh expected known bugs caught 12.00 of 30
+  Greptile/plus + Sol/medium + Sol/medium expected known bugs caught 12.00 of 30
+  Greptile/plus + Sol/medium + Sol/xhigh expected known bugs caught 12.00 of 30
+  Greptile/plus + Sol/medium + Terra/high expected known bugs caught 12.00 of 30
+  Greptile/plus + Sol/medium + Terra/xhigh expected known bugs caught 12.00 of 30
+  Greptile/plus + Sol/xhigh + Sol/xhigh expected known bugs caught 12.00 of 30
+  Greptile/plus + Sol/xhigh + Terra/high expected known bugs caught 12.00 of 30
+  Greptile/plus + Sol/xhigh + Terra/xhigh expected known bugs caught 12.00 of 30
+  Greptile/plus + Terra/high + Terra/high expected known bugs caught 12.00 of 30
+  Greptile/plus + Terra/high + Terra/xhigh expected known bugs caught 12.00 of 30
+  Greptile/plus + Terra/xhigh + Terra/xhigh expected known bugs caught 12.00 of 30
+  Kimi/high + Sol/high + Sol/high expected known bugs caught 10.00 of 30
+  Kimi/high + Sol/high + Sol/medium expected known bugs caught 10.33 of 30
+  Kimi/high + Sol/high + Sol/xhigh expected known bugs caught 10.50 of 30
+  Kimi/high + Sol/high + Terra/high expected known bugs caught 11.00 of 30
+  Kimi/high + Sol/high + Terra/xhigh expected known bugs caught 11.00 of 30
+  Kimi/high + Sol/medium + Sol/medium expected known bugs caught 11.00 of 30
+  Kimi/high + Sol/medium + Sol/xhigh expected known bugs caught 10.50 of 30
+  Kimi/high + Sol/medium + Terra/high expected known bugs caught 10.50 of 30
+  Kimi/high + Sol/medium + Terra/xhigh expected known bugs caught 10.50 of 30
+  Kimi/high + Sol/xhigh + Sol/xhigh expected known bugs caught 11.00 of 30
+  Kimi/high + Sol/xhigh + Terra/high expected known bugs caught 11.00 of 30
+  Kimi/high + Sol/xhigh + Terra/xhigh expected known bugs caught 10.75 of 30
+  Kimi/high + Terra/high + Terra/high expected known bugs caught  9.67 of 30
+  Kimi/high + Terra/high + Terra/xhigh expected known bugs caught  9.67 of 30
+  Kimi/high + Terra/xhigh + Terra/xhigh expected known bugs caught 10.00 of 30
+  Sol/high + Sol/high + Sol/high expected known bugs caught 10.00 of 30
+  Sol/high + Sol/high + Sol/medium expected known bugs caught 10.17 of 30
+  Sol/high + Sol/high + Sol/xhigh expected known bugs caught 10.50 of 30
+  Sol/high + Sol/high + Terra/high expected known bugs caught 11.00 of 30
+  Sol/high + Sol/high + Terra/xhigh expected known bugs caught 11.00 of 30
+  Sol/high + Sol/medium + Sol/medium expected known bugs caught 10.33 of 30
+  Sol/high + Sol/medium + Sol/xhigh expected known bugs caught 10.75 of 30
+  Sol/high + Sol/medium + Terra/high expected known bugs caught 11.00 of 30
+  Sol/high + Sol/medium + Terra/xhigh expected known bugs caught 11.00 of 30
+  Sol/high + Sol/xhigh + Sol/xhigh expected known bugs caught 11.00 of 30
+  Sol/high + Sol/xhigh + Terra/high expected known bugs caught 11.17 of 30
+  Sol/high + Sol/xhigh + Terra/xhigh expected known bugs caught 11.00 of 30
+  Sol/high + Terra/high + Terra/high expected known bugs caught 11.33 of 30
+  Sol/high + Terra/high + Terra/xhigh expected known bugs caught 11.33 of 30
+  Sol/high + Terra/xhigh + Terra/xhigh expected known bugs caught 11.00 of 30
+  Sol/medium + Sol/medium + Sol/xhigh expected known bugs caught 11.00 of 30
+  Sol/medium + Sol/medium + Terra/high expected known bugs caught 11.33 of 30
+  Sol/medium + Sol/medium + Terra/xhigh expected known bugs caught 11.00 of 30
+  Sol/medium + Sol/xhigh + Sol/xhigh expected known bugs caught 11.00 of 30
+  Sol/medium + Sol/xhigh + Terra/high expected known bugs caught 11.17 of 30
+  Sol/medium + Sol/xhigh + Terra/xhigh expected known bugs caught 10.88 of 30
+  Sol/medium + Terra/high + Terra/high expected known bugs caught 10.67 of 30
+  Sol/medium + Terra/high + Terra/xhigh expected known bugs caught 11.00 of 30
+  Sol/medium + Terra/xhigh + Terra/xhigh expected known bugs caught 11.00 of 30
+  Sol/xhigh + Sol/xhigh + Terra/high expected known bugs caught 11.33 of 30
+  Sol/xhigh + Sol/xhigh + Terra/xhigh expected known bugs caught 11.00 of 30
+  Sol/xhigh + Terra/high + Terra/high expected known bugs caught 11.67 of 30
+  Sol/xhigh + Terra/high + Terra/xhigh expected known bugs caught 11.25 of 30
+  Sol/xhigh + Terra/xhigh + Terra/xhigh expected known bugs caught 11.00 of 30
+  Terra/high + Terra/high + Terra/high expected known bugs caught  9.00 of 30
+  Terra/high + Terra/high + Terra/xhigh expected known bugs caught 10.17 of 30
+  Terra/high + Terra/xhigh + Terra/xhigh expected known bugs caught 10.33 of 30

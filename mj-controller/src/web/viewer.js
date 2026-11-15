@@ -375,7 +375,10 @@ function selectedWorkspaceId() {
     if (session?.workspace_id) return session.workspace_id;
   }
 
-  return workspaces[0]?.id;
+  // The list is in name order; open the most recently opened workspace.
+  return workspaces.reduce((recent, workspace) =>
+    !recent || (workspace.last_opened_at || '') > (recent.last_opened_at || '') ? workspace : recent,
+  undefined)?.id;
 }
 
 function applyRoute() {
@@ -5697,14 +5700,6 @@ function workingChildCount(session) {
     .length;
 }
 
-/// Served child attention already includes their descendants' open forms.
-function waitingChildCount(session) {
-  return (session?.subagent_session_ids || [])
-    .map(id => sessionById(id))
-    .filter(child => child?.attention === 'needs_input')
-    .length;
-}
-
 function sessionInWorkspace(id, workspace) {
   const session = sessionById(id);
   return session?.workspace_id === workspace ? session : undefined;
@@ -8995,25 +8990,24 @@ function renderConversationHeader(session) {
     + new Set(native.filter(a => a.state === 'running').map(a => a.stable_id || a.session_id)).size;
   const total = children.length + native.length;
   // A child's approval is not shown in this conversation, so say it is waiting.
-  const waiting = waitingChildCount(session);
+  const waiting = Boolean(childFormHolder(session));
   for (const button of [subagentsButton, subagentsDesktopButton]) {
     if (!button) continue;
     button.textContent = waiting
-      ? `Subagents · ${working} · ${waiting} need${waiting === 1 ? 's' : ''} you`
+      ? `Subagents · ${working} · input needed`
       : `Subagents · ${working}`;
     button.title = waiting
-      ? `${total} retained agents; ${waiting} waiting for your answer`
+      ? `${total} retained agents; a sub-agent is waiting for your answer`
       : `${total} retained agents`;
-    button.classList.toggle('alert', waiting > 0);
+    button.classList.toggle('alert', waiting);
     button.setAttribute('aria-label', waiting
-      ? `Open sub-agent workspace; ${waiting} waiting for your answer`
+      ? 'Open sub-agent question'
       : 'Open sub-agent workspace');
-    // Inside a sub-agent context the button opens this child's own children
-    // only when one of them waits for the person, such as a reviewer of the
-    // child's work; otherwise it stays hidden there.
+    // A descendant's approval remains reachable from inside a child context,
+    // including when the holder is a reviewer with no worker-child row.
     button.classList.toggle(
       'hidden',
-      total === 0 || (Boolean(route.subagentParentId) && waiting === 0),
+      !waiting && (total === 0 || Boolean(route.subagentParentId)),
     );
   }
   // Reviewers stay reachable once any exist, so a finished review's
@@ -9057,8 +9051,18 @@ function renderConversationHeader(session) {
   }
 }
 
+function childFormHolder(session) {
+  const holder = session?.form_holder;
+  return holder && holder !== session.id ? holder : null;
+}
+
 function openChildWorkspace(childKind) {
   const session = activeSession();
+  const holder = childFormHolder(session);
+  if (childKind === 'worker' && holder) {
+    navigate({ name: 'conversation', sessionId: holder });
+    return;
+  }
   const any = childKind === 'reviewer'
     ? childSessionIds(session, 'reviewer').length
     : childSessionIds(session, 'worker').length || session?.native_subagents?.length;

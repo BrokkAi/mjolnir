@@ -1817,6 +1817,157 @@ pub fn validate_inherited_environment_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// One argv-only operation in an ordered shell batch.
+#[derive(Debug, Clone)]
+pub struct CommandStep {
+    argv: Vec<String>,
+    purpose: String,
+    accepted_statuses: Vec<i32>,
+    cleanup: bool,
+    best_effort: bool,
+}
+
+impl CommandStep {
+    pub fn new(
+        purpose: impl Into<String>,
+        argv: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            argv: argv.into_iter().map(Into::into).collect(),
+            purpose: purpose.into(),
+            accepted_statuses: vec![0],
+            cleanup: false,
+            best_effort: false,
+        }
+    }
+
+    pub fn accepted_statuses(mut self, statuses: impl IntoIterator<Item = i32>) -> Self {
+        self.accepted_statuses = statuses.into_iter().collect();
+        self
+    }
+
+    /// Run on shell exit, including when an earlier operation failed.
+    pub fn cleanup(mut self) -> Self {
+        self.cleanup = true;
+        self
+    }
+
+    /// Report a cleanup failure to the caller without failing the batch.
+    /// Callers must log [`step_script_warnings`] even when execution failed.
+    pub fn best_effort_cleanup(mut self) -> Self {
+        self.cleanup = true;
+        self.best_effort = true;
+        self
+    }
+}
+
+/// Build one `sh -c` argv. Local decisions and transport selection stay with
+/// the caller; only these already-decided operations run in the script.
+pub fn step_script(steps: impl IntoIterator<Item = CommandStep>) -> Vec<String> {
+    let steps: Vec<_> = steps.into_iter().collect();
+    let mut script = String::new();
+    for (index, step) in steps.iter().enumerate() {
+        let argv = step
+            .argv
+            .iter()
+            .map(|arg| posix_quote(arg))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let statuses = step
+            .accepted_statuses
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("|");
+        let purpose = serde_json::to_string(&step.purpose).expect("serialize step purpose");
+        let marker = if step.best_effort {
+            "MJ_STEP_WARNING"
+        } else {
+            "MJ_STEP_FAILED"
+        };
+        let returned = if step.best_effort {
+            "0"
+        } else {
+            "\"$mj_status\""
+        };
+        script.push_str(&format!(
+            "mj_step_{index}() {{\n( {argv} )\nmj_status=$?\ncase $mj_status in {statuses}) return 0;; esac\nprintf '\\n{marker} {index} %s %s\\n' \"$mj_status\" {} >&2\nreturn {returned}\n}}\n",
+            posix_quote(&purpose),
+        ));
+    }
+    if steps.iter().any(|step| step.cleanup) {
+        script.push_str("mj_cleanup() {\nmj_original=$?\ntrap - EXIT HUP INT TERM\n");
+        for (index, step) in steps.iter().enumerate() {
+            if step.cleanup {
+                script.push_str(&format!("mj_step_{index}\nmj_result=$?\nif [ \"$mj_original\" -eq 0 ]; then mj_original=$mj_result; fi\n"));
+            }
+        }
+        script.push_str("exit \"$mj_original\"\n}\ntrap mj_cleanup EXIT\ntrap 'exit 129' HUP\ntrap 'exit 130' INT\ntrap 'exit 143' TERM\n");
+    }
+    for (index, step) in steps.iter().enumerate() {
+        if !step.cleanup {
+            script.push_str(&format!("mj_step_{index} || exit $?\n"));
+        }
+    }
+    script.push_str("exit 0\n");
+    vec!["sh".into(), "-c".into(), script, "mj-steps".into()]
+}
+
+/// Decode the first failed step, preserving its stderr and original purpose.
+/// The marker includes JSON-escaped purpose text so transports and serialized
+/// plans need no extra metadata, including for purposes containing newlines.
+pub fn step_script_error(output: &CommandOutput) -> Option<String> {
+    if output.status == 0 {
+        return None;
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut failure = None;
+    let mut detail = Vec::new();
+    for line in stderr.lines() {
+        let parsed = parse_step_marker(line, "MJ_STEP_FAILED ");
+        if let Some(parsed) = parsed {
+            failure.get_or_insert(parsed);
+        } else if parse_step_marker(line, "MJ_STEP_WARNING ").is_none() {
+            detail.push(line);
+        }
+    }
+    failure.map(|(status, purpose)| {
+        format!(
+            "{purpose} failed with status {status}: {}",
+            detail.join("\n").trim()
+        )
+    })
+}
+
+/// Failures of cleanup steps marked best-effort. Always inspect these before
+/// checking the command result, so an earlier failure cannot hide cleanup errors.
+pub fn step_script_warnings(output: &CommandOutput) -> Vec<String> {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let detail = stderr
+        .lines()
+        .filter(|line| !line.starts_with("MJ_STEP_"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    stderr
+        .lines()
+        .filter_map(|line| {
+            let (status, purpose) = parse_step_marker(line, "MJ_STEP_WARNING ")?;
+            Some(format!(
+                "{purpose} failed with status {status}: {}",
+                detail.trim()
+            ))
+        })
+        .collect()
+}
+
+fn parse_step_marker(line: &str, prefix: &str) -> Option<(i32, String)> {
+    let mut fields = line.strip_prefix(prefix)?.splitn(3, ' ');
+    let _index = fields.next()?.parse::<usize>().ok()?;
+    let status = fields.next()?.parse::<i32>().ok()?;
+    let purpose = serde_json::from_str::<String>(fields.next()?).ok()?;
+    Some((status, purpose))
+}
+
 impl CommandPlan {
     /// Supply one container environment value without placing it in the
     /// Podman/SSH argument vector. See [`Self::provide_target_environment_secrets`].
@@ -1899,15 +2050,7 @@ impl CommandPlan {
         let mut outputs = Vec::with_capacity(self.commands.len());
         for command in &self.commands {
             let output = executor.execute(command)?;
-            if output.status != 0 {
-                bail!(
-                    "{} failed with status {}: {}",
-                    command.purpose,
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-            outputs.push(output);
+            outputs.push(checked_command_output(command, output)?);
         }
         Ok(outputs)
     }
@@ -1999,6 +2142,9 @@ pub fn checked_command_output(
     command: &CommandSpec,
     output: CommandOutput,
 ) -> Result<CommandOutput> {
+    if let Some(error) = step_script_error(&output) {
+        bail!("{error}");
+    }
     if output.status != 0 {
         bail!(
             "{} failed with status {}: {}",
@@ -3000,6 +3146,59 @@ exit 125
 
 #[cfg(all(test, unix))]
 mod executor_tests {
+    #[test]
+    #[cfg(unix)]
+    fn step_script_reports_partial_failure_and_runs_cleanup() {
+        use super::*;
+        let directory = tempfile::tempdir().unwrap();
+        let cleaned = directory.path().join("cleanup 'with spaces");
+        let skipped = directory.path().join("must not run");
+        let argv = step_script([
+            CommandStep::new("absent Git key", ["sh", "-c", "exit 5"]).accepted_statuses([0, 5]),
+            CommandStep::new(
+                "failing middle step",
+                ["sh", "-c", "echo precise-error >&2; exit 7"],
+            ),
+            CommandStep::new("later operation", ["touch", skipped.to_str().unwrap()]),
+            CommandStep::new("remove staging", ["touch", cleaned.to_str().unwrap()]).cleanup(),
+            CommandStep::new(
+                "optional cleanup",
+                ["sh", "-c", "echo cleanup-error >&2; exit 9"],
+            )
+            .best_effort_cleanup(),
+        ]);
+        let command = CommandSpec::new(&argv[0], argv[1..].iter().cloned()).purpose("batch");
+        let output = ProcessExecutor.execute(&command).unwrap();
+        assert_eq!(output.status, 7);
+        let warnings = step_script_warnings(&output);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("optional cleanup failed with status 9"));
+        assert!(warnings[0].contains("cleanup-error"));
+        let error = checked_command_output(&command, output)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("failing middle step failed with status 7: precise-error"),
+            "{error}"
+        );
+        assert!(cleaned.exists());
+        assert!(!skipped.exists());
+
+        // Cleanup failure remains visible even after successful publication.
+        let argv = step_script([CommandStep::new(
+            "optional discard",
+            ["sh", "-c", "echo discard-error >&2; exit 9"],
+        )
+        .best_effort_cleanup()]);
+        let command = CommandSpec::new(&argv[0], argv[1..].iter().cloned());
+        let output = ProcessExecutor.execute(&command).unwrap();
+        assert_eq!(output.status, 0);
+        assert_eq!(
+            step_script_warnings(&output),
+            ["optional discard failed with status 9: discard-error"]
+        );
+    }
+
     use std::fs;
 
     use super::*;

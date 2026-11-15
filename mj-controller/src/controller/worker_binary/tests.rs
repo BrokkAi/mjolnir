@@ -1541,8 +1541,19 @@ impl CommandExecutor for SshHostExecutor {
         let mut stdout = Vec::new();
         let remote = command.args.last().cloned().unwrap_or_default();
         if command.purpose == "publish shared Mjolnir worker" {
-            let words = remote.split_whitespace().collect::<Vec<_>>();
-            let directory = words[words.len() - 2].trim_matches('\'');
+            // Publication now shares one shell batch with verification and
+            // discard. Its directory is an argument inside the quoted script.
+            let unquoted = remote.replace(['\'', '\\', '"'], "");
+            let directory = unquoted
+                .split_whitespace()
+                .find(|word| {
+                    word.rsplit_once("worker-binaries/")
+                        .is_some_and(|(_, digest)| {
+                            digest.len() == 64
+                                && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        })
+                })
+                .expect("published worker store directory");
             self.host_files
                 .borrow_mut()
                 .insert(format!("{directory}/hel"));
@@ -1573,6 +1584,10 @@ impl CommandExecutor for SshHostExecutor {
         command: &CommandSpec,
         input: &mut (dyn Read + Send),
     ) -> Result<CommandOutput> {
+        if command.purpose == "query host profile content" {
+            std::io::copy(input, &mut std::io::sink())?;
+            return self.execute(command);
+        }
         // The transport boundary receives a complete archive, rather than a
         // test-only fallback to file-by-file copy.
         let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(input));
@@ -1600,6 +1615,7 @@ fn install_on_ssh_host(
         &fixture.ownership,
         &fixture.profile_stage,
         None,
+        &[],
     )
     .unwrap();
     rendered(&executor.commands.take())
@@ -1733,6 +1749,7 @@ fn docker_uploads_and_replacements_are_usable_by_the_non_root_worker() {
             &fixture.ownership,
             &fixture.profile_stage,
             None,
+            &[],
         )?;
         let owner = crate::worker_lifecycle::WorkerPermit::try_acquire(
             &session,
@@ -2043,6 +2060,7 @@ fn a_container_runs_its_images_worker_through_the_hel_link() {
             &fixture.ownership,
             &fixture.profile_stage,
             None,
+            &[],
         )?;
         as_root(&format!("test ! -e {unused}"))?;
         execute_checked(
@@ -3771,13 +3789,15 @@ fn installing_the_build_cache_places_marked_shared_copy_shims_on_the_session_pat
     );
     assert!(shim.contains("# mjolnir-mbx-shim"), "{shim}");
     assert!(
-        shim.contains("exec '/mnt/fast/mbx-cache/.mjolnir/bin/mbx' \"$@\""),
+        shim.contains(&targets::posix_quote(
+            "exec '/mnt/fast/mbx-cache/.mjolnir/bin/mbx' \"$@\""
+        )),
         "both wrappers execute the synchronized cache copy: {shim}"
     );
     assert!(!commands.iter().any(|line| line.contains(" cp ")));
     assert!(
         commands.iter().any(|line| {
-            line.contains("exec -i hel-session sh -c") && line.contains("config/mbx")
+            line.contains("'exec' '-i' 'hel-session' 'sh' '-c'") && line.contains("config/mbx")
         }),
         "the machine mbx configuration is linked into the container: {commands:#?}"
     );

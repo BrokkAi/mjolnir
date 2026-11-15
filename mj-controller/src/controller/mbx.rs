@@ -385,11 +385,25 @@ pub(super) fn prepare_session_configuration(
         .next()
         .cloned()
         .unwrap_or_default();
-    settings.directory = Some(recorded.directory.clone());
-    // A disabled cache still exists in already provisioned containers. Keep
-    // its policy current until the session no longer mounts it.
-    settings.enabled = Some(true);
-    let inspected = inspect_host(&host, &settings, executor)?;
+    // Reuse the launch's original resolution key first. Retained containers
+    // can still mount an older directory, or a cache disabled since launch;
+    // only those need a second resolution projected onto the recorded mount.
+    let inspected = inspect(&host, &settings, Freshness::Memoized, executor)?;
+    let needs_projection = inspected
+        .cache
+        .as_ref()
+        .is_some_and(|cache| cache.directory != recorded.directory)
+        || matches!(
+            inspected.preview.off_reason.as_ref(),
+            Some(BuildCacheOff::TurnedOff)
+        );
+    let inspected = if needs_projection {
+        settings.directory = Some(recorded.directory.clone());
+        settings.enabled = Some(true);
+        inspect(&host, &settings, Freshness::Memoized, executor)?
+    } else {
+        inspected
+    };
     let cache = inspected.cache.with_context(|| {
         format!(
             "build cache configuration unavailable: {}",
@@ -1614,6 +1628,7 @@ mod tests {
         ignore = "#1293: mbx cache host paths and Linux-host checks assume a Unix controller"
     )]
     fn recorded_darwin_cache_fails_explicitly_without_writing() {
+        let _isolated = isolated();
         let executor = ProbeExecutor::new(&[
             ("uname -sm", 0, "Darwin x86_64"),
             ("$resolved\" --version", 1, ""),

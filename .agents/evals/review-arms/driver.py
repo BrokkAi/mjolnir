@@ -39,6 +39,19 @@ ARMS = {
     "D": ["gpt-6.1-sol:high"] * 3,
     "D2": ["gpt-6.1-sol:high"] * 2,  # stage 1 diffs already have one Sol session
     "E": ["gpt-6.1-sol:medium"] * 2,
+    # deepseek-flash runs on the dsh-review profile (see README). F (DSF/high) was
+    # stopped as too slow after 5 diffs; its runs are kept in runs-dsf-high/.
+    "F": ["deepseek-flash:high", "gpt-6.1-terra:xhigh", "gpt-6.1-sol:xhigh"],
+    "I": ["deepseek-flash:low"],  # 3-diff pilot
+    # H and J give each diff 2 Terra/xhigh, 2 DSF/low and 2 Sol/xhigh sessions.
+    "H": ["gpt-6.1-terra:xhigh"] * 2 + ["gpt-6.1-sol:xhigh"],
+    "J": ["deepseek-flash:low"] * 2 + ["gpt-6.1-sol:xhigh"],
+    # DSF/low proved as slow as DSF/high (126-561 s) and never handed back, so the J
+    # jobs not yet started when it was dropped run as K: the Sol/xhigh session only.
+    "K": ["gpt-6.1-sol:xhigh"],
+    # Non-GPT reviewers, one session each. Muse's highest effort is xhigh.
+    "L": ["muse-ember-1.0:xhigh", "gemini-4-hydrogen:high", "kimi-code/k3.1-pro:high"],
+    "M": ["glm-5.3:high", "glm-5.3-flash:high"],  # GLM, one session each
 }
 WORKSPACE = json.loads((ROOT / "instance/workspace.json").read_text())["workspace"]["id"]
 # Hard-won candidates and the sampled ordinary diffs share one id space.
@@ -330,14 +343,33 @@ def collect(d, bug, identity, sid, place, before):
             settings = {c["key"]: c.get("current") for c in row.get("config_options", [])}
             pages = transcript(child)
             save(cd / "transcript.json", pages)
-            save(cd / "usage.json", mj("usage", "--session", child))
+            usage = mj("usage", "--session", child)
+            save(cd / "usage.json", usage)
             items = [i for p in pages for i in p["items"]]
+            # A reviewer parked before capture reports no config options; its transcript
+            # records the model and effort it was given ("model set to ...").
+            for key in ("model", "effort"):
+                if not settings.get(key):
+                    set_to = [m.group(1) for i in items if i["role"] == "system"
+                              for m in [re.match(rf"{key} set to (\S+)$", i["body"].get("text") or "")] if m]
+                    settings[key] = set_to[-1] if set_to else None
             messages = handback_messages([i for i in items if i["role"] == "tool" and "handback" in json.dumps(i)])
-            if messages:
-                (cd / "output.md").write_text(messages[-1] + "\n")
+            # A reviewer that ends its turn with its findings as a message instead of a
+            # handback call (DeepSeek Flash on DSH did) leaves mj's review incomplete.
+            # Its review is still scored, from that last message, and the miss is recorded.
+            final = ["".join(c.get("content", {}).get("text", "") for c in i["body"].get("chunks", []))
+                     for i in items if i["role"] == "agent"]
+            # Only a turn that ended normally gives a final message; an errored or
+            # cancelled turn may stop on a progress message, so it counts as no output.
+            ended = ((row.get("last_turn_outcome") or {}).get("outcome") or {})
+            completed = ended.get("kind") == "completed" and ended.get("stop_reason") == "EndTurn"
+            output = messages[-1] if messages else (
+                next((t for t in reversed(final) if t.strip()), None) if completed else None)
+            if output:
+                (cd / "output.md").write_text(output + "\n")
             reviewers.append({"child": child, "slot": info["slot"], "profile": row.get("profile_id"),
                               "model": settings.get("model"), "effort": settings.get("effort"),
-                              "has_output": bool(messages)})
+                              "has_output": bool(output), "handback": bool(messages)})
         # A review can clear before every reviewer was observed, or with a reviewer
         # that failed. Only a complete capture is saved as reviewers.json, so a
         # resumed job captures again instead of reloading an incomplete one.

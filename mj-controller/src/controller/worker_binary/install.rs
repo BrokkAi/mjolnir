@@ -501,6 +501,14 @@ pub(super) fn install_mbx_shims(
         cargo_body,
         mbx_body,
     ];
+    let steps = [
+        targets::CommandStep::new("install the shared-cache mbx shims", args),
+        targets::CommandStep::new(
+            "link the shared machine mbx configuration",
+            mbx_configuration_argv(engine, container_id, configuration, config_roots),
+        ),
+    ];
+    let args = targets::step_script(steps);
     let command = match ssh {
         None => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
         Some(ssh) => crate::targets::ssh_command(ssh, args),
@@ -508,7 +516,7 @@ pub(super) fn install_mbx_shims(
     .purpose("install the shared-cache mbx shims")
     .stage(ProvisionStage::Syncing);
     execute_checked(executor, command)?;
-    link_mbx_configuration(executor, locator, configuration, config_roots)
+    Ok(())
 }
 
 pub(super) fn remove_generated_mbx_shims(
@@ -621,56 +629,29 @@ fn reported_mbx_version(output: CommandOutput, command: &CommandSpec) -> Result<
 }
 
 /// Upgrade configuration without touching an executable a live build may use.
-pub(super) fn link_mbx_configuration(
-    executor: &impl CommandExecutor,
-    locator: &targets::TargetLocator,
+fn mbx_configuration_argv(
+    engine: &str,
+    container_id: &str,
     configuration: &Path,
     config_roots: &[PathBuf],
-) -> Result<()> {
-    let (engine, container_id, ssh) = match locator {
-        targets::TargetLocator::LocalPodman { container_id, .. } => ("podman", container_id, None),
-        targets::TargetLocator::LocalDocker { container_id, .. } => ("docker", container_id, None),
-        targets::TargetLocator::SshPodman {
-            ssh, container_id, ..
-        } => ("podman", container_id, Some(ssh)),
-        targets::TargetLocator::SshDocker {
-            ssh, container_id, ..
-        } => ("docker", container_id, Some(ssh)),
-        targets::TargetLocator::LocalBare { .. }
-        | targets::TargetLocator::AppleContainer { .. }
-        | targets::TargetLocator::SshAppleContainer { .. }
-        | targets::TargetLocator::SshNitro { .. }
-        | targets::TargetLocator::AwsEc2 { .. }
-        | targets::TargetLocator::SshBare { .. } => {
-            bail!("the build cache is only installed into Podman and Docker containers")
-        }
-    };
-    {
-        let mut args = vec![
-            engine.to_owned(),
-            "exec".into(),
-            "-i".into(),
-            container_id.clone(),
-            "sh".into(),
-            "-c".into(),
-            MBX_CONFIG_SCRIPT.to_owned(),
-            "mj-mbx-config".into(),
-            configuration.to_string_lossy().into_owned(),
-        ];
-        args.extend(
-            config_roots
-                .iter()
-                .map(|path| path.to_string_lossy().into_owned()),
-        );
-        let command = match ssh {
-            None => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
-            Some(ssh) => crate::targets::ssh_command(ssh, args),
-        }
-        .purpose("link the shared machine mbx configuration")
-        .stage(ProvisionStage::Syncing);
-        execute_checked(executor, command)?;
-    }
-    Ok(())
+) -> Vec<String> {
+    let mut args = vec![
+        engine.to_owned(),
+        "exec".into(),
+        "-i".into(),
+        container_id.to_owned(),
+        "sh".into(),
+        "-c".into(),
+        MBX_CONFIG_SCRIPT.to_owned(),
+        "mj-mbx-config".into(),
+        configuration.to_string_lossy().into_owned(),
+    ];
+    args.extend(
+        config_roots
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned()),
+    );
+    args
 }
 
 /// Preserve legacy private mbx installations and link their shared config in
@@ -738,6 +719,7 @@ pub(super) struct StagedWorkerProfile<'a> {
     pub ownership: &'a Path,
     pub profile: &'a Path,
     pub shared_login: Option<&'a SharedLogin>,
+    pub shared_paths: &'a [&'a str],
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -752,6 +734,7 @@ pub(super) fn install_worker_files(
     ownership: &Path,
     profile_stage: &Path,
     shared_login: Option<&SharedLogin>,
+    shared_paths: &[&str],
 ) -> Result<()> {
     if let Some(binary) = worker.host_binary() {
         verify_worker_build(binary)?;
@@ -767,6 +750,7 @@ pub(super) fn install_worker_files(
             ownership,
             profile: profile_stage,
             shared_login,
+            shared_paths,
         },
     )?;
     install_worker_binary(executor, locator, session_id, worker, "hel")
@@ -785,6 +769,7 @@ pub(super) fn install_worker_profile_files(
         ownership,
         profile: profile_stage,
         shared_login,
+        shared_paths,
     } = staged;
     match locator {
         targets::TargetLocator::LocalBare { .. } => {
@@ -915,6 +900,7 @@ pub(super) fn install_worker_profile_files(
                 launch_config,
                 ownership,
                 profile_stage,
+                shared_paths,
             )?;
         }
         targets::TargetLocator::SshBare { ssh, .. } => {
@@ -926,6 +912,7 @@ pub(super) fn install_worker_profile_files(
                 launch_config,
                 ownership,
                 profile_stage,
+                shared_paths,
             )?;
         }
         targets::TargetLocator::SshPodman {
@@ -959,7 +946,13 @@ pub(super) fn install_worker_profile_files(
                         .purpose("upload remote container worker file"),
                 )?;
             }
-            upload_profile_archive(executor, ssh, profile_stage, &format!("{upload}/profile"))?;
+            upload_profile_archive(
+                executor,
+                ssh,
+                profile_stage,
+                &format!("{upload}/profile"),
+                shared_paths,
+            )?;
             let launch_installed = format!("{worker_root}/launch.json");
             let ownership_installed = format!("{worker_root}/ownership.json");
             let owned = [
@@ -1025,13 +1018,18 @@ pub(super) fn install_worker_profile_files(
                 ],
                 vec!["rm".into(), "-rf".into(), "--".into(), upload.clone()],
             ]);
-            for args in remote {
-                execute_checked(
-                    executor,
-                    crate::targets::ssh_command_owned(ssh, targets::with_engine_argv(args))
-                        .purpose("install remote container worker"),
-                )?;
-            }
+            // Staging removal stays a final success-only step, as before.
+            let steps = remote.into_iter().map(|args| {
+                targets::CommandStep::new(
+                    "install remote container worker",
+                    targets::with_engine_argv(args),
+                )
+            });
+            execute_checked(
+                executor,
+                crate::targets::ssh_command_owned(ssh, targets::step_script(steps))
+                    .purpose("install remote container worker"),
+            )?;
         }
     }
     Ok(())
@@ -1104,6 +1102,7 @@ pub(super) fn install_worker_over_ssh(
     launch_config: &Path,
     ownership: &Path,
     profile_stage: &Path,
+    shared_paths: &[&str],
 ) -> Result<()> {
     execute_checked(
         executor,
@@ -1121,7 +1120,13 @@ pub(super) fn install_worker_over_ssh(
         )?;
     }
     let incoming_profile = format!("{profile_home}.incoming");
-    upload_profile_archive(executor, ssh, profile_stage, &incoming_profile)?;
+    upload_profile_archive(
+        executor,
+        ssh,
+        profile_stage,
+        &incoming_profile,
+        shared_paths,
+    )?;
     execute_checked(
         executor,
         crate::targets::ssh_command(
@@ -1143,44 +1148,303 @@ pub(super) fn install_worker_over_ssh(
     Ok(())
 }
 
-/// Send the staged snapshot as one stream, avoiding SFTP round trips per
-/// plugin file. The private temporary file bounds memory and owns cleanup.
-fn upload_profile_archive(
-    executor: &impl CommandExecutor,
-    ssh: &SshTarget,
+const PROFILE_CONTENT_STORE: &str = ".cache/mjolnir/profile-content";
+const PROFILE_CONTENT_MISSING: i32 = 75;
+
+// Match store.rs:COLLECT and COLLECT_INTERVAL: retain content for a day and
+// collect at most hourly. Touch requested content before collecting it.
+const QUERY_PROFILE_CONTENT: &str = r#"set -eu
+umask 077
+store="$HOME/$1"
+mkdir -p -- "$store"
+chmod -- 700 "$store"
+while IFS= read -r key; do
+    if [ -f "$store/$key" ]; then
+        touch -- "$store/$key"
+    else
+        printf '%s\n' "$key"
+    fi
+done
+if [ ! -f "$store/.collected" ] || [ -n "$(find "$store/.collected" -mmin +60 -print)" ]; then
+    find "$store" -type f -mmin +1440 -exec rm -f -- {} +
+    touch -- "$store/.collected"
+fi"#;
+
+const INSTALL_PROFILE_CONTENT: &str = r#"set -eu
+umask 077
+destination=$1
+store="$HOME/$2"
+# A repeat must discard earlier staging links before restricting private files.
+rm -rf -- "$destination"
+mkdir -p -- "$destination" "$store"
+chmod -- 700 "$store"
+tar -xzf - --no-same-owner --no-same-permissions -C "$destination"
+# Shared content is copied, not linked, below: a hard link would survive `podman cp`
+# and join identical files inside the session, where in-place writes would change both.
+find "$destination" -type d -exec chmod -- go-rwx {} +
+find "$destination" -type f -exec chmod -- go-rwx {} +
+for content in "$destination"/.mj-content/*; do
+    [ -f "$content" ] || continue
+    key=${content##*/}
+    digest=${key%.x}
+    case $(uname -s) in
+        Darwin) actual=$(shasum -a 256 < "$content");;
+        *) actual=$(sha256sum < "$content");;
+    esac
+    actual=${actual%% *}
+    [ "$actual" = "$digest" ] || { echo "profile content digest mismatch: $key" >&2; exit 1; }
+    if [ ! -f "$store/$key" ]; then
+        temporary=$(mktemp "$store/.upload-XXXXXXXXXX")
+        cp -- "$content" "$temporary"
+        case $key in *.x) chmod -- 700 "$temporary";; *) chmod -- 600 "$temporary";; esac
+        mv -f -- "$temporary" "$store/$key"
+    fi
+    touch -- "$store/$key"
+done
+# Copy through a temporary name, so any failure leaves the placeholder link.
+find "$destination" -type l -exec sh -c '
+    store=$1; shift
+    for path do
+        target=$(readlink "$path")
+        case $target in mj-profile-content/*) ;; *) continue;; esac
+        key=${target#mj-profile-content/}
+        [ -f "$store/$key" ] || continue
+        copy=$(mktemp "${path%/*}/.mj-copy-XXXXXXXXXX") || continue
+        # mktemp creates 0600, and cp keeps the mode of an existing file.
+        case $key in *.x) mode=700;; *) mode=600;; esac
+        if cp -- "$store/$key" "$copy" && chmod -- "$mode" "$copy" && mv -f -- "$copy" "$path"; then :; else rm -f -- "$copy"; fi
+    done
+' sh "$store" {} + || :
+# Decide completeness from the links that remain, not from find's exit status:
+# a remaining link whose content left the store is missing; any other failed.
+remaining="$destination/.mj-content-remaining"
+find "$destination" -type l -exec sh -c '
+    for path do
+        target=$(readlink "$path")
+        case $target in mj-profile-content/*) printf "%s\n" "${target#mj-profile-content/}";; esac
+    done
+' sh {} + > "$remaining"
+missing="$destination/.mj-content-missing"
+: > "$missing"
+failed=0
+while IFS= read -r key; do
+    if [ -f "$store/$key" ]; then failed=1; else printf '%s\n' "$key" >> "$missing"; fi
+done < "$remaining"
+rm -f -- "$remaining"
+if [ "$failed" -ne 0 ]; then
+    rm -f -- "$missing"
+    echo "could not copy stored profile content into $destination" >&2
+    exit 1
+fi
+if [ -s "$missing" ]; then
+    cat -- "$missing"
+    rm -f -- "$missing"
+    exit 75
+fi
+rm -f -- "$missing"
+rm -rf -- "$destination/.mj-content""#;
+
+struct ProfileArchiveEntry {
+    path: PathBuf,
+    directory: bool,
+    key: Option<String>,
+}
+
+fn profile_archive_entries(
     source: &Path,
-    destination: &str,
-) -> Result<()> {
+    shared_paths: &[&str],
+) -> Result<Vec<ProfileArchiveEntry>> {
+    fn visit(
+        source: &Path,
+        path: &Path,
+        shared_paths: &[&str],
+        entries: &mut Vec<ProfileArchiveEntry>,
+    ) -> Result<()> {
+        let absolute = source.join(path);
+        // Like the previous tar builder, materialize staged links.
+        let metadata = std::fs::metadata(&absolute)?;
+        let directory = metadata.is_dir();
+        let key = if !directory && shared_paths.iter().any(|shared| path.starts_with(shared)) {
+            let mut header = tar::Header::new_gnu();
+            header.set_metadata(&metadata);
+            let digest = mj_core::worker_launch::worker_executable_digest(&absolute)?;
+            Some(if header.mode()? & 0o100 != 0 {
+                format!("{digest}.x")
+            } else {
+                digest
+            })
+        } else {
+            None
+        };
+        entries.push(ProfileArchiveEntry {
+            path: path.to_owned(),
+            directory,
+            key,
+        });
+        if directory {
+            for child in std::fs::read_dir(&absolute)? {
+                visit(
+                    source,
+                    &path.join(child?.file_name()),
+                    shared_paths,
+                    entries,
+                )?;
+            }
+        }
+        Ok(())
+    }
+    let mut entries = Vec::new();
+    visit(source, Path::new(""), shared_paths, &mut entries)?;
+    Ok(entries)
+}
+
+fn profile_content_keys(output: &[u8], expected: &HashSet<String>) -> Result<HashSet<String>> {
+    let mut keys = HashSet::new();
+    for key in std::str::from_utf8(output)
+        .context("decode missing profile content")?
+        .lines()
+    {
+        ensure!(
+            expected.contains(key),
+            "host reported unexpected profile content key {key:?}"
+        );
+        keys.insert(key.to_owned());
+    }
+    Ok(keys)
+}
+
+fn build_profile_archive(
+    source: &Path,
+    entries: &[ProfileArchiveEntry],
+    missing: &HashSet<String>,
+) -> Result<File> {
     use std::io::Seek;
     let mut file = tempfile::tempfile().context("create private profile archive")?;
     let gzip = flate2::write::GzEncoder::new(&mut file, flate2::Compression::fast());
     let mut archive = tar::Builder::new(gzip);
-    // Recursive scp materialized links in the staged snapshot too.
     archive.follow_symlinks(true);
-    archive
-        .append_dir_all(".", source)
-        .context("archive staged harness profile")?;
+    let mut sent = HashSet::new();
+    for entry in entries {
+        let path = if entry.path.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            &entry.path
+        };
+        let absolute = source.join(&entry.path);
+        if entry.directory {
+            archive.append_dir(path, absolute)?;
+        } else if let Some(key) = &entry.key {
+            if missing.contains(key) && sent.insert(key) {
+                archive.append_path_with_name(&absolute, format!(".mj-content/{key}"))?;
+            }
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_size(0);
+            header.set_mode(0o700);
+            archive.append_link(&mut header, path, format!("mj-profile-content/{key}"))?;
+        } else {
+            archive.append_path_with_name(absolute, path)?;
+        }
+    }
     archive
         .into_inner()?
         .finish()
         .context("finish profile archive")?;
     file.rewind()?;
-    let command = targets::ssh_command(ssh, [
-        "sh", "-c",
-        "set -eu\numask 077\nmkdir -p -- \"$1\"\ntar -xzf - --no-same-owner --no-same-permissions -C \"$1\"\nchmod -R -- go-rwx \"$1\"",
-        "mj-profile-archive", destination,
-    ]).purpose("upload staged harness profile archive").stage(ProvisionStage::Syncing);
-    let output = executor
-        .execute_with_stdin(&command, &mut file)
-        .context("stream staged harness profile archive")?;
+    Ok(file)
+}
+
+/// Serialize the missing-content decision and upload per host. The destination
+/// is staging only: callers copy it into a private profile, then remove it.
+fn upload_profile_archive(
+    executor: &impl CommandExecutor,
+    ssh: &SshTarget,
+    source: &Path,
+    destination: &str,
+    shared_paths: &[&str],
+) -> Result<()> {
+    let entries = profile_archive_entries(source, shared_paths)?;
+    let keys: HashSet<_> = entries
+        .iter()
+        .filter_map(|entry| entry.key.clone())
+        .collect();
+    let host = targets::TargetLocator::SshBare {
+        ssh: ssh.clone(),
+        worker_id: None,
+        workspace: String::new(),
+    };
+    let gate = super::store::store_gate(&host, PROFILE_CONTENT_STORE);
+    let _guard = super::store::lock_gate(executor, &gate, destination, "send profile content")?;
+    let query = targets::ssh_command(
+        ssh,
+        [
+            "sh",
+            "-c",
+            QUERY_PROFILE_CONTENT,
+            "mj-profile-content",
+            PROFILE_CONTENT_STORE,
+        ],
+    )
+    .purpose("query host profile content")
+    .stage(ProvisionStage::Syncing);
+    let mut input = std::io::Cursor::new(
+        keys.iter()
+            .map(|key| format!("{key}\n"))
+            .collect::<String>(),
+    );
+    let output = executor.execute_with_stdin(&query, &mut input)?;
     ensure!(
         output.status == 0,
         "{} failed with status {}: {}",
-        command.purpose,
+        query.purpose,
         output.status,
         String::from_utf8_lossy(&output.stderr).trim()
     );
-    Ok(())
+    let mut missing = profile_content_keys(&output.stdout, &keys)?;
+    for attempt in 0..2 {
+        let mut file = build_profile_archive(source, &entries, &missing)?;
+        tracing::info!(
+            archive_bytes = file.metadata()?.len(),
+            shared_content_files = missing.len(),
+            destination,
+            "send profile content"
+        );
+        let command = targets::ssh_command(
+            ssh,
+            [
+                "sh",
+                "-c",
+                INSTALL_PROFILE_CONTENT,
+                "mj-profile-archive",
+                destination,
+                PROFILE_CONTENT_STORE,
+            ],
+        )
+        .purpose("send profile content")
+        .stage(ProvisionStage::Syncing);
+        let output = executor
+            .execute_with_stdin(&command, &mut file)
+            .context("stream staged harness profile archive")?;
+        if output.status == 0 {
+            return Ok(());
+        }
+        if output.status == PROFILE_CONTENT_MISSING && attempt == 0 {
+            missing = profile_content_keys(&output.stdout, &keys)?;
+            ensure!(
+                !missing.is_empty(),
+                "host reported missing profile content without any keys"
+            );
+            continue;
+        }
+        bail!(
+            "{} failed with status {}: {}{}",
+            command.purpose,
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim(),
+            String::from_utf8_lossy(&output.stdout).trim()
+        );
+    }
+    unreachable!("both upload attempts return or report failure")
 }
 
 #[cfg(test)]
@@ -1363,100 +1627,299 @@ mod mbx_shim_tests {
 #[cfg(all(test, unix))]
 mod profile_archive_tests {
     use super::*;
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
+    use std::collections::BTreeMap;
     use std::fs;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
     struct SystemTar {
-        streams: Cell<usize>,
+        home: PathBuf,
+        uploads: RefCell<Vec<Vec<u8>>>,
+        delete_before_upload: Cell<usize>,
+    }
+    impl SystemTar {
+        fn new(home: &Path) -> Self {
+            Self {
+                home: home.to_owned(),
+                uploads: RefCell::new(Vec::new()),
+                delete_before_upload: Cell::new(0),
+            }
+        }
+        fn store(&self) -> PathBuf {
+            self.home.join(PROFILE_CONTENT_STORE)
+        }
+        fn stored_files(&self) -> Vec<PathBuf> {
+            fs::read_dir(self.store())
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| {
+                    !path
+                        .file_name()
+                        .unwrap()
+                        .as_encoded_bytes()
+                        .starts_with(b".")
+                })
+                .collect()
+        }
     }
     impl CommandExecutor for SystemTar {
         fn execute(&self, _command: &CommandSpec) -> Result<CommandOutput> {
-            bail!("profile upload must use one streamed command")
+            bail!("profile transfer commands must stream their input")
         }
         fn execute_with_stdin(
             &self,
             command: &CommandSpec,
             input: &mut (dyn Read + Send),
         ) -> Result<CommandOutput> {
-            self.streams.set(self.streams.get() + 1);
+            let mut bytes = Vec::new();
+            input.read_to_end(&mut bytes)?;
+            if command.purpose == "send profile content" {
+                self.uploads.borrow_mut().push(bytes.clone());
+                if self.delete_before_upload.get() > 0 {
+                    self.delete_before_upload
+                        .set(self.delete_before_upload.get() - 1);
+                    for path in self.stored_files() {
+                        fs::remove_file(path)?;
+                    }
+                }
+            }
             let script = command.args.last().context("missing remote command")?;
+            let mut local = CommandSpec::new("sh", ["-c", script]);
+            local
+                .env
+                .insert("HOME".into(), self.home.to_string_lossy().into_owned());
+            local.cwd = Some(self.home.clone());
             mj_core::targets::ProcessExecutor
-                .execute_with_stdin(&CommandSpec::new("sh", ["-c", script]), input)
+                .execute_with_stdin(&local, &mut std::io::Cursor::new(bytes))
         }
+    }
+
+    fn upload(executor: &SystemTar, source: &Path, destination: &Path) -> Result<()> {
+        upload_profile_archive(
+            executor,
+            &SshTarget {
+                destination: "unused".into(),
+                ssh_args: vec![],
+            },
+            source,
+            destination.to_str().unwrap(),
+            &shared_profile_paths(HarnessKind::Claude),
+        )
+    }
+
+    fn snapshot(root: &Path) -> BTreeMap<PathBuf, (u32, Vec<u8>)> {
+        fn visit(root: &Path, path: &Path, result: &mut BTreeMap<PathBuf, (u32, Vec<u8>)>) {
+            let absolute = root.join(path);
+            let metadata = fs::metadata(&absolute).unwrap();
+            let bytes = if metadata.is_dir() {
+                Vec::new()
+            } else {
+                fs::read(&absolute).unwrap()
+            };
+            result.insert(
+                path.to_owned(),
+                (metadata.permissions().mode() & 0o700, bytes),
+            );
+            if metadata.is_dir() {
+                for entry in fs::read_dir(absolute).unwrap() {
+                    visit(root, &path.join(entry.unwrap().file_name()), result);
+                }
+            }
+        }
+        let mut result = BTreeMap::new();
+        visit(root, Path::new(""), &mut result);
+        result
+    }
+
+    fn install_private_profile(staging: &Path, destination: &Path) {
+        fs::create_dir(destination).unwrap();
+        execute_checked(
+            &targets::ProcessExecutor,
+            CommandSpec::new(
+                "cp",
+                [
+                    "-R",
+                    staging.join(".").to_str().unwrap(),
+                    destination.to_str().unwrap(),
+                ],
+            ),
+        )
+        .unwrap();
+        fs::remove_dir_all(staging).unwrap();
+        execute_checked(
+            &targets::ProcessExecutor,
+            CommandSpec::new(
+                "chmod",
+                ["-R", "--", "go-rwx", destination.to_str().unwrap()],
+            ),
+        )
+        .unwrap();
     }
 
     // Hard-won: #1483: recursive scp spent 162 seconds on a 17 MB profile.
     // Hard-won: #1187: BSD chmod treats -- after the mode as a filename.
     #[test]
     fn streamed_profile_roundtrips_through_system_tar_without_per_file_commands() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("staged profile");
         let nested = source.join("plugins/日本語");
         fs::create_dir_all(&nested).unwrap();
-        // The production archive is over 8 MiB.
+        // The production archive is over 8 MiB: exercise pipe backpressure too.
         let mut payload = vec![0; 8 * 1024 * 1024 + 70_000];
         getrandom::fill(&mut payload).unwrap();
-        fs::write(nested.join("tool data"), &payload).unwrap();
-        fs::set_permissions(nested.join("tool data"), fs::Permissions::from_mode(0o755)).unwrap();
+        for (name, mode) in [
+            ("tool data", 0o755),
+            ("line\nbreak", 0o644),
+            ("-leading dash", 0o644),
+        ] {
+            fs::write(nested.join(name), &payload).unwrap();
+            fs::set_permissions(nested.join(name), fs::Permissions::from_mode(mode)).unwrap();
+        }
+        fs::create_dir_all(source.join("skills/empty")).unwrap();
         fs::create_dir(source.join("empty")).unwrap();
         fs::write(source.join(".credentials.json"), b"synthetic credentials").unwrap();
         symlink("plugins/日本語/tool data", source.join("linked plugin")).unwrap();
-        let destination = temp.path().join("remote profile");
-        let executor = SystemTar {
-            streams: Cell::new(0),
-        };
-        upload_profile_archive(
-            &executor,
+        let executor = SystemTar::new(temp.path());
+        let expected = snapshot(&source);
+        for index in 0..2 {
+            let staging = temp.path().join(format!("remote staging {index}"));
+            let destination = temp.path().join(format!("private profile {index}"));
+            let abandoned = executor.store().join("0".repeat(64));
+            let abandoned_upload = executor.store().join(".upload-abandoned");
+            if index == 1 {
+                fs::write(&abandoned, b"unused content").unwrap();
+                fs::write(&abandoned_upload, b"interrupted publication").unwrap();
+                let mut args = vec!["-t".to_owned(), "200001010000".to_owned()];
+                args.extend(
+                    fs::read_dir(executor.store())
+                        .unwrap()
+                        .map(|entry| entry.unwrap().path().to_string_lossy().into_owned()),
+                );
+                execute_checked(&targets::ProcessExecutor, CommandSpec::new("touch", args))
+                    .unwrap();
+            }
+            upload(&executor, &source, &staging).unwrap();
+            if index == 1 {
+                assert!(!abandoned.exists());
+                assert!(!abandoned_upload.exists());
+            }
+            for (path, (mode, _)) in &expected {
+                assert_eq!(
+                    staging.join(path).metadata().unwrap().permissions().mode() & 0o777,
+                    *mode,
+                    "staging permissions: {}",
+                    path.display()
+                );
+            }
+            install_private_profile(&staging, &destination);
+            assert_eq!(snapshot(&destination), expected);
+            for (path, (mode, _)) in &expected {
+                let metadata = fs::symlink_metadata(destination.join(path)).unwrap();
+                assert!(!metadata.file_type().is_symlink());
+                assert_eq!(metadata.permissions().mode() & 0o777, *mode);
+                for stored in executor.stored_files() {
+                    assert_ne!(metadata.ino(), stored.metadata().unwrap().ino());
+                }
+            }
+            // A write to a private session copy cannot corrupt later installs.
+            fs::write(
+                destination.join("plugins/日本語/tool data"),
+                b"session mutation",
+            )
+            .unwrap();
+        }
+        let uploads = executor.uploads.borrow();
+        assert_eq!(uploads.len(), 2);
+        for (index, bytes) in uploads.iter().enumerate() {
+            let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes.as_slice()));
+            let shared_content: Vec<_> = archive
+                .entries()
+                .unwrap()
+                .map(|entry| entry.unwrap().path().unwrap().into_owned())
+                .filter(|path| path.starts_with(".mj-content"))
+                .collect();
+            assert_eq!(shared_content.len(), if index == 0 { 2 } else { 0 });
+        }
+        let store = executor.stored_files();
+        assert_eq!(store.len(), 2);
+        for path in store {
+            assert_eq!(fs::read(&path).unwrap(), payload);
+            let executable = path.extension().is_some_and(|extension| extension == "x");
+            assert_eq!(
+                path.metadata().unwrap().permissions().mode() & 0o777,
+                if executable { 0o700 } else { 0o600 }
+            );
+        }
+    }
+
+    #[test]
+    fn profile_content_disappearing_after_query_retries_once_with_the_missing_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir_all(source.join("plugins")).unwrap();
+        fs::write(source.join("plugins/content"), vec![b'x'; 100_000]).unwrap();
+        fs::write(source.join("settings.json"), b"private settings").unwrap();
+        let executor = SystemTar::new(temp.path());
+        upload(&executor, &source, &temp.path().join("initial")).unwrap();
+        executor.delete_before_upload.set(1);
+        let recovered = temp.path().join("recovered");
+        upload(&executor, &source, &recovered).unwrap();
+        assert_eq!(snapshot(&recovered), snapshot(&source));
+        assert_eq!(executor.uploads.borrow().len(), 3);
+        // The real link script reports exactly which content disappeared.
+        let key = executor
+            .stored_files()
+            .pop()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_owned();
+        let entries = profile_archive_entries(&source, &["plugins"]).unwrap();
+        let mut archive = build_profile_archive(&source, &entries, &HashSet::new()).unwrap();
+        fs::remove_file(executor.store().join(&key)).unwrap();
+        let destination = temp.path().join("missing");
+        let command = targets::ssh_command(
             &SshTarget {
                 destination: "unused".into(),
                 ssh_args: vec![],
             },
-            &source,
-            destination.to_str().unwrap(),
+            [
+                "sh",
+                "-c",
+                INSTALL_PROFILE_CONTENT,
+                "mj-profile-archive",
+                destination.to_str().unwrap(),
+                PROFILE_CONTENT_STORE,
+            ],
         )
-        .unwrap();
-        assert_eq!(executor.streams.get(), 1);
+        .purpose("send profile content");
+        let output = executor.execute_with_stdin(&command, &mut archive).unwrap();
+        assert_eq!(output.status, PROFILE_CONTENT_MISSING);
         assert_eq!(
-            fs::read(destination.join("plugins/日本語/tool data")).unwrap(),
-            payload
+            String::from_utf8(output.stdout).unwrap().trim(),
+            key.to_str().unwrap()
         );
-        assert_eq!(
-            fs::read(destination.join("linked plugin")).unwrap(),
-            payload
-        );
+    }
+
+    // Hard-won: review of 09769fc85: a stored file that exists but cannot be
+    // copied must fail the upload instead of leaving a profile with gaps.
+    #[test]
+    fn stored_profile_content_that_cannot_be_copied_fails_the_upload() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir_all(source.join("plugins")).unwrap();
+        fs::write(source.join("plugins/content"), vec![b'x'; 100_000]).unwrap();
+        let executor = SystemTar::new(temp.path());
+        upload(&executor, &source, &temp.path().join("initial")).unwrap();
+        let stored = executor.stored_files().pop().unwrap();
+        fs::set_permissions(&stored, fs::Permissions::from_mode(0o000)).unwrap();
+        let error = upload(&executor, &source, &temp.path().join("unreadable"))
+            .unwrap_err()
+            .to_string();
+        fs::set_permissions(&stored, fs::Permissions::from_mode(0o600)).unwrap();
         assert!(
-            !destination
-                .join("linked plugin")
-                .symlink_metadata()
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
-        assert!(destination.join("empty").is_dir());
-        assert_eq!(
-            fs::read(destination.join(".credentials.json")).unwrap(),
-            b"synthetic credentials"
-        );
-        assert_eq!(
-            destination
-                .join(".credentials.json")
-                .metadata()
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o077,
-            0
-        );
-        assert_eq!(
-            destination
-                .join("plugins/日本語/tool data")
-                .metadata()
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o700
+            error.contains("could not copy stored profile content"),
+            "{error}"
         );
     }
 }

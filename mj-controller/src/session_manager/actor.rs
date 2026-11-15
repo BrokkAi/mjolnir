@@ -65,12 +65,12 @@ fn storage_wait_detail(problem: &str, error: &anyhow::Error) -> String {
     )
 }
 
-/// Bind the actor's decision to the durable lifecycle revision before applying
+/// Bind a reported failure to the durable lifecycle revision before applying
 /// it inside the actor loop. A later lifecycle write rejects the transition.
-async fn capture_harness_timeout(
+async fn capture_harness_failure(
     target: &RelaySessionTarget,
-    waited: Duration,
-) -> Result<Option<HarnessReadinessTimeout>> {
+    cause: String,
+) -> Result<Option<HarnessStartupFailure>> {
     let id = target.session_id.clone();
     let expected_target = target
         .worker_recovery
@@ -87,13 +87,13 @@ async fn capture_harness_timeout(
         {
             return Ok(None);
         }
-        Ok(Some(HarnessReadinessTimeout {
-            waited,
+        Ok(Some(HarnessStartupFailure {
+            cause,
             observed_updated_at: record.updated_at,
         }))
     })
     .await
-    .context("capture harness timeout lifecycle revision")?
+    .context("capture harness failure lifecycle revision")?
 }
 
 pub(super) async fn run_session_actor(
@@ -107,7 +107,7 @@ pub(super) async fn run_session_actor(
     let mut policies = updates.model_policies.subscribe();
     let mut connection: Option<StandaloneSession> = None;
     let mut failures = 0_u32;
-    let mut harness_readiness = HarnessReadinessWatch::default();
+    let mut harness_readiness = HarnessStartupWatch::default();
     let mut next_cpu_read = tokio::time::Instant::now();
     let mut last_recovery_probe = None;
     let mut lifecycle = ActorLifecycle::default();
@@ -137,7 +137,7 @@ pub(super) async fn run_session_actor(
         // The connection's owner invalidates the wait on every loss or lease,
         // including failures in commands whose display error is deferred.
         if connection.is_none() || lifecycle.is_leased() {
-            harness_readiness.observe(tokio::time::Instant::now(), None);
+            harness_readiness.lost_contact();
         }
         // A command can start work on a quiet session (a prompt) or drop the
         // connection. Bring the next sync forward to what the connection's
@@ -231,7 +231,7 @@ pub(super) async fn run_session_actor(
             Event::Returned(returned) => {
                 let Some(returned) = returned else { continue };
                 if lifecycle.return_lease(returned.lease_id) {
-                    harness_readiness.observe(tokio::time::Instant::now(), None);
+                    harness_readiness.lost_contact();
                     // A dropped lease returns no connection; `submit_actor_command`
                     // reconnects on demand, so the drain needs no special case.
                     connection = returned.connection.map(|connection| *connection);
@@ -339,9 +339,13 @@ pub(super) async fn run_session_actor(
                 match result {
                     Ok((snapshot, observed_at)) => {
                         failures = 0;
-                        let timeout = if updates.readiness_failure.get().is_some() {
-                            harness_readiness.observe(
+                        let cause = if updates.harness_failure.get().is_some() {
+                            harness_readiness.observe_worker(
                                 observed_at,
+                                connection
+                                    .as_ref()
+                                    .expect("synced connection")
+                                    .protocol_version(),
                                 Some(
                                     connection
                                         .as_ref()
@@ -351,8 +355,8 @@ pub(super) async fn run_session_actor(
                             )
                         } else {
                             tracing::warn!(session_id = %target.session_id,
-                                "readiness failure handler is missing; waiting for a later successful sync");
-                            harness_readiness.observe(observed_at, None);
+                                "harness failure handler is missing; waiting for a later successful sync");
+                            harness_readiness.lost_contact();
                             None
                         };
                         storage_wait = None;
@@ -370,17 +374,18 @@ pub(super) async fn run_session_actor(
                                 &updates,
                             );
                         }
-                        if let Some(waited) = timeout {
-                            let result = match capture_harness_timeout(&target, waited).await {
-                                Ok(Some(timeout)) => {
+                        if let Some(cause) = cause {
+                            let result = match capture_harness_failure(&target, cause).await {
+                                Ok(Some(failure)) => {
                                     // Installed once before actors start. Await the guarded
-                                    // write here: no ready observation can overtake it.
-                                    match updates.readiness_failure.get() {
+                                    // write here. Current workers have already stopped accepting
+                                    // readiness; only old workers rely on the legacy clock.
+                                    match updates.harness_failure.get() {
                                         Some(handler) => {
-                                            handler(target.session_id.clone(), timeout).await
+                                            handler(target.session_id.clone(), failure).await
                                         }
                                         None => Err(anyhow::anyhow!(
-                                            "readiness failure handler is missing"
+                                            "harness failure handler is missing"
                                         )),
                                     }
                                 }
@@ -390,16 +395,16 @@ pub(super) async fn run_session_actor(
                             match result {
                                 Ok(true) => harness_readiness.applied(),
                                 Ok(false) => tracing::warn!(session_id = %target.session_id,
-                                    "harness readiness failure rejected by lifecycle or record revision; retrying after a later successful sync"),
+                                    "harness failure rejected by lifecycle or record revision; retrying after a later successful sync"),
                                 Err(error) => {
                                     tracing::warn!(session_id = %target.session_id, error = format!("{error:#}"),
-                                    "could not apply harness readiness failure; retrying after a later successful sync")
+                                    "could not record harness failure; retrying after a later successful sync")
                                 }
                             }
                         }
                     }
                     Err(error) => {
-                        harness_readiness.observe(tokio::time::Instant::now(), None);
+                        harness_readiness.lost_contact();
                         connection = None;
                         updates.publish_cpu(&target.session_id, None);
                         failures = failures.saturating_add(1);

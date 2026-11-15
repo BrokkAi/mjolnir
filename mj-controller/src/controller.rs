@@ -1705,6 +1705,9 @@ fn execute_checked(executor: &impl CommandExecutor, command: CommandSpec) -> Res
 /// `output` of `command` when it succeeded, otherwise the error its stderr
 /// describes.
 fn check_output(command: &CommandSpec, output: CommandOutput) -> Result<CommandOutput> {
+    if let Some(error) = targets::step_script_error(&output) {
+        bail!("{error}");
+    }
     if output.status != 0 {
         let detail = command_error_detail(&output.stderr);
         if detail.is_empty() {

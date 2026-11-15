@@ -278,6 +278,7 @@ impl ViewerSnapshot {
                     attention: Default::default(),
                     unread_frontier: None,
                     notification_dismissal: None,
+                    form_holder: None,
                     notifications_ignored: session.notifications_ignored,
                     oracle: session.oracle,
                     oracle_choice: session.oracle_choice.clone().map(|v| *v),
@@ -567,6 +568,8 @@ pub struct ViewerSession {
     pub unread_frontier: Option<u64>,
     #[serde(default)]
     pub notification_dismissal: Option<mj_core::attention::NotificationDismissal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub form_holder: Option<String>,
     /// The session raises no notifications; its attention still renders.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub notifications_ignored: bool,
@@ -1049,6 +1052,9 @@ impl ViewerTurnReview {
 pub struct ViewerWorkspace {
     pub id: String,
     pub name: String,
+    /// Workspaces arrive in name order; the viewer opens the most recently
+    /// opened one when the route names none.
+    pub last_opened_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

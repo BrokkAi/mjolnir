@@ -195,9 +195,9 @@ impl RuntimeState {
         }
     }
 
-    /// Capture only durable/lifecycle ownership for actor-reported failures.
-    /// The relay actor alone decides whether the harness wait expired.
-    pub(super) fn harness_timeout_record(&self, id: &str) -> Option<String> {
+    /// Capture durable/lifecycle ownership for reported harness failures.
+    /// Current workers decide expiry; only old protocols use the actor clock.
+    pub(super) fn harness_failure_record(&self, id: &str) -> Option<String> {
         let owner = self.owner();
         if owner
             .lifecycle
@@ -216,17 +216,17 @@ impl RuntimeState {
     pub(super) async fn fail_unready_session(
         &self,
         session_id: String,
-        timeout: crate::session_manager::HarnessReadinessTimeout,
+        failure: crate::session_manager::HarnessStartupFailure,
     ) -> Result<bool> {
-        let _activity = crate::upgrade::activity_unless_draining("harness readiness failure")?;
-        if self.harness_timeout_record(&session_id).as_deref()
-            != Some(timeout.observed_updated_at.as_str())
+        let _activity = crate::upgrade::activity_unless_draining("harness failure record")?;
+        if self.harness_failure_record(&session_id).as_deref()
+            != Some(failure.observed_updated_at.as_str())
         {
             return Ok(false);
         }
-        let cause = timeout.cause();
-        let observed_updated_at = timeout.observed_updated_at.clone();
-        tracing::warn!(%session_id, waited_seconds = timeout.waited.as_secs(), "{cause}");
+        let cause = failure.cause();
+        let observed_updated_at = failure.observed_updated_at.clone();
+        tracing::warn!(%session_id, "{cause}");
         let applied = blocking({
             let session_id = session_id.clone();
             let cause = cause.clone();

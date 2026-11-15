@@ -198,7 +198,7 @@ fn query_workspaces(
           {filter}
           GROUP BY w.workspace_id, s.harness_kind, s.state
          HAVING w.workspace_id != 'default' OR count(s.session_id) > 0
-          ORDER BY w.last_opened_at DESC, w.created_at DESC, w.workspace_id"
+          ORDER BY w.name_key, w.workspace_id"
     ))?;
     let rows = statement.query_map(parameters, |row| {
         Ok(WorkspaceRecord {

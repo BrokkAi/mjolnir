@@ -257,6 +257,89 @@ Results (`results/stage3/`):
   + 2× Terra (9.0 for 3× Terra, 11.3 for Sol/high + 2× Terra). Only 12
   Hard-won diffs have a matching group, so these differences are small.
 
+## Stage 4 result: xhigh, Greptile and non-GPT reviewers (verified by Opus/high)
+
+Jonathan asked to compare Greptile's Base and Plus tiers, higher efforts, and
+reviewers other than GPT models, and to find the best combination of up to
+three that is not too slow or expensive.
+
+Method:
+
+- New sessions on all 70 diffs:
+  - Terra/xhigh and Sol/xhigh, 2 each (arms H and K; the first J jobs also
+    carried 2 DSF/low reviewers).
+  - Ember/xhigh, Gemini 4 Hydrogen/high and Kimi K3.1 Pro/high, 1 each (arm L).
+    Muse's highest effort is xhigh.
+  - Greptile Base and Plus, 1 each, through `greptile_driver.py`.
+- **Greptile** runs through its CLI (`greptile review --branch <base> --json`,
+  plus `--plus`) on a named branch at each diff's commit. Notes:
+  - Greptile allows one review per commit at a time and cancels the older one,
+    so a diff's tiers run one after another.
+  - About 50 dispatches in a few minutes got HTTP 403 for a while. Runs that
+    were already dispatched are fetched with `greptile review show` rather than
+    paid for again; runs that Greptile cancelled or failed are dispatched again.
+  - Latency comes from Greptile's own `createdAt` and `completedAt`, within
+    1.5 s of the CLI's wall time. Cost is the list price, $1 (Base) or $3 (Plus).
+  - Its context cannot be pinned to the diff's commit, and an org default rule
+    reads today's AGENTS.md. Any leak can only help Greptile.
+- **Dropped:**
+  - DSF/high (4 to 7 minutes per review; kept in `runs-dsf-high/`).
+  - DSF/low, which was no faster (126 to 561 s) and handed back in 12 of 35
+    runs.
+  - GLM 5.3 and GLM 5.3 Flash (about 450 s each, and Z.ai rate-limited 12
+    concurrent sessions; kept in `runs-glm/`).
+  - DeepSeek on DSH ends its turn with its findings instead of calling
+    handback, which leaves mj's review incomplete. The driver scores a final
+    message when there is no handback and records `handback: false`.
+- `verify5` pooled every session of this study (1,236 sessions, 1,928 findings)
+  in one blind pass and gave 415 problem groups: 288 confirmed, 36 plausible,
+  91 rejected. `build_verify.py --arms` keeps out arms OT, OS, BT and BS, which
+  belong to another experiment in the same data directory: their reviewers get
+  extra static-analysis context.
+- Audit (`results/stage4/audit-review.md`): no later-history leak. One rule
+  violation: an Ember session compiled and ran two scratch programs with
+  `rustc`.
+
+Per reviewer (`results/stage4/per-reviewer.md`):
+
+| Reviewer | Median latency (s) | Confirmed per diff | Medium or high | Rejected | Est. cost ($) | Handed back |
+|---|---:|---:|---:|---:|---:|---:|
+| Greptile Plus | 266 | 2.34 | 1.33 | 15% | 3.00 | n/a |
+| Terra/xhigh | 84 | 2.15 | 1.31 | 15% | 0.093 | 100% |
+| Sol/xhigh | 214 | 1.77 | 1.27 | 2% | 0.330 | 100% |
+| Greptile Base | 147 | 1.64 | 0.93 | 8% | 1.00 | n/a |
+| Terra/high | 43 | 1.24 | 0.81 | 15% | 0.044 | 100% |
+| Sol/high | 91 | 1.14 | 0.90 | 3% | 0.168 | 100% |
+| Gemini/high | 200 | 1.04 | 0.71 | 2% | unpriced | 69/70 |
+| Kimi/high | 340 | 0.93 | 0.66 | 10% | unpriced | 63/70 |
+| Sol/medium | 46 | 0.69 | 0.55 | 1% | 0.100 | 100% |
+| Ember/xhigh | 292 | 0.41 | 0.29 | 11% | unpriced | 100% |
+
+Frontier on confirmed problems (`results/stage4/pareto.md`; caps of 1 or 2
+sessions for the new configurations):
+
+| Reviewers | Median latency (s) | Confirmed (70 diffs) | Est. cost per diff ($) | Frontier share |
+|---|---:|---:|---:|---:|
+| 3× Terra/high | 52 | 118 | 0.131 | 1.00 |
+| Terra/xhigh | 84 | 150.5 | 0.093 | 0.36 |
+| Terra/high + 2× Terra/xhigh | 94 | 188.3 | 0.230 | 0.94 |
+| Sol/high + 2× Terra/xhigh | 103 | 191 | 0.353 | 0.81 |
+| Greptile Base + 2× Terra/xhigh | 151 | 213 | 1.186 | 1.00 |
+| Greptile Plus + 2× Terra/xhigh | 266 | 236 | 3.186 | 1.00 |
+
+On medium and high severity only, Sol/medium + 2× Terra/xhigh (93 s, 105) and
+Sol/xhigh + 2× Terra/xhigh (212 s, 120) join the frontier.
+
+- 2× Terra/xhigh finds 181 confirmed against 3× Terra/high's 118 (+63, 95%
+  +43 to +84) in 93 s, and beats Greptile Plus alone (164).
+- A third reviewer added to 2× Terra/xhigh (`results/stage4/third-reviewer.txt`):
+  Greptile Plus +55, Sol/xhigh +30.5, Gemini +21 (+11 to +33; +12 medium or
+  high), Kimi +15, Sol/high +10, Terra/high +7, Ember +5. Gemini is the best
+  non-GPT addition but takes 200 s.
+- Known bugs (`results/stage4/knownbug.txt`): out of 30, Greptile Plus alone
+  catches 12, Terra/xhigh 9, 2× Terra/xhigh 10, and adding Gemini, Sol/high,
+  Sol/xhigh or Greptile Base to 2× Terra/xhigh gives 11.
+
 ## Missing-fact labels (for a static-analysis hypothesis)
 
 Jonathan asked, on 2026-11-14, for the one fact each defect's reviewer needed
@@ -521,4 +604,22 @@ python3 pareto.py verify3 --sessions Sol/medium=2 [--severities high,medium]
 python3 compare.py verify3 Sol/high+Terra/high Sol/medium+Terra/high Terra/high+Terra/high
 python3 consistency.py verify2 verify3
 python3 knownbug.py verify3 results/known-bug.jsonl --groups-from verify2
+```
+
+Stage 4 (new configurations, Greptile, all verified together). Configure the
+Greptile key in `~/.secrets/greptile_api_key`, and a dsh-review profile whose
+home holds no instructions (see `instance-config.toml` notes above):
+
+```sh
+python3 driver.py --jobs jobs.json --concurrency 10     # arms H, K, L (I, J: DSF/low, dropped)
+python3 greptile_driver.py --jobs greptile-jobs.json --concurrency 3   # [{"bug": .., "tier": "base"|"plus"}]
+python3 audit.py runs/<diff>/<arm> ...
+python3 build_verify.py verify5 --arms A,B,D,D2,E,G-base,G-plus,H,J,K,L,I --ready-jobs all-jobs.json  # every job of those arms
+python3 verify_driver.py verify5 --concurrency 7
+python3 score.py verify5
+python3 pareto.py verify5 --exclude DSF/low --bootstrap 300 \
+  --sessions Sol/medium=2,Terra/xhigh=2,Sol/xhigh=2,Greptile/base=1,Greptile/plus=1,Ember/xhigh=1,Gemini/high=1,Kimi/high=1
+python3 compare.py verify5 Terra/xhigh+Terra/xhigh Terra/xhigh+Terra/xhigh+Gemini/high
+python3 knownbug.py verify5 results/known-bug.jsonl --groups-from verify2 --exclude DSF/low
+uv run --with matplotlib python3 plot_pareto.py <out-dir> [--no-greptile-combos]  # latency vs. findings, both frontiers + Greptile
 ```

@@ -445,6 +445,7 @@ impl DashboardContext {
         self.dashboard.set_launch_recency(update.launch_recency);
         self.dashboard
             .set_session_attention(update.session_attention);
+        self.dashboard.set_form_holders(update.form_holders);
         self.dashboard.set_unread_frontiers(update.unread_frontiers);
         self.dashboard
             .set_notification_dismissals(update.notification_dismissals);
