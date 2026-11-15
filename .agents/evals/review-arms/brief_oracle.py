@@ -6,7 +6,10 @@ Usage:
    result as briefs/oracle-work/workflow-out.json)
   python3 brief_oracle.py collect   # checks; writes briefs/oracle-work/factcheck.jsonl
   (read factcheck.jsonl and write briefs/oracle-work/factcheck-decisions.json:
-   {diff: {"decision": "carries" | "does not carry: <reason>", "brief_sha256": <from factcheck.jsonl>}}
+   {diff: {"decision": "carries" | "does not carry: <reason>", "brief_sha256": <from factcheck.jsonl>,
+           "item": <the published brief's item that carries the fact, quoted exactly>,
+           "version": "edit" to publish the editor's brief instead of a leak rewrite that removed
+                      the decisive relation (then brief_sha256 is edit_brief_sha256)}}
    for every primary and secondary diff; a decision counts only for the brief whose hash it names)
   python3 brief_oracle.py collect   # again: publishes briefs/oracle/<diff>/brief.md
 
@@ -96,23 +99,32 @@ def collect():
         blind = ROOT / "briefs/blind" / bug / "brief.md"
         # A control brief that needed no rewrite comes back as null: it is the blind brief.
         final = (r["final_brief"] or blind.read_text()).rstrip() + "\n"
+        edited = ((r.get("edit") or {}).get("oracle_brief") or "").rstrip() + "\n"
+        decision = decisions.get(bug)
+        if decision and decision.get("version") == "edit":
+            # The hand check found that a leak rewrite removed the decisive relation (PLAN:
+            # a neutral relation still judged partial is kept), so the editor's brief is used.
+            final = edited
         inserted = [(r.get("edit") or {}).get("inserted_item")] if r["group"] == "S" else []
         problems = brief_driver.lint(final, driver.CORPUS[bug], in_diff_items=inserted)
         if r["group"] in "PS":
-            item = carrier_item(r)
             norm = lambda t: " ".join((t or "").removeprefix("- ").split())
-            if not item or norm(item) not in norm(final):
-                problems.append(f"the item carrying the decisive fact is not in the final brief: {item!r}")
             item_file = json.loads((W / f"item-{bug}.json").read_text())
             digest = hashlib.sha256(final.encode()).hexdigest()
             factcheck.append({"id": bug, "group": r["group"], "census_fact": item_file["census"]["fact"],
-                              "contains": r["edit"]["contains"], "carrier_item": item,
-                              "rewritten": len(r["leak"]) > 1, "brief_sha256": digest, "final_brief": final})
-            decision = decisions.get(bug)
+                              "contains": r["edit"]["contains"], "carrier_item": carrier_item(r),
+                              "rewritten": len(r["leak"]) > 1, "brief_sha256": digest, "final_brief": final,
+                              "edit_brief_sha256": hashlib.sha256(edited.encode()).hexdigest()})
             if decision is None or decision.get("brief_sha256") != digest:
                 undecided.append(bug)  # never checked, or checked against a different brief
             elif decision["decision"] != "carries":
                 problems.append(f"hand check: {decision['decision']}")
+            else:
+                # The checker quotes the final brief's carrying item (a leak rewrite rewords the
+                # editor's item); without a quote, the editor's item must still be there verbatim.
+                item = decision.get("item") or carrier_item(r)
+                if not item or norm(item) not in norm(final):
+                    problems.append(f"the item carrying the decisive fact is not in the final brief: {item!r}")
         save(d / "oracle.json", {**r, "lint": problems})
         rows.append({"id": bug, "group": r["group"], "contains": (r.get("edit") or {}).get("contains"),
                      "leak_first": r["leak"][0]["label"], "leak_final": r["leak"][-1]["label"],
