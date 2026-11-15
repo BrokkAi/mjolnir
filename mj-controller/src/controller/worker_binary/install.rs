@@ -1037,13 +1037,18 @@ pub(super) fn install_worker_profile_files(
                 ],
                 vec!["rm".into(), "-rf".into(), "--".into(), upload.clone()],
             ]);
-            for args in remote {
-                execute_checked(
-                    executor,
-                    crate::targets::ssh_command_owned(ssh, targets::with_engine_argv(args))
-                        .purpose("install remote container worker"),
-                )?;
-            }
+            // Staging removal stays a final success-only step, as before.
+            let steps = remote.into_iter().map(|args| {
+                targets::CommandStep::new(
+                    "install remote container worker",
+                    targets::with_engine_argv(args),
+                )
+            });
+            execute_checked(
+                executor,
+                crate::targets::ssh_command_owned(ssh, targets::step_script(steps))
+                    .purpose("install remote container worker"),
+            )?;
         }
     }
     Ok(())
