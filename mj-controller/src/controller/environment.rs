@@ -1041,8 +1041,13 @@ fn retained_container_checkout_available(
         return Ok(true);
     }
     let record = &controller.state.sessions[session_id];
-    let workspace = PathBuf::from(resume_checkout_directory(controller, session_id, backend)?);
-    let direct = match backend {
+    let workspace = PathBuf::from(super::network_git::workspace_root(
+        backend,
+        record.container_workspace.as_deref(),
+    ));
+    let checkouts = resume_checkout_directories(controller, session_id, backend)?;
+    let mut paths = std::collections::BTreeSet::new();
+    match backend {
         targets::TargetLocator::LocalPodman {
             workspace_storage: targets::PodmanWorkspaceLocator::HostPath { path, .. },
             ..
@@ -1050,24 +1055,21 @@ fn retained_container_checkout_available(
         | targets::TargetLocator::SshPodman {
             workspace_storage: targets::PodmanWorkspaceLocator::HostPath { path, .. },
             ..
-        } => Some(PathBuf::from(path)),
-        _ => None,
-    };
-    let attachment = mj_core::state::applied_container_settings(record)
-        .additional_mounts
-        .iter()
-        .filter(|mount| workspace.starts_with(&mount.destination))
-        .max_by_key(|mount| mount.destination.components().count())
-        .map(|mount| {
-            mount.source.join(
-                workspace
-                    .strip_prefix(&mount.destination)
-                    .expect("matching mount"),
-            )
-        });
-    let Some(path) = direct.or(attachment) else {
-        return Ok(false);
-    };
+        } => {
+            paths.insert(PathBuf::from(path));
+        }
+        _ => {}
+    }
+    for mount in mj_core::state::applied_container_settings(record).additional_mounts {
+        for directory in checkouts.iter().chain(std::iter::once(&workspace)) {
+            if let Ok(relative) = directory.strip_prefix(&mount.destination) {
+                paths.insert(mount.source.join(relative));
+            }
+        }
+        if mount.destination.starts_with(&workspace) {
+            paths.insert(mount.source.clone());
+        }
+    }
     let host = match backend {
         targets::TargetLocator::SshPodman { ssh, .. }
         | targets::TargetLocator::SshDocker { ssh, .. }
@@ -1078,10 +1080,24 @@ fn retained_container_checkout_available(
             worker_id: None,
         },
         _ => targets::TargetLocator::LocalBare {
-            worker_root: path.to_string_lossy().into_owned(),
+            worker_root: String::new(),
         },
     };
-    directory_available(&host, &path.to_string_lossy(), executor)
+    let mut present = false;
+    let mut unknown = None;
+    for path in paths {
+        match directory_available(&host, &path.to_string_lossy(), executor) {
+            Ok(found) => present |= found,
+            Err(error) => unknown = Some(error),
+        }
+    }
+    if present {
+        Ok(true)
+    } else if let Some(error) = unknown {
+        Err(error)
+    } else {
+        Ok(false)
+    }
 }
 
 pub(super) fn resume_checkout_available(

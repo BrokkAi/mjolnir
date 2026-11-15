@@ -391,12 +391,6 @@ impl DurableRelay {
         session_id: &str,
         command_id: &str,
     ) -> Result<()> {
-        if !root.join(RELAY_STATE_FILE).try_exists()?
-            && !root.join(RELAY_JOURNAL_DIR).try_exists()?
-        {
-            // Fresh recovery seeds already carry their queue restore policy.
-            return Ok(());
-        }
         let mut relay = Self::open_with_harness(
             root.to_path_buf(),
             session_id.to_owned(),

@@ -2,6 +2,7 @@
 use super::*;
 use crate::controller::worker_binary::{WorkerInstall, prepare_managed_harness_for_upgrade};
 use crate::controller::worker_restart::{InstalledWorkerRestart, WorkerRestartMessages};
+use sha2::Digest;
 
 /// Installation is a completed action under the lifecycle owner, not another
 /// platform/build probe against a second snapshot of the same target.
@@ -146,7 +147,7 @@ impl Controller {
             {
                 crate::database::finish_worker_restart(session_id, &intent.operation_id)?;
             }
-            let notice = self.finish_parent_recovery_notice(session_id, &backend, &root, executor, &mut relay).await?;
+            let notice = self.finish_parent_recovery_notice(session_id, &backend, &root, discard_queue, executor, &mut relay).await?;
             Ok(if notice { relay.sync().await?.materialized } else { snapshot.materialized })
         }
         .await;
@@ -346,6 +347,7 @@ impl Controller {
         session_id: &str,
         backend: &targets::TargetLocator,
         root: &str,
+        discard_queue: bool,
         executor: &impl CommandExecutor,
         relay: &mut crate::session_manager::StandaloneSession,
     ) -> Result<bool> {
@@ -364,29 +366,94 @@ impl Controller {
                 "checkout-partial" => ("resume-checkout-recovery.json", "resume-checkout-recovery"),
                 _ => return Ok(recorded),
             };
-            let checkpoint = self.state.sessions[session_id]
-                .checkpoint
-                .as_ref()
-                .context("recovery copy disappeared")?;
-            let text = if kind == "partial" {
-                format!(
-                    "Native history was restored from the recovery copy taken at {} where it was missing; files are current, existing native files and live children were kept.",
-                    checkpoint.created_at
-                )
+            let checkpoint = self.state.sessions[session_id].checkpoint.as_ref();
+            let seed = if kind == "partial" {
+                let output = execute_checked(
+                    executor,
+                    targets::command_on_locator(
+                        backend,
+                        session_id,
+                        vec![
+                            "cat".into(),
+                            format!("{root}/resume-parent-current-seed.json"),
+                        ],
+                        "read completed parent recovery queue",
+                    )?,
+                )?;
+                let seed: mj_core::relay::RestoredRelaySeed =
+                    serde_json::from_slice(&output.stdout)?;
+                for prompt in seed.queued_prompts.iter().filter(|_| !discard_queue) {
+                    if !matches!(&prompt.kind, CanonicalQueuedCommandKind::Prompt) {
+                        continue;
+                    }
+                    let blocks = prompt
+                        .content
+                        .iter()
+                        .cloned()
+                        .map(serde_json::from_value)
+                        .collect::<serde_json::Result<Vec<ContentBlock>>>()?;
+                    let mut missing = false;
+                    for reference in mj_core::attachment::references(&blocks)? {
+                        if !relay.attachment_present(&reference).await? {
+                            missing = true;
+                            break;
+                        }
+                    }
+                    if missing {
+                        let text = format!(
+                            "Queued prompt {} could not recover its image attachments. Re-send this prompt with its images; its content and references remain in the transcript.",
+                            prompt.command_id
+                        );
+                        executor.notify_notice(&text);
+                        relay
+                            .submit(
+                                format!(
+                                    "resume-missing-image-{}",
+                                    mj_core::hex::lower_hex(sha2::Sha256::digest(
+                                        prompt.command_id.as_bytes()
+                                    ))
+                                ),
+                                RelayCommand::RecordNotice { text },
+                            )
+                            .await?;
+                    }
+                }
+                Some(seed)
             } else {
+                None
+            };
+            let text = if kind == "partial" {
+                if let Some(checkpoint) = checkpoint {
+                    format!(
+                        "Native history was restored from the recovery copy taken at {} where it was missing; files are current, existing native files and live children were kept.",
+                        checkpoint.created_at
+                    )
+                } else {
+                    "The missing parent runtime was rebuilt from durable state; native history, current files and live children were kept.".to_owned()
+                }
+            } else {
+                let checkpoint = checkpoint.context("recovery copy disappeared")?;
                 format!(
                     "Checkout recovery completed using the recovery copy taken at {}; any current files and parent history were kept.",
                     checkpoint.created_at
                 )
             };
+            let notice_id = if let Some(checkpoint) = checkpoint {
+                format!("{prefix}-{}", checkpoint.sha256)
+            } else {
+                format!(
+                    "resume-parent-store-{}",
+                    seed.as_ref()
+                        .context("parent recovery queue disappeared")?
+                        .event_frontier_digest
+                )
+            };
             executor.notify_notice(&text);
             relay
-                .submit(
-                    format!("{prefix}-{}", checkpoint.sha256),
-                    RelayCommand::RecordNotice { text },
-                )
+                .submit(notice_id, RelayCommand::RecordNotice { text })
                 .await?;
             if kind == "checkout-partial" {
+                let checkpoint = checkpoint.context("recovery copy disappeared")?;
                 let output = execute_checked(
                     executor,
                     targets::command_on_locator(
@@ -913,7 +980,7 @@ impl Controller {
             .config
             .named_profile(&self.state.sessions[session_id].last_profile)?;
         let spec = CheckpointRestoreSpec {
-            archive_path: PathBuf::new(),
+            archive_path: path(&root).join("resume-parent-recovery.hel.zip"),
             workspace_root: path(&workspace),
             report_root: None,
             relay_root: path(&root),
@@ -934,8 +1001,8 @@ impl Controller {
         let local_seed = staging.path().join("parent-store-seed.json");
         std::fs::write(&local_spec, serde_json::to_vec(&spec)?)?;
         std::fs::write(&local_seed, serde_json::to_vec(&seed)?)?;
-        let remote_spec = format!("{root}/resume-parent-store-spec.json");
-        let remote_seed = format!("{root}/resume-parent-store-seed.json");
+        let remote_spec = format!("{root}/resume-parent-recovery.json");
+        let remote_seed = format!("{root}/resume-parent-current-seed.json");
         super::super::checkpoint::upload_checkpoint_spec(
             executor,
             &backend,
@@ -969,14 +1036,12 @@ impl Controller {
             )?,
         )?;
         executor.end_resumable_work("start reconstructed parent runtime")?;
-        let materialized = Box::pin(self.repair_existing_environment(
+        Box::pin(self.repair_existing_environment(
             session_id,
             RetainedWorker::Installed,
             discard_queue,
             executor,
         ))
-        .await?;
-        executor.notify_notice("The missing parent runtime was rebuilt from durable state; native history, current files and live children were kept.");
-        Ok(materialized)
+        .await
     }
 }

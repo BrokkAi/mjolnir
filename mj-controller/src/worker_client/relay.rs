@@ -735,20 +735,28 @@ impl RelayClient {
         )
     }
 
-    /// Copy a verified controller blob to this session before admitting its reference.
-    pub async fn ensure_attachment(
+    pub async fn attachment_present(
         &mut self,
         reference: &mj_core::attachment::AttachmentRef,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         match self
             .call(RelayRequest::AttachmentPresent {
                 reference: reference.clone(),
             })
             .await?
         {
-            RelayResponsePayload::AttachmentPresent { present: true } => return Ok(()),
-            RelayResponsePayload::AttachmentPresent { present: false } => {}
+            RelayResponsePayload::AttachmentPresent { present } => Ok(present),
             _ => bail!("unexpected image presence response"),
+        }
+    }
+
+    /// Copy a verified controller blob to this session before admitting its reference.
+    pub async fn ensure_attachment(
+        &mut self,
+        reference: &mj_core::attachment::AttachmentRef,
+    ) -> Result<()> {
+        if self.attachment_present(reference).await? {
+            return Ok(());
         }
         let store = mj_core::attachment::AttachmentStore::controller(&self.session_id)?;
         let reference_copy = reference.clone();

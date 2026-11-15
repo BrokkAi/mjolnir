@@ -6,6 +6,7 @@ Uses the container-upgrade lab's deterministic ACP fixture. Build mj with
 All daemon operations use --instance and private configuration/data directories.
 """
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -14,6 +15,7 @@ import signal
 from pathlib import Path
 import sqlite3
 import subprocess
+import urllib.request
 
 import container_upgrades
 from container_upgrades import Regression, WAIT
@@ -37,7 +39,7 @@ class ResumeRegression(Regression):
         return self.podman("exec", "-i", target["container_id"], "/usr/bin/python3", "-",
                            "/var/lib/hel/workers/" + session, *arguments, input=script)
 
-    def lose_bare_parent_root(self, parent, root, child_pid):
+    def lose_bare_parent_root(self, parent, root, child_pid, preserve_home=None):
         # Stop exactly the private parent's worker/supervisor/harness groups
         # before deleting its runtime. The child's group is independent.
         groups = set()
@@ -61,7 +63,14 @@ class ResumeRegression(Regression):
             except ProcessLookupError:
                 pass
         self.wait(lambda: not any(process_is_running(pid) for pid in selected), "bare parent process groups stopped")
+        saved = root.with_name(root.name + "-saved-native-home")
+        retained = preserve_home is not None and preserve_home.is_relative_to(root)
+        if retained:
+            preserve_home.rename(saved)
         shutil.rmtree(root)
+        if retained:
+            preserve_home.parent.mkdir(parents=True)
+            saved.rename(preserve_home)
 
     def wait_recovery_notice(self, parent, copy_time):
         def visible():
@@ -166,6 +175,47 @@ with socket.socket(socket.AF_UNIX) as connection:
         assert self.worker_status(parent)["state"]["native_session_id"] == native
         assert self.working(child)["command_id"] == active["command_id"]
         self.wait_recovery_notice(parent, copy_time)
+        # Hard-won: 9266254: store-only recovery must identify queued images
+        # whose worker blobs disappeared, while retaining their transcript refs.
+        self.prompt(parent, "hold before queued image runtime loss")
+        image = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+        upload = urllib.request.Request(
+            self.base_url + f"/api/sessions/{parent}/attachments", data=image,
+            method="POST", headers={"Content-Type": "image/png"})
+        with self.http.open(upload, timeout=WAIT) as response:
+            reference = json.load(response)["attachment"]
+        uri = "mj-attachment:" + base64.urlsafe_b64encode(
+            json.dumps(reference, separators=(",", ":")).encode()).decode().rstrip("=")
+        queued = "resume-missing-image-queued-prompt"
+        blocks = [{"type": "text", "text": "queued image after the recovery copy"},
+                  {"type": "image", "data": "", "mimeType": reference["mime_type"], "uri": uri}]
+        self.daemon_request({"action": "submit_session_command", "arguments": {
+            "session_id": parent, "command_id": queued,
+            "command": {"type": "prompt", "data": {"prompt": blocks}},
+        }}, timeout=WAIT)
+        self.wait(lambda: any(item["command_id"] == queued for item in self.worker_status(parent)["state"]["queued_prompts"]), "image queued before runtime loss")
+        blob = self.data / "sessions" / parent / "attachments" / reference["sha256"]
+        blob_bytes = blob.read_bytes()
+        native_home = Path(json.loads((root / "launch.json").read_text())["environment"]["CODEX_HOME"])
+        (native_home / "resume-native-sentinel").write_text("retained native state without archive")
+        self.cli("daemon", "stop")
+        # Hard-won: 337bc5e: store-only recovery must pass real worker path validation.
+        self.lose_bare_parent_root(parent, root, child_pid, preserve_home=native_home)
+        with sqlite3.connect(self.data / "mj.sqlite3") as database:
+            database.execute("DELETE FROM session_checkpoints WHERE session_id=?", (parent,))
+            database.execute("UPDATE sessions SET state='error',last_error='injected relay loss with retained native history' WHERE session_id=?", (parent,))
+        self.cli("resume", "--session", parent)
+        self.authenticate()
+        def image_notice():
+            status, conversation = self.request("GET", f"/api/conversations/{parent}", timeout=WAIT)
+            text = json.dumps(conversation)
+            return status == 200 and queued in text and "Re-send this prompt with its images" in text
+        self.wait(image_notice, "durable queued-image recovery guidance")
+        assert blob.read_bytes() == blob_bytes
+        assert (native_home / "resume-native-sentinel").read_text() == "retained native state without archive"
+        assert (checkout / "resume-worktree-sentinel").read_text() == "newer work"
+        assert (child_root / "worker.pid").read_text() == child_pid
+        assert self.working(child)["command_id"] == active["command_id"]
         self.finish_child_turn(child, active, self.runtime_root / "bare-child-prompt.txt")
         return parent, child
 
@@ -220,7 +270,7 @@ with socket.socket(socket.AF_UNIX) as connection:
         directory.mkdir()
         status, response = self.request("POST", "/api/actions", {
             "action": "new", "workspace_id": workspace, "profile_id": "fake",
-            "bundle_id": "fixture", "target_id": "podman-bind", "title": "resume-bound",
+            "bundle_id": "multiple", "target_id": "podman-bind", "title": "resume-bound",
             "additional_mounts": [
                 {"source": str(self.runtime_root), "destination": str(self.runtime_root), "access": "rw"},
                 {"source": str(directory), "destination": "/workspace", "access": "rw"}],
@@ -237,18 +287,25 @@ with socket.socket(socket.AF_UNIX) as connection:
         checkout = directory / Path(self.record(parent)["container_workspace"]).relative_to("/workspace") / "fixture"
         readme = checkout / "README.md"
         assert readme.is_file()
-        readme.write_text("newer tracked work after checkpoint")
-        index = self.git_output(["ls-files", "--stage"], checkout)
+        archived_primary = readme.read_text()
+        secondary = checkout.parent / "second"
+        (secondary / "README.md").write_text("newer secondary work after checkpoint")
+        index = self.git_output(["ls-files", "--stage"], secondary)
         container = self.container(parent)
         self.cli("daemon", "stop")
         self.podman("container", "rm", "--force", container)
+        # Only the secondary checkout survives; its mount still owns current work.
+        shutil.rmtree(checkout)
+        shutil.rmtree(checkout.parent / "current")
         with sqlite3.connect(self.data / "mj.sqlite3") as database:
             database.execute("UPDATE sessions SET state='error' WHERE session_id=?", (parent,))
         self.cli("resume", "--session", parent)
         self.authenticate()
         self.wait(lambda: self.record(parent)["state"] == "running", "container recovered around bound checkout")
-        assert readme.read_text() == "newer tracked work after checkpoint"
-        assert self.git_output(["ls-files", "--stage"], checkout) == index
+        assert readme.read_text() == archived_primary
+        assert (secondary / "README.md").read_text() == "newer secondary work after checkpoint"
+        assert self.git_output(["ls-files", "--stage"], secondary) == index
+        assert (checkout.parent / "current/.git").is_dir()
         self.wait_recovery_notice(parent, copy_time)
         return parent
 
@@ -288,7 +345,7 @@ else:
                     script, parent, "restore" if restore else "break")
 
     # Hard-won: 94d7 resume: Resume of a failed session deleted a container its live sub-agents used and restored older work
-    def run_regression(self):
+    def prepare_resume_fixture(self):
         self.prepare_container_fixture()
         bridge = self.runtime_root / "fake_acp.py"
         options = [{"id": "model", "name": "Model", "category": "model", "type": "select",
@@ -298,6 +355,8 @@ else:
         script = bridge.read_text().replace(
             '            "sessionId": session_id,\n            "modes":',
             '            "sessionId": session_id,\n            "configOptions": ' + repr(options) + ',\n            "modes":')
+        script = script.replace('            "protocolVersion": 1,',
+            '            "protocolVersion": 1,\n            "agentCapabilities": {"promptCapabilities": {"image": True}},')
         script = script.replace('    elif method == "session/set_mode":',
             '    elif method == "session/set_config_option":\n        result = {"configOptions": ' + repr(options) + '}\n    elif method == "session/set_mode":')
         script = script.replace('def wait_for_prompt_cancel():\n',
@@ -319,7 +378,10 @@ else:
         config.write_text(config.read_text() + '\n[targets.podman-bind]\nkind = "podman"\nworkspace_storage = { kind = "container-layer" }\nimage = ' + json.dumps(self.args.image) + '\npull_policy = "never"\n')
         self.cli("workspaces", "create", "Resume shared environment")
         self.authenticate()
-        workspace = self.snapshot()["workspaces"][0]["id"]
+        return self.snapshot()["workspaces"][0]["id"]
+
+    def run_regression(self):
+        workspace = self.prepare_resume_fixture()
         # The fixture and release markers must be visible in both worker roots.
         mounts = [{"source": str(self.runtime_root), "destination": str(self.runtime_root), "access": "rw"}]
         status, response = self.request("POST", "/api/actions", {
@@ -466,13 +528,19 @@ def main():
     parser.add_argument("--worker", type=Path, required=True)
     parser.add_argument("--image", default="ghcr.io/brokkai/mjolnir/agent-dev:latest")
     parser.add_argument("--instance", required=True)
+    parser.add_argument("--bare-only", action="store_true", help="rerun the bare-runtime recovery regression")
     args = parser.parse_args()
     if args.instance == "default":
         parser.error("use a separate named test instance")
     container_upgrades.OLD_IMAGE = args.image
     regression = ResumeRegression(args)
     try:
-        regression.run_regression()
+        if args.bare_only:
+            parent, child = regression.bare_regression(regression.prepare_resume_fixture())
+            print(json.dumps({"result": "passed", "scenario": "bare-runtime", "instance": args.instance,
+                              "parent": parent, "child": child, "artifacts": str(regression.root)}), flush=True)
+        else:
+            regression.run_regression()
     except Exception:
         # Capture only platform facts, never engine environment/credentials.
         diagnostics = []
@@ -489,7 +557,14 @@ def main():
         (regression.root / "failure-platform.json").write_text(json.dumps(diagnostics, indent=2))
         raise
     finally:
-        regression.cleanup()
+        if args.bare_only:
+            # This selection creates no containers or volumes to remove.
+            try:
+                regression.cli("daemon", "stop", check=False)
+            finally:
+                regression.cleanup_owned()
+        else:
+            regression.cleanup()
 
 
 if __name__ == "__main__":
