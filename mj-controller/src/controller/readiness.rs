@@ -74,10 +74,18 @@ impl std::fmt::Display for HarnessPreparationFailure {
 impl std::error::Error for HarnessPreparationFailure {}
 
 pub(super) trait NativeSessionProbe {
+    fn protocol_version(&self) -> u32 {
+        mj_core::relay::RELAY_PROTOCOL_VERSION
+    }
+
     async fn native_session_readiness(&mut self) -> Result<NativeSessionReadiness>;
 }
 
 impl NativeSessionProbe for StandaloneSession {
+    fn protocol_version(&self) -> u32 {
+        StandaloneSession::protocol_version(self)
+    }
+
     async fn native_session_readiness(&mut self) -> Result<NativeSessionReadiness> {
         let snapshot = self.sync().await?;
         let operational = snapshot.operational;
@@ -117,6 +125,42 @@ pub(super) async fn wait_for_native_session(
         ProvisionStage::Installing(harness),
     )
     .await
+}
+
+enum LegacyStartupDeadline {
+    Unobserved,
+    Legacy(tokio::time::Instant),
+    Preparing,
+    Started(tokio::time::Instant),
+}
+
+impl LegacyStartupDeadline {
+    fn deadline(&self) -> Option<tokio::time::Instant> {
+        match self {
+            Self::Legacy(deadline) | Self::Started(deadline) => Some(*deadline),
+            Self::Unobserved | Self::Preparing => None,
+        }
+    }
+
+    fn observe(&mut self, readiness: &NativeSessionReadiness, now: tokio::time::Instant) {
+        match readiness {
+            NativeSessionReadiness::Preparing { .. } => *self = Self::Preparing,
+            NativeSessionReadiness::Started => {
+                if !matches!(self, Self::Started(_)) {
+                    *self = Self::Started(now + NATIVE_SESSION_STARTUP_TIMEOUT);
+                }
+            }
+            NativeSessionReadiness::Waiting
+                if matches!(self, Self::Unobserved | Self::Preparing) =>
+            {
+                *self = Self::Legacy(now + NATIVE_SESSION_STARTUP_TIMEOUT);
+            }
+            NativeSessionReadiness::Waiting
+            | NativeSessionReadiness::Ready(_)
+            | NativeSessionReadiness::PreparationFailed { .. }
+            | NativeSessionReadiness::Closed => {}
+        }
+    }
 }
 
 struct NativeReadinessStage<'a, E: CommandExecutor> {
@@ -215,6 +259,11 @@ async fn wait_for_startup(
     fallback_stage: ProvisionStage,
     until_prepared: bool,
 ) -> Result<Option<String>> {
+    // Existing stalled workers cannot pass idle replacement admission. Keep
+    // their old clock until upgraded; current workers are the sole decider.
+    let mut deadline = (relay.protocol_version()
+        < mj_core::relay::RELAY_WORKER_STARTUP_DEADLINE_PROTOCOL)
+        .then_some(LegacyStartupDeadline::Unobserved);
     let mut stage = NativeReadinessStage::new(executor, harness, fallback_stage);
     loop {
         if executor.cancellation_requested() {
@@ -225,7 +274,22 @@ async fn wait_for_startup(
             tokio::pin!(readiness);
             loop {
                 let now = tokio::time::Instant::now();
-                let cancellation_poll = now + CANCELLATION_POLL_INTERVAL;
+                if deadline
+                    .as_ref()
+                    .and_then(LegacyStartupDeadline::deadline)
+                    .is_some_and(|end| now >= end)
+                {
+                    bail!(
+                        "ACP runtime did not report session startup within {}s",
+                        NATIVE_SESSION_STARTUP_TIMEOUT.as_secs()
+                    );
+                }
+                let cancellation_poll = deadline
+                    .as_ref()
+                    .and_then(LegacyStartupDeadline::deadline)
+                    .map_or(now + CANCELLATION_POLL_INTERVAL, |end| {
+                        std::cmp::min(end, now + CANCELLATION_POLL_INTERVAL)
+                    });
                 tokio::select! {
                     readiness = &mut readiness => break readiness?,
                     _ = tokio::time::sleep_until(cancellation_poll) => {
@@ -238,6 +302,9 @@ async fn wait_for_startup(
         };
         if executor.cancellation_requested() {
             bail!("operation cancelled while waiting for ACP runtime startup");
+        }
+        if let Some(deadline) = &mut deadline {
+            deadline.observe(&readiness, tokio::time::Instant::now());
         }
         stage.observe(&readiness);
         match readiness {
@@ -264,7 +331,22 @@ async fn wait_for_startup(
             bail!("operation cancelled while waiting for ACP runtime startup");
         }
         let now = tokio::time::Instant::now();
-        let next_poll = now + std::time::Duration::from_millis(100);
+        if deadline
+            .as_ref()
+            .and_then(LegacyStartupDeadline::deadline)
+            .is_some_and(|end| now >= end)
+        {
+            bail!(
+                "ACP runtime did not report session startup within {}s",
+                NATIVE_SESSION_STARTUP_TIMEOUT.as_secs()
+            );
+        }
+        let next_poll = deadline
+            .as_ref()
+            .and_then(LegacyStartupDeadline::deadline)
+            .map_or(now + std::time::Duration::from_millis(100), |end| {
+                std::cmp::min(end, now + std::time::Duration::from_millis(100))
+            });
         loop {
             let now = tokio::time::Instant::now();
             if now >= next_poll {
@@ -985,17 +1067,21 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn legacy_native_session_wait_has_no_competing_deadline() {
+    async fn legacy_native_session_wait_keeps_its_deadline_until_worker_upgrade() {
         struct LegacyWaitingProbe;
 
         impl NativeSessionProbe for LegacyWaitingProbe {
+            fn protocol_version(&self) -> u32 {
+                mj_core::relay::RELAY_WORKER_STARTUP_DEADLINE_PROTOCOL - 1
+            }
+
             async fn native_session_readiness(&mut self) -> Result<NativeSessionReadiness> {
                 Ok(NativeSessionReadiness::Waiting)
             }
         }
 
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let executor = CancellableProcessExecutor::new(cancelled.clone());
+        let executor = CancellableProcessExecutor::new(cancelled);
         let wait = tokio::spawn(async move {
             wait_for_native_session(&mut LegacyWaitingProbe, &executor, HarnessKind::Codex).await
         });
@@ -1005,15 +1091,12 @@ mod tests {
         assert!(!wait.is_finished());
         tokio::time::advance(Duration::from_secs(2)).await;
         tokio::task::yield_now().await;
-        assert!(!wait.is_finished());
-        cancelled.store(true, std::sync::atomic::Ordering::Release);
-        tokio::time::advance(Duration::from_millis(100)).await;
         assert!(
             wait.await
                 .unwrap()
                 .unwrap_err()
                 .to_string()
-                .contains("cancelled")
+                .contains("did not report session startup")
         );
     }
 

@@ -154,7 +154,10 @@ pub const RELAY_ATTENTION_PROTOCOL: u32 = 63;
 pub const RELAY_OPEN_REQUEST_PROTOCOL: u32 = 64;
 /// Structured lifecycle notices for sessions following a pull request.
 pub const RELAY_FOLLOWED_LIFECYCLE_PROTOCOL: u32 = 65;
-pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_FOLLOWED_LIFECYCLE_PROTOCOL;
+/// 66 gives harness startup expiry to the worker. Older workers require the
+/// daemon's legacy deadline; workers at this version have exactly one owner.
+pub const RELAY_WORKER_STARTUP_DEADLINE_PROTOCOL: u32 = 66;
+pub const RELAY_PROTOCOL_VERSION: u32 = RELAY_WORKER_STARTUP_DEADLINE_PROTOCOL;
 /// Connection-only worker CPU measurements.
 pub const RELAY_CPU_USAGE_PROTOCOL: u32 = 29;
 

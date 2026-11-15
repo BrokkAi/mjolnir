@@ -195,6 +195,60 @@ impl RuntimeState {
         }
     }
 
+    /// Capture durable/lifecycle ownership for reported harness failures.
+    /// Current workers decide expiry; only old protocols use the actor clock.
+    pub(super) fn harness_failure_record(&self, id: &str) -> Option<String> {
+        let owner = self.owner();
+        if owner
+            .lifecycle
+            .get(id)
+            .is_some_and(|active| active.is_running())
+            || owner.close_requested.contains(id)
+        {
+            return None;
+        }
+        let record = owner.controller().state.sessions.get(id)?;
+        (record.state == SessionState::Running).then(|| record.updated_at.clone())
+    }
+
+    /// Fail one session whose harness never became usable, so it stops looking
+    /// like a session a driver can wait for.
+    pub(super) async fn fail_unready_session(
+        &self,
+        session_id: String,
+        failure: crate::session_manager::HarnessStartupFailure,
+    ) -> Result<bool> {
+        let _activity = crate::upgrade::activity_unless_draining("harness failure record")?;
+        if self.harness_failure_record(&session_id).as_deref()
+            != Some(failure.observed_updated_at.as_str())
+        {
+            return Ok(false);
+        }
+        let cause = failure.cause();
+        let observed_updated_at = failure.observed_updated_at.clone();
+        tracing::warn!(%session_id, "{cause}");
+        let applied = blocking({
+            let session_id = session_id.clone();
+            let cause = cause.clone();
+            let activity = _activity.clone();
+            move || {
+                let _activity = activity;
+                let mut controller = Controller::load()?;
+                controller.fail_unready_session(&session_id, &cause, &observed_updated_at)
+            }
+        })
+        .await;
+        let applied = applied?;
+        if applied {
+            if let Err(error) = self.reload_controller().await {
+                tracing::warn!(%session_id, error = format!("{error:#}"), "could not reload state after failing an unready session");
+            }
+            self.push_notice(&session_id, cause);
+            self.publish_revision();
+        }
+        Ok(applied)
+    }
+
     pub(super) async fn publish_session(
         self: &Arc<Self>,
         session_id: String,
