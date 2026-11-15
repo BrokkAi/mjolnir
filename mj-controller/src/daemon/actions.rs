@@ -239,6 +239,29 @@ pub(super) async fn handle_action(
                     .collect(),
             ))
         }
+        DaemonAction::ListWorkspaceDrafts => {
+            let drafts = blocking(crate::database::list_all_detached_drafts).await?;
+            let mut grouped: Vec<WorkspaceDrafts> = Vec::new();
+            for draft in drafts {
+                let preview = DraftPreview {
+                    id: draft.id,
+                    session_id: draft.session_id,
+                    source: draft.source,
+                    owner_pid: draft.owner_pid,
+                    saved_at: draft.saved_at,
+                };
+                match grouped.last_mut() {
+                    Some(group) if group.workspace_id == draft.workspace_id => {
+                        group.drafts.push(preview);
+                    }
+                    _ => grouped.push(WorkspaceDrafts {
+                        workspace_id: draft.workspace_id,
+                        drafts: vec![preview],
+                    }),
+                }
+            }
+            Ok(DaemonReply::WorkspaceDrafts(grouped))
+        }
         DaemonAction::CreateWorkspace { name } => {
             // Two setup selectors can both have observed an empty workspace
             // list. The daemon operation is create-or-get so both attach to

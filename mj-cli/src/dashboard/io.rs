@@ -472,6 +472,9 @@ pub(crate) struct WorkspaceManagementResult {
     pub(crate) entries: Vec<WorkspaceManagementEntry>,
     pub(crate) select_workspace: Option<String>,
     pub(crate) deleted_workspace_id: Option<String>,
+    /// The entries carry the workspace list ahead of their drafts: the dialog
+    /// shows them at once and keeps mutations off until the details answer.
+    pub(crate) details_pending: bool,
 }
 
 pub(crate) struct RegisteredDashboardSession {
@@ -717,6 +720,7 @@ impl DashboardContext {
                     entries: self.dashboard.workspace_entries_without(&workspace_id),
                     select_workspace: None,
                     deleted_workspace_id: Some(workspace_id),
+                    details_pending: false,
                 });
                 self.apply_dashboard_io_update(DashboardIoUpdate::WorkspaceManagement {
                     generation,
@@ -741,6 +745,7 @@ impl DashboardContext {
                         entries,
                         select_workspace,
                         deleted_workspace_id,
+                        details_pending,
                     } = result;
                     // The runtime feed alone owns tab names, layouts and the
                     // active tab. A deletion owns only the composers, because
@@ -758,7 +763,7 @@ impl DashboardContext {
                     // manager, so a late create cannot switch another tab.
                     let outcome = self
                         .dashboard
-                        .finish_workspace_management(generation, Ok(entries));
+                        .finish_workspace_management(generation, Ok(entries), details_pending);
                     let foreground = outcome.foreground;
                     if let DashboardAction::CloseWorkspace {
                         generation,
@@ -784,7 +789,7 @@ impl DashboardContext {
                 Err(error) => {
                     if !self
                         .dashboard
-                        .finish_workspace_management(generation, Err(error.clone()))
+                        .finish_workspace_management(generation, Err(error.clone()), false)
                         .foreground
                     {
                         self.dashboard

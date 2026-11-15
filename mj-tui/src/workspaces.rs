@@ -398,6 +398,18 @@ fn workspace_manager_in_mode(mode: &mut Mode) -> Option<&mut WorkspaceManager> {
     }
 }
 
+/// The manager lists workspaces by name, whatever order the daemon keeps.
+fn sort_workspace_entries(entries: &mut [WorkspaceManagementEntry]) {
+    entries.sort_by(|a, b| {
+        a.workspace
+            .name
+            .to_lowercase()
+            .cmp(&b.workspace.name.to_lowercase())
+            .then_with(|| a.workspace.name.cmp(&b.workspace.name))
+            .then_with(|| a.workspace.id.cmp(&b.workspace.id))
+    });
+}
+
 impl DashboardState {
     /// Handles the two keyboard stops inside the workspace pane. Tabs own
     /// left/right selection (with up/down as vertical mirrors of the same
@@ -610,11 +622,17 @@ impl DashboardState {
     }
 
     /// Installs a manager snapshot, ignoring replies from an older modal or
-    /// mutation. An error remains visible in the responsive modal.
+    /// mutation. An error remains visible in the responsive modal. A
+    /// `details_pending` answer carries the workspace list ahead of the
+    /// details query: the list shows at once, while `loading` stays on so
+    /// mutations (and the shortcut's pending command) wait for the complete
+    /// answer — closing from a list that has not seen its drafts could
+    /// otherwise skip the confirmation that names them.
     pub fn finish_workspace_management(
         &mut self,
         generation: u64,
         result: Result<Vec<WorkspaceManagementEntry>, String>,
+        details_pending: bool,
     ) -> WorkspaceManagementOutcome {
         if !self.workspace_management_is_current(generation) {
             return WorkspaceManagementOutcome::ignored();
@@ -626,7 +644,32 @@ impl DashboardState {
         };
         let mut close_without_confirmation = false;
         match result {
-            Ok(entries) => {
+            Ok(mut entries) => {
+                sort_workspace_entries(&mut entries);
+                if details_pending {
+                    let previous_selected_id = manager
+                        .selected_entry()
+                        .map(|entry| entry.workspace.id.clone());
+                    manager.entries = entries;
+                    manager.selected = previous_selected_id
+                        .as_deref()
+                        .and_then(|id| {
+                            manager
+                                .entries
+                                .iter()
+                                .position(|entry| entry.workspace.id == id)
+                        })
+                        .unwrap_or_else(|| {
+                            manager
+                                .selected
+                                .min(manager.entries.len().saturating_sub(1))
+                        });
+                    manager.sync_form();
+                    return WorkspaceManagementOutcome {
+                        foreground,
+                        action: DashboardAction::None,
+                    };
+                }
                 let previous_busy = manager.busy;
                 // A rename or close started from its shortcut ends where the
                 // shortcut was pressed, as leaving it with Esc does (B-11).
@@ -729,7 +772,15 @@ impl DashboardState {
                 return WorkspaceManagementOutcome { foreground, action };
             }
             Err(error) => {
+                // A details answer that failed after the list arrived keeps
+                // the list read-only: its drafts are unknown, so no mutation
+                // may run on it. Reopening the manager retries the load.
+                let details_unknown =
+                    manager.busy == Some(WorkspaceMutation::Load) && !manager.entries.is_empty();
                 manager.set_error(error);
+                if details_unknown {
+                    manager.busy = Some(WorkspaceMutation::Load);
+                }
             }
         }
         WorkspaceManagementOutcome {
@@ -1353,7 +1404,11 @@ pub(crate) fn render_workspace_manager(
         ])
         .split(inner);
     let message = if dialog.loading {
-        format!("Loading workspaces{}", theme::glyphs().ellipsis)
+        if dialog.entries.is_empty() {
+            format!("Loading workspaces{}", theme::glyphs().ellipsis)
+        } else {
+            format!("Loading details{}", theme::glyphs().ellipsis)
+        }
     } else if let Some(error) = &dialog.error {
         error.clone()
     } else if let Some(success) = &dialog.success {

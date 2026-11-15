@@ -692,6 +692,13 @@ pub struct DraftPreview {
     pub saved_at: String,
 }
 
+/// One workspace's detached drafts, without their text.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceDrafts {
+    pub workspace_id: String,
+    pub drafts: Vec<DraftPreview>,
+}
+
 /// `Ping`, `Status`, and `Stop` form the frozen management subset: their wire
 /// encoding — together with `RequestEnvelope`, `ResponseEnvelope`,
 /// `DaemonStatus`, and `WebViewerStatus` — must never change shape, because
@@ -857,6 +864,9 @@ pub enum DaemonAction {
     RecoverWebViewer(crate::web::WebViewerRecovery),
     InspectWebListener,
     ListWorkspaces,
+    /// Every workspace's detached drafts, without their text: the workspace
+    /// manager's details answer. Added in protocol 100.
+    ListWorkspaceDrafts,
     CreateWorkspace {
         name: String,
     },
@@ -1332,6 +1342,8 @@ pub enum DaemonReply {
     SubagentOptions(mj_core::subagent::SubagentOptions),
     Workspaces(Vec<WorkspaceListing>),
     Workspace(WorkspaceRecord),
+    /// Every workspace's detached drafts, without their text.
+    WorkspaceDrafts(Vec<WorkspaceDrafts>),
     Snapshot(WorkspaceSnapshot),
     DashboardStartup(Box<DashboardStartup>),
     WorkspaceLayouts(WorkspaceLayouts),
@@ -2271,6 +2283,14 @@ impl DaemonClient {
         match self.request(DaemonAction::ListWorkspaces).await? {
             DaemonReply::Workspaces(workspaces) => Ok(workspaces),
             reply => bail!("unexpected daemon workspace reply {reply:?}"),
+        }
+    }
+
+    /// Every workspace's detached drafts, without their text.
+    pub async fn list_workspace_drafts(&mut self) -> Result<Vec<WorkspaceDrafts>> {
+        match self.request(DaemonAction::ListWorkspaceDrafts).await? {
+            DaemonReply::WorkspaceDrafts(drafts) => Ok(drafts),
+            reply => bail!("unexpected daemon workspace-drafts reply {reply:?}"),
         }
     }
 
@@ -3555,7 +3575,9 @@ fn unsupported_daemon_protocol_message(daemon_protocol: u32, builds: &str) -> St
 // Version 97: the daemon decides which sessions are notifications.
 // Version 98: container settings use the single resource allocation.
 // Version 99: one-shot quota probes for profiles outside the enabled set.
-pub const PROTOCOL_VERSION: u32 = 99;
+// Version 100: a one-shot quota probe can be forced off the profile's
+// schedule; the daemon answers one all-workspaces draft listing.
+pub const PROTOCOL_VERSION: u32 = 100;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// How long a daemon is given to exit after it accepts a stop.
 ///
