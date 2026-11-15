@@ -65,6 +65,7 @@ impl BusyRetry {
 /// A client for one daemon's API.
 pub(crate) struct ApiClient {
     base_url: String,
+    daemon_instance: Option<String>,
     token: String,
     busy_retry: BusyRetry,
     /// Where the one "waiting for the daemon" line goes; stderr outside tests.
@@ -154,7 +155,9 @@ impl ApiClient {
         let http = http_client(certificate_sha256.as_deref(), resolver)?;
         probe_api(&http, &viewer_url).await?;
         let token = client.api_credential().await?;
-        Ok(Self::with_http(viewer_url, token, http))
+        let mut api = Self::with_http(viewer_url, token, http);
+        api.daemon_instance = Some(client.identity().await?.instance_id);
+        Ok(api)
     }
 
     #[cfg(test)]
@@ -165,6 +168,7 @@ impl ApiClient {
     fn with_http(base_url: String, token: String, http: reqwest::Client) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
+            daemon_instance: None,
             token,
             busy_retry: BusyRetry::DEFAULT,
             wait_notice: |line| eprintln!("{line}"),

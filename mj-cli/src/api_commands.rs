@@ -3110,6 +3110,7 @@ mod tests {
                 &[root.path().to_path_buf()],
                 false,
                 FetchMode::Listing,
+                tempfile::tempfile().unwrap(),
             )
             .unwrap();
             serde_json::from_reader(fetched.reader()).unwrap()

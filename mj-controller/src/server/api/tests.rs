@@ -5054,7 +5054,15 @@ async fn the_file_route_serves_files_and_zipped_directories_with_the_path_they_r
     use mj_checkpoint::archive::{FetchMode, FetchedKind, FetchedPath};
     let fetch = |kind, path: &str, bytes: &[u8]| {
         let backend = Arc::new(FakeBackend {
-            file: Some(FetchedPath::from_reader(kind, path.to_owned(), bytes).unwrap()),
+            file: Some(
+                FetchedPath::from_reader(
+                    kind,
+                    path.to_owned(),
+                    bytes,
+                    tempfile::tempfile().unwrap(),
+                )
+                .unwrap(),
+            ),
             ..FakeBackend::default()
         });
         let (app, _actions, _snapshot_tx, _bundles) = api_app(backend.clone(), |_| {});
@@ -5106,6 +5114,7 @@ async fn the_file_route_serves_files_and_zipped_directories_with_the_path_they_r
                 FetchedKind::File,
                 "/tmp/large.bin".into(),
                 payload.as_slice(),
+                tempfile::tempfile().unwrap(),
             )
             .unwrap(),
         ),
@@ -5134,11 +5143,25 @@ async fn the_file_route_serves_files_and_zipped_directories_with_the_path_they_r
     });
     let (pending_app, ..) = api_app(pending_backend, |_| {});
     shutdown.cancel();
-    let response = get(pending_app, "/tmp/large.bin").await;
+    let response = get(pending_app.clone(), "/tmp/large.bin").await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let failure: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(failure["code"], DAEMON_HANDOFF_CODE);
+    let probe = pending_app
+        .oneshot(
+            Request::get("/api/v1/sessions")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(probe.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        probe.headers()[crate::server::UPGRADE_HEADER],
+        "pending",
+        "fresh unauthenticated probes must not identify a shutting-down daemon as healthy"
+    );
 
     // A `..` names a sibling repository in a multi-repo bundle, and an
     // absolute path names a report directory or scratch outside the agent's

@@ -692,8 +692,14 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             } else {
                 mj_checkpoint::archive::FetchMode::Content
             };
-            let fetched = mj_checkpoint::archive::fetch_session_path(&path, &roots, temp, mode)
-                .map_err(export_error)?;
+            let fetched = mj_checkpoint::archive::fetch_session_path(
+                &path,
+                &roots,
+                temp,
+                mode,
+                mj_checkpoint::archive::create_fetch_spool()?,
+            )
+            .map_err(export_error)?;
             mj_core::test_hooks::reach_test_hook("fetch_source_ready")?;
             fetched.write_to(std::io::stdout().lock())
         }

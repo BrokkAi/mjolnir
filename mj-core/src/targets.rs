@@ -1138,8 +1138,8 @@ fn stream_command_with_stdin(
         .context("streamed command stderr missing")?;
     // Reader threads keep the child's output pipes drained; a child that fills
     // one while nobody reads would block instead of exiting.
-    let stdout_reader = PipeCollector::spawn_scanning(stdout, gate.cloned());
-    let stderr_reader = PipeCollector::spawn(stderr);
+    let mut stdout_reader = PipeCollector::spawn_scanning(stdout, gate.cloned());
+    let mut stderr_reader = PipeCollector::spawn(stderr);
     let process_result = std::thread::scope(|scope| -> Result<_> {
         // Pipe writes can block forever when a remote helper stops reading.
         // Keep the writer off the supervising thread so cancellation can kill
@@ -1182,6 +1182,12 @@ fn stream_command_with_stdin(
         let mut exited_at = None;
         let mut group_killed = false;
         let status = loop {
+            if status.is_none() && (stdout_reader.failed() || stderr_reader.failed()) {
+                terminate_cancellable_child(&mut child, false);
+                status = child
+                    .try_wait()
+                    .context("reap command after pipe failure")?;
+            }
             if is_cancelled() {
                 terminate_cancellable_child(&mut child, false);
                 if let Err(error) = input_writer.join() {
@@ -1448,7 +1454,12 @@ pollable_pipe!(std::process::ChildStderr);
 struct PipeCollector {
     bytes: Arc<std::sync::Mutex<Vec<u8>>>,
     stop: Arc<AtomicBool>,
-    thread: Option<std::thread::JoinHandle<std::io::Result<()>>>,
+    task: PipeTask,
+}
+
+enum PipeTask {
+    Running(std::thread::JoinHandle<std::io::Result<()>>),
+    Finished(std::io::Result<()>),
 }
 
 impl PipeCollector {
@@ -1537,14 +1548,35 @@ impl PipeCollector {
         Self {
             bytes,
             stop,
-            thread: Some(thread),
+            task: PipeTask::Running(thread),
         }
     }
 
     fn is_finished(&self) -> bool {
-        self.thread
-            .as_ref()
-            .is_none_or(std::thread::JoinHandle::is_finished)
+        match &self.task {
+            PipeTask::Running(thread) => thread.is_finished(),
+            PipeTask::Finished(_) => true,
+        }
+    }
+
+    fn join(&mut self) {
+        if let PipeTask::Running(thread) =
+            std::mem::replace(&mut self.task, PipeTask::Finished(Ok(())))
+        {
+            self.task =
+                PipeTask::Finished(thread.join().unwrap_or_else(|_| {
+                    Err(std::io::Error::other("command pipe reader panicked"))
+                }));
+        }
+    }
+
+    /// A finished reader owns its one result. The supervisor observes failure
+    /// before waiting for a child that may otherwise keep working forever.
+    fn failed(&mut self) -> bool {
+        if matches!(&self.task, PipeTask::Running(thread) if thread.is_finished()) {
+            self.join();
+        }
+        matches!(&self.task, PipeTask::Finished(Err(_)))
     }
 
     /// Waits for end of stream until `deadline`, then stops the reader and
@@ -1554,12 +1586,15 @@ impl PipeCollector {
             std::thread::sleep(Duration::from_millis(5));
         }
         self.stop.store(true, Ordering::Release);
-        self.thread
-            .take()
-            .context("command reader already joined")?
-            .join()
-            .map_err(|_| anyhow::anyhow!("command {stream} reader panicked"))?
-            .with_context(|| format!("read command {stream}"))?;
+        if matches!(self.task, PipeTask::Running(_)) {
+            self.join();
+        }
+        let PipeTask::Finished(result) =
+            std::mem::replace(&mut self.task, PipeTask::Finished(Ok(())))
+        else {
+            unreachable!()
+        };
+        result.with_context(|| format!("read command {stream}"))?;
         let mut bytes = self
             .bytes
             .lock()
@@ -1679,11 +1714,17 @@ impl CancellableProcessExecutor {
             .then(|| crate::subprocess::ProcessGroupGuard::new(Some(child.id())));
         let stdout = child.stdout.take().context("command stdout missing")?;
         let stderr = child.stderr.take().context("command stderr missing")?;
-        let stdout_reader = PipeCollector::spawn_output(stdout, gate.cloned(), output);
-        let stderr_reader = PipeCollector::spawn(stderr);
+        let mut stdout_reader = PipeCollector::spawn_output(stdout, gate.cloned(), output);
+        let mut stderr_reader = PipeCollector::spawn(stderr);
         let mut status = None;
         let mut exited_at = None;
         let status = loop {
+            if status.is_none() && (stdout_reader.failed() || stderr_reader.failed()) {
+                terminate_cancellable_child(&mut child, command.preserve_children_on_cancel);
+                status = child
+                    .try_wait()
+                    .context("reap command after pipe failure")?;
+            }
             if self.is_cancelled() {
                 terminate_cancellable_child(&mut child, command.preserve_children_on_cancel);
                 let deadline = Instant::now() + IO_DRAIN_TIMEOUT;
@@ -3900,6 +3941,57 @@ mod executor_tests {
                 .unwrap_err()
                 .to_string()
                 .contains("cancelled")
+        );
+    }
+
+    // Hard-won: #1544: a failed output spool was observed only after the child exited.
+    #[test]
+    fn file_output_failure_terminates_a_child_that_keeps_running() {
+        const CHILD: &str = "MJ_TEST_FETCH_WRITE_FAILURE";
+        if std::env::var_os(CHILD).is_some() {
+            // Restrict only this test subprocess's regular-file writes. Pipe
+            // writes are unaffected, so the producer can still fill stdout.
+            unsafe {
+                libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+                let limit = libc::rlimit {
+                    rlim_cur: 128 * 1024,
+                    rlim_max: 128 * 1024,
+                };
+                assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &limit), 0);
+            }
+            let file = tempfile::tempfile().unwrap();
+            let error = CancellableProcessExecutor::new(Default::default())
+                .execute_to_file(
+                    &CommandSpec::new("sh", ["-c", "head -c 1048576 /dev/zero; sleep 600"]),
+                    &file,
+                )
+                .unwrap_err();
+            assert!(
+                error.chain().any(|cause| cause
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.raw_os_error() == Some(libc::EFBIG))),
+                "{error:#}"
+            );
+            return;
+        }
+        let mut command = CommandSpec::new(
+            std::env::current_exe().unwrap().to_string_lossy(),
+            [
+                "--exact",
+                "targets::executor_tests::file_output_failure_terminates_a_child_that_keeps_running",
+                "--nocapture",
+            ],
+        );
+        command.env.insert(CHILD.into(), "1".into());
+        let output = CancellableProcessExecutor::with_timeout(Duration::from_secs(10))
+            .execute(&command)
+            .unwrap();
+        assert_eq!(
+            output.status,
+            0,
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 

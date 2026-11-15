@@ -111,8 +111,8 @@ impl FetchedPath {
         kind: FetchedKind,
         path: String,
         mut reader: impl Read,
+        mut file: fs::File,
     ) -> anyhow::Result<Self> {
-        let mut file = tempfile::tempfile().context("create fetch spool")?;
         std::io::copy(&mut reader, &mut file).context("spool fetched payload")?;
         Self::from_file(kind, path, file)
     }
@@ -159,19 +159,56 @@ impl FetchedPath {
         let path = local_fetch_path(kind, &source, temp, session)?;
         let parent = path.parent().context("fetch destination has no parent")?;
         fs::create_dir_all(parent).context("create fetch destination")?;
-        let mut staged =
-            tempfile::NamedTempFile::new_in(parent).context("stage fetch destination")?;
-        let received = std::io::copy(&mut reader, &mut staged).context("write fetched payload")?;
+        // One lock owns this destination's staging path, including across
+        // killed worker processes. Never remove the lock inode: another owner
+        // may already be waiting on it. Unrelated destinations stay concurrent.
+        let key = blake3::hash(path.as_os_str().as_encoded_bytes()).to_hex();
+        let lock = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(parent.join(format!(".mj-fetch-{key}.lock")))
+            .context("open fetch destination lock")?;
+        lock.lock().context("lock fetch destination")?;
+        let _lock = mj_core::file_lock::FileLock::new(lock);
+        let stage_path = parent.join(format!(".mj-fetch-{key}.part"));
+        // The lock proves the preceding writer has stopped. Reclaim its partial
+        // file before reading a retried payload, so restarts cannot accumulate it.
+        match fs::remove_file(&stage_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("reclaim interrupted fetch"),
+        }
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut staged = StagedFetch {
+            file: Some(
+                options
+                    .open(&stage_path)
+                    .context("stage fetch destination")?,
+            ),
+            path: stage_path,
+        };
+        let received = std::io::copy(&mut reader, staged.file.as_mut().unwrap())
+            .context("write fetched payload")?;
         ensure!(
             received == expected,
             "incomplete fetch transfer: expected {expected} bytes, received {received}"
         );
         mj_core::test_hooks::reach_test_hook("fetch_destination_ready")?;
         staged
-            .as_file()
+            .file
+            .take()
+            .unwrap()
             .sync_all()
             .context("sync fetched payload")?;
-        staged.persist(&path).context("publish fetched payload")?;
+        fs::rename(&staged.path, &path).context("publish fetched payload")?;
+        mj_core::config::sync_directory(parent)?;
         Ok(SavedFetch {
             path,
             kind,
@@ -230,6 +267,30 @@ impl FetchedPath {
     }
 }
 
+/// Internal transfer spools belong to the instance's data filesystem, not
+/// `/tmp`, which is commonly tmpfs. The final user copy keeps its requested
+/// destination; only rebuildable transport scratch lives here.
+pub fn create_fetch_spool() -> anyhow::Result<fs::File> {
+    let directory = mj_core::config::data_dir().join("fetch-spool");
+    fs::create_dir_all(&directory).context("create fetch spool directory")?;
+    tempfile::tempfile_in(directory).context("create fetch spool")
+}
+
+struct StagedFetch {
+    file: Option<fs::File>,
+    path: PathBuf,
+}
+impl Drop for StagedFetch {
+    fn drop(&mut self) {
+        drop(self.file.take());
+        if let Err(error) = fs::remove_file(&self.path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(path=%self.path.display(), %error, "could not remove staged fetch");
+        }
+    }
+}
+
 fn local_fetch_path(
     kind: FetchedKind,
     source: &str,
@@ -273,6 +334,7 @@ pub fn fetch_session_path(
     roots: &[PathBuf],
     temp: bool,
     mode: FetchMode,
+    mut payload: fs::File,
 ) -> Result<FetchedPath, SessionExportError> {
     let mut allowed = roots.to_vec();
     if temp {
@@ -325,7 +387,6 @@ pub fn fetch_session_path(
     let metadata =
         fs::metadata(&resolved).with_context(|| format!("inspect {}", resolved.display()))?;
     let display = resolved.to_string_lossy().into_owned();
-    let mut payload = tempfile::tempfile().context("create fetch spool")?;
     let kind = if mode == FetchMode::Listing {
         list_path(&resolved, &metadata, &mut payload)?;
         FetchedKind::Listing
@@ -527,7 +588,13 @@ mod tests {
             |temp: &Path, session: &str, fetched: &FetchedPath| fetched.local_path(temp, session);
         let temp = PathBuf::from("/scratch");
         let fetched = |kind, path: &str| {
-            FetchedPath::from_reader(kind, path.to_owned(), std::io::empty()).unwrap()
+            FetchedPath::from_reader(
+                kind,
+                path.to_owned(),
+                std::io::empty(),
+                tempfile::tempfile().unwrap(),
+            )
+            .unwrap()
         };
         // Two children's reports share a name; the target path keeps them apart.
         assert_eq!(
@@ -604,7 +671,13 @@ mod tests {
                 .join("../")
                 .join(outside.path().file_name().unwrap()),
         ] {
-            let reason = refusal(fetch_session_path(&path, &roots, false, FetchMode::Content));
+            let reason = refusal(fetch_session_path(
+                &path,
+                &roots,
+                false,
+                FetchMode::Content,
+                tempfile::tempfile().unwrap(),
+            ));
             assert!(
                 reason.contains("outside the directories a session shares"),
                 "{}: {reason}",
@@ -612,7 +685,14 @@ mod tests {
             );
         }
 
-        let fetched = fetch_session_path(&evidence, &roots, false, FetchMode::Content).unwrap();
+        let fetched = fetch_session_path(
+            &evidence,
+            &roots,
+            false,
+            FetchMode::Content,
+            tempfile::tempfile().unwrap(),
+        )
+        .unwrap();
         assert_eq!(fetched.kind, FetchedKind::Directory);
         let mut wire = tempfile::tempfile().unwrap();
         fetched.write_to(&mut wire).unwrap();
@@ -669,7 +749,14 @@ mod tests {
         let file = directory.join("noise.bin");
         fs::write(&file, &noise).unwrap();
         let roots = [workspace.path().to_path_buf()];
-        let fetched = fetch_session_path(&file, &roots, false, FetchMode::Content).unwrap();
+        let fetched = fetch_session_path(
+            &file,
+            &roots,
+            false,
+            FetchMode::Content,
+            tempfile::tempfile().unwrap(),
+        )
+        .unwrap();
         let mut restored = Vec::new();
         fetched.reader().read_to_end(&mut restored).unwrap();
         assert_eq!(restored, noise);
@@ -678,7 +765,14 @@ mod tests {
             .unwrap()
             .set_len(129 * 1024 * 1024)
             .unwrap();
-        let fetched = fetch_session_path(&directory, &roots, false, FetchMode::Content).unwrap();
+        let fetched = fetch_session_path(
+            &directory,
+            &roots,
+            false,
+            FetchMode::Content,
+            tempfile::tempfile().unwrap(),
+        )
+        .unwrap();
         assert!(fetched.len() > 16 * 1024 * 1024);
         let mut wire = tempfile::tempfile().unwrap();
         fetched.write_to(&mut wire).unwrap();

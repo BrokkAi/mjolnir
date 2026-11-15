@@ -18,16 +18,20 @@ impl ApiClient {
                     error.is_connect() || error.is_body() || error.is_request() || error.is_decode()
                 })
             });
-            // GET is repeatable even if the old daemon is still answering its
-            // control socket while its HTTP connection shuts down. Checking
-            // identity here would race that handoff and lose a safe retry.
-            if !is_daemon_handoff(&error) && !transport_failed {
+            let explicit_shutdown = is_daemon_handoff(&error);
+            if !explicit_shutdown && (!transport_failed || client.daemon_instance.is_none()) {
+                return Err(error);
+            }
+            // Reconnect first. API admission refuses every fresh request after
+            // shutdown, so this probe cannot return a shutting-down old daemon.
+            let next = Self::connect_after_handoff().await?;
+            if !explicit_shutdown && next.daemon_instance == client.daemon_instance {
                 return Err(error);
             }
             (self.wait_notice)(
                 "The daemon connection was interrupted during fetch; reconnecting and retrying the download.",
             );
-            replacement = Some(Self::connect_after_handoff().await?);
+            replacement = Some(next);
         }
     }
 
@@ -59,7 +63,8 @@ impl ApiClient {
             .and_then(|value| mj_controller::server::api::decode_fetched_path(value.as_bytes()))
             .context("the daemon did not say where the path resolved; it predates `mj fetch`")?;
         let expected = response.content_length();
-        let file = tokio::task::spawn_blocking(tempfile::tempfile).await??;
+        let file =
+            tokio::task::spawn_blocking(mj_checkpoint::archive::create_fetch_spool).await??;
         let mut file = tokio::fs::File::from_std(file);
         let mut received = 0u64;
         while let Some(chunk) = response.chunk().await.context("read the fetched path")? {

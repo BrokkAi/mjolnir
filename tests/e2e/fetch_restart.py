@@ -152,7 +152,10 @@ def main():
         assert not result.get("isError"), result
         saved = result["structuredContent"]
         assert saved["bytes"] == SIZE and digest(saved["path"]) == expected
-        Path(saved["path"]).unlink()
+        destination = Path(saved["path"])
+        leftovers = [p for p in destination.parent.iterdir() if p != destination and p.stat().st_size]
+        assert not leftovers, f"cancelled receiver left payload files behind: {leftovers}"
+        destination.unlink()
         print(json.dumps({"cli_bytes": SIZE, "mcp_bytes": SIZE,
                           "restart_seconds": restart_seconds, "source_peak_bytes": source_peak,
                           "receiver_peak_bytes": receiver_peak, "artifacts": str(lab.root)}))

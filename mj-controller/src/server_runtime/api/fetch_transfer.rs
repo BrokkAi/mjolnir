@@ -19,7 +19,7 @@ pub(super) async fn read(
             Err(error) => return Ok(Err(error)),
         };
         let command = worker_command_spec(layout, &session, arguments, "session file fetch")?;
-        let mut spool = tempfile::tempfile().context("create fetch transport spool")?;
+        let mut spool = mj_checkpoint::archive::create_fetch_spool()?;
         let mut output = executor.execute_to_file(&command, &spool)?;
         spool.rewind()?;
         if output.status == mj_checkpoint::archive::EXPORT_REFUSED_EXIT_CODE {
