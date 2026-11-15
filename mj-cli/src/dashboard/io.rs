@@ -245,6 +245,12 @@ pub(crate) enum DashboardIoUpdate {
     /// The daemon's answer to a Refresh: it accepted the request, or it could
     /// not be reached.
     QuotaRefreshRequested(std::result::Result<(), String>),
+    /// The daemon's answer to a single profile's Refresh: it accepted the
+    /// probe, or it could not be reached.
+    QuotaProbeRequested {
+        profile_id: String,
+        result: std::result::Result<(), String>,
+    },
     /// The host's global Git author identity, read before the first new
     /// session of this run.
     GitIdentityChecked(std::result::Result<mj_client::daemon::GitIdentity, String>),
@@ -1232,6 +1238,15 @@ impl DashboardContext {
                 self.manual_quota_refresh_cycles = None;
                 self.dashboard
                     .set_notice(format!("Could not refresh quota: {error}"));
+            }
+            DashboardIoUpdate::QuotaProbeRequested {
+                profile_id,
+                result,
+            } => {
+                if let Err(error) = result {
+                    self.dashboard
+                        .set_notice(format!("Could not refresh {profile_id}'s quota: {error}"));
+                }
             }
             DashboardIoUpdate::WebAccess { generation, access } => {
                 if generation == self.web_request_generation {

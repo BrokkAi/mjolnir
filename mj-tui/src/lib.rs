@@ -612,6 +612,10 @@ pub enum DashboardAction {
     },
     /// Empty `[quota] prefer`.
     ClearLoadBalancingPreferences,
+    /// Probe one profile's quota now, even a disabled profile's.
+    ProbeQuotaProfile {
+        profile_id: String,
+    },
     OpenResumeDialog,
     ImportSession {
         profile_id: String,

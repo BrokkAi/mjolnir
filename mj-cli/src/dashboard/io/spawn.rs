@@ -935,6 +935,30 @@ pub(crate) fn spawn_quota_refresh_request(updates: UnboundedSender<DashboardIoUp
     );
 }
 
+/// Asks the daemon to probe one profile's quota now, even a disabled
+/// profile's. The answer arrives through the runtime feed like any other.
+pub(crate) fn spawn_quota_probe_request(
+    profile_id: String,
+    updates: UnboundedSender<DashboardIoUpdate>,
+) {
+    let completion = profile_id.clone();
+    spawn_background_async(
+        format!("asking the daemon to refresh {profile_id}'s quota"),
+        updates,
+        SAVE_ACK_TIMEOUT,
+        async move {
+            daemon::connect_existing()
+                .await?
+                .probe_quota_profiles(vec![profile_id])
+                .await
+        },
+        move |result| DashboardIoUpdate::QuotaProbeRequested {
+            profile_id: completion,
+            result,
+        },
+    );
+}
+
 /// What the container editor asks the controller to persist.
 pub(crate) struct ContainerSettingsRequest {
     pub(crate) session_id: String,
