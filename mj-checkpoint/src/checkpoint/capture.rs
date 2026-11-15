@@ -68,14 +68,6 @@ pub fn capture_checkpoint_with_native_state(
     )?;
     let repositories =
         collect_checkpoint_repositories(&resolved.workspace_root, &resolved.repositories, git)?;
-    let native_bytes =
-        native_artifacts
-            .iter()
-            .try_fold(0_u64, |total, artifact| -> Result<u64> {
-                total
-                    .checked_add(artifact.size()?)
-                    .context("native checkpoint size overflow")
-            })?;
     let repository_bytes = checkpoint_repository_bytes(&repositories)?;
 
     let parent = resolved
@@ -95,10 +87,14 @@ pub fn capture_checkpoint_with_native_state(
         .with_context(|| format!("create temporary checkpoint stage in {}", parent.display()))?;
 
     let mut staged_native = Vec::with_capacity(native_artifacts.len());
+    let mut native_bytes = 0_u64;
     for (index, artifact) in native_artifacts.into_iter().enumerate() {
         let body_path = PathBuf::from(format!("native/{index:08}"));
-        write_private_reader(temporary.path(), &body_path, &mut artifact.reader()?, 0o600)?;
-        let size = artifact.size()?;
+        let size =
+            write_private_reader(temporary.path(), &body_path, &mut artifact.reader()?, 0o600)?;
+        native_bytes = native_bytes
+            .checked_add(size)
+            .context("native checkpoint size overflow")?;
         staged_native.push(StagedNativeArtifact {
             relative_path: artifact.relative_path,
             mode: artifact.mode,
@@ -717,7 +713,7 @@ pub fn export_checkpoint_with_native_state(
     // one just replaced by `/clear`, impossible to close cleanly (R4-5).
     let prompted = current_native_session_received_prompt(&spec.canonical_session);
     let native_started = std::time::Instant::now();
-    let native_artifacts = collect_checkpoint_native_artifacts(
+    let mut native_artifacts = collect_checkpoint_native_artifacts(
         &spec.session,
         &relay_root,
         &harness_home,
@@ -726,6 +722,27 @@ pub fn export_checkpoint_with_native_state(
         !prompted,
         native_state,
     )?;
+    // The barrier stops dispatch, but a harness can still finish an async
+    // native write. Own the captured bytes before repository collection and ZIP
+    // planning, just as the staged capture path does.
+    let parent = output_path
+        .parent()
+        .context("checkpoint archive has no parent")?;
+    fs::create_dir_all(parent)?;
+    let native_snapshot = tempfile::Builder::new()
+        .prefix(CHECKPOINT_CAPTURE_TEMPORARY_PREFIX)
+        .tempdir_in(parent)?;
+    for (index, artifact) in native_artifacts.iter_mut().enumerate() {
+        if matches!(artifact.data, mj_core::archive::NativeArtifactData::File(_)) {
+            let relative = PathBuf::from(index.to_string());
+            {
+                let mut reader = artifact.reader()?;
+                write_private_reader(native_snapshot.path(), &relative, &mut reader, 0o600)?;
+            }
+            artifact.data =
+                mj_core::archive::NativeArtifactData::File(native_snapshot.path().join(relative));
+        }
+    }
     let native_ms = native_started.elapsed().as_millis() as u64;
     let repositories_started = std::time::Instant::now();
     let repositories = collect_checkpoint_repositories_with_policy(

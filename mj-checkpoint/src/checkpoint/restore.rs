@@ -695,7 +695,7 @@ pub(super) fn write_private_file(
     bytes: &[u8],
     mode: u32,
 ) -> Result<()> {
-    write_private_reader(root, relative, &mut std::io::Cursor::new(bytes), mode)
+    write_private_reader(root, relative, &mut std::io::Cursor::new(bytes), mode).map(|_| ())
 }
 
 pub(super) fn write_private_reader(
@@ -703,19 +703,18 @@ pub(super) fn write_private_reader(
     relative: &Path,
     reader: &mut dyn Read,
     mode: u32,
-) -> Result<()> {
+) -> Result<u64> {
     write_private_with(root, relative, mode, |file| {
-        std::io::copy(reader, file)?;
-        Ok(())
+        Ok(std::io::copy(reader, file)?)
     })
 }
 
-fn write_private_with(
+fn write_private_with<T>(
     root: &Path,
     relative: &Path,
     mode: u32,
-    write: impl FnOnce(&mut File) -> Result<()>,
-) -> Result<()> {
+    write: impl FnOnce(&mut File) -> Result<T>,
+) -> Result<T> {
     validate_relative_path(relative)?;
     let path = root.join(relative);
     ensure_no_symlink_ancestors(root, relative)?;
@@ -745,7 +744,7 @@ fn write_private_with(
     let mut file = options
         .open(&path)
         .with_context(|| format!("write {}", path.display()))?;
-    write(&mut file).with_context(|| format!("write {}", path.display()))?;
+    let result = write(&mut file).with_context(|| format!("write {}", path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -753,5 +752,5 @@ fn write_private_with(
     }
     #[cfg(not(unix))]
     let _ = mode;
-    Ok(())
+    Ok(result)
 }

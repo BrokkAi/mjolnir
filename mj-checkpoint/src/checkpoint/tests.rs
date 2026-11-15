@@ -1749,6 +1749,7 @@ fn a_plain_project_directory_is_recorded_but_never_captured_or_restored() {
     assert!(!restore_root.join("notes/drafts").exists());
 }
 
+// Hard-won: 7d68f8bde: the staged copy must own its size when the live source changes at EOF.
 #[test]
 fn staged_checkpoint_preserves_export_contents_and_defers_canonical_history() {
     let temp = tempfile::tempdir().unwrap();
@@ -1757,7 +1758,81 @@ fn staged_checkpoint_preserves_export_contents_and_defers_canonical_history() {
         .harness_home
         .join(format!("sessions/2026/08/09/rollout-{NATIVE}.jsonl"));
     fs::write(&large_native, vec![b'n'; 128 * 1024]).unwrap();
-    export_checkpoint(&export_spec).unwrap();
+    // The same stream used by capture can reach EOF just before the harness
+    // appends. Its result must describe the sealed destination, not the source.
+    struct AppendAtEof {
+        source: File,
+        path: PathBuf,
+        appended: bool,
+    }
+    impl Read for AppendAtEof {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            let count = self.source.read(bytes)?;
+            if count == 0 && !self.appended {
+                self.appended = true;
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(&self.path)?
+                    .write_all(b"later harness bytes")?;
+            }
+            Ok(count)
+        }
+    }
+    let copied = write_private_reader(
+        temp.path(),
+        Path::new("owned-native-copy"),
+        &mut AppendAtEof {
+            source: File::open(&large_native).unwrap(),
+            path: large_native.clone(),
+            appended: false,
+        },
+        0o600,
+    )
+    .unwrap();
+    assert_eq!(
+        copied,
+        fs::metadata(temp.path().join("owned-native-copy"))
+            .unwrap()
+            .len()
+    );
+    assert!(fs::metadata(&large_native).unwrap().len() > copied);
+    struct AppendDuringGit {
+        path: PathBuf,
+        appended: std::sync::atomic::AtomicBool,
+    }
+    impl GitCommandRunner for AppendDuringGit {
+        fn run(&self, repository: &Path, command: &GitCommand) -> Result<GitOutput> {
+            if !self
+                .appended
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(&self.path)?
+                    .write_all(b"async native write during Git")?;
+            }
+            SystemGit.run(repository, command)
+        }
+    }
+    let captured = fs::read(&large_native).unwrap();
+    export_checkpoint_with_git(
+        &export_spec,
+        &AppendDuringGit {
+            path: large_native.clone(),
+            appended: std::sync::atomic::AtomicBool::new(false),
+        },
+    )
+    .unwrap();
+    let legacy = read_archive_verified(&export_spec.output_path).unwrap();
+    let native = legacy
+        .manifest
+        .payloads
+        .iter()
+        .find(|payload| matches!(payload.role, PayloadRole::NativeArtifact { .. }))
+        .unwrap();
+    assert_eq!(legacy.payload(native).unwrap(), captured);
+    assert!(fs::metadata(&large_native).unwrap().len() > captured.len() as u64);
+    fs::write(&large_native, captured).unwrap();
 
     let reports = export_spec
         .workspace_root
