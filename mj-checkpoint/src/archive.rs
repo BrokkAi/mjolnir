@@ -1186,11 +1186,24 @@ fn write_zip(
         let compressed = window
             .par_iter()
             .map(|entry| {
-                compress_stream_entry(entry, spool.path())
-                    .with_context(|| format!("compress ZIP entry '{}'", entry.name))
+                // Stored Git bundles are already compressed and unsharded;
+                // spooling them would duplicate a potentially large bundle.
+                if payload_compression(&entry.payload.descriptor.role) == CompressionMethod::Stored
+                {
+                    Ok(None)
+                } else {
+                    compress_stream_entry(entry, spool.path())
+                        .map(Some)
+                        .with_context(|| format!("compress ZIP entry '{}'", entry.name))
+                }
             })
             .collect::<Result<Vec<_>>>()?;
         for (entry, temporary) in window.iter().zip(compressed) {
+            let Some(temporary) = temporary else {
+                write_payload_entry(&mut writer, entry)
+                    .with_context(|| format!("write ZIP entry '{}'", entry.name))?;
+                continue;
+            };
             let mut source = zip::ZipArchive::new(temporary.reopen()?)
                 .with_context(|| format!("reopen compressed ZIP entry '{}'", entry.name))?;
             let compressed_entry = source
@@ -1220,6 +1233,17 @@ fn compress_stream_entry(
     entry: &StreamEntry<'_>,
     directory: &Path,
 ) -> Result<tempfile::NamedTempFile> {
+    let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
+    let mut writer = zip::ZipWriter::new(temporary.as_file_mut());
+    write_payload_entry(&mut writer, entry)?;
+    writer.finish().context("finish compressed ZIP entry")?;
+    Ok(temporary)
+}
+
+fn write_payload_entry(
+    writer: &mut zip::ZipWriter<&mut File>,
+    entry: &StreamEntry<'_>,
+) -> Result<()> {
     let mut source: Box<dyn Read> = match entry.payload.source {
         Some(path) => {
             let mut file = NativeArtifactData::open_file(path)?;
@@ -1232,10 +1256,8 @@ fn compress_stream_entry(
             Box::new(cursor)
         }
     };
-    let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
-    let mut writer = zip::ZipWriter::new(temporary.as_file_mut());
     write_stream_entry(
-        &mut writer,
+        writer,
         entry.name,
         entry.payload.descriptor.mode,
         payload_compression(&entry.payload.descriptor.role),
@@ -1249,8 +1271,7 @@ fn compress_stream_entry(
             "payload source grew during export"
         );
     }
-    writer.finish().context("finish compressed ZIP entry")?;
-    Ok(temporary)
+    Ok(())
 }
 
 fn write_stream_entry(
