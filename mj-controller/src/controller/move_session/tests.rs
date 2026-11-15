@@ -24,9 +24,8 @@ use mj_checkpoint::archive::{
 };
 use mj_core::config::{Config, HarnessKind, HarnessProfile, ProjectBundle, ProjectRepository};
 #[cfg(unix)]
-use mj_core::state::{
-    CheckpointMetadata, MoveOperation, MovePhase, MoveSelection, ResumeQueueDisposition,
-};
+use mj_core::state::CheckpointMetadata;
+use mj_core::state::{MoveOperation, MovePhase, MoveSelection, ResumeQueueDisposition};
 #[cfg(unix)]
 use mj_core::test_hooks::install_fake_command;
 
@@ -1644,7 +1643,6 @@ fn ssh_bare_targets_share_an_environment_only_on_the_same_connection() {
     ));
 }
 
-#[cfg(unix)]
 pub(super) fn source_recovery_operation(session: &mj_core::state::SessionRecord) -> MoveOperation {
     MoveOperation {
         quota_stop_reason: None,
