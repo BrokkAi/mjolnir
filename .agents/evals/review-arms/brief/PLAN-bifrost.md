@@ -55,9 +55,11 @@ message under the same heading and fixed note as stages A and B.
   in blind batches, with two Opus/high judges and a hand check of every caught
   or partial verdict and every disagreement, as in stages A and B.
 - Ordinary: findings of the stored no-brief Terra/high sessions (arm A) and
-  `FT` are pooled and verified blind (`build_verify.py verify-bifrost --arms
-  A,FT`), then scored with `brief_control2.py --arm FT`, with every
-  broad-match rejected finding hand-marked.
+  `FT` on the 40 ordinary diffs are pooled and verified blind
+  (`build_verify.py verify-bifrost --arms A,FT --bugs-from
+  stageC-ordinary-jobs.json`), then scored with `brief_control2.py --arm FT`
+  (which reads `verify-bifrost` and that jobs file), with every broad-match
+  rejected finding hand-marked.
 
 ## Decision rule
 

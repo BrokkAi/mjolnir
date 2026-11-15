@@ -8,7 +8,8 @@ With no diff ids it covers the 30 Hard-won diffs (corpus/corpus.jsonl) and the
 a time; concurrent processes block on one cache's build lock) and share one
 BIFROST_CACHE_ROOT. --root needs only to be a checkout of mjolnir that has the
 commits: the tool reads the immutable base and target endpoints, not the live
-worktree.
+worktree. The lint's `git diff` reads the same checkout. Outside a mjolnir
+checkout, set REVIEW_ARMS_REPO as well: driver.py runs git at import without it.
 
 Writes $REVIEW_ARMS_DIR/briefs/bifrost/<diff>/:
   output.json  the tool's JSON envelope, as printed
@@ -16,7 +17,8 @@ Writes $REVIEW_ARMS_DIR/briefs/bifrost/<diff>/:
                call failed (the plan counts failures as empty briefs)
   meta.json    version, binary, command, wall time, exit status, completeness,
                item counts, lint problems (recorded, never acted on)
-A diff with meta.json is skipped, so an interrupted run resumes.
+A diff with meta.json is skipped, so an interrupted run resumes; a skipped
+diff whose meta.json records a failure still counts as failed.
 """
 import argparse
 import json
@@ -27,6 +29,7 @@ import sys
 import time
 
 import brief_driver
+import driver
 from driver import CORPUS, ROOT, SCRIPTS, save
 
 # What a reviewer would receive when the tool produced nothing.
@@ -36,7 +39,7 @@ EMPTY_BRIEF = "## Affected callers\n- none\n\n## Paths\n- none\n\n## Value flow\
 def run(diff, binary, checkout, cache, version):
     d = ROOT / "briefs" / "bifrost" / diff
     if (d / "meta.json").exists():
-        return "done"
+        return "failed" if json.loads((d / "meta.json").read_text())["failed"] else "done"
     d.mkdir(parents=True, exist_ok=True)
     bug = CORPUS[diff]
     args = json.dumps({"base": bug["base_commit"], "target": bug["intro_commit"]})
@@ -79,6 +82,8 @@ def main():
     p.add_argument("--cache", type=pathlib.Path, default=ROOT / "bifrost-cache")
     p.add_argument("diffs", nargs="*")
     a = p.parse_args()
+    # brief_driver.lint diffs the corpus commits in driver.REPO; use the checkout Bifrost reads.
+    driver.REPO = str(a.root.resolve())
     diffs = a.diffs or [json.loads(l)["id"] for name in ("corpus.jsonl", "diffs.jsonl")
                         for l in open(SCRIPTS / "corpus" / name)]
     a.cache.mkdir(parents=True, exist_ok=True)

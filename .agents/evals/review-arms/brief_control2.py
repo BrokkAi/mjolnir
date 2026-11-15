@@ -1,10 +1,12 @@
 """Control 2 of brief/PLAN.md: do blind briefs cost findings or add false ones on ordinary diffs?
 
-Usage: python3 brief_control2.py [--arm BT|FT] [--verify verify-brief] [--jobs stageB-ordinary-jobs.json]
+Usage: python3 brief_control2.py [--arm BT|FT] [--verify <dir>] [--jobs <jobs file>]
                                  [--handmarks results/brief-stage-b/control2-citing-handmarks.json]
 
---arm names the brief arm compared with arm A (default BT, blind briefs; stage C:
-`--arm FT --verify verify-bifrost`, read against briefs/bifrost/). Text below says BT for the default.
+--arm names the brief arm compared with arm A: BT (default, blind briefs, stage B) or FT
+(Bifrost briefs, stage C), read from briefs/<kind>/. --verify and --jobs default to that
+stage's: verify-brief and stageB-ordinary-jobs.json for BT, verify-bifrost and
+stageC-ordinary-jobs.json for FT. Text below says BT for the default.
 
 Inputs under REVIEW_ARMS_DIR: the verify dir built with
 `build_verify.py <verify> --arms A,<arm> --bugs-from <jobs>` and verified by
@@ -43,16 +45,18 @@ def spans(text):
     return [(path, int(a), int(b or a)) for path, a, b in ANCHOR.findall(text)]
 
 p = argparse.ArgumentParser()
-p.add_argument("--arm", default="BT", choices=sorted(driver.BRIEF_ARMS),
-               help="brief arm compared with no-brief arm A; its briefs are read from briefs/<kind>/ "
-                    "(BT: blind; FT: bifrost, scored with --verify verify-bifrost)")
-p.add_argument("--verify", default="verify-brief")
-p.add_argument("--jobs", default="stageB-ordinary-jobs.json")
+# Each Terra/high brief arm's verify dir and ordinary jobs file.
+STAGE_INPUTS = {"BT": ("verify-brief", "stageB-ordinary-jobs.json"),
+                "FT": ("verify-bifrost", "stageC-ordinary-jobs.json")}
+p.add_argument("--arm", default="BT", choices=sorted(STAGE_INPUTS),
+               help="brief arm compared with no-brief arm A; its briefs are read from briefs/<kind>/")
+p.add_argument("--verify", help="verify dir; defaults to the arm's stage")
+p.add_argument("--jobs", help="ordinary jobs file; defaults to the arm's stage")
 p.add_argument("--handmarks", help="JSON {finding id: {relies_on_brief, why}} for every broad-match finding")
 a = p.parse_args()
 ARM = a.arm
-V = ROOT / a.verify
-diffs = sorted({j["bug"] for j in json.loads((ROOT / a.jobs).read_text())})
+V = ROOT / (a.verify or STAGE_INPUTS[ARM][0])
+diffs = sorted({j["bug"] for j in json.loads((ROOT / (a.jobs or STAGE_INPUTS[ARM][1])).read_text())})
 key = json.loads((ROOT / "private" / f"key-{V.name}.json").read_text())
 findings, covered = key["findings"], set(key["sessions"])
 
