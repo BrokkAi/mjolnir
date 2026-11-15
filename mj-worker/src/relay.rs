@@ -901,7 +901,11 @@ impl DurableRelay {
         state.native_agent_count = self.native_agent_count();
         state.clear_context = matches!(
             self.verdict_harness,
-            Some(mj_core::config::HarnessKind::Codex | mj_core::config::HarnessKind::Claude)
+            Some(
+                mj_core::config::HarnessKind::Codex
+                    | mj_core::config::HarnessKind::Claude
+                    | mj_core::config::HarnessKind::Kimi
+            )
         );
         state.background_commands = self.background_commands();
         state.background_work_known = self.background_work_known;

@@ -407,7 +407,11 @@ impl DurableRelay {
         if matches!(command, RelayCommand::ClearContext) {
             if !matches!(
                 self.verdict_harness,
-                Some(mj_core::config::HarnessKind::Codex | mj_core::config::HarnessKind::Claude)
+                Some(
+                    mj_core::config::HarnessKind::Codex
+                        | mj_core::config::HarnessKind::Claude
+                        | mj_core::config::HarnessKind::Kimi
+                )
             ) {
                 return Ok(Err(relay_protocol_error(
                     RelayErrorCode::InvalidState,

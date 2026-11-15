@@ -7913,6 +7913,7 @@ async fn native_child_load_negotiates_and_routes_history_for_claude_and_codex() 
 async fn clear_replaces_the_native_session_without_forwarding_a_prompt() {
     exercise_context_clear(false, HarnessKind::Codex).await;
     exercise_context_clear(false, HarnessKind::Claude).await;
+    exercise_context_clear(false, HarnessKind::Kimi).await;
 }
 
 /// I1-13: a resumed Claude session reports its model as a raw id that its own
@@ -7999,6 +8000,7 @@ for line in sys.stdin:
 async fn failed_clear_reloads_the_previous_native_session() {
     exercise_context_clear(true, HarnessKind::Codex).await;
     exercise_context_clear(true, HarnessKind::Claude).await;
+    exercise_context_clear(true, HarnessKind::Kimi).await;
 }
 
 async fn exercise_context_clear(fail_replacement: bool, harness: HarnessKind) {
