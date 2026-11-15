@@ -501,6 +501,14 @@ pub(super) fn install_mbx_shims(
         cargo_body,
         mbx_body,
     ];
+    let steps = [
+        targets::CommandStep::new("install the shared-cache mbx shims", args),
+        targets::CommandStep::new(
+            "link the shared machine mbx configuration",
+            mbx_configuration_argv(engine, container_id, configuration, config_roots),
+        ),
+    ];
+    let args = targets::step_script(steps);
     let command = match ssh {
         None => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
         Some(ssh) => crate::targets::ssh_command(ssh, args),
@@ -508,7 +516,7 @@ pub(super) fn install_mbx_shims(
     .purpose("install the shared-cache mbx shims")
     .stage(ProvisionStage::Syncing);
     execute_checked(executor, command)?;
-    link_mbx_configuration(executor, locator, configuration, config_roots)
+    Ok(())
 }
 
 pub(super) fn remove_generated_mbx_shims(
@@ -621,56 +629,29 @@ fn reported_mbx_version(output: CommandOutput, command: &CommandSpec) -> Result<
 }
 
 /// Upgrade configuration without touching an executable a live build may use.
-pub(super) fn link_mbx_configuration(
-    executor: &impl CommandExecutor,
-    locator: &targets::TargetLocator,
+fn mbx_configuration_argv(
+    engine: &str,
+    container_id: &str,
     configuration: &Path,
     config_roots: &[PathBuf],
-) -> Result<()> {
-    let (engine, container_id, ssh) = match locator {
-        targets::TargetLocator::LocalPodman { container_id, .. } => ("podman", container_id, None),
-        targets::TargetLocator::LocalDocker { container_id, .. } => ("docker", container_id, None),
-        targets::TargetLocator::SshPodman {
-            ssh, container_id, ..
-        } => ("podman", container_id, Some(ssh)),
-        targets::TargetLocator::SshDocker {
-            ssh, container_id, ..
-        } => ("docker", container_id, Some(ssh)),
-        targets::TargetLocator::LocalBare { .. }
-        | targets::TargetLocator::AppleContainer { .. }
-        | targets::TargetLocator::SshAppleContainer { .. }
-        | targets::TargetLocator::SshNitro { .. }
-        | targets::TargetLocator::AwsEc2 { .. }
-        | targets::TargetLocator::SshBare { .. } => {
-            bail!("the build cache is only installed into Podman and Docker containers")
-        }
-    };
-    {
-        let mut args = vec![
-            engine.to_owned(),
-            "exec".into(),
-            "-i".into(),
-            container_id.clone(),
-            "sh".into(),
-            "-c".into(),
-            MBX_CONFIG_SCRIPT.to_owned(),
-            "mj-mbx-config".into(),
-            configuration.to_string_lossy().into_owned(),
-        ];
-        args.extend(
-            config_roots
-                .iter()
-                .map(|path| path.to_string_lossy().into_owned()),
-        );
-        let command = match ssh {
-            None => CommandSpec::new(args[0].clone(), args[1..].iter().cloned()),
-            Some(ssh) => crate::targets::ssh_command(ssh, args),
-        }
-        .purpose("link the shared machine mbx configuration")
-        .stage(ProvisionStage::Syncing);
-        execute_checked(executor, command)?;
-    }
-    Ok(())
+) -> Vec<String> {
+    let mut args = vec![
+        engine.to_owned(),
+        "exec".into(),
+        "-i".into(),
+        container_id.to_owned(),
+        "sh".into(),
+        "-c".into(),
+        MBX_CONFIG_SCRIPT.to_owned(),
+        "mj-mbx-config".into(),
+        configuration.to_string_lossy().into_owned(),
+    ];
+    args.extend(
+        config_roots
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned()),
+    );
+    args
 }
 
 /// Preserve legacy private mbx installations and link their shared config in

@@ -3789,13 +3789,15 @@ fn installing_the_build_cache_places_marked_shared_copy_shims_on_the_session_pat
     );
     assert!(shim.contains("# mjolnir-mbx-shim"), "{shim}");
     assert!(
-        shim.contains("exec '/mnt/fast/mbx-cache/.mjolnir/bin/mbx' \"$@\""),
+        shim.contains(&targets::posix_quote(
+            "exec '/mnt/fast/mbx-cache/.mjolnir/bin/mbx' \"$@\""
+        )),
         "both wrappers execute the synchronized cache copy: {shim}"
     );
     assert!(!commands.iter().any(|line| line.contains(" cp ")));
     assert!(
         commands.iter().any(|line| {
-            line.contains("exec -i hel-session sh -c") && line.contains("config/mbx")
+            line.contains("'exec' '-i' 'hel-session' 'sh' '-c'") && line.contains("config/mbx")
         }),
         "the machine mbx configuration is linked into the container: {commands:#?}"
     );
