@@ -1156,7 +1156,7 @@ fn send_message_tool() -> Value {
 fn fetch_tool() -> Value {
     read_only(tool(
         "fetch",
-        "Copy a file or directory from a Mjolnir session's target into your target's temporary directory, like `mj fetch`. Returns the local path, source path, kind and byte count; directories are saved as zip archives. Set ls to true to return a structured listing with sizes and modification times instead. Relative paths resolve in the source session's working directory; absolute paths must lie in its workspace, sub-agent reports or temporary directory. Symlinks cannot escape those boundaries. Files and zip archives are limited to 16 MiB.",
+        "Copy a file or directory from a Mjolnir session's target into your target's temporary directory, like `mj fetch`. Returns the local path, source path, kind and byte count; directories are saved as zip archives. Set ls to true to return a structured listing with sizes and modification times instead. Relative paths resolve in the source session's working directory; absolute paths must lie in its workspace, sub-agent reports or temporary directory. Symlinks cannot escape those boundaries.",
         json!({"type":"object","properties":{
             "session_id":{"type":"string","description":"Source session's full ID."},
             "path":{"type":"string","description":"File or directory on the source session's target."},

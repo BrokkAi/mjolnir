@@ -728,9 +728,9 @@ container, so one session can read evidence another session cites. A relative
 `--path` resolves in the directory the session's agent runs in; an absolute
 one is read as the target spells it. After symlinks are resolved, the path
 must lie in the session's workspace, its sub-agent report directories, or the
-target's temporary directory. A file is copied as it is, up to 16 MiB. A
-directory arrives as a zip archive of at most 16 MiB, made from at most
-128 MiB of files; symlinks inside it are stored as links, not followed. The
+target's temporary directory. A file is copied as it is. A directory arrives
+as a zip archive; symlinks inside it are stored as links, not followed. Fetch
+imposes no size limit. The
 copy lands in `$TMPDIR/mjolnir/<session>/` followed by the path on the target,
 with `.zip` after a directory's name, and `mj fetch` prints that local path.
 For example, `mj fetch --session d8443f17… --path /tmp/rust-veto-cf` prints

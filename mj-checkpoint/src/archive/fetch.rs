@@ -1,17 +1,11 @@
-use super::{MAX_SESSION_FILE_BYTES, SessionExportError};
+use super::SessionExportError;
 use anyhow::{Context, anyhow, ensure};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{Cursor, Seek, SeekFrom, Write};
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use zip::CompressionMethod;
 use zip::write::SimpleFileOptions;
-
-/// The most file content a directory fetch reads before it compresses any of
-/// it. The archive itself is held to [`MAX_SESSION_FILE_BYTES`]; this bound
-/// stops a directory of very compressible files from costing minutes of reading
-/// on the target to produce an archive that would still fit.
-pub const MAX_FETCHED_DIRECTORY_BYTES: u64 = 8 * MAX_SESSION_FILE_BYTES;
 
 /// What a caller asked of a path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,24 +165,6 @@ pub fn fetch_session_path(
     temp: bool,
     mode: FetchMode,
 ) -> Result<FetchedPath, SessionExportError> {
-    fetch_with_limits(
-        path,
-        roots,
-        temp,
-        mode,
-        MAX_SESSION_FILE_BYTES,
-        MAX_FETCHED_DIRECTORY_BYTES,
-    )
-}
-
-fn fetch_with_limits(
-    path: &Path,
-    roots: &[PathBuf],
-    temp: bool,
-    mode: FetchMode,
-    max_output: u64,
-    max_content: u64,
-) -> Result<FetchedPath, SessionExportError> {
     let mut allowed = roots.to_vec();
     if temp {
         allowed.push(std::env::temp_dir());
@@ -241,7 +217,7 @@ fn fetch_with_limits(
         fs::metadata(&resolved).with_context(|| format!("inspect {}", resolved.display()))?;
     let display = resolved.to_string_lossy().into_owned();
     if mode == FetchMode::Listing {
-        let bytes = list_path(&resolved, &metadata, max_output)?;
+        let bytes = list_path(&resolved, &metadata)?;
         return Ok(FetchedPath {
             kind: FetchedKind::Listing,
             path: display,
@@ -249,11 +225,6 @@ fn fetch_with_limits(
         });
     }
     if metadata.is_file() {
-        if metadata.len() > max_output {
-            return Err(SessionExportError::Refused(format!(
-                "{display} is larger than {max_output} bytes"
-            )));
-        }
         let bytes = fs::read(&resolved).with_context(|| format!("read {display}"))?;
         return Ok(FetchedPath {
             kind: FetchedKind::File,
@@ -266,7 +237,7 @@ fn fetch_with_limits(
             "{display} is neither a regular file nor a directory"
         )));
     }
-    let bytes = zip_directory(&resolved, max_output, max_content)?;
+    let bytes = zip_directory(&resolved)?;
     Ok(FetchedPath {
         kind: FetchedKind::Directory,
         path: display,
@@ -274,12 +245,8 @@ fn fetch_with_limits(
     })
 }
 
-/// A [`SessionListing`] of `path` as JSON, no larger than `max_output`.
-fn list_path(
-    path: &Path,
-    metadata: &fs::Metadata,
-    max_output: u64,
-) -> Result<Vec<u8>, SessionExportError> {
+/// A [`SessionListing`] of `path` as JSON.
+fn list_path(path: &Path, metadata: &fs::Metadata) -> Result<Vec<u8>, SessionExportError> {
     let display = path.to_string_lossy().into_owned();
     let entries = if metadata.is_dir() {
         let mut names = fs::read_dir(path)
@@ -309,11 +276,6 @@ fn list_path(
         entries,
     })
     .context("encode the listing")?;
-    if bytes.len() as u64 > max_output {
-        return Err(SessionExportError::Refused(format!(
-            "{display} has too many entries to list in {max_output} bytes; list a subdirectory"
-        )));
-    }
     Ok(bytes)
 }
 
@@ -347,7 +309,7 @@ fn listed_entry(path: &Path, name: String, metadata: &fs::Metadata) -> anyhow::R
 
 enum Entry {
     Directory,
-    File { size: u64 },
+    File,
     Symlink { target: PathBuf },
 }
 
@@ -378,57 +340,27 @@ fn collect_entries(
         } else if kind.is_dir() {
             collect_entries(&path, &child_name, entries)?;
         } else if kind.is_file() {
-            entries.push((
-                child_name,
-                Entry::File {
-                    size: metadata.len(),
-                },
-            ));
+            entries.push((child_name, Entry::File));
         }
         // Sockets, FIFOs and devices have no content to archive.
     }
     Ok(())
 }
 
-fn zip_directory(
-    directory: &Path,
-    max_output: u64,
-    max_content: u64,
-) -> Result<Vec<u8>, SessionExportError> {
-    let display = directory.display().to_string();
+fn zip_directory(directory: &Path) -> Result<Vec<u8>, SessionExportError> {
     let name = directory
         .file_name()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("root"));
     let mut entries = Vec::new();
     collect_entries(directory, &name, &mut entries)?;
-    let content: u64 = entries
-        .iter()
-        .map(|(_, entry)| match entry {
-            Entry::File { size } => *size,
-            _ => 0,
-        })
-        .sum();
-    if content > max_content {
-        return Err(SessionExportError::Refused(format!(
-            "{display} holds {content} bytes of files, more than the {max_content} a directory fetch reads; fetch a subdirectory"
-        )));
-    }
-    let too_large = || {
-        SessionExportError::Refused(format!(
-            "{display} is larger than {max_output} bytes as a zip archive; fetch a subdirectory"
-        ))
-    };
     let failed = |error: zip::result::ZipError, entry: &Path| -> SessionExportError {
-        match error {
-            zip::result::ZipError::Io(error) if is_limit(&error) => too_large(),
-            error => anyhow!(error)
-                .context(format!("archive {}", entry.display()))
-                .into(),
-        }
+        anyhow!(error)
+            .context(format!("archive {}", entry.display()))
+            .into()
     };
     let parent = directory.parent().unwrap_or(directory);
-    let mut writer = zip::ZipWriter::new(BoundedBuffer::new(max_output));
+    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
     for (entry_name, entry) in &entries {
         // Zip names use `/` whatever the target's separator is.
         let zip_name = entry_name
@@ -448,9 +380,11 @@ fn zip_directory(
                     SimpleFileOptions::default(),
                 )
                 .map_err(|error| failed(error, &path))?,
-            Entry::File { .. } => {
-                let options =
-                    SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+            Entry::File => {
+                // ZIP64 also handles files that grow past 4 GiB while being read.
+                let options = SimpleFileOptions::default()
+                    .compression_method(CompressionMethod::Deflated)
+                    .large_file(true);
                 #[cfg(unix)]
                 let options = {
                     use std::os::unix::fs::PermissionsExt as _;
@@ -466,9 +400,6 @@ fn zip_directory(
                 let mut file =
                     fs::File::open(&path).with_context(|| format!("open {}", path.display()))?;
                 if let Err(error) = std::io::copy(&mut file, &mut writer) {
-                    if is_limit(&error) {
-                        return Err(too_large());
-                    }
                     return Err(anyhow::Error::new(error)
                         .context(format!("archive {}", path.display()))
                         .into());
@@ -480,75 +411,9 @@ fn zip_directory(
     Ok(buffer.into_inner())
 }
 
-/// The error [`BoundedBuffer`] answers once a write would pass its limit.
-#[derive(Debug)]
-struct OverLimit;
-
-impl std::fmt::Display for OverLimit {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("the archive passed its size limit")
-    }
-}
-
-impl std::error::Error for OverLimit {}
-
-fn is_limit(error: &std::io::Error) -> bool {
-    error.get_ref().is_some_and(|inner| inner.is::<OverLimit>())
-}
-
-/// An in-memory archive that refuses to grow past a limit, so compressing a
-/// large directory stops at the limit instead of after the whole directory.
-///
-/// After the first refusal it discards what it is given: the zip writer
-/// finishes the archive when it is dropped, and would otherwise print that
-/// second failure to standard error.
-struct BoundedBuffer {
-    cursor: Cursor<Vec<u8>>,
-    limit: u64,
-    refused: bool,
-}
-
-impl BoundedBuffer {
-    fn new(limit: u64) -> Self {
-        Self {
-            cursor: Cursor::new(Vec::new()),
-            limit,
-            refused: false,
-        }
-    }
-
-    fn into_inner(self) -> Vec<u8> {
-        self.cursor.into_inner()
-    }
-}
-
-impl Write for BoundedBuffer {
-    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        if self.refused {
-            return Ok(buffer.len());
-        }
-        if self.cursor.position() + buffer.len() as u64 > self.limit {
-            self.refused = true;
-            return Err(std::io::Error::other(OverLimit));
-        }
-        self.cursor.write(buffer)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl Seek for BoundedBuffer {
-    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
-        self.cursor.seek(position)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(unix)]
     use std::io::Read as _;
 
     #[test]
@@ -681,14 +546,14 @@ mod tests {
         assert_eq!(link, outside.path().join("secret.txt").to_string_lossy());
     }
 
+    // Hard-won: #1543: fetch rejected real artifacts and directories at arbitrary size limits.
     #[test]
-    fn a_directory_fetch_stops_at_its_limits_instead_of_after_the_whole_directory() {
+    fn fetch_transfers_files_and_archives_beyond_the_former_size_limits() {
         let workspace = tempfile::tempdir().unwrap();
         let directory = workspace.path().join("probes");
         fs::create_dir(&directory).unwrap();
-        // Incompressible, so the archive grows as fast as the input.
         let mut state = 0x2545_f491_4f6c_dd1du64;
-        let noise: Vec<u8> = (0..300_000)
+        let noise: Vec<u8> = (0..17 * 1024 * 1024)
             .map(|_| {
                 state ^= state << 13;
                 state ^= state >> 7;
@@ -696,39 +561,37 @@ mod tests {
                 state as u8
             })
             .collect();
-        fs::write(directory.join("noise.bin"), &noise).unwrap();
+        let file = directory.join("noise.bin");
+        fs::write(&file, &noise).unwrap();
         let roots = [workspace.path().to_path_buf()];
-
-        let reason = refusal(fetch_with_limits(
-            &directory,
-            &roots,
-            false,
-            FetchMode::Content,
-            100_000,
-            1_000_000,
-        ));
-        assert!(reason.contains("as a zip archive"), "{reason}");
-        let reason = refusal(fetch_with_limits(
-            &directory,
-            &roots,
-            false,
-            FetchMode::Content,
-            1_000_000,
-            100_000,
-        ));
-        assert!(reason.contains("bytes of files"), "{reason}");
+        let fetched = fetch_session_path(&file, &roots, false, FetchMode::Content).unwrap();
         assert_eq!(
-            fetch_with_limits(
-                &directory,
-                &roots,
-                false,
-                FetchMode::Content,
-                1_000_000,
-                1_000_000
-            )
-            .unwrap()
-            .kind,
-            FetchedKind::Directory
+            FetchedPath::decode(fetched.encode().unwrap())
+                .unwrap()
+                .bytes,
+            noise
         );
+        // This compresses well but exceeds the former directory input limit.
+        fs::File::create(directory.join("zeros.bin"))
+            .unwrap()
+            .set_len(129 * 1024 * 1024)
+            .unwrap();
+        let fetched = fetch_session_path(&directory, &roots, false, FetchMode::Content).unwrap();
+        assert!(fetched.bytes.len() > 16 * 1024 * 1024);
+        let decoded = FetchedPath::decode(fetched.encode().unwrap()).unwrap();
+        let mut archive = zip::ZipArchive::new(Cursor::new(decoded.bytes)).unwrap();
+        let mut restored = Vec::new();
+        archive
+            .by_name("probes/noise.bin")
+            .unwrap()
+            .read_to_end(&mut restored)
+            .unwrap();
+        assert_eq!(restored, noise);
+        let bytes = std::io::copy(
+            &mut archive.by_name("probes/zeros.bin").unwrap(),
+            &mut std::io::sink(),
+        )
+        .unwrap();
+        assert_eq!(bytes, 129 * 1024 * 1024);
     }
 }
