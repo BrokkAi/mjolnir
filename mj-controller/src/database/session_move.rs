@@ -277,6 +277,14 @@ pub fn load_move_operations() -> Result<Vec<MoveOperation>> {
 }
 
 /// Read Move and close intent together; an unmatched/stale close ID is inert.
+pub(super) fn exact_move_close_intent(
+    decoded_id: &str,
+    row_id: &str,
+    close_id: Option<&str>,
+) -> bool {
+    decoded_id == row_id && close_id == Some(row_id)
+}
+
 /// The durable owner of an interrupted Move, shared by startup and intent GC.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MoveRecoveryOwner {
@@ -316,8 +324,7 @@ pub(crate) fn load_move_recovery() -> Result<(Vec<MoveOperation>, BTreeSet<Strin
     for row in rows {
         let (session_id, operation_id, json, close_id) = row?;
         if let Some(operation) = decode_move_operation(&session_id, &json) {
-            if operation.operation_id == operation_id
-                && close_id.as_deref() == Some(operation_id.as_str())
+            if exact_move_close_intent(&operation.operation_id, &operation_id, close_id.as_deref())
             {
                 closes.insert(operation_id);
             }
@@ -385,7 +392,11 @@ pub(super) fn reap_finished_move_intents_with(connection: &Connection) -> Result
         )?;
         if move_recovery_owner(
             state.as_deref().map(stored_session_state),
-            close_id.as_deref() == Some(operation.operation_id.as_str()),
+            exact_move_close_intent(
+                &operation.operation_id,
+                &operation.operation_id,
+                close_id.as_deref(),
+            ),
         )
         .is_some()
         {

@@ -3745,7 +3745,7 @@ async fn each_rejected_action_keeps_its_own_status_and_guidance() {
                 reference: "4321-9".to_owned(),
             },
             StatusCode::INTERNAL_SERVER_ERROR,
-            "the controller could not start this action. Retry the action; if the runtime is unavailable, Resume the session to repair it first. Reference 4321-9.",
+            "the controller could not start this action: The lifecycle operation could not finish. Retry the action; if the runtime is unavailable, Resume the session to repair it first. Reference 4321-9.",
         ),
         (
             ActionOutcome::Refused(mj_core::refusal::Refusal::precondition(

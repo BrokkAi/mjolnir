@@ -448,6 +448,11 @@ impl RuntimeState {
             crate::controller::move_session::restore_move_queue_hold(operation);
         }
         for operation in operations {
+            // Historical records cannot own a later lifecycle or revive an
+            // intent preserved by an older daemon after terminal publication.
+            if operation.is_resolved() {
+                continue;
+            }
             let state = self
                 .owner()
                 .controller()

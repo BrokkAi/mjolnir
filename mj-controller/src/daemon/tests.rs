@@ -7688,6 +7688,140 @@ esac
             assert!(!source_root.exists());
         }
     }
+    // Historical Moves must not turn a workerless cleanup into interrupted
+    // checkpoint recovery merely because their rows are still retained.
+    let historical = crate::database::load_move_operation("15420000000000000000000000000008")
+        .unwrap()
+        .unwrap();
+    for (index, lifecycle) in [
+        SessionState::Provisioning,
+        SessionState::Parked,
+        SessionState::StartupCleanup,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for phase in [
+            mj_core::state::MovePhase::Completed,
+            mj_core::state::MovePhase::Cancelled,
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let id = format!(
+                "1542{:028x}",
+                16 + 2 * index + usize::from(phase == mj_core::state::MovePhase::Cancelled)
+            );
+            let worker_root = root.path().join(&id);
+            std::fs::create_dir(&worker_root).unwrap();
+            std::fs::write(worker_root.join("partial-checkout"), "unfinished startup").unwrap();
+            let mut record = runtime_test_session(&id, &workspace.id, lifecycle);
+            record.target = Some(Box::new(mj_core::state::TargetLocator::LocalBare {
+                worker_root: worker_root.clone(),
+            }));
+            crate::database::save_session(&record).unwrap();
+            if index == 0 && phase == mj_core::state::MovePhase::Completed {
+                for moving_state in [SessionState::Provisioning, SessionState::Closing] {
+                    record.state = moving_state;
+                    crate::database::save_lifecycle_session(&record).unwrap();
+                    let mut pending = retained_startup_test_move(&record);
+                    pending.operation_id = format!("unaccepted-{id}");
+                    crate::database::save_move_operation(&pending).unwrap();
+                    crate::controller::move_session::restore_move_queue_hold(&pending);
+                    let refused = test_runtime_state_loading_the_store();
+                    let error = match refused.start_suspend_session(id.clone(), true, false).await {
+                        Err(error) => error,
+                        Ok(mut started) => started.confirm_acceptance().await.unwrap_err(),
+                    };
+                    assert!(error.to_string().contains("Move queue admission"));
+                    let unchanged = crate::database::load_session_record(&id).unwrap().unwrap();
+                    assert_eq!(
+                        unchanged.state, moving_state,
+                        "an unaccepted close cannot change another lifecycle's state"
+                    );
+                    assert_eq!(unchanged.target, record.target);
+                    assert_eq!(unchanged.last_error, record.last_error);
+                    assert_eq!(unchanged.updated_at, record.updated_at);
+                    assert!(worker_root.exists());
+                    crate::controller::move_session::release_move_queue_hold(&id);
+                }
+                record.state = lifecycle;
+                crate::database::save_lifecycle_session(&record).unwrap();
+            }
+            let mut completed = historical.clone();
+            completed.selection.session_id = id.clone();
+            completed.operation_id = format!("historical-{id}");
+            completed.phase = phase;
+            completed.queue_admission_started = false;
+            completed.queue_admission_finished = true;
+            completed.prepared_destination = None;
+            crate::database::save_move_operation(&completed).unwrap();
+            // A crash during a later ordinary close must leave close recovery
+            // in charge even while its historical Move row remains.
+            record.state = SessionState::Closing;
+            crate::database::save_lifecycle_session(&record).unwrap();
+            for exact_historical_intent in [false, true] {
+                let recovering = test_runtime_state_loading_the_store();
+                let close_ids = if exact_historical_intent {
+                    BTreeSet::from([completed.operation_id.clone()])
+                } else {
+                    BTreeSet::new()
+                };
+                let owners = recovering
+                    .recover_moves(vec![completed.clone()], &close_ids)
+                    .unwrap();
+                assert!(!owners.moves.contains(&id));
+                assert!(!owners.closes.contains(&id));
+                assert!(
+                    interrupted_suspend_session_ids(&Controller::load().unwrap()).contains(&id)
+                );
+            }
+            record.state = lifecycle;
+            crate::database::save_lifecycle_session(&record).unwrap();
+            let runtime = test_runtime_state_loading_the_store();
+            if lifecycle == SessionState::Provisioning {
+                // An older writer can preserve a now-historical exact marker.
+                // It cannot authorize a rejected action to fail a new startup.
+                let raw = rusqlite::Connection::open(crate::database::database_path()).unwrap();
+                raw.execute("UPDATE session_moves SET close_requested_operation_id=operation_id WHERE session_id=?1", [&id]).unwrap();
+                let before = crate::database::load_session_record(&id).unwrap().unwrap();
+                let cancelled = LifecycleControl::default();
+                cancelled.cancelled.store(true, Ordering::Release);
+                assert!(
+                    runtime
+                        .start_suspend_session_controlled(id.clone(), true, false, cancelled)
+                        .await
+                        .is_err()
+                );
+                let unchanged = crate::database::load_session_record(&id).unwrap().unwrap();
+                assert_eq!(unchanged.state, before.state);
+                assert_eq!(unchanged.last_error, before.last_error);
+                assert_eq!(unchanged.updated_at, before.updated_at);
+                assert_eq!(raw.query_row("SELECT close_requested_operation_id FROM session_moves WHERE session_id=?1", [&id], |row| row.get::<_, String>(0)).unwrap(), completed.operation_id);
+            }
+            runtime.prepare_suspension(&id).await.unwrap();
+            assert_eq!(
+                crate::database::load_session_record(&id)
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                lifecycle,
+                "resolved Move must preserve the existing cleanup route"
+            );
+            assert!(
+                !crate::database::load_move_recovery()
+                    .unwrap()
+                    .1
+                    .contains(&completed.operation_id)
+            );
+            tokio::time::timeout(Duration::from_secs(30), runtime.suspend_session(id.clone()))
+                .await
+                .unwrap()
+                .unwrap();
+            let closed = crate::database::load_session_record(&id).unwrap().unwrap();
+            assert_eq!(closed.state, SessionState::Stopped);
+            assert!(closed.target.is_none());
+            assert!(!worker_root.exists());
+        }
+    }
 }
 
 /// #1191: `mj destroy` is answered "accepted" before the destroy finishes,

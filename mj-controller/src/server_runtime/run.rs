@@ -1307,7 +1307,8 @@ pub(crate) async fn run_server(
                     let notice_sessions = session_control.clone();
                     let failure_runtime = daemon_runtime.clone();
                     let lifecycle_failure_prefix = match &action {
-                        ControllerAction::Suspend { .. } => Some(mj_core::state::CLOSE_FAILURE_PREFIX),
+                        // Admitted Suspend failures belong to the lifecycle
+                        // supervisor; an unaccepted phone request owns no close.
                         ControllerAction::Destroy { .. } => Some(mj_core::state::DESTRUCTION_FAILURE_PREFIX),
                         _ => None,
                     };

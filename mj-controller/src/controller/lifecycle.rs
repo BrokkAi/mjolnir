@@ -875,23 +875,14 @@ impl Controller {
         };
         // The supervisor logs the detailed failure. Always publish this safe
         // outcome, including when an older raw error was already recorded.
-        let previous = record.clone();
-        let record = self.state.sessions.get_mut(session_id).unwrap();
-        if matches!(
-            record.state,
-            SessionState::Closing | SessionState::Provisioning
-        ) {
-            record.state = SessionState::Error;
-        }
+        let mut record = record.clone();
         record.last_error = Some(cause.to_owned());
         record.updated_at = now();
-        persist_session_record_transition_or_restore(
-            &mut self.state,
-            session_id,
-            &previous,
-            "persist the reason a close did not finish",
-            &crate::database::save_failed_close,
-        )?;
+        // The writer decides from the durable close owner in the same
+        // transaction as failure publication; admission may have been refused.
+        let saved = crate::database::save_failed_close(&record)
+            .context("persist the reason a close did not finish")?;
+        self.state.sessions.insert(session_id.to_owned(), saved);
         Ok(true)
     }
 
