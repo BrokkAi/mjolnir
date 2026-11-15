@@ -402,8 +402,7 @@ pub(crate) enum Confirmation {
     RecoverFailed {
         session_id: String,
         error: Option<String>,
-        /// Whether a verified recovery copy exists to resume from. Without one
-        /// there is nothing to recover and only the transcript is on offer.
+        /// Whether an environment can be repaired or a verified archive restored.
         recoverable: bool,
     },
     /// A resume that moves a local checkout into an isolated workspace. The

@@ -572,14 +572,31 @@ fn sqlite_native_database_snapshot(harness: HarnessKind, path: &Path) -> Result<
 /// page in one transaction, so the copy holds exactly what a reader of the
 /// live database sees; copying the file alone would leave out whatever is
 /// still in the log.
-fn sqlite_snapshot(
+pub(super) fn sqlite_snapshot(
     path: &Path,
     label: &str,
     edit: impl FnOnce(&rusqlite::Connection) -> Result<()>,
 ) -> Result<Vec<u8>> {
-    let scratch =
-        tempfile::tempdir().with_context(|| format!("create {label} snapshot directory"))?;
-    let snapshot_path = scratch.path().join("snapshot.db");
+    let snapshot = sqlite_snapshot_file(path, label, edit)?;
+    fs::read(snapshot.path()).with_context(|| {
+        format!(
+            "read {label} database snapshot {}",
+            snapshot.path().display()
+        )
+    })
+}
+
+/// The same consistent copy, left in a private temporary file.
+pub(super) fn sqlite_snapshot_file(
+    path: &Path,
+    label: &str,
+    edit: impl FnOnce(&rusqlite::Connection) -> Result<()>,
+) -> Result<tempfile::NamedTempFile> {
+    let scratch = tempfile::Builder::new()
+        .prefix("snapshot")
+        .tempfile()
+        .with_context(|| format!("create {label} snapshot file"))?;
+    let snapshot_path = scratch.path().to_path_buf();
     let snapshot = || -> Result<()> {
         let source = rusqlite::Connection::open_with_flags(
             path,
@@ -614,8 +631,7 @@ fn sqlite_snapshot(
         Ok(())
     };
     snapshot().with_context(|| format!("snapshot {label} database {}", path.display()))?;
-    fs::read(&snapshot_path)
-        .with_context(|| format!("read {label} database snapshot {}", snapshot_path.display()))
+    Ok(scratch)
 }
 
 pub(super) fn kimi_session_artifact(relative: &Path, session_id: &str) -> bool {

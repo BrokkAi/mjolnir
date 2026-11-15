@@ -5396,56 +5396,68 @@ fn make_stopped(snapshot: &mut ViewerSnapshot) {
     session.compatible_resume_targets = vec!["podman".into(), "raw".into()].into();
 }
 
+// Hard-won: 94d7 resume: an intact failed environment needs no checkpoint to repair.
 #[tokio::test]
 async fn resume_response_waits_until_a_stale_stopped_snapshot_shows_the_operation() {
-    let (app, mut actions, snapshot_tx, _) =
-        api_app(backend_holding_the_session_workspace(), make_stopped);
-    let mut response = tokio::spawn(
-        app.oneshot(
-            bearer(Request::post("/api/v1/sessions/session-1/resume"))
-                .body(Body::empty())
-                .unwrap(),
-        ),
-    );
+    for repair in [false, true] {
+        let (app, mut actions, snapshot_tx, _) =
+            api_app(backend_holding_the_session_workspace(), |snapshot| {
+                make_stopped(snapshot);
+                if repair {
+                    let session = &mut snapshot.sessions[0];
+                    session.state = "error".into();
+                    session.lifecycle = ViewerLifecycleCategory::Failed;
+                    session.has_checkpoint = false;
+                    session.retained_target = true;
+                }
+            });
+        let mut response = tokio::spawn(
+            app.oneshot(
+                bearer(Request::post("/api/v1/sessions/session-1/resume"))
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        );
 
-    let request = actions.recv().await.unwrap();
-    assert!(matches!(request.action, ControllerAction::Resume { .. }));
-    request
-        .reply
-        .send(ActionOutcome::Accepted {
-            session_id: None,
-            notice: None,
-        })
-        .unwrap();
-    tokio::task::yield_now().await;
-    assert!(
-        !response.is_finished(),
-        "the accepted resume must not answer while the snapshot still says suspended"
-    );
+        let request = actions.recv().await.unwrap();
+        assert!(matches!(request.action, ControllerAction::Resume { .. }));
+        request
+            .reply
+            .send(ActionOutcome::Accepted {
+                session_id: None,
+                notice: None,
+            })
+            .unwrap();
+        tokio::task::yield_now().await;
+        assert!(
+            !response.is_finished(),
+            "the accepted resume must not answer while the snapshot still says suspended"
+        );
 
-    snapshot_tx.send_modify(|snapshot| {
-        let session = &mut snapshot.sessions[0];
-        session.operation = Some(Box::new(ViewerOperation {
-            id: "resume-op".into(),
-            session_id: session.id.clone(),
-            kind: ViewerOperationKind::Resume,
-            started_at_epoch_seconds: 1,
-            stages: Vec::new(),
-            notice: None,
-            cancellable: true,
-        }));
-    });
-    let response = tokio::time::timeout(Duration::from_secs(2), &mut response)
-        .await
-        .expect("operation publication releases the waiting response")
-        .unwrap()
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    let body = json_body(response).await;
-    assert_eq!(body["session_id"], "session-1");
-    assert_eq!(body["workspace_id"], "default");
-    assert_eq!(body["profile_id"], "codex-1");
-    assert_eq!(body["target_id"], "podman");
+        snapshot_tx.send_modify(|snapshot| {
+            let session = &mut snapshot.sessions[0];
+            session.operation = Some(Box::new(ViewerOperation {
+                id: "resume-op".into(),
+                session_id: session.id.clone(),
+                kind: ViewerOperationKind::Resume,
+                started_at_epoch_seconds: 1,
+                stages: Vec::new(),
+                notice: None,
+                cancellable: true,
+            }));
+        });
+        let response = tokio::time::timeout(Duration::from_secs(2), &mut response)
+            .await
+            .expect("operation publication releases the waiting response")
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = json_body(response).await;
+        assert_eq!(body["session_id"], "session-1");
+        assert_eq!(body["workspace_id"], "default");
+        assert_eq!(body["profile_id"], "codex-1");
+        assert_eq!(body["target_id"], "podman");
+    }
 }
 
 #[tokio::test]
@@ -5539,6 +5551,7 @@ async fn resuming_a_failed_session_without_a_checkpoint_is_refused_at_once() {
             // A launch that failed before its first checkpoint.
             let session = &mut snapshot.sessions[0];
             session.has_checkpoint = false;
+            session.retained_target = false;
             session.state = "error".into();
             session.lifecycle = ViewerLifecycleCategory::Failed;
             session.has_error = true;

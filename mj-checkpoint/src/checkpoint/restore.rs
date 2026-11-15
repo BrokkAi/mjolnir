@@ -159,95 +159,345 @@ pub fn restore_checkpoint_with_native_state(
     )?;
 
     if spec.restore_native {
-        let target_cwd = spec.primary_repository_root.clone().or_else(|| {
-            target_primary_cwd(
-                &archive.manifest.bundle.primary_repository,
-                &archive.manifest.repositories,
-                &spec.workspace_root,
-            )
+        restore_native_artifacts(&archive, &mut payload_reader, spec, native_state, false)?;
+    }
+    Ok(())
+}
+
+/// Retryable reconstruction in a private staging checkout. Publishing must
+/// atomically refuse any directory that appeared at the current checkout path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckoutRecoverySpec {
+    pub version: u32,
+    pub checkpoint_sha256: String,
+    pub restore: CheckpointRestoreSpec,
+    pub staging_root: PathBuf,
+    pub staged_checkout: PathBuf,
+    pub destination_checkout: PathBuf,
+    #[serde(default)]
+    pub additional_checkouts: Vec<CheckoutRecoveryPublication>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckoutRecoveryPublication {
+    pub staged_checkout: PathBuf,
+    pub destination_checkout: PathBuf,
+}
+
+/// Target-side partial recovery never writes checkout files, refs or child reports.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct ParentRecoveryOutcome {
+    pub native_restored: bool,
+    pub relay_restored: bool,
+}
+
+pub fn restore_missing_parent_checkpoint(
+    spec: &CheckpointRestoreSpec,
+    native_state: &dyn NativeCheckpointState,
+    current_seed: Option<&mj_core::relay::RestoredRelaySeed>,
+) -> Result<ParentRecoveryOutcome> {
+    ensure!(
+        !spec.restore_repositories,
+        "parent recovery cannot restore repositories"
+    );
+    ensure!(spec.workspace_root.is_dir(), "current workspace is missing");
+    // Runtime reconstruction needs no archive when native history survives
+    // and the controller supplies the current durable queue/frontier.
+    if !spec.restore_native
+        && let Some(seed) = current_seed
+    {
+        return Ok(ParentRecoveryOutcome {
+            native_restored: false,
+            relay_restored: restore_missing_parent_relay(&spec.relay_root, seed)?,
         });
-        // A restored database replaces the one in the home, and SQLite would
-        // replay a write-ahead log left beside the old one over it. An archive
-        // from before OpenCode snapshots carries its own log, which the loop
-        // below writes after this.
+    }
+    let archive = crate::archive::read_archive_for_restore(&spec.archive_path)?;
+    let mut payload_reader = crate::archive::CheckpointPayloadReader::open(&spec.archive_path)?;
+    let canonical = archive.canonical_session()?;
+    let mut outcome = ParentRecoveryOutcome::default();
+    if spec.restore_native {
+        outcome.native_restored =
+            restore_native_artifacts(&archive, &mut payload_reader, spec, native_state, true)?;
+    }
+    // A current journal always wins over the archive.
+    if parent_relay_missing(&spec.relay_root)? {
+        let archived_seed;
+        let seed = if let Some(seed) = current_seed {
+            seed
+        } else {
+            archived_seed = relay_seed_for_restore(&canonical, true, spec.queue_policy)?;
+            &archived_seed
+        };
+        let images = mj_core::attachment::AttachmentStore::worker(&spec.relay_root);
         for descriptor in &archive.manifest.payloads {
             if let PayloadRole::NativeArtifact { relative_path } = &descriptor.role
-                && super::native_scan::is_sqlite_native_database(
-                    archive.manifest.session.harness_kind,
-                    relative_path,
-                )
+                && relative_path.starts_with(mj_core::attachment::ARCHIVE_ATTACHMENT_DIR)
             {
-                for sidecar in super::native_scan::sqlite_sidecars(relative_path) {
+                images.restore_artifact(relative_path, archive.payload(descriptor)?)?;
+            }
+        }
+        outcome.relay_restored = restore_missing_parent_relay(&spec.relay_root, seed)?;
+    }
+    Ok(outcome)
+}
+
+fn parent_relay_missing(root: &Path) -> Result<bool> {
+    Ok(!root.join(mj_core::relay::RELAY_STATE_FILE).try_exists()?
+        && !root.join(mj_core::relay::RELAY_JOURNAL_DIR).try_exists()?)
+}
+
+fn restore_missing_parent_relay(
+    root: &Path,
+    seed: &mj_core::relay::RestoredRelaySeed,
+) -> Result<bool> {
+    if !parent_relay_missing(root)? {
+        return Ok(false);
+    }
+    let relative = Path::new(mj_core::relay::RESTORED_RELAY_SEED_FILE);
+    ensure_no_symlink_ancestors(root, relative)?;
+    fs::create_dir_all(root)?;
+    let destination = root.join(relative);
+    match fs::symlink_metadata(&destination) {
+        Ok(metadata) => ensure!(
+            metadata.is_file() && !metadata.file_type().is_symlink(),
+            "invalid parent relay seed destination"
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    // A seed is bootstrap input, not the durable journal. Once that journal
+    // is lost, only the chosen current projection can authorize its queue.
+    let mut temporary = tempfile::NamedTempFile::new_in(root)?;
+    std::io::Write::write_all(&mut temporary, &serde_json::to_vec(seed)?)?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(&destination)
+        .map_err(|error| error.error)?;
+    #[cfg(unix)]
+    fs::File::open(root)?.sync_all()?;
+    Ok(true)
+}
+
+/// Collapse a legacy database/WAL family before publishing any authoritative
+/// file. A retry can then treat a present database as complete, with no receipt
+/// or partially published sidecars to reconcile.
+fn restore_missing_sqlite_families(
+    archive: &crate::archive::VerifiedArchive,
+    payload_reader: &mut crate::archive::CheckpointPayloadReader,
+    spec: &CheckpointRestoreSpec,
+    target_cwd: Option<&Path>,
+) -> Result<(bool, std::collections::BTreeSet<PathBuf>)> {
+    let mut changed = false;
+    let mut families = std::collections::BTreeSet::new();
+    for database in &archive.manifest.payloads {
+        let PayloadRole::NativeArtifact { relative_path } = &database.role else {
+            continue;
+        };
+        if !super::native_scan::is_sqlite_native_database(
+            archive.manifest.session.harness_kind,
+            relative_path,
+        ) {
+            continue;
+        }
+        let sidecars = super::native_scan::sqlite_sidecars(relative_path);
+        families.insert(relative_path.clone());
+        families.extend(sidecars.iter().cloned());
+        if spec.harness_home.join(relative_path).try_exists()? {
+            continue;
+        }
+        for sidecar in &sidecars {
+            ensure!(
+                !spec.harness_home.join(sidecar).try_exists()?,
+                "native database is absent but its sidecar remains; retaining both for recovery"
+            );
+        }
+        let scratch = tempfile::tempdir()?;
+        write_private_with(scratch.path(), relative_path, database.mode, |file| {
+            payload_reader.copy_payload(database, file)
+        })?;
+        for sidecar in &sidecars {
+            if let Some(payload) = archive.manifest.payloads.iter().find(|payload| matches!(&payload.role, PayloadRole::NativeArtifact { relative_path } if relative_path == sidecar)) {
+                write_private_with(scratch.path(), sidecar, payload.mode, |file| {
+                    payload_reader.copy_payload(payload, file)
+                })?;
+            }
+        }
+        // The collapsed copy stays a file; only a relocating provider needs
+        // its bytes in memory to rewrite them.
+        let snapshot = super::native_scan::sqlite_snapshot_file(
+            &scratch.path().join(relative_path),
+            "recovered native",
+            |_| Ok(()),
+        )?;
+        if target_cwd.is_none()
+            || native_artifact_relocation(archive.manifest.session.harness_kind, relative_path)
+                .is_none()
+        {
+            changed |= write_missing_private_with(
+                &spec.harness_home,
+                relative_path,
+                database.mode,
+                |file| {
+                    std::io::copy(&mut File::open(snapshot.path())?, file)?;
+                    Ok(())
+                },
+            )?;
+        } else {
+            let complete = restored_native_artifact_bytes(
+                archive.manifest.session.harness_kind,
+                relative_path,
+                &fs::read(snapshot.path())?,
+                target_cwd,
+                &spec.harness_home,
+            )?;
+            changed |= write_missing_private_file(
+                &spec.harness_home,
+                relative_path,
+                &complete,
+                database.mode,
+            )?;
+        }
+    }
+    Ok((changed, families))
+}
+
+fn restore_native_artifacts(
+    archive: &crate::archive::VerifiedArchive,
+    payload_reader: &mut crate::archive::CheckpointPayloadReader,
+    spec: &CheckpointRestoreSpec,
+    native_state: &dyn NativeCheckpointState,
+    missing_only: bool,
+) -> Result<bool> {
+    let target_cwd = spec.primary_repository_root.clone().or_else(|| {
+        target_primary_cwd(
+            &archive.manifest.bundle.primary_repository,
+            &archive.manifest.repositories,
+            &spec.workspace_root,
+        )
+    });
+    let (mut changed, sqlite_families) = if missing_only {
+        restore_missing_sqlite_families(archive, payload_reader, spec, target_cwd.as_deref())?
+    } else {
+        (false, std::collections::BTreeSet::new())
+    };
+    // A restored database replaces the one in the home, and SQLite would
+    // replay a write-ahead log left beside the old one over it. An archive
+    // from before OpenCode snapshots carries its own log, which the loop
+    // below writes after this.
+    for descriptor in &archive.manifest.payloads {
+        if let PayloadRole::NativeArtifact { relative_path } = &descriptor.role
+            && super::native_scan::is_sqlite_native_database(
+                archive.manifest.session.harness_kind,
+                relative_path,
+            )
+        {
+            for sidecar in super::native_scan::sqlite_sidecars(relative_path) {
+                if missing_only {
+                    ensure!(
+                        !spec.harness_home.join(&sidecar).try_exists()?
+                            || spec.harness_home.join(relative_path).try_exists()?,
+                        "native database is absent but its sidecar remains; retaining both for recovery"
+                    );
+                } else {
                     remove_private_file(&spec.harness_home, &sidecar)?;
                 }
             }
         }
-        for descriptor in &archive.manifest.payloads {
-            let PayloadRole::NativeArtifact { relative_path } = &descriptor.role else {
-                continue;
-            };
-            if relative_path.starts_with(mj_core::attachment::ARCHIVE_ATTACHMENT_DIR)
-                || relative_path.starts_with(mj_core::subagent::ARCHIVE_REPORT_DIR)
-            {
-                continue;
-            }
-            if !relative_path.starts_with(mj_core::goal::NATIVE_ARTIFACT_ROOT) {
-                let destination = restored_native_relative_path(
-                    archive.manifest.session.harness_kind,
-                    relative_path,
-                    target_cwd.as_deref(),
-                )?;
-                // Provider relocation rewrites Kimi/Grok/Muse/DSH records and agy's
-                // SQLite database. Claude and Codex transcripts only remap paths.
-                if target_cwd.is_none()
-                    || native_artifact_relocation(
-                        archive.manifest.session.harness_kind,
-                        &destination,
-                    )
+    }
+    for descriptor in &archive.manifest.payloads {
+        let PayloadRole::NativeArtifact { relative_path } = &descriptor.role else {
+            continue;
+        };
+        if relative_path.starts_with(mj_core::attachment::ARCHIVE_ATTACHMENT_DIR)
+            || relative_path.starts_with(mj_core::subagent::ARCHIVE_REPORT_DIR)
+        {
+            continue;
+        }
+        if missing_only && sqlite_families.contains(relative_path) {
+            continue;
+        }
+        if !relative_path.starts_with(mj_core::goal::NATIVE_ARTIFACT_ROOT) {
+            let destination = restored_native_relative_path(
+                archive.manifest.session.harness_kind,
+                relative_path,
+                target_cwd.as_deref(),
+            )?;
+            // Provider relocation rewrites Kimi/Grok/Muse/DSH records and agy's
+            // SQLite database. Claude and Codex transcripts only remap paths.
+            if target_cwd.is_none()
+                || native_artifact_relocation(archive.manifest.session.harness_kind, &destination)
                     .is_none()
-                {
+            {
+                if missing_only {
+                    changed |= write_missing_private_with(
+                        &spec.harness_home,
+                        &destination,
+                        descriptor.mode,
+                        |file| payload_reader.copy_payload(descriptor, file),
+                    )?;
+                } else {
                     write_private_with(
                         &spec.harness_home,
                         &destination,
                         descriptor.mode,
                         |file| payload_reader.copy_payload(descriptor, file),
                     )?;
-                    continue;
                 }
+                continue;
             }
-            let mut loaded = Vec::new();
-            let native_data = if let Some(bytes) = archive.payloads.get(&descriptor.path) {
-                bytes.as_slice()
-            } else {
-                payload_reader.copy_payload(descriptor, &mut loaded)?;
-                &loaded
-            };
-
-            if native_state.restore(
+        }
+        let mut loaded = Vec::new();
+        let native_data = if let Some(bytes) = archive.payloads.get(&descriptor.path) {
+            bytes.as_slice()
+        } else {
+            payload_reader.copy_payload(descriptor, &mut loaded)?;
+            &loaded
+        };
+        if missing_only {
+            if let Some(written) = native_state.restore_missing(
                 &archive.manifest.session,
                 &spec.harness_home,
                 relative_path,
                 native_data,
             )? {
+                changed |= written;
                 continue;
             }
-            ensure!(
-                !relative_path.starts_with(mj_core::goal::NATIVE_ARTIFACT_ROOT),
-                "this checkpoint requires native goal restoration by the target worker"
-            );
-            let relative_path = restored_native_relative_path(
-                archive.manifest.session.harness_kind,
-                relative_path,
-                target_cwd.as_deref(),
-            )?;
-            let native_data = restored_native_artifact_bytes(
-                archive.manifest.session.harness_kind,
-                &relative_path,
-                native_data,
-                target_cwd.as_deref(),
+        } else if native_state.restore(
+            &archive.manifest.session,
+            &spec.harness_home,
+            relative_path,
+            native_data,
+        )? {
+            continue;
+        }
+        ensure!(
+            !relative_path.starts_with(mj_core::goal::NATIVE_ARTIFACT_ROOT),
+            "this checkpoint requires native goal restoration by the target worker"
+        );
+        let relative_path = restored_native_relative_path(
+            archive.manifest.session.harness_kind,
+            relative_path,
+            target_cwd.as_deref(),
+        )?;
+        let native_data = restored_native_artifact_bytes(
+            archive.manifest.session.harness_kind,
+            &relative_path,
+            native_data,
+            target_cwd.as_deref(),
+            &spec.harness_home,
+        )?;
+        validate_relative_path(&relative_path)?;
+        if missing_only {
+            changed |= write_missing_private_file(
                 &spec.harness_home,
+                &relative_path,
+                &native_data,
+                descriptor.mode,
             )?;
-            validate_relative_path(&relative_path)?;
+        } else {
             write_private_file(
                 &spec.harness_home,
                 &relative_path,
@@ -256,7 +506,7 @@ pub fn restore_checkpoint_with_native_state(
             )?;
         }
     }
-    Ok(())
+    Ok(changed)
 }
 
 /// Reads the controller-owned projection without restoring target artifacts.
@@ -709,12 +959,20 @@ pub(super) fn write_private_reader(
     })
 }
 
-fn write_private_with<T>(
+fn write_missing_private_file(
     root: &Path,
     relative: &Path,
+    bytes: &[u8],
     mode: u32,
-    write: impl FnOnce(&mut File) -> Result<T>,
-) -> Result<T> {
+) -> Result<bool> {
+    write_missing_private_with(root, relative, mode, |file| {
+        std::io::Write::write_all(file, bytes).context("write staged recovery file")
+    })
+}
+
+/// Checks the destination and creates its parents, returning the path to
+/// write. Both the replacing and the missing-only writers start here.
+fn prepare_private_destination(root: &Path, relative: &Path) -> Result<PathBuf> {
     validate_relative_path(relative)?;
     let path = root.join(relative);
     ensure_no_symlink_ancestors(root, relative)?;
@@ -734,8 +992,19 @@ fn write_private_with<T>(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
     }
+    Ok(path)
+}
+
+fn write_private_with<T>(
+    root: &Path,
+    relative: &Path,
+    mode: u32,
+    write: impl FnOnce(&mut File) -> Result<T>,
+) -> Result<T> {
+    let path = prepare_private_destination(root, relative)?;
     let mut options = fs::OpenOptions::new();
-    options.create(true).truncate(true).write(true);
+    options.write(true);
+    options.create(true).truncate(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -753,4 +1022,83 @@ fn write_private_with<T>(
     #[cfg(not(unix))]
     let _ = mode;
     Ok(result)
+}
+
+/// Streams a file into a staged copy and publishes it only when the
+/// destination is still absent; returns whether it published.
+fn write_missing_private_with(
+    root: &Path,
+    relative: &Path,
+    mode: u32,
+    write: impl FnOnce(&mut File) -> Result<()>,
+) -> Result<bool> {
+    let path = prepare_private_destination(root, relative)?;
+    publish_missing_private_file(&path, mode, write)
+}
+
+fn publish_missing_private_file(
+    path: &Path,
+    mode: u32,
+    write: impl FnOnce(&mut fs::File) -> Result<()>,
+) -> Result<bool> {
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(path.parent().context("recovery file has no parent")?)?;
+    write(temporary.as_file_mut())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(mode & 0o700))?;
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    temporary.as_file().sync_all()?;
+    match temporary.persist_noclobber(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => {
+            Err(error).with_context(|| format!("publish recovery file {}", path.display()))
+        }
+    }
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+    use std::io::Write;
+
+    // Hard-won: 337bc5e review: an interrupted missing-only write became permanent truncated history.
+    #[test]
+    fn failed_recovery_write_never_publishes_a_partial_file_and_retry_keeps_concurrent_work() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("native-history");
+        let bytes = vec![b'n'; 128 * 1024];
+        assert!(
+            publish_missing_private_file(&destination, 0o600, |file| {
+                file.write_all(&bytes[..70 * 1024])?;
+                anyhow::bail!("injected write failure")
+            })
+            .is_err()
+        );
+        assert!(!destination.exists());
+        assert!(
+            publish_missing_private_file(&destination, 0o600, |file| {
+                file.write_all(&bytes)?;
+                Ok(())
+            })
+            .unwrap()
+        );
+        assert_eq!(fs::read(&destination).unwrap(), bytes);
+        fs::remove_file(&destination).unwrap();
+        assert!(
+            !publish_missing_private_file(&destination, 0o600, |file| {
+                file.write_all(&bytes)?;
+                fs::write(&destination, b"concurrent native work")?;
+                Ok(())
+            })
+            .unwrap()
+        );
+        assert_eq!(fs::read(&destination).unwrap(), b"concurrent native work");
+    }
 }

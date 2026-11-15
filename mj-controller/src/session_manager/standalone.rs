@@ -79,6 +79,13 @@ impl StandaloneSession {
         self.client.protocol_version()
     }
 
+    pub async fn attachment_present(
+        &mut self,
+        reference: &mj_core::attachment::AttachmentRef,
+    ) -> Result<bool> {
+        self.client.attachment_present(reference).await
+    }
+
     pub async fn reserve_idle(&mut self, command_id: String) -> Result<bool> {
         self.client.reserve_idle(command_id).await
     }

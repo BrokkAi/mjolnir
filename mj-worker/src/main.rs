@@ -94,6 +94,24 @@ enum WorkerCommand {
     RestoreCheckpoint {
         #[arg(long)]
         spec: PathBuf,
+        /// Restore only missing parent state; never modify checkout or child reports.
+        #[arg(long, conflicts_with = "missing_checkout")]
+        missing_parent: bool,
+        #[arg(long)]
+        missing_checkout: bool,
+        /// Current controller-owned queue/frontier, for partial parent recovery.
+        #[arg(long, requires = "missing_parent")]
+        relay_seed: Option<PathBuf>,
+    },
+    /// Journal queue discard while the worker is stopped, before any dispatch.
+    #[command(hide = true)]
+    DiscardQueuedPrompts {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        session_id: String,
+        #[arg(long)]
+        command_id: String,
     },
     /// Install one streamed resource directory on a remote target.
     InstallResource {
@@ -582,9 +600,29 @@ async fn run_command(command: Command, owner: Option<&WorkerRootOwner>) -> Resul
             println!("{}", serde_json::to_string(&checkpoint)?);
             Ok(())
         }
-        WorkerCommand::RestoreCheckpoint { spec } => {
-            mj_worker::checkpoint::restore_from_spec_file(&spec)
+        WorkerCommand::RestoreCheckpoint {
+            spec,
+            missing_parent,
+            missing_checkout,
+            relay_seed,
+        } => {
+            if missing_parent {
+                mj_worker::checkpoint::restore_missing_from_spec_file(&spec, relay_seed.as_deref())
+            } else if missing_checkout {
+                mj_worker::checkpoint::restore_checkout_from_spec_file(&spec)
+            } else {
+                mj_worker::checkpoint::restore_from_spec_file(&spec)
+            }
         }
+        WorkerCommand::DiscardQueuedPrompts {
+            root,
+            session_id,
+            command_id,
+        } => mj_worker::checkpoint::discard_queued_prompts_before_start(
+            &root,
+            &session_id,
+            &command_id,
+        ),
         WorkerCommand::InstallResource { destination } => {
             mj_checkpoint::resources::install_resource_stream(std::io::stdin(), &destination)
         }

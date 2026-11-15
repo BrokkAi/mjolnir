@@ -8476,3 +8476,105 @@ fn legacy_snapshot_open_request_upgrade_and_checkpoint_restore() {
         assert!(current.snapshot.open_request().is_none());
     }
 }
+
+// Hard-won: bd6363001 review: reopening a dead relay promoted work before Resume could discard it.
+// Hard-won: 926625478 review: discard must apply to a seed left by an earlier recovery attempt.
+#[test]
+fn offline_queue_discard_precedes_reopen_promotion_and_requires_exclusive_root_ownership() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut relay = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    submit_relay(&mut relay, "old-active", prompt("old active turn"));
+    relay.claim_pending_commands(true).unwrap();
+    submit_relay(
+        &mut relay,
+        "explicitly-discarded",
+        prompt("must never execute"),
+    );
+    assert!(
+        queued_command_ids(&relay)
+            .iter()
+            .any(|id| id == "explicitly-discarded")
+    );
+    drop(relay);
+    let owner = crate::worker_runtime::WorkerRootOwner::acquire(temp.path()).unwrap();
+    assert!(
+        crate::checkpoint::discard_queued_prompts_before_start(
+            temp.path(),
+            SESSION,
+            "resume-discard"
+        )
+        .is_err()
+    );
+    drop(owner);
+    crate::checkpoint::discard_queued_prompts_before_start(temp.path(), SESSION, "resume-discard")
+        .unwrap();
+    let mut reopened = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    assert!(
+        !reopened
+            .claim_pending_commands(true)
+            .unwrap()
+            .iter()
+            .any(|command| command.command_id == "explicitly-discarded")
+    );
+    assert!(
+        !queued_command_ids(&reopened)
+            .iter()
+            .any(|id| id == "explicitly-discarded")
+    );
+    let ordinal = reopened.snapshot.handled_commands["resume-discard"].accepted_ordinal;
+    drop(reopened);
+    crate::checkpoint::discard_queued_prompts_before_start(temp.path(), SESSION, "resume-discard")
+        .unwrap();
+    let repeated = DurableRelay::open(temp.path(), SESSION, "test").unwrap();
+    assert_eq!(
+        repeated.snapshot.handled_commands["resume-discard"].accepted_ordinal,
+        ordinal
+    );
+    drop(repeated);
+    let seed_root = tempfile::tempdir().unwrap();
+    let seed = mj_core::relay::RestoredRelaySeed {
+        command_ledger: None,
+        assessment_state: None,
+        event_frontier: 7,
+        event_frontier_digest: "a".repeat(64),
+        queued_prompts: vec![mj_core::archive::CanonicalQueuedPrompt {
+            command_id: "seed-queued".into(),
+            kind: mj_core::archive::CanonicalQueuedCommandKind::Prompt,
+            content: vec![
+                serde_json::json!({"type":"text", "text":"must not execute from an old seed"}),
+            ],
+            queued_at_ms: 1,
+        }],
+        accepted_config: [("model".into(), "kept-model".into())]
+            .into_iter()
+            .collect(),
+        native_session_unused: true,
+    };
+    fs::write(
+        mj_core::relay::restored_relay_seed_path(seed_root.path()),
+        serde_json::to_vec(&seed).unwrap(),
+    )
+    .unwrap();
+    crate::checkpoint::discard_queued_prompts_before_start(
+        seed_root.path(),
+        SESSION,
+        "discard-retried-seed",
+    )
+    .unwrap();
+    let mut recovered =
+        DurableRelay::open_for_harness(seed_root.path(), SESSION, "test", HarnessKind::Codex, &[])
+            .unwrap();
+    assert!(
+        !recovered
+            .claim_pending_commands(true)
+            .unwrap()
+            .iter()
+            .any(|command| command.command_id == "seed-queued")
+    );
+    assert!(queued_command_ids(&recovered).is_empty());
+    assert_eq!(recovered.snapshot.recovery_floor_ordinal, 7);
+    assert_eq!(
+        recovered.snapshot.config.get("model").map(String::as_str),
+        Some("kept-model")
+    );
+}

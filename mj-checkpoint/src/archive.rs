@@ -1140,12 +1140,14 @@ fn write_zip(
         &mut Cursor::new(&manifest_bytes),
         &digest_bytes(&manifest_bytes),
     )?;
-    let mut spool_builder = tempfile::Builder::new();
+    let spool_builder = tempfile::Builder::new();
     #[cfg(unix)]
-    {
+    let spool_builder = {
         use std::os::unix::fs::PermissionsExt;
-        spool_builder.permissions(fs::Permissions::from_mode(0o700));
-    }
+        let mut builder = spool_builder;
+        builder.permissions(fs::Permissions::from_mode(0o700));
+        builder
+    };
     let spool = spool_builder
         .tempdir_in(spool_parent)
         .context("create ZIP compression spool")?;
