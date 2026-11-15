@@ -452,6 +452,19 @@ diff-only question at the introducing commit and classed the result.
   so some B classes rest partly on failed calls. A first call on a worktree
   took up to 12 minutes; `usage_graph` calls took 3 to 9 minutes; most
   results reported `complete=false`.
+- Probe 2 (`toolcov/SPEC-probe2.md`, `toolcov/workflow-probe2.js`,
+  `results/tool-coverage-probe2.jsonl`), at the Bifrost session's advice,
+  asked 10 of the records with query steps (`call_input`, `state_events_of`,
+  `guards_of`, `control_relations`) and `:type flow` policies through
+  `run_policy`, one Opus/high agent at a time. No record works: every best
+  outcome is incomplete. `call_input` returns no rows where `call_sites_to`
+  has the binding; `state_events_of` records no write for a struct-literal
+  field; `guards_of` omits an enum `match` arm and still reports complete;
+  Rust flow runs end inconclusive (async, early returns and indexed stores
+  have no value-flow snapshot) yet report status `clean` with exit 0; fixed
+  budgets (source mappings 33,288, scope nodes 20,000, nested entries
+  8,000,000) are exhausted on this workspace; two flow runs gave no output in
+  20 minutes. These became tickets under BrokkAi/bifrost-dev#13143.
 
 ## Running
 
